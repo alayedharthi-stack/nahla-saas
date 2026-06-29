@@ -866,8 +866,6 @@ def should_apply_commerce_humanizer(
     }:
         return False
     path = (chosen_path or "").strip().lower()
-    if path == "kb_availability_facts":
-        return False
     operational_fact = is_operational_availability_fact(reply)
     if (
         path

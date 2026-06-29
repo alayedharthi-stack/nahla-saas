@@ -275,10 +275,6 @@ def resolve_message_purpose(ctx: MarketingEmojiContext, reply: str) -> str:
     intent = ctx.intent_name
     social = ctx.social_category
 
-    if chosen == "kb_availability_facts":
-        if str((ctx.decision_args or {}).get("availability_polarity") or "") == "negative":
-            return PURPOSE_NONE
-
     if path == "payment_evidence_soft_ack" or path == "payment_claim_ack":
         return PURPOSE_RECEIPT_REVIEW
     if path == "payment_receipt_ack":

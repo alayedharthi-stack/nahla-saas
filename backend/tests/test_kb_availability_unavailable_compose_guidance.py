@@ -1,4 +1,4 @@
-"""KB unavailable availability compose guidance — principle-based, no templates."""
+"""KB unavailable availability compose guidance — KB truth only, no emoji policy."""
 from __future__ import annotations
 
 import os
@@ -16,20 +16,15 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
 
 from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noqa: E402
     TOPIC_KB_AVAILABILITY_FACTS,
-    apply_kb_availability_reply_polish,
     compose_kb_availability_facts_goal,
-    strip_kb_unavailable_shopping_emojis,
     try_non_catalog_availability_kb_decision,
 )
-from modules.ai.brain.commerce_reply_humanizer import (  # noqa: E402
-    should_apply_commerce_humanizer,
+from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS  # noqa: E402
+from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: E402
+    apply_catalog_product_grounding_guard,
 )
-from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY  # noqa: E402
-from modules.ai.brain.types import INTENT_ASK_PRODUCT  # noqa: E402
-from modules.ai.postprocess.marketing_emoji_policy import (  # noqa: E402
-    MarketingEmojiContext,
-    PURPOSE_NONE,
-    resolve_message_purpose,
+from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
+    apply_product_availability_truth_guard,
 )
 
 
@@ -117,14 +112,31 @@ def _install_kb_stubs(monkeypatch: pytest.MonkeyPatch, sections: List[_StubKBSec
     return _StubDB(sections)
 
 
-def _ctx(message: str, *, db: Any) -> SimpleNamespace:
+def _ctx(
+    message: str,
+    *,
+    db: Any,
+    catalog_skus: Optional[List[dict]] = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         message=message,
         tenant_id=1,
-        facts=SimpleNamespace(catalog_skus=[{"id": 1, "title": "عسل سمر 2025"}]),
+        facts=SimpleNamespace(
+            catalog_skus=catalog_skus or [{"id": 1, "title": "عسل سمر 2025"}],
+        ),
         state=SimpleNamespace(current_product_focus={}, last_recommended_products=[]),
         db=db,
     )
+
+
+def _sku(pid: int, title: str) -> dict:
+    return {
+        "id": pid,
+        "title": title,
+        "sku": f"SKU-{pid}",
+        "can_checkout": True,
+        "in_stock": True,
+    }
 
 
 def _negative_kb_with_next_step() -> _StubKBSection:
@@ -138,17 +150,8 @@ def _negative_kb_with_next_step() -> _StubKBSection:
     )
 
 
-
-def _positive_kb() -> _StubKBSection:
-    return _StubKBSection(
-        section_id=503,
-        title="زيارات المنحل",
-        body="زيارات المنحل متوفرة يوم الجمعة — للحجز تواصل مع reception.",
-    )
-
-
-class TestUnavailableKBComposeGuidance:
-    def test_greeting_unavailable_goal_forbids_shopping_emoji_and_next_step(
+class TestKBUnavailableTruthCompose:
+    def test_greeting_negative_goal_states_unavailable_not_uncertainty(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -157,38 +160,18 @@ class TestUnavailableKBComposeGuidance:
             _ctx("صباح الخير\nفي عندك طرود نحل؟", db=db),
         )
         assert decision is not None
+        assert decision.args.get("availability_polarity") == "negative"
         goal = str(decision.args.get("response_goal") or "")
         assert "UNAVAILABLE KB compose principles" in goal
         assert "acknowledge the greeting" in goal
-        assert "shopping/cart/catalog emojis" in goal
-        assert "follow-up/next step" in goal
-        assert "quote contact names" in goal
-        assert "shopping_cart_emoji" in str(decision.args.get("forbidden_claims") or [])
+        assert "NOT currently available" in goal
+        assert "availability uncertainty" in goal
+        assert "ما نقدر نؤكد التوفر" in goal
+        forbidden = list(decision.args.get("forbidden_claims") or [])
+        assert "availability_uncertainty_when_kb_negative" in forbidden
+        assert "invented_contact_or_next_step" in forbidden
 
-        polished = apply_kb_availability_reply_polish(
-            "صباح النور! 🛒\nللأسف، ما عندنا طرود نحل حاليًا",
-            topic=TOPIC_KB_AVAILABILITY_FACTS,
-            availability_polarity="negative",
-        )
-        assert "🛒" not in polished
-        assert "طرود نحل" in polished
-
-    def test_unavailable_without_next_step_goal_does_not_invent_action(self) -> None:
-        goal = compose_kb_availability_facts_goal({
-            "availability_polarity": "negative",
-            "allowed_facts": {
-                "kb_section_title": "خدمة معينة",
-                "kb_section_body": "هذه الخدمة غير متوفرة حالياً.",
-            },
-            "forbidden_claims": ["invented_contact_or_next_step"],
-        })
-        assert "do not invent registration, waitlist, or contact actions" in goal
-        assert "follow-up/next step — mention" not in goal
-
-    def test_unavailable_with_contact_in_kb_goal_allows_kb_contact_only(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_negative_with_next_step_goal_from_kb_only(self) -> None:
         goal = compose_kb_availability_facts_goal({
             "availability_polarity": "negative",
             "allowed_facts": {
@@ -197,54 +180,91 @@ class TestUnavailableKBComposeGuidance:
                     "طرود النحل غير متوفرة. للتسجيل تواصل مع أبو هشام."
                 ),
             },
-            "forbidden_claims": ["invented_contact_or_next_step"],
         })
+        assert "follow-up/next step" in goal
+        assert "quote contact names or actions only from KB" in goal
         assert "do not invent" in goal.lower()
-        assert "quote contact names" in goal
-        assert "invented_contact_or_next_step" in goal
 
-    def test_positive_kb_goal_not_tightened_by_unavailable_guidance(
+    def test_negative_without_next_step_does_not_invent_action(self) -> None:
+        goal = compose_kb_availability_facts_goal({
+            "availability_polarity": "negative",
+            "allowed_facts": {
+                "kb_section_title": "خدمة معينة",
+                "kb_section_body": "هذه الخدمة غير متوفرة حالياً.",
+            },
+        })
+        assert "do not invent registration, waitlist, or contact actions" in goal
+        assert "follow-up/next step — mention" not in goal
+
+    def test_no_kb_hit_returns_none_not_negative_compose(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        db = _install_kb_stubs(monkeypatch, [_positive_kb()])
-        decision = try_non_catalog_availability_kb_decision(
-            _ctx("عندكم زيارات المنحل؟", db=db),
-        )
-        assert decision is not None
-        assert decision.args.get("availability_polarity") == "positive"
-        goal = str(decision.args.get("response_goal") or "")
-        assert "UNAVAILABLE KB compose principles" not in goal
-        assert "KB confirms availability" in goal
-
-    def test_no_kb_hit_stays_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         db = _install_kb_stubs(monkeypatch, [])
         decision = try_non_catalog_availability_kb_decision(
             _ctx("صباح الخير\nفي عندك طرود نحل؟", db=db),
         )
         assert decision is None
 
-
-class TestUnavailableKBEmojiPolicy:
-    def test_strip_removes_cart_and_checkmark(self) -> None:
-        raw = "صباح النور! 🛒\nغير متوفر ✅"
-        cleaned = strip_kb_unavailable_shopping_emojis(raw)
-        assert "🛒" not in cleaned
-        assert "✅" not in cleaned
-
-    def test_humanizer_skipped_for_kb_availability_path(self) -> None:
-        assert should_apply_commerce_humanizer(
-            reply="غير متوفر حالياً",
-            inbound_text="هل متوفر؟",
-            intent_name=INTENT_ASK_PRODUCT,
-            primary_customer_goal=GOAL_PRODUCT_AVAILABILITY,
-            chosen_path="kb_availability_facts",
-        ) is False
-
-    def test_marketing_emoji_purpose_none_for_kb_negative(self) -> None:
-        ctx = MarketingEmojiContext(
-            chosen_path="kb_availability_facts",
-            decision_args={"availability_polarity": "negative"},
-            intent_name=INTENT_ASK_PRODUCT,
+    def test_kb_negative_routes_llm_not_catalog_search(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(monkeypatch, [_negative_kb_with_next_step()])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx("في عندك طرود نحل؟", db=db, catalog_skus=[_sku(2, "عسل طلح")]),
         )
-        assert resolve_message_purpose(ctx, "غير متوفر حالياً") == PURPOSE_NONE
+        assert decision is not None
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+        assert decision.args.get("block_commerce_escalation") is True
+
+
+class TestKBNegativeGuardTruth:
+    def setup_method(self) -> None:
+        self._prev_avail = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        self._prev_cat = os.environ.get("NAHLA_CATALOG_PRODUCT_GROUNDING_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        os.environ["NAHLA_CATALOG_PRODUCT_GROUNDING_GUARD_MODE"] = "enforce"
+
+    def teardown_method(self) -> None:
+        for key, prev in (
+            ("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", self._prev_avail),
+            ("NAHLA_CATALOG_PRODUCT_GROUNDING_GUARD_MODE", self._prev_cat),
+        ):
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
+
+    def test_kb_negative_not_rewritten_to_unknown(self) -> None:
+        reply = "طرود النحل غير متوفرة حالياً — التسجيل عند أبو هشام."
+        result = apply_product_availability_truth_guard(
+            reply=reply,
+            availability_context={
+                "platform_connected": True,
+                "catalog_skus": [_sku(7, "عسل طلح")],
+                "kb_signals": [],
+                "product_links": [],
+            },
+            inbound_text="في عندك طرود نحل؟",
+            chosen_path="kb_availability_facts",
+            tenant_id=1,
+        )
+        assert result.replaced is False
+        assert "غير متوفرة" in result.reply
+        assert "ما نقدر نؤكد" not in result.reply
+
+    def test_kb_negative_not_catalog_grounded(self) -> None:
+        reply = (
+            "طرود النحل غير متوفرة حالياً. للحجز تواصل مع أبو هشام عند توفر الدفعة."
+        )
+        result = apply_catalog_product_grounding_guard(
+            reply=reply,
+            inbound_text="في عندك طرود نحل؟",
+            chosen_path="kb_availability_facts",
+            tenant_id=1,
+        )
+        assert result.replaced is False
+        assert "غير متوفرة" in result.reply
