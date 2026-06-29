@@ -110,7 +110,7 @@ class TestPaymentEvidenceHints:
         hints = extract_payment_evidence_hints(blob, meta)
         assert hints.get("payment_evidence_status") == "confirmed"
         assert hints.get("bank_name") == "مصرف الراجحي"
-        assert hints.get("amount") == "360.00"
+        assert hints.get("amount") == "360"
         assert hints.get("reference_number") == "FT123456789"
         assert hints.get("transfer_date") == "15/06/2026"
         assert "أحمد" in (hints.get("sender_name") or "")

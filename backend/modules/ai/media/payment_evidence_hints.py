@@ -85,6 +85,19 @@ _SENDER_RES = (
 )
 _IBAN_RE = re.compile(r"\b(SA\s?\d{2}(?:\s?\d){20})\b", re.IGNORECASE)
 
+_STRUCTURED_HINT_KEYS = frozenset({
+    "amount",
+    "amount_parse_confidence",
+    "vat_percentage",
+    "vat_amount",
+    "fee_amount",
+    "total_charge_amount",
+    "reference_number",
+    "to_account",
+    "from_account_masked",
+    "transfer_date",
+})
+
 
 def _first_match(patterns: tuple[re.Pattern[str], ...], blob: str) -> str:
     for pat in patterns:
@@ -94,13 +107,13 @@ def _first_match(patterns: tuple[re.Pattern[str], ...], blob: str) -> str:
     return ""
 
 
-def _safe_field(value: str, *, max_len: int = 80) -> str:
+def _safe_field(value: str, *, max_len: int = 80, allow_structured: bool = False) -> str:
     raw = (value or "").strip()
     if not raw:
         return ""
     if len(raw) > max_len:
         raw = raw[:max_len].rstrip() + "…"
-    if not is_readable_document_summary(raw, max_len=max_len):
+    if not allow_structured and not is_readable_document_summary(raw, max_len=max_len):
         return ""
     return raw
 
@@ -127,41 +140,28 @@ def extract_payment_evidence_hints(
     blob = (internal_text or "").strip()
     if not blob:
         return {"payment_evidence_status": status} if status else {}
-    try:
-        from core.arabic_ocr_normalization import normalize_arabic_presentation_forms  # noqa: PLC0415
 
-        blob = normalize_arabic_presentation_forms(blob) or blob
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — ocr normalize is optional enhancement
-        pass
+    from core.payment_receipt_field_parser import (  # noqa: PLC0415
+        parse_payment_receipt_fields,
+        parsed_fields_to_hints,
+    )
 
     hints: Dict[str, str] = {}
     if status:
         hints["payment_evidence_status"] = status
 
-    bank = _detect_bank(blob)
-    if bank:
-        hints["bank_name"] = bank
-
-    amount = _first_match(_AMOUNT_RES, blob)
-    amount = _safe_field(amount.replace(",", ""), max_len=32)
-    if amount:
-        hints["amount"] = amount
-
-    transfer_date = _safe_field(_first_match(_DATE_RES, blob), max_len=40)
-    if transfer_date:
-        hints["transfer_date"] = transfer_date
-
-    reference = _safe_field(_first_match(_REF_RES, blob), max_len=40)
-    if reference:
-        hints["reference_number"] = reference
-
-    sender = _safe_field(_first_match(_SENDER_RES, blob), max_len=60)
-    if sender:
-        hints["sender_name"] = sender
-
-    iban_m = _IBAN_RE.search(blob)
-    if iban_m:
-        hints["iban_masked"] = iban_m.group(1).replace(" ", "")[:6] + "…"
+    parsed = parse_payment_receipt_fields(
+        blob,
+        filename=str(meta.get("filename") or ""),
+    )
+    for key, val in parsed_fields_to_hints(parsed).items():
+        safe = _safe_field(
+            val,
+            max_len=80 if key != "reference_number" else 48,
+            allow_structured=key in _STRUCTURED_HINT_KEYS,
+        )
+        if safe:
+            hints[key] = safe
 
     return hints
 
@@ -187,13 +187,27 @@ def safe_payment_hints_for_display(
     for key in (
         "payment_evidence_status",
         "bank_name",
+        "bank_transfer_type",
         "amount",
+        "amount_parse_confidence",
         "transfer_date",
         "reference_number",
         "sender_name",
+        "from_account_masked",
+        "beneficiary_name",
+        "to_account",
+        "vat_percentage",
+        "vat_amount",
+        "fee_amount",
+        "total_charge_amount",
         "iban_masked",
     ):
-        val = _safe_field(str(hints.get(key) or ""), max_len=80)
+        max_len = 48 if key == "reference_number" else 80
+        val = _safe_field(
+            str(hints.get(key) or ""),
+            max_len=max_len,
+            allow_structured=key in _STRUCTURED_HINT_KEYS,
+        )
         if val:
             out[key] = val
     return out or None

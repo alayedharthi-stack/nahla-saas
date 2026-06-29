@@ -124,6 +124,14 @@ class BankReceiptExtraction:
     receipt_type: str = _RECEIPT_TYPE_UNCLEAR
     has_pre_review_imperative: bool = False
     confidence: float = 0.0
+    from_account_masked: str = ""
+    to_account: str = ""
+    bank_type_line: str = ""
+    vat_percentage: str = ""
+    vat_amount: str = ""
+    fee_amount: str = ""
+    total_charge_amount: str = ""
+    amount_parse_confidence: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -174,9 +182,17 @@ def build_receipt_data(extraction: BankReceiptExtraction) -> Dict[str, Any]:
         "beneficiary_name":    extraction.beneficiary_name or None,
         "beneficiary_iban":    extraction.beneficiary_iban or None,
         "account_last_digits": extraction.account_last_digits or None,
+        "from_account_masked": extraction.from_account_masked or None,
+        "to_account":          extraction.to_account or None,
         "reference_number":    extraction.reference_number or None,
         "transfer_datetime":   extraction.transfer_datetime or None,
         "receipt_type":        extraction.receipt_type or None,
+        "bank_transfer_type":  extraction.bank_type_line or None,
+        "vat_percentage":      extraction.vat_percentage or None,
+        "vat_amount":          extraction.vat_amount or None,
+        "fee_amount":          extraction.fee_amount or None,
+        "total_charge_amount": extraction.total_charge_amount or None,
+        "amount_parse_confidence": extraction.amount_parse_confidence or None,
     }
 
 
@@ -215,32 +231,46 @@ def extract_bank_receipt_fields(
     filename: Optional[str] = None,
 ) -> BankReceiptExtraction:
     """Structured extraction from OCR / vision / PDF text."""
+    from core.payment_receipt_field_parser import parse_payment_receipt_fields  # noqa: PLC0415
+
+    parsed = parse_payment_receipt_fields(text, filename=filename)
     blob = _normalise_blob(text)
     if filename:
         blob = f"{blob}\n{filename}".strip()
 
     ext = BankReceiptExtraction()
-    if not blob:
+    if not blob and not parsed.amount:
         return ext
 
-    ext.bank_name = _detect_bank(blob)
-    raw_amount = _first_match(_AMOUNT_RES, blob)
-    ext.amount = raw_amount.replace(",", "") if raw_amount else ""
-    ext.currency = "SAR"
-    ext.transfer_datetime = _first_match(_DATE_RES, blob)
-    ext.reference_number = _first_match(_REF_RES, blob)
-
-    benef = _first_match(_BENEFICIARY_RES, blob)
-    if benef:
-        ext.beneficiary_name = benef.split("\n")[0].strip()[:80]
+    ext.bank_name = parsed.bank_name or _detect_bank(blob)
+    ext.amount = parsed.amount
+    ext.currency = parsed.currency or "SAR"
+    ext.transfer_datetime = parsed.transfer_datetime
+    ext.reference_number = parsed.reference_number
+    ext.beneficiary_name = parsed.beneficiary_name
+    ext.from_account_masked = parsed.from_account_masked
+    ext.to_account = parsed.to_account
+    ext.bank_type_line = parsed.bank_type_line
+    ext.vat_percentage = parsed.vat_percentage
+    ext.vat_amount = parsed.vat_amount
+    ext.fee_amount = parsed.fee_amount
+    ext.total_charge_amount = parsed.total_charge_amount
+    ext.amount_parse_confidence = parsed.amount_confidence
 
     ibans = extract_ibans(blob)
     if ibans:
         ext.beneficiary_iban = ibans[0]
+    elif parsed.to_account.startswith("SA"):
+        ext.beneficiary_iban = parsed.to_account
     else:
         iban_m = _IBAN_RE.search(blob)
         if iban_m:
             ext.beneficiary_iban = re.sub(r"\s+", "", iban_m.group(1)).upper()
+
+    if parsed.from_account_masked:
+        digits = re.sub(r"\D", "", parsed.from_account_masked)
+        if len(digits) >= 4:
+            ext.account_last_digits = digits[-4:]
 
     if not ext.beneficiary_name:
         benefs = extract_beneficiaries(blob)
