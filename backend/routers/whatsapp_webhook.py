@@ -9292,7 +9292,35 @@ async def _handle_merchant_message(
                                 _orig_len, _brain_active,
                             )
                             _outbound_abort_suppressor = "chat_dedup_hard"
-                            reply = ""
+                            try:
+                                from modules.ai.brain.commerce.dedup_operational_delta import (  # noqa: PLC0415
+                                    last_outbound_body as _dedup_last_outbound_body,
+                                    should_restore_brain_reply_after_dedup_silence,
+                                )
+
+                                if should_restore_brain_reply_after_dedup_silence(
+                                    current_inbound=text or "",
+                                    candidate_reply=_po_reply_before_dedup,
+                                    previous_outbound=_dedup_last_outbound_body(history),
+                                ):
+                                    reply = _po_reply_before_dedup
+                                    _outbound_abort_suppressor = None
+                                    logger.info(
+                                        "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                                        "commerce_inquiry_silence_blocked=true "
+                                        "restored_brain_candidate=true reply_len=%d",
+                                        tenant_id,
+                                        to,
+                                        len(reply or ""),
+                                    )
+                                else:
+                                    reply = ""
+                            except Exception as _dedup_restore_exc:  # noqa: BLE001  # noqa: silent-ok — optional commerce restore probe
+                                logger.debug(
+                                    "[CHAT_DEDUP] commerce inquiry restore probe failed: %s",
+                                    _dedup_restore_exc,
+                                )
+                                reply = ""
                         else:
                             _persona_ownership.on_text_replaced(
                                 layer="dedup_substitution",
