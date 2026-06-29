@@ -362,6 +362,8 @@ class TestKB3GreetingAvailabilityRegression:
 
         assert extract_inquiry_subject("صباح الخير\nفي عندك طرود نحل ؟") == "طرود نحل"
         assert extract_inquiry_subject("في عندك طرود نحل ؟") == "طرود نحل"
+        assert extract_inquiry_subject("فيه عندك طرود نحل؟") == "طرود نحل"
+        assert extract_inquiry_subject("صباح الخير\nفيه عندك طرود نحل؟") == "طرود نحل"
 
 
 class TestKB3GuardIntegration:
