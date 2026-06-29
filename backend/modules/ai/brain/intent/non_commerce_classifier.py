@@ -470,6 +470,16 @@ def classify_non_commerce(
     if not raw:
         return None
 
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            has_embedded_commerce_inquiry_beyond_greeting,
+        )
+
+        if has_embedded_commerce_inquiry_beyond_greeting(raw):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional commerce inquiry gate; classify may proceed
+        pass
+
     hints = [str(h) for h in (topic_hints or []) if h]
 
     # 0. Explicit media tag from normalizer — highest priority.

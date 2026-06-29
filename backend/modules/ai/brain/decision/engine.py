@@ -786,36 +786,54 @@ class DefaultDecisionEngine:
         # signal in the message was "thanks", and we honour it.
         if intent.name == INTENT_SOCIAL:
             category = str((intent.slots or {}).get("social_category") or "general_courtesy")
-            logger.info(
-                "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
-                getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
-            )
-            # P1-F — personality social (thanks/blessing/courtesy/warmth) →
-            # LLM persona compose. Compliment keeps merchant_praise_ack.
-            # Occasion/safety categories use build_social_courtesy_decision.
-            from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
-
-            if category == "compliment":
-                from ..cost.intent_cost_policy import (  # noqa: PLC0415
-                    should_avoid_llm_for_social_category,
+            _skip_social_for_commerce = False
+            try:
+                from ..commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+                    has_embedded_commerce_inquiry_beyond_greeting,
                 )
 
-                if not should_avoid_llm_for_social_category(category):
-                    return Decision(
-                        action=ACTION_LLM_REPLY,
-                        args={
-                            "topic": "merchant_praise_ack",
-                            "social_category": category,
-                        },
-                        reason=f"merchant praise — generative warmth ack ({category})",
-                        confidence=intent.confidence,
+                _skip_social_for_commerce = has_embedded_commerce_inquiry_beyond_greeting(
+                    ctx.message or "",
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — optional embedded commerce probe; social may proceed
+                pass
+                logger.info(
+                    "[SOCIAL_ROUTE] skipped tenant=%s category=%s reason=embedded_commerce_inquiry preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    category,
+                    (ctx.message or "")[:60],
+                )
+            else:
+                logger.info(
+                    "[SOCIAL_ROUTE] tenant=%s category=%s preview=%r",
+                    getattr(ctx, "tenant_id", None), category, (ctx.message or "")[:60],
+                )
+                # P1-F — personality social (thanks/blessing/courtesy/warmth) →
+                # LLM persona compose. Compliment keeps merchant_praise_ack.
+                # Occasion/safety categories use build_social_courtesy_decision.
+                from ..persona_expression import build_social_courtesy_decision  # noqa: PLC0415
+
+                if category == "compliment":
+                    from ..cost.intent_cost_policy import (  # noqa: PLC0415
+                        should_avoid_llm_for_social_category,
                     )
 
-            return build_social_courtesy_decision(
-                category,
-                confidence=intent.confidence,
-                reason=f"social courtesy ack ({category})",
-            )
+                    if not should_avoid_llm_for_social_category(category):
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "merchant_praise_ack",
+                                "social_category": category,
+                            },
+                            reason=f"merchant praise — generative warmth ack ({category})",
+                            confidence=intent.confidence,
+                        )
+
+                return build_social_courtesy_decision(
+                    category,
+                    confidence=intent.confidence,
+                    reason=f"social courtesy ack ({category})",
+                )
 
         # ── 0a.42 Persona social / emotional (Phase 2 routing) ─────────────
         if intent.name == INTENT_PERSONA_INTERACTION:
@@ -2752,9 +2770,8 @@ class DefaultDecisionEngine:
                     _loc_update = try_order_context_update_decision(ctx)
                     if _loc_update is not None:
                         return _loc_update
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — order context gate optional; location FAQ may proceed
                 pass
-            _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
             if _maps_url:
                 from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
 
