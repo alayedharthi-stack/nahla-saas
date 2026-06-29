@@ -1,10 +1,10 @@
 """
 commerce_entry_orchestrator.py
 ──────────────────────────────
-Minimal commerce entry routing — PR-CE1 status branch only.
+Commerce entry routing — CE1 status branch + CE2 catalog delivery hook.
 
-Status/story replies with a pinned product focus must delegate to deterministic
-price, quantity, and order paths instead of terminating on LLM-only replies.
+CE1: status/story reply price/qty/buy ownership.
+CE2: see commerce_entry_catalog_delivery.py for catalog send/block ownership.
 """
 from __future__ import annotations
 

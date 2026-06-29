@@ -997,6 +997,22 @@ class DefaultDecisionEngine:
                 confidence=intent.confidence,
             )
 
+        # ── 0a.51 Commerce entry catalog delivery (CE2) ───────────────────
+        try:
+            from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
+                try_commerce_entry_catalog_decision,
+            )
+
+            _ce2_catalog_dec = try_commerce_entry_catalog_decision(ctx)
+            if _ce2_catalog_dec is not None:
+                return _ce2_catalog_dec
+        except Exception as _ce2_catalog_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[COMMERCE_ENTRY_CATALOG] route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _ce2_catalog_exc,
+            )
+
         # ── 0a.52 CatalogNavigator ownership (before discovery/search) ────
         if getattr(ctx, "_db", None) is not None:
             try:

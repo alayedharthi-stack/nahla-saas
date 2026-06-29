@@ -250,6 +250,21 @@ def _try_native_catalog_entry_decision(
 
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve owned catalog navigation turns before discovery/search/product_media."""
+    try:
+        from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
+            catalog_delivery_is_blocked,
+        )
+
+        if catalog_delivery_is_blocked(ctx):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="commerce_entry_catalog_blocked",
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — CE2 block probe must not break navigator
+        pass
+
     if not getattr(getattr(ctx, "facts", None), "has_products", False):
         return None
 
