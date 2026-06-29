@@ -1503,6 +1503,22 @@ class DefaultDecisionEngine:
         except Exception:  # noqa: BLE001
             pass
 
+        # ── 3.8s Status/story reply product context ─────────────────────
+        try:
+            from ..commerce.status_reply_product_context import (  # noqa: PLC0415
+                try_status_reply_product_decision,
+            )
+
+            _status_reply_dec = try_status_reply_product_decision(ctx)
+            if _status_reply_dec is not None:
+                return _status_reply_dec
+        except Exception as _status_reply_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[STATUS_REPLY_CTX] route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _status_reply_exc,
+            )
+
         # ── 3.8t Non-catalog availability KB route (KB3) ─────────────────
         # Must run before product_information_topic_shift — availability asks
         # like «فيه عندك …؟» must not be misclassified as attribute questions.
