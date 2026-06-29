@@ -240,41 +240,32 @@ class TestGuardEnforceMode:
 
     def test_enforce_rewrites_conflict(self) -> None:
         reply = "\u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631"
+        ctx = _ctx(
+            skus=[_sku(50, "Theta Model 2025", checkout=False, years=["2025"])],
+            focus={"id": 50, "title": "Theta Model 2025"},
+            kb=[{
+                "section_id": 30,
+                "kind": "quick_update",
+                "avail_polarity": "positive",
+                "primary_year": "2025",
+                "linked_product_ids": [50],
+            }],
+            links=[{"section_id": 30, "product_id": 50, "source": "manual", "confidence": None}],
+        )
         result = apply_product_availability_truth_guard(
             reply=reply,
-            availability_context=_ctx(
-                skus=[_sku(50, "Theta Model 2025", checkout=False, years=["2025"])],
-                focus={"id": 50, "title": "Theta Model 2025"},
-                kb=[{
-                    "section_id": 30,
-                    "kind": "quick_update",
-                    "avail_polarity": "positive",
-                    "primary_year": "2025",
-                    "linked_product_ids": [50],
-                }],
-                links=[{"section_id": 30, "product_id": 50, "source": "manual", "confidence": None}],
-            ),
+            availability_context=ctx,
             tenant_id=99,
         )
         assert result.replaced is True
         assert "معلومات متعارضة" not in result.reply
         assert customer_facing_availability_reply_is_clean(result.reply)
-        assert "بعدة خيارات" in result.reply
+        assert "متوفر" not in result.reply
+        assert "بعدة خيارات" not in result.reply
         assert "أبشر" not in result.reply
         assert result.reply == build_friendly_availability_conflict_reply(
             result.evidence,
-            availability_context=_ctx(
-                skus=[_sku(50, "Theta Model 2025", checkout=False, years=["2025"])],
-                focus={"id": 50, "title": "Theta Model 2025"},
-                kb=[{
-                    "section_id": 30,
-                    "kind": "quick_update",
-                    "avail_polarity": "positive",
-                    "primary_year": "2025",
-                    "linked_product_ids": [50],
-                }],
-                links=[{"section_id": 30, "product_id": 50, "source": "manual", "confidence": None}],
-            ),
+            availability_context=ctx,
         )
 
     def test_enforce_rewrites_unknown(self) -> None:

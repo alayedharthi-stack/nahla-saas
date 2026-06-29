@@ -26,6 +26,9 @@ from modules.ai.brain.cost.model_router import (  # noqa: E402
 )
 from modules.ai.brain.cost.model_router_audit import TIER_CHEAP, TIER_STANDARD  # noqa: E402
 from modules.ai.brain.intent_priority.types import GOAL_PRODUCT_AVAILABILITY  # noqa: E402
+from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa: E402
+    EVIDENCE_VARIANT_OPTIONS,
+)
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
     build_operational_availability_conflict_reply,
 )
@@ -144,7 +147,10 @@ class TestOperationalGuardThenStyledHumanizer:
             "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
             lambda *a, **k: "عسل طلح",
         )
-        operational = build_operational_availability_conflict_reply(MagicMock())
+        ev = MagicMock()
+        ev.evidence_state = EVIDENCE_VARIANT_OPTIONS
+        ev.evidence_ok_for_positive = True
+        operational = build_operational_availability_conflict_reply(ev)
         assert operational == "متوفر عسل طلح بعدة خيارات."
         assert operational != _DRY_AVAILABILITY_REPLY
 
@@ -173,7 +179,10 @@ class TestOperationalGuardThenStyledHumanizer:
             "modules.ai.brain.postprocess.product_availability_truth_guard._product_label_for_reply",
             lambda *a, **k: "فساتين",
         )
-        operational = build_operational_availability_conflict_reply(MagicMock())
+        ev = MagicMock()
+        ev.evidence_state = EVIDENCE_VARIANT_OPTIONS
+        ev.evidence_ok_for_positive = True
+        operational = build_operational_availability_conflict_reply(ev)
         styled = apply_commerce_reply_humanizer(
             operational,
             inbound_text="هل عندكم فساتين؟",
