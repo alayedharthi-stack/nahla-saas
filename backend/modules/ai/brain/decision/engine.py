@@ -1503,6 +1503,26 @@ class DefaultDecisionEngine:
         except Exception:  # noqa: BLE001
             pass
 
+        # ── 3.8t Non-catalog availability KB route (KB3) ─────────────────
+        # Must run before product_information_topic_shift — availability asks
+        # like «فيه عندك …؟» must not be misclassified as attribute questions.
+        try:
+            from ..commerce.non_catalog_availability_kb_route import (  # noqa: PLC0415
+                try_non_catalog_availability_kb_decision,
+            )
+
+            _kb_avail_dec = try_non_catalog_availability_kb_decision(
+                ctx, route="decision_engine_pre_product_info",
+            )
+            if _kb_avail_dec is not None:
+                return _kb_avail_dec
+        except Exception as _kb_avail_exc:  # noqa: BLE001  # noqa: silent-ok — KB route must not block decide
+            logger.debug(
+                "[KB_AVAILABILITY_ROUTE] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _kb_avail_exc,
+            )
+
         try:
             from ..state.product_information_topic import (  # noqa: PLC0415
                 TOPIC_PRODUCT_ATTRIBUTE_INFORMATION,
@@ -2514,26 +2534,6 @@ class DefaultDecisionEngine:
                 },
                 reason="product visual ask without resolved SKU",
                 confidence=0.85,
-            )
-
-        # ── 3.8t Non-catalog availability KB route (KB3) ─────────────────
-        # Availability/service asks about non-catalog subjects with a KB hit
-        # must compose from KB facts — not catalog search or solution-seeking.
-        try:
-            from ..commerce.non_catalog_availability_kb_route import (  # noqa: PLC0415
-                try_non_catalog_availability_kb_decision,
-            )
-
-            _kb_avail_dec = try_non_catalog_availability_kb_decision(
-                ctx, route="decision_engine_pre_discovery",
-            )
-            if _kb_avail_dec is not None:
-                return _kb_avail_dec
-        except Exception as _kb_avail_exc:  # noqa: BLE001  # noqa: silent-ok — KB route must not block decide
-            logger.debug(
-                "[KB_AVAILABILITY_ROUTE] skipped tenant=%s err=%s",
-                getattr(ctx, "tenant_id", None),
-                _kb_avail_exc,
             )
 
         # ── 3.8u Unified discovery entry (Phase 1) ────────────────────────

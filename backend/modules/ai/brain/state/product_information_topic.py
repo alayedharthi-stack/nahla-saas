@@ -31,8 +31,8 @@ _PRODUCT_ATTRIBUTE_RE = re.compile(
     r"(?:هل\s+)?(?:هو|هي|هذا|هذه|المنتج|هذا\s+المنتج|ال(?:ماده|مادة))?\s*"
     r"(?:مب(?:ستر|سط)|خام|طبيع(?:ي|يه|ية)?|معال[جه]|مصن(?:ع|عة)|عضوي|عضويه|عضوية)"
     r"|(?:pasteurized|pasteurised|raw|natural|processed|unprocessed|organic|artificial|synthetic|manufactured)"
-    r"|(?:هل\s+)?(?:ي)?حتو(?:ي|ى)(?:\s+(?:على|عند))?"
-    r"|(?:هل\s+)?ف(?:ي|يه)(?:ه|ا)\b"
+    r"|(?:هل\s+(?:ي)?حتو(?:ي|ى)(?:\s+(?:على|عند))?)"
+    r"|(?:هل\s+ف(?:ي|يه)(?:ه|ا)\b)"
     r"|(?:ما|ماذا|وش)\s+(?:مكون(?:ات)?(?:ه|ها)?|محتو(?:ى|يات)(?:ه|ها)?)"
     r"|(?:contains?|made\s+(?:of|from)|composition|ingredients?)"
     r")",
@@ -88,6 +88,17 @@ def detect_customer_owned_product_reference(message: str) -> bool:
     return bool(_CUSTOMER_OWNED_PRODUCT_RE.search(norm))
 
 
+def _is_bare_availability_turn(message: str) -> bool:
+    try:
+        from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
+            _is_bare_availability_inquiry,
+        )
+
+        return bool(_is_bare_availability_inquiry(message or ""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def detect_product_attribute_question(message: str) -> bool:
     """True for processing/composition/ingredient attribute questions."""
     norm = _normalize(message or "")
@@ -95,10 +106,16 @@ def detect_product_attribute_question(message: str) -> bool:
         return False
     if _FULFILLMENT_ONLY_RE.search(norm) and not _PRODUCT_ATTRIBUTE_RE.search(norm):
         return False
-    return bool(_PRODUCT_ATTRIBUTE_RE.search(norm))
+    if _PRODUCT_ATTRIBUTE_RE.search(norm):
+        return True
+    if _is_bare_availability_turn(message):
+        return False
+    return False
 
 
 def detect_product_information_topic_shift(message: str) -> bool:
+    if _is_bare_availability_turn(message):
+        return False
     norm = _normalize(message or "")
     if not norm:
         return False

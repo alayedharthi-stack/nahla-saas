@@ -167,6 +167,7 @@ class TestKBUnavailableTruthCompose:
         assert "NOT currently available" in goal
         assert "availability uncertainty" in goal
         assert "ما نقدر نؤكد التوفر" in goal
+        assert "قيد التحقق" in goal
         forbidden = list(decision.args.get("forbidden_claims") or [])
         assert "availability_uncertainty_when_kb_negative" in forbidden
         assert "invented_contact_or_next_step" in forbidden
@@ -219,6 +220,80 @@ class TestKBUnavailableTruthCompose:
         assert decision.action != ACTION_SEARCH_PRODUCTS
         assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
         assert decision.args.get("block_commerce_escalation") is True
+
+
+class TestLiveRegressionFiehAvailability:
+    _MSG = "صباح الخير\nفيه عندك طرود نحل؟"
+
+    def test_fieh_not_product_attribute_false_positive(self) -> None:
+        from modules.ai.brain.state.product_information_topic import (  # noqa: PLC0415
+            detect_product_attribute_question,
+            detect_product_information_topic_shift,
+        )
+
+        assert detect_product_attribute_question(self._MSG) is False
+        assert detect_product_information_topic_shift(self._MSG) is False
+
+    def test_engine_routes_kb_with_hit_not_product_attribute(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: PLC0415
+        from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
+        from modules.ai.brain.types import BrainContext, CommerceFacts, MerchantConversationState  # noqa: E402
+
+        db = _install_kb_stubs(monkeypatch, [_negative_kb_with_next_step()])
+        intent = intent_rules.match(self._MSG)
+        ctx = BrainContext(
+            tenant_id=33,
+            customer_phone="966542980511",
+            message=self._MSG,
+            intent=intent,
+            state=MerchantConversationState(greeted=True),
+            facts=CommerceFacts(
+                has_products=True,
+                product_count=10,
+                in_stock_count=10,
+                has_active_integration=True,
+                orderable=True,
+            ),
+        )
+        ctx._db = db  # type: ignore[attr-defined]
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+        assert decision.args.get("availability_polarity") == "negative"
+        assert "product_information_topic_shift" not in (decision.reason or "")
+
+    def test_quality_guard_does_not_inject_pending_verification(self) -> None:
+        from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
+            apply_commerce_reply_quality_guard,
+        )
+
+        result = apply_commerce_reply_quality_guard(
+            "",
+            inbound_text=self._MSG,
+            intent_name="ask_product",
+            primary_customer_goal="product_availability",
+            decision_topic=TOPIC_KB_AVAILABILITY_FACTS,
+            availability_polarity="negative",
+        )
+        assert result.reply != "التوفر قيد التحقق."
+        assert "قيد التحقق" not in result.reply
+        assert result.fallback_kind == "kb_negative_suppressed"
+
+    def test_no_kb_hit_allows_uncertainty_fallback(self) -> None:
+        from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
+            apply_commerce_reply_quality_guard,
+        )
+
+        result = apply_commerce_reply_quality_guard(
+            "",
+            inbound_text="في عندك منتج خاص؟",
+            intent_name="ask_product",
+            primary_customer_goal="product_availability",
+        )
+        assert result.reply == "التوفر قيد التحقق."
+        assert result.fallback_kind == "availability"
 
 
 class TestKBNegativeGuardTruth:
