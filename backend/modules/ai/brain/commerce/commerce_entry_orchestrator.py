@@ -5,6 +5,7 @@ Commerce entry routing — CE1 status branch + CE2 catalog delivery hook.
 
 CE1: status/story reply price/qty/buy ownership.
 CE2: see commerce_entry_catalog_delivery.py for catalog send/block ownership.
+CE4: see product_knowledge_or_comparison.py for knowledge/comparison ownership.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ class CustomerAction(str, Enum):
     BUY = "buy"
     QUANTITY = "quantity"
     ASK_VARIANT_OR_SIZE = "ask_variant_or_size"
+    KNOWLEDGE = "knowledge"
     DELEGATE = "delegate"
 
 
@@ -42,6 +44,16 @@ def classify_customer_action(
     raw = (message or "").strip()
     if not raw:
         return CustomerAction.DELEGATE
+
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            classify_product_knowledge_kind,
+        )
+
+        if classify_product_knowledge_kind(raw) is not None:
+            return CustomerAction.KNOWLEDGE
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — knowledge probe is best-effort
+        pass
 
     if _PRICE_FOLLOWUP_RE.search(raw):
         return CustomerAction.PRICE
@@ -235,6 +247,9 @@ def resolve_status_entry(ctx: Any, sr: Any) -> Optional[Any]:
         buy_dec = _resolve_status_buy_or_quantity(ctx, sr)
         if buy_dec is not None:
             return buy_dec
+
+    if action == CustomerAction.KNOWLEDGE:
+        return None
 
     if action == CustomerAction.DELEGATE:
         return None
