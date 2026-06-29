@@ -6,9 +6,12 @@ labels and excludes VAT/fee/charge/percentage lines.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger("nahla.payment_receipt_field_parser")
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -295,8 +298,8 @@ def parse_payment_receipt_fields(
         from core.arabic_ocr_normalization import normalize_arabic_presentation_forms  # noqa: PLC0415
 
         blob = normalize_arabic_presentation_forms(blob) or blob
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        logger.exception("[PAYMENT_RECEIPT_FIELD_PARSER] field_parse_failed")
 
     fields = PaymentReceiptParsedFields()
 
