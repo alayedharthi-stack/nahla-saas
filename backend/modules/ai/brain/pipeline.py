@@ -3423,6 +3423,27 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noqa: PLC0415
+                apply_kb_availability_reply_polish,
+            )
+
+            _kb_polished = apply_kb_availability_reply_polish(
+                reply or "",
+                topic=str((decision.args or {}).get("topic") or ""),
+                availability_polarity=str(
+                    (decision.args or {}).get("availability_polarity") or ""
+                ),
+            )
+            if _kb_polished != (reply or ""):
+                reply = _kb_polished
+                _guard_replaced["kb_availability_reply_polish"] = True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[KB_AVAILABILITY_REPLY_POLISH] pipeline hook failed tenant=%s",
+                tenant_id,
+            )
+
+        try:
             from modules.ai.brain.commerce_reply_humanizer import (  # noqa: PLC0415
                 apply_commerce_reply_humanizer,
             )
