@@ -344,7 +344,7 @@ def has_embedded_commerce_inquiry_beyond_greeting(message: str) -> bool:
 
         if _has_commerce_residue(raw):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional rules import; residue probe may skip
         pass
     try:
         from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
@@ -353,7 +353,7 @@ def has_embedded_commerce_inquiry_beyond_greeting(message: str) -> bool:
 
         if has_explicit_product_commerce_intent(raw):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product intent probe; may skip
         pass
     return False
 

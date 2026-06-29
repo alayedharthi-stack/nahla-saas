@@ -795,9 +795,8 @@ class DefaultDecisionEngine:
                 _skip_social_for_commerce = has_embedded_commerce_inquiry_beyond_greeting(
                     ctx.message or "",
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — optional embedded commerce probe; social may proceed
                 pass
-            if _skip_social_for_commerce:
                 logger.info(
                     "[SOCIAL_ROUTE] skipped tenant=%s category=%s reason=embedded_commerce_inquiry preview=%r",
                     getattr(ctx, "tenant_id", None),
@@ -2771,9 +2770,8 @@ class DefaultDecisionEngine:
                     _loc_update = try_order_context_update_decision(ctx)
                     if _loc_update is not None:
                         return _loc_update
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — order context gate optional; location FAQ may proceed
                 pass
-            _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
             if _maps_url:
                 from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
 
