@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -117,6 +117,21 @@ _EXPLICIT_PURCHASE_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_SUBJECT_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"هل\s+"
+    r"|(?:في(?:ه|ا)?|عند(?:كم|ك)?|لد(?:يكم|يك)?|"
+    r"متوفر(?:ة)?|موجود(?:ة)?|available|في)\s+"
+    r")+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_INQUIRY_SUBJECT_RE = re.compile(
+    r"^(?:هل\s+)?(?:في(?:ه|ا)?|عند(?:كم|ك)?|لد(?:يكم|يك)?|"
+    r"متوفر(?:ة)?|موجود(?:ة)?|available|في)\s+(.+?)\s*[؟?]?\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 class CommerceTurnKind(str, Enum):
     UNKNOWN = "unknown"
@@ -140,6 +155,61 @@ def _norm(text: str) -> str:
         .replace("\u0629", "\u0647")
     )
     return _WS_RE.sub(" ", s).strip()
+
+
+def _inquiry_probe_messages(message: str) -> List[str]:
+    """Candidate sub-messages for availability/subject probes after greeting strip."""
+    raw = (message or "").strip()
+    if not raw:
+        return []
+    seen: set[str] = set()
+    probes: List[str] = []
+
+    def _add(candidate: str) -> None:
+        c = (candidate or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            probes.append(c)
+
+    _add(raw)
+    try:
+        from modules.ai.brain.intent.rules import _strip_greeting_residue  # noqa: PLC0415
+
+        _add(_strip_greeting_residue(raw))
+        for line in raw.splitlines():
+            _add(line)
+            _add(_strip_greeting_residue(line))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional rules import
+        for line in raw.splitlines():
+            _add(line)
+    return probes
+
+
+def _clean_inquiry_subject(subject: str) -> Optional[str]:
+    s = _norm(subject)
+    if not s:
+        return None
+    while True:
+        nxt = _SUBJECT_PREFIX_RE.sub("", s, count=1).strip()
+        if nxt == s:
+            break
+        s = nxt
+    s = s.rstrip("?؟").strip()
+    return s or None
+
+
+def _extract_subject_from_probe(probe: str) -> Optional[str]:
+    raw = (probe or "").strip()
+    if not raw:
+        return None
+    norm = _norm(raw)
+    m = _INQUIRY_SUBJECT_RE.search(norm)
+    if m:
+        subject = (m.group(1) or "").strip()
+        return _clean_inquiry_subject(subject) if subject else None
+    if _BARE_TOKEN_INQUIRY_RE.match(raw):
+        return _clean_inquiry_subject(_norm(raw.rstrip("?؟")).strip())
+    return None
 
 
 def has_price_inquiry_signal(message: str) -> bool:
@@ -218,11 +288,12 @@ def classify_commerce_turn_kind(message: str) -> CommerceTurnKind:
     if _MULTI_TYPE_INQUIRY_RE.search(norm) or _SOFT_WANT_INQUIRY_RE.search(norm):
         return CommerceTurnKind.BROWSE
 
-    if _AVAILABILITY_RE.search(norm) or _has_packaged_availability_ask(norm):
-        return CommerceTurnKind.AVAILABILITY
-
-    if _BARE_TOKEN_INQUIRY_RE.match(raw):
-        return CommerceTurnKind.AVAILABILITY
+    for probe in _inquiry_probe_messages(raw):
+        probe_norm = _norm(probe)
+        if _AVAILABILITY_RE.search(probe_norm) or _has_packaged_availability_ask(probe_norm):
+            return CommerceTurnKind.AVAILABILITY
+        if _BARE_TOKEN_INQUIRY_RE.match(probe):
+            return CommerceTurnKind.AVAILABILITY
 
     return CommerceTurnKind.UNKNOWN
 
@@ -243,24 +314,10 @@ def is_commerce_inquiry_turn(message: str) -> bool:
 
 def extract_inquiry_subject(message: str) -> Optional[str]:
     """Best-effort product/group token from an availability question."""
-    raw = (message or "").strip()
-    if not raw:
-        return None
-    norm = _norm(raw)
-
-    m = re.search(
-        r"^(?:هل\s+)?(?:في(?:ه|ا)?|عند(?:كم|ك)?|لد(?:يكم|يك)?|"
-        r"متوفر(?:ة)?|موجود(?:ة)?|available|في)\s+(.+?)\s*[؟?]?\s*$",
-        norm,
-        re.UNICODE | re.IGNORECASE,
-    )
-    if m:
-        subject = (m.group(1) or "").strip()
-        return subject or None
-
-    if _BARE_TOKEN_INQUIRY_RE.match(raw):
-        return _norm(raw.rstrip("?؟")).strip() or None
-
+    for probe in _inquiry_probe_messages(message):
+        subject = _extract_subject_from_probe(probe)
+        if subject:
+            return subject
     return None
 
 

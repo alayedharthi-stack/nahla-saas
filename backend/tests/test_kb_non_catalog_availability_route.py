@@ -267,6 +267,34 @@ class TestKB3NonCatalogAvailabilityRoute:
         )
         assert decision is None
 
+    def test_greeting_then_availability_routes_to_kb(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        message = "صباح الخير\nفي عندك طرود نحل ؟"
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx(message, db=db, catalog_skus=[_sku(10, "عسل سمر الحجاز 2025")]),
+        )
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+        assert decision.args.get("availability_polarity") == "negative"
+
+    def test_space_before_question_mark_still_routes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        db = _install_kb_stubs(monkeypatch, [_bee_packages_kb()])
+        decision = try_non_catalog_availability_kb_decision(
+            _ctx("في عندك طرود نحل ؟", db=db),
+        )
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+
+
+class TestKB3GreetingAvailabilityRegression:
+    def test_extract_subject_after_greeting(self) -> None:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: E402
+            extract_inquiry_subject,
+        )
+
+        assert extract_inquiry_subject("صباح الخير\nفي عندك طرود نحل ؟") == "طرود نحل"
+        assert extract_inquiry_subject("في عندك طرود نحل ؟") == "طرود نحل"
+
 
 class TestKB3GuardIntegration:
     def setup_method(self) -> None:
@@ -330,6 +358,28 @@ class TestKB3GuardIntegration:
         )
         assert result.replaced is True
         assert "متوفر" not in result.reply
+
+    def test_options_variety_claim_rewritten_without_evidence(self) -> None:
+        live_reply = (
+            "حاضر، صباح النور! بالنسبة لطرود النحل، عندنا تشكيلة متنوعة. "
+            "إذا تبي تفاصيل أكثر أو أي شيء معين، خبرني!"
+        )
+        result = apply_product_availability_truth_guard(
+            reply=live_reply,
+            availability_context={
+                "platform_connected": True,
+                "catalog_skus": [_sku(11, "عسل طلح")],
+                "kb_signals": [],
+                "product_links": [],
+            },
+            inbound_text="صباح الخير\nفي عندك طرود نحل ؟",
+            chosen_path="llm",
+            tenant_id=1,
+        )
+        assert result.replaced is True
+        assert "تشكيلة متنوعة" not in result.reply
+        assert "متوفر" not in result.reply
+        assert "خيارات" not in result.reply
 
 
 class TestKB1KB2Regression:
