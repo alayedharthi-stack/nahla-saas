@@ -335,26 +335,53 @@ def has_embedded_commerce_inquiry_beyond_greeting(message: str) -> bool:
         return False
     if _is_media_framed_message(raw):
         return False
-    if is_commerce_inquiry_turn(raw):
-        return True
-    if has_price_inquiry_signal(raw):
-        return True
-    try:
-        from modules.ai.brain.intent.rules import _has_commerce_residue  # noqa: PLC0415
 
-        if _has_commerce_residue(raw):
-            return True
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional rules import; residue probe may skip
-        pass
     try:
-        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
-            has_explicit_product_commerce_intent,
-        )
+        from modules.ai.brain.intent.rules import _strip_greeting_residue  # noqa: PLC0415
 
-        if has_explicit_product_commerce_intent(raw):
+        residue = _strip_greeting_residue(raw)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional rules import; treat as no peel
+        return False
+
+    # Pure greeting or no greeting prefix was removed from the front.
+    if not residue:
+        return False
+    if len(residue) >= len(raw) - 2:
+        return False
+
+    seen: set[str] = set()
+    probes: List[str] = []
+
+    def _add(candidate: str) -> None:
+        c = (candidate or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            probes.append(c)
+
+    _add(raw)
+    _add(residue)
+    for line in raw.splitlines():
+        _add(line)
+        try:
+            _add(_strip_greeting_residue(line))
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional peel per line
+            pass
+
+    for probe in probes:
+        if is_commerce_inquiry_turn(probe):
             return True
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product intent probe; may skip
-        pass
+        if has_price_inquiry_signal(probe):
+            return True
+        try:
+            from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+                has_explicit_product_commerce_intent,
+            )
+
+            if has_explicit_product_commerce_intent(probe):
+                return True
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product intent probe
+            pass
+
     return False
 
 
