@@ -222,7 +222,54 @@ def prior_outbound_was_unhelpful_availability_rewrite(outbound: str) -> bool:
         return True
     if "ما نقدر نأكد التوفر بدقة" in ob:
         return True
+    if "ما نقدر نؤكد التوفر بدقة" in ob:
+        return True
     return False
+
+
+def prior_outbound_was_wrong_social_only_reply(outbound: str) -> bool:
+    """True when the prior outbound was a short social/greeting ack without commerce substance."""
+    ob = (outbound or "").strip()
+    if not ob or len(ob) > 120:
+        return False
+    if prior_outbound_was_unhelpful_availability_rewrite(ob):
+        return False
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            is_commerce_inquiry_turn,
+            has_price_inquiry_signal,
+        )
+
+        if is_commerce_inquiry_turn(ob) or has_price_inquiry_signal(ob):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional commerce inquiry probe
+        pass
+        "صباح النور",
+        "صباح الخير",
+        "مساء النور",
+        "social_persona_ack",
+        "👋",
+        "🌿",
+    )
+    return any(marker in ob for marker in social_markers)
+
+
+def _inbound_is_availability_or_commerce_inquiry(text: str) -> bool:
+    is_direct = False
+    try:
+        from core.product_entity_resolution import direct_product_availability_ask  # noqa: PLC0415
+
+        is_direct = bool(direct_product_availability_ask(text))
+    except Exception:  # noqa: BLE001
+        is_direct = False
+    try:
+        from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            is_commerce_inquiry_turn,
+        )
+
+        return bool(is_commerce_inquiry_turn(text) or is_direct)
+    except Exception:  # noqa: BLE001
+        return is_direct
 
 
 def should_bypass_hard_dedup_repeat_availability(
@@ -231,12 +278,28 @@ def should_bypass_hard_dedup_repeat_availability(
 ) -> bool:
     """
     Allow a new reply when the customer repeats a direct availability ask
-    after the guard replaced the prior answer with an unhelpful canned line.
+    after the guard replaced the prior answer with an unhelpful canned line,
+    or after a wrong social-only reply dropped the commerce question.
     """
-    try:
-        from core.product_entity_resolution import direct_product_availability_ask  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
+    if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
         return False
-    if not direct_product_availability_ask(current_inbound):
+    if prior_outbound_was_unhelpful_availability_rewrite(previous_outbound):
+        return True
+    return prior_outbound_was_wrong_social_only_reply(previous_outbound)
+
+
+def should_restore_brain_reply_after_dedup_silence(
+    *,
+    current_inbound: str,
+    candidate_reply: str,
+    previous_outbound: str = "",
+) -> bool:
+    """True when hard dedup would silence a commerce inquiry that already composed."""
+    if not (candidate_reply or "").strip():
         return False
-    return prior_outbound_was_unhelpful_availability_rewrite(previous_outbound)
+    if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
+        return False
+    if should_bypass_hard_dedup_repeat_availability(current_inbound, previous_outbound):
+        return True
+    # Any commerce inquiry must not end in zero outbound when brain composed text.
+    return True
