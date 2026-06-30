@@ -1728,15 +1728,30 @@ class MerchantBrain:
             )
 
         _turn_owner_contract_meta = {}
+        _turn_owner_contract_summary = {}
         try:
             from .turn_owner_contract import (  # noqa: PLC0415
                 attach_turn_owner_contract,
                 build_turn_owner_contract,
+                summarize_turn_owner_contract,
             )
 
             _turn_owner_contract = build_turn_owner_contract(decision, ctx=ctx)
             attach_turn_owner_contract(ctx, _turn_owner_contract)
             _turn_owner_contract_meta = _turn_owner_contract.to_metadata()
+            _turn_owner_contract_summary = summarize_turn_owner_contract(_turn_owner_contract)
+            logger.info(
+                "[TURN_OWNER_CONTRACT] tenant=%s owner=%s topic=%s protected=%s "
+                "block_catalog=%s block_staff=%s block_showroom=%s blocked=%s",
+                tenant_id,
+                _turn_owner_contract.owner,
+                _turn_owner_contract.topic,
+                _turn_owner_contract.protected_final_reply,
+                _turn_owner_contract.block_catalog_push,
+                _turn_owner_contract.block_staff_contact,
+                _turn_owner_contract.block_showroom_location,
+                sorted(_turn_owner_contract.blocked_postprocess),
+            )
         except Exception as _toc_exc:  # noqa: BLE001  # noqa: silent-ok — contract must not block turns
             logger.debug(
                 "[TURN_OWNER_CONTRACT] build skipped tenant=%s err=%s",
@@ -1773,6 +1788,11 @@ class MerchantBrain:
 
         # ── 5. Execute ────────────────────────────────────────────────────
         result: ActionResult = await self._executor.execute(decision, ctx)
+
+        if _turn_owner_contract_meta:
+            result.data["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+            if _turn_owner_contract_summary:
+                result.data["turn_owner_contract_summary"] = dict(_turn_owner_contract_summary)
 
         if (
             decision.action == ACTION_LLM_REPLY

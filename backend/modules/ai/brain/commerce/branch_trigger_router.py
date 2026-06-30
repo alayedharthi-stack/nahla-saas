@@ -343,11 +343,23 @@ def evaluate_branch_trigger_routing(
     inbound_metadata: Optional[dict] = None,
 ) -> Optional[BranchTriggerDecision]:
     """Return a pre-brain decision when structured keyword routing matches."""
-    from modules.ai.brain.commerce.health_advisory_product_safety import (  # noqa: PLC0415
-        should_defer_non_health_routes,
+    from modules.ai.brain.turn_owner_contract import (  # noqa: PLC0415
+        should_suppress_prebrain_branch_routing,
     )
 
-    if should_defer_non_health_routes(message or ""):
+    suppressed, prebrain_contract = should_suppress_prebrain_branch_routing(
+        message=message or "",
+        inbound_metadata=inbound_metadata,
+    )
+    if suppressed:
+        logger.info(
+            "[BRANCH_TRIGGER_ROUTER] prebrain contract suppressed tenant=%s reason=%s "
+            "owner=%s topic=%s",
+            tenant_id,
+            prebrain_contract.suppress_reason,
+            prebrain_contract.owner,
+            prebrain_contract.topic,
+        )
         return None
 
     from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415

@@ -7258,12 +7258,25 @@ async def _handle_merchant_message(
             from modules.ai.brain.commerce.branch_trigger_router import (  # noqa: PLC0415
                 evaluate_branch_trigger_routing as _evaluate_branch_trigger_routing,
             )
+            from modules.ai.brain.turn_owner_contract import (  # noqa: PLC0415
+                build_prebrain_route_contract,
+            )
+
+            _prebrain_route_contract = build_prebrain_route_contract(
+                message=text or "",
+                inbound_metadata=inbound_metadata,
+            )
+            _btr_inbound_metadata = dict(inbound_metadata or {})
+            if _prebrain_route_contract.suppress_reason:
+                _btr_inbound_metadata["prebrain_route_contract"] = (
+                    _prebrain_route_contract.to_metadata()
+                )
             _btr_decision = _evaluate_branch_trigger_routing(
                 db,
                 tenant_id=tenant_id,
                 message=text or "",
                 customer_phone=to,
-                inbound_metadata=inbound_metadata,
+                inbound_metadata=_btr_inbound_metadata,
             )
         except Exception as _btr_exc:  # noqa: BLE001
             logger.warning(

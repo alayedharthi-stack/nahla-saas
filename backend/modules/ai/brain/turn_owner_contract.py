@@ -6,8 +6,11 @@ choose owners or reorder the decision engine; it summarizes the final
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+
+logger = logging.getLogger("nahla.brain.turn_owner_contract")
 
 
 TOPIC_HEALTH_ADVISORY = "health_advisory_product_safety"
@@ -69,6 +72,53 @@ class TurnOwnerContract:
             "allowed_postprocess": sorted(self.allowed_postprocess),
             "blocked_postprocess": sorted(self.blocked_postprocess),
         }
+
+
+@dataclass(frozen=True)
+class PrebrainRouteContract:
+    """Current-turn route contract available before brain decision."""
+
+    owner: Optional[str] = None
+    topic: Optional[str] = None
+    protected_final_reply: bool = False
+    block_catalog_push: bool = False
+    block_staff_contact: bool = False
+    block_showroom_location: bool = False
+    suppress_reason: str = ""
+
+    def suppresses_branch_routing(self) -> bool:
+        return bool(
+            self.suppress_reason
+            or self.block_staff_contact
+            or self.block_showroom_location
+        )
+
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "owner": self.owner,
+            "topic": self.topic,
+            "protected_final_reply": self.protected_final_reply,
+            "block_catalog_push": self.block_catalog_push,
+            "block_staff_contact": self.block_staff_contact,
+            "block_showroom_location": self.block_showroom_location,
+            "suppress_reason": self.suppress_reason,
+        }
+
+
+def summarize_turn_owner_contract(contract: TurnOwnerContract) -> Dict[str, Any]:
+    """Log-safe summary for telemetry and turn metadata."""
+    return {
+        "owner": contract.owner,
+        "topic": contract.topic,
+        "action": contract.action,
+        "protected_final_reply": contract.protected_final_reply,
+        "block_catalog_push": contract.block_catalog_push,
+        "block_staff_contact": contract.block_staff_contact,
+        "block_showroom_location": contract.block_showroom_location,
+        "pause_order_slot_collection": contract.pause_order_slot_collection,
+        "block_product_ordering_prompt": contract.block_product_ordering_prompt,
+        "blocked_postprocess": sorted(contract.blocked_postprocess),
+    }
 
 
 def _truthy(value: Any) -> bool:
@@ -286,14 +336,92 @@ def attach_turn_owner_contract(ctx: Any, contract: TurnOwnerContract) -> None:
     ctx.turn_owner_contract = contract  # type: ignore[attr-defined]
 
 
+def build_prebrain_route_contract(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+) -> PrebrainRouteContract:
+    """Infer current-turn route protections available before brain decide."""
+    meta = dict(inbound_metadata or {})
+
+    try:
+        from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
+            TOPIC_PAYMENT_EVIDENCE_PENDING,
+            TOPIC_PAYMENT_RECEIPT_RECEIVED,
+            inbound_metadata_has_payment_evidence,
+        )
+
+        if inbound_metadata_has_payment_evidence(meta):
+            pe = str(meta.get("payment_evidence_status") or "").strip().lower()
+            topic = (
+                TOPIC_PAYMENT_EVIDENCE_PENDING
+                if pe == "pre_transfer_review"
+                else TOPIC_PAYMENT_RECEIPT_RECEIVED
+            )
+            return PrebrainRouteContract(
+                owner="payment_evidence",
+                topic=topic,
+                protected_final_reply=True,
+                block_catalog_push=True,
+                block_staff_contact=True,
+                block_showroom_location=True,
+                suppress_reason="payment_evidence_current_turn",
+            )
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — payment probe must not block routes
+        logger.debug("[TURN_OWNER_CONTRACT] payment prebrain probe skipped err=%s", exc)
+
+    try:
+        from modules.ai.brain.commerce.health_advisory_product_safety import (  # noqa: PLC0415
+            TOPIC_HEALTH_ADVISORY,
+            classify_health_advisory,
+        )
+
+        if classify_health_advisory(message or "", state=state).matched:
+            return PrebrainRouteContract(
+                owner="health_advisory",
+                topic=TOPIC_HEALTH_ADVISORY,
+                protected_final_reply=True,
+                block_catalog_push=True,
+                block_staff_contact=True,
+                block_showroom_location=True,
+                suppress_reason="health_advisory_current_turn",
+            )
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — health probe must not block routes
+        logger.debug("[TURN_OWNER_CONTRACT] health prebrain probe skipped err=%s", exc)
+
+    return PrebrainRouteContract()
+
+
+def should_suppress_prebrain_branch_routing(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+    prebrain_contract: Optional[PrebrainRouteContract] = None,
+) -> Tuple[bool, PrebrainRouteContract]:
+    contract = prebrain_contract or build_prebrain_route_contract(
+        message=message,
+        inbound_metadata=inbound_metadata,
+        state=state,
+    )
+    if contract.suppresses_branch_routing():
+        return True, contract
+    return False, contract
+
+
 __all__ = [
     "POSTPROCESS_CATALOG_GROUNDING",
     "POSTPROCESS_MEDICAL_CLAIM_REWRITE",
     "POSTPROCESS_PRODUCT_BENEFIT_REWRITE",
     "POSTPROCESS_PRODUCT_ORDERING_PROMPT",
+    "PrebrainRouteContract",
     "TurnOwnerContract",
     "attach_turn_owner_contract",
+    "build_prebrain_route_contract",
     "build_turn_owner_contract",
     "get_turn_owner_contract",
+    "should_suppress_prebrain_branch_routing",
+    "summarize_turn_owner_contract",
     "turn_owner_contract_from_metadata",
 ]

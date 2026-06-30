@@ -79,17 +79,29 @@ def _receipt_data_signals(md: Dict[str, Any]) -> bool:
     return False
 
 
-def current_turn_has_payment_evidence(ctx: Any) -> bool:
-    """True when current inbound carries payment receipt / transfer evidence."""
-    md = _inbound_metadata(ctx)
-    norm_type = _normalized_inbound_type(ctx, md)
+def inbound_metadata_has_payment_evidence(
+    md: Optional[Dict[str, Any]],
+    *,
+    normalized_type: str = "",
+) -> bool:
+    """True when inbound metadata alone carries payment receipt / transfer evidence."""
+    meta = dict(md or {})
+    if not meta:
+        return False
+
+    norm_type = str(
+        normalized_type
+        or meta.get("normalized_type")
+        or meta.get("source_type")
+        or ""
+    ).strip().lower()
 
     try:
         from core.payment_receipt_attachment_gate import has_inbound_attachment  # noqa: PLC0415
     except Exception:  # noqa: BLE001  # noqa: silent-ok
         has_inbound_attachment = lambda _t, _m: bool(_m.get("has_attached_media"))  # type: ignore[misc, assignment]
 
-    if not has_inbound_attachment(norm_type, md) and not md.get("has_attached_media"):
+    if not has_inbound_attachment(norm_type, meta) and not meta.get("has_attached_media"):
         return False
 
     try:
@@ -97,27 +109,38 @@ def current_turn_has_payment_evidence(ctx: Any) -> bool:
             is_receipt_inbound,
         )
 
-        if is_receipt_inbound(md, normalized_type=norm_type):
+        if is_receipt_inbound(meta, normalized_type=norm_type):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok
         pass
 
-    pe = str(md.get("payment_evidence_status") or "").strip().lower()
+    pe = str(meta.get("payment_evidence_status") or "").strip().lower()
     if pe in _PAYMENT_EVIDENCE_STATUSES:
         return True
 
-    kind = str(md.get("pdf_kind") or md.get("image_kind") or "").strip().lower()
+    kind = str(meta.get("pdf_kind") or meta.get("image_kind") or "").strip().lower()
     if kind in _PAYMENT_MEDIA_KINDS:
         return True
 
-    sem = str(md.get("media_semantic_category") or md.get("semantic_category") or "").strip().lower()
+    sem = str(
+        meta.get("media_semantic_category") or meta.get("semantic_category") or ""
+    ).strip().lower()
     if sem in {"payment_receipt", "invoice"}:
         return True
 
-    if md.get("payment_receipt_detected") or md.get("payment_receipt_short_circuit"):
+    if meta.get("payment_receipt_detected") or meta.get("payment_receipt_short_circuit"):
         return True
 
-    return _receipt_data_signals(md)
+    return _receipt_data_signals(meta)
+
+
+def current_turn_has_payment_evidence(ctx: Any) -> bool:
+    """True when current inbound carries payment receipt / transfer evidence."""
+    md = _inbound_metadata(ctx)
+    return inbound_metadata_has_payment_evidence(
+        md,
+        normalized_type=_normalized_inbound_type(ctx, md),
+    )
 
 
 def block_catalog_for_payment_evidence(ctx: Any) -> None:
@@ -352,5 +375,6 @@ __all__ = [
     "TOPIC_PAYMENT_RECEIPT_RECEIVED",
     "block_catalog_for_payment_evidence",
     "current_turn_has_payment_evidence",
+    "inbound_metadata_has_payment_evidence",
     "try_payment_evidence_turn_decision",
 ]
