@@ -63,6 +63,7 @@ _PAYMENT_EVIDENCE_STATUSES = frozenset({
     "confirmed",
     "pre_transfer_review",
     "needs_confirmation",
+    "amount_only_insufficient",
 })
 
 
@@ -302,7 +303,7 @@ def allows_payment_media_ack(
     if not cat:
         if pe == "confirmed":
             return has_active_order or awaiting_payment_receipt
-        if pe in {"needs_confirmation", "pre_transfer_review"}:
+        if pe in {"needs_confirmation", "pre_transfer_review", "amount_only_insufficient"}:
             return bool(awaiting_payment_receipt and has_active_order)
         return False
 
@@ -310,7 +311,7 @@ def allows_payment_media_ack(
         return False
     if pe == "confirmed":
         return cat in _PAYMENT_SEMANTIC or (has_active_order and awaiting_payment_receipt)
-    if pe in {"needs_confirmation", "pre_transfer_review"}:
+    if pe in {"needs_confirmation", "pre_transfer_review", "amount_only_insufficient"}:
         return bool(
             awaiting_payment_receipt
             and has_active_order
@@ -330,6 +331,7 @@ def metadata_has_payment_evidence_kind_slots(metadata: Dict[str, Any]) -> bool:
 _SOFT_REPLY_STATUS_KIND: Dict[str, str] = {
     "pre_transfer_review": "payment_pre_review",
     "needs_confirmation": "payment_pending_evidence",
+    "amount_only_insufficient": "payment_pending_evidence",
 }
 
 

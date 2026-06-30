@@ -25,8 +25,11 @@ _DIA = re.compile(r"[\u064B-\u065F\u0670]")
 _WS = re.compile(r"\s+")
 
 RECEIPT_UNLINKED_ORDER_ACK_AR = (
-    "وصل إيصال التحويل، الله يعافيك.\n"
-    "أحتاج أتأكد من الطلب المرتبط بهذا التحويل."
+    "وصل إيصال التحويل، وأحتاج أتأكد من الطلب المرتبط قبل التجهيز."
+)
+
+RECEIPT_PENDING_VERIFICATION_ACK_AR = (
+    "وصل إيصال التحويل، وجارٍ التحقق منه قبل تجهيز الطلب."
 )
 
 RECEIPT_AMOUNT_MISMATCH_ACK_AR = (
@@ -371,6 +374,15 @@ def _compose_address_interview(missing: List[str]) -> str:
     return "\n".join(lines)
 
 
+def compose_pending_merchant_receipt_ack(summary: Dict[str, Any]) -> str:
+    """Acknowledge receipt/evidence without confirming payment or shipping."""
+    if summary.get("receipt_amount_mismatch"):
+        return RECEIPT_AMOUNT_MISMATCH_ACK_AR
+    if summary.get("can_mention_receipt_product"):
+        return RECEIPT_PENDING_VERIFICATION_ACK_AR
+    return RECEIPT_UNLINKED_ORDER_ACK_AR
+
+
 def compose_grounded_receipt_ack(summary: Dict[str, Any]) -> str:
     """Deterministic receipt ack respecting order evidence."""
     if summary.get("receipt_amount_mismatch"):
@@ -452,8 +464,10 @@ __all__ = [
     "ReceiptOrderEvidence",
     "RECEIPT_AMOUNT_MISMATCH_ACK_AR",
     "RECEIPT_UNLINKED_ORDER_ACK_AR",
+    "RECEIPT_PENDING_VERIFICATION_ACK_AR",
     "apply_receipt_grounding_to_summary",
     "compose_grounded_receipt_ack",
+    "compose_pending_merchant_receipt_ack",
     "evaluate_receipt_order_grounding",
     "evaluate_receipt_order_grounding_from_state",
     "is_remaining_payment_balance_message",

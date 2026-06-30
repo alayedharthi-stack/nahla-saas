@@ -18,13 +18,22 @@ _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
 
 # Lines that must never supply the primary transfer amount.
+# Note: ``Amount Transfer:`` is handled by a dedicated regex — do not
+# treat the substring ``transfer amount`` as a fee/vat exclusion line.
 _NON_TRANSFER_AMOUNT_LINE_RE = re.compile(
     r"(?:"
     r"vat\s*percentage|vat\s*amount|fee\s*amount|total\s*charge|"
-    r"transfer\s*amount|charge\s*amount|percentage\s*amount|"
+    r"charge\s*amount|percentage\s*amount|"
     r"نسبة\s*ضريبة|مبلغ\s*ضريبة|إجمالي\s*الرسوم|"
     r"percentage\s*:?\s*\d+\s*%"
     r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_AMOUNT_TRANSFER_RE = re.compile(
+    r"(?:Amount\s*Transfer|مبلغ\s*التحويل)\s*:\s*"
+    r"(?:SAR|SR|ريال|ر\.?\s*س)?\s*"
+    r"(?P<value>\d{1,9}(?:[.,]\d{1,2})?)",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -51,9 +60,10 @@ _REF_LABEL_RE = re.compile(
     r"(?:"
     r"رقم\s*(?:العملية|المرجع|المرجعي|التحويل)"
     r"|reference\s*(?:number|no|#)?"
-    r"|transaction\s*(?:id|ref(?:erence)?)"
+    r"|transaction\s*(?:id|ref(?:erence)?|number)"
+    r"|number\s*transaction"
     r")"
-    r"\s*[:#]\s*(?P<ref>[A-Za-z0-9][A-Za-z0-9\-]{9,47}[A-Za-z0-9])",
+    r"\s*[:#]\s*(?P<ref>[A-Za-z0-9][A-Za-z0-9\-]{4,47}[A-Za-z0-9])",
     re.IGNORECASE | re.UNICODE,
 )
 _REF_FT_RE = re.compile(r"\b(FT\d{8,})\b", re.IGNORECASE)
@@ -83,6 +93,24 @@ _BENEFICIARY_RE = re.compile(
 _AR_BENEFICIARY_RE = re.compile(
     r"المستفيد\s*:\s*(?P<name>[^\n\r]{3,80})",
     re.UNICODE,
+)
+_RECEIVER_NAME_RE = re.compile(
+    r"Receiver\s*Name\s*:\s*(?P<name>[^\n\r]{3,80})",
+    re.IGNORECASE,
+)
+_RECEIVER_MOBILE_RE = re.compile(
+    r"Receiver\s*:\s*(?P<mobile>\+?\d[\d\s\-]{8,20}\d)",
+    re.IGNORECASE,
+)
+_CUSTOMER_MOBILE_RES = (
+    re.compile(
+        r"Customer\s*(?:Mobile|Phone)\s*:\s*(?P<mobile>\+?\d[\d\s\-]{8,20}\d)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"Mobile\s*(?:number|Number)\s*:\s*(?P<mobile>\+?\d[\d\s\-]{8,20}\d)",
+        re.IGNORECASE,
+    ),
 )
 
 _VAT_PCT_RE = re.compile(
@@ -114,6 +142,10 @@ _BANK_NEEDLES: tuple[tuple[str, str], ...] = (
     ("alinma", "Alinma Bank"),
     ("الأهلي", "Al Ahli Bank"),
     ("alahli", "Al Ahli Bank"),
+    ("mobilypay", "Mobily Pay"),
+    ("mobily pay", "Mobily Pay"),
+    ("stc pay", "STC Pay"),
+    ("stcpay", "STC Pay"),
 )
 
 _AR_SENDER_RE = re.compile(
@@ -142,6 +174,10 @@ class PaymentReceiptParsedFields:
     transfer_datetime: str = ""
     reference_number: str = ""
     sender_person_name: str = ""
+    receiver_mobile: str = ""
+    beneficiary_mobile: str = ""
+    customer_mobile: str = ""
+    payer_mobile: str = ""
     amount_confidence: str = "low"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -172,10 +208,23 @@ def _line_is_non_transfer_amount(line: str) -> bool:
     return bool(_NON_TRANSFER_AMOUNT_LINE_RE.search(line or ""))
 
 
+def _normalize_mobile(raw: str) -> str:
+    compact = re.sub(r"[\s\-()]", "", (raw or "").strip())
+    if compact.startswith("00"):
+        compact = "+" + compact[2:]
+    if compact.startswith("966") and not compact.startswith("+"):
+        compact = "+" + compact
+    return compact[:20]
+
+
 def _parse_primary_amount(blob: str) -> tuple[str, str]:
     """Return (amount, confidence)."""
     if not blob:
         return "", "absent"
+
+    m = _AMOUNT_TRANSFER_RE.search(blob)
+    if m:
+        return _clean_amount(m.group("value")), "high"
 
     m = _PRIMARY_AMOUNT_LINE_RE.search(blob)
     if m:
@@ -331,9 +380,26 @@ def parse_payment_receipt_fields(
     if not fields.bank_name:
         fields.bank_name = _detect_bank(blob)
 
-    m = _BENEFICIARY_RE.search(blob) or _AR_BENEFICIARY_RE.search(blob)
+    m = _RECEIVER_NAME_RE.search(blob)
     if m:
         fields.beneficiary_name = _clean_person_name(m.group("name"))
+
+    m = _BENEFICIARY_RE.search(blob) or _AR_BENEFICIARY_RE.search(blob)
+    if m and not fields.beneficiary_name:
+        fields.beneficiary_name = _clean_person_name(m.group("name"))
+
+    m = _RECEIVER_MOBILE_RE.search(blob)
+    if m:
+        mobile = _normalize_mobile(m.group("mobile"))
+        fields.receiver_mobile = mobile
+        fields.beneficiary_mobile = mobile
+
+    for pat in _CUSTOMER_MOBILE_RES:
+        cm = pat.search(blob)
+        if cm:
+            fields.customer_mobile = _normalize_mobile(cm.group("mobile"))
+            fields.payer_mobile = fields.customer_mobile
+            break
 
     m = _FROM_ACCOUNT_RE.search(blob)
     if m:
@@ -368,6 +434,12 @@ def parsed_fields_to_hints(fields: PaymentReceiptParsedFields) -> Dict[str, str]
         hints["reference_number"] = fields.reference_number
     if fields.beneficiary_name:
         hints["beneficiary_name"] = fields.beneficiary_name
+    if fields.receiver_mobile:
+        hints["receiver_mobile"] = fields.receiver_mobile
+        hints["beneficiary_mobile"] = fields.beneficiary_mobile
+    if fields.customer_mobile:
+        hints["customer_mobile"] = fields.customer_mobile
+        hints["payer_mobile"] = fields.payer_mobile
     if fields.sender_person_name:
         hints["sender_name"] = fields.sender_person_name
     elif fields.from_account_masked:
