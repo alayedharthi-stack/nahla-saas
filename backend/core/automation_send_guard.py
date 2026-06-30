@@ -30,6 +30,7 @@ REASON_AI_DISABLED = "ai_disabled"
 REASON_HUMAN_TAKEOVER = "human_takeover"
 REASON_REQUIRES_HUMAN = "requires_human"
 REASON_BLOCKED_NUMBER = "blocked_number"
+REASON_STORE_AI_DISABLED = "store_ai_disabled"
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,17 @@ def should_block_automation_for_conversation(
         return AutomationBlockDecision(block=False)
 
     try:
+        from core.ai_disabled_gate import is_store_ai_enabled  # noqa: PLC0415
+
+        if not is_store_ai_enabled(db, int(tenant_id)):
+            return AutomationBlockDecision(
+                block=True,
+                reason=REASON_STORE_AI_DISABLED,
+            )
+    except Exception as exc:  # noqa: silent-ok — fall through to per-convo checks
+        logger.debug("[AUTOMATION_BLOCKED] store_ai check failed: %s", exc)
+
+    try:
         blocked, block_reason = is_internal_or_blocked(db, tenant_id, customer_phone)
     except Exception:
         blocked, block_reason = False, None
@@ -235,7 +247,7 @@ def evaluate_automation_send(
     convo = conversation or lookup_conversation_for_phone(
         db, int(tenant_id), customer_phone,
     )
-    if decision.reason == REASON_AI_DISABLED:
+    if decision.reason in {REASON_AI_DISABLED, REASON_STORE_AI_DISABLED}:
         from core.ai_disabled_gate import (  # noqa: PLC0415
             AIDisabledDecision,
             log_ai_disabled_send_block,
@@ -271,6 +283,7 @@ __all__ = [
     "REASON_BLOCKED_NUMBER",
     "REASON_HUMAN_TAKEOVER",
     "REASON_REQUIRES_HUMAN",
+    "REASON_STORE_AI_DISABLED",
     "evaluate_automation_send",
     "log_automation_blocked",
     "lookup_conversation_for_phone",

@@ -322,6 +322,71 @@ class TestManualSendBypass:
         assert decision.disabled is False
 
 
+class TestAutomationGuardStorePause:
+    def test_automation_blocked_when_store_off_even_without_conversation(self) -> None:
+        from core.automation_send_guard import (
+            REASON_STORE_AI_DISABLED,
+            should_block_automation_for_conversation,
+        )
+
+        db = MagicMock()
+        with patch(
+            "core.ai_disabled_gate.is_store_ai_enabled",
+            return_value=False,
+        ):
+            decision = should_block_automation_for_conversation(
+                db,
+                tenant_id=33,
+                customer_phone="966551459303",
+                conversation=None,
+            )
+
+        assert decision.block is True
+        assert decision.reason == REASON_STORE_AI_DISABLED
+
+
+class TestPutSettingsPreservesStoreAI:
+    def test_put_ai_personality_does_not_clear_store_ai_enabled(self) -> None:
+        from routers.settings import AISettingsIn, update_settings, AllSettingsIn
+
+        settings = SimpleNamespace(
+            ai_settings={"store_ai_enabled": False, "assistant_name": "نحلة"},
+            whatsapp_settings=None,
+            store_settings=None,
+            notification_settings=None,
+            extra_metadata=None,
+            updated_at=None,
+        )
+        db = MagicMock()
+        db.commit = MagicMock()
+        db.refresh = MagicMock()
+        request = MagicMock()
+
+        body = AllSettingsIn(
+            ai=AISettingsIn(assistant_name="مساعد جديد"),
+        )
+
+        with patch("routers.settings.resolve_tenant_id", return_value=33), patch(
+            "routers.settings.get_or_create_settings",
+            return_value=settings,
+        ), patch(
+            "routers.settings.require_not_support_impersonation",
+            return_value={},
+        ), patch(
+            "core.merchant_payment_methods.load_merchant_payment_methods",
+        ) as mock_pm:
+            mock_pm.return_value.to_dict.return_value = {}
+            _run(update_settings(
+                body=body,
+                request=request,
+                db=db,
+                _no_support={},
+            ))
+
+        assert settings.ai_settings["store_ai_enabled"] is False
+        assert settings.ai_settings["assistant_name"] == "مساعد جديد"
+
+
 class TestPatchEndpointDoesNotBulkUpdateConversations:
     def test_patch_only_updates_ai_settings(self) -> None:
         from routers.settings import patch_store_ai_settings, StoreAISettingsPatch

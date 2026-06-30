@@ -70,7 +70,10 @@ def is_store_ai_enabled(db: Session, tenant_id: int) -> bool:
 
     settings = get_or_create_settings(db, tenant_id)
     ai = merge_ai_defaults(settings.ai_settings)
-    return bool(ai.get("store_ai_enabled", True))
+    raw = ai.get("store_ai_enabled", True)
+    if raw is None:
+        return True
+    return bool(raw)
 
 
 def _find_conversations_for_phone(

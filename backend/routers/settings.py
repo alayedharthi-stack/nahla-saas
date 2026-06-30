@@ -50,7 +50,6 @@ class WhatsAppSettingsIn(BaseModel):
 
 
 class AISettingsIn(BaseModel):
-    store_ai_enabled: Optional[bool] = None
     assistant_name: str = "نحلة"
     assistant_role: str = ""
     reply_tone: str = "friendly"
@@ -166,7 +165,7 @@ async def update_settings(
 
     if body.ai is not None:
         current = merge_ai_defaults(settings.ai_settings)
-        current.update(body.ai.model_dump())
+        current.update(body.ai.model_dump(exclude_none=True))
         settings.ai_settings = current
 
     if body.store is not None:
