@@ -16,7 +16,13 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
 from modules.ai.brain.commerce.commerce_entry_catalog_delivery import (  # noqa: E402
     CatalogDeliveryKind,
     catalog_delivery_is_blocked,
+    has_pending_catalog_send,
+    is_catalog_send_confirmation,
+    pin_pending_catalog_send,
     try_commerce_entry_catalog_decision,
+)
+from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: E402
+    current_turn_has_payment_evidence,
 )
 from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noqa: E402
     TOPIC_KB_AVAILABILITY_FACTS,
@@ -350,3 +356,139 @@ class TestCommerceEntryCatalogDelivery:
         engine_dec = DefaultDecisionEngine().decide(ctx)
         assert engine_dec.action == ACTION_PROPOSE_DRAFT_ORDER
         assert engine_dec.args.get("source") == "order_prep_recovery"
+
+
+class TestExplicitCatalogSendAndPendingConfirmation:
+    def test_arabic_send_catalog_immediate(self) -> None:
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("ارسل الكتalog", db=_StubDB()),
+        )
+        assert decision is not None
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("catalog_delivery_kind") == CatalogDeliveryKind.SEND_CATALOG.value
+
+    def test_arabic_katalog_variants_immediate(self) -> None:
+        for message in (
+            "ارسل الكتalog",
+            "أرسل الكتalog",
+            "الكتalog",
+            "اعرض الكتalog",
+            "ورني الكتalog",
+        ):
+            decision = try_commerce_entry_catalog_decision(_ctx(message, db=_StubDB()))
+            assert decision is not None, message
+            assert decision.action == ACTION_CATALOG_NAVIGATE, message
+            assert decision.args.get("catalog_delivery_kind") == (
+                CatalogDeliveryKind.SEND_CATALOG.value
+            ), message
+
+    def test_pending_catalog_confirmation_send(self) -> None:
+        state = _state()
+        pin_pending_catalog_send(state, source="catalog_confirmation")
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("ارسل", state=state, db=_StubDB()),
+        )
+        assert decision is not None
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("catalog_delivery_kind") == CatalogDeliveryKind.SEND_CATALOG.value
+        assert not has_pending_catalog_send(state)
+
+    def test_pending_catalog_confirmation_nam(self) -> None:
+        state = _state()
+        pin_pending_catalog_send(state, source="catalog_confirmation")
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("نعم", state=state, db=_StubDB()),
+        )
+        assert decision is not None
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+
+    def test_explicit_catalog_after_payment_receipt_prior_block(self) -> None:
+        state = _state()
+        state.commerce_session = {"catalog_delivery_blocked": "payment_evidence"}
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("ارسل الكتalog", state=state, db=_StubDB()),
+        )
+        assert decision is not None
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert not catalog_delivery_is_blocked(_ctx("ارسل الكتalog", state=state, db=_StubDB()))
+
+    def test_receipt_same_turn_blocks_catalog(self) -> None:
+        meta = {
+            "normalized_type": "document",
+            "has_attached_media": True,
+            "pdf_kind": "payment_receipt",
+            "payment_evidence_status": "confirmed",
+            "receipt_data": {"amount": 350.0, "beneficiary_name": "test"},
+        }
+        ctx = _ctx("ارسل الكتalog", inbound_metadata=meta, db=_StubDB())
+        assert current_turn_has_payment_evidence(ctx) is True
+        assert try_commerce_entry_catalog_decision(ctx) is None
+
+    def test_bare_send_without_pending_not_product_item(self) -> None:
+        state = _state(
+            stage="checkout",
+            current_product_focus={"id": 9, "title": "عسل سدر", "from_status_reply": True},
+        )
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("ارسل", state=state, db=_StubDB()),
+        )
+        assert decision is None
+        assert is_catalog_send_confirmation("ارسل")
+
+    def test_ce1_regression_status_product_buy_not_catalog(self) -> None:
+        state = _state()
+        state.commerce_session = {
+            "status_reply_product_context": {
+                "active": True,
+                "product_title": "عسل سدر بلدي",
+                "product_id": 9,
+                "has_trusted_title": True,
+            },
+        }
+        state.current_product_focus = {
+            "id": 9,
+            "title": "عسل سدر بلدي",
+            "price": 120.0,
+            "from_status_reply": True,
+        }
+        db = _StubDB(products=[_StubProduct(pid=9, title="عسل سدر بلدي")])
+        catalog_dec = try_commerce_entry_catalog_decision(_ctx("أبيه", state=state, db=db))
+        assert catalog_dec is None
+        status_dec = try_status_reply_product_decision(_ctx("أبيه", state=state, db=db))
+        assert status_dec is not None
+        assert status_dec.action in {ACTION_PROPOSE_DRAFT_ORDER, ACTION_VARIANT_PRICING, ACTION_CLARIFY}
+
+    def test_grounding_guard_pins_pending_catalog_confirmation(self) -> None:
+        from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: PLC0415
+            apply_catalog_product_grounding_guard,
+        )
+
+        state = _state()
+        result = apply_catalog_product_grounding_guard(
+            reply="عندنا عسل القطف وعسل الشهد متوفر.",
+            inbound_text="وش عندكم؟",
+            executor_products=[{"title": "عسل سدر بلدي"}],
+            order_state=state,
+            chosen_path="llm_general",
+        )
+        assert result.replaced is True
+        assert "الخيارات المؤكدة" in result.reply
+        assert has_pending_catalog_send(state)
+
+    def test_ce4_regression_product_knowledge_not_catalog(self) -> None:
+        state = _state()
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("وش الفرق عن السدر العادي؟", state=state, db=_StubDB()),
+        )
+        assert decision is None
+        assert catalog_delivery_is_blocked(
+            _ctx("وش الفرق عن السدر العادي؟", state=state, db=_StubDB()),
+        )
+        state = _state()
+        decision = try_commerce_entry_catalog_decision(
+            _ctx("وش الفرق عن السدر العادي؟", state=state, db=_StubDB()),
+        )
+        assert decision is None
+        assert catalog_delivery_is_blocked(
+            _ctx("وش الفرق عن السدر العادي؟", state=state, db=_StubDB()),
+        )

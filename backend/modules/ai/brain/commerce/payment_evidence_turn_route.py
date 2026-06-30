@@ -121,18 +121,12 @@ def current_turn_has_payment_evidence(ctx: Any) -> bool:
 
 
 def block_catalog_for_payment_evidence(ctx: Any) -> None:
-    """Persist catalog block for payment-evidence turns."""
-    state = getattr(ctx, "state", None)
-    if state is None:
-        return
-    try:
-        from modules.ai.brain.commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
-            block_catalog_delivery,
-        )
+    """Same-turn catalog block is enforced via ``current_turn_has_payment_evidence``.
 
-        block_catalog_delivery(state, "payment_evidence")
-    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
-        logger.debug("[PAYMENT_EVIDENCE_TURN] catalog block failed err=%s", exc)
+    Payment receipt turns must not persist catalog blocks into later turns — the
+    customer may explicitly request catalog delivery on the next message.
+    """
+    _ = ctx
 
 
 def _summary_from_ctx(ctx: Any, md: Dict[str, Any]) -> Dict[str, Any]:
@@ -262,7 +256,6 @@ def try_payment_evidence_turn_decision(ctx: Any) -> Optional[Any]:
         return None
 
     md = _inbound_metadata(ctx)
-    block_catalog_for_payment_evidence(ctx)
     summary = _summary_from_ctx(ctx, md)
     allowed_facts = _collect_allowed_facts(md)
 
