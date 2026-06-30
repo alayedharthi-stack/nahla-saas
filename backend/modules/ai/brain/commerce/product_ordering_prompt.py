@@ -282,6 +282,15 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
     message = ctx.message or ""
 
     try:
+        from ..turn_owner_contract import get_turn_owner_contract  # noqa: PLC0415
+
+        contract = get_turn_owner_contract(ctx=ctx)
+        if contract is not None and contract.block_product_ordering_prompt:
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — contract probe must not break prompts
+        pass
+
+    try:
         from .health_advisory_product_safety import should_defer_non_health_routes  # noqa: PLC0415
 
         if should_defer_non_health_routes(message, state=getattr(ctx, "state", None)):

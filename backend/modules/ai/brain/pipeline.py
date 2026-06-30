@@ -1727,6 +1727,23 @@ class MerchantBrain:
                 getattr(ctx, "tenant_id", "?"), _pm_exc,
             )
 
+        _turn_owner_contract_meta = {}
+        try:
+            from .turn_owner_contract import (  # noqa: PLC0415
+                attach_turn_owner_contract,
+                build_turn_owner_contract,
+            )
+
+            _turn_owner_contract = build_turn_owner_contract(decision, ctx=ctx)
+            attach_turn_owner_contract(ctx, _turn_owner_contract)
+            _turn_owner_contract_meta = _turn_owner_contract.to_metadata()
+        except Exception as _toc_exc:  # noqa: BLE001  # noqa: silent-ok — contract must not block turns
+            logger.debug(
+                "[TURN_OWNER_CONTRACT] build skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _toc_exc,
+            )
+
         # Visible in all Railway log levels — critical checkpoint.
         _policy_changed = (decision.reason != reason_before_policy)
         logger.info(
@@ -3209,6 +3226,8 @@ class MerchantBrain:
                 _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 _pcgg_meta["inbound_text"] = message or ""
                 _pcgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                if _turn_owner_contract_meta:
+                    _pcgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
                 for _flag in (
                     "block_catalog_push",
                     "block_staff_contact",
@@ -3288,6 +3307,8 @@ class MerchantBrain:
             if catalog_product_grounding_guard_mode() != "off" and not _navigator_owner_locked:
                 _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                if _turn_owner_contract_meta:
+                    _cpgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
                 for _flag in (
                     "block_catalog_push",
                     "block_staff_contact",
@@ -3391,6 +3412,9 @@ class MerchantBrain:
             )
 
             if not result.data.get("shipment_claim_scrubbed_empty"):
+                _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                if _turn_owner_contract_meta:
+                    _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
                     inbound_text=message or "",
@@ -3406,7 +3430,7 @@ class MerchantBrain:
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                     state=new_state,
-                    inbound_metadata=(profile or {}).get("inbound_metadata") or {},
+                    inbound_metadata=_crqg_meta,
                     decision_topic=str((decision.args or {}).get("topic") or ""),
                     availability_polarity=str(
                         (decision.args or {}).get("availability_polarity") or ""

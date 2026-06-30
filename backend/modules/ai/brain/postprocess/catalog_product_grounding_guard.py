@@ -29,6 +29,10 @@ from modules.ai.brain.postprocess.product_claim_grounding_evidence import (
     ProductClaimGroundingEvidence,
     _norm,
 )
+from modules.ai.brain.turn_owner_contract import (
+    POSTPROCESS_CATALOG_GROUNDING,
+    get_turn_owner_contract,
+)
 
 logger = logging.getLogger("nahla.brain.postprocess.catalog_product_grounding_guard")
 
@@ -103,6 +107,12 @@ class CatalogProductGroundingGuardResult:
 def _catalog_rewrite_blocked_by_current_turn(
     inbound_metadata: Optional[Dict[str, Any]],
 ) -> bool:
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
+    if contract is not None and (
+        contract.block_catalog_push
+        or contract.blocks(POSTPROCESS_CATALOG_GROUNDING)
+    ):
+        return True
     meta = dict(inbound_metadata or {})
     topic = str(meta.get("decision_topic") or meta.get("topic") or "").strip()
     if topic in _CATALOG_REWRITE_BLOCKED_TOPICS:

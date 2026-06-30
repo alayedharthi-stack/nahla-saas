@@ -23,6 +23,7 @@ from modules.ai.brain.postprocess.stub_reply_guard_context import (
     is_lightweight_social_turn,
     should_suppress_generic_stub_injection,
 )
+from modules.ai.brain.turn_owner_contract import get_turn_owner_contract
 
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
 
@@ -556,6 +557,7 @@ def apply_commerce_reply_quality_guard(
         chosen_path=chosen_path,
         kb_availability_facts=kb_availability_facts,
     )
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
     try:
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             is_generic_stub_reply,
@@ -578,6 +580,15 @@ def apply_commerce_reply_quality_guard(
         pass
 
     if not original:
+        if contract is not None and contract.protected_final_reply:
+            return CommerceReplyQualityGuardResult(
+                reply=original,
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind="protected_final_reply_no_fallback",
+            )
         fallback, kind = select_arabic_commerce_fallback(
             intent_name=intent_name,
             primary_customer_goal=primary_customer_goal,
@@ -643,6 +654,15 @@ def apply_commerce_reply_quality_guard(
     ):
         needs_fallback = True
     if needs_fallback:
+        if contract is not None and contract.protected_final_reply:
+            return CommerceReplyQualityGuardResult(
+                reply=original,
+                replaced=False,
+                stripped_residue=stripped_residue,
+                stripped_english=stripped_english,
+                used_fallback=False,
+                fallback_kind="protected_final_reply_no_fallback",
+            )
         text, fallback_kind = select_arabic_commerce_fallback(
             intent_name=intent_name,
             primary_customer_goal=primary_customer_goal,
