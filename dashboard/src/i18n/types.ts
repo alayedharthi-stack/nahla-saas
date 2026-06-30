@@ -865,8 +865,8 @@ export interface Translations {
       metaCardTitle:          string
       metaCardSubtitle:       string
       metaCardBadge:          string
-      metaCardMessage:        string
-      metaConnectDisabledBtn: string
+      metaApprovalNotice:     string
+      metaConnectBtn:         string
     }
     assisted: {
       formTitle:               string

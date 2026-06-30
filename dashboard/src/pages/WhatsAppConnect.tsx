@@ -265,43 +265,6 @@ function MetaEmbeddedOptionCard({
 }) {
   const { t } = useLanguage()
   const s = t(tr => tr.whatsappConnect.simplified)
-  const emb = t(tr => tr.whatsappConnect.embedded)
-  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null)
-  const [disabledReason, setDisabledReason] = useState('')
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const cfg = await apiCall<{
-          app_id: string
-          config_id: string
-          embedded_signup_config_id?: string
-          embedded_signup_enabled?: boolean
-          disabled_reason?: string
-        }>('/whatsapp/embedded/config')
-        if (cancelled) return
-        const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
-        const isEnabled = cfg.embedded_signup_enabled !== false && !!cfg.app_id && !!cfgId
-        setSignupEnabled(isEnabled)
-        setDisabledReason(cfg.disabled_reason || '')
-      } catch {
-        if (!cancelled) {
-          setSignupEnabled(false)
-          setDisabledReason('')
-        }
-      }
-    })()
-    return () => { cancelled = true }
-  }, [])
-
-  if (signupEnabled === true) {
-    return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-        <EmbeddedSignupFlow onConnected={onConnected} />
-      </div>
-    )
-  }
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
@@ -310,27 +273,16 @@ function MetaEmbeddedOptionCard({
           <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
           <p className="text-sm text-slate-500 mt-1">{s.metaCardSubtitle}</p>
         </div>
-        <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">
+        <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">
           {s.metaCardBadge}
         </span>
       </div>
 
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
-        {disabledReason || s.metaCardMessage}
+        {s.metaApprovalNotice}
       </div>
 
-      <p className="text-xs text-slate-500 leading-relaxed">{emb.disabledExplainBody}</p>
-
-      <button
-        type="button"
-        disabled
-        className="w-full flex items-center justify-center gap-2 bg-[#1877F2]/40 text-white font-bold py-3.5 rounded-xl cursor-not-allowed"
-      >
-        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
-        </svg>
-        {s.metaConnectDisabledBtn}
-      </button>
+      <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
     </div>
   )
 }
@@ -488,11 +440,14 @@ function explainWhatsAppError(msg: unknown, err: Translations['whatsappConnect']
 
 function EmbeddedSignupFlow({
   onConnected,
+  embeddedInCard = false,
 }: {
   onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
+  embeddedInCard?: boolean
 }) {
   const { t } = useLanguage()
   const emb = t(tr => tr.whatsappConnect.embedded)
+  const simp = t(tr => tr.whatsappConnect.simplified)
   const waErr = t(tr => tr.whatsappConnect.errors)
   const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'done'>('init')
   const [error, setError]       = useState('')
@@ -503,13 +458,6 @@ function EmbeddedSignupFlow({
   const embeddedStatusChecked   = useRef(false)
 
   const [configId, setConfigId] = useState('')
-  // Whether the merchant's Meta app actually has the FB Login for
-  // Business / WhatsApp Embedded Signup entitlement. Read from the
-  // backend ``/embedded/config`` payload. When false we render a
-  // "قريباً" state and DO NOT open the FB.login popup (Meta would
-  // reject it with the BSP/TP entitlement error anyway).
-  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null)
-  const [disabledReason, setDisabledReason] = useState('')
 
   // Add-phone form state
   const [newPhone, setNewPhone]         = useState('')
@@ -538,18 +486,14 @@ function EmbeddedSignupFlow({
         const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
         if (cfgId) setConfigId(cfgId)
 
-        // Gate the entire flow on the backend's enablement flag. When
-        // disabled we render a "قريباً / قيد التفعيل" state — we do
-        // NOT load the FB SDK because the popup would just bounce
-        // back with the BSP/TP entitlement error.
-        const isEnabled = cfg.embedded_signup_enabled !== false && !!cfg.app_id && !!cfgId
-        setSignupEnabled(isEnabled)
-        setDisabledReason(cfg.disabled_reason || '')
-        if (!isEnabled) {
+        const hasCredentials = !!cfg.app_id && !!cfgId
+        if (!hasCredentials) {
           setStage('ready')
           return
         }
 
+        // Always load the FB SDK when credentials exist so merchants can
+        // trial Meta Embedded Signup before official BSP/TP approval.
         window.fbAsyncInit = () => {
           window.FB.init({ appId: cfg.app_id, version: cfg.graph_version, xfbml: false, cookie: true })
           if (!cancelled) { sdkLoaded.current = true; setStage('ready') }
@@ -691,10 +635,6 @@ function EmbeddedSignupFlow({
   }, [emb.bspNotEnabled, emb.exchangeFailed])
 
   const launchSignup = useCallback(() => {
-    if (signupEnabled === false) {
-      setError(disabledReason || emb.directNotEnabled)
-      return
-    }
     if (!window.FB || !sdkLoaded.current) { setError(emb.sdkNotReady); return }
     setError('')
     window.FB.login((response: any) => {
@@ -703,7 +643,7 @@ function EmbeddedSignupFlow({
       if (!code) { setError(emb.exchangeFailed); return }
       handleExchange(code, undefined)
     }, buildEmbeddedSignupFbLoginOptions(configId))
-  }, [handleExchange, configId, signupEnabled, disabledReason, emb.directNotEnabled, emb.sdkNotReady, emb.linkCancelled])
+  }, [handleExchange, configId, emb.sdkNotReady, emb.linkCancelled, emb.exchangeFailed])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
@@ -1011,43 +951,32 @@ function EmbeddedSignupFlow({
     )
   }
 
-  // ── Disabled state (May 2026) ────────────────────────────────────
-  // When the backend reports ``embedded_signup_enabled=false`` we
-  // render a "قريباً / قيد التفعيل" card instead of mounting the FB
-  // SDK and showing the "ربط مع Meta" button. The backend reason
-  // string is shown verbatim so changes to the disabled copy live
-  // in one place (``core/config.meta_embedded_disabled_reason``).
-  // The card guides the merchant toward 360dialog as the working
-  // path; clicking the secondary button switches the parent tab
-  // back to manual/360dialog via a custom event the parent listens
-  // to.
-  if (signupEnabled === false) {
+  // ── Compact card CTA (simplified merchant page) ─────────────────
+  if (
+    embeddedInCard
+    && ['init', 'loading-sdk', 'ready', 'exchanging'].includes(stage)
+  ) {
     return (
-      <div className="space-y-5">
-        <div className="flex flex-col items-center gap-3 py-4">
-          <div className="w-16 h-16 rounded-2xl bg-slate-100 flex items-center justify-center">
-            <AlertCircle className="w-8 h-8 text-slate-500" />
-          </div>
-          <div className="text-center">
-            <p className="font-bold text-slate-800 text-lg">{emb.disabledTitle}</p>
-            <p className="text-sm text-slate-500 mt-1">
-              {emb.disabledSubtitle}
-            </p>
-          </div>
-        </div>
-
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
-          {disabledReason || emb.disabledReasonFallback}
-        </div>
-
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs text-slate-600 space-y-1.5">
-          <p className="font-semibold text-slate-700">{emb.disabledExplainTitle}</p>
-          <p>{emb.disabledExplainBody}</p>
-        </div>
-
-        <p className="text-center text-xs text-slate-400">
-          {emb.disabledFooter}
-        </p>
+      <div className="space-y-3">
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
+        )}
+        <button
+          type="button"
+          onClick={launchSignup}
+          disabled={stage !== 'ready' || busy}
+          className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
+        >
+          {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
+            ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
+            : <>
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                </svg>
+                {simp.metaConnectBtn}
+              </>
+          }
+        </button>
       </div>
     )
   }

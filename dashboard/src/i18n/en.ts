@@ -880,10 +880,10 @@ const en: Translations = {
     },
     simplified: {
       metaCardTitle:           'Connect via Meta',
-      metaCardSubtitle:        'Official path — activates automatically after Meta approval',
-      metaCardBadge:           'Coming soon',
-      metaCardMessage:         'Direct Meta connect will be enabled once Meta officially approves the Nahla app.',
-      metaConnectDisabledBtn:  'Connect via Meta',
+      metaCardSubtitle:        'Official path to connect WhatsApp Business',
+      metaCardBadge:           'Meta',
+      metaApprovalNotice:      'Direct Meta connection may not complete until Meta approval is finalized. If it does not work, we recommend requesting assisted setup from the Nahlah team.',
+      metaConnectBtn:          'Connect via Meta',
     },
     assisted: {
       formTitle:               'Request WhatsApp connect with Nahla team help',

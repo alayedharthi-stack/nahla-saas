@@ -884,10 +884,10 @@ const ar: Translations = {
     },
     simplified: {
       metaCardTitle:           'ربط عبر Meta',
-      metaCardSubtitle:        'المسار الرسمي — سيتفعّل تلقائياً بعد اعتماد Meta',
-      metaCardBadge:           'قريباً',
-      metaCardMessage:         'سيتم تفعيل الربط المباشر عبر Meta بعد اكتمال اعتماد Meta الرسمي.',
-      metaConnectDisabledBtn:  'ربط عبر Meta',
+      metaCardSubtitle:        'المسار الرسمي لربط WhatsApp Business',
+      metaCardBadge:           'Meta',
+      metaApprovalNotice:      'الربط المباشر عبر Meta قد لا يكتمل حالياً حتى تنتهي موافقة Meta الرسمية. إذا لم يعمل معك، نوصي بطلب الربط بمساعدة فريق نحلة.',
+      metaConnectBtn:          'ربط عبر Meta',
     },
     assisted: {
       formTitle:               'طلب ربط بمساعدة فريق نحلة',

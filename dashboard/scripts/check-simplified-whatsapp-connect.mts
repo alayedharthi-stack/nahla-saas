@@ -12,6 +12,8 @@ const connectPage = readFileSync(
   join(__dir, '../src/pages/WhatsAppConnect.tsx'),
   'utf8',
 )
+const arLocale = readFileSync(join(__dir, '../src/i18n/ar.ts'), 'utf8')
+const enLocale = readFileSync(join(__dir, '../src/i18n/en.ts'), 'utf8')
 
 let failed = 0
 
@@ -19,7 +21,11 @@ const required = [
   'MetaEmbeddedOptionCard',
   'AssistedConnectFlow',
   'requestAssistedConnect',
-  'metaConnectDisabledBtn',
+  'metaApprovalNotice',
+  'metaConnectBtn',
+  'launchSignup',
+  'buildEmbeddedSignupFbLoginOptions',
+  'embeddedInCard',
   'a.submitBtn',
 ]
 
@@ -36,10 +42,14 @@ const forbidden = [
   "setMode('manual'",
   "setMode('direct'",
   "setMode('coexistence'",
+  "setMode('embedded'",
   'wc.page.modes.manual',
   'wc.page.modes.otp',
+  'wc.page.modes.coexistence',
   '<ManualConnectForm',
   '<CoexistenceFlow',
+  'metaConnectDisabledBtn',
+  'bg-[#1877F2]/40',
 ]
 
 for (const needle of forbidden) {
@@ -51,11 +61,30 @@ for (const needle of forbidden) {
   }
 }
 
-if (!connectPage.includes('disabled') || !connectPage.includes('type="button"')) {
+if (!connectPage.includes('onClick={launchSignup}')) {
   failed++
-  console.error('FAIL Meta connect button must remain disabled for merchants when signup is off')
+  console.error('FAIL Meta connect button must call launchSignup (enabled trial path)')
 } else {
-  console.log('OK   disabled Meta button pattern present')
+  console.log('OK   Meta button calls launchSignup')
+}
+
+const arNotice =
+  'الربط المباشر عبر Meta قد لا يكتمل حالياً حتى تنتهي موافقة Meta الرسمية'
+const enNotice =
+  'Direct Meta connection may not complete until Meta approval is finalized'
+
+if (!arLocale.includes(arNotice)) {
+  failed++
+  console.error('FAIL ar.ts missing Meta approval notice copy')
+} else {
+  console.log('OK   ar.ts Meta approval notice')
+}
+
+if (!enLocale.includes(enNotice)) {
+  failed++
+  console.error('FAIL en.ts missing Meta approval notice copy')
+} else {
+  console.log('OK   en.ts Meta approval notice')
 }
 
 if (failed > 0) {
