@@ -24,6 +24,7 @@ _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # full store sync every 1 hour
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
+_WA_TOKEN_HEALTH_INTERVAL_SECONDS = 6 * 3600  # Meta token health every 6 hours
 _SALLA_TOKEN_REFRESH_SECONDS = 24 * 3600  # Salla token refresh daily (smart conditions)
 _AUTOMATION_POLL_SECONDS = 60  # automation engine poll interval
 _TEMPLATE_SYNC_INTERVAL_SECONDS = 30 * 60  # WhatsApp template auto-sync every 30 min
@@ -811,6 +812,24 @@ async def run_wa_token_refresh_scheduler() -> None:
         except Exception as exc:
             logger.error("[WA Token Refresh] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_SECONDS)
+
+
+async def run_wa_token_health_scheduler() -> None:
+    """Validate stored Meta tokens, update health_status, never silent-disconnect."""
+    await asyncio.sleep(420)
+    logger.info(
+        "[WA Token Health] Started — checking every %ss",
+        _WA_TOKEN_HEALTH_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            from services.whatsapp_platform.wa_token_health import (  # noqa: PLC0415
+                run_whatsapp_token_health_checks,
+            )
+            await run_whatsapp_token_health_checks()
+        except Exception as exc:
+            logger.error("[WA Token Health] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_WA_TOKEN_HEALTH_INTERVAL_SECONDS)
 
 
 async def run_automation_engine_scheduler() -> None:

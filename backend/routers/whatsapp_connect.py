@@ -38,7 +38,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from models import WhatsAppConnection  # noqa: E402
 
 from core.audit import audit
-from core.auth import get_jwt_user_id, require_admin, require_merchant_scope
+from core.auth import get_jwt_user_id, is_platform_admin_role, require_admin, require_merchant_scope
 from core.config import (
     BACKEND_URL,
     D360_COHOST_ALLOW_SELF_REQUEST,
@@ -50,6 +50,7 @@ from core.config import (
     META_APP_SECRET,
     META_GRAPH_API_VERSION,
     META_WA_CONFIG_ID,
+    is_whatsapp_merchant_self_service_manual_enabled,
 )
 from core.coexistence_client_id import (
     client_id_is_present_for_integration,
@@ -59,6 +60,7 @@ from core.database import get_db
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
 from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty
 from services.whatsapp_platform.provider_utils import (
+    WHATSAPP_CONNECTION_TYPE_ASSISTED,
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
     WHATSAPP_CONNECTION_TYPE_DIRECT,
     WHATSAPP_CONNECTION_TYPE_EMBEDDED,
@@ -67,6 +69,11 @@ from services.whatsapp_platform.provider_utils import (
     merchant_channel_label as _merchant_channel_label,
     provider_label as _provider_label,
     wa_provider as _wa_provider,
+)
+from services.whatsapp_platform.wa_connection_secrets import (  # noqa: E402
+    access_token_present,
+    read_access_token,
+    store_access_token,
 )
 from services.whatsapp_platform.token_manager import (
     get_oauth_session_state,
@@ -152,6 +159,29 @@ class CoexistenceRequestIn(BaseModel):
     understands_keep_app_installed: bool = True
     understands_open_every_13_days: bool = True
     notes: Optional[str] = None
+
+
+class AssistedConnectRequestIn(BaseModel):
+    """Merchant-facing assisted onboarding — contact hints only, never Meta secrets."""
+    contact_phone: Optional[str] = None
+    display_name: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def _assert_merchant_self_service_secrets_allowed(request: Request) -> None:
+    """Block merchant self-service manual connect unless explicitly enabled or admin."""
+    if is_whatsapp_merchant_self_service_manual_enabled():
+        return
+    jwt_payload = getattr(request.state, "jwt_payload", None) or {}
+    if is_platform_admin_role(jwt_payload.get("role")):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "الربط اليدوي الذاتي غير متاح حالياً. "
+            "يرجى استخدام «طلب ربط واتساب بمساعدة فريق نحلة»."
+        ),
+    )
 
 
 class CoexistenceOpsActivateIn(BaseModel):
@@ -364,6 +394,46 @@ def _set_coexistence_state(
     meta["coexistence"] = coex
     conn.extra_metadata = meta
     flag_modified(conn, "extra_metadata")
+
+
+def _assisted_connect_state(conn: Optional[WhatsAppConnection]) -> Dict[str, Optional[str]]:
+    meta = dict(getattr(conn, "extra_metadata", None) or {}) if conn else {}
+    state = dict(meta.get("assisted_connect") or {})
+    return state
+
+
+def _set_assisted_connect_state(
+    conn: WhatsAppConnection,
+    *,
+    status: str,
+    request_payload: Optional[Dict[str, object]] = None,
+    action_required_message: Optional[str] = None,
+) -> None:
+    meta = dict(conn.extra_metadata or {})
+    assisted = dict(meta.get("assisted_connect") or {})
+    assisted["status"] = status
+    assisted["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+    if request_payload is not None:
+        assisted["request"] = request_payload
+    if action_required_message is not None:
+        assisted["action_required_message"] = action_required_message
+    meta["assisted_connect"] = assisted
+    conn.extra_metadata = meta
+    flag_modified(conn, "extra_metadata")
+
+
+def _assisted_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
+    base = _build_wa_status(conn)
+    state = _assisted_connect_state(conn)
+    base.update({
+        "assisted_connect_status": state.get("status"),
+        "action_required_message": state.get("action_required_message"),
+        "request_submitted_at": (
+            (state.get("request") or {}).get("submitted_at")
+            if isinstance(state.get("request"), dict) else None
+        ),
+    })
+    return base
 
 
 # ── Canonical state buckets ──────────────────────────────────────────────────
@@ -1448,6 +1518,7 @@ async def resolve_waba(
     Returns the resolved waba_id, or an error explaining why it could not be determined.
     This endpoint never writes to the database.
     """
+    _assert_merchant_self_service_secrets_allowed(request)
     from services.whatsapp_connection_service import resolve_waba_for_phone  # noqa: PLC0415
 
     pid   = body.phone_number_id.strip()
@@ -1494,6 +1565,7 @@ async def manual_connect(
     in the verified JWT.  No fallback, no tenant creation, no drift.
     Any ambiguity is rejected loudly before any write happens.
     """
+    _assert_merchant_self_service_secrets_allowed(request)
     from core.auth import get_jwt_user_id  # noqa: PLC0415
     from models import Tenant as _Tenant   # noqa: PLC0415
 
@@ -1703,6 +1775,82 @@ async def reconnect(request: Request, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/assisted-connect/request")
+async def request_assisted_connect(
+    body: AssistedConnectRequestIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Merchant requests Nahla-team-assisted WhatsApp onboarding — no Meta secrets."""
+    tenant_id = resolve_tenant_id(request)
+    conn = _get_or_create_connection(db, tenant_id)
+
+    if conn.status == "connected" and conn.sending_enabled:
+        raise HTTPException(status_code=409, detail="واتساب مرتبط بالفعل لهذا المتجر.")
+
+    if (
+        conn.connection_type == WHATSAPP_CONNECTION_TYPE_ASSISTED
+        and conn.status in {"request_submitted", "pending_activation", "action_required"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="يوجد طلب ربط معلّق بالفعل — سيتواصل معك فريق نحلة قريباً.",
+        )
+
+    now = datetime.now(timezone.utc)
+    contact_phone = (body.contact_phone or "").strip() or None
+    display_name = (body.display_name or "").strip() or None
+    notes = (body.notes or "").strip() or None
+
+    conn.provider = WHATSAPP_PROVIDER_META
+    conn.connection_type = WHATSAPP_CONNECTION_TYPE_ASSISTED
+    conn.status = "request_submitted"
+    conn.phone_number = contact_phone
+    conn.business_display_name = display_name or conn.business_display_name
+    conn.phone_number_id = None
+    conn.whatsapp_business_account_id = None
+    conn.meta_business_account_id = None
+    conn.access_token = None
+    conn.token_type = "meta_permanent"
+    conn.token_expires_at = None
+    conn.connected_at = None
+    conn.webhook_verified = False
+    conn.sending_enabled = False
+    conn.last_error = None
+    conn.last_attempt_at = now
+    _set_assisted_connect_state(
+        conn,
+        status="request_submitted",
+        request_payload={
+            "contact_phone": contact_phone,
+            "display_name": display_name,
+            "notes": notes,
+            "submitted_at": now.isoformat(),
+        },
+    )
+    db.commit()
+
+    audit(
+        "WHATSAPP_ASSISTED_CONNECT_REQUEST",
+        tenant_id=tenant_id,
+        contact_phone=contact_phone or "-",
+        display_name=display_name,
+    )
+
+    return {
+        "status": "request_submitted",
+        "message": "تم استلام طلب الربط. سيتواصل معك فريق نحلة لإتمام ربط واتساب.",
+        **_assisted_status_payload(conn),
+    }
+
+
+@router.get("/assisted-connect/status")
+async def assisted_connect_status(request: Request, db: Session = Depends(get_db)):
+    tenant_id = resolve_tenant_id(request)
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    return _assisted_status_payload(conn)
+
+
 @router.post("/coexistence/request")
 async def request_coexistence(
     body: CoexistenceRequestIn,
@@ -1867,7 +2015,8 @@ async def coexistence_partner_connect(
     meta["coexistence_internal_secret"] = internal_secret
 
     if api_key:
-        conn.access_token = api_key
+        from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
+        store_access_token(conn, api_key)
         conn.status = "pending_activation"
         conn.sending_enabled = False
         conn.webhook_verified = False
@@ -1985,7 +2134,7 @@ async def admin_activate_coexistence(
     conn.phone_number = body.phone_number
     conn.business_display_name = body.display_name or conn.business_display_name
     conn.whatsapp_business_account_id = body.waba_id
-    conn.access_token = body.api_key
+    store_access_token(conn, body.api_key)
     conn.token_type = "dialog360_api_key"
     conn.token_expires_at = None
     conn.last_attempt_at = datetime.now(timezone.utc)
@@ -2093,7 +2242,7 @@ async def _resolve_and_apply_metadata(
 
     Existing values on the record win — we only fill MISSING fields, so
     this is safe to call repeatedly without losing manual overrides."""
-    api_key = conn.access_token
+    api_key = read_access_token(conn)
     pnid = conn.phone_number_id
     channel_id = (conn.extra_metadata or {}).get("provider_details", {}).get("channel_id")
     if not channel_id:
@@ -2256,8 +2405,8 @@ async def admin_coexistence_edit_record(
     if body.phone_number is not None and body.phone_number != conn.phone_number:
         conn.phone_number = body.phone_number.strip() or None
         changed.append("phone_number")
-    if body.api_key is not None and body.api_key != conn.access_token:
-        conn.access_token = body.api_key.strip() or None
+    if body.api_key is not None and body.api_key != read_access_token(conn):
+        store_access_token(conn, body.api_key.strip() or None)
         conn.token_type = "dialog360_api_key"
         changed.append("api_key")
     if body.display_name is not None and body.display_name != conn.business_display_name:
@@ -2431,7 +2580,7 @@ async def admin_coexistence_verify_webhook(
     verify_error: Optional[str] = None
     try:
         cfg = await asyncio.wait_for(
-            dialog360_get_webhook_config(api_key=conn.access_token, timeout=5.0),
+            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0),
             timeout=6.0,
         )
     except Exception as exc:
@@ -2618,7 +2767,7 @@ async def admin_coexistence_auto_configure(
     try:
         result = await asyncio.wait_for(
             dialog360_configure_webhook(
-                api_key=conn.access_token,
+                api_key=read_access_token(conn),
                 url=_coexistence_webhook_url(),
                 headers={"X-Nahla-Coexistence-Secret": secret},
                 timeout=5.0,
@@ -2665,7 +2814,7 @@ async def admin_coexistence_auto_configure(
     try:
         waba_result = await asyncio.wait_for(
             dialog360_set_waba_webhook(
-                api_key=conn.access_token,
+                api_key=read_access_token(conn),
                 url=_coexistence_webhook_url(),
                 headers={"X-Nahla-Coexistence-Secret": secret},
                 override_all=True,
@@ -2806,7 +2955,7 @@ async def admin_coexistence_waba_webhook_read(
     # Channel read
     try:
         chan_cfg = await asyncio.wait_for(
-            dialog360_get_webhook_config(api_key=conn.access_token, timeout=5.0),
+            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0),
             timeout=6.0,
         )
     except Exception as exc:
@@ -2839,7 +2988,7 @@ async def admin_coexistence_waba_webhook_read(
     # WABA read
     try:
         waba_cfg = await asyncio.wait_for(
-            dialog360_get_waba_webhook(api_key=conn.access_token, timeout=5.0),
+            dialog360_get_waba_webhook(api_key=read_access_token(conn), timeout=5.0),
             timeout=6.0,
         )
     except Exception as exc:
@@ -4448,6 +4597,10 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
         conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
         if conn and _wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
             payload = _coexistence_status_payload(conn)
+            payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
+            return payload
+        if conn and conn.connection_type == WHATSAPP_CONNECTION_TYPE_ASSISTED:
+            payload = _assisted_status_payload(conn)
             payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
             return payload
         if conn and conn.connection_type == "embedded" and conn.phone_number_id:

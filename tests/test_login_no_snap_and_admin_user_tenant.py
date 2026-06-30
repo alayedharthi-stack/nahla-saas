@@ -29,6 +29,7 @@ import asyncio
 import sys
 from pathlib import Path
 from typing import Any, Tuple
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException, Request
@@ -271,27 +272,43 @@ class TestSetWhatsAppTokenEndpoint:
             wa = self._seed_wa(db, tenant_id=11)
 
             new_tok = "EAA_PERMANENT_SYSTEM_USER_TOKEN_LONG_OK"
-            res = asyncio.run(admin_router.admin_whatsapp_set_token(
-                tenant_id=11,
-                body=admin_router._SetWaTokenBody(
-                    access_token=new_tok,
-                    token_type="permanent_system_user",
-                    note="rotated by owner",
-                ),
-                db=db,
-            ))
+            from services.whatsapp_platform.wa_token_validation import classify_debug_info  # noqa: E402
+            with patch(
+                "services.whatsapp_platform.wa_token_validation.validate_meta_access_token_sync",
+                return_value=classify_debug_info({
+                    "is_valid": True,
+                    "type": "SYSTEM_USER",
+                    "expires_at": 0,
+                    "scopes": ["whatsapp_business_messaging"],
+                    "app_id": "123",
+                }),
+            ):
+                res = asyncio.run(admin_router.admin_whatsapp_set_token(
+                    tenant_id=11,
+                    body=admin_router._SetWaTokenBody(
+                        access_token=new_tok,
+                        token_type="permanent_system_user",
+                        note="rotated by owner",
+                    ),
+                    db=db,
+                    _admin={"role": "admin", "sub": "admin@test"},
+                ))
             assert res["status"] == "ok"
             assert res["token_tail"] == new_tok[-6:]
             assert res["previous_token_tail"] == "OLDEND"
+            assert res["production_ready"] is True
 
             db.refresh(wa)
-            assert wa.access_token == new_tok
+            from core.wa_token_crypto import is_encrypted_at_rest  # noqa: E402
+            from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: E402
+            assert is_encrypted_at_rest(wa.access_token)
+            assert read_access_token(wa) == new_tok
             assert wa.token_expires_at is None, (
                 "Permanent tokens have no expiry; we must wipe the old one."
             )
             assert wa.token_type == "permanent_system_user"
             meta = wa.extra_metadata or {}
-            assert meta["token_status"] == "permanent"
+            assert meta["token_status"] == "valid"
             assert meta["oauth_session_needs_reauth"] is False
             assert meta["oauth_session_status"] == "replaced_with_permanent"
             assert meta["last_token_set_note"] == "rotated by owner"

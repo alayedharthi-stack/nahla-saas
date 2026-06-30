@@ -407,6 +407,7 @@ from routers.promotions   import router as _promotions_router    # noqa: E402
 from routers.offer_decisions import router as _offer_decisions_router  # noqa: E402
 from routers.orders       import router as _orders_router        # noqa: E402
 from routers.intelligence import router as _intelligence_router  # noqa: E402
+from routers.ai_playground import router as _ai_playground_router  # noqa: E402
 from routers.intelligence_libraries import router as _intelligence_libraries_router  # noqa: E402
 from routers.knowledge    import router as _knowledge_router      # noqa: E402
 from routers.inbound_media import router as _inbound_media_router  # noqa: E402
@@ -480,6 +481,7 @@ app.include_router(_promotions_router)
 app.include_router(_offer_decisions_router)
 app.include_router(_orders_router)
 app.include_router(_intelligence_router)
+app.include_router(_ai_playground_router)
 app.include_router(_intelligence_libraries_router)
 app.include_router(_knowledge_router)
 app.include_router(_inbound_media_router)
@@ -1346,6 +1348,11 @@ async def on_startup() -> None:
         from core.scheduler import run_wa_token_refresh_scheduler  # noqa: PLC0415
         return run_wa_token_refresh_scheduler()
     _start("wa_token_refresh", _f_wa_refresh, 45)
+
+    def _f_wa_health():
+        from core.scheduler import run_wa_token_health_scheduler  # noqa: PLC0415
+        return run_wa_token_health_scheduler()
+    _start("wa_token_health", _f_wa_health, 48)
 
     def _f_salla_refresh():
         from core.scheduler import run_salla_token_refresh_scheduler  # noqa: PLC0415

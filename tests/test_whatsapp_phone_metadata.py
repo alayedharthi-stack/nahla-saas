@@ -61,11 +61,27 @@ def _seed_tenant(db) -> Tenant:
     return t
 
 
+def _valid_meta_token_validation():
+    from services.whatsapp_platform.wa_token_validation import classify_debug_info  # noqa: PLC0415
+
+    return classify_debug_info({
+        "is_valid": True,
+        "type": "SYSTEM_USER",
+        "expires_at": 0,
+        "scopes": ["whatsapp_business_messaging"],
+        "app_id": "123",
+    })
+
+
 def _stub_side_effects(monkeypatch) -> None:
     """Neutralise the network/registration/webhook side effects so we can
     drive `commit_connection` end-to-end against an in-memory database."""
     monkeypatch.setattr(wa_svc, "validate_phone_waba_match",
                         lambda *_a, **_kw: (True, None, None))
+    monkeypatch.setattr(
+        "services.whatsapp_platform.wa_token_validation.validate_meta_access_token_sync",
+        lambda _token: _valid_meta_token_validation(),
+    )
     monkeypatch.setattr(wa_svc, "evict_phone_id_from_other_tenants",
                         lambda *_a, **_kw: None, raising=False)
     monkeypatch.setattr(wa_svc, "evict_waba_id_from_other_tenants",
