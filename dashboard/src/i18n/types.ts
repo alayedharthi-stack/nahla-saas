@@ -861,6 +861,40 @@ export interface Translations {
         embedded: string
       }
     }
+    simplified: {
+      metaCardTitle:          string
+      metaCardSubtitle:       string
+      metaCardBadge:          string
+      metaApprovalNotice:     string
+      metaConnectBtn:         string
+    }
+    assisted: {
+      formTitle:               string
+      formSubtitle:            string
+      benefitNoSecrets:        string
+      benefitTeamSetup:        string
+      benefitSecure:           string
+      contactPhoneLabel:       string
+      contactPhoneHint:        string
+      contactPhonePlaceholder: string
+      displayNameLabel:        string
+      displayNameHint:         string
+      displayNamePlaceholder:  string
+      notesLabel:              string
+      notesHint:               string
+      notesPlaceholder:        string
+      submitBtn:               string
+      submitting:              string
+      submitFailed:            string
+      footerHint:              string
+      statusRequestSubmitted:  string
+      statusPendingActivation: string
+      statusActionRequired:    string
+      defaultPendingMessage:   string
+      requestTimeLabel:        string
+      contactInstructions:     string
+      supportEmail:            string
+    }
     connLabels: {
       viaMeta:      string
       coexistence:  string

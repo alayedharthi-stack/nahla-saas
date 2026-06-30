@@ -14,6 +14,7 @@
     "check:plan-features": "npx --yes tsx@4 scripts/check-plan-features.mts",
     "check:no-native-dialogs": "npx --yes tsx@4 scripts/check-no-native-dialogs.mts",
     "check:meta-embedded-signup-login": "npx --yes tsx@4 scripts/check-meta-embedded-signup-login.mts",
+    "check:simplified-whatsapp-connect": "npx --yes tsx@4 scripts/check-simplified-whatsapp-connect.mts",
     "smoke:order-catalog-pick": "npx --yes tsx@4 scripts/smoke-order-catalog-pick.mts"
   },
   "dependencies": {
