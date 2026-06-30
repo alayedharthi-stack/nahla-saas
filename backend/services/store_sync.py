@@ -1190,6 +1190,7 @@ class StoreSyncService:
                 .first()
             )
             if existing:
+                prev_status = existing.status
                 existing.status                = normalised_status
                 existing.total                 = normalised["total"]
                 existing.customer_info         = normalised["customer_info"]
@@ -1203,6 +1204,8 @@ class StoreSyncService:
                     **(existing.extra_metadata or {}),
                     "created_at": normalised.get("created_at"),
                 }
+                from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+                stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
                 updated += 1
             else:
                 new_row = Order(
@@ -1224,6 +1227,8 @@ class StoreSyncService:
                 )
                 self.db.add(new_row)
                 self.db.flush()  # assign PK so we can reference new_row.id below
+                from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+                stamp_order_delivered_at_if_needed(new_row, previous_status=None)
 
                 # ── Fire automation events for new orders found via API poll ──
                 # Mirrors handle_order_webhook so confirmation messages are sent
@@ -2265,6 +2270,7 @@ class StoreSyncService:
         )
 
         if order_row is not None:
+            prev_status = order_row.status
             order_row.status                = normalised["status"]
             order_row.total                 = normalised["total"]
             order_row.customer_info         = normalised["customer_info"]
@@ -2278,6 +2284,8 @@ class StoreSyncService:
                 **(order_row.extra_metadata or {}),
                 "created_at": normalised.get("created_at"),
             }
+            from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+            stamp_order_delivered_at_if_needed(order_row, previous_status=prev_status)
             try:
                 self.db.commit()
             except Exception:
@@ -2302,6 +2310,8 @@ class StoreSyncService:
                 },
             )
             self.db.add(order_row)
+            from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+            stamp_order_delivered_at_if_needed(order_row, previous_status=None)
             try:
                 self.db.commit()
                 is_new = True
@@ -2321,6 +2331,7 @@ class StoreSyncService:
                 if order_row is None:
                     # Should be impossible, but fail loudly rather than silently.
                     raise
+                prev_status = order_row.status
                 order_row.status                = normalised["status"]
                 order_row.total                 = normalised["total"]
                 order_row.customer_info         = normalised["customer_info"]
@@ -2330,6 +2341,8 @@ class StoreSyncService:
                 if normalised["customer_name"]:
                     order_row.customer_name = normalised["customer_name"]
                 order_row.source = webhook_source
+                from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+                stamp_order_delivered_at_if_needed(order_row, previous_status=prev_status)
                 try:
                     self.db.commit()
                 except Exception:
