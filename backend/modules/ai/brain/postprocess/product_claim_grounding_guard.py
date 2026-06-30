@@ -513,6 +513,7 @@ def apply_product_claim_grounding_guard(
 ) -> ProductClaimGroundingGuardResult:
     mode = product_claim_grounding_guard_mode()
     original = str(reply or "")
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
 
     if mode == "off":
         return ProductClaimGroundingGuardResult(reply=original, action="disabled")
@@ -632,6 +633,15 @@ def apply_product_claim_grounding_guard(
                 reason=reason,
                 blocked_claims=tuple(kinds),
                 shadow_mode=True,
+                would_rewrite=True,
+            )
+
+        if contract is not None and contract.protected_final_reply:
+            return ProductClaimGroundingGuardResult(
+                reply=original,
+                action="blocked_protected_final_reply",
+                reason=reason,
+                blocked_claims=tuple(kinds),
                 would_rewrite=True,
             )
 

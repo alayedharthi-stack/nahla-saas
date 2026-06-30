@@ -565,7 +565,10 @@ def apply_commerce_reply_quality_guard(
             resolve_staff_rejection_commerce_resume,
         )
 
-        if is_staff_route_rejection_message(inbound_text):
+        if (
+            is_staff_route_rejection_message(inbound_text)
+            and not (contract is not None and contract.protected_final_reply)
+        ):
             if not original or is_generic_stub_reply(original):
                 resume = resolve_staff_rejection_commerce_resume(state)
                 return CommerceReplyQualityGuardResult(
@@ -697,6 +700,7 @@ def apply_commerce_reply_quality_guard(
             not replaced
             and is_generic_stub_reply(text)
             and is_staff_route_rejection_message(inbound_text)
+            and not (contract is not None and contract.protected_final_reply)
         ):
             text = resolve_staff_rejection_commerce_resume(state)
             used_fallback = True

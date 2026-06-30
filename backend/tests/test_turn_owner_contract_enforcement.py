@@ -36,6 +36,12 @@ from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: E402
     apply_catalog_product_grounding_guard,
 )
+from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: E402
+    apply_commerce_reply_quality_guard,
+)
+from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: E402
+    ProductClaimGroundingEvidence,
+)
 from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
     apply_product_claim_grounding_guard,
 )
@@ -46,6 +52,7 @@ from modules.ai.brain.turn_owner_contract import (  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    Decision,
     Intent,
     MerchantConversationState,
 )
@@ -83,6 +90,25 @@ def _ctx(
         facts=facts or CommerceFacts(has_products=True, orderable=True),
         profile=profile or {},
     )
+
+
+def _claim_evidence(**overrides) -> ProductClaimGroundingEvidence:
+    base = dict(
+        grounded_prices=frozenset({120}),
+        grounded_text_corpus="",
+        available_products=(),
+        unavailable_products=(),
+        catalog_products_this_turn=False,
+        catalog_miss_this_turn=False,
+        recent_catalog_miss=False,
+        recent_no_synced=False,
+        has_checkout_catalog=True,
+        executor_product_ids=frozenset(),
+        kb_section_ids=frozenset(),
+    )
+    base.update(overrides)
+    return ProductClaimGroundingEvidence(**base)
+
 
 def test_health_contract_blocks_catalog_grounding_rewrite() -> None:
     state = MerchantConversationState()
@@ -155,7 +181,10 @@ def test_payment_evidence_contract_blocks_catalog_grounding() -> None:
     decision = DefaultDecisionEngine().decide(_ctx("", profile=profile))
     contract = build_turn_owner_contract(decision)
 
-    assert contract.topic == "payment_receipt_received"
+    assert contract.topic in {
+        "payment_receipt_received",
+        "payment_evidence_pending_review",
+    }
     assert contract.block_catalog_push is True
 
     result = apply_catalog_product_grounding_guard(
@@ -226,3 +255,56 @@ def test_order_buy_flow_still_works_with_product_focus() -> None:
 
     assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
     assert contract.owner in {None, "ordering"}
+
+
+def test_protected_payment_reply_blocks_product_claim_fallback(monkeypatch) -> None:
+    def _fake_evidence(*_args, **_kwargs):
+        return _claim_evidence(grounded_prices=frozenset({120}))
+
+    monkeypatch.setattr(
+        "modules.ai.brain.postprocess.product_claim_grounding_guard."
+        "build_product_claim_grounding_evidence",
+        _fake_evidence,
+    )
+    decision = Decision(
+        action=ACTION_LLM_REPLY,
+        args={"topic": "payment_receipt_received"},
+    )
+    contract = build_turn_owner_contract(decision)
+
+    result = apply_product_claim_grounding_guard(
+        reply="تم استلام الإيصال، وسعر المنتج 999 ريال.",
+        inbound_metadata={"turn_owner_contract": contract.to_metadata()},
+    )
+
+    assert result.replaced is False
+    assert result.action == "blocked_protected_final_reply"
+    assert result.would_rewrite is True
+    assert "ungrounded_price" in result.blocked_claims
+    assert "ما ظهر عندي سعر مؤكد من الكتالوج" not in result.reply
+
+
+def test_protected_reply_quality_does_not_resume_staff_route() -> None:
+    decision = Decision(
+        action=ACTION_LLM_REPLY,
+        args={"topic": "health_advisory_product_safety"},
+    )
+    contract = build_turn_owner_contract(decision)
+    original = "تمام 🌷 وصلت رسالتك."
+
+    result = apply_commerce_reply_quality_guard(
+        original,
+        inbound_text="ما أبغى أمين أنا أبغى أشتري عسل",
+        state={
+            "order_prep": {
+                "city": "الطائف",
+                "quantity_label": "نصف كيلو",
+                "product_name": "عسل",
+            },
+        },
+        inbound_metadata={"turn_owner_contract": contract.to_metadata()},
+    )
+
+    assert result.replaced is False
+    assert result.reply == original
+    assert result.fallback_kind == ""
