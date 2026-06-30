@@ -243,14 +243,14 @@ class TestDeliveredOrderScenario:
 class TestReviewRequestEmitterGap:
     REVIEW_EMITTER_SCAN = "scan_post_delivery_review_requests"
 
-    def test_review_emitter_scan_not_implemented(self) -> None:
+    def test_review_emitter_scan_implemented(self) -> None:
         from core import automation_emitters  # noqa: PLC0415
         from core.automation_triggers import AutomationTrigger  # noqa: PLC0415
 
-        assert not hasattr(automation_emitters, self.REVIEW_EMITTER_SCAN)
+        assert hasattr(automation_emitters, self.REVIEW_EMITTER_SCAN)
+        assert callable(getattr(automation_emitters, self.REVIEW_EMITTER_SCAN))
         trigger_values = {member.value for member in AutomationTrigger}
-        assert "review_request" not in trigger_values
-        assert "order_delivered" not in trigger_values
+        assert AutomationTrigger.POST_DELIVERY_REVIEW_REQUEST_DUE.value in trigger_values
 
     def test_delivered_order_seed_ready_for_future_review_job(self) -> None:
         db, _ = make_scenario_db()

@@ -10,12 +10,13 @@ the storefront snippet, and the customer-intelligence pipeline write
 signal that says "this cart has now been abandoned for 6 hours" or "this
 COD order has not been confirmed yet". Those need a periodic scanner.
 
-This module provides six such scanners:
+This module provides seven such scanners:
 
   • `scan_unpaid_orders`              → recovery engine (online payment)
   • `scan_abandoned_order_drafts`    → recovery engine (WhatsApp draft orders)
   • `scan_abandoned_cart_followups`   → recovery engine (cart stages 2 + 3)
   • `scan_cod_confirmations`          → recovery engine (COD reminder + cancel)
+  • `scan_post_delivery_review_requests` → recovery engine (one-time review ask)
   • `scan_predictive_reorders`        → growth engine
   • `scan_calendar_events`            → growth engine (seasonal + salary)
 
@@ -56,6 +57,8 @@ Each emitter uses the cheapest persistent marker for its domain:
   • Unpaid orders mark per-step progress in `Order.extra_metadata.unpaid_reminders`.
   • WhatsApp draft reminders mark per-kind progress in
     `Order.extra_metadata.wa_abandoned_draft_reminders`.
+  • Post-delivery review marks `Order.extra_metadata.review_request_sent`
+    and `review_requested_at`.
   • Predictive reorder uses the existing `PredictiveReorderEstimate.notified`
     boolean.
   • Calendar / salary use a per-tenant log inside
@@ -421,6 +424,151 @@ def scan_abandoned_order_drafts(
         db.commit()
         logger.info(
             "[Emitter] tenant=%s abandoned_order_drafts emitted=%d", tenant_id, emitted,
+        )
+    return emitted
+
+
+# ── Post-delivery review request (one-time) ───────────────────────────────────
+
+def scan_post_delivery_review_requests(
+    db: Session, tenant_id: int, *, now: Optional[datetime] = None,
+) -> int:
+    """
+    Emit ``POST_DELIVERY_REVIEW_REQUEST_DUE`` for delivered orders past the
+    configured delay that have not yet received a review request.
+
+    Eligibility (all required):
+      • ``order.status == delivered``
+      • ``extra_metadata.delivered_at`` present and older than ``delay_hours``
+      • ``extra_metadata.review_request_sent`` is not true
+      • customer resolvable with a phone number
+      • ``should_block_automation_for_conversation`` passes (store AI on,
+        conversation not paused / handoff / blocklisted)
+
+    Idempotency: stamps ``review_request_sent`` + ``review_requested_at`` on
+    emit so a second scan never re-queues the same order.
+    """
+    from models import Order, SmartAutomation  # noqa: PLC0415
+    from core.automation_send_guard import should_block_automation_for_conversation  # noqa: PLC0415
+    from core.post_delivery_review_request import (  # noqa: PLC0415
+        POST_DELIVERY_REVIEW_DELAY_HOURS,
+        is_order_eligible_for_review_request,
+        read_delivered_at,
+        stamp_review_request_sent,
+    )
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+
+    autos: List[Any] = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == tenant_id,
+            SmartAutomation.automation_type == "post_delivery_review",
+            SmartAutomation.enabled.is_(True),
+        )
+        .all()
+    )
+    if not autos:
+        return 0
+
+    auto = autos[0]
+    config: Dict[str, Any] = auto.config or {}
+    delay_hours = int(config.get("delay_hours") or POST_DELIVERY_REVIEW_DELAY_HOURS)
+    if delay_hours < 1:
+        delay_hours = POST_DELIVERY_REVIEW_DELAY_HOURS
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+            Order.is_abandoned.isnot(True),
+        )
+        .all()
+    )
+    if not orders:
+        return 0
+
+    emitted = 0
+    for order in orders:
+        if not is_order_eligible_for_review_request(
+            order, now=now, delay_hours=delay_hours,
+        ):
+            continue
+
+        customer = _resolve_order_customer(db, tenant_id, order)
+        if customer is None:
+            continue
+
+        phone = str(getattr(customer, "phone", "") or "")
+        block = should_block_automation_for_conversation(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=phone,
+            blocked_path="automation_emitters.post_delivery_review",
+        )
+        if block.block:
+            logger.info(
+                "[Emitter:post_delivery_review] tenant=%s order=%s skipped — supervision=%s",
+                tenant_id, order.id, block.reason,
+            )
+            continue
+
+        _store_meta: Dict[str, Any] = {}
+        try:
+            from core.settings_utils import get_or_create_settings, merge_defaults, DEFAULT_STORE  # noqa: PLC0415
+            _st = merge_defaults(
+                get_or_create_settings(db, tenant_id).store_settings, DEFAULT_STORE
+            )
+            _store_meta = {"store_name": _st.get("store_name") or ""}
+        except Exception:  # noqa: silent-ok — store_name optional for template fallback
+            pass
+
+        line_items = getattr(order, "line_items", None) or []
+        product_name = ""
+        if isinstance(line_items, list) and line_items:
+            first = line_items[0] if isinstance(line_items[0], dict) else {}
+            product_name = str(first.get("title") or first.get("name") or "").strip()
+
+        customer_info = dict(getattr(order, "customer_info", None) or {})
+        customer_name = str(
+            customer_info.get("name")
+            or getattr(customer, "name", None)
+            or ""
+        ).strip()
+
+        delivered_at = read_delivered_at(order)
+        payload: Dict[str, Any] = {
+            "source":                "automation_emitters",
+            "order_id":              order.id,
+            "order_internal_id":     order.id,
+            "order_number":          order.external_order_number or order.external_id,
+            "external_order_number": order.external_order_number,
+            "order_status":          str(getattr(order, "status", "") or ""),
+            "delivered_at":          delivered_at.isoformat() if delivered_at else None,
+            "customer_name":         customer_name,
+            "product_name":          product_name,
+            "nahla_source_key":      str(config.get("nahla_source_key") or "review_request"),
+            **_store_meta,
+        }
+
+        emit_automation_event(
+            db,
+            tenant_id=tenant_id,
+            event_type=AutomationTrigger.POST_DELIVERY_REVIEW_REQUEST_DUE.value,
+            customer_id=customer.id,
+            payload=payload,
+            commit=False,
+        )
+        order.extra_metadata = stamp_review_request_sent(
+            order, now=now.replace(tzinfo=timezone.utc),
+        )
+        emitted += 1
+
+    if emitted:
+        db.commit()
+        logger.info(
+            "[Emitter] tenant=%s post_delivery_review_requests emitted=%d",
+            tenant_id, emitted,
         )
     return emitted
 
@@ -1312,6 +1460,7 @@ async def run_automation_emitters_scheduler() -> None:
                     try:
                         scan_unpaid_orders(db, tenant.id)
                         scan_abandoned_order_drafts(db, tenant.id)
+                        scan_post_delivery_review_requests(db, tenant.id)
                         scan_abandoned_cart_followups(db, tenant.id)
                         scan_cod_confirmations(db, tenant.id)
                         scan_predictive_reorders(db, tenant.id)

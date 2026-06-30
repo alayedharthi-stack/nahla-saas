@@ -64,6 +64,9 @@ class AutomationTrigger(str, Enum):
     # No emitter fans into this trigger yet — the row exists for dashboard + readiness;
     # real sends use events like ``order_shipped`` / dedicated flows. Kept stable for UI/sync.
     ORDER_NOTIFICATIONS    = "order_notifications"
+    # Post-delivery: one-time review request after ``delivered_at + delay``.
+    # Emitted by ``automation_emitters.scan_post_delivery_review_requests``.
+    POST_DELIVERY_REVIEW_REQUEST_DUE = "post_delivery_review_request_due"
 
 
 # Canonical mapping: SmartAutomation.automation_type → AutomationTrigger
@@ -82,6 +85,7 @@ AUTOMATION_TYPE_TO_TRIGGER: Dict[str, AutomationTrigger] = {
     "cod_confirmation":      AutomationTrigger.ORDER_COD_PENDING,
     "abandoned_order_draft": AutomationTrigger.WA_ORDER_DRAFT_REMINDER_DUE,
     "order_notifications":   AutomationTrigger.ORDER_NOTIFICATIONS,
+    "post_delivery_review":  AutomationTrigger.POST_DELIVERY_REVIEW_REQUEST_DUE,
 }
 
 
