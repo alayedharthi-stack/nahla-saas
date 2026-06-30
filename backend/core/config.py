@@ -350,6 +350,17 @@ def meta_embedded_disabled_reason() -> str:
         )
     return ""
 
+
+def is_whatsapp_merchant_self_service_manual_enabled() -> bool:
+    """Return True when merchants may POST secrets to manual-connect / resolve-waba.
+
+    Default is disabled — merchants use admin-assisted onboarding until token
+    encryption at rest ships and ops explicitly re-enables self-service.
+    """
+    raw = (os.environ.get("WHATSAPP_MERCHANT_SELF_SERVICE_MANUAL_ENABLED", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
 # ── 360dialog / WhatsApp Coexistence ───────────────────────────────────────────
 # Internal / platform-managed provider configuration. Never expose these values
 # to merchants in the dashboard.

@@ -2241,7 +2241,8 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
     )
     phone_number_id = (wa_conn.phone_number_id if wa_conn else None) \
         or wa.get("phone_number_id", "")
-    access_token    = (wa_conn.access_token if wa_conn else None) \
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
+    access_token    = (read_access_token(wa_conn) if wa_conn else None) \
         or wa.get("access_token", "") or wa.get("api_key", "")
     conn_status     = wa_conn.status if wa_conn else None
 

@@ -817,9 +817,10 @@ async def sync_embedded_connection_from_meta(
     # if it hasn't been done yet, and persist the verified flag explicitly.
     if sync_state.get("connected") and not conn.webhook_verified:
         from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
+        from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
         wh_ok, wh_err = subscribe_phone_webhook(
             conn.phone_number_id or "",
-            conn.access_token or "",
+            read_access_token(conn),
             conn.tenant_id,
             waba_id=conn.whatsapp_business_account_id or None,
         )
