@@ -271,18 +271,32 @@ function MetaEmbeddedOptionCard({
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
-          <p className="text-sm text-slate-500 mt-1">{s.metaCardSubtitle}</p>
+          <p className="text-sm text-slate-500 mt-1 leading-relaxed">{s.metaCardDescription}</p>
         </div>
         <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">
           {s.metaCardBadge}
         </span>
       </div>
 
+      <div className="bg-slate-50 rounded-xl p-4 space-y-2.5">
+        <p className="text-sm font-semibold text-slate-700">{s.metaStepsTitle}</p>
+        {s.metaSteps.map((step, index) => (
+          <div key={step} className="flex items-start gap-3">
+            <div className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
+              {index + 1}
+            </div>
+            <p className="text-sm text-slate-600 leading-relaxed">{step}</p>
+          </div>
+        ))}
+      </div>
+
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
         {s.metaApprovalNotice}
       </div>
 
-      <div className="mt-auto">
+      <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
+
+      <div className="mt-auto pt-1">
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
       </div>
     </div>
