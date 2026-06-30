@@ -353,3 +353,79 @@ class TestPlaygroundDryRunEndpoint:
             payload = _run(playground_dry_run(request, body, db))
 
         assert "متجر A" not in (payload.get("reply_text") or "")
+
+
+class TestPlaygroundKBSanitization:
+    FAQ_MESSAGE = "هل منتجاتكم أصلية؟"
+    INTERNAL_HEADING = "قواعد علينا يجب أن يلتزم بها الذكاء"
+
+    def test_playground_does_not_expose_internal_kb_headings(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db)
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="custom",
+            title="قاعدة المعرفة الرسمية",
+            body=(
+                "# قاعدة المعرفة الرسمية — متجر تجريبي\n"
+                "## قواعد علينا يجب أن يلتزم بها الذكاء\n"
+                "- لا تخترع أسعارًا."
+            ),
+        )
+        result = _run_playground(db, tenant.id, message=self.FAQ_MESSAGE)
+        assert self.INTERNAL_HEADING not in (result.reply_text or "")
+        assert "قاعدة المعرفة الرسمية" not in (result.reply_text or "")
+        assert result.would_send is False
+        assert result.needs_better_kb_answer is True
+
+    def test_playground_uses_customer_safe_kb_fact(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db)
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="faq",
+            title="أصلية المنتجات",
+            body="منتجاتنا أصلية ومضمونة، ويمكنك طلب التفاصيل حسب المنتج.",
+        )
+        result = _run_playground(db, tenant.id, message=self.FAQ_MESSAGE)
+        assert result.would_send is True
+        assert result.reply_text
+        assert "أصلية" in result.reply_text or "مضمونة" in result.reply_text
+        assert self.INTERNAL_HEADING not in result.reply_text
+
+    def test_playground_returns_warning_when_only_internal_kb_exists(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db)
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="escalation_rules",
+            title="تعليمات للنظام",
+            body="قواعد يجب أن يلتزم بها الذكاء — لا تذكر خصومات غير معتمدة.",
+        )
+        result = _run_playground(db, tenant.id, message=self.FAQ_MESSAGE)
+        assert result.would_send is False
+        assert result.needs_better_kb_answer is True
+        assert result.reply_text is None
+        assert any("صالحة للعرض للعميل" in w for w in result.warnings)
+        assert "يلتزم بها الذكاء" not in (result.reply_text or "")
+
+    def test_playground_kb_sanitization_side_effects_remain_false(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db)
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="faq",
+            title="أصلية المنتجات",
+            body="منتجاتنا أصلية ومضمونة.",
+        )
+        result = _run_playground(db, tenant.id, message=self.FAQ_MESSAGE)
+        assert result.side_effects == {
+            "whatsapp_sent": False,
+            "order_created": False,
+            "customer_updated": False,
+            "automation_triggered": False,
+        }
