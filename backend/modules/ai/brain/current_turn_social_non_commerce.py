@@ -99,6 +99,15 @@ _DUA_ONLY_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_PRAYER_FRAGMENT_RE = re.compile(
+    r"^(?:"
+    r"ب?شرك|"
+    r"ب?شرك\s+الله|"
+    r"ب?شرك\s+الله\s+بالخير"
+    r")\s*[،,.!؟?🤍🌷]*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _CONGRATULATIONS_RE = re.compile(
     r"(?:"
     r"مبروك|الف\s+الف\s+مبروك|ألف\s+ألف\s+مبروك|تهانينا|تهنئ|"
@@ -420,6 +429,10 @@ def resolve_current_turn_social_non_commerce(
         return CurrentTurnSocialNonCommerce(True, "thanks", "thanks_only", 0.94)
     if _DUA_ONLY_RE.search(norm):
         return CurrentTurnSocialNonCommerce(True, "dua", "dua_only", 0.94)
+    if _PRAYER_FRAGMENT_RE.search(norm):
+        return CurrentTurnSocialNonCommerce(
+            True, "dua", "prayer_fragment", 0.93,
+        )
     if _CONGRATULATIONS_RE.search(norm) and not _has_product_evidence(norm):
         return CurrentTurnSocialNonCommerce(True, "congratulations", "congratulations_only", 0.90)
     if _LAUGHTER_OR_JOKE_RE.search(norm):

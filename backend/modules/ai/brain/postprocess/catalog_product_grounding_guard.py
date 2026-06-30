@@ -356,6 +356,43 @@ def apply_catalog_product_grounding_guard(
     if not ungrounded and not seasonal_invented:
         return CatalogProductGroundingGuardResult(reply=original, action="allowed")
 
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
+    try:
+        from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
+            should_block_catalog_grounding_fallback,
+        )
+
+        meta = dict(inbound_metadata or {})
+        _block_catalog, _block_reason = should_block_catalog_grounding_fallback(
+            inbound_text=inbound_text,
+            inbound_metadata=meta,
+            intent=intent,
+            decision_topic=str(
+                meta.get("decision_topic") or meta.get("topic") or "",
+            ),
+            protected_final_reply=bool(
+                contract is not None and contract.protected_final_reply
+            ),
+        )
+        if _block_catalog:
+            logger.info(
+                "[CATALOG_PRODUCT_GROUNDING_GUARD] blocked_catalog_containment "
+                "tenant=%s conv=%s reason=%s inbound=%r",
+                tenant_id,
+                conversation_id,
+                _block_reason or "-",
+                (inbound_text or "")[:80],
+            )
+            return CatalogProductGroundingGuardResult(
+                reply=original,
+                action="blocked_catalog_containment",
+                reason=_block_reason or "catalog_containment",
+                ungrounded_mentions=tuple(ungrounded),
+                would_rewrite=True,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_GROUNDING_GUARD] catalog_containment_probe_failed")
+
     rewritten = _rewrite_grounded_reply(
         catalog_titles=catalog_titles,
         inbound_text=inbound_text,

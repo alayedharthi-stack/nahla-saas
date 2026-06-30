@@ -6363,6 +6363,85 @@ async def _handle_merchant_message(
             extra_metadata=_live_in_meta,
         )
 
+        # ── Repeated short fragment guard (Jun 2026) ─────────────────────
+        # Same short text repeated within a brief window must not each spawn
+        # a full brain turn (and catalog fallback). Inbound is already visible
+        # in the inbox; suppress duplicate processing or clarify once.
+        try:
+            from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
+                duplicate_fragment_clarification_reply,
+                evaluate_duplicate_fragment_turn,
+            )
+
+            _frag_decision = evaluate_duplicate_fragment_turn(
+                tenant_id=tenant_id,
+                customer_phone=to,
+                text=text or "",
+            )
+            if not _frag_decision.process_turn:
+                _trace.fallback_source = "inbound_fragment_guard"
+                _trace.response_goal = _frag_decision.reason or "duplicate_fragment"
+                if _frag_decision.send_clarification_once:
+                    _frag_reply = duplicate_fragment_clarification_reply(
+                        inbound_text=text or "",
+                    )
+                    _frag_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=_frag_reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                    )
+                    if _frag_ok:
+                        StateManager.save_message(
+                            db,
+                            to,
+                            _frag_reply,
+                            "outbound",
+                            conversation_id=convo.id,
+                            tenant_id=tenant_id,
+                            extra_metadata={
+                                **_persona_ownership.to_metadata(),
+                                "deterministic_path": "inbound_fragment_guard",
+                                "fragment_guard_reason": _frag_decision.reason,
+                            },
+                        )
+                        try:
+                            db.commit()
+                        except Exception:
+                            try:
+                                db.rollback()
+                            except Exception:  # noqa: silent-ok
+                                pass
+                        _trace.outbound_sent = True
+                        _trace.reply_source = _TS.SOURCE_FALLBACK
+                else:
+                    try:
+                        db.commit()
+                    except Exception:
+                        try:
+                            db.rollback()
+                        except Exception:  # noqa: silent-ok
+                            pass
+                logger.info(
+                    "[INBOUND_FRAGMENT_GUARD] suppressed tenant=%s to=%s "
+                    "reason=%s clarify=%s inbound=%r",
+                    tenant_id,
+                    to,
+                    _frag_decision.reason or "-",
+                    _frag_decision.send_clarification_once,
+                    (text or "")[:80],
+                )
+                _sync_persona_observability()
+                return
+        except Exception as _frag_exc:  # noqa: BLE001
+            logger.warning(
+                "[INBOUND_FRAGMENT_GUARD] check failed tenant=%s to=%s err=%s",
+                tenant_id,
+                to,
+                _frag_exc,
+            )
+
         # ── PAYMENT-ASSET EARLY BYPASS ───────────────────────────────────
         #
         # This block runs BEFORE the AI pause guard and BEFORE the mode
