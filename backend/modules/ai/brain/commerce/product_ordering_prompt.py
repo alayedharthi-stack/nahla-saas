@@ -282,6 +282,14 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
     message = ctx.message or ""
 
     try:
+        from .health_advisory_product_safety import should_defer_non_health_routes  # noqa: PLC0415
+
+        if should_defer_non_health_routes(message, state=getattr(ctx, "state", None)):
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — health guard is best-effort
+        pass
+
+    try:
         from .commerce_order_channel_owner import should_suppress_product_ordering_prompt  # noqa: PLC0415
 
         if should_suppress_product_ordering_prompt(ctx):

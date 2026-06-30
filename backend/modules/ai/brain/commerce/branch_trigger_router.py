@@ -343,6 +343,13 @@ def evaluate_branch_trigger_routing(
     inbound_metadata: Optional[dict] = None,
 ) -> Optional[BranchTriggerDecision]:
     """Return a pre-brain decision when structured keyword routing matches."""
+    from modules.ai.brain.commerce.health_advisory_product_safety import (  # noqa: PLC0415
+        should_defer_non_health_routes,
+    )
+
+    if should_defer_non_health_routes(message or ""):
+        return None
+
     from modules.ai.brain.commerce.operational_choice_turn_guard import (  # noqa: PLC0415
         customer_turn_probe_message,
         has_explicit_operational_intent,

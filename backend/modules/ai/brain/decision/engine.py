@@ -1013,6 +1013,22 @@ class DefaultDecisionEngine:
                 _pay_ev_exc,
             )
 
+        # ── 0a.506 Health advisory product safety ───────────────────────
+        try:
+            from ..commerce.health_advisory_product_safety import (  # noqa: PLC0415
+                try_health_advisory_product_safety_decision,
+            )
+
+            _health_adv_dec = try_health_advisory_product_safety_decision(ctx)
+            if _health_adv_dec is not None:
+                return _health_adv_dec
+        except Exception as _health_adv_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[HEALTH_ADVISORY] route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _health_adv_exc,
+            )
+
         # ── 0a.507 Commerce order channel + shipping (CE3) ────────────────
         try:
             from ..commerce.commerce_order_channel_owner import (  # noqa: PLC0415
