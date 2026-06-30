@@ -1530,9 +1530,10 @@ function AIPlaygroundPanel() {
         <div className="card border border-slate-200">
           <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-slate-900">نتيجة المعاينة</h3>
-            <Badge variant={result.would_send ? 'green' : 'amber'}>
-              {result.would_send ? 'سيرسل ردًا' : 'لن يرسل'}
-            </Badge>
+            <Badge
+              variant={result.would_send ? 'green' : 'amber'}
+              label={result.would_send ? 'سيرسل ردًا' : 'لن يرسل'}
+            />
           </div>
           <div className="p-5 space-y-4 text-sm">
             {result.blocked_reason === 'store_ai_disabled' && (
