@@ -22,6 +22,8 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if s not in sys.path:
         sys.path.insert(0, s)
 
+from cryptography.fernet import Fernet  # noqa: E402
+
 from core.wa_token_crypto import decrypt_access_token, encrypt_access_token, is_encrypted_at_rest  # noqa: E402
 from models import Base, Tenant, WhatsAppConnection  # noqa: E402
 from services.whatsapp_platform.wa_connection_secrets import (  # noqa: E402
@@ -52,6 +54,61 @@ def _make_db():
     db.commit()
     db.refresh(tenant)
     return db, tenant
+
+
+@pytest.fixture
+def valid_fernet_key() -> str:
+    return Fernet.generate_key().decode()
+
+
+def test_production_with_wa_token_enc_key_works(monkeypatch, valid_fernet_key):
+    other_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("WA_TOKEN_ENC_KEY", valid_fernet_key)
+    monkeypatch.setenv("TOTP_ENC_KEY", other_key)
+
+    plain = "EAABprodWaKeyToken123456789012345678"
+    enc = encrypt_access_token(plain)
+    assert is_encrypted_at_rest(enc)
+    assert decrypt_access_token(enc) == plain
+
+
+@pytest.mark.parametrize("prod_env", ["production", "prod"])
+def test_production_rejects_totp_fallback(monkeypatch, valid_fernet_key, prod_env):
+    monkeypatch.setenv("ENVIRONMENT", prod_env)
+    monkeypatch.delenv("WA_TOKEN_ENC_KEY", raising=False)
+    monkeypatch.setenv("TOTP_ENC_KEY", valid_fernet_key)
+
+    with pytest.raises(RuntimeError, match="WA_TOKEN_ENC_KEY is required in production"):
+        encrypt_access_token("EAABshouldNotUseTotpFallback123456789")
+
+
+def test_production_rejects_invalid_wa_token_enc_key(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("WA_TOKEN_ENC_KEY", "not-a-valid-fernet-key")
+
+    with pytest.raises(RuntimeError, match="WA_TOKEN_ENC_KEY is set but invalid"):
+        encrypt_access_token("EAABinvalidKeyEnv123456789012345")
+
+
+def test_dev_totp_fallback_works(monkeypatch, valid_fernet_key):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("WA_TOKEN_ENC_KEY", raising=False)
+    monkeypatch.setenv("TOTP_ENC_KEY", valid_fernet_key)
+
+    plain = "EAABdevTotpFallbackToken123456789012"
+    enc = encrypt_access_token(plain)
+    assert decrypt_access_token(enc) == plain
+
+
+def test_dev_jwt_fallback_works(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("WA_TOKEN_ENC_KEY", raising=False)
+    monkeypatch.delenv("TOTP_ENC_KEY", raising=False)
+
+    plain = "EAABdevJwtFallbackToken1234567890123"
+    enc = encrypt_access_token(plain)
+    assert decrypt_access_token(enc) == plain
 
 
 def test_encrypt_roundtrip_and_legacy_plaintext():
