@@ -1594,10 +1594,22 @@ class DefaultDecisionEngine:
                 product_information_blocks_checkout,
                 resolve_product_information_llm_topic,
             )
+            from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+                is_product_knowledge_continuation,
+                product_knowledge_blocks_product_information,
+            )
+
+            _pk_blocks_info = (
+                product_knowledge_blocks_product_information(ctx.message or "")
+                or is_product_knowledge_continuation(ctx.message or "", state)
+            )
 
             if (
-                detect_product_information_topic_shift(ctx.message or "")
-                or product_information_blocks_checkout(ctx)
+                not _pk_blocks_info
+                and (
+                    detect_product_information_topic_shift(ctx.message or "")
+                    or product_information_blocks_checkout(ctx)
+                )
             ):
                 _info_topic = resolve_product_information_llm_topic(ctx.message or "")
                 _response_goal = (

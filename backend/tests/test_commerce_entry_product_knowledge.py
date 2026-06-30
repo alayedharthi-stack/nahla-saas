@@ -30,10 +30,18 @@ from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa:
     ProductKnowledgeKind,
     TOPIC_PRODUCT_KNOWLEDGE_FACTS,
     classify_product_knowledge_kind,
+    get_product_knowledge_session,
+    pin_product_knowledge_session,
     try_product_knowledge_decision,
 )
 from modules.ai.brain.commerce.status_reply_product_context import (  # noqa: E402
     try_status_reply_product_decision,
+)
+from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
+    apply_product_claim_grounding_guard,
+)
+from modules.ai.brain.state.product_information_topic import (  # noqa: E402
+    detect_product_information_topic_shift,
 )
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_CATALOG_NAVIGATE,
@@ -223,11 +231,36 @@ class TestProductKnowledgeClassification:
     def test_price_query_not_knowledge(self) -> None:
         assert classify_product_knowledge_kind("كم سعرhe") is None
 
-    def test_customer_action_knowledge(self) -> None:
-        assert classify_customer_action("ايش يفرق عن السدر العادي؟") == CustomerAction.KNOWLEDGE
+    def test_live_case_wesh_farq_without_al(self) -> None:
+        assert classify_product_knowledge_kind("وش فرق عن السدر العادي؟") == (
+            ProductKnowledgeKind.COMPARISON
+        )
+
+    def test_meaning_kind(self) -> None:
+        assert classify_product_knowledge_kind("وش معنى قيضية؟") == ProductKnowledgeKind.MEANING
+        assert classify_product_knowledge_kind("وش قصته؟") == ProductKnowledgeKind.MEANING
+
+    def test_explicit_health_not_comparison(self) -> None:
+        assert classify_product_knowledge_kind("وش فوائده الصحية؟") == ProductKnowledgeKind.HEALTH
 
 
 class TestCommerceEntryProductKnowledge:
+    def test_customer_action_knowledge(self) -> None:
+        assert classify_customer_action("ايش يفرق عن السدر العادي؟") == CustomerAction.KNOWLEDGE
+
+    def test_live_status_comparison_not_health_or_details_offer(self) -> None:
+        state = _state()
+        _status_focus(state)
+        decision = try_product_knowledge_decision(
+            _ctx("وش فرق عن السدر العادي؟", state=state, db=_StubDB()),
+        )
+        assert decision is not None
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.COMPARISON.value
+        goal = str(decision.args.get("response_goal") or "")
+        assert "do NOT pivot to health benefits" in goal
+        assert "تبي أرسل لك تفاصيله" in goal
+        assert detect_product_information_topic_shift("وش فرق عن السدر العادي؟") is False
+
     def test_status_product_comparison_routes_to_knowledge(self) -> None:
         state = _state()
         _status_focus(state)
@@ -371,3 +404,67 @@ class TestCommerceEntryProductKnowledge:
         catalog_dec = try_commerce_entry_catalog_decision(ctx)
         assert catalog_dec is not None
         assert catalog_dec.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
+
+    def test_comparison_continuation_naaam_arsil(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kb = _StubKBSection(
+            section_id=21,
+            kind="product_info",
+            title="سدرة قيضية",
+            body="تختلف عن السدر العادي بندرة القطف.",
+        )
+        db = _install_kb_stubs(monkeypatch, [kb])
+        state = _state()
+        _status_focus(state)
+        first = try_product_knowledge_decision(
+            _ctx("وش فرق عن السدر العادي؟", state=state, db=db),
+        )
+        assert first is not None
+        assert get_product_knowledge_session(state).get("active") is True
+
+        follow = try_product_knowledge_decision(
+            _ctx("نعم ارسل", state=state, db=db),
+        )
+        assert follow is not None
+        assert follow.args.get("product_knowledge_continuation") is True
+        assert follow.args.get("question_kind") == ProductKnowledgeKind.COMPARISON.value
+        goal = str(follow.args.get("response_goal") or "")
+        assert "deliver available" in goal
+        assert "no price/availability fallback" in goal
+
+    def test_explicit_health_routes_kb_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kb = _StubKBSection(
+            section_id=31,
+            kind="product_benefit",
+            title="عسل سدر",
+            body="قد يفيد كمصدر طاقة طبيعي.",
+        )
+        db = _install_kb_stubs(monkeypatch, [kb])
+        state = _state()
+        _status_focus(state, title="عسل سدر", pid=9)
+        decision = try_product_knowledge_decision(
+            _ctx("وش فوائده الصحية؟", state=state, db=db),
+        )
+        assert decision is not None
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.HEALTH.value
+        sections = (decision.args.get("allowed_facts") or {}).get("kb_sections") or []
+        assert sections
+        assert all(s.get("kind") == "product_benefit" for s in sections)
+
+    def test_claim_grounding_skips_health_fallback_on_knowledge_turn(self) -> None:
+        state = _state()
+        pin_product_knowledge_session(
+            state,
+            question_kind=ProductKnowledgeKind.COMPARISON,
+            subject_product={"title": "عسل سدرة"},
+            anchor_message="وش فرق عن السدر العادي؟",
+            comparison_reference="السدر العادي",
+        )
+        reply = "السدر أخف في الطعم ويفيد للمناعة."
+        result = apply_product_claim_grounding_guard(
+            reply=reply,
+            order_state=state,
+            inbound_metadata={"decision_topic": TOPIC_PRODUCT_KNOWLEDGE_FACTS},
+        )
+        assert result.action == "allowed_product_knowledge"
+        assert result.replaced is False
+        assert "فوائد صحية" not in result.reply

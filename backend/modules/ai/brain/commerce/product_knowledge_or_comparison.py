@@ -27,7 +27,8 @@ _WS_RE = re.compile(r"\s+")
 _COMPARISON_RE = re.compile(
     r"(?:"
     r"(?:وش|ايش|ما|what)\s*(?:ال)?(?:فرق|اختلاف|difference)"
-    r"|(?:ي|ت)?(?:فرق|يختلف|different)\s+عن"
+    r"|(?:وش|ايش|ما)\s+فرق\s+عن"
+    r"|(?:ي|ت)?(?:فرق|يفرق|يختلف|different)\s+عن"
     r"|(?:ال)?(?:فرق|اختلاف)\s+(?:بين|عن|between)"
     r"|compare|comparison"
     r")",
@@ -73,18 +74,52 @@ _NEW_PRODUCTION_RE = re.compile(
 
 _COMPARISON_REF_RE = re.compile(
     r"(?:"
-    r"(?:فرق|يختلف|different)\s+عن\s+(.+?)(?:\?|؟|$)"
+    r"(?:فرق|يفرق|يختلف|different)\s+عن\s+(.+?)(?:\?|؟|$)"
+    r"|(?:وش|ايش|ما)\s+(?:ال)?(?:فرق|اختلاف)\s+عن\s+(.+?)(?:\?|؟|$)"
     r"|(?:compared?\s+to|vs\.?)\s+(.+?)(?:\?|$)"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
 
+_MEANING_RE = re.compile(
+    r"(?:"
+    r"(?:وش|ما|what)\s+(?:قص(?:ت(?:ه|ها)?|ة)|معن(?:ى|ا)(?:\s+\S+)?|story|meaning)"
+    r"|(?:what\s+(?:is|does)\s+\S+\s+mean)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_HEALTH_BENEFITS_RE = re.compile(
+    r"(?:"
+    r"(?:وش|ما|what)\s*(?:فوائد(?:ه|ها)?(?:\s*(?:ال)?(?:صح(?:ية|يه|ية)?))?"
+    r"|فايد(?:ت(?:ه|ها)?)(?:\s*(?:ال)?(?:صح(?:ية|يه|ية)?))?)"
+    r"|(?:فوائد|فايد)\s*(?:ال)?(?:صح(?:ية|يه|ية)?)"
+    r"|(?:يفيد|ينفع|يفيدني|ينفعني)\s*(?:في|ل)"
+    r"|(?:علاج|مرض|امراض|أمراض|مناعة|قولون|سكر|diabetes|immunity|cure|treat)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SEND_CONTINUATION_RE = re.compile(
+    r"(?:"
+    r"^(?:نعم|اي|أي|ايه|ايه|تمام|اوكي|ok|yes)\b"
+    r"|^(?:نعم\s+)?(?:ارسل|أ?رسل)(?:\s+(?:لي\s+)?(?:التفاصيل|ال?تفاصيل|le|details))?"
+    r"|^(?:ارسل|أ?رسل)(?:\s+(?:لي\s+)?(?:التفاصيل|ال?تفاصيل|le|details))?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SESSION_KEY = "product_knowledge_context"
+
 _FORBIDDEN_CLAIMS = (
+    "invented_health_benefits",
     "invented_harvest_year",
     "invented_batch_claim",
     "invented_medical_benefit",
     "catalog_push_during_knowledge_question",
+    "price_or_availability_fallback_when_question_is_knowledge",
     "staff_contact_without_request",
+    "details_confirmation_when_question_is_clear",
 )
 
 _PRODUCT_KB_KINDS = frozenset({
@@ -102,6 +137,8 @@ class ProductKnowledgeKind(str, Enum):
     BATCH = "batch"
     VALUE = "value"
     FEATURES = "features"
+    MEANING = "meaning"
+    HEALTH = "health"
     SEASON = "season"
     UNKNOWN = "unknown"
 
@@ -134,6 +171,86 @@ def is_product_knowledge_message(message: str) -> bool:
     return classify_product_knowledge_kind(message) is not None
 
 
+def detect_explicit_health_benefits_question(message: str) -> bool:
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if _COMPARISON_RE.search(raw):
+        return False
+    return bool(_EXPLICIT_HEALTH_BENEFITS_RE.search(raw))
+
+
+def get_product_knowledge_session(state: Any) -> Dict[str, Any]:
+    if state is None:
+        return {}
+    session = dict(getattr(state, "commerce_session", None) or {})
+    ctx = session.get(_SESSION_KEY)
+    return dict(ctx) if isinstance(ctx, dict) else {}
+
+
+def pin_product_knowledge_session(
+    state: Any,
+    *,
+    question_kind: ProductKnowledgeKind,
+    subject_product: Dict[str, Any],
+    anchor_message: str,
+    comparison_reference: str = "",
+) -> None:
+    if state is None:
+        return
+    session = dict(getattr(state, "commerce_session", None) or {})
+    session[_SESSION_KEY] = {
+        "active": True,
+        "question_kind": question_kind.value,
+        "subject_product": dict(subject_product or {}),
+        "anchor_message": str(anchor_message or "").strip(),
+        "comparison_reference": str(comparison_reference or "").strip(),
+    }
+    state.commerce_session = session
+
+
+def clear_product_knowledge_session(state: Any) -> None:
+    if state is None:
+        return
+    session = dict(getattr(state, "commerce_session", None) or {})
+    session.pop(_SESSION_KEY, None)
+    state.commerce_session = session
+
+
+def is_product_knowledge_continuation(message: str, state: Any) -> bool:
+    session = get_product_knowledge_session(state)
+    if not session.get("active"):
+        return False
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if classify_product_knowledge_kind(raw) is not None:
+        return False
+    if detect_explicit_health_benefits_question(raw):
+        return False
+    if _is_price_query_not_knowledge(raw):
+        return False
+    norm = _norm(raw)
+    if _SEND_CONTINUATION_RE.search(norm):
+        return True
+    words = norm.split()
+    if len(words) <= 3 and re.search(
+        r"^(?:نعم|اي|أي|ايه|تمام|اوكي|ok|yes)$",
+        norm,
+    ):
+        return True
+    return False
+
+
+def product_knowledge_blocks_product_information(message: str) -> bool:
+    """True when product_information_topic must not hijack this turn."""
+    if is_product_knowledge_message(message):
+        return True
+    if detect_explicit_health_benefits_question(message):
+        return True
+    return False
+
+
 def classify_product_knowledge_kind(message: str) -> Optional[ProductKnowledgeKind]:
     raw = (message or "").strip()
     if not raw:
@@ -150,6 +267,10 @@ def classify_product_knowledge_kind(message: str) -> Optional[ProductKnowledgeKi
         return ProductKnowledgeKind.BATCH
     if _FEATURES_RE.search(raw):
         return ProductKnowledgeKind.FEATURES
+    if _MEANING_RE.search(raw):
+        return ProductKnowledgeKind.MEANING
+    if detect_explicit_health_benefits_question(raw):
+        return ProductKnowledgeKind.HEALTH
     if _VALUE_PRICE_RE.search(raw):
         return ProductKnowledgeKind.VALUE
     if _SEASON_RE.search(raw) and re.search(
@@ -157,16 +278,6 @@ def classify_product_knowledge_kind(message: str) -> Optional[ProductKnowledgeKi
         _norm(raw),
     ):
         return ProductKnowledgeKind.SEASON
-
-    try:
-        from modules.ai.brain.commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
-            _is_product_knowledge_or_comparison,
-        )
-
-        if _is_product_knowledge_or_comparison(raw):
-            return ProductKnowledgeKind.COMPARISON
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog delivery probe is best-effort
-        pass
 
     return None
 
@@ -216,7 +327,7 @@ def extract_comparison_reference(message: str) -> str:
     m = _COMPARISON_REF_RE.search(raw)
     if not m:
         return ""
-    ref = (m.group(1) or m.group(2) or "").strip(" ؟?!.")
+    ref = (m.group(1) or m.group(2) or m.group(3) or "").strip(" ؟?!.")
     return ref
 
 
@@ -317,6 +428,7 @@ def _retrieve_product_kb_sections(
     subject: str,
     message: str,
     limit: int = 4,
+    kinds_filter: Optional[frozenset] = None,
 ) -> List[Dict[str, Any]]:
     if not db or not tenant_id:
         return []
@@ -331,11 +443,12 @@ def _retrieve_product_kb_sections(
         return []
 
     try:
+        kind_tuple = tuple(kinds_filter or _PRODUCT_KB_KINDS)
         rows = (
             apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
             .filter(
                 MerchantKnowledgeSection.tenant_id == int(tenant_id),
-                MerchantKnowledgeSection.kind.in_(tuple(_PRODUCT_KB_KINDS)),
+                MerchantKnowledgeSection.kind.in_(kind_tuple),
             )
             .order_by(
                 MerchantKnowledgeSection.priority.asc(),
@@ -420,6 +533,11 @@ def gather_product_knowledge_facts(
         int(getattr(ctx, "tenant_id", 0) or 0),
         subject=subject_title or comparison_ref,
         message=message,
+        kinds_filter=(
+            frozenset({"product_benefit"})
+            if question_kind == ProductKnowledgeKind.HEALTH
+            else None
+        ),
     )
     if kb_sections:
         allowed["kb_sections"] = kb_sections
@@ -427,8 +545,15 @@ def gather_product_knowledge_facts(
         ProductKnowledgeKind.COMPARISON,
         ProductKnowledgeKind.BATCH,
         ProductKnowledgeKind.SEASON,
+        ProductKnowledgeKind.MEANING,
     }:
         missing.append("kb_product_facts")
+
+    if question_kind == ProductKnowledgeKind.HEALTH and not kb_sections:
+        missing.append("health_benefit_facts")
+
+    if question_kind == ProductKnowledgeKind.MEANING and not kb_sections:
+        missing.append("meaning_facts")
 
     if not subject_title and not subject_product.get("id"):
         missing.append("subject_product")
@@ -459,14 +584,32 @@ def compose_product_knowledge_response_goal(
     *,
     question_kind: ProductKnowledgeKind,
     bundle: ProductKnowledgeFactsBundle,
+    continuation: bool = False,
 ) -> str:
     parts = [
         "PRODUCT KNOWLEDGE compose principles: answer from allowed_facts only; "
         "natural concise Saudi Arabic; no rigid templates; no catalog browse push; "
         "no staff phone/contact unless customer explicitly asked for contact; "
-        "never say تبي رقمهم or offer staff numbers unprompted.",
+        "never say تبي رقمهم or offer staff numbers unprompted; "
+        "never ask تبي أرسل لك تفاصيله when the question is already clear.",
         f"question_kind={question_kind.value}",
     ]
+    if question_kind == ProductKnowledgeKind.COMPARISON:
+        parts.append(
+            "this is a product comparison question — explain differences from allowed_facts; "
+            "do NOT pivot to health benefits, price, availability, or catalog unless asked."
+        )
+    if question_kind == ProductKnowledgeKind.HEALTH:
+        parts.append(
+            "explicit health-benefits question — use KB product_benefit facts only; "
+            "never invent medical claims beyond allowed_facts."
+        )
+    if continuation:
+        parts.append(
+            "customer confirmed they want the knowledge details — deliver available "
+            "comparison/story facts directly from allowed_facts; no price/availability "
+            "fallback and no health-benefits pivot unless question_kind=health."
+        )
     if bundle.subject_product.get("title"):
         parts.append(f"subject_product={bundle.subject_product.get('title')}")
     if bundle.comparison_reference:
@@ -481,8 +624,9 @@ def compose_product_knowledge_response_goal(
             "question or state what is not confirmed in evidence."
         )
     parts.append(
-        "forbidden: invented harvest year, invented batch, invented medical benefit, "
-        "catalog push, unprompted staff contact."
+        "forbidden: invented health benefits, invented harvest year, invented batch, "
+        "invented medical benefit, catalog push, price/availability fallback, "
+        "unprompted staff contact, details-offer when question is clear."
     )
     if bundle.kb_sections:
         parts.append(
@@ -500,25 +644,55 @@ def try_product_knowledge_decision(ctx: Any) -> Optional[Any]:
     if not message:
         return None
 
+    state = getattr(ctx, "state", None)
+    continuation = False
     kind = classify_product_knowledge_kind(message)
+    anchor_message = message
+
     if kind is None:
-        return None
+        if is_product_knowledge_continuation(message, state):
+            session = get_product_knowledge_session(state)
+            kind = ProductKnowledgeKind(
+                str(session.get("question_kind") or ProductKnowledgeKind.COMPARISON.value),
+            )
+            anchor_message = str(session.get("anchor_message") or message)
+            continuation = True
+        else:
+            return None
 
     if kind == ProductKnowledgeKind.VALUE and _should_defer_to_price_objection(message):
         return None
 
-    subject = resolve_subject_product(ctx, message)
+    subject = resolve_subject_product(
+        ctx,
+        anchor_message if continuation else message,
+    )
+    if continuation:
+        session = get_product_knowledge_session(state)
+        session_subject = dict(session.get("subject_product") or {})
+        if session_subject.get("title") or session_subject.get("id"):
+            subject = {**session_subject, **{k: v for k, v in subject.items() if v}}
+
     bundle = gather_product_knowledge_facts(
         ctx,
         subject_product=subject,
         question_kind=kind,
-        message=message,
+        message=anchor_message if continuation else message,
+    )
+
+    pin_product_knowledge_session(
+        state,
+        question_kind=kind,
+        subject_product=dict(bundle.subject_product),
+        anchor_message=anchor_message,
+        comparison_reference=bundle.comparison_reference,
     )
 
     logger.info(
-        "[PRODUCT_KNOWLEDGE] tenant=%s kind=%s subject=%r missing=%s kb=%s",
+        "[PRODUCT_KNOWLEDGE] tenant=%s kind=%s continuation=%s subject=%r missing=%s kb=%s",
         getattr(ctx, "tenant_id", None),
         kind.value,
+        continuation,
         subject.get("title") or subject.get("title_hint_from_message") or "-",
         bundle.missing_facts,
         len(bundle.kb_sections),
@@ -538,12 +712,14 @@ def try_product_knowledge_decision(ctx: Any) -> Optional[Any]:
             "block_commerce_escalation": True,
             "block_staff_contact": True,
             "customer_action": "knowledge",
+            "product_knowledge_continuation": continuation,
             "response_goal": compose_product_knowledge_response_goal(
                 question_kind=kind,
                 bundle=bundle,
+                continuation=continuation,
             ),
         },
-        reason=f"product_knowledge — {kind.value}",
+        reason=f"product_knowledge — {kind.value}" + (" (continuation)" if continuation else ""),
         confidence=0.93,
     )
 
@@ -553,10 +729,16 @@ __all__ = [
     "ProductKnowledgeKind",
     "ProductKnowledgeFactsBundle",
     "classify_product_knowledge_kind",
+    "clear_product_knowledge_session",
     "compose_product_knowledge_response_goal",
+    "detect_explicit_health_benefits_question",
     "extract_comparison_reference",
     "gather_product_knowledge_facts",
+    "get_product_knowledge_session",
     "is_product_knowledge_message",
+    "is_product_knowledge_continuation",
+    "pin_product_knowledge_session",
+    "product_knowledge_blocks_product_information",
     "resolve_subject_product",
     "try_product_knowledge_decision",
 ]
