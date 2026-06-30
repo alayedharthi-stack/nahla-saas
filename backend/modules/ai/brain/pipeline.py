@@ -3209,6 +3209,14 @@ class MerchantBrain:
                 _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 _pcgg_meta["inbound_text"] = message or ""
                 _pcgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                for _flag in (
+                    "block_catalog_push",
+                    "block_staff_contact",
+                    "block_showroom_location",
+                    "pause_order_slot_collection",
+                ):
+                    if _flag in (decision.args or {}):
+                        _pcgg_meta[_flag] = bool((decision.args or {}).get(_flag))
                 try:
                     from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
                         active_catalog_group_slug_from_state,
@@ -3278,6 +3286,16 @@ class MerchantBrain:
                 catalog_product_grounding_guard_mode,
             )
             if catalog_product_grounding_guard_mode() != "off" and not _navigator_owner_locked:
+                _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                for _flag in (
+                    "block_catalog_push",
+                    "block_staff_contact",
+                    "block_showroom_location",
+                    "pause_order_slot_collection",
+                ):
+                    if _flag in (decision.args or {}):
+                        _cpgg_meta[_flag] = bool((decision.args or {}).get(_flag))
                 _cpgg_category = str((decision.args or {}).get("category_hint") or "").strip()
                 if not _cpgg_category:
                     from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
@@ -3298,7 +3316,7 @@ class MerchantBrain:
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                     order_state=new_state,
-                    inbound_metadata=dict((profile or {}).get("inbound_metadata") or {}),
+                    inbound_metadata=_cpgg_meta,
                     intent=intent,
                 )
                 if _cpgg.replaced:

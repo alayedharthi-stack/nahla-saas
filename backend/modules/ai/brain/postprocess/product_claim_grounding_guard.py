@@ -70,6 +70,16 @@ _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "checkout_slot_prompt",
 })
 
+_HEALTH_PROTECTED_TOPICS = frozenset({
+    "health_advisory_product_safety",
+})
+
+_NON_HEALTH_CHANNEL_TOPICS = frozenset({
+    "cold_shipping_inquiry",
+    "shipping_inquiry",
+    "storefront_self_checkout",
+})
+
 _MEDICAL_MARKERS = (
     "الصحه العامه",
     "الصحة العامة",
@@ -240,6 +250,31 @@ def _find_markers(text: str, markers: Sequence[str]) -> List[str]:
         if m and m in norm:
             found.append(marker)
     return found
+
+
+def _decision_topic(inbound_metadata: Optional[Dict[str, Any]]) -> str:
+    meta = dict(inbound_metadata or {})
+    return str(meta.get("decision_topic") or meta.get("topic") or "").strip()
+
+
+def _is_health_protected_turn(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
+    return _decision_topic(inbound_metadata) in _HEALTH_PROTECTED_TOPICS
+
+
+def _is_non_health_channel_turn(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
+    return _decision_topic(inbound_metadata) in _NON_HEALTH_CHANNEL_TOPICS
+
+
+def _filter_topic_scoped_violations(
+    violations: List[tuple[str, str]],
+    *,
+    inbound_metadata: Optional[Dict[str, Any]],
+) -> List[tuple[str, str]]:
+    if not violations:
+        return violations
+    if _is_non_health_channel_turn(inbound_metadata):
+        return [v for v in violations if v[0] != "ungrounded_medical"]
+    return violations
 
 
 def _claim_grounded_in_corpus(claim_marker: str, corpus: str) -> bool:
@@ -474,6 +509,12 @@ def apply_product_claim_grounding_guard(
             action="allowed_product_knowledge",
         )
 
+    if _is_health_protected_turn(inbound_metadata):
+        return ProductClaimGroundingGuardResult(
+            reply=original,
+            action="allowed_health_protected_topic",
+        )
+
     path = str(chosen_path or "").strip()
     if path in _DETERMINISTIC_ALLOW_PATHS:
         return ProductClaimGroundingGuardResult(reply=original, action="allowed")
@@ -509,6 +550,10 @@ def apply_product_claim_grounding_guard(
             original,
             evidence,
             customer_claimed=customer_claimed if is_price_objection else None,
+        )
+        violations = _filter_topic_scoped_violations(
+            violations,
+            inbound_metadata=inbound_metadata,
         )
         category_browse = _is_general_category_browse_turn(
             inbound_metadata,

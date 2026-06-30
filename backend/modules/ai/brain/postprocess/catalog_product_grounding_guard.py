@@ -46,6 +46,13 @@ _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "kb_availability_facts",
 })
 
+_CATALOG_REWRITE_BLOCKED_TOPICS = frozenset({
+    "health_advisory_product_safety",
+    "cold_shipping_inquiry",
+    "shipping_inquiry",
+    "storefront_self_checkout",
+})
+
 _HONEY_PRODUCT_MENTION_RE = re.compile(
     r"عسل\s+[\u0600-\u06FFa-zA-Z]+(?:\s+[\u0600-\u06FFa-zA-Z]+){0,3}",
     re.UNICODE,
@@ -91,6 +98,16 @@ class CatalogProductGroundingGuardResult:
     ungrounded_mentions: tuple[str, ...] = ()
     shadow_mode: bool = False
     would_rewrite: bool = False
+
+
+def _catalog_rewrite_blocked_by_current_turn(
+    inbound_metadata: Optional[Dict[str, Any]],
+) -> bool:
+    meta = dict(inbound_metadata or {})
+    topic = str(meta.get("decision_topic") or meta.get("topic") or "").strip()
+    if topic in _CATALOG_REWRITE_BLOCKED_TOPICS:
+        return True
+    return bool(meta.get("block_catalog_push"))
 
 
 def _catalog_titles_from_evidence(
@@ -246,6 +263,12 @@ def apply_catalog_product_grounding_guard(
 
     if not original.strip():
         return CatalogProductGroundingGuardResult(reply=original, action="allowed")
+
+    if _catalog_rewrite_blocked_by_current_turn(inbound_metadata):
+        return CatalogProductGroundingGuardResult(
+            reply=original,
+            action="allowed_catalog_push_blocked",
+        )
 
     path = str(chosen_path or "").strip()
     if path in _DETERMINISTIC_ALLOW_PATHS:
