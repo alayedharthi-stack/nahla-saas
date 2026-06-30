@@ -251,6 +251,21 @@ def _try_native_catalog_entry_decision(
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve owned catalog navigation turns before discovery/search/product_media."""
     try:
+        from ..commerce.payment_evidence_turn_route import (  # noqa: PLC0415
+            current_turn_has_payment_evidence,
+        )
+
+        if current_turn_has_payment_evidence(ctx):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="payment_evidence_turn",
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — payment block probe is best-effort
+        pass
+
+    try:
         from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
             catalog_delivery_is_blocked,
         )

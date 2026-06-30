@@ -124,6 +124,11 @@ def catalog_delivery_is_blocked(ctx: Any) -> bool:
     return bool(session.get(_BLOCK_KEY))
 
 
+def block_catalog_delivery(state: Any, reason: str) -> None:
+    """Block catalog delivery for the current commerce session."""
+    _set_catalog_delivery_block(state, reason)
+
+
 def _set_catalog_delivery_block(state: Any, reason: str) -> None:
     if state is None:
         return
@@ -600,6 +605,23 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     """
     message = str(getattr(ctx, "message", "") or "").strip()
     state = getattr(ctx, "state", None)
+
+    try:
+        from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
+            block_catalog_for_payment_evidence,
+            current_turn_has_payment_evidence,
+        )
+
+        if current_turn_has_payment_evidence(ctx):
+            block_catalog_for_payment_evidence(ctx)
+            logger.info(
+                "[COMMERCE_ENTRY_CATALOG] blocked payment_evidence tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — payment block probe is best-effort
+        pass
+
     if not message:
         return None
 
@@ -684,6 +706,7 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
 __all__ = [
     "TOPIC_COMMERCE_ENTRY_CATALOG",
     "CatalogDeliveryKind",
+    "block_catalog_delivery",
     "catalog_delivery_is_blocked",
     "try_commerce_entry_catalog_decision",
 ]

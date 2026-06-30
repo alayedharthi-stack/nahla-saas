@@ -997,6 +997,22 @@ class DefaultDecisionEngine:
                 confidence=intent.confidence,
             )
 
+        # ── 0a.505 Payment evidence turn (before catalog delivery) ─────────
+        try:
+            from ..commerce.payment_evidence_turn_route import (  # noqa: PLC0415
+                try_payment_evidence_turn_decision,
+            )
+
+            _pay_ev_dec = try_payment_evidence_turn_decision(ctx)
+            if _pay_ev_dec is not None:
+                return _pay_ev_dec
+        except Exception as _pay_ev_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[PAYMENT_EVIDENCE_TURN] route skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _pay_ev_exc,
+            )
+
         # ── 0a.51 Commerce entry catalog delivery (CE2) ───────────────────
         try:
             from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
