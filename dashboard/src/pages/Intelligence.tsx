@@ -33,6 +33,7 @@ import {
   ResponseQualityData,
 } from '../api/automations'
 import { settingsApi, type AISettings } from '../api/settings'
+import { playgroundApi, type PlaygroundDryRunResponse } from '../api/playground'
 import { CategoryBadges, OperationalFactWarning } from './knowledge/aiSettingsHints'
 import { StructuredContactsCutoverBanner } from '../components/operations/StructuredContactsCutoverBanner'
 
@@ -1447,6 +1448,168 @@ function BrainAnalyticsPanel() {
   )
 }
 
+// ── AI Playground Panel ───────────────────────────────────────────────────────
+
+function AIPlaygroundPanel() {
+  const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<PlaygroundDryRunResponse | null>(null)
+
+  const runDryRun = async () => {
+    const text = message.trim()
+    if (!text || loading) return
+    setLoading(true)
+    setError(null)
+    setResult(null)
+    try {
+      const res = await playgroundApi.dryRun({ message: text })
+      setResult(res)
+    } catch {
+      setError('تعذّر تشغيل الاختبار — حاول مجدداً')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-xl border border-sky-200 bg-sky-50/80 px-4 py-3 flex items-start gap-2">
+        <Info className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+        <div className="text-xs text-sky-900 leading-relaxed">
+          <span className="inline-flex items-center rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-semibold text-sky-800 mb-1">
+            Dry Run — لن يتم إرسال أي رسالة واتساب
+          </span>
+          <p className="mt-1">
+            اكتب رسالة اختبار لمعرفة ما كان الذكاء سيرد به — بدون إرسال حقيقي وبدون تغيير
+            محادثات العملاء.
+          </p>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <MessageSquare className="w-4 h-4 text-brand-500" />
+          <h2 className="text-sm font-semibold text-slate-900">ساحة اختبار الذكاء</h2>
+        </div>
+        <div className="p-5 space-y-4">
+          <Field
+            label="رسالة العميل"
+            hint="مثل: هل السدر متوفر؟ أو أرسل رقم التتبع"
+          >
+            <textarea
+              className="input min-h-[120px] resize-y"
+              value={message}
+              onChange={e => setMessage(e.target.value)}
+              placeholder="اكتب رسالة اختبار مثل: هل السدر متوفر؟"
+            />
+          </Field>
+          <button
+            type="button"
+            onClick={() => { void runDryRun() }}
+            disabled={loading || !message.trim()}
+            className="btn-primary text-sm flex items-center gap-2 disabled:opacity-60"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                جاري الاختبار…
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4" />
+                اختبار الرد
+              </>
+            )}
+          </button>
+          {error && <p className="text-xs text-red-600">{error}</p>}
+        </div>
+      </div>
+
+      {result && (
+        <div className="card border border-slate-200">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-slate-900">نتيجة المعاينة</h3>
+            <Badge variant={result.would_send ? 'green' : 'amber'}>
+              {result.would_send ? 'سيرسل ردًا' : 'لن يرسل'}
+            </Badge>
+          </div>
+          <div className="p-5 space-y-4 text-sm">
+            {result.blocked_reason === 'store_ai_disabled' && (
+              <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+                الذكاء متوقف للمتجر، لذلك لن يتم إرسال رد للعملاء. هذه نتيجة اختبار فقط.
+              </div>
+            )}
+
+            <div>
+              <p className="text-xs font-medium text-slate-500 mb-1">الرد المتوقع</p>
+              <p className="text-slate-800 whitespace-pre-wrap rounded-lg bg-slate-50 px-3 py-2 min-h-[48px]">
+                {result.reply_text || '—'}
+              </p>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3 text-xs">
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-slate-500">نوع الإرسال</span>
+                <p className="font-medium text-slate-800 mt-0.5">{result.outbound_kind}</p>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-slate-500">سبب المنع</span>
+                <p className="font-medium text-slate-800 mt-0.5">{result.blocked_reason || '—'}</p>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-slate-500">decision / topic</span>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {[result.decision_action, result.decision_topic].filter(Boolean).join(' · ') || '—'}
+                </p>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <span className="text-slate-500">owner / LLM</span>
+                <p className="font-medium text-slate-800 mt-0.5">
+                  {result.owner || '—'} · {result.used_llm ? 'LLM' : 'FakeFacts'}
+                </p>
+              </div>
+            </div>
+
+            {result.needs_context && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                يحتاج سياق طلب (order context) — لا يُخترَع رقم تتبع في v1.
+              </p>
+            )}
+
+            {result.warnings.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-slate-500 mb-1">تحذيرات</p>
+                <ul className="text-xs text-amber-800 space-y-1 list-disc list-inside">
+                  {result.warnings.map(w => (
+                    <li key={w}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div>
+              <p className="text-xs font-medium text-slate-500 mb-1">Side effects</p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(result.side_effects).map(([key, val]) => (
+                  <span
+                    key={key}
+                    className={`text-[11px] px-2 py-1 rounded-full ${
+                      val ? 'bg-red-100 text-red-700' : 'bg-emerald-50 text-emerald-700'
+                    }`}
+                  >
+                    {key}: {val ? 'true' : 'false'}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function Intelligence() {
@@ -1456,7 +1619,7 @@ export default function Intelligence() {
   // dashboard / merchant-knowledge tabs and reporting "the AI page is read-only,
   // there is no save button". The settings tab is where the textareas + save
   // controls actually live, so it should be the entry point.
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics' | 'coupons' | 'media'>('settings')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'settings' | 'merchant' | 'analytics' | 'coupons' | 'media' | 'playground'>('settings')
   const [data, setData] = useState<IntelligenceDashboard | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -1513,6 +1676,10 @@ export default function Intelligence() {
           ) : activeTab === 'media' ? (
             <span className="text-xs text-slate-400 flex items-center gap-1.5">
               <ImageIcon className="w-3.5 h-3.5" /> صور وملفات ترسلها نحلة مع ردودها
+            </span>
+          ) : activeTab === 'playground' ? (
+            <span className="text-xs text-slate-400 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5" /> معاينة آمنة بدون إرسال واتساب
             </span>
           ) : undefined
         }
@@ -1577,6 +1744,17 @@ export default function Intelligence() {
             مكتبة الوسائط
           </button>
           <button
+            onClick={() => setActiveTab('playground')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+              activeTab === 'playground'
+                ? 'border-brand-500 text-brand-600'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Sparkles className="w-4 h-4 shrink-0" />
+            ساحة اختبار الذكاء
+          </button>
+          <button
             onClick={() => setActiveTab('analytics')}
             className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
               activeTab === 'analytics'
@@ -1603,6 +1781,9 @@ export default function Intelligence() {
 
       {/* ── AI Media Library Tab ───────────────────────────────────────────── */}
       {activeTab === 'media' && <AIMediaLibraryPanel />}
+
+      {/* ── AI Playground Tab ──────────────────────────────────────────────── */}
+      {activeTab === 'playground' && <AIPlaygroundPanel />}
 
       {/* ── Brain Analytics Tab ────────────────────────────────────────────── */}
       {activeTab === 'analytics' && <BrainAnalyticsPanel />}
