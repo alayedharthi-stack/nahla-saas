@@ -267,7 +267,7 @@ function MetaEmbeddedOptionCard({
   const s = t(tr => tr.whatsappConnect.simplified)
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4 h-full flex flex-col">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
@@ -282,7 +282,9 @@ function MetaEmbeddedOptionCard({
         {s.metaApprovalNotice}
       </div>
 
-      <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
+      <div className="mt-auto">
+        <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
+      </div>
     </div>
   )
 }
@@ -333,7 +335,7 @@ function AssistedConnectFlow({
       : localStatus!.status === 'pending_activation' ? a.statusPendingActivation
       : a.statusRequestSubmitted
     return (
-      <div className="bg-white rounded-2xl border border-blue-200 p-6 shadow-sm space-y-3">
+      <div className="bg-white rounded-2xl border border-blue-200 p-6 shadow-sm space-y-3 h-full flex flex-col">
         <p className="text-lg font-bold text-slate-800">{pendingTitle}</p>
         <p className="text-sm text-slate-600 leading-relaxed">
           {localStatus!.action_required_message || a.defaultPendingMessage}
@@ -353,7 +355,7 @@ function AssistedConnectFlow({
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-violet-200 p-6 shadow-sm space-y-4">
+    <div className="bg-white rounded-2xl border border-violet-200 p-6 shadow-sm space-y-4 h-full flex flex-col">
       <div>
         <p className="font-bold text-slate-800 text-lg">{a.formTitle}</p>
         <p className="text-sm text-slate-500 mt-1">{a.formSubtitle}</p>
@@ -401,16 +403,18 @@ function AssistedConnectFlow({
 
       {error && <ErrorBox msg={error} />}
 
-      <button
-        type="button"
-        onClick={submitRequest}
-        disabled={busy}
-        className="w-full rounded-xl bg-violet-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60 shadow-lg shadow-violet-600/20"
-      >
-        {busy ? a.submitting : a.submitBtn}
-      </button>
+      <div className="mt-auto space-y-3">
+        <button
+          type="button"
+          onClick={submitRequest}
+          disabled={busy}
+          className="w-full rounded-xl bg-violet-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60 shadow-lg shadow-violet-600/20"
+        >
+          {busy ? a.submitting : a.submitBtn}
+        </button>
 
-      <p className="text-center text-xs text-slate-400">{a.footerHint}</p>
+        <p className="text-center text-xs text-slate-400">{a.footerHint}</p>
+      </div>
     </div>
   )
 }
@@ -1750,7 +1754,7 @@ export default function WhatsAppConnect() {
       onConfirm={confirmDisconnect}
       onCancel={() => setShowDisconnectModal(false)}
     />
-    <div className="max-w-lg mx-auto space-y-4" dir={dir}>
+    <div className={`mx-auto space-y-4 ${step < 4 ? 'max-w-5xl' : 'max-w-lg'}`} dir={dir}>
 
       {/* Header */}
       <div>
@@ -1766,19 +1770,28 @@ export default function WhatsAppConnect() {
       {/* ── Simplified connect options (merchant) ───────────────────────── */}
       {step < 4 && !loading && (
         <div className="space-y-4">
-          <MetaEmbeddedOptionCard
-            onConnected={(payload) => {
-              setConnPhone(payload?.phone_number ?? '')
-              setConnName(payload?.display_name ?? '')
-              setConnAt(payload?.connected_at ?? new Date().toISOString())
-              setConnLabel('ربط عبر Meta')
-              setStep(4)
-            }}
-          />
-          <AssistedConnectFlow
-            status={status}
-            onSubmitted={(next) => setStatus(next)}
-          />
+          <p className="text-sm font-semibold text-slate-700">
+            {wc.simplified.chooseMethodTitle}
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 items-stretch">
+            <div className="min-h-0 h-full">
+              <MetaEmbeddedOptionCard
+                onConnected={(payload) => {
+                  setConnPhone(payload?.phone_number ?? '')
+                  setConnName(payload?.display_name ?? '')
+                  setConnAt(payload?.connected_at ?? new Date().toISOString())
+                  setConnLabel('ربط عبر Meta')
+                  setStep(4)
+                }}
+              />
+            </div>
+            <div className="min-h-0 h-full">
+              <AssistedConnectFlow
+                status={status}
+                onSubmitted={(next) => setStatus(next)}
+              />
+            </div>
+          </div>
         </div>
       )}
 

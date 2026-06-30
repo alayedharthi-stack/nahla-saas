@@ -862,6 +862,7 @@ export interface Translations {
       }
     }
     simplified: {
+      chooseMethodTitle:      string
       metaCardTitle:          string
       metaCardSubtitle:       string
       metaCardBadge:          string

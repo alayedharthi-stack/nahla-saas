@@ -883,6 +883,7 @@ const ar: Translations = {
       },
     },
     simplified: {
+      chooseMethodTitle:       'اختر طريقة الربط المناسبة لك',
       metaCardTitle:           'ربط عبر Meta',
       metaCardSubtitle:        'المسار الرسمي لربط WhatsApp Business',
       metaCardBadge:           'Meta',

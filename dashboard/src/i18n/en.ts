@@ -879,6 +879,7 @@ const en: Translations = {
       },
     },
     simplified: {
+      chooseMethodTitle:       'Choose your connection method',
       metaCardTitle:           'Connect via Meta',
       metaCardSubtitle:        'Official path to connect WhatsApp Business',
       metaCardBadge:           'Meta',
