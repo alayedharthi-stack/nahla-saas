@@ -8,6 +8,7 @@ WHATSAPP_PROVIDER_360DIALOG = "dialog360"
 WHATSAPP_CONNECTION_TYPE_DIRECT = "direct"
 WHATSAPP_CONNECTION_TYPE_EMBEDDED = "embedded"
 WHATSAPP_CONNECTION_TYPE_COEXISTENCE = "coexistence"
+WHATSAPP_CONNECTION_TYPE_ASSISTED = "assisted"
 
 
 def wa_provider(conn: Optional[Any]) -> str:
@@ -37,4 +38,6 @@ def merchant_channel_label(conn: Optional[Any]) -> Optional[str]:
         return "ربط عبر Meta"
     if ctype == WHATSAPP_CONNECTION_TYPE_DIRECT:
         return "إدخال مباشر"
+    if ctype == WHATSAPP_CONNECTION_TYPE_ASSISTED:
+        return "طلب ربط بمساعدة نحلة"
     return "واتساب الأعمال"

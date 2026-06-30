@@ -14,6 +14,7 @@ from .provider_utils import (
     WHATSAPP_PROVIDER_360DIALOG,
     wa_provider,
 )
+from .wa_connection_secrets import read_access_token, store_access_token
 
 logger = logging.getLogger("nahla.whatsapp.token_manager")
 
@@ -50,7 +51,7 @@ def _read_meta(conn: Any) -> Dict[str, Any]:
 
 
 def _merchant_token_health(conn: Any) -> Tuple[str, Optional[datetime]]:
-    if not conn or not getattr(conn, "access_token", None):
+    if not conn or not read_access_token(conn):
         return "missing", None
     expires_at = _as_utc(getattr(conn, "token_expires_at", None))
     now = _now_utc()
@@ -69,9 +70,9 @@ def get_oauth_session_state(conn: Any) -> tuple[str, Optional[str]]:
     if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
         return "not_applicable", None
     meta = _read_meta(conn)
-    if getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT and not getattr(conn, "access_token", None):
+    if getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT and not read_access_token(conn):
         return "not_applicable", None
-    access_token = getattr(conn, "access_token", None)
+    access_token = read_access_token(conn)
     expires_at = _as_utc(getattr(conn, "token_expires_at", None))
     if access_token and expires_at and _now_utc() > expires_at:
         return (
@@ -89,11 +90,11 @@ def build_token_context(conn: Any, *, source: str) -> WhatsAppTokenContext:
         token_status = "healthy" if token else "missing"
         expires_at = None
     elif source == "dialog360":
-        token = str(getattr(conn, "access_token", "") or "")
+        token = read_access_token(conn)
         token_status = "healthy" if token else "missing"
         expires_at = None
     elif source == "merchant_oauth":
-        token = str(getattr(conn, "access_token", "") or "")
+        token = read_access_token(conn)
         token_status, expires_at = _merchant_token_health(conn)
     else:
         token = ""
@@ -223,7 +224,8 @@ def persist_token_context(
 
 
 async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppTokenContext]:
-    if not conn or not getattr(conn, "access_token", None):
+    plain = read_access_token(conn) if conn else ""
+    if not conn or not plain:
         return None
     if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
         return None
@@ -245,7 +247,7 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
                     "grant_type": "fb_exchange_token",
                     "client_id": META_APP_ID,
                     "client_secret": META_APP_SECRET,
-                    "fb_exchange_token": conn.access_token,
+                    "fb_exchange_token": plain,
                 },
             )
             data = resp.json()
@@ -266,7 +268,7 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
     new_token = data.get("access_token")
     if not new_token:
         return None
-    conn.access_token = new_token
+    store_access_token(conn, new_token)
     conn.token_type = "long_lived"
     new_expires_at = _now_utc() + timedelta(seconds=int(data.get("expires_in") or 5183944))
     conn.token_expires_at = new_expires_at

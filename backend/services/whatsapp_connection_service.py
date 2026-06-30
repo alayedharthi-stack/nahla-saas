@@ -213,17 +213,47 @@ def commit_connection(
     now = datetime.now(timezone.utc)
     conn.phone_number_id              = phone_number_id
     conn.whatsapp_business_account_id = waba_id
-    conn.access_token                 = access_token
-    conn.status                       = "connected"
-    conn.sending_enabled              = sending_enabled
     conn.connection_type              = connection_type
     conn.provider                     = provider
+    conn.status                       = "connected"
     conn.webhook_verified             = False   # must be earned by subscription
     conn.last_error                   = None
     conn.connected_at                 = now
     conn.updated_at                   = now
     conn.disconnect_reason            = None
     conn.disconnected_at              = None
+
+    # ── Token validation + encrypted persistence (Meta only) ─────────────────
+    from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
+    effective_sending = sending_enabled
+    if provider == "meta":
+        from services.whatsapp_platform.wa_token_validation import (  # noqa: PLC0415
+            apply_validation_to_connection,
+            production_sending_allowed,
+            validate_meta_access_token_sync,
+        )
+        validation = validate_meta_access_token_sync(access_token)
+        apply_validation_to_connection(conn, validation)
+        if not validation.is_valid:
+            raise WhatsAppConnectionError(
+                validation.error_message or "Meta access token is invalid."
+            )
+        if not production_sending_allowed(validation):
+            effective_sending = False
+            conn.last_error = (
+                "Token saved but not production-ready: "
+                + "; ".join(validation.warnings or ["Use a permanent System User token."])
+            )[:500]
+            logger.warning(
+                "[WASvc] non-production token tenant=%s status=%s warnings=%s",
+                tenant_id, validation.token_status, validation.warnings,
+            )
+        if validation.token_source_label == "system_user" and validation.token_status == "valid":
+            conn.token_type = "permanent_system_user"
+        elif validation.expires_at:
+            conn.token_type = "long_lived"
+    store_access_token(conn, access_token)
+    conn.sending_enabled = effective_sending
     try:
         from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
         stamp_whatsapp_ai_live_since_if_empty(conn)
@@ -421,7 +451,8 @@ def begin_waba_session(
         db.add(conn)
 
     conn.whatsapp_business_account_id = waba_id
-    conn.access_token                 = access_token
+    from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
+    store_access_token(conn, access_token)
     conn.connection_type              = connection_type
     conn.provider                     = provider
     conn.status                       = "pending"

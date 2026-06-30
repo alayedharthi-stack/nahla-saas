@@ -1349,6 +1349,11 @@ async def on_startup() -> None:
         return run_wa_token_refresh_scheduler()
     _start("wa_token_refresh", _f_wa_refresh, 45)
 
+    def _f_wa_health():
+        from core.scheduler import run_wa_token_health_scheduler  # noqa: PLC0415
+        return run_wa_token_health_scheduler()
+    _start("wa_token_health", _f_wa_health, 48)
+
     def _f_salla_refresh():
         from core.scheduler import run_salla_token_refresh_scheduler  # noqa: PLC0415
         return run_salla_token_refresh_scheduler()

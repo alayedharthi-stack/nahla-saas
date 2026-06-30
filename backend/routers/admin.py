@@ -1244,44 +1244,78 @@ async def admin_whatsapp_set_token(
     if not wa_conn:
         raise HTTPException(status_code=404, detail="No WhatsAppConnection for tenant")
 
-    old_tail = (wa_conn.access_token or "")[-6:] if wa_conn.access_token else None
-    wa_conn.access_token = body.access_token.strip()
-    wa_conn.token_type = body.token_type
-    wa_conn.token_expires_at = None
+    from services.whatsapp_platform.wa_connection_secrets import (  # noqa: PLC0415
+        safe_token_tail,
+        store_access_token,
+    )
+    from services.whatsapp_platform.wa_token_validation import (  # noqa: PLC0415
+        admin_production_block_message,
+        apply_validation_to_connection,
+        production_sending_allowed,
+        validate_meta_access_token_sync,
+    )
 
+    plain = body.access_token.strip()
+    validation = validate_meta_access_token_sync(plain)
+    if not validation.is_valid:
+        raise HTTPException(
+            status_code=400,
+            detail=validation.error_message or "Meta rejected this access token.",
+        )
+
+    old_tail = safe_token_tail(wa_conn)
+    store_access_token(wa_conn, plain)
+    wa_conn.token_type = body.token_type
+    if validation.expires_at is None and validation.production_ready:
+        wa_conn.token_expires_at = None
+    elif validation.expires_at is not None:
+        wa_conn.token_expires_at = validation.expires_at.replace(tzinfo=None)
+
+    apply_validation_to_connection(wa_conn, validation)
     meta = dict(wa_conn.extra_metadata or {})
-    meta["token_status"] = "permanent"
-    meta["token_health"] = "healthy"
-    meta["active_graph_token_source"] = "permanent_system_user"
     if body.note:
         meta["last_token_set_note"] = body.note
     meta["last_token_set_at"] = datetime.now(timezone.utc).isoformat()
     if meta.get("oauth_session_status") in {"expired", "invalid", "missing"}:
         meta["oauth_session_status"] = "replaced_with_permanent"
     meta["oauth_session_needs_reauth"] = False
+    if not production_sending_allowed(validation):
+        wa_conn.sending_enabled = False
+        meta["admin_token_warning"] = admin_production_block_message(validation)
+    elif wa_conn.status == "connected":
+        wa_conn.sending_enabled = True
+        meta.pop("admin_token_warning", None)
     wa_conn.extra_metadata = meta
     flag_modified(wa_conn, "extra_metadata")
 
     db.add(wa_conn)
     db.commit()
 
+    new_tail = safe_token_tail(wa_conn)
     audit(
         "admin.whatsapp.set_token",
         tenant_id=tenant_id,
         from_token_tail=old_tail,
-        to_token_tail=body.access_token[-6:],
+        to_token_tail=new_tail,
         token_type=body.token_type,
+        token_status=validation.token_status,
+        production_ready=validation.production_ready,
     )
     logger.warning(
-        "[admin] WhatsApp token replaced tenant_id=%s old_tail=%s new_tail=%s type=%s",
-        tenant_id, old_tail, body.access_token[-6:], body.token_type,
+        "[admin] WhatsApp token replaced tenant_id=%s old_tail=%s new_tail=%s type=%s status=%s prod_ready=%s",
+        tenant_id, old_tail, new_tail, body.token_type, validation.token_status, validation.production_ready,
     )
     return {
         "status": "ok",
         "tenant_id": tenant_id,
         "token_type": body.token_type,
-        "token_tail": body.access_token[-6:],
+        "token_tail": new_tail,
         "previous_token_tail": old_tail,
+        "token_status": validation.token_status,
+        "production_ready": validation.production_ready,
+        "health_status": validation.health_status,
+        "expires_at": validation.expires_at.isoformat() if validation.expires_at else None,
+        "warnings": validation.warnings,
     }
 
 
@@ -2886,6 +2920,51 @@ async def admin_list_coexistence_requests(
         logger.error("[admin/coexistence/requests] unhandled error: %s\n%s", exc, _tb.format_exc())
         from fastapi.responses import JSONResponse as _J  # noqa: PLC0415
         return _J(status_code=500, content={"detail": "خطأ في تحميل طلبات الربط", "error": str(exc)})
+
+
+@router.get("/admin/whatsapp/assisted-requests")
+async def admin_list_assisted_whatsapp_requests(
+    status_filter: str = "request_submitted",
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """List merchant-initiated admin-assisted WhatsApp connect requests."""
+    from routers.whatsapp_connect import _assisted_connect_state  # noqa: PLC0415
+
+    query = db.query(WhatsAppConnection).filter(
+        WhatsAppConnection.connection_type == "assisted"
+    )
+    if status_filter != "all":
+        query = query.filter(WhatsAppConnection.status == status_filter)
+    connections = query.order_by(WhatsAppConnection.last_attempt_at.desc().nullslast()).all()
+
+    rows = []
+    for conn in connections:
+        tenant = db.query(Tenant).filter(Tenant.id == conn.tenant_id).first()
+        user = (
+            db.query(User)
+            .filter(User.tenant_id == conn.tenant_id)
+            .order_by(User.id.asc())
+            .first()
+        )
+        assisted_meta = _assisted_connect_state(conn)
+        request_data = dict(assisted_meta.get("request") or {})
+        rows.append({
+            "tenant_id":       conn.tenant_id,
+            "tenant_name":     tenant.name if tenant else None,
+            "merchant_email":  user.email if user else None,
+            "merchant_phone":  getattr(user, "phone", None) if user else None,
+            "wa_status":       conn.status,
+            "connection_type": conn.connection_type,
+            "contact_phone":   request_data.get("contact_phone") or conn.phone_number,
+            "display_name":    request_data.get("display_name") or conn.business_display_name,
+            "notes":           request_data.get("notes"),
+            "submitted_at":    request_data.get("submitted_at"),
+            "last_attempt_at": conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
+            "last_error":      conn.last_error,
+        })
+
+    return {"requests": rows, "total": len(rows)}
 
 
 # ── Admin: live runtime performance snapshot ────────────────────────────────
