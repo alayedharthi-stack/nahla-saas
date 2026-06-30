@@ -22,6 +22,7 @@ logger = logging.getLogger("nahla-backend")
 REASON_AI_PAUSED = "ai_paused"
 REASON_MANUAL_PAUSE = "manual_pause"
 REASON_HUMAN_SUPERVISION = "human_supervision"
+REASON_STORE_AI_DISABLED = "store_ai_disabled"
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,18 @@ def disabled_reason_for_conversation(convo: Conversation | None) -> str:
     return ""
 
 
+def is_store_ai_enabled(db: Session, tenant_id: int) -> bool:
+    """Return True when the merchant has store-wide AI replies enabled."""
+    from core.tenant import get_or_create_settings, merge_ai_defaults  # noqa: PLC0415
+
+    settings = get_or_create_settings(db, tenant_id)
+    ai = merge_ai_defaults(settings.ai_settings)
+    raw = ai.get("store_ai_enabled", True)
+    if raw is None:
+        return True
+    return bool(raw)
+
+
 def _find_conversations_for_phone(
     db: Session,
     tenant_id: int,
@@ -88,7 +101,31 @@ def is_ai_disabled_for_conversation(
 
     Mirrors dashboard pause semantics: if ANY matching row is paused or
     under human supervision, automated AI is disabled for the thread.
+
+    Store-wide pause is checked first and does not mutate per-conversation
+    ai_paused flags — individual pauses remain intact when the store toggle
+    is turned back on.
     """
+    if not is_store_ai_enabled(db, tenant_id):
+        convos = _find_conversations_for_phone(db, tenant_id, customer_phone)
+        anchor = conversation
+        if anchor is None and convos:
+            anchor = convos[0]
+        logger.info(
+            "[AI_DISABLED_GATE] reason=%s tenant_id=%s source=%s phone=%s conversation_id=%s",
+            REASON_STORE_AI_DISABLED,
+            tenant_id,
+            source,
+            customer_phone,
+            getattr(anchor, "id", None),
+        )
+        return AIDisabledDecision(
+            disabled=True,
+            reason=REASON_STORE_AI_DISABLED,
+            conversation=anchor,
+            source=source,
+        )
+
     convos = _find_conversations_for_phone(db, tenant_id, customer_phone)
     if conversation is not None:
         known_ids = {getattr(c, "id", None) for c in convos}
@@ -244,9 +281,11 @@ __all__ = [
     "REASON_AI_PAUSED",
     "REASON_HUMAN_SUPERVISION",
     "REASON_MANUAL_PAUSE",
+    "REASON_STORE_AI_DISABLED",
     "disabled_reason_for_conversation",
     "evaluate_ai_disabled_send_block",
     "is_ai_disabled_for_conversation",
+    "is_store_ai_enabled",
     "log_ai_disabled_gate",
     "log_ai_disabled_send_block",
     "no_ai_reply_result",

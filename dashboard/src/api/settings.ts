@@ -14,6 +14,8 @@ export interface WhatsAppSettings {
 }
 
 export interface AISettings {
+  /** Store-wide master switch — independent of per-conversation ai_paused. */
+  store_ai_enabled: boolean
   assistant_name: string
   assistant_role: string
   reply_tone: 'friendly' | 'professional' | 'sales'
@@ -88,6 +90,12 @@ export const settingsApi = {
     apiCall<AllSettings>('/settings', {
       method: 'PUT',
       body: JSON.stringify(data),
+    }),
+
+  patchStoreAI: (store_ai_enabled: boolean) =>
+    apiCall<{ ok: boolean; store_ai_enabled: boolean; ai: AISettings }>('/settings/ai', {
+      method: 'PATCH',
+      body: JSON.stringify({ store_ai_enabled }),
     }),
 
   testWhatsApp: () =>

@@ -147,6 +147,8 @@ function AISettingsPanel() {
   const [saving, setSaving]   = useState(false)
   const [saved, setSaved]     = useState(false)
   const [error, setError]     = useState<string | null>(null)
+  const [storeAiSaving, setStoreAiSaving] = useState(false)
+  const [storeAiError, setStoreAiError] = useState<string | null>(null)
 
   useEffect(() => {
     settingsApi.getAll()
@@ -156,6 +158,23 @@ function AISettingsPanel() {
   }, [])
 
   const patch = (p: Partial<AISettings>) => setAi(prev => prev ? { ...prev, ...p } : prev)
+
+  const handleStoreAiToggle = async (enabled: boolean) => {
+    if (!ai) return
+    setStoreAiSaving(true)
+    setStoreAiError(null)
+    const previous = ai.store_ai_enabled
+    setAi(prev => prev ? { ...prev, store_ai_enabled: enabled } : prev)
+    try {
+      const res = await settingsApi.patchStoreAI(enabled)
+      setAi(res.ai)
+    } catch {
+      setAi(prev => prev ? { ...prev, store_ai_enabled: previous } : prev)
+      setStoreAiError('تعذّر تحديث إعداد الذكاء للمتجر — حاول مجدداً')
+    } finally {
+      setStoreAiSaving(false)
+    }
+  }
 
   const handleSave = async () => {
     if (!ai) return
@@ -184,6 +203,34 @@ function AISettingsPanel() {
 
   return (
     <div className="space-y-5">
+
+      {/* ── Store-wide AI master switch ── */}
+      <div className={`card border-2 ${ai.store_ai_enabled ? 'border-emerald-200' : 'border-violet-300'}`}>
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <ShieldCheck className={`w-4 h-4 ${ai.store_ai_enabled ? 'text-emerald-600' : 'text-violet-600'}`} />
+          <h2 className="text-sm font-semibold text-slate-900">الذكاء للمتجر كاملًا</h2>
+        </div>
+        <div className="p-5 space-y-3">
+          <Toggle
+            label={ai.store_ai_enabled ? 'تشغيل الذكاء للمتجر' : 'إيقاف الذكاء للمتجر كاملًا'}
+            hint={
+              ai.store_ai_enabled
+                ? 'سيعود الذكاء للرد على العملاء غير الموقوفين فرديًا فقط.'
+                : 'عند الإيقاف، لن يرد الذكاء على أي عميل في هذا المتجر. ستبقى الرسائل محفوظة ويمكنك الرد يدويًا. العملاء الموقوفون فرديًا سيبقون موقوفين حتى بعد إعادة تشغيل الذكاء العام.'
+            }
+            value={ai.store_ai_enabled !== false}
+            onChange={v => { if (!storeAiSaving) void handleStoreAiToggle(v) }}
+          />
+          {storeAiSaving && (
+            <p className="text-xs text-slate-400 flex items-center gap-1.5">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> جاري الحفظ…
+            </p>
+          )}
+          {storeAiError && (
+            <p className="text-xs text-red-600">{storeAiError}</p>
+          )}
+        </div>
+      </div>
 
       <div className="rounded-xl border border-amber-200 bg-amber-50/70 px-4 py-3 text-xs text-amber-900 leading-relaxed">
         الحقائق التشغيلية (الأسعار، التوفر، الشحن، الدفع، الموقع، أرقام التواصل) لا تُدار

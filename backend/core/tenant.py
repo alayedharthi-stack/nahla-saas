@@ -38,6 +38,9 @@ DEFAULT_WHATSAPP: Dict[str, Any] = {
 }
 
 DEFAULT_AI: Dict[str, Any] = {
+    # Store-wide AI master switch. When False, no automated AI outbound for
+    # any customer. Independent of per-conversation ai_paused flags.
+    "store_ai_enabled":  True,
     "assistant_name":    "نحلة",
     # ARCH-KB-001: neutral store-context stub — no professional role or
     # mandatory first-turn self-introduction. Merchants tune voice via

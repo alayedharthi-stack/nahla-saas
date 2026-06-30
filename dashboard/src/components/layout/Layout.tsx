@@ -3,6 +3,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import Header from './Header'
 import TrialBanner from '../ui/TrialBanner'
+import StoreAIPausedBanner from '../ui/StoreAIPausedBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { MobileChatFullscreenProvider, useMobileChatFullscreen } from '../../context/MobileChatFullscreenContext'
 import { useLanguage } from '../../i18n/context'
@@ -236,6 +237,7 @@ function LayoutShell() {
             />
             <ImpersonationBanner />
             <SupportAccessWarningBanner />
+            <StoreAIPausedBanner />
             <TrialBanner />
           </div>
         )}

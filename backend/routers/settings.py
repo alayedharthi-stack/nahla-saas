@@ -120,6 +120,10 @@ class WidgetSettingsIn(BaseModel):
     scroll_threshold: int = 250
 
 
+class StoreAISettingsPatch(BaseModel):
+    store_ai_enabled: bool
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/settings")
@@ -161,7 +165,7 @@ async def update_settings(
 
     if body.ai is not None:
         current = merge_ai_defaults(settings.ai_settings)
-        current.update(body.ai.model_dump())
+        current.update(body.ai.model_dump(exclude_none=True))
         settings.ai_settings = current
 
     if body.store is not None:
@@ -200,6 +204,35 @@ async def update_settings(
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
         "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
+    }
+
+
+@router.patch("/settings/ai")
+async def patch_store_ai_settings(
+    body: StoreAISettingsPatch,
+    request: Request,
+    db: Session = Depends(get_db),
+    _no_support: dict = Depends(require_not_support_impersonation),
+):
+    """Toggle store-wide AI replies without touching per-conversation pause state."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    settings = get_or_create_settings(db, tenant_id)
+
+    ai_settings = dict(settings.ai_settings or {})
+    ai_settings["store_ai_enabled"] = bool(body.store_ai_enabled)
+    settings.ai_settings = ai_settings
+    flag_modified(settings, "ai_settings")
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+
+    ai = merge_ai_defaults(settings.ai_settings)
+    return {
+        "ok": True,
+        "store_ai_enabled": bool(ai.get("store_ai_enabled", True)),
+        "ai": ai,
     }
 
 
