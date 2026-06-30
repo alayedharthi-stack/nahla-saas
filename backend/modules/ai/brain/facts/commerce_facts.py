@@ -35,7 +35,7 @@ class DefaultFactsLoader:
     """Implements FactsLoader protocol."""
 
     def load(self, db: Any, tenant_id: int) -> CommerceFacts:
-        from database.models import (
+        from models import (  # noqa: PLC0415
             Coupon,
             Integration,
             Product,
