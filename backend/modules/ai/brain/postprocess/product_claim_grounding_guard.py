@@ -24,6 +24,11 @@ from modules.ai.brain.postprocess.product_claim_grounding_evidence import (
     _norm,
     _text_references_product,
 )
+from modules.ai.brain.turn_owner_contract import (
+    POSTPROCESS_MEDICAL_CLAIM_REWRITE,
+    POSTPROCESS_PRODUCT_BENEFIT_REWRITE,
+    get_turn_owner_contract,
+)
 
 logger = logging.getLogger("nahla.brain.postprocess.product_claim_grounding_guard")
 
@@ -258,10 +263,22 @@ def _decision_topic(inbound_metadata: Optional[Dict[str, Any]]) -> str:
 
 
 def _is_health_protected_turn(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
+    if contract is not None and contract.topic in _HEALTH_PROTECTED_TOPICS:
+        return True
     return _decision_topic(inbound_metadata) in _HEALTH_PROTECTED_TOPICS
 
 
 def _is_non_health_channel_turn(inbound_metadata: Optional[Dict[str, Any]]) -> bool:
+    contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
+    if contract is not None:
+        return (
+            contract.topic in _NON_HEALTH_CHANNEL_TOPICS
+            or contract.block_product_benefit_rewrite
+            or contract.block_medical_claim_rewrite
+            or contract.blocks(POSTPROCESS_PRODUCT_BENEFIT_REWRITE)
+            or contract.blocks(POSTPROCESS_MEDICAL_CLAIM_REWRITE)
+        )
     return _decision_topic(inbound_metadata) in _NON_HEALTH_CHANNEL_TOPICS
 
 
