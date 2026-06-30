@@ -38,6 +38,7 @@ ENGINE_BY_TYPE: Dict[str, str] = {
     "customer_winback":      "recovery",
     "unpaid_order_reminder": "recovery",
     "abandoned_order_draft": "recovery",
+    "post_delivery_review":  "recovery",
     "cod_confirmation":      "recovery",
     "vip_upgrade":           "growth",
     "predictive_reorder":    "growth",
@@ -288,6 +289,22 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
             "template_name":     "wa_abandoned_order_draft_ar",
             "template_name_en":  "wa_abandoned_order_draft_en",
             "delay_minutes":     120,
+            "stop_on_reply":     True,
+        },
+    },
+    {
+        "automation_type": "post_delivery_review",
+        "engine":          "recovery",
+        "trigger_event":   AutomationTrigger.POST_DELIVERY_REVIEW_REQUEST_DUE.value,
+        "name":            "طلب تقييم بعد التسليم",
+        "enabled":         False,
+        "config": {
+            # Sweeper: `automation_emitters.scan_post_delivery_review_requests`.
+            # One review request per delivered order after delay_hours.
+            "delay_hours":       24,
+            "service_key":       "post_delivery",
+            "nahla_source_key":  "review_request",
+            "language":          "ar",
             "stop_on_reply":     True,
         },
     },

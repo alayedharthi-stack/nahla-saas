@@ -269,6 +269,63 @@ def seed_abandoned_draft_automation(db: Session, tenant_id: int) -> SmartAutomat
     return auto
 
 
+def seed_post_delivery_review_automation(
+    db: Session,
+    tenant_id: int,
+    *,
+    delay_hours: int = 24,
+    enabled: bool = True,
+) -> SmartAutomation:
+    from core.automation_triggers import AutomationTrigger  # noqa: PLC0415
+
+    auto = SmartAutomation(
+        tenant_id=tenant_id,
+        automation_type="post_delivery_review",
+        trigger_event=AutomationTrigger.POST_DELIVERY_REVIEW_REQUEST_DUE.value,
+        name="Post-delivery review",
+        enabled=enabled,
+        config={
+            "delay_hours": delay_hours,
+            "service_key": "post_delivery",
+            "nahla_source_key": "review_request",
+            "language": "ar",
+        },
+    )
+    db.add(auto)
+    db.commit()
+    db.refresh(auto)
+    return auto
+
+
+def seed_review_request_template(db: Session, tenant_id: int) -> "WhatsAppTemplate":
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    tpl = WhatsAppTemplate(
+        tenant_id=tenant_id,
+        name="review_request",
+        language="ar",
+        category="MARKETING",
+        status="APPROVED",
+        service_key="post_delivery",
+        nahla_source_key="review_request",
+        is_active=True,
+        components=[{"type": "BODY", "text": "يسعدنا تقييم تجربتك معنا."}],
+    )
+    db.add(tpl)
+    db.commit()
+    db.refresh(tpl)
+    return tpl
+
+
+def enable_tenant_autopilot(db: Session, tenant_id: int) -> None:
+    settings = db.query(TenantSettings).filter_by(tenant_id=tenant_id).one()
+    ai = dict(settings.ai_settings or {})
+    ai["autopilot_enabled"] = True
+    settings.ai_settings = ai
+    db.add(settings)
+    db.commit()
+
+
 def build_order_prep(
     *,
     product_id: str = "sku-talh-half",

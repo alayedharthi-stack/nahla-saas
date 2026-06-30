@@ -1224,6 +1224,32 @@ async def _execute_action(
         or config.get("template_name")
     )
 
+    preferred_source_key = (
+        (getattr(event, "payload", None) or {}).get("nahla_source_key")
+        or config.get("nahla_source_key")
+        or active_step.get("nahla_source_key")
+    )
+    if preferred_source_key and svc_key:
+        template = (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.service_key == svc_key,
+                WhatsAppTemplate.nahla_source_key == str(preferred_source_key),
+                WhatsAppTemplate.status == "APPROVED",
+            )
+            .order_by(
+                WhatsAppTemplate.is_active.desc(),
+                WhatsAppTemplate.updated_at.desc(),
+            )
+            .first()
+        )
+        if template:
+            logger.info(
+                "[AutoEngine] Template resolved via nahla_source_key=%s service=%s → id=%s name=%s",
+                preferred_source_key, svc_key, template.id, template.name,
+            )
+
     # Single-step services (payment_reminder, cod_confirmation, vip_exclusive,
     # welcome_message, new_arrivals, …) have no per-step config and resolve to
     # `step_num=None`.  The resolver / DB use `step_number IS NULL` for the
@@ -1235,10 +1261,11 @@ async def _execute_action(
         try:
             from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
             _step_for_resolver = int(step_num) if step_num is not None else None
-            template = resolve_template_for_send(
-                db, tenant_id, svc_key, _step_for_resolver,
-                fallback_template_name=tpl_name,
-            )
+            if not template:
+                template = resolve_template_for_send(
+                    db, tenant_id, svc_key, _step_for_resolver,
+                    fallback_template_name=tpl_name,
+                )
             if template:
                 logger.info(
                     "[AutoEngine] Template resolved via service_key=%s step=%s → id=%s name=%s",
@@ -2157,6 +2184,7 @@ _AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
     "abandoned_cart":          "cart_recovery",
     "unpaid_order_reminder":   "payment_reminder",   # fix: was missing → svc_key=None bypassed smart resolver
     "abandoned_order_draft":   "wa_draft_reminder",
+    "post_delivery_review":    "post_delivery",
     "cod_confirmation":        "cod_confirmation",
     "order_confirmation":      "order_confirmation",
     "shipping_update":         "shipping_update",
