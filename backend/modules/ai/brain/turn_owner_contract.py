@@ -281,10 +281,9 @@ def get_turn_owner_contract(
 
 
 def attach_turn_owner_contract(ctx: Any, contract: TurnOwnerContract) -> None:
-    try:
-        ctx.turn_owner_contract = contract  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    if ctx is None:
+        return
+    ctx.turn_owner_contract = contract  # type: ignore[attr-defined]
 
 
 __all__ = [
