@@ -114,6 +114,15 @@ def detect_product_attribute_question(message: str) -> bool:
 
 
 def detect_product_information_topic_shift(message: str) -> bool:
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            product_knowledge_blocks_product_information,
+        )
+
+        if product_knowledge_blocks_product_information(message or ""):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — knowledge probe is best-effort
+        pass
     if _is_bare_availability_turn(message):
         return False
     norm = _normalize(message or "")

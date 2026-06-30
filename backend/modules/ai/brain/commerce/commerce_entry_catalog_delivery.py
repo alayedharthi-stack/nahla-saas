@@ -84,8 +84,10 @@ _COMPARISON_KNOWLEDGE_RE = re.compile(
     r"(?:"
     r"(?:ال)?(?:فرق|اختلاف)|compare|comparison|أيهما|ايهما|"
     r"وش\s+(?:ال)?(?:فرق|اختلاف|يميز(?:ه|ها)?)|"
+    r"(?:وش|ايش|ما)\s+فرق\s+عن|"
     r"(?:ليش|لماذا|why)\s+(?:أ?غلى|اغلى|expensive)|"
-    r"(?:هو|هي|هذا)\s+(?:نفس|same)\s+(?:ال)?(?:إنتاج|production|batch)"
+    r"(?:هو|هي|هذا)\s+(?:نفس|same)\s+(?:ال)?(?:إنتاج|production|batch)|"
+    r"(?:وش|ما)\s+(?:قص(?:ت(?:ه|ها)?|ة)|معن(?:ى|ا))"
     r")",
     re.UNICODE | re.IGNORECASE,
 )

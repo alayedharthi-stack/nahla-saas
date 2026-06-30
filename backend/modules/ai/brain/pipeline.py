@@ -3208,6 +3208,7 @@ class MerchantBrain:
                     )
                 _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 _pcgg_meta["inbound_text"] = message or ""
+                _pcgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
                 try:
                     from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
                         active_catalog_group_slug_from_state,

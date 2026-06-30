@@ -406,6 +406,26 @@ def log_product_claim_grounding_guard(
         pass
 
 
+def _product_knowledge_turn_active(
+    inbound_metadata: Optional[Dict[str, Any]],
+    order_state: Any,
+) -> bool:
+    meta = dict(inbound_metadata or {})
+    topic = str(meta.get("decision_topic") or meta.get("topic") or "")
+    if topic == "product_knowledge_facts":
+        return True
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            get_product_knowledge_session,
+        )
+
+        if get_product_knowledge_session(order_state).get("active"):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — session probe is best-effort
+        pass
+    return False
+
+
 def _resolve_price_objection_context(
     inbound_metadata: Optional[Dict[str, Any]],
 ) -> tuple[bool, Set[int], str]:
@@ -447,6 +467,12 @@ def apply_product_claim_grounding_guard(
 
     if not original.strip():
         return ProductClaimGroundingGuardResult(reply=original, action="allowed")
+
+    if _product_knowledge_turn_active(inbound_metadata, order_state):
+        return ProductClaimGroundingGuardResult(
+            reply=original,
+            action="allowed_product_knowledge",
+        )
 
     path = str(chosen_path or "").strip()
     if path in _DETERMINISTIC_ALLOW_PATHS:
