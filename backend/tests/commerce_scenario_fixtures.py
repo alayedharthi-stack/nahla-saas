@@ -28,6 +28,7 @@ from models import (  # noqa: E402
     Conversation,
     Customer,
     CustomerAddress,
+    MerchantKnowledgeSection,
     MessageEvent,
     Order,
     OrderShipment,
@@ -372,6 +373,125 @@ def persona_draft_order(db: Session) -> ScenarioWorld:
     return world
 
 
+def seed_knowledge_section(
+    db: Session,
+    tenant_id: int,
+    *,
+    kind: str = "faq",
+    title: str = "",
+    body: str = "",
+    priority: int = 10,
+) -> MerchantKnowledgeSection:
+    section = MerchantKnowledgeSection(
+        tenant_id=tenant_id,
+        kind=kind,
+        title=title,
+        body=body,
+        priority=priority,
+        is_active=True,
+        source="manual",
+        ai_status="approved",
+    )
+    db.add(section)
+    db.commit()
+    db.refresh(section)
+    return section
+
+
+def seed_honey_kb_bundle(db: Session, tenant_id: int) -> Dict[str, MerchantKnowledgeSection]:
+    """Curated KB rows for FAQ / origin / availability scenario tests."""
+    sections = {
+        "natural_honey": seed_knowledge_section(
+            db,
+            tenant_id,
+            kind="faq",
+            title="هل العسل طبيعي؟",
+            body="عسلنا طبيعي 100% بدون إضافات أو تسخين.",
+        ),
+        "talh_origin": seed_knowledge_section(
+            db,
+            tenant_id,
+            kind="product_info",
+            title="منشأ عسل الطلح",
+            body="عسل الطلح يُقطف من جبال عسير ومناطق الطلح المعروفة.",
+        ),
+        "sidr_availability": seed_knowledge_section(
+            db,
+            tenant_id,
+            kind="quick_update",
+            title="توفر السدر",
+            body="عسل السدر متوفر حالياً — الكمية محدودة.",
+        ),
+    }
+    return sections
+
+
+def build_commerce_bundle_from_order(
+    order: Order,
+    shipment: Optional[OrderShipment] = None,
+    *,
+    order_status: str = "shipped",
+    shipping_status: str = "shipped",
+) -> Dict[str, Any]:
+    """Structured commerce bundle for tracking/shipment guard probes."""
+    reference = str(order.external_order_number or order.external_id or order.id)
+    ctx: Dict[str, Any] = {
+        "order_id": reference,
+        "external_id": order.external_id,
+        "order_status": order_status,
+        "raw_order_status": order_status,
+        "shipping_status": shipping_status,
+        "tracking_number": None,
+        "tracking_url": None,
+        "shipping_provider": None,
+        "confirmed_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        "product_summary": "عسل طلح",
+    }
+    if shipment is not None:
+        ctx["tracking_number"] = shipment.tracking_number
+        ctx["tracking_url"] = f"https://track.test/{shipment.tracking_number}"
+        ctx["shipping_provider"] = shipment.provider
+    return {
+        "active_order_id": str(order.id),
+        "active_order_context": ctx,
+        "recent_order_ids": [str(order.id)],
+    }
+
+
+def attach_commerce_bundle(
+    convo: Conversation,
+    bundle: Dict[str, Any],
+) -> None:
+    meta = dict(convo.extra_metadata or {})
+    meta.update(bundle)
+    convo.extra_metadata = meta
+
+
+def attach_shipped_commerce_context(
+    convo: Conversation,
+    order: Order,
+    shipment: OrderShipment,
+) -> None:
+    attach_commerce_bundle(
+        convo,
+        build_commerce_bundle_from_order(order, shipment),
+    )
+
+
+def attach_delivered_commerce_context(
+    convo: Conversation,
+    order: Order,
+) -> None:
+    attach_commerce_bundle(
+        convo,
+        build_commerce_bundle_from_order(
+            order,
+            order_status="delivered",
+            shipping_status="delivered",
+        ),
+    )
+
+
 def persona_shipped_order(db: Session) -> ScenarioWorld:
     world = persona_returning_with_address(db)
     ext_id = f"nahla-wa-{world.tenant.id}-{world.conversation.id}"
@@ -384,6 +504,45 @@ def persona_shipped_order(db: Session) -> ScenarioWorld:
         customer_info={"phone": world.phone_e164, "name": "فايز الصبحي"},
     )
     world.shipment = seed_shipment(db, world.tenant.id, world.order.id)
+    attach_shipped_commerce_context(world.conversation, world.order, world.shipment)
+    world.db.add(world.conversation)
+    world.db.commit()
+    world.extras["kb_sections"] = seed_honey_kb_bundle(db, world.tenant.id)
+    return world
+
+
+def persona_delivered_order(db: Session) -> ScenarioWorld:
+    world = persona_returning_with_address(db)
+    ext_id = f"nahla-wa-{world.tenant.id}-{world.conversation.id}"
+    delivered_at = datetime.now(timezone.utc) - timedelta(days=3)
+    world.order = seed_order(
+        db,
+        world.tenant.id,
+        status="delivered",
+        external_id=ext_id,
+        external_order_number="NHL-9900",
+        customer_info={"phone": world.phone_e164, "name": "فايز الصبحي"},
+        extra_metadata={
+            "delivered_at": delivered_at.isoformat(),
+            "review_request_sent": False,
+        },
+    )
+    attach_delivered_commerce_context(world.conversation, world.order)
+    prep = build_order_prep(
+        customer_first_name="فايز",
+        customer_last_name="الصبحي",
+        order_status="delivered",
+    )
+    attach_brain_state(world.conversation, prep)
+    world.db.add(world.conversation)
+    world.db.commit()
+    return world
+
+
+def persona_kb_inquiry(db: Session) -> ScenarioWorld:
+    """New customer with seeded honey FAQ/KB — no active order."""
+    world = persona_new_customer(db)
+    world.extras["kb_sections"] = seed_honey_kb_bundle(db, world.tenant.id)
     return world
 
 

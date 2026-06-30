@@ -420,3 +420,30 @@ class AIScenarioRunner:
         attach_brain_state(convo, prep)
         self.world.db.add(convo)
         self.world.db.commit()
+
+    def order_count(self) -> int:
+        return len(list_orders(self.world.db, self.world.tenant.id))
+
+    def commerce_bundle(self) -> Dict[str, Any]:
+        from core.active_order_context import load_commerce_bundle  # noqa: PLC0415
+
+        convo = self.world.db.query(Conversation).filter_by(id=self.world.conversation.id).one()
+        return load_commerce_bundle(dict(convo.extra_metadata or {}))
+
+    def run_inbound_only(self, text: str) -> ScenarioRunResult:
+        """Persist inbound text without order-bridge side effects."""
+        from core.conversation_engine import StateManager  # noqa: PLC0415
+
+        db = self.world.db
+        convo = db.query(Conversation).filter_by(id=self.world.conversation.id).one()
+        StateManager.save_message(
+            db,
+            self.world.phone,
+            (text or "").strip(),
+            "inbound",
+            conversation_id=convo.id,
+            tenant_id=self.world.tenant.id,
+            extra_metadata={"message_origin": "scenario_runner_inbound_only"},
+        )
+        db.commit()
+        return self.refresh()
