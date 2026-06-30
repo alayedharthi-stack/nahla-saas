@@ -212,12 +212,12 @@ def _refresh_order_state(order: Any) -> None:
         payment_verified=bool(meta.get("payment_confirmed")),
         line_items=line_items,
     )
+    prev_status = _raw_status(order)
     if status:
-        prev = _raw_status(order)
-        if prev != status:
+        if prev_status != status:
             timeline = list(meta.get("status_timeline") or [])
             timeline.append({
-                "from": prev or "none",
+                "from": prev_status or "none",
                 "to":   status,
                 "at":   _utcnow_iso(),
                 "reason": "merchant_edit",
@@ -237,6 +237,8 @@ def _refresh_order_state(order: Any) -> None:
         meta["needs_amount_review"] = True
 
     order.extra_metadata = meta
+    from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+    stamp_order_delivered_at_if_needed(order, previous_status=prev_status)
 
 
 def _validate_line_item(item: Dict[str, Any]) -> Dict[str, Any]:

@@ -1310,6 +1310,8 @@ def sync_nahla_wa_order(
                 last_sync_snapshot=curr_snap,
             )
             existing.extra_metadata = meta
+            from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+            stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
             db.add(existing)
             _log_bridge(
                 external_id=external_id,
@@ -1360,6 +1362,8 @@ def sync_nahla_wa_order(
             last_sync_snapshot=curr_snap,
         )
         order.extra_metadata = base_meta
+        from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
+        stamp_order_delivered_at_if_needed(order, previous_status=None)
         db.flush()
         _log_bridge(
             external_id=external_id,
