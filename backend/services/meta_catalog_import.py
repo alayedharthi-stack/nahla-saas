@@ -122,6 +122,7 @@ from core.catalog import (
 )
 from core.config import META_GRAPH_API_VERSION, WA_TOKEN
 from models import Product, WhatsAppConnection
+from services.whatsapp_platform.wa_connection_secrets import read_access_token
 
 logger = logging.getLogger("nahla.meta_catalog_import")
 
@@ -1225,38 +1226,40 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
     """
     provider     = str(getattr(conn, "provider", "") or "").lower()
     connection_t = str(getattr(conn, "connection_type", "") or "").lower()
-    raw_token    = str(getattr(conn, "access_token", "") or "").strip()
+    plain_token  = read_access_token(conn)
 
     considered: List[Dict[str, Any]] = []
 
     # ── Slot 1: merchant Meta OAuth ─────────────────────────────
     # provider=meta always; coexistence may store a long EAA token on
     # the same row alongside (or instead of) a short D360 API key.
+    # Use read_access_token so encrypted-at-rest (enc1:) values decrypt
+    # before eligibility checks and Graph calls — never send ciphertext.
     merchant_oauth_eligible = (
-        provider == "meta" or _looks_like_meta_graph_token(raw_token)
+        provider == "meta" or _looks_like_meta_graph_token(plain_token)
     )
     if merchant_oauth_eligible:
-        if raw_token:
+        if plain_token:
             return {
-                "token":           raw_token,
+                "token":           plain_token,
                 "token_source":    _TOKEN_SOURCE_MERCHANT_OAUTH,
                 "provider":        provider,
                 "connection_type": connection_t,
-                "token_tail":      _mask_token(raw_token),
-                "token_len":       len(raw_token),
+                "token_tail":      _mask_token(plain_token),
+                "token_len":       len(plain_token),
                 "considered":      considered,
             }
         considered.append({
             "source": _TOKEN_SOURCE_MERCHANT_OAUTH,
-            "reason": "provider=meta but conn.access_token is empty",
+            "reason": "provider=meta but merchant access token is empty",
         })
     else:
         considered.append({
             "source": _TOKEN_SOURCE_MERCHANT_OAUTH,
             "reason": (
                 f"skipped — provider={provider or '<unset>'} and "
-                f"conn.access_token is not a Meta Graph token "
-                f"(len={len(raw_token)}, typically a 360dialog D360-API-KEY). "
+                f"merchant access token is not a Meta Graph token "
+                f"(len={len(plain_token)}, typically a 360dialog D360-API-KEY). "
                 f"Sending it to graph.facebook.com would trigger OAuthException code=190."
             ),
         })
