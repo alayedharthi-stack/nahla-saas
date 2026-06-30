@@ -35,6 +35,8 @@ _BANK_LABELS: tuple[tuple[str, str], ...] = (
     ("alinma", "Alinma Bank"),
     ("stc pay", "STC Pay"),
     ("stcpay", "STC Pay"),
+    ("mobily pay", "Mobily Pay"),
+    ("mobilypay", "Mobily Pay"),
     ("البلاد", "بنك البلاد"),
     ("albilad", "Bank AlBilad"),
     ("الرياض", "بنك الرياض"),
@@ -68,7 +70,8 @@ _DATE_RES = (
 _REF_RES = (
     re.compile(
         r"(?:رقم\s*(?:العملية|المرجع|المرجعي)|reference\s*(?:number|no)?|"
-        r"transaction\s*(?:id|ref(?:erence)?))[\s:#]*([A-Za-z0-9\-]{6,32})",
+        r"transaction\s*(?:id|ref(?:erence)?|number)|number\s*transaction)"
+        r"[\s:#]*([A-Za-z0-9\-]{6,32})",
         re.IGNORECASE,
     ),
     re.compile(r"\b(FT\d{8,})\b", re.IGNORECASE),

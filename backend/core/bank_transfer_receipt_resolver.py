@@ -97,6 +97,8 @@ _BANK_NEEDLES: tuple[tuple[str, str], ...] = (
     ("alinma", "Alinma Bank"),
     ("stc pay", "STC Pay"),
     ("stcpay", "STC Pay"),
+    ("mobily pay", "Mobily Pay"),
+    ("mobilypay", "Mobily Pay"),
 )
 
 _SUCCESS_MARKERS = (
@@ -132,6 +134,9 @@ class BankReceiptExtraction:
     fee_amount: str = ""
     total_charge_amount: str = ""
     amount_parse_confidence: str = ""
+    receiver_mobile: str = ""
+    beneficiary_mobile: str = ""
+    customer_mobile: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -188,6 +193,9 @@ def build_receipt_data(extraction: BankReceiptExtraction) -> Dict[str, Any]:
         "transfer_datetime":   extraction.transfer_datetime or None,
         "receipt_type":        extraction.receipt_type or None,
         "bank_transfer_type":  extraction.bank_type_line or None,
+        "beneficiary_mobile":  extraction.beneficiary_mobile or None,
+        "receiver_mobile":     extraction.receiver_mobile or None,
+        "customer_mobile":     extraction.customer_mobile or None,
         "vat_percentage":      extraction.vat_percentage or None,
         "vat_amount":          extraction.vat_amount or None,
         "fee_amount":          extraction.fee_amount or None,
@@ -249,13 +257,16 @@ def extract_bank_receipt_fields(
     ext.reference_number = parsed.reference_number
     ext.beneficiary_name = parsed.beneficiary_name
     ext.from_account_masked = parsed.from_account_masked
-    ext.to_account = parsed.to_account
+    ext.to_account = parsed.to_account or parsed.receiver_mobile or parsed.beneficiary_mobile
     ext.bank_type_line = parsed.bank_type_line
     ext.vat_percentage = parsed.vat_percentage
     ext.vat_amount = parsed.vat_amount
     ext.fee_amount = parsed.fee_amount
     ext.total_charge_amount = parsed.total_charge_amount
     ext.amount_parse_confidence = parsed.amount_confidence
+    ext.receiver_mobile = parsed.receiver_mobile
+    ext.beneficiary_mobile = parsed.beneficiary_mobile
+    ext.customer_mobile = parsed.customer_mobile
 
     ibans = extract_ibans(blob)
     if ibans:
@@ -536,6 +547,11 @@ def apply_resolution_to_metadata(
         hints["transfer_datetime"] = ext.transfer_datetime
     if ext.reference_number:
         hints["reference_number"] = ext.reference_number
+    if ext.receiver_mobile:
+        hints["receiver_mobile"] = ext.receiver_mobile
+        hints["beneficiary_mobile"] = ext.beneficiary_mobile or ext.receiver_mobile
+    if ext.customer_mobile:
+        hints["customer_mobile"] = ext.customer_mobile
     if hints:
         metadata["payment_evidence_hints"] = hints
 

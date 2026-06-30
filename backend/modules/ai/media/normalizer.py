@@ -232,7 +232,8 @@ DOCUMENT_FALLBACK_REPLY_AR = (
 #     in that moment is more likely a payment receipt.
 
 _PDF_RECEIPT_FILENAME_KEYWORDS = (
-    "receipt", "transfer", "rajhi", "stcpay", "alinma", "alahli",
+    "receipt", "transfer", "transaction", "mobilypay", "mobily pay",
+    "rajhi", "stcpay", "alinma", "alahli",
     "snb", "ncb", "sabb", "barwa", "albilad", "anb",
     "إيصال", "ايصال", "تحويل", "حواله", "حوالة", "تحوي",
     "transferreceipt", "remittance", "payment",
@@ -3050,6 +3051,7 @@ async def _process_document(
         from core.payment_evidence import (  # noqa: PLC0415
             classify_payment_evidence,
             log_payment_evidence_verdict,
+            PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
             PAYMENT_EVIDENCE_CONFIRMED,
             PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
             PAYMENT_EVIDENCE_NEEDS_CONFIRMATION,
@@ -3135,6 +3137,13 @@ async def _process_document(
                 list(base_meta.get("pdf_kind_reasons") or [])
                 + ["payment_evidence_needs_confirmation"]
             )
+        elif _ev["status"] == PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT:
+            base_meta["pdf_kind"]            = "payment_pending_evidence"
+            base_meta["pdf_kind_confidence"] = "medium"
+            base_meta["pdf_kind_reasons"]    = (
+                list(base_meta.get("pdf_kind_reasons") or [])
+                + ["payment_evidence_amount_only_insufficient"]
+            )
 
         # ── Tenant-aware bank receipt resolver (P0) ─────────────────
         try:
@@ -3185,6 +3194,27 @@ async def _process_document(
             "tenant=%s media_id=%s err=%s",
             tenant_id, media_id, _pe_exc,
         )
+
+    try:
+        from core.payment_document_signals import (  # noqa: PLC0415
+            ensure_payment_pending_document_metadata,
+        )
+        from modules.ai.media.payment_evidence_hints import (  # noqa: PLC0415
+            attach_payment_evidence_hints,
+        )
+
+        _hint_blob = "\n".join(filter(None, [
+            filename or "",
+            caption or "",
+            extracted_text or "",
+        ]))
+        attach_payment_evidence_hints(base_meta, internal_text=_hint_blob)
+        ensure_payment_pending_document_metadata(
+            base_meta,
+            text=_hint_blob,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — promotion is best-effort
+        pass
 
     # ── Compose brain-facing text ────────────────────────────────
     label_ar = {

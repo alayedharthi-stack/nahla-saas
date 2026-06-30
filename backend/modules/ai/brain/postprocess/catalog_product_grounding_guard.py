@@ -117,7 +117,27 @@ def _catalog_rewrite_blocked_by_current_turn(
     topic = str(meta.get("decision_topic") or meta.get("topic") or "").strip()
     if topic in _CATALOG_REWRITE_BLOCKED_TOPICS:
         return True
-    return bool(meta.get("block_catalog_push"))
+    if meta.get("block_catalog_push"):
+        return True
+    if meta.get("potential_payment_document") or meta.get("payment_receipt_turn"):
+        return True
+    try:
+        from core.payment_document_signals import metadata_has_potential_payment_document  # noqa: PLC0415
+
+        if metadata_has_potential_payment_document(meta):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok
+        pass
+    try:
+        from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
+            inbound_metadata_has_payment_evidence,
+        )
+
+        if inbound_metadata_has_payment_evidence(meta):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok
+        pass
+    return False
 
 
 def _catalog_titles_from_evidence(

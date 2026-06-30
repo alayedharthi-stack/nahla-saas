@@ -20,6 +20,7 @@ _PAYMENT_EVIDENCE_STATUSES = frozenset({
     "confirmed",
     "needs_confirmation",
     "pre_transfer_review",
+    "amount_only_insufficient",
 })
 
 _PAYMENT_MEDIA_KINDS = frozenset({
@@ -67,6 +68,8 @@ def _receipt_data_signals(md: Dict[str, Any]) -> bool:
             "amount",
             "beneficiary_name",
             "beneficiary_iban",
+            "beneficiary_mobile",
+            "receiver_mobile",
             "reference_number",
             "bank_name",
             "transfer_date",
@@ -74,7 +77,14 @@ def _receipt_data_signals(md: Dict[str, Any]) -> bool:
             return True
     hints = md.get("payment_evidence_hints")
     if isinstance(hints, dict):
-        if any(hints.get(k) for k in ("amount", "bank_name", "beneficiary_name", "reference_number")):
+        if any(hints.get(k) for k in (
+            "amount",
+            "bank_name",
+            "beneficiary_name",
+            "reference_number",
+            "receiver_mobile",
+            "beneficiary_mobile",
+        )):
             return True
     return False
 
@@ -131,7 +141,21 @@ def inbound_metadata_has_payment_evidence(
     if meta.get("payment_receipt_detected") or meta.get("payment_receipt_short_circuit"):
         return True
 
-    return _receipt_data_signals(meta)
+    if meta.get("potential_payment_document"):
+        return True
+
+    if _receipt_data_signals(meta):
+        return True
+
+    try:
+        from core.payment_document_signals import metadata_has_potential_payment_document  # noqa: PLC0415
+
+        if metadata_has_potential_payment_document(meta):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok
+        pass
+
+    return False
 
 
 def current_turn_has_payment_evidence(ctx: Any) -> bool:
@@ -201,6 +225,14 @@ def _summary_from_ctx(ctx: Any, md: Dict[str, Any]) -> Dict[str, Any]:
             ev_dict = dict(summary.get("receipt_order_evidence") or {})
             ev_dict.setdefault("receipt_amount", parsed.get("amount"))
             summary["receipt_order_evidence"] = ev_dict
+            if evidence.expected_total is not None and parsed.get("amount") is not None:
+                try:
+                    receipt_amt = float(str(parsed.get("amount")).replace(",", ""))
+                    summary["receipt_amount_mismatch"] = abs(
+                        float(evidence.expected_total) - receipt_amt,
+                    ) > 0.01
+                except (TypeError, ValueError):
+                    pass
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
         logger.debug("[PAYMENT_EVIDENCE_TURN] grounding skipped err=%s", exc)
 
@@ -215,6 +247,9 @@ def _collect_allowed_facts(md: Dict[str, Any]) -> Dict[str, Any]:
             "amount",
             "beneficiary_name",
             "beneficiary_iban",
+            "beneficiary_mobile",
+            "receiver_mobile",
+            "customer_mobile",
             "bank_name",
             "reference_number",
             "transfer_date",
@@ -223,7 +258,15 @@ def _collect_allowed_facts(md: Dict[str, Any]) -> Dict[str, Any]:
                 allowed[key] = receipt_data[key]
     hints = md.get("payment_evidence_hints")
     if isinstance(hints, dict):
-        for key in ("amount", "bank_name", "beneficiary_name", "reference_number"):
+        for key in (
+            "amount",
+            "bank_name",
+            "beneficiary_name",
+            "reference_number",
+            "receiver_mobile",
+            "beneficiary_mobile",
+            "customer_mobile",
+        ):
             if hints.get(key) not in (None, "") and key not in allowed:
                 allowed[key] = hints[key]
     pe = str(md.get("payment_evidence_status") or "").strip().lower()
@@ -250,8 +293,8 @@ def _compose_response_goal(
     ]
     if pending_review:
         parts.append(
-            "pre-transfer or needs-review evidence — ask customer to send final receipt "
-            "after transfer completes; do not mutate payment confirmed state."
+            "pending merchant verification — acknowledge receipt only; "
+            "do not mutate payment confirmed state or promise shipping."
         )
     elif route_kind == "needs_order_linking":
         parts.append(
@@ -283,34 +326,44 @@ def try_payment_evidence_turn_decision(ctx: Any) -> Optional[Any]:
     allowed_facts = _collect_allowed_facts(md)
 
     try:
-        from core.payment_evidence import PAYMENT_EVIDENCE_CONFIRMED, PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW  # noqa: PLC0415
+        from core.payment_document_signals import (  # noqa: PLC0415
+            requires_merchant_verification_before_confirm,
+        )
+        from core.payment_evidence import (  # noqa: PLC0415
+            PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT,
+            PAYMENT_EVIDENCE_CONFIRMED,
+            PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW,
+        )
         from core.payment_receipt_attachment_gate import (  # noqa: PLC0415
             blocks_receipt_received_ack,
             build_receipt_received_state_patch,
         )
-        from core.receipt_order_grounding import compose_grounded_receipt_ack  # noqa: PLC0415
+        from core.receipt_order_grounding import (  # noqa: PLC0415
+            compose_grounded_receipt_ack,
+            compose_pending_merchant_receipt_ack,
+        )
         from core.reply_instruction import build_payment_receipt_instruction  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
         logger.debug("[PAYMENT_EVIDENCE_TURN] imports failed err=%s", exc)
         return None
 
     pe = str(md.get("payment_evidence_status") or "").strip().lower()
-    pending_review = blocks_receipt_received_ack(md, summary=summary) or (
-        pe == PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW
+    merchant_review_required = (
+        blocks_receipt_received_ack(md, summary=summary)
+        or pe == PAYMENT_EVIDENCE_PRE_TRANSFER_REVIEW
+        or pe == PAYMENT_EVIDENCE_AMOUNT_ONLY_INSUFFICIENT
+        or requires_merchant_verification_before_confirm(md)
     )
 
     has_active_order = bool(summary.get("can_mention_receipt_product")) or bool(
         summary.get("awaiting_payment_receipt"),
     )
 
-    if pending_review:
+    if merchant_review_required:
         route_kind = "pending_merchant_review"
         topic = TOPIC_PAYMENT_EVIDENCE_PENDING
         state_patch: Dict[str, Any] = {}
-        legacy = (
-            "Payment evidence received but transfer completion is not confirmed yet. "
-            "Ask the customer to send the final receipt after the transfer completes."
-        )
+        legacy = compose_pending_merchant_receipt_ack(summary)
     elif has_active_order:
         route_kind = "attach_receipt_to_active_order"
         topic = TOPIC_PAYMENT_RECEIPT_RECEIVED
@@ -319,12 +372,12 @@ def try_payment_evidence_turn_decision(ctx: Any) -> Optional[Any]:
             if pe == PAYMENT_EVIDENCE_CONFIRMED and not blocks_receipt_received_ack(md, summary=summary)
             else {}
         )
-        legacy = compose_grounded_receipt_ack(summary)
+        legacy = compose_pending_merchant_receipt_ack(summary) if state_patch else compose_grounded_receipt_ack(summary)
     else:
         route_kind = "needs_order_linking"
-        topic = TOPIC_PAYMENT_RECEIPT_RECEIVED
+        topic = TOPIC_PAYMENT_EVIDENCE_PENDING
         state_patch = {}
-        legacy = compose_grounded_receipt_ack(summary)
+        legacy = compose_pending_merchant_receipt_ack(summary)
 
     instruction = build_payment_receipt_instruction(
         legacy_copy=legacy,
@@ -337,7 +390,7 @@ def try_payment_evidence_turn_decision(ctx: Any) -> Optional[Any]:
         getattr(ctx, "tenant_id", None),
         route_kind,
         topic,
-        pending_review,
+        merchant_review_required,
         has_active_order,
     )
 
@@ -352,10 +405,11 @@ def try_payment_evidence_turn_decision(ctx: Any) -> Optional[Any]:
         "block_general_image_ack": True,
         "block_staff_contact": True,
         "payment_receipt_turn": True,
+        "potential_payment_document": bool(md.get("potential_payment_document")),
         "response_goal": _compose_response_goal(
             route_kind=route_kind,
             summary=summary,
-            pending_review=pending_review,
+            pending_review=merchant_review_required,
         ),
         "reply_instruction": instruction.to_dict(),
     }
