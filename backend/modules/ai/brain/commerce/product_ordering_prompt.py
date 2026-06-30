@@ -281,6 +281,14 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
     """
     message = ctx.message or ""
 
+    try:
+        from .commerce_order_channel_owner import should_suppress_product_ordering_prompt  # noqa: PLC0415
+
+        if should_suppress_product_ordering_prompt(ctx):
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — CE3 guard is best-effort
+        pass
+
     if _is_best_seller_request(message):
         names = _catalog_titles(ctx)
         joined = _join_names(names, limit=2)
