@@ -48,6 +48,7 @@ export interface WaConnection {
   action_required_message?: string | null
   request_submitted_at?: string | null
   coexistence_available?: boolean
+  assisted_connect_status?: string | null
   /** Per-URL Coexistence webhook block (channel / coexistence / status). */
   webhooks?: CoexistenceWebhookBlock | null
   coexistence_sync_state?: string | null
@@ -113,6 +114,12 @@ export interface CoexistenceRequestPayload {
   notes?: string
 }
 
+export interface AssistedConnectRequestPayload {
+  contact_phone?: string
+  display_name?: string
+  notes?: string
+}
+
 // ── API ───────────────────────────────────────────────────────────────────────
 
 export const whatsappConnectApi = {
@@ -155,4 +162,13 @@ export const whatsappConnectApi = {
 
   getCoexistenceStatus: () =>
     apiCall<WaConnection>('/whatsapp/coexistence/status'),
+
+  requestAssistedConnect: (data: AssistedConnectRequestPayload) =>
+    apiCall<WaConnection & { status: string; message?: string }>('/whatsapp/assisted-connect/request', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getAssistedConnectStatus: () =>
+    apiCall<WaConnection>('/whatsapp/assisted-connect/status'),
 }

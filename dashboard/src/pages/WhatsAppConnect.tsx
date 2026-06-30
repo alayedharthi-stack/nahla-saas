@@ -258,6 +258,211 @@ function CoexistenceFlow({
   )
 }
 
+function MetaEmbeddedOptionCard({
+  onConnected,
+}: {
+  onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
+}) {
+  const { t } = useLanguage()
+  const s = t(tr => tr.whatsappConnect.simplified)
+  const emb = t(tr => tr.whatsappConnect.embedded)
+  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null)
+  const [disabledReason, setDisabledReason] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const cfg = await apiCall<{
+          app_id: string
+          config_id: string
+          embedded_signup_config_id?: string
+          embedded_signup_enabled?: boolean
+          disabled_reason?: string
+        }>('/whatsapp/embedded/config')
+        if (cancelled) return
+        const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
+        const isEnabled = cfg.embedded_signup_enabled !== false && !!cfg.app_id && !!cfgId
+        setSignupEnabled(isEnabled)
+        setDisabledReason(cfg.disabled_reason || '')
+      } catch {
+        if (!cancelled) {
+          setSignupEnabled(false)
+          setDisabledReason('')
+        }
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  if (signupEnabled === true) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+        <EmbeddedSignupFlow onConnected={onConnected} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
+          <p className="text-sm text-slate-500 mt-1">{s.metaCardSubtitle}</p>
+        </div>
+        <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">
+          {s.metaCardBadge}
+        </span>
+      </div>
+
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
+        {disabledReason || s.metaCardMessage}
+      </div>
+
+      <p className="text-xs text-slate-500 leading-relaxed">{emb.disabledExplainBody}</p>
+
+      <button
+        type="button"
+        disabled
+        className="w-full flex items-center justify-center gap-2 bg-[#1877F2]/40 text-white font-bold py-3.5 rounded-xl cursor-not-allowed"
+      >
+        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+        </svg>
+        {s.metaConnectDisabledBtn}
+      </button>
+    </div>
+  )
+}
+
+function AssistedConnectFlow({
+  status,
+  onSubmitted,
+}: {
+  status: WaConnection | null
+  onSubmitted: (next: WaConnection) => void
+}) {
+  const { t, lang } = useLanguage()
+  const a = t(tr => tr.whatsappConnect.assisted)
+  const [contactPhone, setContactPhone] = useState(status?.phone_number ?? '')
+  const [displayName, setDisplayName] = useState(status?.display_name ?? '')
+  const [notes, setNotes] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [localStatus, setLocalStatus] = useState<WaConnection | null>(status)
+
+  useEffect(() => { setLocalStatus(status) }, [status])
+
+  const pending = localStatus && (
+    localStatus.connection_type === 'assisted'
+    || localStatus.assisted_connect_status === 'request_submitted'
+  ) && ['request_submitted', 'pending_activation', 'action_required'].includes(localStatus.status)
+
+  const submitRequest = async () => {
+    setBusy(true); setError('')
+    try {
+      const result = await whatsappConnectApi.requestAssistedConnect({
+        contact_phone: contactPhone.trim() || undefined,
+        display_name: displayName.trim() || undefined,
+        notes: notes.trim() || undefined,
+      })
+      setLocalStatus(result)
+      onSubmitted(result)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : a.submitFailed)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (pending) {
+    const pendingTitle =
+      localStatus!.status === 'action_required' ? a.statusActionRequired
+      : localStatus!.status === 'pending_activation' ? a.statusPendingActivation
+      : a.statusRequestSubmitted
+    return (
+      <div className="bg-white rounded-2xl border border-blue-200 p-6 shadow-sm space-y-3">
+        <p className="text-lg font-bold text-slate-800">{pendingTitle}</p>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          {localStatus!.action_required_message || a.defaultPendingMessage}
+        </p>
+        {localStatus!.request_submitted_at && (
+          <p className="text-xs text-slate-500">
+            {a.requestTimeLabel}{' '}
+            {new Date(localStatus!.request_submitted_at).toLocaleString(lang === 'ar' ? 'ar-SA' : 'en-US')}
+          </p>
+        )}
+        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 space-y-1">
+          <p>{a.contactInstructions}</p>
+          <p className="font-medium text-slate-800">{a.supportEmail}</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-violet-200 p-6 shadow-sm space-y-4">
+      <div>
+        <p className="font-bold text-slate-800 text-lg">{a.formTitle}</p>
+        <p className="text-sm text-slate-500 mt-1">{a.formSubtitle}</p>
+      </div>
+
+      <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 space-y-1.5">
+        {[a.benefitNoSecrets, a.benefitTeamSetup, a.benefitSecure].map(item => (
+          <div key={item} className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{item}</span>
+          </div>
+        ))}
+      </div>
+
+      <Field label={a.contactPhoneLabel} hint={a.contactPhoneHint}>
+        <input
+          type="tel"
+          value={contactPhone}
+          onChange={e => setContactPhone(e.target.value)}
+          placeholder={a.contactPhonePlaceholder}
+          className={inputCls}
+          dir="ltr"
+        />
+      </Field>
+
+      <Field label={a.displayNameLabel} hint={a.displayNameHint}>
+        <input
+          type="text"
+          value={displayName}
+          onChange={e => setDisplayName(e.target.value)}
+          placeholder={a.displayNamePlaceholder}
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label={a.notesLabel} hint={a.notesHint}>
+        <textarea
+          value={notes}
+          onChange={e => setNotes(e.target.value.slice(0, 500))}
+          placeholder={a.notesPlaceholder}
+          rows={3}
+          className={`${inputCls} resize-none`}
+        />
+      </Field>
+
+      {error && <ErrorBox msg={error} />}
+
+      <button
+        type="button"
+        onClick={submitRequest}
+        disabled={busy}
+        className="w-full rounded-xl bg-violet-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60 shadow-lg shadow-violet-600/20"
+      >
+        {busy ? a.submitting : a.submitBtn}
+      </button>
+
+      <p className="text-center text-xs text-slate-400">{a.footerHint}</p>
+    </div>
+  )
+}
+
 function explainWhatsAppError(msg: unknown, err: Translations['whatsappConnect']['errors']): string {
   const raw = typeof msg === 'string' ? msg.trim() : ''
   const m = raw.toLowerCase()
@@ -1369,8 +1574,6 @@ export default function WhatsAppConnect() {
   const wc = t(tr => tr.whatsappConnect)
   const d = t(tr => tr.whatsappConnect.direct)
   const err = t(tr => tr.whatsappConnect.errors)
-  // 'manual' = Manual connect (current) | 'embedded' = Meta Embedded Signup | 'direct' = OTP flow
-  const [mode, setMode]       = useState<'manual'|'embedded'|'direct'|'coexistence'>('manual')
   const [step, setStep]       = useState<1|2|3|4>(1)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy]       = useState(false)
@@ -1423,7 +1626,6 @@ export default function WhatsAppConnect() {
         ok: true,
         text: wc.metaBanner.success,
       })
-      setMode('embedded')
     } else {
       setMetaCallbackBanner({
         ok: false,
@@ -1475,32 +1677,15 @@ export default function WhatsAppConnect() {
     getStatus()
       .then(s => {
         setStatus(s as WaConnection)
-        if ((s as StatusResponse).coexistence_available && (s.provider === 'dialog360' || s.connection_type === 'coexistence')) {
-          setMode('coexistence')
-        }
         if (s.connected && s.sending_enabled !== false) {
           setConnPhone(s.phone_number ?? '')
           setConnName(s.display_name ?? '')
           setConnAt(s.connected_at ?? '')
           setConnLabel(s.merchant_channel_label ?? 'واتساب الأعمال')
           setStep(4)
-          // Probe the provider in the background — DB record alone isn't proof.
           void runLiveVerify()
-        } else if (s.connection_type === 'coexistence' || s.provider === 'dialog360') {
-          setMode('coexistence')
-        } else if ((s.status === 'pending' || s.status === 'otp_pending') && s.phone_number_id) {
-          // Resume from Step 2 — OTP was already sent, pending verification
-          setPhoneNumberId(s.phone_number_id)
-          setSentMsg(d.resumeOtpSent)
-          setStep(2)
-          // Calculate remaining cooldown from last_attempt_at
-          if (s.last_attempt_at) {
-            const elapsed = Math.floor((Date.now() - new Date(s.last_attempt_at).getTime()) / 1000)
-            const remaining = Math.max(0, 60 - elapsed)
-            if (remaining > 0) setResendCooldown(remaining)
-          }
-        } else if (s.status === 'activation_pending' || s.status === 'review_pending') {
-          setMode('embedded')
+        } else if (s.connection_type === 'embedded' && (s.status === 'activation_pending' || s.status === 'review_pending')) {
+          // Meta embedded in-flight — simplified cards remain visible below banner.
         }
       })
       .catch(()=>{})
@@ -1601,6 +1786,7 @@ export default function WhatsAppConnect() {
     const managedByOps =
       status?.provider === 'dialog360' ||
       status?.connection_type === 'coexistence' ||
+      status?.connection_type === 'assisted' ||
       isCoexistenceConnLabel(connLabel)
     if (managedByOps) {
       setError(wc.disconnect.opsOnlyError)
@@ -1648,85 +1834,23 @@ export default function WhatsAppConnect() {
         </p>
       </div>
 
-      {/* ── Mode switcher (only when not connected) ─────────────────────── */}
+      {/* ── Simplified connect options (merchant) ───────────────────────── */}
       {step < 4 && !loading && (
-        <div className="space-y-2">
-          {/* Main tabs */}
-          <div className="flex gap-2 bg-slate-100 rounded-xl p-1">
-            <button
-              onClick={() => { setMode('manual'); setStep(1); setError('') }}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-1.5 ${
-                mode === 'manual'
-                  ? 'bg-white shadow text-emerald-700'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {wc.page.modes.manual}
-              {mode === 'manual' && (
-                <span className="text-[10px] bg-emerald-100 text-emerald-700 font-semibold px-1.5 py-0.5 rounded-full">
-                  {wc.page.modes.manualBadge}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => { setMode('embedded'); setStep(1); setError('') }}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                mode === 'embedded'
-                  ? 'bg-white shadow text-violet-700'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {wc.page.modes.embedded}
-            </button>
-            <button
-              onClick={() => { setMode('direct'); setStep(1); setError('') }}
-              className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                mode === 'direct'
-                  ? 'bg-white shadow text-violet-700'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              {wc.page.modes.otp}
-            </button>
-            {status?.coexistence_available && (
-              <button
-                onClick={() => { setMode('coexistence'); setStep(1); setError('') }}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                  mode === 'coexistence'
-                    ? 'bg-white shadow text-violet-700'
-                    : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                {wc.page.modes.coexistence}
-              </button>
-            )}
-          </div>
-
-          {/* Context hint per mode */}
-          {mode === 'manual' && (
-            <p className="text-xs text-emerald-700 text-center bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
-              {wc.page.modeHints.manual}
-            </p>
-          )}
-          {mode === 'embedded' && (
-            <p className="text-xs text-slate-500 text-center bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5">
-              {wc.page.modeHints.embedded}
-            </p>
-          )}
+        <div className="space-y-4">
+          <MetaEmbeddedOptionCard
+            onConnected={(payload) => {
+              setConnPhone(payload?.phone_number ?? '')
+              setConnName(payload?.display_name ?? '')
+              setConnAt(payload?.connected_at ?? new Date().toISOString())
+              setConnLabel('ربط عبر Meta')
+              setStep(4)
+            }}
+          />
+          <AssistedConnectFlow
+            status={status}
+            onSubmitted={(next) => setStatus(next)}
+          />
         </div>
-      )}
-
-      {/* ── Manual connect mode ──────────────────────────────────────────── */}
-      {mode === 'manual' && step < 4 && !loading && (
-        <ManualConnectForm
-          onConnected={(r) => {
-            setConnPhone('')
-            setConnName('')
-            setConnAt(r.connected_at)
-            setConnLabel(`واتساب يدوي — ID: ${r.phone_number_id}`)
-            setStep(4)
-          }}
-        />
       )}
 
       {/* ── Server-side Meta OAuth callback banner ───────────────────────── */}
@@ -1743,292 +1867,7 @@ export default function WhatsAppConnect() {
         </div>
       )}
 
-      {/* ── Embedded Signup mode ─────────────────────────────────────────── */}
-      {mode === 'embedded' && step < 4 && !loading && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-          <EmbeddedSignupFlow onConnected={(payload) => {
-            setConnPhone(payload?.phone_number ?? '')
-            setConnName(payload?.display_name ?? '')
-            setConnAt(payload?.connected_at ?? new Date().toISOString())
-            setConnLabel('ربط عبر Meta')
-            setStep(4)
-          }} />
-        </div>
-      )}
-
-      {mode === 'coexistence' && step < 4 && !loading && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-          <CoexistenceFlow
-            status={status}
-            onConnected={(payload) => {
-              setConnPhone(payload?.phone_number ?? '')
-              setConnName(payload?.display_name ?? '')
-              setConnAt(payload?.connected_at ?? new Date().toISOString())
-              setConnLabel('واتساب الجوال + الذكاء الاصطناعي')
-              setStep(4)
-            }}
-          />
-        </div>
-      )}
-
-      {/* ── Direct mode step bar ─────────────────────────────────────────── */}
-      {mode === 'direct' && step < 4 && (
-        <StepBar step={step} labels={[d.stepIdentity, d.stepVerify, d.stepProfile, d.stepDone]} />
-      )}
-
-      {/* ── Direct mode steps (1-3) ──────────────────────────────────────── */}
-      {/* ── Step 1: Identity ─────────────────────────────────────────────── */}
-      {mode === 'direct' && step === 1 && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
-              <Phone className="w-5 h-5 text-violet-600" />
-            </div>
-            <div>
-              <p className="font-semibold text-slate-800">{d.step1Title}</p>
-              <p className="text-xs text-slate-500">{d.step1Subtitle}</p>
-            </div>
-          </div>
-
-          <Field label={d.phoneLabel} hint={d.phoneHint} required>
-            <input
-              type="tel" value={phone}
-              onChange={e => {
-                setPhone(e.target.value)
-                // Clear any previous error immediately when user edits the field
-                setError('')
-              }}
-              placeholder="+9665XXXXXXXX"
-              className={inputCls} dir="ltr"
-            />
-            {phone.trim() && (() => {
-              const n = normalizePhone(phone.trim())
-              return isValidSaudiPhone(n)
-                ? <p className="text-xs text-emerald-600 mt-1">✓ {d.phoneNormalizedOk} {n}</p>
-                : <p className="text-xs text-amber-500 mt-1">{d.phoneFormatHint}</p>
-            })()}
-          </Field>
-
-          <Field
-            label={d.displayNameLabel}
-            hint={d.displayNameHint}
-            required
-          >
-            <input
-              type="text" value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
-              placeholder={d.displayNamePlaceholder}
-              className={inputCls}
-            />
-            <p className="text-xs text-amber-600 mt-1">
-              {d.displayNameWarning}
-            </p>
-          </Field>
-
-          <Field label={d.otpMethodLabel}>
-            <div className="flex gap-3">
-              {(['SMS','VOICE'] as const).map(m => (
-                <button key={m} onClick={() => setOtpMethod(m)}
-                  className={`flex-1 py-2.5 rounded-xl text-sm font-medium border transition-all
-                    ${otpMethod===m ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-slate-600 border-slate-300 hover:border-violet-300'}`}>
-                  {m==='SMS' ? d.otpMethodSms : d.otpMethodVoice}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {error && <ErrorBox msg={error} />}
-
-          <button onClick={handleRequestOtp} disabled={busy}
-            className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
-            {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.sending}</>
-              : <>{d.sendOtpBtn} <ChevronRight className="w-4 h-4"/></>}
-          </button>
-
-          {/* Info */}
-          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-xs text-blue-700 space-y-1">
-            <p className="font-semibold text-blue-800">{d.requirementsTitle}</p>
-            <ul className="space-y-1 list-disc list-inside">
-              <li>{d.requirement1}</li>
-              <li>{d.requirement2}</li>
-              <li>{d.requirement3}</li>
-            </ul>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 2: OTP ──────────────────────────────────────────────────── */}
-      {mode === 'direct' && step === 2 && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
-              <ShieldCheck className="w-5 h-5 text-amber-600"/>
-            </div>
-            <div>
-              <p className="font-semibold text-slate-800">{d.step2Title}</p>
-              <p className="text-xs text-slate-500 mt-0.5">{sentMsg}</p>
-            </div>
-          </div>
-
-          <Field label={d.otpFieldLabel} required>
-            <input
-              type="text" value={otp}
-              onChange={e => setOtp(e.target.value.replace(/\D/g,'').slice(0,6))}
-              placeholder="• • • • • •"
-              maxLength={6} autoFocus
-              className={`${inputCls} text-center text-2xl font-mono tracking-[0.5em]`}
-              dir="ltr"
-            />
-          </Field>
-
-          {error && <ErrorBox msg={error} />}
-
-          <button onClick={handleVerifyOtp} disabled={busy||otp.length<6}
-            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-emerald-600/20">
-            {busy
-              ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.verifying}</>
-              : <>{d.confirmPhoneBtn} <CheckCircle2 className="w-4 h-4"/></>}
-          </button>
-
-          {/* Already verified in Meta? refresh button */}
-          <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700">
-            <ShieldCheck className="w-4 h-4 shrink-0 text-blue-500"/>
-            <span>{d.metaVerifiedPrompt}</span>
-            <button
-              onClick={async () => {
-                setBusy(true); setError('')
-                try {
-                  const r = await post<{ updated: boolean; connected?: boolean; message: string }>(
-                    '/whatsapp/direct/refresh-from-meta', {}
-                  )
-                  if (r.updated || r.connected) {
-                    setStep(3)
-                    setSentMsg(d.refreshSuccess)
-                  } else {
-                    setError(sanitizeMessage(r.message, err.sanitizeFallback))
-                  }
-                } catch(e) {
-                  setError(sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback))
-                } finally { setBusy(false) }
-              }}
-              disabled={busy}
-              className="mr-auto font-semibold underline hover:text-blue-900 disabled:opacity-50 whitespace-nowrap">
-              {busy ? d.refreshStatusBusy : d.refreshStatusBtn}
-            </button>
-          </div>
-
-          {/* Resend code */}
-          <div className="flex items-center justify-between text-sm pt-1">
-            <button onClick={()=>{setStep(1);setError('');setOtp('')}}
-              className="text-slate-400 hover:text-slate-600">
-              {d.changePhone}
-            </button>
-            <button
-              onClick={async () => {
-                setOtp(''); setError(''); setBusy(true)
-                try {
-                  const r = await resendOtp(phoneNumberId)
-                  setSentMsg(sanitizeMessage(r.message, err.sanitizeFallback))
-                  setResendCooldown(60)
-                } catch(e) {
-                  const msg = sanitizeMessage(e instanceof Error ? e.message : '', err.sanitizeFallback)
-                  // Stale phone_number_id — reset to step 1 so user can re-add
-                  if (msg.includes('الخطوة الأولى') || msg.includes('STALE_PHONE')) {
-                    setStep(1); setPhone(''); setOtp(''); setPhoneNumberId('')
-                  }
-                  setError(msg)
-                } finally { setBusy(false) }
-              }}
-              disabled={resendCooldown > 0 || busy}
-              className="text-violet-600 hover:text-violet-800 disabled:text-slate-400 disabled:cursor-not-allowed font-medium">
-              {resendCooldown > 0
-                ? `${d.resendLabel} (${resendCooldown}${d.resendCooldownUnit})`
-                : d.resendBtn}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Step 3: Business Profile ─────────────────────────────────────── */}
-      {mode === 'direct' && step === 3 && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center">
-              <Building2 className="w-5 h-5 text-emerald-600"/>
-            </div>
-            <div>
-              <p className="font-semibold text-slate-800">{d.step3Title}</p>
-              <p className="text-xs text-slate-500">{d.step3Subtitle}</p>
-            </div>
-          </div>
-
-          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0"/>
-            <p className="text-xs text-emerald-700">
-              {d.verifiedBanner}
-            </p>
-          </div>
-
-          <Field label={d.verticalLabel} required>
-            <select value={vertical} onChange={e=>setVertical(e.target.value)} className={inputCls}>
-              {VERTICAL_VALUES.map(v => (
-                <option key={v} value={v}>{d.verticals[v]}</option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label={d.aboutLabel} hint={d.aboutHint}>
-            <textarea
-              value={about} onChange={e=>setAbout(e.target.value.slice(0,512))}
-              placeholder={d.aboutPlaceholder}
-              rows={3} className={`${inputCls} resize-none`}
-            />
-            <p className="text-xs text-slate-400 text-start">{about.length}/512</p>
-          </Field>
-
-          <Field label={d.addressLabel} hint={d.addressHint}>
-            <input type="text" value={address} onChange={e=>setAddress(e.target.value)}
-              placeholder={d.addressPlaceholder}
-              className={inputCls}/>
-          </Field>
-
-          <div className="grid grid-cols-2 gap-4">
-            <Field label={d.emailLabel} hint={d.emailHint}>
-              <div className="relative">
-                <Mail className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
-                <input type="email" value={email} onChange={e=>setEmail(e.target.value)}
-                  placeholder="info@store.com"
-                  className={`${inputCls} pr-9`} dir="ltr"/>
-              </div>
-            </Field>
-
-            <Field label={d.websiteLabel}>
-              <div className="relative">
-                <Globe className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/>
-                <input type="url" value={website} onChange={e=>setWebsite(e.target.value)}
-                  placeholder="https://store.com"
-                  className={`${inputCls} pr-9`} dir="ltr"/>
-              </div>
-            </Field>
-          </div>
-
-          {error && <ErrorBox msg={error}/>}
-
-          <div className="flex gap-3">
-            <button onClick={handleSaveProfile} disabled={busy}
-              className="flex-1 flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-500 text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-violet-600/20">
-              {busy
-                ? <><Loader2 className="w-4 h-4 animate-spin"/>{d.saving}</>
-                : <>{d.saveBtn} <CheckCircle2 className="w-4 h-4"/></>}
-            </button>
-            <button onClick={()=>{setConnAt(new Date().toISOString());setStep(4)}}
-              className="px-4 border border-slate-300 text-slate-500 hover:bg-slate-50 rounded-xl text-sm transition-all">
-              {d.skipBtn}
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Legacy OTP / manual / coexistence flows removed from merchant UI — admin tools unchanged. */}
 
       {/* ── Step 4: Connected ─────────────────────────────────────────────── */}
       {step === 4 && (() => {
