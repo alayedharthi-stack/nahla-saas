@@ -365,6 +365,36 @@ _DELIVERY_CONFIRMATION_TOKENS = (
     "وصل البكج",
 )
 
+# Anchored delivery confirmations — avoids false positives such as
+# «متى يوصل الطلب؟» matching a bare «وصل الطلب» substring inside «يوصل الطلب».
+_SHIPPING_DURATION_QUESTION_RE = re.compile(
+    r"^(?:متى|متي|when)\s",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_DELIVERY_CONFIRMATION_ANCHORED_RES = (
+    re.compile(
+        r"^وصل(?:ني|ت)?(?:\s+)?(?:ال)?طلب(?:\s*[؟?]?)?$",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:ال)?طلب\s+وصل(?:\s*[؟?]?)?$",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"^تم(?:\s+)?(?:ال)?استلام(?:\s*[؟?]?)?$",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"^وصلت(?:\s+)?(?:ال)?شحن(?:ه|ة)(?:\s*[؟?]?)?$",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"^استلمت(?:\s+)?(?:ال)?شحن(?:ه|ة)(?:\s*[؟?]?)?$",
+        re.UNICODE | re.IGNORECASE,
+    ),
+)
+
 # When ANY of these appear, treat the message as explicitly
 # transfer-related and DO NOT apply the delivery gate. Listed in
 # normalised form (post ``_normalise_arabic``).
@@ -403,6 +433,11 @@ def looks_like_delivery_confirmation(text: Optional[str]) -> bool:
     for tok in _EXPLICIT_PAYMENT_TOKENS:
         if tok in norm:
             return False
+    if _SHIPPING_DURATION_QUESTION_RE.search(norm):
+        return False
+    for pat in _DELIVERY_CONFIRMATION_ANCHORED_RES:
+        if pat.search(norm):
+            return True
     for tok in _DELIVERY_CONFIRMATION_TOKENS:
         if tok in norm:
             return True
