@@ -60,6 +60,16 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
     if not is_identity_collaboration_without_purchase(msg):
         return None
 
+    try:
+        from modules.ai.brain.commerce.health_advisory_product_safety import (  # noqa: PLC0415
+            should_defer_non_health_routes,
+        )
+
+        if should_defer_non_health_routes(msg, state=getattr(ctx, "state", None)):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok
+        pass
+
     logger.info(
         "[IDENTITY_COLLABORATION_GUARD] tenant=%s route=%s preview=%r",
         getattr(ctx, "tenant_id", None),
