@@ -34,6 +34,18 @@ _AVAILABILITY_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# «هل السدر متوفر؟» / «السدر موجود؟» — subject precedes availability marker.
+_SUBJECT_TRAILING_AVAILABILITY_RE = re.compile(
+    r"^(?:هل\s+)?(?P<subject>.+?)\s+(?:متوفر(?:ة)?|موجود(?:ة)?)\s*[؟?]?\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# «هل يوجد سدر؟» / «هل فيه سدر؟»
+_HAL_EXISTS_AVAILABILITY_RE = re.compile(
+    r"^هل\s+(?:يوجد|فيه|في(?:ه|ا)?)\s+(?P<subject>.+?)\s*[؟?]?\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _VISUAL_BROWSE_RE = re.compile(
     r"(?:"
     r"(?:اب(?:ي|غ(?:ى|a)?)|أ(?:بي|ب(?:غ(?:ى|a)?)?)|ودي|ار(?:يد|سل)|"
@@ -219,6 +231,14 @@ def _extract_subject_from_probe(probe: str) -> Optional[str]:
     if m:
         subject = (m.group(1) or "").strip()
         return _clean_inquiry_subject(subject) if subject else None
+    m = _SUBJECT_TRAILING_AVAILABILITY_RE.search(norm)
+    if m:
+        subject = (m.group("subject") or "").strip()
+        return _clean_inquiry_subject(subject) if subject else None
+    m = _HAL_EXISTS_AVAILABILITY_RE.search(norm)
+    if m:
+        subject = (m.group("subject") or "").strip()
+        return _clean_inquiry_subject(subject) if subject else None
     if _BARE_TOKEN_INQUIRY_RE.match(raw):
         return _clean_inquiry_subject(_norm(raw.rstrip("?؟")).strip())
     return None
@@ -302,7 +322,12 @@ def classify_commerce_turn_kind(message: str) -> CommerceTurnKind:
 
     for probe in _inquiry_probe_messages(raw):
         probe_norm = _norm(probe)
-        if _AVAILABILITY_RE.search(probe_norm) or _has_packaged_availability_ask(probe_norm):
+        if (
+            _AVAILABILITY_RE.search(probe_norm)
+            or _has_packaged_availability_ask(probe_norm)
+            or _SUBJECT_TRAILING_AVAILABILITY_RE.search(probe_norm)
+            or _HAL_EXISTS_AVAILABILITY_RE.search(probe_norm)
+        ):
             return CommerceTurnKind.AVAILABILITY
         if _BARE_TOKEN_INQUIRY_RE.match(probe):
             return CommerceTurnKind.AVAILABILITY

@@ -37,6 +37,7 @@ from modules.ai.brain.commerce.conversation_context_reset import (  # noqa: E402
     maybe_reset_stale_order_context,
 )
 from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noqa: E402
+    TOPIC_KB_AVAILABILITY_FACTS,
     try_non_catalog_availability_kb_decision,
 )
 from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E402
@@ -116,16 +117,16 @@ class TestFAQKnowledgeScenarios:
         assert intent is None or intent.name not in {INTENT_TRACK_ORDER, INTENT_START_ORDER}
         assert is_explicit_order_tracking_request(message) is False
 
-    def test_sidr_availability_kb_route_current_gap(self) -> None:
-        """Document platform gap: bare «هل السدر متوفر؟» is not KB-owned yet."""
+    def test_sidr_availability_kb_route_after_detection_fix(self) -> None:
         from modules.ai.brain.commerce.solution_seeking import _is_bare_availability_inquiry  # noqa: PLC0415
 
         db, _ = make_scenario_db()
         world = persona_kb_inquiry(db)
         message = "هل السدر متوفر؟"
-        assert _is_bare_availability_inquiry(message) is False
+        assert _is_bare_availability_inquiry(message) is True
         decision = try_non_catalog_availability_kb_decision(_brain_ctx(world, message))
-        assert decision is None  # TODO: classify + KB hit in a follow-up PR
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_KB_AVAILABILITY_FACTS
 
 
 class TestPreOrderShippingScenarios:
@@ -225,9 +226,8 @@ class TestDeliveredOrderScenario:
         runner.run([TextInbound("نعم أكد الطلب")])
         assert runner.order_count() == before
 
-    def test_bare_wasl_al_talb_not_yet_delivery_confirmation_token(self) -> None:
-        """Current platform gap — document for follow-up PR."""
-        assert looks_like_delivery_confirmation(self.DELIVERED_MESSAGE) is False
+    def test_wasl_al_talb_recognized_as_delivery_confirmation(self) -> None:
+        assert looks_like_delivery_confirmation(self.DELIVERED_MESSAGE) is True
 
     def test_delivered_state_reset_preserves_history_not_new_checkout(self) -> None:
         state = MerchantConversationState(
