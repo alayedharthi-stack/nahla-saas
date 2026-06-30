@@ -706,6 +706,7 @@ SEED_EXPECTED_SOURCE: dict[str, str] = {
     "back_in_stock":         SOURCE_NONE,         # informational only
     "unpaid_order_reminder": SOURCE_NONE,
     "abandoned_order_draft": SOURCE_NONE,         # WhatsApp draft reminder; no discount
+    "post_delivery_review":  SOURCE_NONE,         # one-time review ask; no discount
     "cod_confirmation":      SOURCE_NONE,         # transactional reminder, no discount
     "seasonal_offer":        SOURCE_PROMOTION,    # discount_source=promotion
     "salary_payday_offer":   SOURCE_PROMOTION,
