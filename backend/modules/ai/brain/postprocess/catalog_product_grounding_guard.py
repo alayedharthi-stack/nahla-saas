@@ -335,6 +335,16 @@ def apply_catalog_product_grounding_guard(
         ungrounded,
         seasonal_invented,
     )
+    try:
+        from modules.ai.brain.commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
+            is_catalog_confirmation_bot_reply,
+            pin_pending_catalog_send,
+        )
+
+        if is_catalog_confirmation_bot_reply(rewritten):
+            pin_pending_catalog_send(order_state, source="catalog_confirmation")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — pending pin is best-effort
+        logger.debug("[CATALOG_PRODUCT_GROUNDING_GUARD] pending_catalog_pin_failed")
     return CatalogProductGroundingGuardResult(
         reply=rewritten,
         action="rewritten",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import unicodedata
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -20,6 +21,35 @@ TOPIC_COMMERCE_ENTRY_CATALOG = "commerce_entry_catalog"
 _SESSION_KEY = "commerce_entry_catalog_delivery"
 _BLOCK_KEY = "catalog_delivery_blocked"
 _LAST_SENT_KEY = "catalog_delivery_last_sent"
+_PENDING_CATALOG_KEY = "pending_catalog_delivery"
+
+_CATALOG_ARABIC_TOKENS = (
+    "كاتلوج",
+    "الكتالوج",
+    "كتالوج",
+    "كتalog",
+    "catalog",
+    "الخيارات",
+    "المتجر",
+)
+
+_CATALOG_NORM_TOKENS = frozenset({
+    "كاتلوج",
+    "الكتالوج",
+    "كتaloj",
+    "كتalog",
+    "catalog",
+    "الانواع",
+    "انواع",
+    "المتوفر",
+    "المتاح",
+})
+
+_CATALOG_TOKEN_RE = (
+    r"(?:"
+    r"كاتلوج|الكتالوج|كتaloj|كتalog|catalog|الخيارات|المتجر"
+    r")"
+)
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -27,11 +57,21 @@ _WS_RE = re.compile(r"\s+")
 
 _SEND_CATALOG_EXPLICIT_RE = re.compile(
     r"(?:"
-    r"(?:أ?رسل|ابع|ابع(?:ه|لي| لي))\s*(?:ال)?(?:كتalog|كتalog|catalog|الخيارات|المتجر)"
-    r"|(?:^|\s)(?:ال)?(?:كتalog|كتalog|catalog)(?:\s|$|[؟?])"
+    rf"(?:أ?رسل|ابع|ابع(?:ه|لي| لي))\s*(?:ال)?{_CATALOG_TOKEN_RE}"
+    rf"|(?:^|\s)(?:ال)?{_CATALOG_TOKEN_RE}(?:\s|$|[؟?])"
+    rf"|(?:أ?عرض|ورني|وريني|أ?بين|شوف)\s*(?:ال)?{_CATALOG_TOKEN_RE}"
     r"|(?:وش|ايش)\s+(?:ال)?(?:انواع|أنواع)(?:\s+(?:المتوف(?:ر(?:ه|ة))?|عند(?:كم|ك)))?"
     r"|(?:وش|ايش)\s+(?:المتوفر|المتاح|عند(?:كم|ك)\s+(?:من\s+)?\S)"
     r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_CATALOG_SEND_CONFIRMATION_RE = re.compile(
+    r"^(?:"
+    r"ارسل|أرسل|ابع|ابعه|ابع(?:ه|لي| لي)"
+    r"|نعم|ايه|أيه|آيه|اي|أي|اه|أه"
+    r"|تمام|طيب|اوك|أوك|ok|yes|yep"
+    r")(?:\s*[!.؟?🌷👍✅]*)*$",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -45,7 +85,7 @@ _SHOW_CATEGORY_BROWSE_RE = re.compile(
 
 _SEND_PRODUCT_ITEM_RE = re.compile(
     r"(?:"
-    r"أ?رسل\s*(?:ال)?(?:رابط|المنتج|الصور(?:ه|ة)|ه|ها)?"
+    r"أ?رسل\s+(?:ال)?(?:رابط|المنتج|الصور(?:ه|ة)|ه|ها)\b"
     r"|(?:أ?بغ[ىي]|أ?بي|أ?ريد)\s*(?:أ?شوف\s*)?(?:ال)?(?:رابط|المنتج|الخيارات)"
     r"|send\s+(?:link|product|catalog\s+item)"
     r")",
@@ -63,7 +103,7 @@ _CATALOG_PRODUCT_AVAIL_RE = re.compile(
 _CATALOG_MISS_COMPLAINT_RE = re.compile(
     r"(?:"
     r"(?:ما|مو)\s*(?:فيه|في(?:ه)?)\s*(?:إلا|الا|ب(?:س|س))"
-    r"|(?:مو|ما)\s+(?:ال)?(?:عسل|منتج|هذا|هذي|الكتalog|الخيارات)"
+    r"|(?:مو|ما)\s+(?:ال)?(?:عسل|منتج|هذا|هذي|الكتaloj|الكاتلوج|الخيارات)"
     r"|(?:انا|أنا)\s+(?:اسأل|بسأل|سأل(?:ت)?)\s+عن"
     r")",
     re.UNICODE | re.IGNORECASE,
@@ -122,6 +162,75 @@ def catalog_delivery_is_blocked(ctx: Any) -> bool:
     state = getattr(ctx, "state", None)
     session = dict(getattr(state, "commerce_session", None) or {})
     return bool(session.get(_BLOCK_KEY))
+
+
+def _catalog_block_reason(state: Any) -> str:
+    session = dict(getattr(state, "commerce_session", None) or {})
+    return str(session.get(_BLOCK_KEY) or "").strip()
+
+
+def _clear_catalog_delivery_block(state: Any) -> None:
+    if state is None:
+        return
+    session = dict(getattr(state, "commerce_session", None) or {})
+    session.pop(_BLOCK_KEY, None)
+    ce = session.get(_SESSION_KEY)
+    if isinstance(ce, dict) and ce.get("blocked"):
+        session.pop(_SESSION_KEY, None)
+    state.commerce_session = session
+
+
+def pin_pending_catalog_send(state: Any, *, source: str) -> None:
+    """Pin send-catalog confirmation so short affirmatives execute catalog send."""
+    if state is None:
+        return
+    session = dict(getattr(state, "commerce_session", None) or {})
+    session[_PENDING_CATALOG_KEY] = {
+        "type": "send_catalog",
+        "source": str(source or "catalog_confirmation"),
+        "created_at": time.time(),
+    }
+    state.commerce_session = session
+
+
+def get_pending_catalog_send(state: Any) -> Optional[Dict[str, Any]]:
+    session = dict(getattr(state, "commerce_session", None) or {})
+    pending = session.get(_PENDING_CATALOG_KEY)
+    if not isinstance(pending, dict):
+        return None
+    if str(pending.get("type") or "") != "send_catalog":
+        return None
+    return dict(pending)
+
+
+def clear_pending_catalog_send(state: Any) -> None:
+    if state is None:
+        return
+    session = dict(getattr(state, "commerce_session", None) or {})
+    session.pop(_PENDING_CATALOG_KEY, None)
+    state.commerce_session = session
+
+
+def has_pending_catalog_send(state: Any) -> bool:
+    return get_pending_catalog_send(state) is not None
+
+
+def is_catalog_send_confirmation(message: str) -> bool:
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    return bool(_CATALOG_SEND_CONFIRMATION_RE.search(_norm(raw)))
+
+
+def is_catalog_confirmation_bot_reply(reply: str) -> bool:
+    norm = _norm(reply or "")
+    if not norm:
+        return False
+    if "الخيارات المؤكده من" in norm and "كت" in norm:
+        return True
+    if "تبغاني" in norm and ("ارسل" in norm or "اعرض" in norm) and "كت" in norm:
+        return True
+    return False
 
 
 def block_catalog_delivery(state: Any, reason: str) -> None:
@@ -190,6 +299,10 @@ def _is_explicit_catalog_browse_request(message: str, ctx: Any) -> bool:
     raw = (message or "").strip()
     if not raw:
         return False
+    if _ORDER_CONTINUATION_RE.search(raw):
+        return False
+    if _SEND_PRODUCT_ITEM_RE.search(raw):
+        return False
     if _SEND_CATALOG_EXPLICIT_RE.search(raw):
         return True
     if _SHOW_CATEGORY_BROWSE_RE.search(raw):
@@ -231,10 +344,7 @@ def _is_explicit_catalog_only_request(message: str) -> bool:
     if _SEND_CATALOG_EXPLICIT_RE.search(raw):
         return True
     norm = _norm(raw)
-    if any(
-        token in norm
-        for token in ("كتalog", "catalog", "الانواع", "انواع", "المتوفر", "المتاح")
-    ):
+    if any(token in norm for token in _CATALOG_NORM_TOKENS):
         return True
     try:
         from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
@@ -317,15 +427,22 @@ def _order_context_blocks_catalog_delivery(ctx: Any, message: str) -> bool:
     """CE2 must defer when order_prep/focus expects propose_draft_order recovery."""
     if not _has_active_order_or_order_prep_context(ctx):
         return False
-    if _is_status_product_delivery_request(message):
+    if _is_status_product_delivery_request(message, state=getattr(ctx, "state", None)):
         focus = dict(getattr(getattr(ctx, "state", None), "current_product_focus", None) or {})
         if focus.get("from_status_reply") or focus.get("title"):
             return False
     return not _is_explicit_catalog_only_request(message)
 
 
-def _is_status_product_delivery_request(message: str) -> bool:
-    return bool(_SEND_PRODUCT_ITEM_RE.search((message or "").strip()))
+def _is_status_product_delivery_request(message: str, *, state: Any = None) -> bool:
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if has_pending_catalog_send(state) and is_catalog_send_confirmation(raw):
+        return False
+    if is_catalog_send_confirmation(raw):
+        return False
+    return bool(_SEND_PRODUCT_ITEM_RE.search(raw))
 
 
 def _status_ce1_should_own(ctx: Any) -> bool:
@@ -502,6 +619,9 @@ def _resolve_send_catalog(ctx: Any) -> Optional[Any]:
     from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE  # noqa: PLC0415
     from modules.ai.brain.types import Decision  # noqa: PLC0415
 
+    state = getattr(ctx, "state", None)
+    clear_pending_catalog_send(state)
+    _clear_catalog_delivery_block(state)
     try:
         from modules.ai.brain.catalog.navigation import (  # noqa: PLC0415
             OWNER_STEP_NATIVE_CATALOG,
@@ -585,7 +705,10 @@ def _resolve_specific_product_delivery(ctx: Any) -> Optional[Any]:
     if _CATALOG_PRODUCT_AVAIL_RE.search(message) or _SHOW_CATEGORY_BROWSE_RE.search(message):
         return _resolve_send_product_item(ctx, product)
 
-    if re.search(r"(?:أ?رسل|ابع)", message, re.I):
+    if (
+        not is_catalog_send_confirmation(message)
+        and re.search(r"(?:أ?رسل|ابع)\s+\S", message, re.I)
+    ):
         return _resolve_send_product_item(ctx, product)
 
     norm_q = _norm(query)
@@ -608,12 +731,10 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
 
     try:
         from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
-            block_catalog_for_payment_evidence,
             current_turn_has_payment_evidence,
         )
 
         if current_turn_has_payment_evidence(ctx):
-            block_catalog_for_payment_evidence(ctx)
             logger.info(
                 "[COMMERCE_ENTRY_CATALOG] blocked payment_evidence tenant=%s",
                 getattr(ctx, "tenant_id", None),
@@ -628,6 +749,14 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     facts = getattr(ctx, "facts", None)
     if facts is not None and not bool(getattr(facts, "has_products", False)):
         return None
+
+    if has_pending_catalog_send(state) and is_catalog_send_confirmation(message):
+        logger.info(
+            "[COMMERCE_ENTRY_CATALOG] pending_catalog_confirmation tenant=%s preview=%r",
+            getattr(ctx, "tenant_id", None),
+            message[:60],
+        )
+        return _resolve_send_catalog(ctx)
 
     if _is_product_knowledge_or_comparison(message):
         _set_catalog_delivery_block(state, CatalogDeliveryKind.BLOCK_NON_CATALOG_SUBJECT.value)
@@ -655,10 +784,15 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
         _set_catalog_delivery_block(state, CatalogDeliveryKind.BLOCK_NON_CATALOG_SUBJECT.value)
         return kb_dec
 
+    if _is_explicit_catalog_browse_request(message, ctx):
+        if _catalog_block_reason(state) == "payment_evidence":
+            _clear_catalog_delivery_block(state)
+        return _resolve_send_catalog(ctx)
+
     if catalog_delivery_is_blocked(ctx):
         return None
 
-    if _status_ce1_should_own(ctx) and not _is_status_product_delivery_request(message):
+    if _status_ce1_should_own(ctx) and not _is_status_product_delivery_request(message, state=state):
         return None
 
     if _order_context_blocks_catalog_delivery(ctx, message):
@@ -670,7 +804,7 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
         return None
 
     focus = dict(getattr(state, "current_product_focus", None) or {})
-    if _is_status_product_delivery_request(message) and (
+    if _is_status_product_delivery_request(message, state=state) and (
         focus.get("from_status_reply") or focus.get("title")
     ):
         product = focus if focus.get("title") else None
@@ -697,9 +831,6 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     if specific is not None:
         return specific
 
-    if _is_explicit_catalog_browse_request(message, ctx):
-        return _resolve_send_catalog(ctx)
-
     return None
 
 
@@ -708,5 +839,11 @@ __all__ = [
     "CatalogDeliveryKind",
     "block_catalog_delivery",
     "catalog_delivery_is_blocked",
+    "clear_pending_catalog_send",
+    "get_pending_catalog_send",
+    "has_pending_catalog_send",
+    "is_catalog_confirmation_bot_reply",
+    "is_catalog_send_confirmation",
+    "pin_pending_catalog_send",
     "try_commerce_entry_catalog_decision",
 ]
