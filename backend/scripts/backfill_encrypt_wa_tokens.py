@@ -7,15 +7,20 @@ import logging
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
-    s = str(_p)
-    if s not in sys.path:
-        sys.path.insert(0, s)
+# ── Repo bootstrap ───────────────────────────────────────────────────────────
+# Works from repo root (/app) or backend root (/app/backend):
+#   python backend/scripts/backfill_encrypt_wa_tokens.py --dry-run
+#   python scripts/backfill_encrypt_wa_tokens.py --dry-run
+_SCRIPT = Path(__file__).resolve()
+_REPO_ROOT = _SCRIPT.parents[2]
+for _p in (_REPO_ROOT / "backend", _REPO_ROOT / "database"):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
-from core.database import SessionLocal  # noqa: E402
+from session import SessionLocal  # noqa: E402
 from core.wa_token_crypto import is_encrypted_at_rest  # noqa: E402
-from database.models import WhatsAppConnection  # noqa: E402
+from models import WhatsAppConnection  # noqa: E402
 from services.whatsapp_platform.wa_connection_secrets import maybe_reencrypt_plaintext  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
