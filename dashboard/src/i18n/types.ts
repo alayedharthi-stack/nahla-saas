@@ -862,12 +862,15 @@ export interface Translations {
       }
     }
     simplified: {
-      chooseMethodTitle:      string
-      metaCardTitle:          string
-      metaCardSubtitle:       string
-      metaCardBadge:          string
-      metaApprovalNotice:     string
-      metaConnectBtn:         string
+      chooseMethodTitle:        string
+      metaCardTitle:            string
+      metaCardDescription:      string
+      metaCardBadge:            string
+      metaStepsTitle:           string
+      metaSteps:                string[]
+      metaApprovalNotice:       string
+      metaExistingAccountHint:  string
+      metaConnectBtn:           string
     }
     assisted: {
       formTitle:               string

@@ -881,9 +881,18 @@ const en: Translations = {
     simplified: {
       chooseMethodTitle:       'Choose your connection method',
       metaCardTitle:           'Connect via Meta',
-      metaCardSubtitle:        'Official path to connect WhatsApp Business',
+      metaCardDescription:     'Connect your store’s WhatsApp Business account directly through Meta.',
       metaCardBadge:           'Meta',
+      metaStepsTitle:          'How it works',
+      metaSteps: [
+        'Click "Connect via Meta"',
+        'Sign in with the Facebook account linked to your business',
+        'Select or create a WhatsApp Business Account',
+        'Choose your WhatsApp Business phone number and complete verification',
+        'After connection, Nahlah can start replying to your customers based on your settings',
+      ],
       metaApprovalNotice:      'Direct Meta connection may not complete until Meta approval is finalized. If it does not work, we recommend requesting assisted setup from the Nahlah team.',
+      metaExistingAccountHint: 'You can connect an existing WhatsApp Business account, or create a new one during the Meta flow if the option is available to you.',
       metaConnectBtn:          'Connect via Meta',
     },
     assisted: {

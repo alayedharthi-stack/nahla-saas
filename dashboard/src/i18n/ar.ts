@@ -885,9 +885,18 @@ const ar: Translations = {
     simplified: {
       chooseMethodTitle:       'اختر طريقة الربط المناسبة لك',
       metaCardTitle:           'ربط عبر Meta',
-      metaCardSubtitle:        'المسار الرسمي لربط WhatsApp Business',
+      metaCardDescription:     'اربط حساب واتساب الأعمال الخاص بمتجرك مباشرة عبر Meta.',
       metaCardBadge:           'Meta',
+      metaStepsTitle:          'كيف يتم الربط؟',
+      metaSteps: [
+        'اضغط زر "ربط عبر Meta"',
+        'سجّل دخولك بحساب Facebook المرتبط بنشاطك التجاري',
+        'اختر أو أنشئ حساب WhatsApp Business',
+        'اختر رقم واتساب الأعمال وأكمل التحقق',
+        'بعد نجاح الربط، ستبدأ نحلة بالرد على عملائك حسب إعداداتك',
+      ],
       metaApprovalNotice:      'الربط المباشر عبر Meta قد لا يكتمل حالياً حتى تنتهي موافقة Meta الرسمية. إذا لم يعمل معك، نوصي بطلب الربط بمساعدة فريق نحلة.',
+      metaExistingAccountHint: 'يمكنك ربط حساب واتساب الأعمال الحالي، أو اختيار إنشاء حساب جديد أثناء خطوات Meta إذا كان الخيار متاحاً لك.',
       metaConnectBtn:          'ربط عبر Meta',
     },
     assisted: {
