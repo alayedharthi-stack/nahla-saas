@@ -45,6 +45,34 @@ from modules.ai.brain.types import (
 BLOCKED_BILLING_DENIED = "billing_denied"
 OUTBOUND_NONE = "none"
 OUTBOUND_SESSION_TEXT = "session_text"
+WARNING_NO_CUSTOMER_SAFE_KB = (
+    "لا توجد إجابة معرفة صالحة للعرض للعميل في dry run."
+)
+
+# Heuristic markers for KB rows / bodies that are operator/system instructions,
+# not customer-facing facts. Playground preview must never leak these.
+_INTERNAL_KB_BODY_PATTERNS: Tuple[str, ...] = (
+    r"قاعدة\s+المعرفة\s+الرسمية",
+    r"قواعد\s+(?:علينا|يجب\s+أن)\s+(?:يلتزم|يلتزم\s+بها)",
+    r"تعليمات\s+(?:لل|ال)?(?:نظام|ذكاء|مساعد)",
+    r"سياسة\s+داخلية",
+    r"\binternal\b",
+    r"\bsystem\b",
+    r"\bguardrail",
+    r"owner_instructions",
+    r"manual_knowledge_base",
+    r"لا\s+تخترع",
+    r"لا\s+تذكر",
+    r"يجب\s+أن\s+يلتزم",
+)
+_INTERNAL_KB_TITLE_PATTERNS: Tuple[str, ...] = (
+    r"^#+\s",
+    r"قواعد\s+(?:علينا|يجب)",
+    r"تعليمات",
+    r"سلوك\s+المساعد",
+    r"internal",
+    r"guardrail",
+)
 
 PLAYGROUND_PHONE = "+966500000099"
 PLAYGROUND_CUSTOMER_ID = 0
@@ -87,6 +115,7 @@ class PlaygroundDryRunResult:
     facts: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     needs_context: bool = False
+    needs_better_kb_answer: bool = False
     side_effects: Dict[str, bool] = field(default_factory=lambda: {
         "whatsapp_sent": False,
         "order_created": False,
@@ -109,8 +138,16 @@ class PlaygroundDryRunResult:
             "facts": self.facts,
             "warnings": self.warnings,
             "needs_context": self.needs_context,
+            "needs_better_kb_answer": self.needs_better_kb_answer,
             "side_effects": dict(self.side_effects),
         }
+
+
+@dataclass
+class SynthesizedPreview:
+    reply_text: str = ""
+    needs_better_kb_answer: bool = False
+    used_kb: bool = False
 
 
 def _empty_side_effects() -> Dict[str, bool]:
@@ -236,12 +273,83 @@ def _resolve_decision(ctx: BrainContext) -> Decision:
     return DefaultDecisionEngine().decide(ctx)
 
 
-def _kb_sections_from_db(ctx: BrainContext, *, hint: str = "") -> List[str]:
+def _looks_like_internal_kb_content(
+    *,
+    kind: str = "",
+    title: str = "",
+    body: str = "",
+) -> bool:
+    from services.knowledge_section_kinds import is_behavioral_kind  # noqa: PLC0415
+
+    if is_behavioral_kind(kind):
+        return True
+    haystack = f"{title}\n{body}".strip()
+    if not haystack:
+        return False
+    for pattern in _INTERNAL_KB_BODY_PATTERNS:
+        if re.search(pattern, haystack, flags=re.IGNORECASE):
+            return True
+    for pattern in _INTERNAL_KB_TITLE_PATTERNS:
+        if re.search(pattern, title, flags=re.IGNORECASE):
+            return True
+    heading_lines = [
+        line.strip()
+        for line in body.splitlines()
+        if re.match(r"^#+\s", line.strip())
+    ]
+    if len(heading_lines) >= 2:
+        return True
+    if heading_lines and not re.sub(r"^#+\s*", "", heading_lines[0]).strip():
+        return True
+    return False
+
+
+def _strip_internal_markdown_lines(text: str) -> str:
+    """Keep prose lines only — drop markdown headings and empty lines."""
+    kept: List[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or re.match(r"^#+\s", line):
+            continue
+        if any(re.search(p, line, flags=re.IGNORECASE) for p in _INTERNAL_KB_BODY_PATTERNS):
+            continue
+        kept.append(line)
+    return " ".join(kept).strip()
+
+
+def _sanitize_customer_kb_preview(
+    text: str,
+    *,
+    kind: str = "",
+    title: str = "",
+) -> Optional[str]:
+    """Return customer-safe preview text or None when only internal KB remains."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    if _looks_like_internal_kb_content(kind=kind, title=title, body=raw):
+        return None
+    cleaned = _strip_internal_markdown_lines(raw)
+    if not cleaned:
+        return None
+    if _looks_like_internal_kb_content(kind=kind, title=title, body=cleaned):
+        return None
+    return cleaned
+
+
+def _customer_safe_kb_candidates(
+    ctx: BrainContext,
+    *,
+    hint: str = "",
+) -> List[Tuple[int, str]]:
+    from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
     from models import MerchantKnowledgeSection  # noqa: PLC0415
 
     rows = (
-        ctx._db.query(MerchantKnowledgeSection)  # noqa: SLF001
-        .filter_by(tenant_id=ctx.tenant_id, is_active=True)
+        apply_ai_visible_kb_query_filters(
+            ctx._db.query(MerchantKnowledgeSection)  # noqa: SLF001
+        )
+        .filter_by(tenant_id=ctx.tenant_id)
         .all()
     )
     hint_tokens = [
@@ -252,34 +360,61 @@ def _kb_sections_from_db(ctx: BrainContext, *, hint: str = "") -> List[str]:
     for row in rows:
         body = str(getattr(row, "body", "") or "").strip()
         title = str(getattr(row, "title", "") or "").strip()
+        kind = str(getattr(row, "kind", "") or "").strip()
         if not body:
             continue
-        score = sum(1 for tok in hint_tokens if tok in title or tok in body)
-        scored.append((score, body))
+        safe = _sanitize_customer_kb_preview(body, kind=kind, title=title)
+        if not safe:
+            continue
+        score = sum(1 for tok in hint_tokens if tok in title or tok in safe)
+        scored.append((score, safe))
     scored.sort(key=lambda item: item[0], reverse=True)
-    if scored and scored[0][0] > 0:
-        return [scored[0][1]]
-    return [body for _, body in scored if body]
+    return scored
 
 
-def synthesize_facts_reply(decision: Any, ctx: BrainContext) -> str:
-    """FakeFacts compose — wording from allowed_facts / KB / bundle only."""
+def _pick_customer_safe_kb_text(ctx: BrainContext, *, hint: str = "") -> Optional[str]:
+    scored = _customer_safe_kb_candidates(ctx, hint=hint)
+    if not scored:
+        return None
+    if hint and scored[0][0] > 0:
+        return scored[0][1]
+    return scored[0][1]
+
+
+def synthesize_facts_reply(decision: Any, ctx: BrainContext) -> SynthesizedPreview:
+    """FakeFacts compose — customer-safe KB / facts only (playground preview)."""
     args = dict(getattr(decision, "args", None) or {})
     allowed = dict(args.get("allowed_facts") or {})
+    used_kb = False
 
     body = str(allowed.get("kb_section_body") or "").strip()
     if body:
-        return body
+        used_kb = True
+        safe = _sanitize_customer_kb_preview(body)
+        if safe:
+            return SynthesizedPreview(reply_text=safe, used_kb=True)
+        return SynthesizedPreview(needs_better_kb_answer=True, used_kb=True)
 
     kb_sections = allowed.get("kb_sections") or []
     if isinstance(kb_sections, list) and kb_sections:
-        chunks = [
-            str(item.get("body") or item.get("text") or "").strip()
-            for item in kb_sections
-            if isinstance(item, dict) and (item.get("body") or item.get("text"))
-        ]
+        used_kb = True
+        chunks: List[str] = []
+        for item in kb_sections:
+            if not isinstance(item, dict):
+                continue
+            raw = str(item.get("body") or item.get("text") or "").strip()
+            if not raw:
+                continue
+            safe = _sanitize_customer_kb_preview(
+                raw,
+                kind=str(item.get("kind") or ""),
+                title=str(item.get("title") or ""),
+            )
+            if safe:
+                chunks.append(safe)
         if chunks:
-            return " ".join(chunks)
+            return SynthesizedPreview(reply_text=" ".join(chunks), used_kb=True)
+        return SynthesizedPreview(needs_better_kb_answer=True, used_kb=True)
 
     topic = str(args.get("topic") or args.get("topic_hint") or "")
     if topic == "tracking_link_follow_up":
@@ -291,23 +426,29 @@ def synthesize_facts_reply(decision: Any, ctx: BrainContext) -> str:
             active.get("shipping_provider") or active.get("provider") or ""
         ).strip()
         parts = [p for p in (ref, tracking, provider) if p]
-        return " | ".join(parts)
+        return SynthesizedPreview(reply_text=" | ".join(parts))
 
     if topic in {TOPIC_KB_AVAILABILITY_FACTS, TOPIC_PRODUCT_KNOWLEDGE_FACTS}:
+        used_kb = True
         hint = str(allowed.get("inquiry_subject") or ctx.message or "")
-        bodies = _kb_sections_from_db(ctx, hint=hint)
-        if bodies:
-            return bodies[0]
+        safe = _pick_customer_safe_kb_text(ctx, hint=hint)
+        if safe:
+            return SynthesizedPreview(reply_text=safe, used_kb=True)
+        return SynthesizedPreview(needs_better_kb_answer=True, used_kb=True)
 
     if "shipping" in topic or str(args.get("topic_hint") or "") == "shipping":
         policy = str(getattr(ctx.facts, "shipping_policy", "") or "").strip()
+        safe = _sanitize_customer_kb_preview(policy) if policy else None
+        if safe:
+            return SynthesizedPreview(reply_text=safe)
         if policy:
-            return policy
+            return SynthesizedPreview(needs_better_kb_answer=True, used_kb=True)
 
-    bodies = _kb_sections_from_db(ctx, hint=str(ctx.message or ""))
-    if bodies:
-        return bodies[0]
-    return ""
+    used_kb = True
+    safe = _pick_customer_safe_kb_text(ctx, hint=str(ctx.message or ""))
+    if safe:
+        return SynthesizedPreview(reply_text=safe, used_kb=True)
+    return SynthesizedPreview(needs_better_kb_answer=True, used_kb=True)
 
 
 def _extract_preview_facts(decision: Decision, ctx: BrainContext) -> Dict[str, Any]:
@@ -426,9 +567,17 @@ def run_playground_dry_run(
             "Delivery confirmation detected — playground will not create orders or emit review automation."
         )
 
-    reply = synthesize_facts_reply(decision, ctx).strip()
+    preview = synthesize_facts_reply(decision, ctx)
+    reply = preview.reply_text.strip()
     base.reply_text = reply or None
     base.used_llm = False
+    base.needs_better_kb_answer = preview.needs_better_kb_answer
+
+    if preview.needs_better_kb_answer:
+        base.would_send = False
+        base.outbound_kind = OUTBOUND_NONE
+        base.warnings.append(WARNING_NO_CUSTOMER_SAFE_KB)
+        return base
 
     if reply and action in {ACTION_LLM_REPLY, ACTION_PROPOSE_DRAFT_ORDER}:
         base.would_send = True
