@@ -27,6 +27,44 @@ from modules.ai.brain.turn_owner_contract import get_turn_owner_contract
 
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
 
+
+def _finalize_commerce_fallback(
+    fallback: str,
+    kind: str,
+    *,
+    inbound_text: str = "",
+    inbound_metadata: Optional[dict] = None,
+    intent_name: str = "",
+    decision_topic: str = "",
+    protected_final_reply: bool = False,
+) -> Tuple[str, str]:
+    """Block catalog fallback on non-catalog turns; route coupon inquiries safely."""
+    try:
+        from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
+            build_discount_coupon_support_reply,
+            is_catalog_fallback_reply,
+            is_discount_coupon_inquiry,
+            should_block_catalog_grounding_fallback,
+        )
+
+        if is_discount_coupon_inquiry(inbound_text):
+            return build_discount_coupon_support_reply(), "discount_coupon_support"
+
+        blocked, block_reason = should_block_catalog_grounding_fallback(
+            inbound_text=inbound_text,
+            inbound_metadata=inbound_metadata,
+            decision_topic=decision_topic,
+            protected_final_reply=protected_final_reply,
+        )
+        if blocked and is_catalog_fallback_reply(fallback):
+            if is_discount_coupon_inquiry(inbound_text):
+                return build_discount_coupon_support_reply(), "discount_coupon_support"
+            return "", f"catalog_containment_{block_reason or 'blocked'}"
+    except Exception:  # noqa: BLE001
+        logger.exception("[COMMERCE_REPLY_QUALITY] catalog_containment_failed")
+    return fallback, kind
+
+
 _FALLBACK_AVAILABILITY_AR = "التوفر قيد التحقق."
 _FALLBACK_PRODUCT_UNRESOLVED_AR = "حدّد المنتج أو المقاس المطلوب."
 _FALLBACK_DELIVERY_AR = "التوصيل لمنطقتك قيد التحقق."
@@ -604,6 +642,17 @@ def apply_commerce_reply_quality_guard(
             chosen_path=chosen_path,
             kb_availability_facts=kb_availability_facts,
         )
+        fallback, kind = _finalize_commerce_fallback(
+            fallback,
+            kind,
+            inbound_text=inbound_text,
+            inbound_metadata=inbound_metadata,
+            intent_name=intent_name,
+            decision_topic=decision_topic,
+            protected_final_reply=bool(
+                contract is not None and contract.protected_final_reply
+            ),
+        )
         if kb_negative and kind == "kb_negative_suppressed":
             return CommerceReplyQualityGuardResult(
                 reply="",
@@ -614,6 +663,15 @@ def apply_commerce_reply_quality_guard(
                 fallback_kind=kind,
             )
         if not fallback and kind == "social_suppressed":
+            return CommerceReplyQualityGuardResult(
+                reply="",
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind=kind,
+            )
+        if not fallback and kind.startswith("catalog_containment"):
             return CommerceReplyQualityGuardResult(
                 reply="",
                 replaced=False,
@@ -677,6 +735,17 @@ def apply_commerce_reply_quality_guard(
             availability_polarity=availability_polarity,
             chosen_path=chosen_path,
             kb_availability_facts=kb_availability_facts,
+        )
+        text, fallback_kind = _finalize_commerce_fallback(
+            text,
+            fallback_kind,
+            inbound_text=inbound_text,
+            inbound_metadata=inbound_metadata,
+            intent_name=intent_name,
+            decision_topic=decision_topic,
+            protected_final_reply=bool(
+                contract is not None and contract.protected_final_reply
+            ),
         )
         used_fallback = True
         if kb_negative and fallback_kind == "kb_negative_suppressed":
