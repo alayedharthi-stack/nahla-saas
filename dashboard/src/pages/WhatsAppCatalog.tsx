@@ -50,6 +50,7 @@ import {
   type MetaImportReport,
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
+import { ProductThumbnail } from '../components/catalog/ProductThumbnail'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -1311,17 +1312,7 @@ function ImportedProductsSection(props: { refreshTrigger: number }) {
                           className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0"
                           title={row.image_url ? undefined : ip.noImage}
                         >
-                          {row.image_url ? (
-                            <img
-                              src={row.image_url}
-                              alt=""
-                              loading="lazy"
-                              decoding="async"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <ImageIcon className="w-5 h-5 text-slate-300" />
-                          )}
+                          <ProductThumbnail row={row} />
                         </div>
                       </td>
                       <td className="py-3 px-3">
