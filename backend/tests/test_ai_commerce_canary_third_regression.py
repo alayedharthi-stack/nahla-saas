@@ -43,7 +43,7 @@ _ASK_CITY = "وش المدينة؟"
 _REGISTERED_ORDER_CLAIM = "سجلت لك الطلب"
 _HONEST_PREP = "اختياراتك محفوظة"
 _NO_ORDERS = "لم أجد أي طلبات مسجّلة"
-_NO_NUMBER_YET = "لسه ما صدر رقم طلب"
+_NO_NUMBER_YET = "باقي ما صدر رقم طلب"
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,12 @@
 """OrderFlowV2 deterministic replies — built from state, not canned templates."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from core.order_creation_evidence import (
+    NO_ORDER_NUMBER_YET_AR,
+    ORDER_REFERENCE_CREATE_FAILED_AR,
+)
 
 from core.order_context_prefill import MODE_CONFIRM
 from core.wa_order_lifecycle import has_accepted_delivery_address
@@ -348,6 +353,68 @@ def build_product_image_request_reply(
     )
 
 
+def build_order_created_reply(
+    *,
+    reference: str,
+    payment_block: str = "",
+    summary: str = "",
+) -> str:
+    """Deterministic creation ACK — only when a persisted reference exists."""
+    ref = str(reference or "").strip()
+    if not ref:
+        return ""
+    lines = ["تم إنشاء طلبك بنجاح ✅", f"رقم الطلب: {ref}"]
+    body = "\n".join(lines)
+    if summary.strip():
+        body = f"{summary.strip()}\n\n{body}"
+    if payment_block.strip():
+        body = f"{body}\n\n{payment_block.strip()}"
+    return body.strip()
+
+
+def build_checkout_completion_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    payment_method: str,
+) -> Tuple[str, Dict[str, Any], str]:
+    """
+    Persist draft/order, announce reference when available, then payment instructions.
+
+    Returns ``(reply, state_patch, reason_suffix)``.
+    """
+    from .order_reference import persist_checkout_draft_and_resolve_reference
+
+    from .payment import build_payment_instruction_reply
+
+    payment_block = build_payment_instruction_reply(
+        db,
+        tenant_id=int(tenant_id),
+        order_prep=order_prep,
+        brain_state=brain_state,
+        payment_method=payment_method,
+    )
+    reference, ref_patch = persist_checkout_draft_and_resolve_reference(
+        db,
+        tenant_id=int(tenant_id),
+        conversation=conversation,
+        brain_state=brain_state,
+        order_prep=order_prep,
+    )
+    if reference:
+        reply = build_order_created_reply(
+            reference=reference,
+            payment_block=payment_block,
+        )
+        return reply, ref_patch, "with_reference"
+
+    reply = f"{ORDER_REFERENCE_CREATE_FAILED_AR}\n\n{payment_block}".strip()
+    return reply, ref_patch, "no_reference"
+
+
 def build_checkout_order_number_reply(
     db: Any,
     *,
@@ -386,5 +453,5 @@ def build_checkout_order_number_reply(
             return f"رقم طلبك الحالي {reference}."
 
     if line_items_from_state(order_prep, brain_state):
-        return "لسه ما صدر رقم طلب؛ نحتاج نكمل العنوان ثم ننشئ الطلب."
+        return NO_ORDER_NUMBER_YET_AR
     return ""

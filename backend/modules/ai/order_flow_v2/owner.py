@@ -24,7 +24,6 @@ from .missing_fields import compute_v2_missing_fields
 from .payment import (
     apply_payment_method_selection,
     build_payment_bank_mismatch_reply,
-    build_payment_instruction_reply,
     default_payment_method_patch,
 )
 from .replies import (
@@ -32,6 +31,7 @@ from .replies import (
     build_catalog_order_extraction_fallback_reply,
     build_catalog_order_start_reply,
     build_catalog_selection_ack_reply,
+    build_checkout_completion_reply,
     build_checkout_order_number_reply,
     build_greeting_checkout_resume_reply,
     build_greeting_with_pending_hint,
@@ -178,15 +178,23 @@ def _sync_draft_order(
     tenant_id: int,
     phone: str,
     brain_state: Dict[str, Any],
+    conversation: Any = None,
 ) -> None:
     try:
         from services.nahla_order_bridge import sync_nahla_wa_order  # noqa: PLC0415
 
+        conv = conversation
+        if conv is None:
+            conv, _ = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+        if conv is None or not getattr(conv, "id", None):
+            return
+        op = prep_dict((brain_state or {}).get("order_prep") or {})
         sync_nahla_wa_order(
             db,
             tenant_id=int(tenant_id),
-            customer_phone=phone,
-            brain_state=brain_state,
+            conversation=conv,
+            brain_state=dict(brain_state or {}),
+            order_prep=op,
             trigger="order_flow_v2",
         )
     except Exception as exc:  # noqa: BLE001
@@ -682,18 +690,21 @@ def try_handle_order_flow_v2(
             ).to_patch())
 
     if merged_prep.get("payment_method") and not missing and not on_file_claim:
-        reply = build_payment_instruction_reply(
+        reply, ref_patch, completion_suffix = build_checkout_completion_reply(
             db,
-            tenant_id=tenant_id,
+            tenant_id=int(tenant_id),
+            conversation=conversation,
             order_prep=merged_prep,
             brain_state=bs,
             payment_method=str(merged_prep.get("payment_method") or ""),
         )
+        if ref_patch:
+            patch.update(ref_patch)
         return _finalize_result(
             enabled=enabled,
             shadow=shadow,
             reply=reply,
-            reason="payment_instructions",
+            reason=f"checkout_complete_{completion_suffix}",
             state_patch=patch,
         )
 
@@ -738,5 +749,11 @@ def persist_order_flow_v2_result(
         phone=customer_phone,
         state_patch=result.state_patch,
     )
-    _, bs = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
-    _sync_draft_order(db, tenant_id=tenant_id, phone=customer_phone, brain_state=bs)
+    conversation, bs = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
+    _sync_draft_order(
+        db,
+        tenant_id=tenant_id,
+        phone=customer_phone,
+        brain_state=bs,
+        conversation=conversation,
+    )

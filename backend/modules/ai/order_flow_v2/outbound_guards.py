@@ -61,7 +61,25 @@ def apply_order_flow_v2_outbound_guards(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — outbound guard belt must not block V2 send
         pass
 
-    _ = order_prep  # reserved for future checkout-scoped guards
+    try:
+        from modules.ai.brain.postprocess.order_creation_claim_guard import (  # noqa: PLC0415
+            apply_order_creation_claim_guard,
+        )
+
+        occg = apply_order_creation_claim_guard(
+            text,
+            db=db,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            order_prep=order_prep,
+            brain_state=None,
+        )
+        if occg.replaced:
+            text = occg.reply
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — outbound guard belt must not block V2 send
+        pass
+
+    _ = order_prep  # used by creation-claim guard above
     return text
 
 

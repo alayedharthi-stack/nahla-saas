@@ -3116,38 +3116,41 @@ class MerchantBrain:
                 tenant_id, _pcg_exc,
             )
 
+        _order_prep_dict: Dict[str, Any] = {}
+        _brain_state_dict: Dict[str, Any] = {}
+        if _op is not None:
+            if isinstance(_op, dict):
+                _order_prep_dict = dict(_op)
+            else:
+                from dataclasses import asdict as _asdict  # noqa: PLC0415
+
+                try:
+                    _order_prep_dict = _asdict(_op)  # type: ignore[arg-type]
+                except Exception:  # noqa: BLE001
+                    _order_prep_dict = {
+                        k: getattr(_op, k)
+                        for k in (
+                            "requested_bank",
+                            "payment_method",
+                            "free_shipping",
+                            "shipping_fee",
+                            "shipping_cost",
+                            "line_items",
+                            "city",
+                            "order_creation_status",
+                            "draft_order_reference",
+                        )
+                        if hasattr(_op, k)
+                    }
+        _bs = getattr(new_state, "brain_state", None) or getattr(ctx, "state", None)
+        if isinstance(_bs, dict):
+            _brain_state_dict = dict(_bs)
+
         try:
             from modules.ai.brain.postprocess.shipping_cost_truth_guard import (  # noqa: PLC0415
                 apply_shipping_cost_truth_guard,
             )
 
-            _order_prep_dict: Dict[str, Any] = {}
-            _brain_state_dict: Dict[str, Any] = {}
-            if _op is not None:
-                if isinstance(_op, dict):
-                    _order_prep_dict = dict(_op)
-                else:
-                    from dataclasses import asdict as _asdict  # noqa: PLC0415
-
-                    try:
-                        _order_prep_dict = _asdict(_op)  # type: ignore[arg-type]
-                    except Exception:  # noqa: BLE001
-                        _order_prep_dict = {
-                            k: getattr(_op, k)
-                            for k in (
-                                "requested_bank",
-                                "payment_method",
-                                "free_shipping",
-                                "shipping_fee",
-                                "shipping_cost",
-                                "line_items",
-                                "city",
-                            )
-                            if hasattr(_op, k)
-                        }
-            _bs = getattr(new_state, "brain_state", None) or getattr(ctx, "state", None)
-            if isinstance(_bs, dict):
-                _brain_state_dict = dict(_bs)
             _scg = apply_shipping_cost_truth_guard(
                 reply or "",
                 db=getattr(ctx, "db", None),
@@ -3163,6 +3166,29 @@ class MerchantBrain:
             logger.warning(
                 "[SHIPPING_COST_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _scg_exc,
+            )
+
+        try:
+            from modules.ai.brain.postprocess.order_creation_claim_guard import (  # noqa: PLC0415
+                apply_order_creation_claim_guard,
+            )
+
+            _occg = apply_order_creation_claim_guard(
+                reply or "",
+                db=getattr(ctx, "db", None),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                order_prep=_order_prep_dict,
+                brain_state=_brain_state_dict,
+                state=new_state,
+            )
+            if _occg.replaced:
+                reply = _occg.reply
+                _guard_replaced["order_creation_claim_guard"] = True
+        except Exception as _occg_exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDER_CREATION_CLAIM_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _occg_exc,
             )
 
         try:
