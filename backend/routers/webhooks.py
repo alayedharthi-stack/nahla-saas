@@ -620,25 +620,35 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
 def _resolve_tenant_from_store(db, store_id) -> int | None:
     """Look up the Nahla tenant_id that owns a given Salla store_id."""
     from models import Integration  # noqa: PLC0415
-    sid = str(store_id)
+    from services.salla_store_identity import (  # noqa: PLC0415
+        find_salla_integration_by_identity,
+        SallaStoreIdentity,
+        resolve_tenant_for_salla_store,
+    )
 
-    active = db.query(Integration).filter(
-        Integration.provider == "salla",
-        Integration.enabled == True,  # noqa: E712
-        Integration.external_store_id == sid,
-    ).first()
-    if active:
-        logger.info("[Salla WH] resolved store_id=%s → tenant=%s (integration id=%s)", sid, active.tenant_id, active.id)
-        return active.tenant_id
+    sid = str(store_id or "").strip()
+    if not sid:
+        return None
 
-    disabled = db.query(Integration).filter(
-        Integration.provider == "salla",
-        Integration.external_store_id == sid,
-    ).first()
-    if disabled:
+    tenant_id, integration, matched_via = resolve_tenant_for_salla_store(
+        db,
+        SallaStoreIdentity(store_id=sid),
+        include_disabled=False,
+    )
+    if tenant_id is not None:
+        logger.info(
+            "[Salla WH] resolved store_id=%s → tenant=%s (integration id=%s via=%s)",
+            sid, tenant_id, integration.id if integration else None, matched_via,
+        )
+        return tenant_id
+
+    disabled_integration, disabled_via = find_salla_integration_by_identity(
+        db, sid, include_disabled=True,
+    )
+    if disabled_integration and not disabled_integration.enabled:
         logger.warning(
-            "[Salla WH] store_id=%s found BUT disabled | tenant=%s enabled=%s — webhook ignored",
-            sid, disabled.tenant_id, disabled.enabled,
+            "[Salla WH] store_id=%s found BUT disabled | tenant=%s enabled=%s via=%s — webhook ignored",
+            sid, disabled_integration.tenant_id, disabled_integration.enabled, disabled_via,
         )
     else:
         logger.warning("[Salla WH] store_id=%s NOT FOUND in any integration — webhook dropped", sid)
@@ -756,8 +766,11 @@ async def _handle_salla_authorize(
     access_token  = (data.get("access_token")  or payload.get("access_token",  "")).strip()
     refresh_token = (data.get("refresh_token") or payload.get("refresh_token", "")).strip()
     expires_in    = data.get("expires_in")    or payload.get("expires_in", 0)
-    salla_store_id = str(data.get("merchant_id") or data.get("store_id") or store_id or "")
-    store_name     = (
+    from services.salla_store_identity import normalize_salla_ids_from_event_data  # noqa: PLC0415
+
+    event_identity = normalize_salla_ids_from_event_data(data)
+    salla_store_id = event_identity.store_id
+    store_name     = event_identity.store_name or (
         data.get("store", {}).get("name", "")
         if isinstance(data.get("store"), dict) else
         data.get("name", "")
@@ -770,15 +783,25 @@ async def _handle_salla_authorize(
         expires_in, store_name, payload.get("event", "?"),
     )
 
-    # ── Find existing integration by salla store_id in config ─────────────────
-    # Search ALL integrations (enabled AND disabled) so we re-activate existing
-    # tenants instead of creating duplicates — critical for Easy-mode reinstalls.
+    # ── Find existing integration by salla store_id (canonical + aliases) ───
+    from services.salla_store_identity import (  # noqa: PLC0415
+        find_salla_integration_for_identity,
+        promote_integration_canonical_store,
+        SallaStoreIdentity,
+    )
+
     existing_integration = None
     try:
-        existing_integration = db.query(Integration).filter(
-            Integration.provider == "salla",
-            Integration.external_store_id == salla_store_id,
-        ).first()
+        identity = SallaStoreIdentity(
+            store_id=salla_store_id,
+            merchant_account_id=event_identity.merchant_account_id,
+            alias_ids=event_identity.alias_ids,
+        )
+        existing_integration, matched_via = find_salla_integration_for_identity(
+            db, identity, include_disabled=True,
+        )
+        if existing_integration and salla_store_id:
+            promote_integration_canonical_store(db, existing_integration, identity)
     except Exception as _e:
         logger.warning("[Salla Easy] integration lookup error: %s", _e)
 

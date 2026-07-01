@@ -204,13 +204,21 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     # STEP 2 — Introspect the Salla embedded token
     # ══════════════════════════════════════════════════════════════
-    merchant_id_str = ""
+    from services.salla_store_identity import (  # noqa: PLC0415
+        find_salla_integration_for_identity,
+        promote_integration_canonical_store,
+        resolve_salla_store_identity,
+        SallaStoreIdentity,
+    )
+
+    payload_data: dict = {}
     store_name      = ""
     owner_email     = ""
     introspect_ok   = False
     introspect_access_token  = ""
     introspect_refresh_token = ""
     introspect_expires_in    = None
+    store_identity = SallaStoreIdentity(store_id="")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -251,37 +259,26 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 if data.get("success"):
                     introspect_ok   = True
                     payload_data    = data.get("data") or {}
-                    merchant        = payload_data.get("merchant") or {}
-                    # Defensive: if Salla ever returns a refresh_token in
-                    # introspect (some app types do), capture it so the
-                    # integration save below can persist it.
                     introspect_access_token  = str(payload_data.get("access_token")  or data.get("access_token")  or "")
                     introspect_refresh_token = str(payload_data.get("refresh_token") or data.get("refresh_token") or "")
                     introspect_expires_in    = payload_data.get("expires_in") or data.get("expires_in")
 
-                    # Handle multiple possible Salla response shapes
-                    merchant_id_str = str(
-                        merchant.get("id")              or
-                        payload_data.get("merchant_id") or
-                        payload_data.get("store_id")    or
-                        ""
+                    store_identity = await resolve_salla_store_identity(
+                        payload_data,
+                        introspect_access_token or salla_token,
+                        client=client,
                     )
-                    store_name  = (
-                        merchant.get("name")       or
-                        payload_data.get("store_name") or
-                        ""
-                    )
-                    owner_email = (
-                        merchant.get("email")      or
-                        payload_data.get("email")  or
-                        merchant.get("mobile")     or
-                        ""
-                    ).strip().lower()
+                    store_name  = store_identity.store_name
+                    owner_email = store_identity.owner_email
 
                     logger.info(
                         "[SallaLogin] ✅ STEP 2 — Introspect SUCCESS | "
-                        "merchant_id=%s store=%r email=%s",
-                        merchant_id_str, store_name, owner_email,
+                        "store_id=%s merchant_account_id=%s store=%r email=%s via=%s",
+                        store_identity.store_id,
+                        store_identity.merchant_account_id,
+                        store_name,
+                        owner_email,
+                        store_identity.resolved_via,
                     )
                 else:
                     logger.warning(
@@ -296,13 +293,16 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     except Exception as exc:
         logger.error("[SallaLogin] ❌ STEP 2 — Introspect call raised: %s", exc)
 
+    canonical_store_id = store_identity.store_id
+    lookup_store_id = canonical_store_id or store_identity.merchant_account_id
+
     # ══════════════════════════════════════════════════════════════
     # STEP 3 — Derive identity (fallback if introspect gave no email)
     # ══════════════════════════════════════════════════════════════
     email_is_derived = False
-    if not owner_email and merchant_id_str:
+    if not owner_email and lookup_store_id:
         safe_name    = "".join(c for c in store_name if c.isalnum() or c in "-_").lower()[:30]
-        owner_email  = f"{safe_name or 'store'}-{merchant_id_str}@salla-merchant.nahlah.ai"
+        owner_email  = f"{safe_name or 'store'}-{lookup_store_id}@salla-merchant.nahlah.ai"
         email_is_derived = True   # derived — cannot trust user-email lookup
         logger.info(
             "[SallaLogin] ℹ️  STEP 3 — No email from Salla, using derived: %s",
@@ -311,8 +311,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
     if not owner_email:
         logger.error(
-            "[SallaLogin] ❌ Cannot identify merchant — introspect_ok=%s merchant_id=%s",
-            introspect_ok, merchant_id_str,
+            "[SallaLogin] ❌ Cannot identify merchant — introspect_ok=%s store_id=%s",
+            introspect_ok, lookup_store_id,
         )
         raise HTTPException(
             status_code=401,
@@ -321,8 +321,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         )
 
     logger.info(
-        "[SallaLogin] ▶ STEP 4 — Resolving Nahla account | email=%s merchant_id=%s",
-        owner_email, merchant_id_str,
+        "[SallaLogin] ▶ STEP 4 — Resolving Nahla account | email=%s store_id=%s",
+        owner_email, canonical_store_id or lookup_store_id,
     )
 
     # ══════════════════════════════════════════════════════════════
@@ -339,11 +339,12 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     #
     # The OAuth path NEVER touches User.password_hash — local password
     # changes therefore cannot break Salla iframe login (the spec).
+    provision_store_id = canonical_store_id or lookup_store_id
     try:
         provision = get_or_create_merchant_user(
             db,
             provider          = "salla",
-            external_store_id = merchant_id_str,
+            external_store_id = provision_store_id,
             owner_email       = owner_email,
             store_name        = store_name,
             is_email_derived  = email_is_derived,
@@ -360,74 +361,79 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 "salla_oauth_linked_existing",
                 sub=owner_email,
                 tenant_id=tenant_id,
-                store_id=merchant_id_str,
+                store_id=provision_store_id,
             )
             logger.info(
                 "[SallaLogin] ✅ STEP 4 — linked existing | tenant_id=%s user_id=%s store_id=%s",
-                tenant_id, provision.user_id, merchant_id_str,
+                tenant_id, provision.user_id, provision_store_id,
             )
         elif provision.filled_gap:
             audit(
                 "salla_oauth_user_filled_gap",
                 sub=owner_email,
                 tenant_id=tenant_id,
-                store_id=merchant_id_str,
+                store_id=provision_store_id,
             )
             logger.info(
                 "[SallaLogin] ✅ STEP 4 — filled missing user row | tenant_id=%s user_id=%s store_id=%s",
-                tenant_id, provision.user_id, merchant_id_str,
+                tenant_id, provision.user_id, provision_store_id,
             )
         elif provision.created_user:
             audit(
                 "salla_oauth_merchant_auto_created",
                 sub=owner_email,
                 tenant_id=tenant_id,
-                store_id=merchant_id_str,
+                store_id=provision_store_id,
             )
             logger.info(
                 "[SallaLogin] ✅ STEP 4 — merchant auto-created | tenant_id=%s user_id=%s store_id=%s store=%r",
-                tenant_id, provision.user_id, merchant_id_str, store_name,
+                tenant_id, provision.user_id, provision_store_id, store_name,
             )
 
         # ── Save / update Salla integration record ────────────────────────────
         salla_integration_id = None
-        if merchant_id_str:
-            integration = db.query(Integration).filter(
-                Integration.provider == "salla",
-                Integration.external_store_id == str(merchant_id_str),
-            ).first()
+        if provision_store_id:
+            identity_for_save = SallaStoreIdentity(
+                store_id=canonical_store_id or provision_store_id,
+                merchant_account_id=store_identity.merchant_account_id,
+                store_name=store_name,
+                owner_email=owner_email,
+                alias_ids=store_identity.alias_ids,
+            )
+            integration, _matched_via = find_salla_integration_for_identity(
+                db, identity_for_save, include_disabled=True,
+            )
+            if integration is None:
+                integration = db.query(Integration).filter(
+                    Integration.tenant_id == tenant_id,
+                    Integration.provider == "salla",
+                ).first()
 
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            # The embedded Salla token CAN be used as a temporary api_key for
-            # most read operations (products, orders, customers, store info).
-            # We save it so the merchant sees the integration as "connected"
-            # immediately on first login, even before the full OAuth refresh
-            # token arrives via the app.store.authorize webhook.
-            #
-            # If introspect ALSO returned an access_token/refresh_token (some
-            # Salla app types do — Easy mode, OAuth-completed apps), we
-            # prefer those over the embedded iframe token because they're
-            # valid Admin API tokens.
-            embedded_api_key   = salla_token  # the v4.public.* token from the iframe
+            embedded_api_key   = salla_token
             api_key_to_persist = introspect_access_token or embedded_api_key
             api_key_source     = "introspect" if introspect_access_token else "embedded_token"
 
+            persist_store_id = canonical_store_id or (
+                (integration.external_store_id if integration else "") or provision_store_id
+            )
+
             if integration:
+                promote_integration_canonical_store(db, integration, identity_for_save)
                 cfg = dict(integration.config or {})
-                # If the existing row has a real refresh_token, keep its
-                # access_token (don't downgrade to embedded).  Otherwise
-                # overwrite with whatever introspect/embedded gave us so
-                # the row reflects the active session.
                 existing_refresh = cfg.get("refresh_token", "")
                 cfg.update({
-                    "store_id":          merchant_id_str,
+                    "store_id":          persist_store_id,
                     "store_name":        store_name,
                     "last_seen":         now_iso,
                     "salla_owner_email": owner_email,
                 })
+                if store_identity.merchant_account_id:
+                    cfg["merchant_id"] = store_identity.merchant_account_id
+                    if store_identity.merchant_account_id != persist_store_id:
+                        cfg["salla_merchant_id_alt"] = store_identity.merchant_account_id
                 if not existing_refresh:
-                    # No prior OAuth state — refresh from introspect/embedded
                     cfg["api_key"]             = api_key_to_persist
                     cfg["api_key_source"]      = api_key_source
                     cfg["api_key_received_at"] = now_iso
@@ -436,24 +442,16 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     cfg["api_key_source"] = "introspect"
                     if introspect_expires_in:
                         cfg["expires_in"] = introspect_expires_in
-                # When the merchant actively logs in, clear any stale reauth /
-                # no_auto_refresh / cleanup flags so a pending app.store.authorize
-                # webhook (which may arrive shortly after login) — or this very
-                # introspect — can restore full sync.
-                cfg.pop("needs_reauth",                None)
-                cfg.pop("needs_reauth_at",             None)
-                cfg.pop("needs_reauth_reason",         None)
-                cfg.pop("no_auto_refresh",             None)
-                cfg.pop("no_auto_refresh_reason",      None)
-                cfg.pop("no_auto_refresh_at",          None)
-                cfg.pop("soft_disabled",               None)
-                cfg.pop("uninstalled_at",              None)
-                cfg.pop("superseded_by_oauth_reconnect", None)
-                cfg.pop("disabled_reason",             None)
-                cfg.pop("disabled_at",                 None)
+                for k in (
+                    "needs_reauth", "needs_reauth_at", "needs_reauth_reason",
+                    "no_auto_refresh", "no_auto_refresh_reason", "no_auto_refresh_at",
+                    "soft_disabled", "uninstalled_at", "superseded_by_oauth_reconnect",
+                    "disabled_reason", "disabled_at",
+                ):
+                    cfg.pop(k, None)
+                integration.tenant_id = tenant_id
                 integration.config = cfg
-                integration.external_store_id = merchant_id_str
-                # Mark as enabled if we have ANY usable api_key
+                integration.external_store_id = persist_store_id
                 if cfg.get("api_key"):
                     integration.enabled = True
                 from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
@@ -462,13 +460,13 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 logger.info(
                     "[SallaLogin]    Integration UPDATED | tenant=%s store_id=%s "
                     "enabled=%s api_key_source=%s has_refresh=%s",
-                    tenant_id, merchant_id_str, integration.enabled,
+                    tenant_id, persist_store_id, integration.enabled,
                     cfg.get("api_key_source") or "?",
                     bool(cfg.get("refresh_token")),
                 )
             else:
                 new_cfg = {
-                    "store_id":             merchant_id_str,
+                    "store_id":             persist_store_id,
                     "store_name":           store_name,
                     "salla_token_login":    True,
                     "connected_at":         now_iso,
@@ -477,25 +475,27 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "api_key_source":       api_key_source,
                     "api_key_received_at":  now_iso,
                 }
+                if store_identity.merchant_account_id:
+                    new_cfg["merchant_id"] = store_identity.merchant_account_id
+                    if store_identity.merchant_account_id != persist_store_id:
+                        new_cfg["salla_merchant_id_alt"] = store_identity.merchant_account_id
                 if introspect_refresh_token:
                     new_cfg["refresh_token"] = introspect_refresh_token
                     new_cfg["api_key_source"] = "introspect"
                     if introspect_expires_in:
                         new_cfg["expires_in"] = introspect_expires_in
-                new_integration = Integration(
-                    tenant_id = tenant_id,
-                    provider  = "salla",
-                    external_store_id = merchant_id_str,
-                    config    = new_cfg,
-                    enabled   = bool(api_key_to_persist),
+                from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+                claimed = claim_store_for_tenant(
+                    db,
+                    store_id=persist_store_id,
+                    tenant_id=tenant_id,
+                    new_config=new_cfg,
                 )
-                db.add(new_integration)
-                db.flush()
-                salla_integration_id = new_integration.id
+                salla_integration_id = claimed.id
                 logger.info(
                     "[SallaLogin]    Integration CREATED | tenant=%s store_id=%s "
                     "enabled=%s api_key_source=%s has_refresh=%s",
-                    tenant_id, merchant_id_str, bool(api_key_to_persist),
+                    tenant_id, persist_store_id, bool(api_key_to_persist),
                     new_cfg.get("api_key_source"),
                     bool(new_cfg.get("refresh_token")),
                 )
@@ -689,7 +689,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         "role":           role,
         "tenant_id":      tenant_id,
         "store_name":     store_name,
-        "store_id":       merchant_id_str,
+        "store_id":       canonical_store_id or provision_store_id,
         "email":          owner_email,
         "needs_oauth":    needs_oauth,
         "oauth_url":      oauth_url,
@@ -2307,7 +2307,32 @@ async def salla_api_oauth_callback(
     # ── Persist as the canonical Sync integration ───────────────────────────
     try:
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+        from services.salla_store_identity import (  # noqa: PLC0415
+            assert_oauth_tenant_matches_store_owner,
+            promote_integration_canonical_store,
+            SallaStoreIdentity,
+        )
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        if salla_store_id:
+            ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
+                db,
+                session_tenant_id=tenant_id,
+                store_id=salla_store_id,
+            )
+            if not ok:
+                logger.error(
+                    "[Salla API OAuth] tenant/store mismatch blocked | session_tenant=%s "
+                    "owner_tenant=%s store_id=%s reason=%s",
+                    tenant_id, owner_tenant_id, salla_store_id, reason,
+                )
+                return RedirectResponse(
+                    url=_api_oauth_redirect_url(
+                        "error",
+                        reason="store_owned_by_other_tenant",
+                    ),
+                    status_code=302,
+                )
 
         existing = db.query(Integration).filter(
             Integration.tenant_id == tenant_id,
@@ -2356,6 +2381,14 @@ async def salla_api_oauth_callback(
                 store_id=salla_store_id,
                 tenant_id=tenant_id,
                 new_config=merged_config,
+            )
+            promote_integration_canonical_store(
+                db,
+                integration,
+                SallaStoreIdentity(
+                    store_id=salla_store_id,
+                    store_name=store_name,
+                ),
             )
             flag_modified(integration, "config")
         elif existing:
@@ -2832,6 +2865,7 @@ async def salla_oauth_callback(
 
     try:
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner  # noqa: PLC0415
 
         new_config = {
             "api_key":       access_token,
@@ -2844,6 +2878,23 @@ async def salla_oauth_callback(
             "redirect_uri":  SALLA_REDIRECT_URI,
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
+
+        if salla_store_id and not is_new_merchant:
+            ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
+                db,
+                session_tenant_id=tenant_id,
+                store_id=salla_store_id,
+            )
+            if not ok:
+                logger.error(
+                    "[Salla OAuth] tenant/store mismatch blocked | session_tenant=%s "
+                    "owner_tenant=%s store_id=%s reason=%s",
+                    tenant_id, owner_tenant_id, salla_store_id, reason,
+                )
+                return HTMLResponse(
+                    content=_install_error_html("store_owned_by_other_tenant"),
+                    status_code=403,
+                )
 
         if salla_store_id:
             claim_store_for_tenant(

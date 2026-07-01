@@ -147,30 +147,65 @@ def get_or_create_merchant_user(
     now_iso = datetime.now(timezone.utc).isoformat()
     store_id_str = str(external_store_id or "").strip()
 
-    # ─ Branch 1 / 2 — store-id-based lookup (authoritative) ────────────────
+    # ─ Branch 1 / 2 — store-id-based lookup (authoritative + alias keys) ─
     integration = None
+    matched_via = ""
     if store_id_str:
-        integration = (
-            db.query(Integration)
-            .filter(
-                Integration.provider == provider,
-                Integration.external_store_id == store_id_str,
+        if provider == "salla":
+            from services.salla_store_identity import (  # noqa: PLC0415
+                find_salla_integration_by_identity,
+                promote_integration_canonical_store,
+                SallaStoreIdentity,
             )
-            .first()
-        )
-        if integration is None:
-            # Branch 2: legacy rows where store_id was only stored in the
-            # config JSONB. Promote to top-level so future lookups hit
-            # branch 1.
+            integration, matched_via = find_salla_integration_by_identity(
+                db, store_id_str, include_disabled=True,
+            )
+            if integration is not None and matched_via not in ("", "external_store_id"):
+                cfg = integration.config or {}
+                canonical = (
+                    str(integration.external_store_id or "").strip()
+                    or str(cfg.get("store_id") or "").strip()
+                )
+                promote_integration_canonical_store(
+                    db,
+                    integration,
+                    SallaStoreIdentity(
+                        store_id=canonical or store_id_str,
+                        merchant_account_id=(
+                            store_id_str
+                            if store_id_str and store_id_str != canonical
+                            else ""
+                        ),
+                    ),
+                )
+                logger.info(
+                    "[provisioning] alias integration match | provider=%s "
+                    "integration_id=%s tenant=%s store_id=%s matched_via=%s",
+                    provider, integration.id, integration.tenant_id,
+                    store_id_str, matched_via,
+                )
+        else:
             integration = (
                 db.query(Integration)
                 .filter(
                     Integration.provider == provider,
-                    Integration.config["store_id"].as_string() == store_id_str,
+                    Integration.external_store_id == store_id_str,
                 )
                 .first()
             )
-            if integration is not None:
+            if integration is None:
+                integration = (
+                    db.query(Integration)
+                    .filter(
+                        Integration.provider == provider,
+                        Integration.config["store_id"].as_string() == store_id_str,
+                    )
+                    .first()
+                )
+                matched_via = "config.store_id" if integration else ""
+
+        if integration is not None and matched_via in ("", "external_store_id"):
+            if not integration.external_store_id:
                 integration.external_store_id = store_id_str
                 logger.info(
                     "[provisioning] repaired external_store_id | provider=%s "
