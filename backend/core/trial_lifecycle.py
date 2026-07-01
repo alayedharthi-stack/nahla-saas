@@ -33,6 +33,11 @@ SUBSCRIPTION_PERIOD_DAYS = 30
 
 def _conversation_quota_allows_service(db: Session, tenant_id: int) -> bool:
     """True when the tenant still has automated service-reply quota."""
+    from core.billing_override import is_partner_testing_override_active  # noqa: PLC0415
+
+    if is_partner_testing_override_active(db, tenant_id):
+        return True
+
     try:
         from core.wa_usage import check_limit  # noqa: PLC0415
 
@@ -729,6 +734,10 @@ def build_billing_status_payload(
             payload["current_price_sar"] = int(price)
 
     payload.update(resolve_billing_renewal_info(db, tenant_id, lifecycle))
+
+    from core.billing_override import partner_testing_override_status  # noqa: PLC0415
+
+    payload.update(partner_testing_override_status(db, tenant_id))
 
     return payload
 

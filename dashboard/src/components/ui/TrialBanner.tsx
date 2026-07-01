@@ -93,6 +93,34 @@ export default function TrialBanner() {
 
   if (!status) return null
 
+  if (status.partner_testing_override_active) {
+    return (
+      <div className="bg-violet-700 text-white px-4 py-2.5 flex items-center justify-between gap-3 text-sm" dir="rtl">
+        <div className="flex items-center gap-2 flex-1">
+          <Info className="w-5 h-5 shrink-0" />
+          <div>
+            <span className="font-bold block">
+              {status.partner_testing_override_headline_ar || 'وضع اختبار سلة مفعل لهذا المتجر'}
+            </span>
+            {status.partner_testing_override_expires_at && (
+              <span className="text-violet-100 text-xs block mt-0.5">
+                صلاحية الاختبار حتى{' '}
+                {String(status.partner_testing_override_expires_at).slice(0, 10)}
+              </span>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={() => setDismissed(true)}
+          className="opacity-70 hover:opacity-100 transition-opacity shrink-0"
+          aria-label="إخفاء"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    )
+  }
+
   const lifecycle = resolveLifecycle(status)
   if (lifecycle === 'paid_active') return null
 
