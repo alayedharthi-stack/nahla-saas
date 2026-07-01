@@ -871,6 +871,7 @@ export interface Translations {
       metaApprovalNotice:       string
       metaExistingAccountHint:  string
       metaConnectBtn:           string
+      manualSetupLink:          string
     }
     assisted: {
       formTitle:               string
@@ -898,6 +899,7 @@ export interface Translations {
       requestTimeLabel:        string
       contactInstructions:     string
       supportEmail:            string
+      manualSetupLink:         string
     }
     connLabels: {
       viaMeta:      string

@@ -27,6 +27,7 @@ const required = [
   'buildEmbeddedSignupFbLoginOptions',
   'embeddedInCard',
   'a.submitBtn',
+  '/help/whatsapp-manual-setup',
 ]
 
 for (const needle of required) {

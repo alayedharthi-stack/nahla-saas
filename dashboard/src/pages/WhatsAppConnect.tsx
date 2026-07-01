@@ -9,9 +9,11 @@ import {
   AlertCircle,
   AlertTriangle,
   BadgeCheck,
+  BookOpen,
   Building2,
   CheckCircle2,
   ChevronRight,
+  ExternalLink,
   Globe,
   Loader2,
   Mail,
@@ -296,6 +298,17 @@ function MetaEmbeddedOptionCard({
 
       <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
 
+      <a
+        href="/help/whatsapp-manual-setup"
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex items-center gap-1.5 text-sm text-emerald-600 hover:text-emerald-700 font-medium transition"
+      >
+        <BookOpen className="w-4 h-4 shrink-0" />
+        {s.manualSetupLink}
+        <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-60" />
+      </a>
+
       <div className="mt-auto pt-1">
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
       </div>
@@ -428,6 +441,18 @@ function AssistedConnectFlow({
         </button>
 
         <p className="text-center text-xs text-slate-400">{a.footerHint}</p>
+
+        <p className="text-center">
+          <a
+            href="/help/whatsapp-manual-setup"
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-violet-600 hover:text-violet-700 font-medium transition"
+          >
+            {a.manualSetupLink}
+            <ExternalLink className="w-3 h-3 shrink-0 opacity-60" />
+          </a>
+        </p>
       </div>
     </div>
   )
