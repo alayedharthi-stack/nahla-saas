@@ -1,0 +1,26 @@
+{
+  "tenant_name": "متجر تجريبي عام",
+  "store_ai_mode": "test",
+  "shipping_kb_body": "العسل والمنتجات الغذائية: شحن مجاني.\nباقي الأقسام (مستحضرات/هدايا): شحن توصيل 29 ريال.",
+  "products": [
+    {
+      "title": "250 جرام عسل سمر الحجاز البلدي إنتاج مناحلنا من شمال الطايف",
+      "external_id": "86bqzca62a",
+      "price": "126",
+      "catalog_price": 126.0
+    },
+    {
+      "title": "500 جرام العسل الصيفي أزهار جبلية من جنوب الطائف",
+      "external_id": "summer-500",
+      "price": "239.50",
+      "catalog_price": 239.5
+    }
+  ],
+  "payment": {
+    "rajhi": true,
+    "ahli": true,
+    "barcode_aliases": ["payment_rajhi_barcode", "payment_alahli_barcode"]
+  },
+  "saved_address": false,
+  "customer_name": ""
+}
