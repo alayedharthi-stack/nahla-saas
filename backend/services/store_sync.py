@@ -76,6 +76,11 @@ from services.customer_intelligence import (  # noqa: E402
     normalize_phone as intelligence_normalize_phone,
 )
 from utils.phone_utils import normalize_to_e164 as _normalize_to_e164  # noqa: E402
+from core.catalog_image import (  # noqa: E402
+    coerce_image_url,
+    extract_sync_additional_images,
+    extract_sync_product_image,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -102,6 +107,18 @@ def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    image_url = extract_sync_product_image(raw)
+    additional_images = extract_sync_additional_images(raw, primary=image_url)
+    variants_raw = raw.get("variants") or []
+    variants_out: List[Dict[str, Any]] = []
+    for v in variants_raw:
+        v_dict = _coerce_variant_dict(v)
+        v_img = coerce_image_url(v_dict.get("image_url"))
+        if v_img:
+            v_dict["image_url"] = v_img
+        elif "image_url" in v_dict and not v_dict.get("image_url"):
+            v_dict.pop("image_url", None)
+        variants_out.append(v_dict)
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
         "sku":           raw.get("sku", ""),
@@ -112,12 +129,14 @@ def _normalise_product(raw: Any) -> Dict:
         "status":        _extract_status_string(raw.get("status"), fallback="active"),
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
-        "image_url":     raw.get("image", raw.get("thumbnail", "")),
+        "image_url":     image_url,
+        "additional_images": additional_images,
+        "product_url":   (raw.get("product_url") or raw.get("url") or "").strip(),
         "currency":      raw.get("currency", "SAR"),
         "in_stock":      raw.get("in_stock", True),
         "stock_qty":     raw.get("quantity", raw.get("stock_quantity", None)),
         "tags":          raw.get("tags", []),
-        "variants":      raw.get("variants", []),
+        "variants":      variants_out,
         "options":       raw.get("options", []),
         "has_required_options": bool(raw.get("has_required_options", False)),
         "metadata":      raw.get("metadata", {}),
@@ -270,7 +289,7 @@ def _upsert_variants_for(db: Session, product: Any,
     raw_variants = normalised.get("variants") or []
     parent_currency = normalised.get("currency") or "SAR"
     parent_price = normalised.get("price") or ""
-    parent_image = normalised.get("image_url") or ""
+    parent_image = coerce_image_url(normalised.get("image_url")) or ""
 
     # Index existing rows for O(1) lookup. ``salla_variant_id`` may be
     # NULL (synthetic default rows) — we match those by ``is_default``.
@@ -315,7 +334,7 @@ def _upsert_variants_for(db: Session, product: Any,
             options = v_dict.get("options")
             if not isinstance(options, dict):
                 options = None
-            image_url = v_dict.get("image_url") or parent_image or None
+            image_url = coerce_image_url(v_dict.get("image_url")) or None
             row = by_salla_id.get(sid)
             if row is None:
                 row = ProductVariant(

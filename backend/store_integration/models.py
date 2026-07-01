@@ -10,6 +10,7 @@ class NormalizedVariant(BaseModel):
     sku: Optional[str] = None
     in_stock: bool = True
     stock_quantity: Optional[int] = None
+    image_url: Optional[str] = None
 
 
 class NormalizedProduct(BaseModel):

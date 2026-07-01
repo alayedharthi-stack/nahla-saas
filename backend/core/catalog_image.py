@@ -67,3 +67,42 @@ def resolve_product_image_url(
         if url:
             return url
     return ""
+
+
+def extract_sync_product_image(raw: Any) -> str:
+    """Canonical parent image URL for store sync → ``extra_metadata.image_url``."""
+    if hasattr(raw, "dict"):
+        try:
+            raw = raw.dict()
+        except Exception:  # noqa: BLE001
+            return ""
+    if not isinstance(raw, Mapping):
+        return ""
+    for key in ("image_url", "main_image", "image", "thumbnail"):
+        url = coerce_image_url(raw.get(key))
+        if url:
+            return url
+    return coerce_image_url(raw.get("images"))
+
+
+def extract_sync_additional_images(raw: Any, *, primary: str = "") -> list[str]:
+    """Collect extra gallery URLs from Salla ``images`` arrays."""
+    if hasattr(raw, "dict"):
+        try:
+            raw = raw.dict()
+        except Exception:  # noqa: BLE001
+            return []
+    if not isinstance(raw, Mapping):
+        return []
+    images = raw.get("images")
+    if not isinstance(images, (list, tuple)):
+        return []
+    out: list[str] = []
+    seen = {primary} if primary else set()
+    for item in images:
+        url = coerce_image_url(item)
+        if url and url not in seen:
+            out.append(url)
+            seen.add(url)
+    return out
+
