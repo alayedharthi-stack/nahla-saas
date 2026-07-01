@@ -171,6 +171,22 @@ def reply_contains_unverified_payment_credentials(
     return False, ()
 
 
+def _build_requested_bank_mismatch_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    requested_bank: str,
+) -> str:
+    from modules.ai.order_flow_v2.payment import build_payment_bank_mismatch_reply  # noqa: PLC0415
+
+    return build_payment_bank_mismatch_reply(
+        db,
+        tenant_id=int(tenant_id),
+        rejection_reason="requested_bank_not_enabled",
+        requested_bank=requested_bank,
+    )
+
+
 def compose_verified_bank_transfer_block(
     db: Any,
     *,
@@ -179,13 +195,18 @@ def compose_verified_bank_transfer_block(
 ) -> str:
     """Deterministic bank-transfer instructions from verified tenant settings only."""
     requested = _canonical_bank_brand(requested_bank)
-    accounts: Tuple[str, ...] = ()
     if requested:
         accounts = _ibans_for_requested_brand(db, int(tenant_id), requested)
-    if not accounts:
+        if not accounts:
+            return _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id),
+                requested_bank=requested,
+            )
+    else:
         accounts = _verified_ibans(db, tenant_id)
-    if not accounts:
-        return _BANK_DETAILS_NOT_CONFIGURED_AR
+        if not accounts:
+            return _BANK_DETAILS_NOT_CONFIGURED_AR
     lines = ["تم اختيار التحويل البنكي."]
     if len(accounts) == 1:
         lines.append(f"الآيبان الخاص بالمتجر: {accounts[0]}")
@@ -221,27 +242,23 @@ def apply_payment_credential_guard(
     requested = _canonical_bank_brand(
         requested_bank or _canonical_bank_brand(inbound_text)
     )
-    verified = _verified_ibans(db, tenant_id)
+    brand_ibans: Tuple[str, ...] = ()
     if requested:
         brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
-        if brand_ibans:
-            verified = brand_ibans
+    verified = brand_ibans if requested else _verified_ibans(db, tenant_id)
 
     if requested and _reply_mentions_wrong_bank_brand(original, requested_bank=requested):
-        replacement = compose_verified_bank_transfer_block(
-            db,
-            tenant_id=int(tenant_id or 0),
-            requested_bank=requested,
-        )
-        if replacement == _BANK_DETAILS_NOT_CONFIGURED_AR:
-            from modules.ai.order_flow_v2.payment import (  # noqa: PLC0415
-                build_payment_bank_mismatch_reply,
-            )
-
-            replacement = build_payment_bank_mismatch_reply(
+        brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
+        if brand_ibans:
+            replacement = compose_verified_bank_transfer_block(
                 db,
                 tenant_id=int(tenant_id or 0),
-                rejection_reason="requested_bank_not_enabled",
+                requested_bank=requested,
+            )
+        else:
+            replacement = _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id or 0),
                 requested_bank=requested,
             )
         logger.info(
@@ -289,11 +306,19 @@ def apply_payment_credential_guard(
             )
 
     if requested and blocked:
-        replacement = compose_verified_bank_transfer_block(
-            db,
-            tenant_id=int(tenant_id or 0),
-            requested_bank=requested,
-        )
+        brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
+        if brand_ibans:
+            replacement = compose_verified_bank_transfer_block(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
+            )
+        else:
+            replacement = _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
+            )
 
     logger.info(
         "[PAYMENT_CREDENTIAL_GUARD] replaced tenant=%s conversation=%s blocked=%s link=%s",
