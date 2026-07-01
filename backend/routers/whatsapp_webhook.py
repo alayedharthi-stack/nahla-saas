@@ -6875,6 +6875,30 @@ async def _handle_merchant_message(
                     customer_phone=to,
                     result=_of2_result,
                 )
+                _of2_reply = _of2_result.reply
+                try:
+                    from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
+                        apply_order_flow_v2_outbound_guards,
+                    )
+
+                    _of2_reply = apply_order_flow_v2_outbound_guards(
+                        _of2_reply,
+                        db=db,
+                        tenant_id=int(tenant_id),
+                        conversation_id=getattr(convo, "id", None),
+                        order_prep=dict(
+                            ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                "order_prep"
+                            )
+                            or {}
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[ORDER_FLOW_V2] outbound guard failed tenant=%s to=%s",
+                        tenant_id,
+                        to,
+                    )
                 _persona_ownership.mark_bypass(
                     _POReason.PRE_BRAIN_FAST_PATH,
                     owner=f"order_flow_v2:{_of2_result.reason}",
@@ -6882,7 +6906,7 @@ async def _handle_merchant_message(
                 _of2_ok = await _send_whatsapp_message(
                     phone_id=phone_id,
                     to=to,
-                    text=_of2_result.reply,
+                    text=_of2_reply,
                     _tenant_id=tenant_id,
                     _db=db,
                 )
@@ -6890,7 +6914,7 @@ async def _handle_merchant_message(
                     StateManager.save_message(
                         db,
                         to,
-                        _of2_result.reply,
+                        _of2_reply,
                         "outbound",
                         conversation_id=convo.id,
                         tenant_id=tenant_id,

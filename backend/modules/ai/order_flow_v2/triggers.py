@@ -65,6 +65,16 @@ _RESUME_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_PRODUCT_IMAGE_RE = re.compile(
+    r"(?:"
+    r"صور(?:ة|ته|ها)?|"
+    r"(?:show|send)\s+(?:me\s+)?(?:the\s+)?(?:product\s+)?(?:image|photo|picture)|"
+    r"product\s+image|"
+    r"picture|photo"
+    r")",
+    re.I | re.UNICODE,
+)
+
 _ORDER_NUMBER_QUESTION_RE = re.compile(
     r"(?:"
     r"كم\s*رقم\s*(?:ال)?طلب"
@@ -163,6 +173,15 @@ def should_not_start_checkout(message: str, inbound_metadata: Optional[Dict[str,
     return False
 
 
+def is_product_image_request_in_order_flow(message: str) -> bool:
+    text = _norm(message)
+    if not text:
+        return False
+    if is_greeting_message(message) or is_explicit_purchase_intent(text):
+        return False
+    return bool(_PRODUCT_IMAGE_RE.search(text))
+
+
 def is_checkout_escape_inquiry(
     message: str,
     inbound_metadata: Optional[Dict[str, Any]] = None,
@@ -224,6 +243,8 @@ def is_short_product_keyword_in_order_flow(message: str) -> bool:
     if is_explicit_purchase_intent(text) or is_resume_order_command(text):
         return False
     if is_checkout_order_number_intent(text):
+        return False
+    if is_product_image_request_in_order_flow(message):
         return False
     try:
         from modules.ai.brain.commerce.commerce_turn_contract import is_address_on_file_claim  # noqa: PLC0415

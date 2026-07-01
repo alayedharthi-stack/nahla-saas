@@ -3093,6 +3093,27 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
+                apply_payment_credential_guard,
+            )
+
+            _pcg = apply_payment_credential_guard(
+                reply or "",
+                db=getattr(ctx, "db", None),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                inbound_text=message or "",
+            )
+            if _pcg.replaced:
+                reply = _pcg.reply
+                _guard_replaced["payment_credential_guard"] = True
+        except Exception as _pcg_exc:  # noqa: BLE001
+            logger.warning(
+                "[PAYMENT_CREDENTIAL_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _pcg_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: PLC0415
                 apply_shipment_truth_guard,
             )

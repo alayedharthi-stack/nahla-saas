@@ -330,16 +330,28 @@ def try_active_catalog_checkout_continue_decision(ctx: BrainContext) -> Optional
     if not is_active_catalog_checkout(ctx):
         return None
     product = _product_from_state(ctx)
-    if not product:
+    address_like = False
+    try:
+        from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+
+        address_like = is_address_like_delivery_text(str(getattr(ctx, "message", "") or ""))
+    except Exception:  # noqa: BLE001
+        address_like = False
+    if not product and not address_like:
         return None
+    reason = (
+        "active_catalog_checkout_address_like → continue_checkout"
+        if address_like
+        else "active_catalog_checkout → continue_checkout"
+    )
     return Decision(
         action=ACTION_PROPOSE_DRAFT_ORDER,
         args=_catalog_order_continue_args(
             ctx,
-            product,
-            reason="active_catalog_checkout → continue_checkout",
+            product or {},
+            reason=reason,
         ),
-        reason="active_catalog_checkout → continue_checkout",
+        reason=reason,
         confidence=0.98,
     )
 

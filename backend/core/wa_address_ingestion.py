@@ -26,6 +26,13 @@ _CITY_ONLY_HINT_RE = re.compile(
     re.I,
 )
 
+_ADDRESS_NEAR_RE = re.compile(r"عنوان\s*قريب", re.I | re.UNICODE)
+_ADDRESS_CLUE_RE = re.compile(
+    r"(?:حي|شارع|طريق|منزل|بيت|عمارة|شقة|قريب|بجوار|"
+    r"riyadh|jeddah|dammam|makkah|madinah|khobar)",
+    re.I | re.UNICODE,
+)
+
 
 def is_accepted_maps_url(text: str) -> bool:
     """True when ``text`` contains a supported Google/Apple Maps URL."""
@@ -118,6 +125,57 @@ def build_short_address_patch(text: str) -> Dict[str, Any]:
     return patch
 
 
+def is_address_like_delivery_text(text: str) -> bool:
+    """True when free-form text looks like delivery address evidence, not catalog browse."""
+    raw = str(text or "").strip()
+    if not raw or is_city_only_address_text(raw):
+        return False
+    if is_bare_short_address_code(raw) or is_accepted_maps_url(raw):
+        return True
+    if _ADDRESS_NEAR_RE.search(raw):
+        return True
+    signals = extract_address_signals(raw)
+    if signals.get("short_address_code") or signals.get("google_maps_url"):
+        return True
+    if len(raw) >= 12 and _ADDRESS_CLUE_RE.search(raw):
+        return True
+    return False
+
+
+def build_delivery_address_patch(text: str) -> Dict[str, Any]:
+    """Accept embedded short codes, map URLs, and descriptive address strings."""
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    if is_bare_short_address_code(raw):
+        return build_short_address_patch(raw)
+    if is_accepted_maps_url(raw):
+        return build_maps_url_patch(raw)
+
+    patch: Dict[str, Any] = {
+        "delivery_address_status": "accepted",
+        "delivery_address_type": "text",
+        "address_line": raw,
+    }
+    signals = extract_address_signals(raw)
+    code = str(signals.get("short_address_code") or "").strip().upper()
+    if code:
+        patch["short_address_code"] = code
+        patch["delivery_address_type"] = "short_address_code"
+    url = str(signals.get("google_maps_url") or "").strip()
+    if url:
+        patch["google_maps_url"] = url
+    lat = signals.get("latitude")
+    lng = signals.get("longitude")
+    if lat is not None:
+        patch["latitude"] = lat
+        patch["delivery_location_lat"] = str(lat)
+    if lng is not None:
+        patch["longitude"] = lng
+        patch["delivery_location_lng"] = str(lng)
+    return patch
+
+
 def build_maps_url_patch(text: str) -> Dict[str, Any]:
     signals = extract_address_signals(text)
     url = str(signals.get("google_maps_url") or "").strip()
@@ -185,15 +243,19 @@ def resolve_address_state_patch(
         return build_short_address_patch(text)
     if is_accepted_maps_url(text):
         return build_maps_url_patch(text)
+    if is_address_like_delivery_text(text):
+        return build_delivery_address_patch(text)
     return None
 
 
 __all__ = [
+    "build_delivery_address_patch",
     "build_maps_url_patch",
     "build_short_address_patch",
     "build_whatsapp_location_patch",
     "compose_address_reply",
     "is_accepted_maps_url",
+    "is_address_like_delivery_text",
     "is_bare_short_address_code",
     "is_city_only_address_text",
     "resolve_address_state_patch",

@@ -291,6 +291,34 @@ def build_order_flow_product_keyword_reply(*, order_prep: Dict[str, Any]) -> str
     return "وش المنتج اللي تبغاه؟"
 
 
+def build_product_image_request_reply(
+    *,
+    order_prep: Dict[str, Any],
+    brain_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Honest fallback when direct product card send is unavailable in V2 path."""
+    bs = dict(brain_state or {})
+    items = line_items_from_state(order_prep, bs)
+    if items:
+        name = str(
+            items[0].get("product_name") or items[0].get("title") or items[0].get("name") or ""
+        ).strip()
+        if name:
+            return (
+                f"بخصوص «{name}»، اختره من الكتالوج أو أرسل لي المنتج من الكتالوج "
+                "عشان أضبطه لك."
+            )
+    focus = str(order_prep.get("product_name") or order_prep.get("selected_product") or "").strip()
+    if focus:
+        return (
+            f"بخصوص «{focus}»، اختره من الكتالوج أو أرسل لي المنتج من الكتالوج "
+            "عشان أضبطه لك."
+        )
+    return (
+        "اختر المنتج من الكتالوج، أو أرسل لي المنتج من الكتالوج عشان أضبطه لك."
+    )
+
+
 def build_checkout_order_number_reply(
     db: Any,
     *,

@@ -24,6 +24,11 @@ _DIA = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 _REPLACEMENTS: Tuple[Tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"شنو\s+بالذات", re.UNICODE | re.IGNORECASE), "وش اللي تبحث عنه"),
     (re.compile(r"عنوان(?:ك|كم)\s+بتاع(?:ك|كم)", re.UNICODE | re.IGNORECASE), "عنوانك أو موقعك"),
+    (re.compile(r"الكمية\s+كام", re.UNICODE | re.IGNORECASE), "الكمية كم"),
+    (re.compile(r"(?<![\w\u0600-\u06FF])كام(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "كم"),
+    (re.compile(r"بتاع(?:نا|ك|كم|كن|ه)", re.UNICODE | re.IGNORECASE), "الخاص"),
+    (re.compile(r"بتاعت(?:نا|ك|كم|كن|ه)", re.UNICODE | re.IGNORECASE), "الخاص"),
+    (re.compile(r"(?<![\w\u0600-\u06FF])لسه(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "باقي"),
     (re.compile(r"(?<![\w\u0600-\u06FF])شنو(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "وش"),
     (re.compile(r"(?<![\w\u0600-\u06FF])عايز(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "أبي"),
     (re.compile(r"(?<![\w\u0600-\u06FF])إ?زاي(?![\w\u0600-\u06FF])", re.UNICODE | re.IGNORECASE), "كيف"),
@@ -51,7 +56,11 @@ def _normalize_for_scan(text: str) -> str:
 def _detect_hits(text: str) -> List[str]:
     norm = _normalize_for_scan(text).lower()
     hits: List[str] = []
-    markers = ("شنو", "شلون", "هسة", "هواية", "هوية", "بتاع", "بتاعك", "عايز", "إزاي", "ازاي")
+    markers = (
+        "شنو", "شلون", "هسة", "هواية", "هوية",
+        "بتاع", "بتاعك", "بتاعنا", "بتاعت", "بتاعتنا",
+        "كام", "عايز", "إزاي", "ازاي", "لسه",
+    )
     for marker in markers:
         if marker in norm:
             hits.append(marker)
