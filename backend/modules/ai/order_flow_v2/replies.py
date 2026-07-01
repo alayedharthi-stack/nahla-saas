@@ -281,3 +281,53 @@ def build_catalog_order_extraction_fallback_reply(*, order_prep: Dict[str, Any])
         f"{visible}\n"
         "أعد إرسال الطلب من الكتالوج أو أكّد الأصناف كما ظهرت عندك عشان أكمله."
     )
+
+
+def build_order_flow_product_keyword_reply(*, order_prep: Dict[str, Any]) -> str:
+    """Clarify product intent during WhatsApp quick-order browse — not social."""
+    channel = str(order_prep.get("checkout_channel") or "").strip().lower()
+    if channel in {"whatsapp_fast", "whatsapp_quick_order", "whatsapp_catalog"}:
+        return "وش المنتج اللي تبغاه من القائمة؟"
+    return "وش المنتج اللي تبغاه؟"
+
+
+def build_checkout_order_number_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+) -> str:
+    """Honest order-number answer during active checkout — never generic no-orders."""
+    from core.order_context_builder import _load_active_draft  # noqa: PLC0415
+
+    from .state import line_items_from_state
+
+    conv_id = getattr(conversation, "id", None) if conversation is not None else None
+    draft = _load_active_draft(
+        db,
+        tenant_id=int(tenant_id),
+        conversation_id=conv_id,
+    )
+    if draft is not None:
+        reference = str(draft.external_id or "").strip()
+        if draft.order_id:
+            try:
+                from models import Order  # noqa: PLC0415
+
+                row = db.query(Order).filter_by(id=int(draft.order_id)).first()
+                if row is not None:
+                    reference = str(
+                        getattr(row, "external_order_number", None)
+                        or getattr(row, "external_id", None)
+                        or reference
+                    ).strip()
+            except Exception:  # noqa: BLE001
+                pass
+        if reference:
+            return f"رقم طلبك الحالي {reference}."
+
+    if line_items_from_state(order_prep, brain_state):
+        return "لسه ما صدر رقم طلب؛ نحتاج نكمل العنوان ثم ننشئ الطلب."
+    return ""

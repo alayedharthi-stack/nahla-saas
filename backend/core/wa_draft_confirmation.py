@@ -237,15 +237,15 @@ def compose_wa_order_flow_reply(
     # Rule E — product clear, location missing
     if missing_address and line_items and any(i.get("product_id") for i in line_items):
         return (
-            "تمام، سجلت لك الطلب مبدئيًا. "
-            "أرسل الموقع أو المدينة والحي عشان نكمل الطلب."
+            "اختياراتك محفوظة في هذه المحادثة مبدئيًا، "
+            "ونكملها بعد العنوان."
         )
 
     # Rule A — generic draft acknowledgement when location still missing
     if missing_address and line_items:
         return (
-            "تمام، جهزت لك الطلب مبدئيًا. "
-            "باقي نحتاج الموقع/العنوان لإكماله."
+            "اختياراتك محفوظة في هذه المحادثة مبدئيًا، "
+            "ونكملها بعد العنوان."
         )
 
     if line_items and cart_changed:

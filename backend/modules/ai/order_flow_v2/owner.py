@@ -30,9 +30,11 @@ from .replies import (
     build_address_on_file_collect_reply,
     build_catalog_order_extraction_fallback_reply,
     build_catalog_order_start_reply,
+    build_checkout_order_number_reply,
     build_greeting_checkout_resume_reply,
     build_greeting_with_pending_hint,
     build_next_field_reply,
+    build_order_flow_product_keyword_reply,
     build_resume_ack,
 )
 from .state import (
@@ -40,6 +42,7 @@ from .state import (
     checkout_active_now,
     deactivate_checkout_patch,
     incomplete_checkout_with_items,
+    in_flight_catalog_checkout,
     line_items_from_state,
     mark_pending_patch,
     pending_order_exists,
@@ -55,9 +58,12 @@ from .slot_ownership import (
 from .triggers import (
     is_catalog_order_inbound,
     is_checkout_escape_inquiry,
+    is_checkout_order_number_intent,
     is_explicit_purchase_intent,
     is_greeting_message,
     is_resume_order_command,
+    is_short_product_keyword_in_order_flow,
+    is_whatsapp_order_browse_context,
     should_not_start_checkout,
 )
 
@@ -338,6 +344,22 @@ def try_handle_order_flow_v2(
                 reason="catalog_order_v2_error",
             )
 
+    if (
+        is_short_product_keyword_in_order_flow(text)
+        and is_whatsapp_order_browse_context(order_prep, bs, meta)
+        and not is_greeting_message(text)
+        and not is_catalog_order_inbound(meta, text)
+    ):
+        reply = build_order_flow_product_keyword_reply(order_prep=order_prep)
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="order_flow_product_keyword",
+            state_patch={},
+            skip_brain=True,
+        )
+
     def _address_on_file_claim(text_value: str) -> bool:
         from modules.ai.brain.commerce.commerce_turn_contract import is_address_on_file_claim  # noqa: PLC0415
 
@@ -461,10 +483,34 @@ def try_handle_order_flow_v2(
             state_patch=patch,
         )
 
-    if not checkout_active_now(order_prep):
+    if is_checkout_order_number_intent(text) and in_flight_catalog_checkout(order_prep, bs):
+        reply = build_checkout_order_number_reply(
+            db,
+            tenant_id=int(tenant_id),
+            conversation=conversation,
+            order_prep=order_prep,
+            brain_state=bs,
+        )
+        if reply:
+            active_patch: Dict[str, Any] = {}
+            if not checkout_active_now(order_prep):
+                active_patch.update(activate_checkout_patch())
+            return _finalize_result(
+                enabled=enabled,
+                shadow=shadow,
+                reply=reply,
+                reason="checkout_order_number",
+                state_patch=active_patch,
+                skip_brain=True,
+            )
+
+    if not in_flight_catalog_checkout(order_prep, bs):
         if pending_order_exists(order_prep, bs):
             patch.update(mark_pending_patch())
         return OrderFlowV2Result(handled=False, reason="not_active")
+
+    if not checkout_active_now(order_prep):
+        patch.update(activate_checkout_patch())
 
     addr_confirm_patch = apply_previous_address_confirmation(
         db,

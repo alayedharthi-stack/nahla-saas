@@ -112,6 +112,22 @@ def checkout_active_now(order_prep: Dict[str, Any]) -> bool:
     return bool(order_prep.get("order_flow_v2_active"))
 
 
+def in_flight_catalog_checkout(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+) -> bool:
+    """Checkout is active or a native catalog order is mid-collection."""
+    if checkout_active_now(order_prep):
+        return True
+    if not incomplete_checkout_with_items(order_prep, brain_state):
+        return False
+    return bool(
+        order_prep.get("order_flow_v2_trusted_price")
+        or order_prep.get("catalog_line_items_authoritative")
+        or order_prep.get("order_flow_v2_pending")
+    )
+
+
 def trusted_catalog_price(order_prep: Dict[str, Any], brain_state: Dict[str, Any]) -> bool:
     if order_prep.get("order_flow_v2_trusted_price"):
         return True

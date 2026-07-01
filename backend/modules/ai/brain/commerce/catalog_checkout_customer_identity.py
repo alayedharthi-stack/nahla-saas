@@ -83,6 +83,16 @@ def _valid_customer_name(name: str) -> bool:
         return len(text) >= 2
 
 
+def resolve_customer_row_by_phone(
+    db: Any,
+    tenant_id: int,
+    phone: str,
+    customer: Any = None,
+) -> Any:
+    """Resolve ``Customer`` by WhatsApp phone variants (+966 / 966 / local)."""
+    return _load_customer_row(db, tenant_id, phone, customer=customer)
+
+
 def _load_customer_row(
     db: Any,
     tenant_id: int,
@@ -376,6 +386,7 @@ __all__ = [
     "merge_prep_with_customer_identity",
     "reply_contains_forbidden_catalog_name_question",
     "resolve_catalog_checkout_customer_identity",
+    "resolve_customer_row_by_phone",
     "sanitize_forbidden_catalog_name_question",
     "split_operational_full_name",
 ]
