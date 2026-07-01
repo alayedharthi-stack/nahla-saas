@@ -150,6 +150,43 @@ Build for the platform, not for a single merchant.
 
 ---
 
+## Generic Commerce Regression Tests
+
+Nahla AI is a **multi-merchant** WhatsApp commerce platform. Every AI commerce fix and regression test must be **platform-wide and merchant-agnostic**.
+
+### Core rule
+
+Do not make runtime logic, tests, prompts, or examples behave like one honey store or one merchant (e.g. Al Ayed) only. The system must work across normal catalog merchants: food, clothing, shoes, perfumes, cosmetics, accessories, gifts, and similar categories.
+
+### Test data policy
+
+When adding regression tests, do **not** rely only on production-store examples such as sidr, honey-only product names, one real customer name, or one city.
+
+For every platform-level behavior fix, include **at least one neutral generic commerce scenario**, for example:
+
+- Merchant: `متجر تجريبي عام`
+- Product: `حذاء رياضي أبيض` / `قميص قطني أزرق` / `عطر ورد 100ml`
+- Customer: generic verified profile (e.g. `أحمد سالم`, `نورة عبدالله`)
+- City / short code: generic values (e.g. `الرياض` + `RRRD1234`)
+
+Rotate categories across tests when product examples are needed.
+
+### Required coverage for AI commerce regressions
+
+For every root fix in OrderFlowV2, catalog checkout, customer context, tracking, payment, shipping, availability, or FAQ:
+
+1. Add a regression test for the **real observed case** (if one exists).
+2. Add **at least one generic merchant/category test** proving the fix is not category-specific.
+3. Avoid hardcoding product keywords in runtime logic.
+4. Assert **system behavior and state**, not rigid Arabic phrases, unless the phrase itself is the bug.
+5. Phrase triggers (e.g. previous-address claims) may appear in tests, but **truth must come from persisted state** (`CustomerAddress`, profile, order context) — not from the phrase alone.
+
+### Guards unchanged by test additions
+
+Regression tests must not bypass or weaken: `store_ai_enabled`, `store_ai_mode`, pause, handoff, blocklist, subscription, dry-run/playground boundaries, or real WhatsApp provider calls.
+
+---
+
 ## Reference Implementations
 
 These slices apply the doctrine correctly:
