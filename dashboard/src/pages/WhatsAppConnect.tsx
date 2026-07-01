@@ -260,6 +260,32 @@ function CoexistenceFlow({
   )
 }
 
+function ManualSetupGuideButton({
+  label,
+  variant = 'emerald',
+}: {
+  label: string
+  variant?: 'emerald' | 'violet'
+}) {
+  const palette =
+    variant === 'violet'
+      ? 'border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100 hover:border-violet-400'
+      : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:border-emerald-400'
+
+  return (
+    <a
+      href="/help/whatsapp-manual-setup"
+      target="_blank"
+      rel="noreferrer"
+      className={`w-full flex items-center justify-center gap-2 rounded-xl border-2 px-4 py-3 text-sm font-semibold transition shadow-sm ${palette}`}
+    >
+      <BookOpen className="w-4 h-4 shrink-0" />
+      <span>{label}</span>
+      <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-70" />
+    </a>
+  )
+}
+
 function MetaEmbeddedOptionCard({
   onConnected,
 }: {
@@ -298,18 +324,8 @@ function MetaEmbeddedOptionCard({
 
       <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
 
-      <a
-        href="/help/whatsapp-manual-setup"
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex items-center gap-1.5 text-sm text-emerald-600 hover:text-emerald-700 font-medium transition"
-      >
-        <BookOpen className="w-4 h-4 shrink-0" />
-        {s.manualSetupLink}
-        <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-60" />
-      </a>
-
-      <div className="mt-auto pt-1">
+      <div className="mt-auto pt-1 space-y-3">
+        <ManualSetupGuideButton label={s.manualSetupLink} />
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
       </div>
     </div>
@@ -325,8 +341,8 @@ function AssistedConnectFlow({
 }) {
   const { t, lang } = useLanguage()
   const a = t(tr => tr.whatsappConnect.assisted)
-  const [contactPhone, setContactPhone] = useState(status?.phone_number ?? '')
-  const [displayName, setDisplayName] = useState(status?.display_name ?? '')
+  const [contactPhone, setContactPhone] = useState('')
+  const [displayName, setDisplayName] = useState('')
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -431,6 +447,8 @@ function AssistedConnectFlow({
       {error && <ErrorBox msg={error} />}
 
       <div className="mt-auto space-y-3">
+        <ManualSetupGuideButton label={a.manualSetupLink} variant="violet" />
+
         <button
           type="button"
           onClick={submitRequest}
@@ -441,18 +459,6 @@ function AssistedConnectFlow({
         </button>
 
         <p className="text-center text-xs text-slate-400">{a.footerHint}</p>
-
-        <p className="text-center">
-          <a
-            href="/help/whatsapp-manual-setup"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-violet-600 hover:text-violet-700 font-medium transition"
-          >
-            {a.manualSetupLink}
-            <ExternalLink className="w-3 h-3 shrink-0 opacity-60" />
-          </a>
-        </p>
       </div>
     </div>
   )

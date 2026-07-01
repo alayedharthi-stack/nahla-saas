@@ -3,11 +3,12 @@
  *
  * Run: npm run check:simplified-whatsapp-connect   (from dashboard/)
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dir = dirname(fileURLToPath(import.meta.url))
+const dashboardSrc = join(__dir, '../src')
 const connectPage = readFileSync(
   join(__dir, '../src/pages/WhatsAppConnect.tsx'),
   'utf8',
@@ -20,6 +21,7 @@ let failed = 0
 const required = [
   'MetaEmbeddedOptionCard',
   'AssistedConnectFlow',
+  'ManualSetupGuideButton',
   'requestAssistedConnect',
   'metaApprovalNotice',
   'metaConnectBtn',
@@ -28,6 +30,7 @@ const required = [
   'embeddedInCard',
   'a.submitBtn',
   '/help/whatsapp-manual-setup',
+  'manualSetupLink',
 ]
 
 for (const needle of required) {
@@ -51,6 +54,7 @@ const forbidden = [
   '<CoexistenceFlow',
   'metaConnectDisabledBtn',
   'bg-[#1877F2]/40',
+  "const [contactPhone, setContactPhone] = useState(status?.phone_number",
 ]
 
 for (const needle of forbidden) {
@@ -67,6 +71,25 @@ if (!connectPage.includes('onClick={launchSignup}')) {
   console.error('FAIL Meta connect button must call launchSignup (enabled trial path)')
 } else {
   console.log('OK   Meta button calls launchSignup')
+}
+
+const arGuideMeta = 'تحتاج مساعدة؟ افتح دليل الربط اليدوي'
+const arGuideAssisted = 'اقرأ دليل الربط اليدوي'
+const enGuideMeta = 'Need help? Open the manual setup guide'
+const enGuideAssisted = 'Read the manual setup guide'
+
+for (const [label, text, locale] of [
+  ['ar meta guide', arGuideMeta, arLocale],
+  ['ar assisted guide', arGuideAssisted, arLocale],
+  ['en meta guide', enGuideMeta, enLocale],
+  ['en assisted guide', enGuideAssisted, enLocale],
+] as const) {
+  if (!locale.includes(text)) {
+    failed++
+    console.error(`FAIL missing ${label} copy`)
+  } else {
+    console.log(`OK   ${label} copy`)
+  }
 }
 
 const arNotice =
@@ -86,6 +109,35 @@ if (!enLocale.includes(enNotice)) {
   console.error('FAIL en.ts missing Meta approval notice copy')
 } else {
   console.log('OK   en.ts Meta approval notice')
+}
+
+const forbiddenPhones = ['0549815590', '549815590']
+
+function walkTsFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name)
+    if (statSync(full).isDirectory()) {
+      walkTsFiles(full, out)
+    } else if (/\.(tsx?|mts)$/.test(name)) {
+      out.push(full)
+    }
+  }
+  return out
+}
+
+let forbiddenPhoneFound = false
+for (const file of walkTsFiles(dashboardSrc)) {
+  const content = readFileSync(file, 'utf8')
+  for (const phone of forbiddenPhones) {
+    if (content.includes(phone)) {
+      forbiddenPhoneFound = true
+      failed++
+      console.error(`FAIL forbidden phone ${phone} in ${file.replace(dashboardSrc, 'src')}`)
+    }
+  }
+}
+if (!forbiddenPhoneFound) {
+  console.log('OK   no forbidden default phone numbers in dashboard/src')
 }
 
 if (failed > 0) {

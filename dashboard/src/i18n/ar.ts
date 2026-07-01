@@ -908,7 +908,7 @@ const ar: Translations = {
       benefitSecure:           'بياناتك الحساسة تُشارك فقط عبر قناة آمنة مع فريقنا',
       contactPhoneLabel:       'رقم التواصل (اختياري)',
       contactPhoneHint:        'للوصول إليك أثناء إتمام الربط',
-      contactPhonePlaceholder: '+9665XXXXXXXX',
+      contactPhonePlaceholder: 'مثال: 05xxxxxxxx',
       displayNameLabel:        'اسم النشاط التجاري (اختياري)',
       displayNameHint:         'كما تريد ظهوره على واتساب',
       displayNamePlaceholder:  'مثال: متجر نحلة',

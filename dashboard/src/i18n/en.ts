@@ -904,7 +904,7 @@ const en: Translations = {
       benefitSecure:           'Sensitive credentials are shared only through a secure channel with our team',
       contactPhoneLabel:       'Contact phone (optional)',
       contactPhoneHint:        'So we can reach you while completing the connect',
-      contactPhonePlaceholder: '+9665XXXXXXXX',
+      contactPhonePlaceholder: 'Example: 05xxxxxxxx',
       displayNameLabel:        'Business name (optional)',
       displayNameHint:         'As you want it to appear on WhatsApp',
       displayNamePlaceholder:  'Example: Nahla Store',
