@@ -318,6 +318,44 @@ def select_arabic_commerce_fallback(
     chosen_path: str = "",
     kb_availability_facts: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
+    try:
+        from modules.ai.order_flow_v2.triggers import is_catalog_selection_acknowledgment  # noqa: PLC0415
+        from modules.ai.order_flow_v2.replies import build_catalog_selection_ack_reply  # noqa: PLC0415
+        from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+            has_active_commerce_from_state,
+        )
+
+        if is_catalog_selection_acknowledgment(inbound_text) and has_active_commerce_from_state(state):
+            prep = dict(getattr(state, "order_prep", None) or {})
+            if not prep and isinstance(state, dict):
+                prep = dict(state.get("order_prep") or {})
+            missing = list(prep.get("missing_fields") or [])
+            reply = build_catalog_selection_ack_reply(
+                order_prep=prep,
+                brain_state=state if isinstance(state, dict) else {},
+                missing_fields=missing or ["customer_name", "city", "delivery_address", "payment_method"],
+            )
+            if reply:
+                return reply, "catalog_selection_ack"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog ack must not break fallback
+        pass
+
+    try:
+        from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+            has_active_commerce_from_state,
+        )
+        from modules.ai.order_flow_v2.triggers import is_short_product_keyword_in_order_flow  # noqa: PLC0415
+
+        if (
+            has_active_commerce_from_state(state)
+            and not is_short_product_keyword_in_order_flow(inbound_text)
+            and len(str(inbound_text or "").split()) >= 2
+            and re.search(r"^[\u0600-\u06FF\s]+$", str(inbound_text or "").strip())
+        ):
+            return "", "checkout_name_owned_suppressed"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — checkout name gate must not break fallback
+        pass
+
     if _kb_negative_availability_decision(
         decision_topic,
         availability_polarity,

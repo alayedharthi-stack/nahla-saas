@@ -102,6 +102,16 @@ _WHATSAPP_CHECKOUT_CHANNELS = frozenset({
 
 _CATALOG_ORDER_SOURCE = frozenset({"catalog_order", "native_catalog_order"})
 
+_CATALOG_SELECTION_ACK_RE = re.compile(
+    r"(?:انا|أنا)\s*اخترت\s*(?:ال)?منتجات",
+    re.I | re.UNICODE,
+)
+
+_ARABIC_MULTI_TOKEN_NAME_RE = re.compile(
+    r"^[\u0600-\u06FF]{2,}(?:\s+[\u0600-\u06FF]{2,})+$",
+    re.UNICODE,
+)
+
 
 def _norm(text: str) -> str:
     t = _NORM_RE.sub("", str(text or ""))
@@ -233,10 +243,16 @@ def is_whatsapp_order_browse_context(
     return pending_order_exists(prep, bs)
 
 
+def is_catalog_selection_acknowledgment(message: str) -> bool:
+    return bool(_CATALOG_SELECTION_ACK_RE.search(_norm(message)))
+
+
 def is_short_product_keyword_in_order_flow(message: str) -> bool:
     """Short product-like token during order flow — not social/greeting."""
     text = _norm(message)
     if not text or len(text) > 16:
+        return False
+    if _ARABIC_MULTI_TOKEN_NAME_RE.match(text):
         return False
     if is_greeting_message(message):
         return False

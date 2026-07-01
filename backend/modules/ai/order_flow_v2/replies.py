@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from core.order_context_prefill import MODE_CONFIRM
+from core.wa_order_lifecycle import has_accepted_delivery_address
 
 from .missing_fields import next_missing_field
 from .state import line_items_from_state, trusted_catalog_price
@@ -165,8 +166,36 @@ def build_next_field_reply(
             f"(مثل RIYD1234)."
         ).strip()
     if nxt == "payment_method":
+        if has_accepted_delivery_address(order_prep):
+            return (
+                f"{prefix}أعتمد التوصيل لعنوانك. وش طريقة الدفع المناسبة لك؟"
+            ).strip()
         return f"{prefix}وش طريقة الدفع المناسبة لك؟".strip()
     return f"{prefix}أكمل معي بيانات الطلب.".strip()
+
+
+def build_catalog_selection_ack_reply(
+    *,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
+) -> str:
+    """Acknowledge catalog picks and continue checkout without browse escape."""
+    summary = _order_summary(order_prep, brain_state)
+    prefix = f"{summary}\n\n" if summary else ""
+    ack = "تمام، شفت اختياراتك من الكتالوج."
+    nxt = build_next_field_reply(
+        order_prep=order_prep,
+        brain_state=brain_state,
+        missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
+    )
+    if nxt.startswith(prefix):
+        return f"{prefix}{ack}\n\n{nxt[len(prefix):].lstrip()}".strip()
+    return f"{prefix}{ack}\n\n{nxt}".strip()
 
 
 def build_greeting_checkout_resume_reply(

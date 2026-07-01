@@ -23,6 +23,7 @@ from .ingest import apply_inbound_slots
 from .missing_fields import compute_v2_missing_fields
 from .payment import (
     apply_payment_method_selection,
+    build_payment_bank_mismatch_reply,
     build_payment_instruction_reply,
     default_payment_method_patch,
 )
@@ -30,6 +31,7 @@ from .replies import (
     build_address_on_file_collect_reply,
     build_catalog_order_extraction_fallback_reply,
     build_catalog_order_start_reply,
+    build_catalog_selection_ack_reply,
     build_checkout_order_number_reply,
     build_greeting_checkout_resume_reply,
     build_greeting_with_pending_hint,
@@ -58,6 +60,7 @@ from .slot_ownership import (
 )
 from .triggers import (
     is_catalog_order_inbound,
+    is_catalog_selection_acknowledgment,
     is_checkout_escape_inquiry,
     is_checkout_order_number_intent,
     is_explicit_purchase_intent,
@@ -377,6 +380,26 @@ def try_handle_order_flow_v2(
             skip_brain=True,
         )
 
+    if is_catalog_selection_acknowledgment(text) and incomplete_checkout_with_items(order_prep, bs):
+        merged_prep = dict(order_prep)
+        missing = _missing(merged_prep)
+        reply_ctx = _reply_ctx(merged_prep)
+        reply = build_catalog_selection_ack_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="catalog_selection_acknowledged",
+            state_patch={},
+            skip_brain=True,
+        )
+
     def _address_on_file_claim(text_value: str) -> bool:
         from modules.ai.brain.commerce.commerce_turn_contract import is_address_on_file_claim  # noqa: PLC0415
 
@@ -444,7 +467,6 @@ def try_handle_order_flow_v2(
     if is_checkout_escape_inquiry(text, meta):
         try:
             from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
-            from .state import incomplete_checkout_with_items  # noqa: PLC0415
 
             if not (
                 is_address_like_delivery_text(text)
@@ -534,7 +556,6 @@ def try_handle_order_flow_v2(
     if not in_flight_catalog_checkout(order_prep, bs):
         try:
             from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
-            from .state import incomplete_checkout_with_items  # noqa: PLC0415
 
             if is_address_like_delivery_text(text) and incomplete_checkout_with_items(order_prep, bs):
                 patch.update(activate_checkout_patch())
@@ -597,6 +618,31 @@ def try_handle_order_flow_v2(
 
     if (
         "payment_method" in missing
+        and not higher_priority_missing_before_payment(missing)
+        and not merged_prep.get("shipping_policy_source")
+    ):
+        try:
+            from core.checkout_shipping_policy import resolve_checkout_shipping_policy  # noqa: PLC0415
+
+            shipping_resolution = resolve_checkout_shipping_policy(
+                db,
+                tenant_id=int(tenant_id),
+                order_prep=merged_prep,
+                brain_state=bs,
+            )
+            shipping_patch = shipping_resolution.to_state_patch()
+            if shipping_patch:
+                patch.update(shipping_patch)
+                merged_prep = {**merged_prep, **shipping_patch}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ORDER_FLOW_V2] shipping policy stamp failed tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+
+    if (
+        "payment_method" in missing
         and not merged_prep.get("payment_method")
         and not higher_priority_missing_before_payment(missing)
         and not on_file_claim
@@ -605,6 +651,23 @@ def try_handle_order_flow_v2(
         if not pay_patch and not payment_attempt(text):
             pay_patch, chosen = default_payment_method_patch(db, tenant_id=tenant_id)
         if pay_patch:
+            if pay_patch.get("order_flow_v2_payment_rejected"):
+                reply = build_payment_bank_mismatch_reply(
+                    db,
+                    tenant_id=int(tenant_id),
+                    rejection_reason=str(
+                        pay_patch.get("order_flow_v2_payment_rejection_reason") or ""
+                    ),
+                    requested_bank=str(pay_patch.get("requested_bank") or ""),
+                )
+                patch.update(pay_patch)
+                return _finalize_result(
+                    enabled=enabled,
+                    shadow=shadow,
+                    reply=reply,
+                    reason="payment_bank_rejected",
+                    state_patch=patch,
+                )
             patch.update(pay_patch)
             merged_prep = {**merged_prep, **pay_patch}
             missing = _missing(merged_prep)
