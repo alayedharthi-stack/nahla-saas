@@ -6853,6 +6853,13 @@ async def _handle_merchant_message(
         # ── OrderFlowV2 deterministic checkout owner ─────────────────────
         _of2_result = None
         _of2_catalog_error = False
+        _inbound_normalized_type = "text"
+        if isinstance(inbound_metadata, dict):
+            _inbound_normalized_type = str(
+                inbound_metadata.get("inbound_normalized_type")
+                or inbound_metadata.get("type")
+                or "text"
+            )
         try:
             from modules.ai.order_flow_v2.owner import (  # noqa: PLC0415
                 persist_order_flow_v2_result,
@@ -6865,7 +6872,7 @@ async def _handle_merchant_message(
                 customer_phone=to,
                 message=text or "",
                 inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
-                inbound_normalized_type=str(inbound_type or "text"),
+                inbound_normalized_type=_inbound_normalized_type,
             )
             _of2_catalog_error = str(getattr(_of2_result, "reason", "") or "") == "catalog_order_v2_error"
             if _of2_result.handled and _of2_result.reply and _trace.outbound_lock_acquired():
