@@ -58,6 +58,7 @@ from sqlalchemy.orm import Session
 
 from core.audit import audit
 from core.auth import get_current_user, require_admin
+from core.catalog_image import coerce_image_url, resolve_product_image_url
 from core.catalog import (
     CATALOG_STATUS_ACTIVE,
     CATALOG_STATUS_ARCHIVED,
@@ -1085,7 +1086,8 @@ def _product_diag_rows(
         # round-trip. Reads through the central ``extract_field``
         # helper so Phase 2's column-promotion is a one-line change.
         meta = (p.extra_metadata or {}) if hasattr(p, "extra_metadata") else {}
-        image_url   = meta.get("image_url") or meta.get("thumbnail") or ""
+        variants_rel = getattr(p, "variants", None) or []
+        image_url   = resolve_product_image_url(meta=meta, variants=variants_rel)
         product_url = meta.get("product_url") or meta.get("url") or ""
         currency    = meta.get("currency") or ""
         price_val   = getattr(p, "price", None)
@@ -1116,7 +1118,7 @@ def _product_diag_rows(
                     "is_default":       bool(v.is_default),
                     "options":          v.options or {},
                     "option_summary":   v.option_summary or "",
-                    "image_url":        v.image_url or "",
+                    "image_url":        coerce_image_url(v.image_url) or "",
                 })
         except Exception:  # noqa: BLE001
             variants_payload = []
@@ -2243,7 +2245,9 @@ def _serialise_studio_product(p: "Product") -> Dict[str, Any]:
         "stock_quantity":   p.stock_quantity,
         "source":           product_source(p),
         # Phase 1 JSONB sidecar — Phase 2 promotes these to columns.
-        "image_url":          meta.get("image_url") or meta.get("thumbnail") or "",
+        "image_url":          resolve_product_image_url(
+            meta=meta, variants=getattr(p, "variants", None) or [],
+        ),
         "product_url":        meta.get("product_url") or meta.get("url") or "",
         "additional_images":  meta.get("additional_images") or [],
         "sale_price":         meta.get("sale_price") or "",

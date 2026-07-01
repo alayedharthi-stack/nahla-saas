@@ -53,6 +53,7 @@ import {
   type StudioProduct,
   type CatalogVisibility,
 } from '../api/catalog'
+import { ProductThumbnail } from '../components/catalog/ProductThumbnail'
 import { useLanguage } from '../i18n/context'
 import type { Lang, Translations } from '../i18n/types'
 
@@ -529,9 +530,7 @@ function ProductGridRow(props: {
         <td className="py-3 px-3">
           <div className="flex items-center gap-3">
             <div className="shrink-0 w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
-              {row.image_url
-                ? <img src={row.image_url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
-                : <ImageIcon className="w-5 h-5 text-slate-300" />}
+              <ProductThumbnail row={row} />
             </div>
             <div className="min-w-0">
               <div className="font-semibold text-slate-900 text-sm truncate max-w-[320px]" title={row.title}>
@@ -1090,9 +1089,13 @@ function ProductDrawer(props: {
             {/* Hero — image + meta */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 flex gap-4">
               <div className="shrink-0 w-32 h-32 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
-                {data.product.image_url
-                  ? <img src={data.product.image_url} alt="" loading="lazy" decoding="async" className="w-full h-full object-cover" />
-                  : <ImageIcon className="w-8 h-8 text-slate-300" />}
+                <ProductThumbnail
+                  row={{
+                    image_url: draft.image_url ?? data.product.image_url,
+                    additional_images: data.product.additional_images,
+                  }}
+                  iconClassName="w-8 h-8 text-slate-300"
+                />
               </div>
               <div className="min-w-0 flex-1 space-y-1.5">
                 <div className="text-xs text-slate-400 font-mono" dir="ltr">#{data.product.id}</div>
