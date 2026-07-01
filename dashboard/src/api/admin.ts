@@ -7,7 +7,11 @@ export interface CoexistenceIntegrationCompleteness {
   db_status?: string | null
 }
 
+export type WhatsAppConnectRequestKind = 'assisted_connect' | 'coexistence' | 'manual_help'
+
 export interface CoexistenceRequest {
+  request_id?: number | null
+  request_kind?: WhatsAppConnectRequestKind | null
   tenant_id: number
   tenant_name: string | null
   merchant_email: string | null

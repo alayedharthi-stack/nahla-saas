@@ -1829,6 +1829,14 @@ async def request_assisted_connect(
         },
     )
     db.commit()
+    db.refresh(conn)
+
+    logger.info(
+        "[ASSISTED_CONNECT_REQUEST_CREATED] tenant_id=%s request_id=%s status=%s",
+        tenant_id,
+        conn.id,
+        conn.status,
+    )
 
     audit(
         "WHATSAPP_ASSISTED_CONNECT_REQUEST",

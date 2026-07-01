@@ -37,8 +37,6 @@ import {
   type CoexistenceDiagnoseResult,
 } from '../api/admin'
 
-// ── Status badge ─────────────────────────────────────────────────────────────
-
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
     request_submitted:  { label: 'طلب جديد',        cls: 'bg-amber-100 text-amber-700' },
@@ -48,6 +46,21 @@ function StatusBadge({ status }: { status: string }) {
     not_connected:      { label: 'غير مربوط',       cls: 'bg-slate-100 text-slate-500' },
   }
   const { label, cls } = map[status] ?? { label: status, cls: 'bg-slate-100 text-slate-500' }
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${cls}`}>
+      {label}
+    </span>
+  )
+}
+
+function RequestKindBadge({ kind }: { kind?: string | null }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    assisted_connect: { label: 'ربط بمساعدة فريق نحلة', cls: 'bg-violet-100 text-violet-700' },
+    coexistence:      { label: 'واتساب الجوال + الذكاء', cls: 'bg-sky-100 text-sky-700' },
+    manual_help:      { label: 'ربط يدوي',               cls: 'bg-slate-100 text-slate-600' },
+  }
+  const key = kind || 'coexistence'
+  const { label, cls } = map[key] ?? { label: key, cls: 'bg-slate-100 text-slate-500' }
   return (
     <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ${cls}`}>
       {label}
@@ -1270,6 +1283,7 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
   const [activating, setActivating] = useState(false)
 
   const isNew = req.wa_status === 'request_submitted'
+  const isAssisted = req.request_kind === 'assisted_connect'
 
   const fmt = (iso: string | null) => {
     if (!iso) return '—'
@@ -1284,7 +1298,7 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
       {/* Header */}
       <div className="p-4 flex items-start justify-between gap-4">
         <div className="flex items-start gap-3 min-w-0">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isNew ? 'bg-amber-500' : 'bg-slate-200'}`}>
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${isNew ? (isAssisted ? 'bg-violet-500' : 'bg-amber-500') : 'bg-slate-200'}`}>
             <Smartphone className={`w-5 h-5 ${isNew ? 'text-white' : 'text-slate-400'}`} />
           </div>
           <div className="min-w-0">
@@ -1292,6 +1306,7 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
               <span className="font-bold text-slate-800 text-sm">
                 {req.display_name || req.tenant_name || `Tenant #${req.tenant_id}`}
               </span>
+              <RequestKindBadge kind={req.request_kind} />
               <StatusBadge status={req.wa_status} />
             </div>
             <div className="flex items-center gap-4 mt-1 text-xs text-slate-500 flex-wrap">
@@ -1330,10 +1345,12 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
               <p className="text-slate-400 font-semibold mb-0.5">البريد الإلكتروني</p>
               <p className="text-slate-700">{req.merchant_email || '—'}</p>
             </div>
-            <div>
-              <p className="text-slate-400 font-semibold mb-0.5">تطبيق WA Business</p>
-              <p className="text-slate-700">{req.has_whatsapp_business_app ? 'نعم ✓' : 'لا'}</p>
-            </div>
+            {!isAssisted && (
+              <div>
+                <p className="text-slate-400 font-semibold mb-0.5">تطبيق WA Business</p>
+                <p className="text-slate-700">{req.has_whatsapp_business_app ? 'نعم ✓' : 'لا'}</p>
+              </div>
+            )}
             <div>
               <p className="text-slate-400 font-semibold mb-0.5">وقت تقديم الطلب</p>
               <p className="text-slate-700">{fmt(req.submitted_at)}</p>
@@ -1361,8 +1378,14 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
             </div>
           )}
 
-          {/* Activate button (only for pending requests) */}
-          {(req.wa_status === 'request_submitted' || req.wa_status === 'action_required') && !activating && (
+          {isAssisted && (
+            <div className="rounded-lg bg-violet-50 border border-violet-200 p-3 text-sm text-violet-900">
+              طلب ربط بمساعدة فريق نحلة — أكمل الربط يدوياً من أدوات الإدارة ثم حدّث حالة التاجر.
+            </div>
+          )}
+
+          {/* Activate button (only for pending coexistence requests) */}
+          {!isAssisted && (req.wa_status === 'request_submitted' || req.wa_status === 'action_required') && !activating && (
             <button
               onClick={() => setActivating(true)}
               className="w-full mt-2 rounded-xl bg-violet-600 py-2.5 text-sm font-bold text-white hover:bg-violet-500 transition"
@@ -1379,19 +1402,13 @@ function RequestCard({ req, onRefresh }: { req: CoexistenceRequest; onRefresh: (
             />
           )}
 
-          {/* Integrity banner — shows ONLY when the merchant page would
-              currently show "غير متصل فعليًا". This is the cure for the
-              owner panel and merchant page disagreeing. */}
-          <IntegrationIntegrityBanner req={req} onReconciled={onRefresh} />
-
-          {/* Editable integration record — Sync/Repair button + manual
-              field overrides + Save & Recheck. */}
-          <IntegrationFieldsPanel req={req} onRefresh={onRefresh} />
-
-          {/* Webhook tooling — always visible. For tenants still in
-              `request_submitted` the buttons will fail with a clear error
-              ("API key not stored yet"), which is the expected feedback. */}
-          <WebhookManagementPanel tenantId={req.tenant_id} />
+          {!isAssisted && (
+            <>
+              <IntegrationIntegrityBanner req={req} onReconciled={onRefresh} />
+              <IntegrationFieldsPanel req={req} onRefresh={onRefresh} />
+              <WebhookManagementPanel tenantId={req.tenant_id} />
+            </>
+          )}
         </div>
       )}
     </div>
@@ -1432,8 +1449,8 @@ export default function AdminCoexistence() {
             <Smartphone className="w-5 h-5 text-white" />
           </div>
           <div>
-            <h1 className="text-lg font-black text-slate-800">طلبات واتساب الجوال + الذكاء</h1>
-            <p className="text-slate-400 text-xs">إدارة وتفعيل طلبات التاجر لخدمة 360dialog Coexistence</p>
+            <h1 className="text-lg font-black text-slate-800">طلبات ربط واتساب</h1>
+            <p className="text-slate-400 text-xs">طلبات المساعدة الجديدة + طلبات واتساب الجوال + الذكاء (360dialog)</p>
           </div>
         </div>
         <button
@@ -1504,7 +1521,7 @@ export default function AdminCoexistence() {
       ) : (
         <div className="space-y-3">
           {requests.map(req => (
-            <RequestCard key={req.tenant_id} req={req} onRefresh={load} />
+            <RequestCard key={`${req.request_kind ?? 'coexistence'}-${req.tenant_id}`} req={req} onRefresh={load} />
           ))}
         </div>
       )}

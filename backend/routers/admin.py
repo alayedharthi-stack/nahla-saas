@@ -2844,21 +2844,31 @@ async def admin_list_coexistence_requests(
     _admin: Dict[str, Any] = Depends(require_admin),
 ):
     """
-    List all WhatsApp coexistence (360dialog) requests.
-    By default returns requests with status='request_submitted'.
-    Pass ?status_filter=all to get every dialog360 connection.
+    List WhatsApp connect requests for the admin queue.
+
+    Includes:
+      * ``coexistence`` — legacy 360dialog / mobile+AI onboarding
+      * ``assisted`` — merchant «طلب ربط بمساعدة فريق نحلة»
+
+    Pass ``?status_filter=all`` to include every status.
     """
     import traceback as _tb  # noqa: PLC0415
     try:
-        # Match both provider values to handle any legacy data
+        from core.coexistence_client_id import sanitize_coexistence_client_id  # noqa: PLC0415
+        from routers.whatsapp_connect import (  # noqa: PLC0415
+            _assisted_connect_state,
+            _coexistence_integration_complete,
+            _coexistence_webhook_block,
+        )
+
         query = db.query(WhatsAppConnection).filter(
-            WhatsAppConnection.connection_type == "coexistence"
+            WhatsAppConnection.connection_type.in_(("coexistence", "assisted"))
         )
         if status_filter != "all":
             query = query.filter(WhatsAppConnection.status == status_filter)
-        connections = query.order_by(WhatsAppConnection.last_attempt_at.desc().nullslast()).all()
-
-        from core.coexistence_client_id import sanitize_coexistence_client_id  # noqa: PLC0415
+        connections = query.order_by(
+            WhatsAppConnection.last_attempt_at.desc().nullslast()
+        ).all()
 
         rows = []
         for conn in connections:
@@ -2870,19 +2880,55 @@ async def admin_list_coexistence_requests(
                     .order_by(User.id.asc())
                     .first()
                 )
+                ctype = (conn.connection_type or "").strip().lower()
+                if ctype == "assisted":
+                    assisted_meta = _assisted_connect_state(conn)
+                    request_data = dict(assisted_meta.get("request") or {})
+                    rows.append({
+                        "request_id":         conn.id,
+                        "request_kind":       "assisted_connect",
+                        "tenant_id":          conn.tenant_id,
+                        "tenant_name":        tenant.name if tenant else None,
+                        "merchant_email":     user.email if user else None,
+                        "merchant_phone":     getattr(user, "phone", None) if user else None,
+                        "wa_status":          conn.status,
+                        "connection_type":    conn.connection_type,
+                        "provider":           conn.provider,
+                        "requested_phone":    request_data.get("contact_phone") or conn.phone_number,
+                        "display_name":       request_data.get("display_name") or conn.business_display_name,
+                        "notes":              request_data.get("notes"),
+                        "submitted_at":       request_data.get("submitted_at"),
+                        "has_whatsapp_business_app": None,
+                        "phone_number_id":    conn.phone_number_id,
+                        "waba_id":            conn.whatsapp_business_account_id,
+                        "channel_id":         None,
+                        "client_id":          None,
+                        "has_api_key":        False,
+                        "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
+                        "last_error":         conn.last_error,
+                        "sending_enabled":    bool(conn.sending_enabled),
+                        "webhook_verified":   bool(conn.webhook_verified),
+                        "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
+                        "integration_complete": {
+                            "truly_connected": bool(
+                                conn.status == "connected" and conn.sending_enabled
+                            ),
+                            "reason_code": "assisted_connect",
+                            "missing_fields": [],
+                            "db_status": conn.status,
+                        },
+                        "webhooks": _coexistence_webhook_block(conn),
+                    })
+                    continue
+
                 coex_meta = dict((conn.extra_metadata or {}).get("coexistence") or {})
                 request_data = dict(coex_meta.get("request") or {})
                 provider_details = dict((conn.extra_metadata or {}).get("provider_details") or {})
-
-                # Reuse the integration-completeness rule the merchant page
-                # consumes so the admin list cannot disagree with it.
-                from routers.whatsapp_connect import (  # noqa: PLC0415
-                    _coexistence_integration_complete,
-                    _coexistence_webhook_block,
-                )
                 completeness = _coexistence_integration_complete(conn)
 
                 rows.append({
+                    "request_id":         conn.id,
+                    "request_kind":       "coexistence",
                     "tenant_id":          conn.tenant_id,
                     "tenant_name":        tenant.name if tenant else None,
                     "merchant_email":     user.email if user else None,
@@ -2899,15 +2945,12 @@ async def admin_list_coexistence_requests(
                     "waba_id":            conn.whatsapp_business_account_id,
                     "channel_id":         provider_details.get("channel_id"),
                     "client_id":          sanitize_coexistence_client_id(provider_details.get("client_id")),
-                    # Never expose the API key — only whether it is stored.
                     "has_api_key":        bool(conn.access_token),
                     "last_attempt_at":    conn.last_attempt_at.isoformat() if conn.last_attempt_at else None,
                     "last_error":         conn.last_error,
                     "sending_enabled":    bool(conn.sending_enabled),
                     "webhook_verified":   bool(conn.webhook_verified),
                     "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
-                    # Authoritative completeness summary — same rule the
-                    # merchant page uses to render its red/green banner.
                     "integration_complete": completeness,
                     "webhooks":           _coexistence_webhook_block(conn),
                 })
@@ -2950,6 +2993,8 @@ async def admin_list_assisted_whatsapp_requests(
         assisted_meta = _assisted_connect_state(conn)
         request_data = dict(assisted_meta.get("request") or {})
         rows.append({
+            "request_id":      conn.id,
+            "request_kind":    "assisted_connect",
             "tenant_id":       conn.tenant_id,
             "tenant_name":     tenant.name if tenant else None,
             "merchant_email":  user.email if user else None,
