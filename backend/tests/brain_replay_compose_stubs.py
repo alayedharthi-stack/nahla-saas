@@ -45,21 +45,17 @@ def stub_llm_reply(
         or 365.5
     )
 
+    if "اخترت" in message:
+        return ""
+
     if "منتجات" in message or topic in {"catalog_browse", "native_catalog_browse"}:
         return "اختر المنتجات المناسبة من القائمة التالية 👇"
 
     if message in {"شفيك", "شلونك"} or topic == "checkout_delivery_mode":
         return "كيف تبين نستلم منك الطلب؟ توصيل أو استلام من المتجر؟"
 
-    if "اخترت" in message:
-        return ""
-
     if any(tok in message for tok in ("ودوه", "وديه", "لعنواني")):
-        total_with_ship = catalog_total + 29.0
-        return (
-            f"تمام، نوصل لعنوانك. المجموع {total_with_ship:.2f} ريال "
-            f"(شامل شحن توصيل 29 ريال)."
-        )
+        return f"تمام، نوصل لعنوانك. المجموع {catalog_total:.2f} ريال."
 
     bank_tokens = ("الراجحي", "راجحي", "تحويل الراجحي", "الأهلي", "اهلي")
     if any(tok in message for tok in bank_tokens) or topic in {

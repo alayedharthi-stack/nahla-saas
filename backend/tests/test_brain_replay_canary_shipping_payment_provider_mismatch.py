@@ -139,6 +139,10 @@ class TestBrainReplayCanaryShippingPaymentProviderMismatch:
         assert "brain" in by_label["delivery"].route_owner
         assert "brain" in by_label["bank"].route_owner or "payment" in by_label["bank"].route_owner
         assert by_label["name"].brain_called or "brain" in by_label["name"].route_owner
+        picked = by_label.get("picked")
+        if picked is not None:
+            assert picked.handled
+            assert _CATALOG_BROWSE_PHRASE not in (picked.outbound_reply or "")
 
         payload = json.loads(audit.to_json())
         assert payload["match_vs_live"] == audit.match_vs_live
@@ -165,6 +169,8 @@ class TestBrainReplayCanaryShippingPaymentProviderMismatch:
                 "default_29_sar_fallback",
                 "tenant_settings_or_kb",
             }
+        else:
+            assert "29" not in (delivery.outbound_reply or "")
 
     def test_payment_provider_parity_matrix(self) -> None:
         cases = [

@@ -3047,13 +3047,13 @@ class MerchantBrain:
         )
 
         _guard_replaced: dict[str, bool] = {}
+        _op = getattr(new_state, "order_prep", None)
 
         try:
             from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
                 apply_payment_reply_guard,
             )
             _prg_meta = dict((profile or {}).get("inbound_metadata") or {})
-            _op = getattr(new_state, "order_prep", None)
             if _op is not None:
                 _focus = getattr(new_state, "current_product_focus", None)
                 _prg_meta["awaiting_payment_receipt"] = bool(
@@ -3103,6 +3103,9 @@ class MerchantBrain:
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,
                 inbound_text=message or "",
+                requested_bank=str(
+                    getattr(_op, "requested_bank", "") or ""
+                ).strip() if _op is not None else "",
             )
             if _pcg.replaced:
                 reply = _pcg.reply
@@ -3111,6 +3114,55 @@ class MerchantBrain:
             logger.warning(
                 "[PAYMENT_CREDENTIAL_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _pcg_exc,
+            )
+
+        try:
+            from modules.ai.brain.postprocess.shipping_cost_truth_guard import (  # noqa: PLC0415
+                apply_shipping_cost_truth_guard,
+            )
+
+            _order_prep_dict: Dict[str, Any] = {}
+            _brain_state_dict: Dict[str, Any] = {}
+            if _op is not None:
+                if isinstance(_op, dict):
+                    _order_prep_dict = dict(_op)
+                else:
+                    from dataclasses import asdict as _asdict  # noqa: PLC0415
+
+                    try:
+                        _order_prep_dict = _asdict(_op)  # type: ignore[arg-type]
+                    except Exception:  # noqa: BLE001
+                        _order_prep_dict = {
+                            k: getattr(_op, k)
+                            for k in (
+                                "requested_bank",
+                                "payment_method",
+                                "free_shipping",
+                                "shipping_fee",
+                                "shipping_cost",
+                                "line_items",
+                                "city",
+                            )
+                            if hasattr(_op, k)
+                        }
+            _bs = getattr(new_state, "brain_state", None) or getattr(ctx, "state", None)
+            if isinstance(_bs, dict):
+                _brain_state_dict = dict(_bs)
+            _scg = apply_shipping_cost_truth_guard(
+                reply or "",
+                db=getattr(ctx, "db", None),
+                tenant_id=tenant_id,
+                order_prep=_order_prep_dict,
+                brain_state=_brain_state_dict,
+                conversation_id=conversation_id,
+            )
+            if _scg.replaced:
+                reply = _scg.reply
+                _guard_replaced["shipping_cost_truth_guard"] = True
+        except Exception as _scg_exc:  # noqa: BLE001
+            logger.warning(
+                "[SHIPPING_COST_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _scg_exc,
             )
 
         try:

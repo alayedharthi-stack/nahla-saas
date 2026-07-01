@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.merchant_payment_methods import (
     MerchantPaymentMethods,
@@ -54,6 +54,9 @@ def parse_payment_method_choice(message: str, methods: MerchantPaymentMethods) -
     if indexed and not indexed.startswith("__"):
         return indexed
     if _BANK_RE.search(text) and methods.bank_transfer_enabled:
+        return "bank_transfer"
+    bank = requested_bank_brand(text)
+    if bank and methods.bank_transfer_enabled:
         return "bank_transfer"
     if _COD_RE.search(text) and methods.cash_on_delivery_enabled:
         return "cash_on_delivery"
@@ -113,6 +116,58 @@ def default_payment_method_patch(
     return build_payment_method_state_patch(chosen), chosen
 
 
+_BANK_DISPLAY = {
+    "rajhi": "الراجحي",
+    "alahli": "الأهلي",
+    "alinma": "الإنماء",
+    "albilad": "البلاد",
+}
+
+
+def build_requested_bank_not_enabled_reply(
+    *,
+    requested_bank: str,
+    enabled_brands: Sequence[str],
+) -> str:
+    requested_label = _BANK_DISPLAY.get(requested_bank, requested_bank)
+    enabled_labels = [
+        _BANK_DISPLAY.get(str(brand), str(brand))
+        for brand in enabled_brands
+        if str(brand).strip()
+    ]
+    if enabled_labels:
+        enabled_txt = " أو ".join(enabled_labels)
+        return (
+            f"بنك {requested_label} غير مفعّلة للتحويل في هذا المتجر حالياً. "
+            f"المتاح: {enabled_txt}."
+        )
+    return (
+        "بيانات التحويل البنكي غير مضبوطة في المتجر حالياً. "
+        "تواصل مع المتجر لتأكيد بيانات التحويل."
+    )
+
+
+def build_payment_bank_mismatch_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    rejection_reason: str,
+    requested_bank: str = "",
+) -> str:
+    accounts = load_tenant_payment_accounts(db, tenant_id=int(tenant_id))
+    reason = str(rejection_reason or "").strip()
+    bank = _canonical_bank_brand(requested_bank)
+    if reason == "requested_bank_not_enabled":
+        return build_requested_bank_not_enabled_reply(
+            requested_bank=bank,
+            enabled_brands=list(accounts.bank_brands or ()),
+        )
+    return build_requested_bank_not_enabled_reply(
+        requested_bank=bank,
+        enabled_brands=list(accounts.bank_brands or ()),
+    )
+
+
 def build_payment_instruction_reply(
     db: Any,
     *,
@@ -139,7 +194,11 @@ def build_payment_instruction_reply(
             compose_verified_bank_transfer_block,
         )
 
-        body = compose_verified_bank_transfer_block(db, tenant_id=int(tenant_id))
+        body = compose_verified_bank_transfer_block(
+            db,
+            tenant_id=int(tenant_id),
+            requested_bank=str(order_prep.get("requested_bank") or "").strip(),
+        )
         return f"{prefix}{body}".strip()
     if method in {PAYMENT_METHOD_CASH_ON_DELIVERY, "cash_on_delivery", "cod"}:
         return f"{prefix}تم اختيار الدفع عند الاستلام.".strip()

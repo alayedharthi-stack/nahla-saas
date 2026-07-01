@@ -112,27 +112,9 @@ def apply_slot_ownership(
         return patch, "last_name_correction"
 
     if expected == "customer_name" and _ARABIC_SHORT_TEXT_RE.match(text):
-        if prep.get("customer_first_name") and not prep.get("customer_last_name"):
-            patch["customer_last_name"] = text
-            patch["order_flow_v2_last_field"] = "city"
-            field = "customer_last_name"
-        elif not prep.get("customer_first_name"):
-            patch["customer_first_name"] = text.split()[0]
-            if len(text.split()) > 1:
-                patch["customer_last_name"] = " ".join(text.split()[1:])
-                patch["order_flow_v2_last_field"] = "city"
-            else:
-                patch["order_flow_v2_last_field"] = "customer_name"
-            field = "customer_first_name"
-        else:
-            patch["order_flow_v2_last_field"] = "customer_name"
-            field = "customer_name"
-        patch.update(build_contract(
-            decision="update_slot",
-            field=field,
-            reason="customer_name_owned_turn",
-        ).to_patch())
-        return patch, "customer_name_owned"
+        name_patch, name_reason = _consume_customer_name_patch(text, prep, missing)
+        if name_patch:
+            return name_patch, name_reason
 
     if expected == "city" and _ARABIC_TEXT_RE.match(text):
         city, address_hint = _city_and_hint_from_text(text)
@@ -217,3 +199,35 @@ def _next_missing_field(missing: List[str]) -> str:
         if field in missing:
             return field
     return ""
+
+
+def _consume_customer_name_patch(
+    text: str,
+    prep: Dict[str, Any],
+    missing: List[str],
+) -> Tuple[Dict[str, Any], str]:
+    """Own a name-like turn when customer_name is the next missing slot."""
+    patch: Dict[str, Any] = {}
+    if "customer_name" not in missing or not _ARABIC_SHORT_TEXT_RE.match(text):
+        return patch, ""
+    if prep.get("customer_first_name") and not prep.get("customer_last_name"):
+        patch["customer_last_name"] = text
+        patch["order_flow_v2_last_field"] = "city"
+        field = "customer_last_name"
+    elif not prep.get("customer_first_name"):
+        patch["customer_first_name"] = text.split()[0]
+        if len(text.split()) > 1:
+            patch["customer_last_name"] = " ".join(text.split()[1:])
+            patch["order_flow_v2_last_field"] = "city"
+        else:
+            patch["order_flow_v2_last_field"] = "customer_name"
+        field = "customer_first_name"
+    else:
+        patch["order_flow_v2_last_field"] = "customer_name"
+        field = "customer_name"
+    patch.update(build_contract(
+        decision="update_slot",
+        field=field,
+        reason="customer_name_owned_turn",
+    ).to_patch())
+    return patch, "customer_name_owned"

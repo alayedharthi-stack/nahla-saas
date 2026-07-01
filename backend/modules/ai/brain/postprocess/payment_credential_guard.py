@@ -41,6 +41,13 @@ _ACCOUNT_NUMBER_LINE_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_BANK_BRANDS = (
+    ("alahli", re.compile(r"(?:الاهلي|الأهلي|اهلي|أهلي|alahli|al\s*ahli|ncb|snb)", re.I)),
+    ("rajhi", re.compile(r"(?:الراجحي|راجحي|rajhi|al\s*rajhi)", re.I)),
+    ("alinma", re.compile(r"(?:الانماء|الإنماء|alinma)", re.I)),
+    ("albilad", re.compile(r"(?:البلاد|albilad)", re.I)),
+)
+
 
 @dataclass(frozen=True)
 class PaymentCredentialGuardResult:
@@ -48,6 +55,36 @@ class PaymentCredentialGuardResult:
     replaced: bool = False
     reason: str = ""
     blocked_ibans: Tuple[str, ...] = ()
+
+
+def _canonical_bank_brand(value: str) -> str:
+    text = str(value or "").strip().lower()
+    for brand, pattern in _BANK_BRANDS:
+        if pattern.search(text) or text == brand:
+            return brand
+    return text
+
+
+def _mentioned_bank_brands(text: str) -> Tuple[str, ...]:
+    found: List[str] = []
+    for brand, pattern in _BANK_BRANDS:
+        if pattern.search(str(text or "")):
+            found.append(brand)
+    return tuple(found)
+
+
+def _reply_mentions_wrong_bank_brand(
+    reply: str,
+    *,
+    requested_bank: str,
+) -> bool:
+    requested = _canonical_bank_brand(requested_bank)
+    if not requested:
+        return False
+    mentioned = _mentioned_bank_brands(reply)
+    if not mentioned:
+        return False
+    return any(brand != requested for brand in mentioned)
 
 
 def _verified_ibans(db: Any, tenant_id: Optional[int]) -> Tuple[str, ...]:
@@ -60,6 +97,56 @@ def _verified_ibans(db: Any, tenant_id: Optional[int]) -> Tuple[str, ...]:
         return tuple(accounts.ibans or ())
     except Exception:  # noqa: BLE001
         return ()
+
+
+def _ibans_for_requested_brand(
+    db: Any,
+    tenant_id: int,
+    requested_bank: str,
+) -> Tuple[str, ...]:
+    brand = _canonical_bank_brand(requested_bank)
+    if not brand or db is None or not tenant_id:
+        return ()
+    try:
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from core.tenant_payment_accounts import extract_ibans  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return ()
+
+    try:
+        rows = (
+            db.query(MerchantKnowledgeSection)
+            .filter(
+                MerchantKnowledgeSection.tenant_id == int(tenant_id),
+                MerchantKnowledgeSection.kind.in_(("bank_transfer", "payment_method")),
+                MerchantKnowledgeSection.is_active.is_(True),
+            )
+            .all()
+        )
+    except Exception:  # noqa: BLE001
+        return ()
+
+    ibans: List[str] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        title = str(getattr(row, "title", "") or "")
+        body = str(getattr(row, "body", "") or "")
+        blob = f"{title}\n{body}"
+        md = getattr(row, "metadata_json", None) or {}
+        row_brand = _canonical_bank_brand(
+            str(md.get("bank_brand") or "") if isinstance(md, dict) else ""
+        )
+        if not row_brand:
+            mentioned = _mentioned_bank_brands(blob)
+            row_brand = mentioned[0] if len(mentioned) == 1 else ""
+        if row_brand and row_brand != brand:
+            continue
+        if row_brand == brand or brand in _mentioned_bank_brands(blob):
+            for iban in extract_ibans(blob):
+                if iban not in seen:
+                    seen.add(iban)
+                    ibans.append(iban)
+    return tuple(ibans)
 
 
 def reply_contains_unverified_payment_credentials(
@@ -84,15 +171,42 @@ def reply_contains_unverified_payment_credentials(
     return False, ()
 
 
+def _build_requested_bank_mismatch_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    requested_bank: str,
+) -> str:
+    from modules.ai.order_flow_v2.payment import build_payment_bank_mismatch_reply  # noqa: PLC0415
+
+    return build_payment_bank_mismatch_reply(
+        db,
+        tenant_id=int(tenant_id),
+        rejection_reason="requested_bank_not_enabled",
+        requested_bank=requested_bank,
+    )
+
+
 def compose_verified_bank_transfer_block(
     db: Any,
     *,
     tenant_id: int,
+    requested_bank: str = "",
 ) -> str:
     """Deterministic bank-transfer instructions from verified tenant settings only."""
-    accounts = _verified_ibans(db, tenant_id)
-    if not accounts:
-        return _BANK_DETAILS_NOT_CONFIGURED_AR
+    requested = _canonical_bank_brand(requested_bank)
+    if requested:
+        accounts = _ibans_for_requested_brand(db, int(tenant_id), requested)
+        if not accounts:
+            return _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id),
+                requested_bank=requested,
+            )
+    else:
+        accounts = _verified_ibans(db, tenant_id)
+        if not accounts:
+            return _BANK_DETAILS_NOT_CONFIGURED_AR
     lines = ["تم اختيار التحويل البنكي."]
     if len(accounts) == 1:
         lines.append(f"الآيبان الخاص بالمتجر: {accounts[0]}")
@@ -119,12 +233,47 @@ def apply_payment_credential_guard(
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
     inbound_text: str = "",
+    requested_bank: str = "",
 ) -> PaymentCredentialGuardResult:
     original = str(reply or "")
     if not original.strip():
         return PaymentCredentialGuardResult(reply=original, replaced=False)
 
-    verified = _verified_ibans(db, tenant_id)
+    requested = _canonical_bank_brand(
+        requested_bank or _canonical_bank_brand(inbound_text)
+    )
+    brand_ibans: Tuple[str, ...] = ()
+    if requested:
+        brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
+    verified = brand_ibans if requested else _verified_ibans(db, tenant_id)
+
+    if requested and _reply_mentions_wrong_bank_brand(original, requested_bank=requested):
+        brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
+        if brand_ibans:
+            replacement = compose_verified_bank_transfer_block(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
+            )
+        else:
+            replacement = _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
+            )
+        logger.info(
+            "[PAYMENT_CREDENTIAL_GUARD] wrong_provider_substitution tenant=%s "
+            "conversation=%s requested=%s",
+            tenant_id,
+            conversation_id,
+            requested,
+        )
+        return PaymentCredentialGuardResult(
+            reply=replacement,
+            replaced=True,
+            reason="wrong_provider_substitution",
+        )
+
     blocked, blocked_ibans = reply_contains_unverified_payment_credentials(
         original,
         verified_ibans=verified,
@@ -154,6 +303,21 @@ def apply_payment_credential_guard(
                 replaced=True,
                 reason="stripped_unverified_credentials",
                 blocked_ibans=blocked_ibans,
+            )
+
+    if requested and blocked:
+        brand_ibans = _ibans_for_requested_brand(db, int(tenant_id or 0), requested)
+        if brand_ibans:
+            replacement = compose_verified_bank_transfer_block(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
+            )
+        else:
+            replacement = _build_requested_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id or 0),
+                requested_bank=requested,
             )
 
     logger.info(

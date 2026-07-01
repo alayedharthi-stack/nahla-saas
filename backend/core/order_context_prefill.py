@@ -662,6 +662,8 @@ def build_checkout_compose_facts(
     facts: Dict[str, Any] = {
         "do_not_ask_phone": True,
         "do_not_repeat_field_confirmations": True,
+        "do_not_ask_delivery_method": True,
+        "do_not_invent_shipping_fee": True,
     }
 
     inquiry = detect_customer_identity_inquiry(message)

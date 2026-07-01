@@ -124,6 +124,12 @@ class BrainReplayRunner:
 
     @contextmanager
     def _runtime_patches(self) -> Iterator[None]:
+        import sys  # noqa: PLC0415
+
+        import models as _models  # noqa: PLC0415
+
+        sys.modules.setdefault("database.models", _models)
+
         from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
         from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
             apply_payment_credential_guard as _pcg,
@@ -212,6 +218,8 @@ class BrainReplayRunner:
         ), patch(
             "modules.ai.brain.postprocess.saudi_dialect_guard.apply_saudi_dialect_guard",
             new=_sdg_wrap,
+        ), patch(
+            "modules.ai.brain.memory.updater.DefaultMemoryUpdater.update",
         ), patch(
             "modules.ai.order_flow_v2.owner.build_line_items_from_payload",
             side_effect=self._line_items_from_catalog_meta,
