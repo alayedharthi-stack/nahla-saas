@@ -323,7 +323,7 @@ def build_checkout_order_number_reply(
                         or getattr(row, "external_id", None)
                         or reference
                     ).strip()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — draft order reference read is best-effort
                 pass
         if reference:
             return f"رقم طلبك الحالي {reference}."

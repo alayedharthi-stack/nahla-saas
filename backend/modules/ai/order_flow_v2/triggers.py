@@ -230,7 +230,7 @@ def is_short_product_keyword_in_order_flow(message: str) -> bool:
 
         if is_address_on_file_claim(message):
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address-on-file probe must not block product routing
         pass
     if is_checkout_escape_inquiry(text):
         return False
