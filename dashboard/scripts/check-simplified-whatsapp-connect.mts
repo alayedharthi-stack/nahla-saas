@@ -13,6 +13,10 @@ const connectPage = readFileSync(
   join(__dir, '../src/pages/WhatsAppConnect.tsx'),
   'utf8',
 )
+const manualSetupPage = readFileSync(
+  join(__dir, '../src/pages/WhatsAppManualSetup.tsx'),
+  'utf8',
+)
 const arLocale = readFileSync(join(__dir, '../src/i18n/ar.ts'), 'utf8')
 const enLocale = readFileSync(join(__dir, '../src/i18n/en.ts'), 'utf8')
 
@@ -138,6 +142,66 @@ for (const file of walkTsFiles(dashboardSrc)) {
 }
 if (!forbiddenPhoneFound) {
   console.log('OK   no forbidden default phone numbers in dashboard/src')
+}
+
+const manualSetupRequired = [
+  'ماذا تحتاج قبل البدء؟',
+  'ماذا يحدث بعد طلب المساعدة؟',
+  'الكتالوج خطوة لاحقة',
+  '/whatsapp-connect',
+  'PATH_EXISTING_ACCOUNT',
+  'PATH_NEW_ACCOUNT',
+  'GUIDE_STEPS',
+]
+
+for (const needle of manualSetupRequired) {
+  if (!manualSetupPage.includes(needle)) {
+    failed++
+    console.error(`FAIL WhatsAppManualSetup.tsx missing required marker: ${needle}`)
+  } else {
+    console.log(`OK   manual setup contains ${needle}`)
+  }
+}
+
+const manualSetupForbiddenSections = [
+  'بيانات قد يطلبها فريق نحلة',
+  'قائمة الصور المطلوبة',
+  'NAHLA_NEEDS',
+  'HELP_MANUAL_SETUP_IMAGES.map',
+]
+
+for (const needle of manualSetupForbiddenSections) {
+  if (manualSetupPage.includes(needle)) {
+    failed++
+    console.error(`FAIL WhatsAppManualSetup.tsx exposes internal section: ${needle}`)
+  } else {
+    console.log(`OK   manual setup hides ${needle}`)
+  }
+}
+
+const manualSetupForbiddenTerms = [
+  'Permanent System User Access Token',
+  'Phone Number ID',
+  'WhatsApp Business Account ID',
+  'Business ID',
+  'Meta Catalog ID',
+  'Access Token',
+  'WABA',
+]
+
+/** Strip asset filename lines — internal dev paths only, not merchant UI copy. */
+const manualSetupPublicSource = manualSetupPage
+  .split('\n')
+  .filter(line => !/\.png['"]/.test(line))
+  .join('\n')
+
+for (const term of manualSetupForbiddenTerms) {
+  if (manualSetupPublicSource.includes(term)) {
+    failed++
+    console.error(`FAIL WhatsAppManualSetup.tsx exposes internal term: ${term}`)
+  } else {
+    console.log(`OK   manual setup hides ${term}`)
+  }
 }
 
 if (failed > 0) {
