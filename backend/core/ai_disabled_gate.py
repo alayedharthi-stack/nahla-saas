@@ -23,6 +23,14 @@ REASON_AI_PAUSED = "ai_paused"
 REASON_MANUAL_PAUSE = "manual_pause"
 REASON_HUMAN_SUPERVISION = "human_supervision"
 REASON_STORE_AI_DISABLED = "store_ai_disabled"
+REASON_STORE_AI_TEST_MODE_NOT_ALLOWED = "store_ai_test_mode_not_allowed"
+
+
+@dataclass(frozen=True)
+class StoreAIModeDecision:
+    allowed: bool
+    reason: str = ""
+    mode: str = "on"
 
 
 @dataclass(frozen=True)
@@ -65,15 +73,65 @@ def disabled_reason_for_conversation(convo: Conversation | None) -> str:
 
 
 def is_store_ai_enabled(db: Session, tenant_id: int) -> bool:
-    """Return True when the merchant has store-wide AI replies enabled."""
-    from core.tenant import get_or_create_settings, merge_ai_defaults  # noqa: PLC0415
+    """Return True only when store AI is fully on for all customers."""
+    from core.tenant import (  # noqa: PLC0415
+        get_or_create_settings,
+        merge_ai_defaults,
+        resolve_store_ai_mode,
+        STORE_AI_MODE_ON,
+    )
 
     settings = get_or_create_settings(db, tenant_id)
     ai = merge_ai_defaults(settings.ai_settings)
-    raw = ai.get("store_ai_enabled", True)
-    if raw is None:
-        return True
-    return bool(raw)
+    return resolve_store_ai_mode(ai) == STORE_AI_MODE_ON
+
+
+def is_ai_allowed_by_store_mode(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+) -> StoreAIModeDecision:
+    """
+    Evaluate store-wide AI mode for an inbound/automation target phone.
+
+    off  → blocked (store_ai_disabled)
+    test → allowed only when phone is in ai_test_allowed_numbers
+    on   → allowed (per-conversation guards still apply afterward)
+    """
+    from core.tenant import (  # noqa: PLC0415
+        STORE_AI_MODE_OFF,
+        STORE_AI_MODE_ON,
+        STORE_AI_MODE_TEST,
+        get_or_create_settings,
+        merge_ai_defaults,
+        resolve_store_ai_mode,
+    )
+    from utils.phone_utils import phone_matches_ai_test_allowlist  # noqa: PLC0415
+
+    settings = get_or_create_settings(db, tenant_id)
+    ai = merge_ai_defaults(settings.ai_settings)
+    mode = resolve_store_ai_mode(ai)
+
+    if mode == STORE_AI_MODE_ON:
+        return StoreAIModeDecision(allowed=True, mode=mode)
+    if mode == STORE_AI_MODE_OFF:
+        return StoreAIModeDecision(
+            allowed=False,
+            reason=REASON_STORE_AI_DISABLED,
+            mode=mode,
+        )
+
+    allowlist = ai.get("ai_test_allowed_numbers")
+    if not isinstance(allowlist, list):
+        allowlist = []
+    if phone_matches_ai_test_allowlist(customer_phone, allowlist):
+        return StoreAIModeDecision(allowed=True, mode=STORE_AI_MODE_TEST)
+
+    return StoreAIModeDecision(
+        allowed=False,
+        reason=REASON_STORE_AI_TEST_MODE_NOT_ALLOWED,
+        mode=STORE_AI_MODE_TEST,
+    )
 
 
 def _find_conversations_for_phone(
@@ -106,22 +164,24 @@ def is_ai_disabled_for_conversation(
     ai_paused flags — individual pauses remain intact when the store toggle
     is turned back on.
     """
-    if not is_store_ai_enabled(db, tenant_id):
+    mode_decision = is_ai_allowed_by_store_mode(db, tenant_id, customer_phone)
+    if not mode_decision.allowed:
         convos = _find_conversations_for_phone(db, tenant_id, customer_phone)
         anchor = conversation
         if anchor is None and convos:
             anchor = convos[0]
         logger.info(
-            "[AI_DISABLED_GATE] reason=%s tenant_id=%s source=%s phone=%s conversation_id=%s",
-            REASON_STORE_AI_DISABLED,
+            "[AI_DISABLED_GATE] reason=%s tenant_id=%s source=%s phone=%s conversation_id=%s mode=%s",
+            mode_decision.reason or REASON_STORE_AI_DISABLED,
             tenant_id,
             source,
             customer_phone,
             getattr(anchor, "id", None),
+            mode_decision.mode,
         )
         return AIDisabledDecision(
             disabled=True,
-            reason=REASON_STORE_AI_DISABLED,
+            reason=mode_decision.reason or REASON_STORE_AI_DISABLED,
             conversation=anchor,
             source=source,
         )
@@ -282,8 +342,11 @@ __all__ = [
     "REASON_HUMAN_SUPERVISION",
     "REASON_MANUAL_PAUSE",
     "REASON_STORE_AI_DISABLED",
+    "REASON_STORE_AI_TEST_MODE_NOT_ALLOWED",
+    "StoreAIModeDecision",
     "disabled_reason_for_conversation",
     "evaluate_ai_disabled_send_block",
+    "is_ai_allowed_by_store_mode",
     "is_ai_disabled_for_conversation",
     "is_store_ai_enabled",
     "log_ai_disabled_gate",

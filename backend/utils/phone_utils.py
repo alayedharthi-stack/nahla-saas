@@ -188,6 +188,43 @@ def format_wa_send_recipient(raw: Optional[str]) -> Optional[str]:
     return digits
 
 
+def normalize_whatsapp_phone_for_ai_allowlist(raw: Optional[str]) -> str:
+    """
+    Normalize a WhatsApp phone for AI test allowlist comparison.
+
+    Returns MSISDN digits only (no ``+``), matching webhook ``from`` values.
+    """
+    msisdn = format_wa_send_recipient(raw)
+    if msisdn:
+        return msisdn
+    e164 = normalize_to_e164(str(raw or "").strip())
+    if e164 and e164.startswith("+"):
+        digits = e164[1:]
+        if digits.isdigit():
+            return digits
+    digits = re.sub(r"\D", "", str(raw or ""))
+    return digits
+
+
+def phone_matches_ai_test_allowlist(
+    phone: Optional[str],
+    allowlist: Optional[list],
+) -> bool:
+    """True when *phone* matches any normalized entry in *allowlist*."""
+    needle = normalize_whatsapp_phone_for_ai_allowlist(phone)
+    if not needle:
+        return False
+    if not allowlist:
+        return False
+    normalized = {
+        normalize_whatsapp_phone_for_ai_allowlist(entry)
+        for entry in allowlist
+        if entry is not None and str(entry).strip()
+    }
+    normalized.discard("")
+    return needle in normalized
+
+
 def redact_phone_for_log(raw: Optional[str]) -> str:
     """Mask a phone for structured logs — never log full MSISDN."""
     digits = re.sub(r"\D", "", str(raw or ""))

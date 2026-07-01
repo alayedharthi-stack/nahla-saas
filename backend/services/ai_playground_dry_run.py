@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from core.ai_disabled_gate import REASON_STORE_AI_DISABLED, is_store_ai_enabled
+from core.ai_disabled_gate import (
+    REASON_STORE_AI_DISABLED,
+    REASON_STORE_AI_TEST_MODE_NOT_ALLOWED,
+    is_ai_allowed_by_store_mode,
+)
 from core.billing import has_billing_access
 from core.payment_intent import looks_like_delivery_confirmation
 from modules.ai.brain.commerce.non_catalog_availability_kb_route import (
@@ -507,6 +511,7 @@ def run_playground_dry_run(
     message: str,
     mode: str = "stateless",
     context: Optional[Mapping[str, Any]] = None,
+    test_phone: Optional[str] = None,
 ) -> PlaygroundDryRunResult:
     """
     Preview what AI would reply to an inbound message without side effects.
@@ -521,11 +526,22 @@ def run_playground_dry_run(
         base.warnings.append("Message is empty.")
         return base
 
-    if not is_store_ai_enabled(db, tenant_id):
-        base.blocked_reason = REASON_STORE_AI_DISABLED
-        base.warnings.append(
-            "Store AI is disabled; no customer would receive a reply."
-        )
+    mode_decision = is_ai_allowed_by_store_mode(
+        db,
+        tenant_id,
+        (test_phone or "").strip(),
+    )
+    if not mode_decision.allowed:
+        base.blocked_reason = mode_decision.reason or REASON_STORE_AI_DISABLED
+        if base.blocked_reason == REASON_STORE_AI_TEST_MODE_NOT_ALLOWED:
+            base.warnings.append(
+                "Store AI is in test mode; provide test_phone matching "
+                "ai_test_allowed_numbers to preview a reply."
+            )
+        else:
+            base.warnings.append(
+                "Store AI is disabled; no customer would receive a reply."
+            )
         return base
 
     if not has_billing_access(db, tenant_id):

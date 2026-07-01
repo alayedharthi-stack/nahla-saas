@@ -8,9 +8,9 @@ POST /settings/test-whatsapp — test WhatsApp connection
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -22,11 +22,18 @@ from core.tenant import (
     DEFAULT_NOTIFICATIONS,
     DEFAULT_STORE,
     DEFAULT_WHATSAPP,
+    STORE_AI_MODE_OFF,
+    STORE_AI_MODE_ON,
+    STORE_AI_MODE_TEST,
+    VALID_STORE_AI_MODES,
     get_or_create_settings,
     merge_defaults,
     merge_ai_defaults,
+    resolve_store_ai_mode,
     resolve_tenant_id,
+    sync_store_ai_enabled_from_mode,
 )
+from utils.phone_utils import normalize_whatsapp_phone_for_ai_allowlist
 from services.whatsapp_platform.token_manager import get_token_context
 
 router = APIRouter()
@@ -121,7 +128,9 @@ class WidgetSettingsIn(BaseModel):
 
 
 class StoreAISettingsPatch(BaseModel):
-    store_ai_enabled: bool
+    store_ai_enabled: Optional[bool] = None
+    store_ai_mode: Optional[str] = None
+    ai_test_allowed_numbers: Optional[List[str]] = None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -214,14 +223,45 @@ async def patch_store_ai_settings(
     db: Session = Depends(get_db),
     _no_support: dict = Depends(require_not_support_impersonation),
 ):
-    """Toggle store-wide AI replies without touching per-conversation pause state."""
+    """Toggle store-wide AI mode without touching per-conversation pause state."""
     from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    if (
+        body.store_ai_enabled is None
+        and body.store_ai_mode is None
+        and body.ai_test_allowed_numbers is None
+    ):
+        raise HTTPException(status_code=400, detail="No AI settings fields provided.")
 
     tenant_id = resolve_tenant_id(request)
     settings = get_or_create_settings(db, tenant_id)
 
     ai_settings = dict(settings.ai_settings or {})
-    ai_settings["store_ai_enabled"] = bool(body.store_ai_enabled)
+
+    if body.store_ai_mode is not None:
+        mode = str(body.store_ai_mode).strip().lower()
+        if mode not in VALID_STORE_AI_MODES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid store_ai_mode. Expected one of: {sorted(VALID_STORE_AI_MODES)}",
+            )
+        ai_settings["store_ai_mode"] = mode
+        ai_settings["store_ai_enabled"] = sync_store_ai_enabled_from_mode(mode)
+    elif body.store_ai_enabled is not None:
+        enabled = bool(body.store_ai_enabled)
+        ai_settings["store_ai_enabled"] = enabled
+        ai_settings["store_ai_mode"] = STORE_AI_MODE_ON if enabled else STORE_AI_MODE_OFF
+
+    if body.ai_test_allowed_numbers is not None:
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for raw in body.ai_test_allowed_numbers:
+            digits = normalize_whatsapp_phone_for_ai_allowlist(str(raw or ""))
+            if digits and digits not in seen:
+                seen.add(digits)
+                normalized.append(digits)
+        ai_settings["ai_test_allowed_numbers"] = normalized
+
     settings.ai_settings = ai_settings
     flag_modified(settings, "ai_settings")
     settings.updated_at = datetime.now(timezone.utc)
@@ -229,9 +269,12 @@ async def patch_store_ai_settings(
     db.refresh(settings)
 
     ai = merge_ai_defaults(settings.ai_settings)
+    mode = resolve_store_ai_mode(ai)
     return {
         "ok": True,
         "store_ai_enabled": bool(ai.get("store_ai_enabled", True)),
+        "store_ai_mode": mode,
+        "ai_test_allowed_numbers": list(ai.get("ai_test_allowed_numbers") or []),
         "ai": ai,
     }
 
