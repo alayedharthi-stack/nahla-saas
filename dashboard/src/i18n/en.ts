@@ -894,6 +894,7 @@ const en: Translations = {
       metaApprovalNotice:      'Direct Meta connection may not complete until Meta approval is finalized. If it does not work, we recommend requesting assisted setup from the Nahlah team.',
       metaExistingAccountHint: 'You can connect an existing WhatsApp Business account, or create a new one during the Meta flow if the option is available to you.',
       metaConnectBtn:          'Connect via Meta',
+      manualSetupLink:         'Need help? Open the manual setup guide',
     },
     assisted: {
       formTitle:               'Request WhatsApp connect with Nahla team help',
@@ -921,6 +922,7 @@ const en: Translations = {
       requestTimeLabel:        'Request time:',
       contactInstructions:     'You can also reach us at:',
       supportEmail:            'support@nahlah.ai',
+      manualSetupLink:         'Read the manual setup guide',
     },
     connLabels: {
       viaMeta:      'Connected via Meta',

@@ -1,91 +1,256 @@
 /**
  * WhatsAppManualSetup.tsx
  * ────────────────────────
- * صفحة شرح تفصيلي للتاجر — كيفية استخراج بيانات Meta لربط واتساب يدويًا
- * (Phone Number ID / WABA ID / Permanent Access Token)
+ * /help/whatsapp-manual-setup
+ *
+ * دليل عربي لتجهيز Meta Business وربط حساب واتساب للأعمال بنحلة.
+ *
+ * الصور (dashboard/public/help/whatsapp-manual-setup/):
+ *   01-meta-business-home.png
+ *   02-business-settings.png
+ *   03-whatsapp-accounts.png
+ *   04-add-or-select-waba.png
+ *   05-add-phone-number.png
+ *   06-verify-phone-number.png
+ *   07-whatsapp-manager-status.png
+ *   08-nahlah-whatsapp-connect.png
+ *   09-nahlah-assisted-request.png
+ *   10-commerce-catalog-later.png  (اختياري — الكتالوج لاحقاً)
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  AlertTriangle, ArrowLeft, BookOpen, CheckCircle2,
-  ChevronDown, ChevronUp, Copy, ExternalLink,
-  Info, MessageCircle, Phone, ShieldCheck,
+  AlertTriangle,
+  ArrowLeft,
+  BookOpen,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  ImageIcon,
+  Info,
+  Link2,
+  MessageCircle,
+  ShieldCheck,
 } from 'lucide-react'
 
-// ── Image placeholder ─────────────────────────────────────────────────────────
-// Replace `src` with real screenshots when available.
-function StepImage({ alt, note }: { alt: string; note?: string }) {
+const HELP_IMAGE_BASE = '/help/whatsapp-manual-setup'
+
+export const HELP_MANUAL_SETUP_IMAGES = [
+  '01-meta-business-home.png',
+  '02-business-settings.png',
+  '03-whatsapp-accounts.png',
+  '04-add-or-select-waba.png',
+  '05-add-phone-number.png',
+  '06-verify-phone-number.png',
+  '07-whatsapp-manager-status.png',
+  '08-nahlah-whatsapp-connect.png',
+  '09-nahlah-assisted-request.png',
+  '10-commerce-catalog-later.png',
+] as const
+
+const QUICK_LINKS = [
+  { label: 'لوحة نحلة', href: 'https://app.nahlah.ai' },
+  { label: 'صفحة ربط واتساب', href: 'https://app.nahlah.ai/whatsapp-connect' },
+  { label: 'Meta Business', href: 'https://business.facebook.com/' },
+  { label: 'إعدادات النشاط التجاري', href: 'https://business.facebook.com/settings' },
+  { label: 'WhatsApp Manager', href: 'https://business.facebook.com/latest/whatsapp_manager' },
+] as const
+
+const PATH_EXISTING_ACCOUNT = [
+  'افتح «ربط عبر Meta» في نحلة',
+  'سجّل دخولك بحساب فيسبوك',
+  'اختر النشاط التجاري',
+  'اختر حساب واتساب للأعمال الموجود',
+  'اختر رقم واتساب الأعمال',
+  'أكمل التحقق والربط',
+]
+
+const PATH_NEW_ACCOUNT = [
+  'افتح «ربط عبر Meta» في نحلة',
+  'سجّل دخولك بحساب فيسبوك',
+  'أنشئ أو اختر Meta Business',
+  'أنشئ حساب واتساب للأعمال أثناء خطوات Meta إذا ظهر لك الخيار',
+  'أضف رقم واتساب الأعمال',
+  'أكمل التحقق',
+]
+
+type GuideStep = {
+  num: number
+  title: string
+  body: string
+  image: (typeof HELP_MANUAL_SETUP_IMAGES)[number]
+  href?: string
+  path?: string
+}
+
+const GUIDE_STEPS: GuideStep[] = [
+  {
+    num: 1,
+    title: 'فتح Meta Business',
+    href: 'https://business.facebook.com/',
+    image: '01-meta-business-home.png',
+    body: 'افتح Meta Business وسجّل الدخول بحساب فيسبوك المرتبط بنشاطك التجاري. إذا لم يكن لديك Business Portfolio، أنشئ واحداً باسم نشاطك.',
+  },
+  {
+    num: 2,
+    title: 'التأكد من Business Portfolio',
+    href: 'https://business.facebook.com/settings',
+    image: '02-business-settings.png',
+    body: 'من إعدادات النشاط التجاري تأكد أن لديك صلاحية Admin وأن اسم النشاط صحيح.',
+  },
+  {
+    num: 3,
+    title: 'فتح حسابات واتساب',
+    path: 'Accounts → WhatsApp accounts  ·  الحسابات → حسابات واتساب',
+    image: '03-whatsapp-accounts.png',
+    body: 'تأكد من وجود حساب واتساب للأعمال مرتبط بنشاطك، أو جهّز نفسك لإنشاء حساب جديد في الخطوة التالية.',
+  },
+  {
+    num: 4,
+    title: 'ربط أو إنشاء حساب واتساب للأعمال',
+    image: '04-add-or-select-waba.png',
+    body: 'إذا كان لديك حساب واتساب للأعمال مسبقاً، اختره. إذا لم يكن لديك، أنشئ حساباً جديداً أثناء خطوات Meta أو من WhatsApp Manager عندما يتوفر الخيار.',
+  },
+  {
+    num: 5,
+    title: 'إضافة رقم واتساب الأعمال',
+    image: '05-add-phone-number.png',
+    body: 'أضف رقم واتساب الأعمال الذي تريد استخدامه مع نحلة. يجب أن يكون الرقم قابلاً لاستقبال رمز التحقق (SMS أو مكالمة).',
+  },
+  {
+    num: 6,
+    title: 'التحقق من الرقم',
+    image: '06-verify-phone-number.png',
+    body: 'أكمل التحقق من الرقم داخل Meta. بدون تحقق ناجح لن يعمل الربط مع نحلة.',
+  },
+  {
+    num: 7,
+    title: 'مراجعة الحالة في WhatsApp Manager',
+    href: 'https://business.facebook.com/latest/whatsapp_manager',
+    image: '07-whatsapp-manager-status.png',
+    body: 'من WhatsApp Manager تحقق أن الرقم ظاهر وحالته جاهزة أو قيد التفعيل قبل العودة إلى نحلة.',
+  },
+  {
+    num: 8,
+    title: 'العودة إلى نحلة — تجربة ربط Meta',
+    href: 'https://app.nahlah.ai/whatsapp-connect',
+    image: '08-nahlah-whatsapp-connect.png',
+    body: 'ارجع إلى صفحة ربط واتساب في نحلة واضغط «ربط عبر Meta» لإكمال الربط إذا كان مسار Meta متاحاً لحسابك.',
+  },
+  {
+    num: 9,
+    title: 'أو طلب مساعدة فريق نحلة',
+    href: 'https://app.nahlah.ai/whatsapp-connect',
+    image: '09-nahlah-assisted-request.png',
+    body: 'إذا واجهت صعوبة، اختر «طلب ربط بمساعدة فريق نحلة». لا تدخل Access Token أو معرفات Meta في واجهة التاجر — فريقنا يكمل الربط معك بأمان.',
+  },
+]
+
+const NAHLA_NEEDS = [
+  'Business ID',
+  'WhatsApp Business Account ID',
+  'Phone Number ID',
+  'رقم واتساب المعروض',
+  'Permanent System User Access Token عند الحاجة فقط',
+  'Meta Catalog ID لاحقاً إذا أردنا ربط الكتالوج',
+]
+
+function HelpStepImage({ filename, alt }: { filename: string; alt: string }) {
+  const [missing, setMissing] = useState(false)
+  const src = `${HELP_IMAGE_BASE}/${filename}`
+
+  if (missing) {
+    return (
+      <div className="w-full rounded-xl overflow-hidden border-2 border-dashed border-violet-200 bg-gradient-to-br from-slate-50 to-violet-50/40 flex flex-col items-center justify-center py-12 gap-3 text-slate-500">
+        <ImageIcon className="w-10 h-10 text-violet-300" />
+        <p className="text-sm font-medium text-slate-600">سيتم إضافة الصورة هنا:</p>
+        <code className="text-xs font-mono bg-white/80 border border-slate-200 px-3 py-1.5 rounded-lg text-violet-700">
+          {filename}
+        </code>
+      </div>
+    )
+  }
+
   return (
-    <div className="w-full rounded-xl overflow-hidden border-2 border-dashed border-slate-200 bg-slate-50 flex flex-col items-center justify-center py-10 gap-2 text-slate-400">
-      <BookOpen className="w-8 h-8 text-slate-300" />
-      <p className="text-sm font-medium">{alt}</p>
-      {note && <p className="text-xs text-center px-8 text-slate-400">{note}</p>}
-    </div>
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      onError={() => setMissing(true)}
+      className="w-full rounded-xl border border-slate-200 shadow-sm bg-white object-contain max-h-[420px]"
+    />
   )
 }
 
-// ── Tip / Warning boxes ───────────────────────────────────────────────────────
 function TipBox({ children }: { children: React.ReactNode }) {
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex gap-3">
       <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
-      <div className="text-sm text-blue-800">{children}</div>
+      <div className="text-sm text-blue-800 leading-relaxed">{children}</div>
     </div>
   )
 }
+
 function WarnBox({ children }: { children: React.ReactNode }) {
   return (
     <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3">
       <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-      <div className="text-sm text-amber-800">{children}</div>
+      <div className="text-sm text-amber-900 leading-relaxed">{children}</div>
     </div>
   )
 }
 
-// ── CopyField ─────────────────────────────────────────────────────────────────
-function CopyableValue({ label, example }: { label: string; example: string }) {
-  const [copied, setCopied] = useState(false)
+function ExternalHref({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2 bg-slate-900 rounded-lg px-4 py-2.5">
-      <span className="text-xs text-slate-400 shrink-0">{label}:</span>
-      <code className="flex-1 text-emerald-400 text-sm font-mono truncate">{example}</code>
-      <button
-        onClick={() => { navigator.clipboard.writeText(example); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-        className="p-1 hover:text-white text-slate-400 transition"
-        title="نسخ"
-      >
-        {copied ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-      </button>
-    </div>
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-1 text-emerald-600 hover:text-emerald-700 underline font-medium break-all"
+    >
+      {children}
+      <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+    </a>
   )
 }
 
-// ── Accordion Step ────────────────────────────────────────────────────────────
 function StepCard({
-  num, title, duration, children,
+  num,
+  title,
   defaultOpen = false,
+  children,
 }: {
-  num: number; title: string; duration?: string
-  children: React.ReactNode; defaultOpen?: boolean
+  num: number
+  title: string
+  defaultOpen?: boolean
+  children: React.ReactNode
 }) {
   const [open, setOpen] = useState(defaultOpen)
+
   return (
     <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
       <button
+        type="button"
         onClick={() => setOpen(p => !p)}
         className="w-full flex items-center gap-4 px-5 py-4 text-right hover:bg-slate-50 transition"
       >
-        <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-base font-black shrink-0 ${open ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500'}`}>
+        <div
+          className={`w-9 h-9 rounded-xl flex items-center justify-center text-base font-black shrink-0 ${
+            open ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500'
+          }`}
+        >
           {num}
         </div>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <p className="font-bold text-slate-800 text-sm">{title}</p>
-          {duration && <p className="text-xs text-slate-400 mt-0.5">{duration}</p>}
         </div>
-        {open ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
+        {open
+          ? <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+          : <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />}
       </button>
       {open && (
-        <div className="px-5 pb-5 space-y-4 border-t border-slate-50">
+        <div className="px-5 pb-5 space-y-4 border-t border-slate-50 pt-4">
           {children}
         </div>
       )}
@@ -93,27 +258,32 @@ function StepCard({
   )
 }
 
-// ── SubStep ───────────────────────────────────────────────────────────────────
-function SubStep({ n, text }: { n: number; text: React.ReactNode }) {
+function PathCard({ title, steps }: { title: string; steps: string[] }) {
   return (
-    <div className="flex gap-3">
-      <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
-        {n}
-      </span>
-      <div className="text-sm text-slate-700">{text}</div>
+    <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+      <p className="font-semibold text-slate-800 text-sm">{title}</p>
+      <ol className="space-y-2">
+        {steps.map((step, i) => (
+          <li key={step} className="flex items-start gap-3 text-sm text-slate-700">
+            <span className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xs font-bold shrink-0">
+              {i + 1}
+            </span>
+            <span className="leading-relaxed">{step}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   )
 }
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
 export default function WhatsAppManualSetup() {
   const navigate = useNavigate()
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-8 space-y-6" dir="rtl">
+    <div className="max-w-3xl mx-auto px-4 py-8 space-y-8" dir="rtl">
 
-      {/* ── Back navigation ────────────────────────────────────────────────── */}
       <button
+        type="button"
         onClick={() => navigate(-1)}
         className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition"
       >
@@ -121,204 +291,132 @@ export default function WhatsAppManualSetup() {
         رجوع
       </button>
 
-      {/* ── Page header ────────────────────────────────────────────────────── */}
-      <div className="space-y-3">
+      <div className="space-y-4">
         <div className="flex items-center gap-3">
           <div className="w-12 h-12 rounded-2xl bg-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/25">
             <MessageCircle className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-black text-slate-900">ربط واتساب يدويًا</h1>
-            <p className="text-sm text-slate-500">دليل خطوة بخطوة للحصول على بيانات Meta</p>
+            <h1 className="text-xl font-black text-slate-900">دليل ربط واتساب الأعمال بنحلة</h1>
+            <p className="text-sm text-slate-500">تجهيز Meta Business وربط حساب واتساب للأعمال</p>
           </div>
         </div>
 
+        <TipBox>
+          هذا الدليل يركز على <strong>ربط رقم واتساب الأعمال بنحلة</strong>.
+          لا تحتاج لإرسال Access Token أو معرفات Meta من واجهة التاجر.
+          عند اختيار «طلب ربط بمساعدة فريق نحلة»، فريقنا يتولى الربط الآمن.
+        </TipBox>
+
         <WarnBox>
-          <p className="font-semibold mb-1">⚠️ تنبيه مهم</p>
-          <p>
-            هذه الطريقة اليدوية هي <strong>الطريقة المعتمدة حاليًا</strong> في نحلة.
-            بعد اكتمال اعتماد Meta الرسمي سيتم تفعيل الربط السهل التلقائي.
-          </p>
+          لا ترسل Access Token أو بيانات حساسة داخل محادثة عامة.
+          فريق نحلة سيطلب البيانات بالطريقة المناسبة عند الحاجة.
         </WarnBox>
       </div>
 
-      {/* ── What you need ──────────────────────────────────────────────────── */}
-      <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5">
-        <p className="font-bold text-slate-800 mb-3">ما ستحتاجه عند الانتهاء</p>
-        <div className="space-y-2">
-          {[
-            { icon: Phone,       label: 'Phone Number ID',   desc: 'رقم تعريفي للهاتف — أرقام فقط (~15 رقمًا)' },
-            { icon: MessageCircle, label: 'WABA ID',          desc: 'معرّف حساب واتساب للأعمال — أرقام فقط' },
-            { icon: ShieldCheck, label: 'Permanent Access Token', desc: 'رمز وصول دائم — يبدأ بـ EAA...' },
-          ].map(({ icon: Icon, label, desc }) => (
-            <div key={label} className="flex items-start gap-3 bg-white rounded-xl p-3 border border-slate-100">
-              <Icon className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-sm font-semibold text-slate-800 font-mono">{label}</p>
-                <p className="text-xs text-slate-500">{desc}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Steps ──────────────────────────────────────────────────────────── */}
       <div className="space-y-3">
-        <p className="font-bold text-slate-800">الخطوات</p>
-
-        {/* Step 1 */}
-        <StepCard num={1} title="إنشاء حساب Meta Business (إذا لم يكن لديك)" duration="5–10 دقائق" defaultOpen>
-          <div className="pt-2 space-y-3">
-            <SubStep n={1} text={<>افتح <a href="https://business.facebook.com" target="_blank" rel="noreferrer" className="text-emerald-600 underline font-medium">business.facebook.com <ExternalLink className="w-3 h-3 inline" /></a> وسجّل الدخول بحساب فيسبوك شخصي</>} />
-            <SubStep n={2} text="انقر على «إنشاء حساب» وأدخل اسم شركتك ومعلوماتك" />
-            <SubStep n={3} text="أكمل إعداد الحساب وتحقق من البريد الإلكتروني" />
-            <StepImage alt="صورة: صفحة إنشاء Meta Business Suite" note="سيتم إضافة الصورة قريبًا" />
-            <TipBox>إذا كان لديك حساب Meta Business بالفعل، انتقل مباشرةً إلى الخطوة التالية.</TipBox>
-          </div>
-        </StepCard>
-
-        {/* Step 2 */}
-        <StepCard num={2} title="إضافة منتج WhatsApp Business لتطبيقك" duration="3–5 دقائق">
-          <div className="pt-2 space-y-3">
-            <SubStep n={1} text={<>افتح <a href="https://developers.facebook.com" target="_blank" rel="noreferrer" className="text-emerald-600 underline font-medium">developers.facebook.com <ExternalLink className="w-3 h-3 inline" /></a></>} />
-            <SubStep n={2} text="من القائمة العلوية، انقر «My Apps» ثم «إنشاء تطبيق»" />
-            <SubStep n={3} text='اختر نوع التطبيق: "Business"' />
-            <SubStep n={4} text="أدخل اسم التطبيق وربطه بحساب Meta Business الذي أنشأته" />
-            <SubStep n={5} text='انتقل إلى «Add Products» وأضف «WhatsApp»' />
-            <StepImage alt="صورة: إضافة منتج WhatsApp في Meta Developer" />
-            <WarnBox>تأكد من اختيار "Business" وليس "Consumer" عند إنشاء التطبيق.</WarnBox>
-          </div>
-        </StepCard>
-
-        {/* Step 3 */}
-        <StepCard num={3} title="الحصول على Phone Number ID و WABA ID" duration="2 دقائق">
-          <div className="pt-2 space-y-3">
-            <SubStep n={1} text='من صفحة التطبيق، انقر على "WhatsApp" في القائمة الجانبية' />
-            <SubStep n={2} text='انقر على "API Setup"' />
-            <SubStep n={3} text="ستجد في الأعلى قسمًا بعنوان «Step 1: Select phone numbers»" />
-            <SubStep n={4} text={<>ستظهر لك قيمتان:<br /><strong>Phone Number ID</strong> — تحت رقم الهاتف مباشرةً<br /><strong>WhatsApp Business Account ID (WABA ID)</strong> — في الأسفل</>} />
-            <StepImage alt="صورة: موقع Phone Number ID و WABA ID في API Setup" note="انظر القسم المحاط باللون الأخضر في الصورة" />
-
-            <div className="space-y-2 pt-1">
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">مثال على الشكل</p>
-              <CopyableValue label="Phone Number ID" example="123456789012345" />
-              <CopyableValue label="WABA ID" example="987654321098765" />
-            </div>
-
-            <TipBox>
-              <strong>هل الرقم رقم اختبار؟</strong> في بداية إعداد API ستجد رقم اختبار مؤقت من Meta.
-              يمكنك استخدامه للاختبار، لكن عليك لاحقًا إضافة رقمك الفعلي وإكمال التحقق.
-            </TipBox>
-          </div>
-        </StepCard>
-
-        {/* Step 4 */}
-        <StepCard num={4} title="إنشاء Permanent Access Token" duration="5 دقائق">
-          <div className="pt-2 space-y-3">
-            <SubStep n={1} text={<>افتح <a href="https://business.facebook.com/settings/system-users" target="_blank" rel="noreferrer" className="text-emerald-600 underline font-medium">System Users في Meta Business Settings <ExternalLink className="w-3 h-3 inline" /></a></>} />
-            <SubStep n={2} text='انقر «Add» وأنشئ مستخدم نظام جديد بصلاحية "Admin"' />
-            <SubStep n={3} text='انقر على المستخدم الجديد ثم «Add Assets» وأضف تطبيق WhatsApp Business الخاص بك' />
-            <SubStep n={4} text='انقر «Generate New Token»، اختر تطبيقك، وحدد الصلاحيات التالية:' />
-
-            <div className="bg-slate-900 rounded-xl p-4 space-y-1">
-              {[
-                'whatsapp_business_messaging',
-                'whatsapp_business_management',
-                'business_management',
-              ].map(p => (
-                <div key={p} className="flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <code className="text-sm text-emerald-400 font-mono">{p}</code>
-                </div>
-              ))}
-            </div>
-
-            <SubStep n={5} text='انقر «Generate Token» ثم انسخ الـ Token فورًا — لن يُعرض مرة أخرى' />
-            <StepImage alt="صورة: إنشاء System User Token في Meta Business" note="احرص على اختيار Never Expire عند إنشاء الـ Token" />
-
-            <WarnBox>
-              <p className="font-semibold mb-1">تحذير مهم جدًا</p>
-              <ul className="list-disc list-inside space-y-1">
-                <li>لا تشارك هذا الـ Token مع أي أحد</li>
-                <li>لا تنشره في كود مصدر عام أو Git</li>
-                <li>إذا سرّبته، أعد إنشاءه فورًا</li>
-              </ul>
-            </WarnBox>
-
-            <div className="pt-1">
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">شكل الـ Token</p>
-              <CopyableValue label="Access Token" example="EAAxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" />
-            </div>
-          </div>
-        </StepCard>
-
-        {/* Step 5 */}
-        <StepCard num={5} title="إدخال البيانات في نحلة" duration="أقل من دقيقة">
-          <div className="pt-2 space-y-3">
-            <SubStep n={1} text={<>ارجع إلى صفحة <a href="/whatsapp-connect" className="text-emerald-600 underline font-medium">ربط واتساب في نحلة</a></>} />
-            <SubStep n={2} text='تأكد أن التبويب المحدد هو "الربط اليدوي"' />
-            <SubStep n={3} text={<>أدخل:<br /><strong>Phone Number ID</strong> في الحقل الأول<br /><strong>WABA ID</strong> في الحقل الثاني<br /><strong>Access Token</strong> في الحقل الثالث</>} />
-            <SubStep n={4} text='انقر "ربط واتساب يدويًا"' />
-            <SubStep n={5} text="ستظهر رسالة نجاح وسيتحول حساب واتساب إلى «مرتبط»" />
-            <StepImage alt="صورة: نموذج الربط اليدوي في نحلة" />
-
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
-              <p className="font-semibold text-emerald-800 text-sm mb-2">✅ بعد الربط الناجح ستتمكن من:</p>
-              <ul className="text-sm text-emerald-700 space-y-1">
-                {[
-                  'استقبال رسائل العملاء والرد التلقائي عبر نحلة AI',
-                  'إرسال حملات تسويقية عبر واتساب',
-                  'عرض المحادثات في لوحة التحكم',
-                ].map(t => (
-                  <li key={t} className="flex items-start gap-2">
-                    <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                    {t}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </StepCard>
+        <p className="font-bold text-slate-800">مساران من صفحة ربط واتساب في نحلة</p>
+        <PathCard
+          title="المسار الأول — لديك حساب واتساب للأعمال مسبقاً"
+          steps={PATH_EXISTING_ACCOUNT}
+        />
+        <PathCard
+          title="المسار الثاني — لا يوجد لديك حساب واتساب للأعمال بعد"
+          steps={PATH_NEW_ACCOUNT}
+        />
       </div>
 
-      {/* ── FAQ ────────────────────────────────────────────────────────────── */}
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
-        <p className="font-bold text-slate-800 mb-4">أسئلة شائعة</p>
-        <div className="space-y-4">
-          {[
-            {
-              q: 'ماذا يحدث إذا غيّرت الـ Token؟',
-              a: 'يتوقف الربط تلقائيًا. ستحتاج للدخول إلى صفحة ربط واتساب وإعادة الربط بـ Token الجديد.',
-            },
-            {
-              q: 'هل يمكنني استخدام رقم مسجّل بالفعل على واتساب الشخصي؟',
-              a: 'لا. الرقم الذي تستخدمه يجب أن لا يكون مسجلاً على واتساب الشخصي أو Business App. إذا كان مسجلاً، حذف الحساب من التطبيق أولاً.',
-            },
-            {
-              q: 'هل الـ Token الذي أحصل عليه من "Generate Access Token" في API Setup يكفي؟',
-              a: 'لا. الـ Token من API Setup مؤقت (يصلح لـ 24 ساعة فقط). تحتاج Token دائمًا (Permanent) من System Users كما شرحنا في الخطوة 4.',
-            },
-            {
-              q: 'متى ستتوفر الطريقة السهلة (Meta Embedded Signup)؟',
-              a: 'بعد اكتمال عملية اعتماد Meta الرسمية لنحلة. سيتم إشعارك عند التفعيل.',
-            },
-          ].map(({ q, a }) => (
-            <div key={q} className="border-b border-slate-50 pb-4 last:border-0 last:pb-0">
-              <p className="text-sm font-semibold text-slate-800 mb-1">{q}</p>
-              <p className="text-sm text-slate-600">{a}</p>
-            </div>
+      <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5 space-y-3">
+        <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
+          <Link2 className="w-4 h-4 text-emerald-500" />
+          روابط سريعة
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {QUICK_LINKS.map(link => (
+            <a
+              key={link.href}
+              href={link.href}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-700 hover:border-emerald-300 hover:text-emerald-700 transition"
+            >
+              <span>{link.label}</span>
+              <ExternalLink className="w-3.5 h-3.5 shrink-0 text-slate-400" />
+            </a>
           ))}
         </div>
       </div>
 
-      {/* ── CTA ────────────────────────────────────────────────────────────── */}
-      <div className="text-center py-4">
+      <div className="space-y-3">
+        <p className="font-bold text-slate-800">خطوات التجهيز في Meta</p>
+        {GUIDE_STEPS.map(step => (
+          <StepCard key={step.num} num={step.num} title={step.title} defaultOpen={step.num === 1}>
+            <p className="text-sm text-slate-700 leading-relaxed">{step.body}</p>
+            {step.href && (
+              <p className="text-sm">
+                <span className="text-slate-500">الرابط: </span>
+                <ExternalHref href={step.href}>{step.href}</ExternalHref>
+              </p>
+            )}
+            {step.path && (
+              <p className="text-sm bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 font-mono text-slate-600">
+                {step.path}
+              </p>
+            )}
+            <HelpStepImage filename={step.image} alt={step.title} />
+          </StepCard>
+        ))}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <p className="font-bold text-slate-800">الكتالوج خطوة لاحقة</p>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          بعد اكتمال ربط واتساب، يمكن لاحقاً ربط Meta Catalog حتى تظهر المنتجات داخل واتساب.
+          هذه الخطوة <strong>ليست مطلوبة</strong> لإتمام ربط رقم واتساب بنحلة.
+        </p>
+        <HelpStepImage filename="10-commerce-catalog-later.png" alt="Meta Catalog — خطوة لاحقة" />
+      </div>
+
+      <div className="bg-white rounded-2xl border border-emerald-200 shadow-sm p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="w-5 h-5 text-emerald-600" />
+          <p className="font-bold text-slate-800">بيانات قد يطلبها فريق نحلة عند الربط اليدوي</p>
+        </div>
+        <p className="text-xs text-slate-500">
+          للاستخدام الداخلي مع فريق نحلة فقط — لا تُدخل في واجهة التاجر.
+        </p>
+        <ul className="space-y-2">
+          {NAHLA_NEEDS.map(item => (
+            <li
+              key={item}
+              className="flex items-center gap-2 text-sm text-slate-700 bg-emerald-50/60 border border-emerald-100 rounded-xl px-3 py-2.5"
+            >
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="font-mono text-xs sm:text-sm">{item}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="bg-slate-900 rounded-2xl p-5 text-slate-300 space-y-2">
+        <p className="text-sm font-bold text-white flex items-center gap-2">
+          <BookOpen className="w-4 h-4" />
+          قائمة الصور المطلوبة
+        </p>
+        <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
+          {HELP_MANUAL_SETUP_IMAGES.map(name => (
+            <li key={name} className="text-xs font-mono text-emerald-400/90">{name}</li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="text-center py-2">
         <a
           href="/whatsapp-connect"
           className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-6 py-3 rounded-xl transition shadow-lg shadow-emerald-600/20"
         >
           <MessageCircle className="w-4 h-4" />
-          ابدأ ربط واتساب الآن
+          انتقل إلى صفحة ربط واتساب
         </a>
       </div>
     </div>
