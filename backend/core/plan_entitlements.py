@@ -454,6 +454,7 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
     Resolve the current entitlements for a tenant.
 
     Priority:
+    0. Partner-testing override (tenant 1, metadata-driven, temporary)
     1. Salla Integration.config (Salla-billed tenants)
     2. Nahla BillingSubscription / BillingPlan (Moyasar/Stripe tenants)
     3. Fallback: plan="none"
@@ -461,6 +462,32 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
     Safety rule: unknown/missing plan slug always resolves to "none"
     — never accidentally grant Growth or Scale features.
     """
+    from core.billing_override import (  # noqa: PLC0415
+        DEFAULT_OVERRIDE_PLAN_SLUG,
+        get_partner_testing_override_plan_slug,
+        is_partner_testing_override_active,
+        log_billing_override_grant,
+        PARTNER_TESTING_REASON,
+    )
+
+    if is_partner_testing_override_active(db, tenant_id):
+        log_billing_override_grant(tenant_id, reason=PARTNER_TESTING_REASON)
+        override_slug = get_partner_testing_override_plan_slug(db, tenant_id)
+        effective_slug = (
+            override_slug if override_slug in PLAN_DEFINITIONS else DEFAULT_OVERRIDE_PLAN_SLUG
+        )
+        plan_def = PLAN_DEFINITIONS[effective_slug]
+        return PlanEntitlements(
+            plan_slug=effective_slug,
+            plan_name_ar=plan_def.name_ar,
+            billing_status="active",
+            is_active=True,
+            is_blocked=False,
+            features=plan_def.features,
+            limits=plan_def.limits,
+            raw_plan=plan_def,
+        )
+
     plan_slug      = "none"
     billing_status = "none"
 

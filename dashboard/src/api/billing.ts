@@ -63,6 +63,11 @@ export interface BillingStatus {
   payment_provider?:       string
   payment_history?:        BillingPaymentHistoryRow[]
   ai_auto_replies_allowed?: boolean
+  partner_testing_override_active?: boolean
+  partner_testing_override_headline_ar?: string | null
+  partner_testing_override_reason?: string | null
+  partner_testing_override_expires_at?: string | null
+  partner_testing_override_plan_slug?: string | null
   manual_replies_allowed?: boolean
   campaigns_automations_allowed?: boolean
   billing_channel?:        BillingChannel

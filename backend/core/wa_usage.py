@@ -906,6 +906,17 @@ def check_limit(
         abandoned-cart, or template message.
         Pass "service" for replies to inbound customer messages.
     """
+    from core.billing_override import is_partner_testing_override_active  # noqa: PLC0415
+
+    if is_partner_testing_override_active(db, tenant_id):
+        return AllowResult(
+            allowed=True,
+            reason="partner_testing_override",
+            used_total=0,
+            limit=UNLIMITED_LIMIT_SENTINEL,
+            pct=0.0,
+        )
+
     now   = _utcnow()
     ctx   = _usage_period_context(db, tenant_id)
     usage = _get_or_create_usage(db, tenant_id, ctx)

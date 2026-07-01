@@ -304,15 +304,30 @@ def has_billing_access(db: Session, tenant_id: int) -> bool:
       1. Nahla-native active subscription (Stripe / HyperPay)
       2. Salla App Store active or trial subscription
       3. Nahla internal free-trial window
+      4. Explicit partner-testing override (tenant 1 only, metadata-driven)
 
     Inbound ingestion, store sync, analytics, and webhook processing
     are ALWAYS allowed regardless of this flag — see automation_engine._execute_action.
     """
-    return bool(
+    normal_access = bool(
         get_tenant_subscription(db, tenant_id)
         or _has_salla_active_subscription(db, tenant_id)
         or has_active_trial(db, tenant_id)
     )
+    if normal_access:
+        return True
+
+    from core.billing_override import (  # noqa: PLC0415
+        is_partner_testing_override_active,
+        log_billing_override_grant,
+        PARTNER_TESTING_REASON,
+    )
+
+    if is_partner_testing_override_active(db, tenant_id):
+        log_billing_override_grant(tenant_id, reason=PARTNER_TESTING_REASON)
+        return True
+
+    return False
 
 
 def require_outbound_access(db: Session, tenant_id: int) -> None:
