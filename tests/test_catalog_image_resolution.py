@@ -58,6 +58,14 @@ class TestResolveProductImageUrl:
         })
         assert url == "https://cdn.example.com/thumb.jpg"
 
+    def test_extract_sync_product_image_from_images_array(self):
+        from core.catalog_image import extract_sync_product_image  # noqa: PLC0415
+
+        url = extract_sync_product_image({
+            "images": [{"url": "https://cdn.example.com/gallery.jpg"}],
+        })
+        assert url == "https://cdn.example.com/gallery.jpg"
+
 
 class TestMetaExportCandidateSkip:
     """Future Meta export must skip products imported from Meta."""

@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from core.catalog_image import coerce_image_url, extract_sync_product_image
 from store_integration.models import (
     NormalizedOffer,
     NormalizedOrder,
@@ -1194,7 +1195,7 @@ class SallaAdapter(BaseStoreAdapter):
             in_stock=(raw.get("quantity", 1) or 0) > 0,
             stock_quantity=raw.get("quantity"),
             description=(raw.get("description") or "")[:300],
-            image_url=raw.get("main_image") or raw.get("thumbnail"),
+            image_url=extract_sync_product_image(raw) or None,
             product_url=raw.get("url"),
             tags=raw.get("tags") or [],
             variants=variants,
@@ -1275,6 +1276,12 @@ class SallaAdapter(BaseStoreAdapter):
             sku=raw.get("sku"),
             in_stock=raw.get("available", True),
             stock_quantity=raw.get("quantity"),
+            image_url=coerce_image_url(
+                raw.get("image_url")
+                or raw.get("image")
+                or raw.get("main_image")
+                or raw.get("thumbnail"),
+            ) or None,
         )
 
     # ── Orders ─────────────────────────────────────────────────────────────────
