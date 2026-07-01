@@ -265,14 +265,15 @@ class TestKnownCustomerAddressRegression:
             order_prep=prep,
             brain_state={"order_prep": prep},
         )
-        assert ctx.field_modes.get("city") == MODE_CONFIRM or ctx.known_previous.get("city")
+        assert ctx.known_previous.get("city") == scenario.city
+        assert ctx.known_previous.get("short_address") == scenario.short_code
+        assert ctx.field_modes.get("city") == MODE_CONFIRM
         reply = build_next_field_reply(
             order_prep=prep,
             brain_state={"order_prep": prep},
             missing_fields=["city"],
-            field_modes=ctx.field_modes or {"city": MODE_CONFIRM},
-            known_previous=ctx.known_previous
-            or {"city": scenario.city, "short_address": scenario.short_code},
+            field_modes=ctx.field_modes,
+            known_previous=ctx.known_previous,
         )
         _assert_address_confirm_reply(reply, scenario=scenario)
 
@@ -331,3 +332,56 @@ class TestKnownCustomerAddressRegression:
         assert tenant.name == scenario.tenant_name
         for marker in _HONEY_MARKERS:
             assert marker.lower() not in scenario.product_title.lower()
+
+    def test_previous_address_phrase_does_not_invent_address_without_customer_address_row(
+        self,
+    ) -> None:
+        """Phrase is only a trigger; without CustomerAddress row no city is applied."""
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name=GENERIC_SHOES.tenant_name)
+        customer = seed_customer(
+            db,
+            tenant.id,
+            phone=DEFAULT_PHONE_E164,
+            name=GENERIC_SHOES.customer_name,
+            extra_metadata={
+                "customer_name_source": SOURCE_MERCHANT,
+                "customer_name_status": STATUS_CUSTOMER_ENTERED,
+                "customer_name_confidence": 0.95,
+            },
+        )
+        product = seed_product(
+            db,
+            tenant.id,
+            title=GENERIC_SHOES.product_title,
+            external_id=GENERIC_SHOES.product_external_id,
+            price=GENERIC_SHOES.product_price,
+            meta_retailer_id=GENERIC_SHOES.product_external_id,
+        )
+        convo = seed_conversation(db, tenant.id, customer.id)
+        active_prep = {
+            "order_flow_v2_active": True,
+            "line_items": [{
+                "product_id": str(product.id),
+                "product_name": product.title,
+                "quantity": 1,
+                "catalog_price": GENERIC_SHOES.catalog_price,
+            }],
+            "order_flow_v2_trusted_price": True,
+            "customer_first_name": GENERIC_SHOES.customer_first_name,
+            "customer_last_name": GENERIC_SHOES.customer_last_name,
+        }
+        attach_brain_state(convo, active_prep)
+        db.add(convo)
+        db.commit()
+
+        result = try_handle_order_flow_v2(
+            db,
+            tenant_id=tenant.id,
+            customer_phone=DEFAULT_PHONE,
+            message="عنواني السابق عندكم",
+        )
+        assert result.handled, result.reason
+        assert result.state_patch.get("city") in (None, "")
+        assert not result.state_patch.get("customer_confirmed_previous_address")
+        assert _DENY_SAVED_ADDRESS not in result.reply

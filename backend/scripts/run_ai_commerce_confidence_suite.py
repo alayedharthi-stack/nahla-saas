@@ -8,6 +8,10 @@ Usage (from repo root):
   python backend/scripts/run_ai_commerce_confidence_suite.py
 
 Exit code 0 only when every suite passes.
+
+Policy: AI commerce regressions must be merchant-agnostic. See AGENTS.md
+「Generic Commerce Regression Tests」. New suites must use generic store/product
+fixtures and assert persisted state — not honey/Al Ayed-only examples or phrase-only truth.
 """
 from __future__ import annotations
 

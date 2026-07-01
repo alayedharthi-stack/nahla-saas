@@ -2,6 +2,10 @@
 commerce_scenario_fixtures.py
 ─────────────────────────────
 Shared SQLite test DB + seed helpers for AI commerce scenario tests.
+
+Policy: seed neutral merchants/products/customers for platform regressions.
+See AGENTS.md 「Generic Commerce Regression Tests」. Truth comes from persisted
+Customer / CustomerAddress / order state — not from inbound phrase matching alone.
 """
 from __future__ import annotations
 
