@@ -173,7 +173,7 @@ class TestPaymentGroundingP0:
 
 class TestSaudiDialectGuard:
     def test_orderflow_replies_do_not_use_egyptian_terms(self) -> None:
-        raw = "الكمية كام؟ لسه ما صدر رقم طلب"
+        raw = "الكمية كام؟ باقي ما صدر رقم طلب"
         guarded = apply_order_flow_v2_outbound_guards(
             raw,
             db=None,

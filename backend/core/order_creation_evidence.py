@@ -17,6 +17,13 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.order_creation_evidence")
 
+NO_ORDER_NUMBER_YET_AR = (
+    "باقي ما صدر رقم طلب؛ نحتاج نكمل البيانات ثم ننشئ الطلب."
+)
+ORDER_REFERENCE_CREATE_FAILED_AR = (
+    "تعذر إنشاء رقم الطلب الآن، وسيتم مراجعته من فريق المتجر."
+)
+
 _CREATING_OUTBOUND_MARKERS = (
     "جارٍ إنشاء طلب",
     "جاري إنشاء طلب",
@@ -250,9 +257,7 @@ def resolve_track_order_fallback(
     if prep_d.get("line_items") or prep_d.get("order_flow_v2_trusted_price"):
         items = prep_d.get("line_items") or []
         if items or prep_d.get("catalog_line_items_authoritative"):
-            return (
-                "لسه ما صدر رقم طلب؛ نحتاج نكمل العنوان ثم ننشئ الطلب."
-            )
+            return NO_ORDER_NUMBER_YET_AR
 
     return None
 
@@ -296,6 +301,8 @@ def log_order_creation_evidence(
 
 
 __all__ = [
+    "NO_ORDER_NUMBER_YET_AR",
+    "ORDER_REFERENCE_CREATE_FAILED_AR",
     "OrderCreationEvidence",
     "OrderCreationStatus",
     "log_order_creation_evidence",
