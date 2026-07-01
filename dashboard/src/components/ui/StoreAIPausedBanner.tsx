@@ -1,16 +1,22 @@
 /**
  * StoreAIPausedBanner
- * Shown below the header when the merchant has disabled store-wide AI replies.
+ * Shown below the header when store AI is off or in canary test mode.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bot, RefreshCw } from 'lucide-react'
-import { settingsApi } from '../../api/settings'
+import { Bot, FlaskConical, RefreshCw } from 'lucide-react'
+import { settingsApi, type StoreAIMode } from '../../api/settings'
 import { throttleFocusRefetch } from '../../lib/focusThrottleRefetch'
+
+function resolveStoreAIMode(ai: { store_ai_mode?: StoreAIMode; store_ai_enabled?: boolean }): StoreAIMode {
+  const mode = ai.store_ai_mode
+  if (mode === 'off' || mode === 'test' || mode === 'on') return mode
+  return ai.store_ai_enabled === false ? 'off' : 'on'
+}
 
 export default function StoreAIPausedBanner() {
   const navigate = useNavigate()
-  const [storeAiEnabled, setStoreAiEnabled] = useState<boolean | null>(null)
+  const [storeAiMode, setStoreAiMode] = useState<StoreAIMode | null>(null)
   const [error, setError] = useState(false)
   const [retrying, setRetrying] = useState(false)
   const lastFocusPollRef = useRef(0)
@@ -20,7 +26,7 @@ export default function StoreAIPausedBanner() {
       setRetrying(true)
       setError(false)
       const data = await settingsApi.getAll()
-      setStoreAiEnabled(data.ai.store_ai_enabled !== false)
+      setStoreAiMode(resolveStoreAIMode(data.ai))
     } catch {
       setError(true)
     } finally {
@@ -59,7 +65,29 @@ export default function StoreAIPausedBanner() {
     )
   }
 
-  if (storeAiEnabled !== false) return null
+  if (storeAiMode === 'on' || storeAiMode === null) return null
+
+  if (storeAiMode === 'test') {
+    return (
+      <div className="bg-amber-600 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <FlaskConical className="w-5 h-5 shrink-0" />
+          <div>
+            <span className="font-bold block">الذكاء في وضع الاختبار — يرد فقط على أرقام محددة</span>
+            <span className="text-amber-100 text-xs block mt-0.5">
+              بقية العملاء ستصل رسائلهم للوحة بدون رد آلي.
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => navigate('/intelligence')}
+          className="shrink-0 bg-white text-amber-700 text-xs font-bold px-4 py-2 rounded-lg hover:bg-amber-50 transition-colors"
+        >
+          إعدادات الذكاء
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="bg-violet-700 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">

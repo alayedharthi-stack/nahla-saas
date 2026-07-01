@@ -37,10 +37,19 @@ DEFAULT_WHATSAPP: Dict[str, Any] = {
     "template_submission_mode": "draft_approval",
 }
 
+STORE_AI_MODE_OFF = "off"
+STORE_AI_MODE_TEST = "test"
+STORE_AI_MODE_ON = "on"
+VALID_STORE_AI_MODES = frozenset({STORE_AI_MODE_OFF, STORE_AI_MODE_TEST, STORE_AI_MODE_ON})
+
 DEFAULT_AI: Dict[str, Any] = {
     # Store-wide AI master switch. When False, no automated AI outbound for
     # any customer. Independent of per-conversation ai_paused flags.
+    # Legacy boolean — kept in sync with store_ai_mode on PATCH /settings/ai.
     "store_ai_enabled":  True,
+    # off | test | on — test mode replies only to ai_test_allowed_numbers.
+    "store_ai_mode":     STORE_AI_MODE_ON,
+    "ai_test_allowed_numbers": [],
     "assistant_name":    "نحلة",
     # ARCH-KB-001: neutral store-context stub — no professional role or
     # mandatory first-turn self-introduction. Merchants tune voice via
@@ -146,6 +155,23 @@ _AI_TEXT_FIELDS = frozenset({
 })
 
 
+def resolve_store_ai_mode(ai: Optional[Dict[str, Any]]) -> str:
+    """Resolve effective store AI mode with backward compatibility."""
+    stored = dict(ai or {})
+    if "store_ai_mode" in stored:
+        mode = str(stored.get("store_ai_mode") or "").strip().lower()
+        if mode in VALID_STORE_AI_MODES:
+            return mode
+    if stored.get("store_ai_enabled") is False:
+        return STORE_AI_MODE_OFF
+    return STORE_AI_MODE_ON
+
+
+def sync_store_ai_enabled_from_mode(mode: str) -> bool:
+    """Legacy boolean mirror for banners and older callers."""
+    return resolve_store_ai_mode({"store_ai_mode": mode}) == STORE_AI_MODE_ON
+
+
 def merge_ai_defaults(stored: Optional[Dict]) -> Dict:
     """
     Like merge_defaults but for AI settings:
@@ -161,6 +187,11 @@ def merge_ai_defaults(stored: Optional[Dict]) -> Dict:
                 pass  # keep rich default
             else:
                 result[k] = v
+    if not stored or "store_ai_mode" not in stored:
+        if result.get("store_ai_enabled") is False:
+            result["store_ai_mode"] = STORE_AI_MODE_OFF
+        else:
+            result["store_ai_mode"] = STORE_AI_MODE_ON
     return result
 
 

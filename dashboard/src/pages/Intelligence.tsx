@@ -32,7 +32,7 @@ import {
   MerchantKnowledgePolicies,
   ResponseQualityData,
 } from '../api/automations'
-import { settingsApi, type AISettings } from '../api/settings'
+import { settingsApi, type AISettings, type StoreAIMode } from '../api/settings'
 import { playgroundApi, type PlaygroundDryRunResponse } from '../api/playground'
 import { CategoryBadges, OperationalFactWarning } from './knowledge/aiSettingsHints'
 import { StructuredContactsCutoverBanner } from '../components/operations/StructuredContactsCutoverBanner'
@@ -142,6 +142,12 @@ function Toggle({ label, hint, value, onChange }: { label: string; hint?: string
   )
 }
 
+function resolveStoreAIMode(ai: AISettings): StoreAIMode {
+  const mode = ai.store_ai_mode
+  if (mode === 'off' || mode === 'test' || mode === 'on') return mode
+  return ai.store_ai_enabled === false ? 'off' : 'on'
+}
+
 function AISettingsPanel() {
   const [ai, setAi]       = useState<AISettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -150,28 +156,69 @@ function AISettingsPanel() {
   const [error, setError]     = useState<string | null>(null)
   const [storeAiSaving, setStoreAiSaving] = useState(false)
   const [storeAiError, setStoreAiError] = useState<string | null>(null)
+  const [testNumbersText, setTestNumbersText] = useState('')
 
   useEffect(() => {
     settingsApi.getAll()
-      .then(s => setAi(s.ai))
+      .then(s => {
+        setAi(s.ai)
+        setTestNumbersText((s.ai.ai_test_allowed_numbers ?? []).join('\n'))
+      })
       .catch(() => setError('تعذّر تحميل إعدادات الذكاء'))
       .finally(() => setLoading(false))
   }, [])
 
   const patch = (p: Partial<AISettings>) => setAi(prev => prev ? { ...prev, ...p } : prev)
 
-  const handleStoreAiToggle = async (enabled: boolean) => {
+  const handleStoreModeChange = async (mode: StoreAIMode) => {
     if (!ai) return
     setStoreAiSaving(true)
     setStoreAiError(null)
-    const previous = ai.store_ai_enabled
-    setAi(prev => prev ? { ...prev, store_ai_enabled: enabled } : prev)
+    const previous = { ...ai }
+    const numbers = testNumbersText
+      .split(/[\n,]+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    setAi(prev => prev ? {
+      ...prev,
+      store_ai_mode: mode,
+      store_ai_enabled: mode === 'on',
+      ai_test_allowed_numbers: mode === 'test' ? numbers : prev.ai_test_allowed_numbers,
+    } : prev)
     try {
-      const res = await settingsApi.patchStoreAI(enabled)
+      const res = await settingsApi.patchStoreAI({
+        store_ai_mode: mode,
+        ...(mode === 'test' ? { ai_test_allowed_numbers: numbers } : {}),
+      })
       setAi(res.ai)
+      setTestNumbersText((res.ai_test_allowed_numbers ?? []).join('\n'))
     } catch {
-      setAi(prev => prev ? { ...prev, store_ai_enabled: previous } : prev)
-      setStoreAiError('تعذّر تحديث إعداد الذكاء للمتجر — حاول مجدداً')
+      setAi(previous)
+      setStoreAiError('تعذّر تحديث وضع الذكاء — حاول مجدداً')
+    } finally {
+      setStoreAiSaving(false)
+    }
+  }
+
+  const handleSaveTestNumbers = async () => {
+    if (!ai || resolveStoreAIMode(ai) !== 'test') return
+    setStoreAiSaving(true)
+    setStoreAiError(null)
+    const numbers = testNumbersText
+      .split(/[\n,]+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    const previous = { ...ai }
+    try {
+      const res = await settingsApi.patchStoreAI({
+        store_ai_mode: 'test',
+        ai_test_allowed_numbers: numbers,
+      })
+      setAi(res.ai)
+      setTestNumbersText((res.ai_test_allowed_numbers ?? []).join('\n'))
+    } catch {
+      setAi(previous)
+      setStoreAiError('تعذّر حفظ أرقام الاختبار — حاول مجدداً')
     } finally {
       setStoreAiSaving(false)
     }
@@ -202,26 +249,76 @@ function AISettingsPanel() {
     </div>
   )
 
+  const storeMode = resolveStoreAIMode(ai)
+  const modeCardBorder =
+    storeMode === 'on' ? 'border-emerald-200'
+    : storeMode === 'test' ? 'border-amber-300'
+    : 'border-violet-300'
+
   return (
     <div className="space-y-5">
 
-      {/* ── Store-wide AI master switch ── */}
-      <div className={`card border-2 ${ai.store_ai_enabled ? 'border-emerald-200' : 'border-violet-300'}`}>
+      {/* ── Store-wide AI mode ── */}
+      <div className={`card border-2 ${modeCardBorder}`}>
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-          <ShieldCheck className={`w-4 h-4 ${ai.store_ai_enabled ? 'text-emerald-600' : 'text-violet-600'}`} />
-          <h2 className="text-sm font-semibold text-slate-900">الذكاء للمتجر كاملًا</h2>
+          <ShieldCheck className={`w-4 h-4 ${storeMode === 'on' ? 'text-emerald-600' : storeMode === 'test' ? 'text-amber-600' : 'text-violet-600'}`} />
+          <h2 className="text-sm font-semibold text-slate-900">وضع الذكاء</h2>
         </div>
-        <div className="p-5 space-y-3">
-          <Toggle
-            label={ai.store_ai_enabled ? 'تشغيل الذكاء للمتجر' : 'إيقاف الذكاء للمتجر كاملًا'}
-            hint={
-              ai.store_ai_enabled
-                ? 'سيعود الذكاء للرد على العملاء غير الموقوفين فرديًا فقط.'
-                : 'عند الإيقاف، لن يرد الذكاء على أي عميل في هذا المتجر. ستبقى الرسائل محفوظة ويمكنك الرد يدويًا. العملاء الموقوفون فرديًا سيبقون موقوفين حتى بعد إعادة تشغيل الذكاء العام.'
-            }
-            value={ai.store_ai_enabled !== false}
-            onChange={v => { if (!storeAiSaving) void handleStoreAiToggle(v) }}
-          />
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-slate-500 leading-relaxed">
+            يتحكم في من يرد عليه الذكاء تلقائيًا. إيقاف المحادثات الفردية يبقى مستقلًا عن هذا الإعداد.
+          </p>
+          <div className="space-y-2">
+            {([
+              ['off', 'متوقف للجميع', 'لن يرد الذكاء على أي عميل. الرسائل محفوظة والرد اليدوي متاح.'],
+              ['test', 'اختبار على أرقام محددة', 'في وضع الاختبار، سيرد الذكاء فقط على الأرقام المحددة هنا. بقية العملاء ستصل رسائلهم للوحة بدون رد آلي.'],
+              ['on', 'تشغيل للجميع', 'الذكاء يعمل لجميع العملاء غير الموقوفين فرديًا أو تحت تصعيد بشري.'],
+            ] as const).map(([value, label, hint]) => (
+              <label
+                key={value}
+                className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-colors ${
+                  storeMode === value ? 'border-brand-400 bg-brand-50/40' : 'border-slate-200 hover:border-slate-300'
+                } ${storeAiSaving ? 'opacity-60 pointer-events-none' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="store_ai_mode"
+                  className="mt-1"
+                  checked={storeMode === value}
+                  onChange={() => { if (!storeAiSaving) void handleStoreModeChange(value) }}
+                />
+                <span>
+                  <span className="text-sm font-medium text-slate-900 block">{label}</span>
+                  <span className="text-xs text-slate-500 block mt-0.5">{hint}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          {storeMode === 'test' && (
+            <div className="space-y-2 pt-1">
+              <label className="block text-xs font-medium text-slate-700">أرقام الاختبار</label>
+              <textarea
+                className="input w-full min-h-[88px] text-sm font-mono"
+                dir="ltr"
+                placeholder={'9665xxxxxxxx\n9665yyyyyyyy'}
+                value={testNumbersText}
+                onChange={e => setTestNumbersText(e.target.value)}
+              />
+              <p className="text-xs text-slate-400">
+                رقم واحد في كل سطر. يقبل +966 أو 966 أو 05.
+              </p>
+              <button
+                type="button"
+                onClick={() => { void handleSaveTestNumbers() }}
+                disabled={storeAiSaving}
+                className="btn-secondary text-xs"
+              >
+                حفظ أرقام الاختبار
+              </button>
+            </div>
+          )}
+
           {storeAiSaving && (
             <p className="text-xs text-slate-400 flex items-center gap-1.5">
               <Loader2 className="w-3.5 h-3.5 animate-spin" /> جاري الحفظ…

@@ -20,10 +20,12 @@ for _p in [_BACKEND, os.path.join(_BACKEND, "..")]:
 from core.ai_pause_guard import REASON_MANUAL_PAUSE
 from core.ai_disabled_gate import (
     REASON_STORE_AI_DISABLED,
+    StoreAIModeDecision,
     evaluate_ai_disabled_send_block,
     is_ai_disabled_for_conversation,
     is_store_ai_enabled,
 )
+from core.tenant import STORE_AI_MODE_OFF, STORE_AI_MODE_ON
 
 
 def _run(coro):
@@ -57,6 +59,14 @@ def _settings(ai_settings: dict | None):
     return SimpleNamespace(ai_settings=ai_settings)
 
 
+def _store_mode_off() -> StoreAIModeDecision:
+    return StoreAIModeDecision(allowed=False, reason=REASON_STORE_AI_DISABLED, mode=STORE_AI_MODE_OFF)
+
+
+def _store_mode_on() -> StoreAIModeDecision:
+    return StoreAIModeDecision(allowed=True, mode=STORE_AI_MODE_ON)
+
+
 class TestStoreAIEnabledHelper:
     def test_defaults_to_true_when_missing(self) -> None:
         db = MagicMock()
@@ -81,8 +91,8 @@ class TestStoreAIDisabledGate:
         db = MagicMock()
 
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=False,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_off(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -101,8 +111,8 @@ class TestStoreAIDisabledGate:
         db = MagicMock()
 
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=True,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_on(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -121,8 +131,8 @@ class TestStoreAIDisabledGate:
         db = MagicMock()
 
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            side_effect=[False, True],
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            side_effect=[_store_mode_off(), _store_mode_on()],
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -158,8 +168,8 @@ class TestMerchantWebhookStorePause:
             return {"messages": [{"id": "wamid.X"}]}
 
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=store_ai_enabled,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_off() if not store_ai_enabled else _store_mode_on(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -204,8 +214,8 @@ class TestMerchantWebhookStorePause:
         convo = _convo(ai_paused=False)
 
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=True,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_on(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -241,8 +251,8 @@ class TestBrainProcessStorePause:
             "core.wa_usage.check_limit",
             return_value=_quota_ok(),
         ), patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=False,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_off(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -284,8 +294,8 @@ class TestSubscriptionIndependent:
             "core.wa_usage.check_limit",
             return_value=_quota_ok(),
         ), patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=True,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_on(),
         ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
@@ -307,8 +317,8 @@ class TestManualSendBypass:
     def test_manual_dashboard_send_not_blocked_by_store_pause(self) -> None:
         db = MagicMock()
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=False,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_off(),
         ):
             blocked, decision = evaluate_ai_disabled_send_block(
                 db,
@@ -331,8 +341,8 @@ class TestAutomationGuardStorePause:
 
         db = MagicMock()
         with patch(
-            "core.ai_disabled_gate.is_store_ai_enabled",
-            return_value=False,
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=_store_mode_off(),
         ):
             decision = should_block_automation_for_conversation(
                 db,
@@ -420,6 +430,7 @@ class TestPatchEndpointDoesNotBulkUpdateConversations:
             ))
 
         assert result["store_ai_enabled"] is False
+        assert result["store_ai_mode"] == "off"
         assert settings.ai_settings["store_ai_enabled"] is False
         assert settings.ai_settings["coupon_cap_hours"] == 48
         db.query.assert_not_called()

@@ -31,6 +31,11 @@ class PlaygroundDryRunBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     mode: str = "stateless"
     context: Optional[PlaygroundOrderContextBody] = None
+    test_phone: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Simulated customer phone for store_ai_mode=test previews.",
+    )
 
 
 @router.post("/intelligence/playground/dry-run")
@@ -53,5 +58,6 @@ async def playground_dry_run(
         message=body.message,
         mode=body.mode,
         context=ctx_payload,
+        test_phone=body.test_phone,
     )
     return result.to_dict()

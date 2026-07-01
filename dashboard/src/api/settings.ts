@@ -13,9 +13,14 @@ export interface WhatsAppSettings {
   transfer_to_owner_enabled: boolean
 }
 
+export type StoreAIMode = 'off' | 'test' | 'on'
+
 export interface AISettings {
-  /** Store-wide master switch — independent of per-conversation ai_paused. */
+  /** Store-wide master switch — legacy mirror of store_ai_mode=on. */
   store_ai_enabled: boolean
+  /** off | test | on — test replies only to ai_test_allowed_numbers. */
+  store_ai_mode?: StoreAIMode
+  ai_test_allowed_numbers?: string[]
   assistant_name: string
   assistant_role: string
   reply_tone: 'friendly' | 'professional' | 'sales'
@@ -74,6 +79,20 @@ export interface NotificationSettings {
   low_balance_alerts: boolean
 }
 
+export interface StoreAIPatchPayload {
+  store_ai_enabled?: boolean
+  store_ai_mode?: StoreAIMode
+  ai_test_allowed_numbers?: string[]
+}
+
+export interface StoreAIPatchResponse {
+  ok: boolean
+  store_ai_enabled: boolean
+  store_ai_mode: StoreAIMode
+  ai_test_allowed_numbers: string[]
+  ai: AISettings
+}
+
 export interface AllSettings {
   whatsapp: WhatsAppSettings
   ai: AISettings
@@ -92,10 +111,10 @@ export const settingsApi = {
       body: JSON.stringify(data),
     }),
 
-  patchStoreAI: (store_ai_enabled: boolean) =>
-    apiCall<{ ok: boolean; store_ai_enabled: boolean; ai: AISettings }>('/settings/ai', {
+  patchStoreAI: (payload: StoreAIPatchPayload) =>
+    apiCall<StoreAIPatchResponse>('/settings/ai', {
       method: 'PATCH',
-      body: JSON.stringify({ store_ai_enabled }),
+      body: JSON.stringify(payload),
     }),
 
   testWhatsApp: () =>
