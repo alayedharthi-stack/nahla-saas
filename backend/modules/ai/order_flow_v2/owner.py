@@ -27,8 +27,10 @@ from .payment import (
     default_payment_method_patch,
 )
 from .replies import (
+    build_address_on_file_collect_reply,
     build_catalog_order_extraction_fallback_reply,
     build_catalog_order_start_reply,
+    build_greeting_checkout_resume_reply,
     build_greeting_with_pending_hint,
     build_next_field_reply,
     build_resume_ack,
@@ -37,10 +39,12 @@ from .state import (
     activate_checkout_patch,
     checkout_active_now,
     deactivate_checkout_patch,
+    incomplete_checkout_with_items,
     line_items_from_state,
     mark_pending_patch,
     pending_order_exists,
     prep_dict,
+    should_resume_checkout_on_greeting,
 )
 from .slot_ownership import (
     apply_slot_ownership,
@@ -334,7 +338,49 @@ def try_handle_order_flow_v2(
                 reason="catalog_order_v2_error",
             )
 
+    def _address_on_file_claim(text_value: str) -> bool:
+        from modules.ai.brain.commerce.commerce_turn_contract import is_address_on_file_claim  # noqa: PLC0415
+
+        return is_address_on_file_claim(text_value)
+
+    def _handle_greeting_checkout_resume() -> OrderFlowV2Result:
+        if not checkout_active_now(order_prep):
+            patch.update(activate_checkout_patch())
+        merged_prep = {**order_prep, **patch}
+        missing = _missing(merged_prep)
+        reply_ctx = _reply_ctx(merged_prep)
+        first_name = load_identity_first_name(
+            db,
+            tenant_id=tenant_id,
+            conversation=conversation,
+            customer_phone=customer_phone,
+        )
+        patch.update(stamp_last_field_patch(missing))
+        patch.update(build_contract(
+            decision="ask_missing_field",
+            field=(patch.get("order_flow_v2_last_field") or ""),
+            reason="greeting_checkout_resume",
+        ).to_patch())
+        reply = build_greeting_checkout_resume_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
+            first_name=first_name,
+            address_on_file_claim=False,
+        )
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="greeting_checkout_resume",
+            state_patch=patch,
+        )
+
     if is_greeting_message(text):
+        if should_resume_checkout_on_greeting(order_prep, bs):
+            return _handle_greeting_checkout_resume()
         if pending_order_exists(order_prep, bs):
             first_name = load_identity_first_name(
                 db,
@@ -501,13 +547,23 @@ def try_handle_order_flow_v2(
         )
 
     reply_ctx = _reply_ctx(merged_prep)
-    reply = build_next_field_reply(
-        order_prep=merged_prep,
-        brain_state=bs,
-        missing_fields=missing,
-        field_modes=reply_ctx.field_modes,
-        known_previous=reply_ctx.known_previous,
-    )
+    on_file_claim = _address_on_file_claim(text)
+    if on_file_claim and not reply_ctx.known_previous:
+        reply = build_address_on_file_collect_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
+        )
+    else:
+        reply = build_next_field_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
+        )
     return _finalize_result(
         enabled=enabled,
         shadow=shadow,

@@ -79,6 +79,53 @@ def _build_saved_address_confirm_reply(
     return f"{prefix}{body}".strip() if prefix else body.strip()
 
 
+def _salam_line(*, first_name: str = "") -> str:
+    name = str(first_name or "").strip()
+    if name:
+        return f"وعليكم السلام ورحمة الله وبركاته يا {name}."
+    return "وعليكم السلام ورحمة الله وبركاته."
+
+
+def _build_no_saved_address_collect_reply(prefix: str = "") -> str:
+    body = (
+        "ما ظهر لي عنوان محفوظ الآن. "
+        "أرسل لي المدينة والرمز المختصر أو رابط الموقع."
+    )
+    return f"{prefix}{body}".strip() if prefix else body.strip()
+
+
+def _build_checkout_progress_reply(
+    *,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
+    intro: str = "",
+    include_order_summary: bool = True,
+    address_on_file_claim: bool = False,
+) -> str:
+    known = dict(known_previous or {})
+    has_saved = bool(
+        known.get("city") or known.get("short_address") or known.get("maps_url")
+    )
+    if address_on_file_claim and not has_saved:
+        return _build_no_saved_address_collect_reply(intro)
+
+    summary = _order_summary(order_prep, brain_state) if include_order_summary else ""
+    summary_prefix = f"{summary}\n\n" if summary else ""
+    prefix = f"{intro}{summary_prefix}" if intro else summary_prefix
+
+    return build_next_field_reply(
+        order_prep=order_prep,
+        brain_state=brain_state,
+        missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
+        prefix_override=prefix,
+    )
+
+
 def build_next_field_reply(
     *,
     order_prep: Dict[str, Any],
@@ -86,12 +133,16 @@ def build_next_field_reply(
     missing_fields: List[str],
     field_modes: Optional[Dict[str, str]] = None,
     known_previous: Optional[Dict[str, str]] = None,
+    prefix_override: Optional[str] = None,
 ) -> str:
     """Ask only for the next missing checkout field."""
     modes = dict(field_modes or {})
     nxt = next_missing_field(missing_fields)
     summary = _order_summary(order_prep, brain_state)
-    prefix = f"{summary}\n\n" if summary else ""
+    if prefix_override is not None:
+        prefix = prefix_override
+    else:
+        prefix = f"{summary}\n\n" if summary else ""
 
     if nxt in {"city", "delivery_address"} and modes.get(nxt) == MODE_CONFIRM:
         confirm = _build_saved_address_confirm_reply(
@@ -116,6 +167,47 @@ def build_next_field_reply(
     if nxt == "payment_method":
         return f"{prefix}وش طريقة الدفع المناسبة لك؟".strip()
     return f"{prefix}أكمل معي بيانات الطلب.".strip()
+
+
+def build_greeting_checkout_resume_reply(
+    *,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
+    first_name: str = "",
+    address_on_file_claim: bool = False,
+) -> str:
+    intro = f"{_salam_line(first_name=first_name)}\nنكمل طلبك السابق.\n"
+    return _build_checkout_progress_reply(
+        order_prep=order_prep,
+        brain_state=brain_state,
+        missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
+        intro=intro,
+        include_order_summary=False,
+        address_on_file_claim=address_on_file_claim,
+    )
+
+
+def build_address_on_file_collect_reply(
+    *,
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
+) -> str:
+    return _build_checkout_progress_reply(
+        order_prep=order_prep,
+        brain_state=brain_state,
+        missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
+        address_on_file_claim=True,
+    )
 
 
 def build_greeting_with_pending_hint(

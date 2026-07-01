@@ -91,6 +91,23 @@ def pending_order_exists(order_prep: Dict[str, Any], brain_state: Dict[str, Any]
     return bool(items) or len(missing) < 5
 
 
+def incomplete_checkout_with_items(order_prep: Dict[str, Any], brain_state: Dict[str, Any]) -> bool:
+    return bool(line_items_from_state(order_prep, brain_state)) or bool(
+        str(order_prep.get("product_id") or "").strip()
+    )
+
+
+def should_resume_checkout_on_greeting(order_prep: Dict[str, Any], brain_state: Dict[str, Any]) -> bool:
+    """True when a greeting should resume an in-flight checkout instead of falling through to brain."""
+    if not incomplete_checkout_with_items(order_prep, brain_state):
+        return False
+    if checkout_active_now(order_prep):
+        return True
+    if order_prep.get("order_flow_v2_trusted_price") or order_prep.get("catalog_line_items_authoritative"):
+        return True
+    return False
+
+
 def checkout_active_now(order_prep: Dict[str, Any]) -> bool:
     return bool(order_prep.get("order_flow_v2_active"))
 
