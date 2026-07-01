@@ -226,7 +226,7 @@ def _resolve_customer_for_order_context(
             row = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
             if row is not None:
                 return row
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — conversation customer lookup is best-effort
             pass
     if db is not None and tenant_id and phone:
         try:
@@ -235,7 +235,7 @@ def _resolve_customer_for_order_context(
             )
 
             return resolve_customer_row_by_phone(db, int(tenant_id), phone)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — tenant-scoped phone lookup is best-effort
             pass
     return None
 
