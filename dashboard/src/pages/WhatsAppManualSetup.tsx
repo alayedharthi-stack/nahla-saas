@@ -3,40 +3,24 @@
  * ────────────────────────
  * /help/whatsapp-manual-setup
  *
- * دليل عربي لتجهيز Meta Business وربط حساب واتساب للأعمال بنحلة.
- *
- * الصور (dashboard/public/help/whatsapp-manual-setup/):
- *   01-meta-business-home.png
- *   02-business-settings.png
- *   03-whatsapp-accounts.png
- *   04-add-or-select-waba.png
- *   05-add-phone-number.png
- *   06-verify-phone-number.png
- *   07-whatsapp-manager-status.png
- *   08-nahlah-whatsapp-connect.png
- *   09-nahlah-assisted-request.png
- *   10-commerce-catalog-later.png  (اختياري — الكتالوج لاحقاً)
+ * Merchant-facing guide for preparing Meta Business and connecting WhatsApp.
+ * Image assets live under dashboard/public/help/whatsapp-manual-setup/ (see README there).
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  AlertTriangle,
   ArrowLeft,
-  BookOpen,
-  CheckCircle2,
   ChevronDown,
   ChevronUp,
   ExternalLink,
   ImageIcon,
   Info,
-  Link2,
   MessageCircle,
-  ShieldCheck,
 } from 'lucide-react'
 
 const HELP_IMAGE_BASE = '/help/whatsapp-manual-setup'
 
-export const HELP_MANUAL_SETUP_IMAGES = [
+const HELP_MANUAL_SETUP_IMAGES = [
   '01-meta-business-home.png',
   '02-business-settings.png',
   '03-whatsapp-accounts.png',
@@ -47,14 +31,6 @@ export const HELP_MANUAL_SETUP_IMAGES = [
   '08-nahlah-whatsapp-connect.png',
   '09-nahlah-assisted-request.png',
   '10-commerce-catalog-later.png',
-] as const
-
-const QUICK_LINKS = [
-  { label: 'لوحة نحلة', href: 'https://app.nahlah.ai' },
-  { label: 'صفحة ربط واتساب', href: 'https://app.nahlah.ai/whatsapp-connect' },
-  { label: 'Meta Business', href: 'https://business.facebook.com/' },
-  { label: 'إعدادات النشاط التجاري', href: 'https://business.facebook.com/settings' },
-  { label: 'WhatsApp Manager', href: 'https://business.facebook.com/latest/whatsapp_manager' },
 ] as const
 
 const PATH_EXISTING_ACCOUNT = [
@@ -73,6 +49,13 @@ const PATH_NEW_ACCOUNT = [
   'أنشئ حساب واتساب للأعمال أثناء خطوات Meta إذا ظهر لك الخيار',
   'أضف رقم واتساب الأعمال',
   'أكمل التحقق',
+]
+
+const BEFORE_YOU_START = [
+  'حساب فيسبوك يمكنك الدخول إليه',
+  'صلاحية إدارة النشاط التجاري في Meta',
+  'رقم واتساب أعمال يمكنه استقبال رمز التحقق',
+  'اسم النشاط التجاري ومعلوماته الأساسية',
 ]
 
 type GuideStep = {
@@ -143,17 +126,8 @@ const GUIDE_STEPS: GuideStep[] = [
     title: 'أو طلب مساعدة فريق نحلة',
     href: 'https://app.nahlah.ai/whatsapp-connect',
     image: '09-nahlah-assisted-request.png',
-    body: 'إذا واجهت صعوبة، اختر «طلب ربط بمساعدة فريق نحلة». لا تدخل Access Token أو معرفات Meta في واجهة التاجر — فريقنا يكمل الربط معك بأمان.',
+    body: 'إذا واجهت صعوبة، اختر «طلب ربط بمساعدة فريق نحلة». فريقنا يكمل الربط معك بأمان خطوة بخطوة.',
   },
-]
-
-const NAHLA_NEEDS = [
-  'Business ID',
-  'WhatsApp Business Account ID',
-  'Phone Number ID',
-  'رقم واتساب المعروض',
-  'Permanent System User Access Token عند الحاجة فقط',
-  'Meta Catalog ID لاحقاً إذا أردنا ربط الكتالوج',
 ]
 
 function HelpStepImage({ filename, alt }: { filename: string; alt: string }) {
@@ -164,10 +138,7 @@ function HelpStepImage({ filename, alt }: { filename: string; alt: string }) {
     return (
       <div className="w-full rounded-xl overflow-hidden border-2 border-dashed border-violet-200 bg-gradient-to-br from-slate-50 to-violet-50/40 flex flex-col items-center justify-center py-12 gap-3 text-slate-500">
         <ImageIcon className="w-10 h-10 text-violet-300" />
-        <p className="text-sm font-medium text-slate-600">سيتم إضافة الصورة هنا:</p>
-        <code className="text-xs font-mono bg-white/80 border border-slate-200 px-3 py-1.5 rounded-lg text-violet-700">
-          {filename}
-        </code>
+        <p className="text-sm font-medium text-slate-600">صورة توضيحية — قريباً</p>
       </div>
     )
   }
@@ -188,15 +159,6 @@ function TipBox({ children }: { children: React.ReactNode }) {
     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex gap-3">
       <Info className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
       <div className="text-sm text-blue-800 leading-relaxed">{children}</div>
-    </div>
-  )
-}
-
-function WarnBox({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3">
-      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-      <div className="text-sm text-amber-900 leading-relaxed">{children}</div>
     </div>
   )
 }
@@ -276,6 +238,15 @@ function PathCard({ title, steps }: { title: string; steps: string[] }) {
   )
 }
 
+function InfoSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+      <p className="font-bold text-slate-800">{title}</p>
+      {children}
+    </div>
+  )
+}
+
 export default function WhatsAppManualSetup() {
   const navigate = useNavigate()
 
@@ -303,15 +274,9 @@ export default function WhatsAppManualSetup() {
         </div>
 
         <TipBox>
-          هذا الدليل يركز على <strong>ربط رقم واتساب الأعمال بنحلة</strong>.
-          لا تحتاج لإرسال Access Token أو معرفات Meta من واجهة التاجر.
-          عند اختيار «طلب ربط بمساعدة فريق نحلة»، فريقنا يتولى الربط الآمن.
+          هذا الدليل يساعدك على تجهيز حساب واتساب الأعمال وربطه بنحلة.
+          يمكنك الإكمال عبر Meta مباشرة، أو طلب مساعدة فريق نحلة إذا احتجت.
         </TipBox>
-
-        <WarnBox>
-          لا ترسل Access Token أو بيانات حساسة داخل محادثة عامة.
-          فريق نحلة سيطلب البيانات بالطريقة المناسبة عند الحاجة.
-        </WarnBox>
       </div>
 
       <div className="space-y-3">
@@ -326,27 +291,6 @@ export default function WhatsAppManualSetup() {
         />
       </div>
 
-      <div className="bg-slate-50 rounded-2xl border border-slate-100 p-5 space-y-3">
-        <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
-          <Link2 className="w-4 h-4 text-emerald-500" />
-          روابط سريعة
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {QUICK_LINKS.map(link => (
-            <a
-              key={link.href}
-              href={link.href}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-700 hover:border-emerald-300 hover:text-emerald-700 transition"
-            >
-              <span>{link.label}</span>
-              <ExternalLink className="w-3.5 h-3.5 shrink-0 text-slate-400" />
-            </a>
-          ))}
-        </div>
-      </div>
-
       <div className="space-y-3">
         <p className="font-bold text-slate-800">خطوات التجهيز في Meta</p>
         {GUIDE_STEPS.map(step => (
@@ -359,7 +303,7 @@ export default function WhatsAppManualSetup() {
               </p>
             )}
             {step.path && (
-              <p className="text-sm bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 font-mono text-slate-600">
+              <p className="text-sm bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-slate-600">
                 {step.path}
               </p>
             )}
@@ -368,46 +312,32 @@ export default function WhatsAppManualSetup() {
         ))}
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
-        <p className="font-bold text-slate-800">الكتالوج خطوة لاحقة</p>
-        <p className="text-sm text-slate-600 leading-relaxed">
-          بعد اكتمال ربط واتساب، يمكن لاحقاً ربط Meta Catalog حتى تظهر المنتجات داخل واتساب.
-          هذه الخطوة <strong>ليست مطلوبة</strong> لإتمام ربط رقم واتساب بنحلة.
-        </p>
-        <HelpStepImage filename="10-commerce-catalog-later.png" alt="Meta Catalog — خطوة لاحقة" />
-      </div>
-
-      <div className="bg-white rounded-2xl border border-emerald-200 shadow-sm p-5 space-y-4">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="w-5 h-5 text-emerald-600" />
-          <p className="font-bold text-slate-800">بيانات قد يطلبها فريق نحلة عند الربط اليدوي</p>
-        </div>
-        <p className="text-xs text-slate-500">
-          للاستخدام الداخلي مع فريق نحلة فقط — لا تُدخل في واجهة التاجر.
-        </p>
+      <InfoSection title="ماذا تحتاج قبل البدء؟">
         <ul className="space-y-2">
-          {NAHLA_NEEDS.map(item => (
-            <li
-              key={item}
-              className="flex items-center gap-2 text-sm text-slate-700 bg-emerald-50/60 border border-emerald-100 rounded-xl px-3 py-2.5"
-            >
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span className="font-mono text-xs sm:text-sm">{item}</span>
+          {BEFORE_YOU_START.map(item => (
+            <li key={item} className="flex items-start gap-3 text-sm text-slate-700">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 mt-2" />
+              <span className="leading-relaxed">{item}</span>
             </li>
           ))}
         </ul>
-      </div>
+      </InfoSection>
 
-      <div className="bg-slate-900 rounded-2xl p-5 text-slate-300 space-y-2">
-        <p className="text-sm font-bold text-white flex items-center gap-2">
-          <BookOpen className="w-4 h-4" />
-          قائمة الصور المطلوبة
+      <InfoSection title="ماذا يحدث بعد طلب المساعدة؟">
+        <p className="text-sm text-slate-600 leading-relaxed">
+          بعد إرسال طلب الربط، سيتواصل معك فريق نحلة لإكمال الخطوات بطريقة آمنة.
+          لا ترسل أي بيانات حساسة أو رموز دخول في محادثة عامة.
+          سنرشدك خطوة بخطوة من داخل حسابك في Meta عند الحاجة.
         </p>
-        <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
-          {HELP_MANUAL_SETUP_IMAGES.map(name => (
-            <li key={name} className="text-xs font-mono text-emerald-400/90">{name}</li>
-          ))}
-        </ul>
+      </InfoSection>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <p className="font-bold text-slate-800">الكتالوج خطوة لاحقة</p>
+        <p className="text-sm text-slate-600 leading-relaxed">
+          ربط المنتجات والكتالوج يتم لاحقاً بعد اكتمال ربط واتساب.
+          لا تحتاج لإعداد الكتالوج الآن لإكمال ربط الرقم.
+        </p>
+        <HelpStepImage filename="10-commerce-catalog-later.png" alt="الكتالوج — خطوة لاحقة" />
       </div>
 
       <div className="text-center py-2">
