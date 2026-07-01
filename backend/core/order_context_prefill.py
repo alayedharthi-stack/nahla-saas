@@ -48,6 +48,7 @@ _PREVIOUS_ADDRESS_CONFIRM_RE = re.compile(
     r"(?:عندكم|عندك|مسجل|محفوظ).{0,30}(?:عنوان(?:ي|نا)?|الموقع|المدينة)|"
     r"عنوان(?:ي|نا)?\s*(?:عندكم|عندك|مسجل|محفوظ)|"
     r"(?:عندكم|عندك)\s*مسجل(?:ة)?|"
+    r"مسجل(?:ة|ه)?\s*عند(?:كم|ك)|"
     r"confirm\s*(?:previous|old)\s*address|same\s*address"
     r")",
     re.I | re.UNICODE,

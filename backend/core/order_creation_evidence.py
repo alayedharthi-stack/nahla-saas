@@ -235,6 +235,25 @@ def resolve_track_order_fallback(
             reference=draft_id,
         )
 
+    prep_d: Dict[str, Any] = {}
+    op = None
+    if state is not None:
+        op = getattr(state, "order_prep", None)
+    if op is not None:
+        if hasattr(op, "to_dict"):
+            try:
+                prep_d = dict(op.to_dict())
+            except Exception:  # noqa: BLE001
+                prep_d = {}
+        elif isinstance(op, dict):
+            prep_d = dict(op)
+    if prep_d.get("line_items") or prep_d.get("order_flow_v2_trusted_price"):
+        items = prep_d.get("line_items") or []
+        if items or prep_d.get("catalog_line_items_authoritative"):
+            return (
+                "لسه ما صدر رقم طلب؛ نحتاج نكمل العنوان ثم ننشئ الطلب."
+            )
+
     return None
 
 

@@ -208,6 +208,38 @@ def _missing_name_reason(customer: Any, snap: Any) -> str:
     return "not_verified"
 
 
+def _resolve_customer_for_order_context(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any = None,
+    phone: str = "",
+    customer: Any = None,
+) -> Any:
+    """Load customer from conversation link, then fall back to phone lookup."""
+    if customer is not None:
+        return customer
+    if conversation is not None and getattr(conversation, "customer_id", None):
+        try:
+            from models import Customer  # noqa: PLC0415
+
+            row = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
+            if row is not None:
+                return row
+        except Exception:  # noqa: BLE001
+            pass
+    if db is not None and tenant_id and phone:
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                resolve_customer_row_by_phone,
+            )
+
+            return resolve_customer_row_by_phone(db, int(tenant_id), phone)
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 def build_order_identity(
     *,
     customer: Any,
@@ -774,14 +806,12 @@ def build_order_context_for_order(
             prep[key] = val
     bs = {**bs, "order_prep": prep}
 
-    customer = None
-    if conversation is not None and getattr(conversation, "customer_id", None):
-        try:
-            from models import Customer  # noqa: PLC0415
-
-            customer = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
-        except Exception:  # noqa: BLE001
-            customer = None
+    customer = _resolve_customer_for_order_context(
+        db,
+        tenant_id=int(tenant_id),
+        conversation=conversation,
+        phone=phone,
+    )
 
     active_draft = _active_draft_from_order(order)
     identity = build_order_identity(
@@ -919,13 +949,13 @@ def build_order_context(
     prep = _prep_dict(bs)
     conversation_id = getattr(conversation, "id", None) if conversation is not None else None
 
-    if customer is None and conversation is not None and getattr(conversation, "customer_id", None):
-        try:
-            from models import Customer  # noqa: PLC0415
-
-            customer = db.query(Customer).filter_by(id=int(conversation.customer_id)).first()
-        except Exception:  # noqa: BLE001
-            customer = None
+    customer = _resolve_customer_for_order_context(
+        db,
+        tenant_id=int(tenant_id),
+        conversation=conversation,
+        phone=phone,
+        customer=customer,
+    )
 
     active_draft = _load_active_draft(
         db, tenant_id=tenant_id, conversation_id=conversation_id
