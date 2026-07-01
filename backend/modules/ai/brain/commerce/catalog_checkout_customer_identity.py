@@ -97,15 +97,28 @@ def _load_customer_row(
         from models import Customer  # noqa: PLC0415
         from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
 
-        e164 = normalize_to_e164(str(phone))
-        return (
-            db.query(Customer)
-            .filter(
-                Customer.tenant_id == int(tenant_id),
-                Customer.normalized_phone == e164,
+        raw = str(phone or "").strip()
+        e164 = normalize_to_e164(raw) or raw
+        candidates = tuple({
+            p for p in (
+                raw,
+                e164,
+                e164.lstrip("+") if e164 else "",
+                f"+{e164.lstrip('+')}" if e164 else "",
+            ) if p
+        })
+        for candidate in candidates:
+            row = (
+                db.query(Customer)
+                .filter(
+                    Customer.tenant_id == int(tenant_id),
+                    (Customer.normalized_phone == candidate) | (Customer.phone == candidate),
+                )
+                .first()
             )
-            .first()
-        )
+            if row is not None:
+                return row
+        return None
     except Exception:  # noqa: BLE001
         logger.debug(
             "[CATALOG_CHECKOUT_IDENTITY] customer lookup failed tenant=%s",

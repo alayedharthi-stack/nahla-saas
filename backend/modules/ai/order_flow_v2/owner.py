@@ -12,6 +12,12 @@ from core.wa_native_catalog_order import (
 )
 
 from .contract import build_contract
+from .checkout_context import (
+    CheckoutReplyContext,
+    apply_previous_address_confirmation,
+    load_checkout_reply_context,
+    load_identity_first_name,
+)
 from .flags import is_order_flow_v2_enabled, is_order_flow_v2_shadow_enabled
 from .ingest import apply_inbound_slots
 from .missing_fields import compute_v2_missing_fields
@@ -231,6 +237,17 @@ def try_handle_order_flow_v2(
             inbound_metadata=meta,
         )
 
+    def _reply_ctx(prep: Dict[str, Any]) -> CheckoutReplyContext:
+        return load_checkout_reply_context(
+            db,
+            tenant_id=tenant_id,
+            conversation=conversation,
+            customer_phone=customer_phone,
+            order_prep=prep,
+            brain_state=bs,
+            inbound_metadata=meta,
+        )
+
     if is_catalog_order_inbound(meta, text):
         try:
             patch.update(_catalog_order_patch(
@@ -291,10 +308,13 @@ def try_handle_order_flow_v2(
                 field=(patch.get("order_flow_v2_last_field") or ""),
                 reason="catalog_order_start",
             ).to_patch())
+            reply_ctx = _reply_ctx(merged_prep)
             reply = build_catalog_order_start_reply(
                 order_prep=merged_prep,
                 brain_state=bs,
                 missing_fields=missing,
+                field_modes=reply_ctx.field_modes,
+                known_previous=reply_ctx.known_previous,
             )
             return _finalize_result(
                 enabled=enabled,
@@ -316,7 +336,16 @@ def try_handle_order_flow_v2(
 
     if is_greeting_message(text):
         if pending_order_exists(order_prep, bs):
-            reply = build_greeting_with_pending_hint(has_pending=True)
+            first_name = load_identity_first_name(
+                db,
+                tenant_id=tenant_id,
+                conversation=conversation,
+                customer_phone=customer_phone,
+            )
+            reply = build_greeting_with_pending_hint(
+                has_pending=True,
+                first_name=first_name,
+            )
             return _finalize_result(
                 enabled=enabled,
                 shadow=shadow,
@@ -340,10 +369,13 @@ def try_handle_order_flow_v2(
             field=(patch.get("order_flow_v2_last_field") or ""),
             reason="resume_checkout",
         ).to_patch())
+        reply_ctx = _reply_ctx(merged_prep)
         reply = build_resume_ack(
             order_prep=merged_prep,
             brain_state=bs,
             missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
         )
         return _finalize_result(
             enabled=enabled,
@@ -367,10 +399,13 @@ def try_handle_order_flow_v2(
             field=(patch.get("order_flow_v2_last_field") or ""),
             reason="explicit_purchase_start",
         ).to_patch())
+        reply_ctx = _reply_ctx(merged_prep)
         reply = build_next_field_reply(
             order_prep=merged_prep,
             brain_state=bs,
             missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
         )
         return _finalize_result(
             enabled=enabled,
@@ -385,7 +420,20 @@ def try_handle_order_flow_v2(
             patch.update(mark_pending_patch())
         return OrderFlowV2Result(handled=False, reason="not_active")
 
-    pre_missing = _missing(order_prep)
+    addr_confirm_patch = apply_previous_address_confirmation(
+        db,
+        tenant_id=tenant_id,
+        conversation=conversation,
+        customer_phone=customer_phone,
+        order_prep=order_prep,
+        brain_state=bs,
+        inbound_metadata=meta,
+        message=text,
+    )
+    if addr_confirm_patch:
+        patch.update(addr_confirm_patch)
+
+    pre_missing = _missing({**order_prep, **patch})
     owner_patch, owner_reason = apply_slot_ownership(
         message=text,
         order_prep=order_prep,
@@ -452,10 +500,13 @@ def try_handle_order_flow_v2(
             state_patch=patch,
         )
 
+    reply_ctx = _reply_ctx(merged_prep)
     reply = build_next_field_reply(
         order_prep=merged_prep,
         brain_state=bs,
         missing_fields=missing,
+        field_modes=reply_ctx.field_modes,
+        known_previous=reply_ctx.known_previous,
     )
     return _finalize_result(
         enabled=enabled,

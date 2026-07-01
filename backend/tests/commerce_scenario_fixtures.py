@@ -2,6 +2,10 @@
 commerce_scenario_fixtures.py
 ─────────────────────────────
 Shared SQLite test DB + seed helpers for AI commerce scenario tests.
+
+Policy: seed neutral merchants/products/customers for platform regressions.
+See AGENTS.md 「Generic Commerce Regression Tests」. Truth comes from persisted
+Customer / CustomerAddress / order state — not from inbound phrase matching alone.
 """
 from __future__ import annotations
 
@@ -177,6 +181,7 @@ def seed_customer_address(
     lng: str = "39.8579",
     city: str = "مكة",
     address_text: str = "حي العزيزية",
+    saudi_national_address: str = "",
 ) -> CustomerAddress:
     addr = CustomerAddress(
         tenant_id=tenant_id,
@@ -185,6 +190,7 @@ def seed_customer_address(
         lng=lng,
         city=city,
         address_text=address_text,
+        saudi_national_address=saudi_national_address or None,
         google_maps_link=f"https://maps.google.com/?q={lat},{lng}",
         whatsapp_location={"latitude": lat, "longitude": lng},
     )
