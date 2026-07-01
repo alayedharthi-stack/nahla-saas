@@ -43,9 +43,12 @@ Notes
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Dict, Optional, Tuple
+
+logger = logging.getLogger("nahla.inbound_dedup")
 
 # (phone_number_id, msg_id) → expires_at_monotonic
 _CACHE: Dict[Tuple[str, str], float] = {}
@@ -62,6 +65,26 @@ _SWEEP_BUDGET = 64
 
 def _normalize(value: Optional[str]) -> str:
     return (value or "").strip()
+
+
+def log_inbound_dedup_event(
+    *,
+    phone_number_id: Optional[str],
+    provider_msg_id: Optional[str],
+    result: str,
+    source: str = "memory",
+) -> None:
+    """Structured, log-safe dedup diagnosis — no message body."""
+    try:
+        logger.info(
+            "[INBOUND_DEDUP] phone_number_id=%s provider_msg_id=%s result=%s source=%s",
+            (phone_number_id or "-")[:24],
+            (provider_msg_id or "-")[:64],
+            result,
+            source,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — dedup log must not block inbound processing
+        pass
 
 
 def is_duplicate_inbound(
@@ -86,6 +109,12 @@ def is_duplicate_inbound(
     pid = _normalize(phone_number_id)
     mid = _normalize(msg_id)
     if not pid or not mid:
+        log_inbound_dedup_event(
+            phone_number_id=pid,
+            provider_msg_id=mid,
+            result="miss_missing_ids",
+            source="memory",
+        )
         return False
 
     key = (pid, mid)
@@ -95,6 +124,12 @@ def is_duplicate_inbound(
     with _LOCK:
         existing = _CACHE.get(key)
         if existing is not None and existing > now:
+            log_inbound_dedup_event(
+                phone_number_id=pid,
+                provider_msg_id=mid,
+                result="hit",
+                source="memory",
+            )
             return True
 
         # Not a duplicate (or expired) — record this arrival.
@@ -111,6 +146,12 @@ def is_duplicate_inbound(
             for k in stale:
                 _CACHE.pop(k, None)
 
+    log_inbound_dedup_event(
+        phone_number_id=pid,
+        provider_msg_id=mid,
+        result="miss",
+        source="memory",
+    )
     return False
 
 

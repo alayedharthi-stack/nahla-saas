@@ -135,10 +135,12 @@ def build_payment_instruction_reply(
     prefix = f"{summary_txt}\n\n" if summary_txt else ""
 
     if method in {PAYMENT_METHOD_BANK_TRANSFER, "bank_transfer", "transfer"}:
-        return (
-            f"{prefix}تم اختيار التحويل البنكي.\n"
-            "بعد التحويل، أرسل صورة الإيصال أو إثبات الدفع."
-        ).strip()
+        from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
+            compose_verified_bank_transfer_block,
+        )
+
+        body = compose_verified_bank_transfer_block(db, tenant_id=int(tenant_id))
+        return f"{prefix}{body}".strip()
     if method in {PAYMENT_METHOD_CASH_ON_DELIVERY, "cash_on_delivery", "cod"}:
         return f"{prefix}تم اختيار الدفع عند الاستلام.".strip()
     if method in {PAYMENT_METHOD_MOYASAR, "moyasar"}:

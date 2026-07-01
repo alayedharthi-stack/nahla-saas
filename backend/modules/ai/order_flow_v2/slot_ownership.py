@@ -178,6 +178,24 @@ def apply_slot_ownership(
         ).to_patch())
         return patch, "payment_before_address"
 
+    if "delivery_address" in missing:
+        try:
+            from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+
+            if is_address_like_delivery_text(text):
+                from core.wa_address_ingestion import build_delivery_address_patch  # noqa: PLC0415
+
+                patch.update(build_delivery_address_patch(text))
+                patch["order_flow_v2_last_field"] = "payment_method"
+                patch.update(build_contract(
+                    decision="update_slot",
+                    field="delivery_address",
+                    reason="address_like_text_owned_turn",
+                ).to_patch())
+                return patch, "address_owned"
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — address-like probe must not block slot ownership
+            pass
+
     patch.update(stamp_last_field_patch(missing))
     return patch, "no_slot_override"
 

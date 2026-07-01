@@ -35,6 +35,7 @@ from .replies import (
     build_greeting_with_pending_hint,
     build_next_field_reply,
     build_order_flow_product_keyword_reply,
+    build_product_image_request_reply,
     build_resume_ack,
 )
 from .state import (
@@ -61,6 +62,7 @@ from .triggers import (
     is_checkout_order_number_intent,
     is_explicit_purchase_intent,
     is_greeting_message,
+    is_product_image_request_in_order_flow,
     is_resume_order_command,
     is_short_product_keyword_in_order_flow,
     is_whatsapp_order_browse_context,
@@ -345,6 +347,21 @@ def try_handle_order_flow_v2(
             )
 
     if (
+        is_product_image_request_in_order_flow(text)
+        and is_whatsapp_order_browse_context(order_prep, bs, meta)
+        and not is_greeting_message(text)
+    ):
+        reply = build_product_image_request_reply(order_prep=order_prep, brain_state=bs)
+        return _finalize_result(
+            enabled=enabled,
+            shadow=shadow,
+            reply=reply,
+            reason="order_flow_product_image_request",
+            state_patch={},
+            skip_brain=True,
+        )
+
+    if (
         is_short_product_keyword_in_order_flow(text)
         and is_whatsapp_order_browse_context(order_prep, bs, meta)
         and not is_greeting_message(text)
@@ -425,7 +442,17 @@ def try_handle_order_flow_v2(
         return OrderFlowV2Result(handled=False, reason="greeting_no_pending")
 
     if is_checkout_escape_inquiry(text, meta):
-        return OrderFlowV2Result(handled=False, reason="inquiry_escape")
+        try:
+            from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+            from .state import incomplete_checkout_with_items  # noqa: PLC0415
+
+            if not (
+                is_address_like_delivery_text(text)
+                and incomplete_checkout_with_items(order_prep, bs)
+            ):
+                return OrderFlowV2Result(handled=False, reason="inquiry_escape")
+        except Exception:  # noqa: BLE001
+            return OrderFlowV2Result(handled=False, reason="inquiry_escape")
 
     if is_resume_order_command(text) and pending_order_exists(order_prep, bs):
         patch.update(activate_checkout_patch())
@@ -505,12 +532,25 @@ def try_handle_order_flow_v2(
             )
 
     if not in_flight_catalog_checkout(order_prep, bs):
-        if pending_order_exists(order_prep, bs):
-            patch.update(mark_pending_patch())
-        return OrderFlowV2Result(handled=False, reason="not_active")
+        try:
+            from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+            from .state import incomplete_checkout_with_items  # noqa: PLC0415
+
+            if is_address_like_delivery_text(text) and incomplete_checkout_with_items(order_prep, bs):
+                patch.update(activate_checkout_patch())
+            else:
+                if pending_order_exists(order_prep, bs):
+                    patch.update(mark_pending_patch())
+                return OrderFlowV2Result(handled=False, reason="not_active")
+        except Exception:  # noqa: BLE001
+            if pending_order_exists(order_prep, bs):
+                patch.update(mark_pending_patch())
+            return OrderFlowV2Result(handled=False, reason="not_active")
 
     if not checkout_active_now(order_prep):
         patch.update(activate_checkout_patch())
+
+    on_file_claim = _address_on_file_claim(text)
 
     addr_confirm_patch = apply_previous_address_confirmation(
         db,
@@ -541,6 +581,7 @@ def try_handle_order_flow_v2(
         "city_uncertain",
         "address_refusal",
         "payment_before_address",
+        "address_owned",
     }:
         slot_patch = apply_inbound_slots(
             message=text,
@@ -558,6 +599,7 @@ def try_handle_order_flow_v2(
         "payment_method" in missing
         and not merged_prep.get("payment_method")
         and not higher_priority_missing_before_payment(missing)
+        and not on_file_claim
     ):
         pay_patch, chosen = apply_payment_method_selection(db, tenant_id=tenant_id, message=text)
         if not pay_patch and not payment_attempt(text):
@@ -576,7 +618,7 @@ def try_handle_order_flow_v2(
                 reason=owner_reason or "collect_next_field",
             ).to_patch())
 
-    if merged_prep.get("payment_method") and not missing:
+    if merged_prep.get("payment_method") and not missing and not on_file_claim:
         reply = build_payment_instruction_reply(
             db,
             tenant_id=tenant_id,
@@ -593,8 +635,7 @@ def try_handle_order_flow_v2(
         )
 
     reply_ctx = _reply_ctx(merged_prep)
-    on_file_claim = _address_on_file_claim(text)
-    if on_file_claim and not reply_ctx.known_previous:
+    if on_file_claim:
         reply = build_address_on_file_collect_reply(
             order_prep=merged_prep,
             brain_state=bs,
