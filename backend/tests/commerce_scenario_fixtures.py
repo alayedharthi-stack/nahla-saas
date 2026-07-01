@@ -177,6 +177,7 @@ def seed_customer_address(
     lng: str = "39.8579",
     city: str = "مكة",
     address_text: str = "حي العزيزية",
+    saudi_national_address: str = "",
 ) -> CustomerAddress:
     addr = CustomerAddress(
         tenant_id=tenant_id,
@@ -185,6 +186,7 @@ def seed_customer_address(
         lng=lng,
         city=city,
         address_text=address_text,
+        saudi_national_address=saudi_national_address or None,
         google_maps_link=f"https://maps.google.com/?q={lat},{lng}",
         whatsapp_location={"latitude": lat, "longitude": lng},
     )

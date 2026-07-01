@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from core.order_context_prefill import MODE_CONFIRM
+
 from .missing_fields import next_missing_field
 from .state import line_items_from_state, trusted_catalog_price
 
@@ -49,16 +51,56 @@ def _order_summary(order_prep: Dict[str, Any], brain_state: Dict[str, Any]) -> s
     return body.strip()
 
 
+def _build_saved_address_confirm_reply(
+    prefix: str,
+    *,
+    known_previous: Optional[Dict[str, str]],
+    order_prep: Dict[str, Any],
+) -> str:
+    known = dict(known_previous or {})
+    city = known.get("city") or str(order_prep.get("city") or "").strip()
+    short_code = (
+        known.get("short_address")
+        or str(order_prep.get("short_address_code") or "").strip()
+    )
+    if not city and not short_code:
+        return ""
+
+    if city and short_code:
+        body = (
+            f"العنوان المسجل عندنا في {city}، والرمز المختصر {short_code}.\n"
+            "هل نعتمد نفس العنوان؟"
+        )
+    elif city:
+        body = f"أشوف المدينة المسجلة عندنا: {city}. أرسل لي الرمز المختصر أو رابط الموقع حتى نكمل الطلب."
+    else:
+        body = "هل نعتمد عنوان التوصيل المحفوظ عندنا؟"
+
+    return f"{prefix}{body}".strip() if prefix else body.strip()
+
+
 def build_next_field_reply(
     *,
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
     missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
 ) -> str:
     """Ask only for the next missing checkout field."""
+    modes = dict(field_modes or {})
     nxt = next_missing_field(missing_fields)
     summary = _order_summary(order_prep, brain_state)
     prefix = f"{summary}\n\n" if summary else ""
+
+    if nxt in {"city", "delivery_address"} and modes.get(nxt) == MODE_CONFIRM:
+        confirm = _build_saved_address_confirm_reply(
+            prefix,
+            known_previous=known_previous,
+            order_prep=order_prep,
+        )
+        if confirm:
+            return confirm
 
     if nxt == "product":
         return f"{prefix}وش المنتج اللي تبغاه؟".strip()
@@ -76,8 +118,16 @@ def build_next_field_reply(
     return f"{prefix}أكمل معي بيانات الطلب.".strip()
 
 
-def build_greeting_with_pending_hint(*, has_pending: bool) -> str:
-    base = "وعليكم السلام، يا هلا فيك"
+def build_greeting_with_pending_hint(
+    *,
+    has_pending: bool,
+    first_name: str = "",
+) -> str:
+    name = str(first_name or "").strip()
+    if name:
+        base = f"وعليكم السلام ورحمة الله وبركاته يا {name}، كيف أقدر أخدمك؟"
+    else:
+        base = "وعليكم السلام ورحمة الله وبركاته 🙏\nكيف أساعدك؟"
     if not has_pending:
         return base
     return f"{base}\n\nعندك طلب سابق غير مكتمل — إذا حاب نكمله قل: كمل الطلب."
@@ -88,12 +138,16 @@ def build_resume_ack(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
     missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
 ) -> str:
     summary = _order_summary(order_prep, brain_state)
     nxt = build_next_field_reply(
         order_prep=order_prep,
         brain_state=brain_state,
         missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
     )
     if summary and summary in nxt:
         return nxt
@@ -105,17 +159,15 @@ def build_catalog_order_start_reply(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
     missing_fields: List[str],
+    field_modes: Optional[Dict[str, str]] = None,
+    known_previous: Optional[Dict[str, str]] = None,
 ) -> str:
-    if trusted_catalog_price(order_prep, brain_state):
-        return build_next_field_reply(
-            order_prep=order_prep,
-            brain_state=brain_state,
-            missing_fields=missing_fields,
-        )
     return build_next_field_reply(
         order_prep=order_prep,
         brain_state=brain_state,
         missing_fields=missing_fields,
+        field_modes=field_modes,
+        known_previous=known_previous,
     )
 
 

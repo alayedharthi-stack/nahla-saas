@@ -30,6 +30,7 @@ CONFIDENCE_SUITES = (
     "tests/test_order_delivered_stamp.py",
     "tests/test_ai_commerce_confidence_hardening.py",
     "tests/test_ai_test_mode_allowlist.py",
+    "tests/test_ai_commerce_known_customer_address_regression.py",
 )
 
 
