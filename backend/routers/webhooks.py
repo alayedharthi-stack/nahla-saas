@@ -634,6 +634,7 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
         db,
         SallaStoreIdentity(store_id=sid),
         include_disabled=False,
+        allow_alias_match=True,
     )
     if tenant_id is not None:
         logger.info(
@@ -643,7 +644,7 @@ def _resolve_tenant_from_store(db, store_id) -> int | None:
         return tenant_id
 
     disabled_integration, disabled_via = find_salla_integration_by_identity(
-        db, sid, include_disabled=True,
+        db, sid, include_disabled=True, allow_alias_match=True,
     )
     if disabled_integration and not disabled_integration.enabled:
         logger.warning(
@@ -798,7 +799,7 @@ async def _handle_salla_authorize(
             alias_ids=event_identity.alias_ids,
         )
         existing_integration, matched_via = find_salla_integration_for_identity(
-            db, identity, include_disabled=True,
+            db, identity, include_disabled=True, allow_alias_match=True,
         )
         if existing_integration and salla_store_id:
             promote_integration_canonical_store(db, existing_integration, identity)

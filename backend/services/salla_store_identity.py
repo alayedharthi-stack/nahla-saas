@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
+
+SallaIdentitySource = Literal["canonical_store_id", "merchant_account_only"]
 
 logger = logging.getLogger("nahla.salla_store_identity")
 
@@ -61,12 +63,17 @@ def verify_jwt_tenant_owns_salla_store(
     jwt_tenant_id: int,
     store_id: str,
     context: str = "",
+    allow_alias_match: bool = False,
 ) -> SallaTenantGuardResult:
     """Fail closed unless ``jwt_tenant_id`` owns ``store_id`` via integrations.
 
+    Embedded/session/launch paths pass ``allow_alias_match=False`` so
+    ``salla_merchant_id_alt`` / ``config.merchant_id`` cannot prove ownership
+  when only a merchant account id is known.
+
   Returns ``SallaTenantGuardResult`` with ``reason`` one of:
   ``ok``, ``store_id_required``, ``invalid_tenant``, ``store_not_registered``,
-  ``store_tenant_mismatch``.
+  ``merchant_identity_not_canonical``, ``store_tenant_mismatch``.
     """
     sid = _str_id(store_id)
     if not sid:
@@ -83,12 +90,40 @@ def verify_jwt_tenant_owns_salla_store(
         )
         return result
 
-    identity = SallaStoreIdentity(store_id=sid)
-    owner_tenant_id, integration, matched_via = resolve_tenant_for_salla_store(
-        db, identity, include_disabled=True,
+    owner_tenant_id, integration, matched_via = _resolve_owner_via_integration_lookup(
+        db,
+        sid,
+        include_disabled=True,
+        allow_alias_match=allow_alias_match,
     )
 
     if owner_tenant_id is None:
+        _alias_row, alias_via = find_salla_integration_by_identity(
+            db, sid, include_disabled=True, allow_alias_match=True,
+        )
+        if _alias_row is not None and alias_via not in ("", "external_store_id"):
+            result = SallaTenantGuardResult(
+                ok=False,
+                owner_tenant_id=_alias_row.tenant_id,
+                integration_id=_alias_row.id,
+                matched_via=alias_via,
+                reason="merchant_identity_not_canonical",
+            )
+            logger.warning(
+                "[SallaTenantGuard] FAIL merchant_identity_not_canonical | "
+                "context=%s jwt_tenant_id=%s store_id=%s alias_matched_via=%s "
+                "alias_owner_tenant=%s has_canonical_store_id=false",
+                context or "verify",
+                jwt_tenant_id,
+                sid,
+                alias_via,
+                _alias_row.tenant_id,
+            )
+            _log_salla_tenant_guard(
+                context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+            )
+            return result
+
         result = SallaTenantGuardResult(ok=False, reason="store_not_registered")
         _log_salla_tenant_guard(
             context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
@@ -121,6 +156,72 @@ def verify_jwt_tenant_owns_salla_store(
     return result
 
 
+def _resolve_owner_via_integration_lookup(
+    db: Session,
+    lookup_id: str,
+    *,
+    include_disabled: bool,
+    allow_alias_match: bool,
+) -> Tuple[Optional[int], Optional[Any], str]:
+    row, matched_via = find_salla_integration_by_identity(
+        db,
+        lookup_id,
+        include_disabled=include_disabled,
+        allow_alias_match=allow_alias_match,
+    )
+    if row is None:
+        return None, None, ""
+    return row.tenant_id, row, matched_via
+
+
+def reject_merchant_account_only_alias_routing(
+    db: Session,
+    *,
+    merchant_account_id: str,
+    context: str = "token_login",
+) -> Optional[SallaTenantGuardResult]:
+    """Block embedded routing when only merchant id is known but an alias row exists."""
+    mid = _str_id(merchant_account_id)
+    if not mid:
+        return None
+
+    strict_owner, strict_integ, strict_via = _resolve_owner_via_integration_lookup(
+        db, mid, include_disabled=True, allow_alias_match=False,
+    )
+    if strict_owner is not None:
+        return None
+
+    alias_row, alias_via = find_salla_integration_by_identity(
+        db, mid, include_disabled=True, allow_alias_match=True,
+    )
+    if alias_row is None or alias_via in ("", "external_store_id"):
+        return None
+
+    result = SallaTenantGuardResult(
+        ok=False,
+        owner_tenant_id=alias_row.tenant_id,
+        integration_id=alias_row.id,
+        matched_via=alias_via,
+        reason="merchant_identity_not_canonical",
+    )
+    logger.warning(
+        "[SallaLogin] merchant_account_only rejected for tenant routing | "
+        "context=%s merchant_account_id=%s has_store_id=false "
+        "alias_matched_via=%s alias_owner_tenant=%s",
+        context,
+        mid,
+        alias_via,
+        alias_row.tenant_id,
+    )
+    _log_salla_tenant_guard(
+        context=context,
+        jwt_tenant_id=0,
+        store_id=mid,
+        result=result,
+    )
+    return result
+
+
 @dataclass
 class SallaStoreIdentity:
     """Canonical + auxiliary Salla identifiers for one logical store."""
@@ -131,6 +232,14 @@ class SallaStoreIdentity:
     owner_email: str = ""
     resolved_via: str = ""
     alias_ids: List[str] = field(default_factory=list)
+
+    @property
+    def identity_source(self) -> SallaIdentitySource | Literal[""]:
+        if self.store_id:
+            return "canonical_store_id"
+        if self.merchant_account_id or self.resolved_via == "merchant_account_only":
+            return "merchant_account_only"
+        return ""
 
     @property
     def all_lookup_ids(self) -> List[str]:
@@ -327,8 +436,13 @@ def find_salla_integration_by_identity(
     lookup_id: str,
     *,
     include_disabled: bool = True,
+    allow_alias_match: bool = False,
 ) -> Tuple[Optional[Any], str]:
     """Find a Salla integration by canonical or alias id.
+
+    When ``allow_alias_match`` is False (embedded token-login / session /
+    launch guards), only ``integrations.external_store_id`` may match — never
+    ``salla_merchant_id_alt`` or legacy ``config.merchant_id``.
 
     Returns ``(integration, matched_via)`` where ``matched_via`` is one of:
     ``external_store_id``, ``config.store_id``, ``config.salla_merchant_id_alt``,
@@ -349,6 +463,9 @@ def find_salla_integration_by_identity(
     if row:
         return row, "external_store_id"
 
+    if not allow_alias_match:
+        return None, ""
+
     # Config alias fields — portable across SQLite (tests) and Postgres.
     rows = q.all()
     for row in rows:
@@ -368,11 +485,31 @@ def find_salla_integration_for_identity(
     identity: SallaStoreIdentity,
     *,
     include_disabled: bool = True,
+    allow_alias_match: bool = False,
 ) -> Tuple[Optional[Any], str]:
     """Try every known id on ``identity`` until an integration matches."""
+    if identity.store_id:
+        return find_salla_integration_by_identity(
+            db,
+            identity.store_id,
+            include_disabled=include_disabled,
+            allow_alias_match=allow_alias_match,
+        )
+
+    if identity.merchant_account_id:
+        return find_salla_integration_by_identity(
+            db,
+            identity.merchant_account_id,
+            include_disabled=include_disabled,
+            allow_alias_match=False,
+        )
+
     for lookup_id in identity.all_lookup_ids:
         row, matched_via = find_salla_integration_by_identity(
-            db, lookup_id, include_disabled=include_disabled,
+            db,
+            lookup_id,
+            include_disabled=include_disabled,
+            allow_alias_match=allow_alias_match,
         )
         if row is not None:
             return row, matched_via
@@ -424,10 +561,14 @@ def resolve_tenant_for_salla_store(
     identity: SallaStoreIdentity,
     *,
     include_disabled: bool = True,
+    allow_alias_match: bool = False,
 ) -> Tuple[Optional[int], Optional[Any], str]:
     """Return ``(tenant_id, integration, matched_via)`` for a Salla identity."""
     integration, matched_via = find_salla_integration_for_identity(
-        db, identity, include_disabled=include_disabled,
+        db,
+        identity,
+        include_disabled=include_disabled,
+        allow_alias_match=allow_alias_match,
     )
     if integration is None:
         return None, None, ""
@@ -449,7 +590,7 @@ def assert_oauth_tenant_matches_store_owner(
 
     identity = SallaStoreIdentity(store_id=store_id)
     owner_tenant_id, integration, matched_via = resolve_tenant_for_salla_store(
-        db, identity, include_disabled=True,
+        db, identity, include_disabled=True, allow_alias_match=True,
     )
     if owner_tenant_id is None:
         return True, None, ""

@@ -163,7 +163,9 @@ class TestAliasIntegrationLookup:
             owner_email=PARTNER_EMAIL,
         )
 
-        row, via = find_salla_integration_by_identity(db, PARTNER_ALT_MERCHANT)
+        row, via = find_salla_integration_by_identity(
+            db, PARTNER_ALT_MERCHANT, allow_alias_match=True,
+        )
         assert row is not None
         assert row.tenant_id == PARTNER_TENANT
         assert via == "config.salla_merchant_id_alt"
@@ -171,6 +173,7 @@ class TestAliasIntegrationLookup:
         tenant_id, _, _ = resolve_tenant_for_salla_store(
             db,
             SallaStoreIdentity(store_id=PARTNER_ALT_MERCHANT),
+            allow_alias_match=True,
         )
         assert tenant_id == PARTNER_TENANT
 
@@ -185,7 +188,9 @@ class TestAliasIntegrationLookup:
             store_name=GENERIC_STORE_NAME,
         )
 
-        row, via = find_salla_integration_by_identity(db, GENERIC_ALT_MERCHANT)
+        row, via = find_salla_integration_by_identity(
+            db, GENERIC_ALT_MERCHANT, allow_alias_match=True,
+        )
         assert row.tenant_id == GENERIC_TENANT
         assert via in ("config.salla_merchant_id_alt", "config.merchant_id")
 

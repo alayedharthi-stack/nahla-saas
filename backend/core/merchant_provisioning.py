@@ -86,6 +86,7 @@ def get_or_create_merchant_user(
     is_email_derived: bool = False,
     issued_via: str = "",
     request_ip: str = "",
+    allow_alias_match: bool = True,
 ) -> ProvisioningResult:
     """Resolve (Tenant, User) for a merchant arriving via OAuth.
 
@@ -158,7 +159,7 @@ def get_or_create_merchant_user(
                 SallaStoreIdentity,
             )
             integration, matched_via = find_salla_integration_by_identity(
-                db, store_id_str, include_disabled=True,
+                db, store_id_str, include_disabled=True, allow_alias_match=allow_alias_match,
             )
             if integration is not None and matched_via not in ("", "external_store_id"):
                 cfg = integration.config or {}

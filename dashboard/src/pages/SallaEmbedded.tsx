@@ -31,6 +31,8 @@ import {
   EMBEDDED_SESSION_TIMEOUT_MS,
   EMBEDDED_WATCHDOG_TIMEOUT_MS,
   shouldRetryEmbeddedLogin,
+  isSallaRoutingBlockDetail,
+  clearSallaEmbeddedSession,
 } from '../lib/embeddedLogin'
 import {
   signalEmbeddedReady,
@@ -97,11 +99,7 @@ function jwtStoreId(token: string): string {
 }
 
 function clearEmbeddedSession(): void {
-  ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
-    'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
-    'nahla_salla_store_name', 'nahla_store_name',
-    'nahla_salla_is_new', 'nahla_salla_wa_connected',
-  ].forEach(k => localStorage.removeItem(k))
+  clearSallaEmbeddedSession()
 }
 
 function persistSession(data: LoginResponse | SessionResponse) {
@@ -138,7 +136,7 @@ function persistSession(data: LoginResponse | SessionResponse) {
 
 export default function SallaEmbedded() {
   const navigate = useNavigate()
-  const { isRTL, t } = useEmbeddedLocale()
+  const { isRTL, lang, t } = useEmbeddedLocale()
   const { isDark } = useEmbeddedTheme()
 
   const [phase, setPhase]               = useState<Phase>('init')
@@ -369,7 +367,17 @@ export default function SallaEmbedded() {
         if (!res.ok || !data.access_token) {
           const detail = data?.detail || `HTTP ${res.status}`
           console.error('[SallaEmbedded] token-login failed:', detail, data)
-          showError(data?.detail || t.errors.verifyFailed)
+          if (isSallaRoutingBlockDetail(detail)) {
+            clearEmbeddedSession()
+            console.warn('[SallaEmbedded] routing block — session cleared | detail=%s', detail)
+          }
+          showError(
+            isSallaRoutingBlockDetail(detail)
+              ? (lang === 'ar'
+                ? 'تعذّر فتح هذا المتجر — هوية المتجر غير مكتملة. أعد فتح التطبيق من سلة.'
+                : 'Could not open this store — store identity is incomplete. Re-open the app from Salla.')
+              : (data?.detail || t.errors.verifyFailed),
+          )
           return
         }
 
@@ -427,7 +435,7 @@ export default function SallaEmbedded() {
         return
       }
     }
-  }, [sallaToken, appId, cancelActiveLogin, showError, markReady, clearWatchdog, t])
+  }, [sallaToken, appId, cancelActiveLogin, showError, markReady, clearWatchdog, t, lang])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
 

@@ -19,6 +19,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { clearSallaEmbeddedSession, isSallaRoutingBlockDetail } from '../lib/embeddedLogin'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 
 // Signal Salla host frame immediately — this page may be loaded in the top
@@ -29,11 +30,7 @@ import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 })()
 
 function clearEmbeddedSession(): void {
-  ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
-    'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
-    'nahla_salla_store_name', 'nahla_store_name',
-    'nahla_salla_is_new', 'nahla_salla_wa_connected', 'nahla_salla_embedded',
-  ].forEach(k => { try { localStorage.removeItem(k) } catch { /* noop */ } })
+  clearSallaEmbeddedSession()
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
@@ -132,6 +129,10 @@ export default function SallaLaunch() {
         navigate(nextPath, { replace: true })
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
+        if (isSallaRoutingBlockDetail(msg)) {
+          clearEmbeddedSession()
+          console.warn('[SallaLaunch] routing block — session cleared | detail=%s', msg)
+        }
         const looksLocalized = msg.length > 0 && /[\u0600-\u06FFa-zA-Z]/.test(msg)
         setErrorMsg(looksLocalized ? msg : t.launch.errorGeneric)
       }
