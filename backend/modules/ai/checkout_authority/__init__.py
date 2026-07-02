@@ -208,6 +208,26 @@ def state_has_local_draft_authority(state: Any) -> bool:
     return False
 
 
+def brain_payment_paths_should_defer_to_checkout_owner(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+) -> bool:
+    """True when Brain/webhook payment bypass must not preempt checkout owner."""
+    if conversation is None:
+        return False
+    meta = dict(getattr(conversation, "extra_metadata", None) or {})
+    bs = dict(meta.get("brain_state") or {})
+    prep = order_prep_from_any(bs)
+    draft = load_local_draft_evidence(
+        db,
+        tenant_id=int(tenant_id),
+        conversation_id=getattr(conversation, "id", None),
+    )
+    return active_whatsapp_checkout(prep, bs, draft=draft)
+
+
 def resolve_local_draft_reference_from_db(
     db: Any,
     *,
@@ -225,6 +245,7 @@ def resolve_local_draft_reference_from_db(
 __all__ = [
     "LocalDraftEvidence",
     "active_whatsapp_checkout",
+    "brain_payment_paths_should_defer_to_checkout_owner",
     "checkout_has_items",
     "draft_display_reference",
     "load_local_draft_evidence",

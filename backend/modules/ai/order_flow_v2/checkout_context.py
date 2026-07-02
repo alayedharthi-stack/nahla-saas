@@ -215,3 +215,48 @@ def apply_previous_address_confirmation(
 
     # On-file claim without explicit confirm phrase — reply layer confirms; do not auto-apply.
     return {}
+
+
+def apply_delivery_continuation_address_patch(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    customer_phone: str,
+    order_prep: Dict[str, Any],
+    brain_state: Optional[Dict[str, Any]] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Accept saved / evidenced address when customer asks delivery to their address."""
+    from modules.ai.order_flow_v2.slot_ownership import promote_address_evidence_patch  # noqa: PLC0415
+
+    prep = dict(order_prep or {})
+    patch = promote_address_evidence_patch(prep)
+    merged = {**prep, **patch}
+    if has_accepted_delivery_address(merged):
+        patch["customer_confirmed_previous_address"] = True
+        patch["shipping_source"] = patch.get("shipping_source") or "delivery_continuation"
+        return patch
+
+    from core.order_context_builder import build_order_context  # noqa: PLC0415
+    from core.order_context_prefill import _shipping_context_to_prep_patch  # noqa: PLC0415
+
+    ctx = build_order_context(
+        db,
+        tenant_id=int(tenant_id),
+        conversation=conversation,
+        phone=str(customer_phone or ""),
+        brain_state=brain_state,
+        inbound_metadata=inbound_metadata,
+        message="",
+        build_source="order_flow_v2_delivery_continuation",
+    )
+    if ctx.known_previous_address is None:
+        return patch
+    if bool(getattr(ctx.shipping, "locked_by_merchant", False)):
+        return patch
+    saved = _shipping_context_to_prep_patch(ctx.known_previous_address)
+    saved["customer_confirmed_previous_address"] = True
+    saved["shipping_source"] = "delivery_continuation_saved_address"
+    patch.update(saved)
+    return patch

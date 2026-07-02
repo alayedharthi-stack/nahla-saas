@@ -21,6 +21,6 @@
     "ahli": true,
     "barcode_aliases": ["payment_rajhi_barcode", "payment_alahli_barcode"]
   },
-  "saved_address": false,
+  "saved_address": true,
   "customer_name": ""
 }

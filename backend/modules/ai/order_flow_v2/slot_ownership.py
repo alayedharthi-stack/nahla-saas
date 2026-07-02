@@ -80,11 +80,113 @@ def stamp_last_field_patch(missing_fields: List[str]) -> Dict[str, Any]:
     return {"order_flow_v2_last_field": field}
 
 
+def _stored_customer_name(prep: Dict[str, Any]) -> str:
+    first = str(prep.get("customer_first_name") or "").strip()
+    last = str(prep.get("customer_last_name") or "").strip()
+    return " ".join(x for x in (first, last) if x).strip()
+
+
+def is_explicit_customer_name_turn(message: str) -> bool:
+    """Two-token Arabic full-name turn (not payment/city)."""
+    text = str(message or "").strip()
+    if not text or payment_attempt(text):
+        return False
+    if not _ARABIC_SHORT_TEXT_RE.match(text):
+        return False
+    city, _ = _city_and_hint_from_text(text)
+    if city and len(text.split()) <= 2:
+        return False
+    return True
+
+
+def promote_address_evidence_patch(order_prep: Dict[str, Any]) -> Dict[str, Any]:
+    """Promote short-code evidence from address_line into accepted delivery fields."""
+    if has_accepted_delivery_address(order_prep):
+        return {}
+    patch: Dict[str, Any] = {}
+    code = str(order_prep.get("short_address_code") or "").strip()
+    if not code:
+        line = str(order_prep.get("address_line") or "")
+        match = _SHORT_CODE_RE.search(line)
+        if match:
+            patch["short_address_code"] = match.group(0).upper()
+    return patch
+
+
+def apply_explicit_name_override(
+    *,
+    message: str,
+    order_prep: Dict[str, Any],
+    checkout_active: bool,
+) -> Tuple[Dict[str, Any], str]:
+    """Current-turn explicit name overrides stale stored customer identity."""
+    if not checkout_active or not is_explicit_customer_name_turn(message):
+        return {}, ""
+    text = str(message or "").strip()
+    prep = dict(order_prep or {})
+    incoming = text
+    stored = _stored_customer_name(prep)
+    if stored and stored == incoming:
+        return {}, ""
+    parts = text.split()
+    patch: Dict[str, Any] = {
+        "customer_first_name": parts[0],
+        "customer_name_override_turn": True,
+        "order_flow_v2_last_field": "city",
+    }
+    if len(parts) > 1:
+        patch["customer_last_name"] = " ".join(parts[1:])
+    else:
+        patch.pop("order_flow_v2_last_field", None)
+        patch["order_flow_v2_last_field"] = "customer_name"
+    patch.update(build_contract(
+        decision="update_slot",
+        field="customer_name",
+        reason="explicit_name_override_turn",
+        facts={"replaced_stale_name": bool(stored and stored != incoming)},
+    ).to_patch())
+    return patch, "explicit_name_override"
+
+
+def apply_active_checkout_city_turn(
+    *,
+    message: str,
+    order_prep: Dict[str, Any],
+    missing_fields: List[str],
+    checkout_active: bool,
+) -> Tuple[Dict[str, Any], str]:
+    """City/location text during active checkout — not product browse."""
+    if not checkout_active:
+        return {}, ""
+    text = str(message or "").strip()
+    if not text or not _ARABIC_TEXT_RE.match(text) or payment_attempt(text):
+        return {}, ""
+    if is_explicit_customer_name_turn(text):
+        return {}, ""
+    city, address_hint = _city_and_hint_from_text(text)
+    if not city:
+        return {}, ""
+    patch: Dict[str, Any] = {
+        "city": city,
+        "order_flow_v2_last_field": "delivery_address",
+    }
+    if address_hint and not order_prep.get("address_line"):
+        patch["address_line"] = address_hint
+    patch.update(build_contract(
+        decision="update_slot",
+        field="city",
+        reason="active_checkout_city_owned",
+    ).to_patch())
+    _ = missing_fields
+    return patch, "active_checkout_city_owned"
+
+
 def apply_slot_ownership(
     *,
     message: str,
     order_prep: Dict[str, Any],
     missing_fields: List[str],
+    checkout_active: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     """Return state patch + reason for current-turn slot ownership."""
     text = str(message or "").strip()
@@ -93,6 +195,23 @@ def apply_slot_ownership(
     patch: Dict[str, Any] = {}
     expected = _next_missing_field(missing) or ""
     last_field = str(prep.get("order_flow_v2_last_field") or "").strip()
+
+    name_patch, name_reason = apply_explicit_name_override(
+        message=text,
+        order_prep=prep,
+        checkout_active=checkout_active,
+    )
+    if name_patch:
+        return name_patch, name_reason
+
+    city_patch, city_reason = apply_active_checkout_city_turn(
+        message=text,
+        order_prep=prep,
+        missing_fields=missing,
+        checkout_active=checkout_active,
+    )
+    if city_patch:
+        return city_patch, city_reason
 
     if not text:
         return stamp_last_field_patch(missing), "empty"
