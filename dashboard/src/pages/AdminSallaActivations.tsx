@@ -36,6 +36,7 @@ interface Activation {
 interface ActivateResult {
   access_token: string
   tenant_id: number
+  store_id?: string
   store_name: string
   email: string
   is_new: boolean
@@ -83,8 +84,12 @@ function ActivateForm({ onSuccess }: { onSuccess: () => void }) {
 
   const copyLink = () => {
     if (!result?.access_token) return
-    // Build a direct login link using the token via salla-callback mechanism
-    const url = `${window.location.origin}/salla-callback?token=${result.access_token}&status=connected&new=${result.is_new ? '1' : '0'}&store=${result.tenant_id}`
+    const callbackStoreId = (result.store_id || storeId.trim() || '').trim()
+    if (!callbackStoreId) {
+      setError('معرف المتجر غير متوفر — أدخل store_id أو فعّل مع introspect')
+      return
+    }
+    const url = `${window.location.origin}/salla-callback?token=${result.access_token}&status=connected&new=${result.is_new ? '1' : '0'}&store=${encodeURIComponent(callbackStoreId)}${result.store_name ? `&name=${encodeURIComponent(result.store_name)}` : ''}`
     navigator.clipboard.writeText(url).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)

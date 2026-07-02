@@ -37,6 +37,24 @@ function getToken(): string {
   try { return localStorage.getItem('nahla_token') || '' } catch { return '' }
 }
 
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const parts = token.split('.')
+    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+  } catch {
+    return {}
+  }
+}
+
+function resolveStoreId(token: string): string {
+  try {
+    const saved = localStorage.getItem('nahla_salla_store_id') || ''
+    if (saved) return saved
+  } catch { /* noop */ }
+  const claim = decodeJwtPayload(token).store_id
+  return claim != null ? String(claim).trim() : ''
+}
+
 // Robust resolver for the merchant JWT — used before redirecting to
 // /api/salla/oauth/start.  That endpoint reads ?token=<JWT> from the query
 // string because top-level navigation strips Authorization headers.
@@ -467,9 +485,24 @@ export default function SallaEntryScreen() {
     }
 
     try {
+      const savedStore = resolveStoreId(token)
+      if (!savedStore) {
+        console.warn('[SallaEntry] launch blocked — missing store_id; re-auth required')
+        alert(t.errors.sessionExpired)
+        setLaunching(null)
+        navigate('/app/salla', { replace: true })
+        return
+      }
       const res = await fetch(
         `${API_BASE}/salla/session/launch-dashboard?next=${encodeURIComponent(next)}`,
-        { method: 'POST', headers: { Authorization: `Bearer ${token}` } },
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ store_id: savedStore }),
+        },
       )
       if (!res.ok) {
         let detail = `HTTP ${res.status}`
@@ -561,12 +594,16 @@ export default function SallaEntryScreen() {
     const token = getToken()
     if (!token) { navigate('/app/salla', { replace: true }); return }
 
+    const savedStore = resolveStoreId(token)
+    if (!savedStore) {
+      console.warn('[SallaEntry] missing store_id — redirecting to embedded re-auth')
+      navigate('/app/salla', { replace: true })
+      return
+    }
+
     const headers    = { Authorization: `Bearer ${token}` }
     const signal     = AbortSignal.timeout(9000)
-    const savedStore = (() => { try { return localStorage.getItem('nahla_salla_store_id') || '' } catch { return '' } })()
-    const sessionUrl = savedStore
-      ? `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(savedStore)}`
-      : `${API_BASE}/api/salla/session`
+    const sessionUrl = `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(savedStore)}`
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -24,6 +24,104 @@ SALLA_STORE_INFO_URL = "https://api.salla.dev/admin/v2/store/info"
 
 
 @dataclass
+class SallaTenantGuardResult:
+    """Result of verifying a JWT tenant against a Salla store owner."""
+
+    ok: bool
+    owner_tenant_id: Optional[int] = None
+    integration_id: Optional[int] = None
+    matched_via: str = ""
+    reason: str = ""
+
+
+def _log_salla_tenant_guard(
+    *,
+    context: str,
+    jwt_tenant_id: int,
+    store_id: str,
+    result: SallaTenantGuardResult,
+) -> None:
+    status = "pass" if result.ok else "fail"
+    logger.info(
+        "[SallaTenantGuard] %s %s tenant_id=%s store_id=%s integration_id=%s "
+        "matched_via=%s reason=%s",
+        status,
+        context or "verify",
+        jwt_tenant_id,
+        store_id or "-",
+        result.integration_id,
+        result.matched_via or "-",
+        result.reason or "-",
+    )
+
+
+def verify_jwt_tenant_owns_salla_store(
+    db: Session,
+    *,
+    jwt_tenant_id: int,
+    store_id: str,
+    context: str = "",
+) -> SallaTenantGuardResult:
+    """Fail closed unless ``jwt_tenant_id`` owns ``store_id`` via integrations.
+
+  Returns ``SallaTenantGuardResult`` with ``reason`` one of:
+  ``ok``, ``store_id_required``, ``invalid_tenant``, ``store_not_registered``,
+  ``store_tenant_mismatch``.
+    """
+    sid = _str_id(store_id)
+    if not sid:
+        result = SallaTenantGuardResult(ok=False, reason="store_id_required")
+        _log_salla_tenant_guard(
+            context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+        )
+        return result
+
+    if jwt_tenant_id <= 0:
+        result = SallaTenantGuardResult(ok=False, reason="invalid_tenant")
+        _log_salla_tenant_guard(
+            context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+        )
+        return result
+
+    identity = SallaStoreIdentity(store_id=sid)
+    owner_tenant_id, integration, matched_via = resolve_tenant_for_salla_store(
+        db, identity, include_disabled=True,
+    )
+
+    if owner_tenant_id is None:
+        result = SallaTenantGuardResult(ok=False, reason="store_not_registered")
+        _log_salla_tenant_guard(
+            context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+        )
+        return result
+
+    if owner_tenant_id != jwt_tenant_id:
+        result = SallaTenantGuardResult(
+            ok=False,
+            owner_tenant_id=owner_tenant_id,
+            integration_id=integration.id if integration else None,
+            matched_via=matched_via,
+            reason="store_tenant_mismatch",
+        )
+        _log_salla_tenant_guard(
+            context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+        )
+        return result
+
+    result = SallaTenantGuardResult(
+        ok=True,
+        owner_tenant_id=owner_tenant_id,
+        integration_id=integration.id if integration else None,
+        matched_via=matched_via,
+        reason="ok",
+    )
+    _log_salla_tenant_guard(
+        context=context, jwt_tenant_id=jwt_tenant_id, store_id=sid, result=result,
+    )
+    return result
+
+
+@dataclass
 class SallaStoreIdentity:
     """Canonical + auxiliary Salla identifiers for one logical store."""
 
@@ -357,15 +455,32 @@ def assert_oauth_tenant_matches_store_owner(
         return True, None, ""
 
     if owner_tenant_id != session_tenant_id:
-        logger.error(
-            "[SallaIdentity] OAuth tenant mismatch | session_tenant=%s "
-            "store_owner_tenant=%s store_id=%s matched_via=%s integration_id=%s",
-            session_tenant_id,
-            owner_tenant_id,
-            store_id,
-            matched_via,
-            integration.id if integration else None,
+        result = SallaTenantGuardResult(
+            ok=False,
+            owner_tenant_id=owner_tenant_id,
+            integration_id=integration.id if integration else None,
+            matched_via=matched_via,
+            reason="store_owned_by_other_tenant",
+        )
+        _log_salla_tenant_guard(
+            context="oauth_reconnect",
+            jwt_tenant_id=session_tenant_id,
+            store_id=store_id,
+            result=result,
         )
         return False, owner_tenant_id, "store_owned_by_other_tenant"
 
+    result = SallaTenantGuardResult(
+        ok=True,
+        owner_tenant_id=owner_tenant_id,
+        integration_id=integration.id if integration else None,
+        matched_via=matched_via,
+        reason="ok",
+    )
+    _log_salla_tenant_guard(
+        context="oauth_reconnect",
+        jwt_tenant_id=session_tenant_id,
+        store_id=store_id,
+        result=result,
+    )
     return True, owner_tenant_id, ""

@@ -208,6 +208,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         find_salla_integration_for_identity,
         promote_integration_canonical_store,
         resolve_salla_store_identity,
+        resolve_tenant_for_salla_store,
+        verify_jwt_tenant_owns_salla_store,
         SallaStoreIdentity,
     )
 
@@ -325,6 +327,25 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email, canonical_store_id or lookup_store_id,
     )
 
+    # ── Authoritative store owner (integration row wins over provisioning) ──
+    identity_for_lookup = (
+        store_identity
+        if store_identity.store_id
+        else SallaStoreIdentity(store_id=lookup_store_id)
+    )
+    owner_tenant_id, owner_integration, owner_matched_via = (
+        resolve_tenant_for_salla_store(db, identity_for_lookup, include_disabled=True)
+        if (canonical_store_id or lookup_store_id)
+        else (None, None, "")
+    )
+    if owner_tenant_id is not None:
+        verify_jwt_tenant_owns_salla_store(
+            db,
+            jwt_tenant_id=owner_tenant_id,
+            store_id=canonical_store_id or lookup_store_id,
+            context="token_login_owner_resolve",
+        )
+
     # ══════════════════════════════════════════════════════════════
     # STEP 4 — Find or create isolated Tenant + User
     # ══════════════════════════════════════════════════════════════
@@ -355,6 +376,32 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email = provision.email   # canonical, may have been remapped
         role        = provision.role
         is_new      = provision.is_brand_new
+        db_user_id  = provision.user_id
+
+        # Integration owner is authoritative — never issue JWT for another tenant.
+        if owner_tenant_id is not None and tenant_id != owner_tenant_id:
+            logger.warning(
+                "[SallaLogin] provision tenant mismatch — forcing integration owner | "
+                "provision_tenant=%s owner_tenant=%s store_id=%s matched_via=%s",
+                tenant_id,
+                owner_tenant_id,
+                canonical_store_id or lookup_store_id,
+                owner_matched_via,
+            )
+            tenant_id = owner_tenant_id
+            from models import User  # noqa: PLC0415
+            owner_user = (
+                db.query(User)
+                .filter(User.tenant_id == owner_tenant_id, User.email == owner_email)
+                .first()
+            )
+            if owner_user:
+                db_user_id = owner_user.id
+            elif provision.user_id:
+                stray_user = db.query(User).filter(User.id == provision.user_id).first()
+                if stray_user and stray_user.tenant_id != owner_tenant_id:
+                    stray_user.tenant_id = owner_tenant_id
+                    db_user_id = stray_user.id
 
         if provision.linked_existing:
             audit(
@@ -403,6 +450,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             integration, _matched_via = find_salla_integration_for_identity(
                 db, identity_for_save, include_disabled=True,
             )
+            if integration is None and owner_integration is not None:
+                integration = owner_integration
             if integration is None:
                 integration = db.query(Integration).filter(
                     Integration.tenant_id == tenant_id,
@@ -535,9 +584,50 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # ══════════════════════════════════════════════════════════════
     # STEP 5 — Issue Nahla JWT (must carry user_id for tenant isolation)
     # ══════════════════════════════════════════════════════════════
-    db_user_id = provision.user_id
+    jwt_store_id = canonical_store_id or provision_store_id
+    if jwt_store_id:
+        final_guard = verify_jwt_tenant_owns_salla_store(
+            db,
+            jwt_tenant_id=tenant_id,
+            store_id=jwt_store_id,
+            context="token_login_issue",
+        )
+        if not final_guard.ok:
+            if final_guard.reason == "store_not_registered":
+                retry = verify_jwt_tenant_owns_salla_store(
+                    db,
+                    jwt_tenant_id=tenant_id,
+                    store_id=jwt_store_id,
+                    context="token_login_post_provision",
+                )
+                if not retry.ok:
+                    logger.error(
+                        "[SallaLogin] provision incomplete — no integration for new store | "
+                        "tenant=%s store_id=%s",
+                        tenant_id, jwt_store_id,
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="store_provision_incomplete",
+                    )
+                logger.info(
+                    "[SallaLogin] new store provisioned | tenant=%s store_id=%s",
+                    tenant_id, jwt_store_id,
+                )
+            elif final_guard.owner_tenant_id:
+                tenant_id = final_guard.owner_tenant_id
+            else:
+                raise HTTPException(
+                    status_code=403,
+                    detail=final_guard.reason or "store_tenant_mismatch",
+                )
+
     nahla_jwt = create_token(
-        email=owner_email, role=role, tenant_id=tenant_id, user_id=db_user_id
+        email=owner_email,
+        role=role,
+        tenant_id=tenant_id,
+        user_id=db_user_id,
+        extra_claims={"store_id": jwt_store_id} if jwt_store_id else None,
     )
     audit(
         "salla_oauth_login_success",
@@ -723,10 +813,12 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
     # Try body first, then Authorization header (backward compatible)
     body_token = ""
     body_next  = ""
+    body_store_id = ""
     try:
         body = await request.json()
         body_token = str(body.get("token") or "").strip()
         body_next  = str(body.get("next")  or "").strip()
+        body_store_id = str(body.get("store_id") or "").strip()
     except Exception:
         body = {}
 
@@ -735,6 +827,7 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
 
     nahla_jwt_input = body_token or header_token
     next_path       = body_next or str(request.query_params.get("next", "/overview"))
+    query_store_id  = str(request.query_params.get("store_id") or "").strip()
 
     if not nahla_jwt_input:
         logger.warning("[LaunchDashboard] No JWT provided (neither body nor Authorization)")
@@ -752,10 +845,34 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
     email     = str(decoded.get("sub", ""))
     role      = str(decoded.get("role", "merchant"))
     user_id   = decoded.get("user_id")
+    jwt_store_id = str(decoded.get("store_id") or "").strip()
+    store_id  = body_store_id or query_store_id or jwt_store_id
 
     if not tenant_id:
         logger.warning("[LaunchDashboard] JWT missing tenant_id")
         raise HTTPException(status_code=401, detail="token_missing_tenant")
+
+    from services.salla_store_identity import verify_jwt_tenant_owns_salla_store  # noqa: PLC0415
+
+    if not store_id:
+        logger.warning(
+            "[LaunchDashboard] store_id missing — rejecting launch | tenant=%s",
+            tenant_id,
+        )
+        raise HTTPException(status_code=403, detail="store_id_required")
+
+    guard = verify_jwt_tenant_owns_salla_store(
+        db,
+        jwt_tenant_id=tenant_id,
+        store_id=store_id,
+        context="launch_dashboard",
+    )
+    if not guard.ok:
+        logger.warning(
+            "[LaunchDashboard] store guard failed | tenant=%s store_id=%s reason=%s",
+            tenant_id, store_id, guard.reason,
+        )
+        raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
     # Fetch user_id if missing
     if not user_id:
@@ -773,6 +890,8 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
         "launch_token": True,
         "exp":          int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp()),
     }
+    if store_id:
+        launch_payload["store_id"] = store_id
     try:
         import jose.jwt as _jose_jwt  # noqa: PLC0415
         launch_jwt = _jose_jwt.encode(launch_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -785,8 +904,8 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
     launch_url = f"{_DASHBOARD.rstrip('/')}/app/salla/launch?{params}"
 
     logger.info(
-        "[LaunchDashboard] launch_url issued | tenant=%s email=%s next=%s",
-        tenant_id, email, next_path,
+        "[LaunchDashboard] launch_url issued | tenant=%s store_id=%s email=%s next=%s",
+        tenant_id, store_id or "-", email, next_path,
     )
     return {"launch_url": launch_url}
 
@@ -841,9 +960,28 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
     email     = str(decoded.get("sub", ""))
     role      = str(decoded.get("role", "merchant"))
     tenant_id = int(decoded.get("tenant_id", 0))
+    store_id  = str(decoded.get("store_id") or "").strip()
 
     if not tenant_id or not email:
         raise HTTPException(status_code=401, detail="بيانات الجلسة غير مكتملة.")
+
+    from services.salla_store_identity import verify_jwt_tenant_owns_salla_store  # noqa: PLC0415
+
+    if not store_id:
+        logger.warning(
+            "[ResolveLaunch] store_id missing — rejecting resolve | tenant=%s",
+            tenant_id,
+        )
+        raise HTTPException(status_code=403, detail="store_id_required")
+
+    guard = verify_jwt_tenant_owns_salla_store(
+        db,
+        jwt_tenant_id=tenant_id,
+        store_id=store_id,
+        context="resolve_launch",
+    )
+    if not guard.ok:
+        raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
     # Fetch user_id (may be absent from token if legacy)
     db_user = db.query(User).filter(User.email == email).first()
@@ -863,11 +1001,12 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
         role=role,
         tenant_id=tenant_id,
         user_id=user_id,
+        extra_claims={"store_id": store_id} if store_id else None,
     )
 
     logger.info(
-        "[ResolveLaunch] Full session issued | tenant=%s email=%s",
-        tenant_id, email,
+        "[ResolveLaunch] Full session issued | tenant=%s store_id=%s email=%s",
+        tenant_id, store_id or "-", email,
     )
     return {
         "access_token": full_jwt,
@@ -875,6 +1014,7 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
         "email":        email,
         "role":         role,
         "store_name":   store_name,
+        "store_id":     store_id or None,
     }
 
 
@@ -951,16 +1091,18 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
 
     Also used by /app/entry to fetch merchant readiness state in one call.
 
-    Optional query param ?store_id= — when present, the endpoint verifies
-    that the JWT's tenant actually owns this Salla store. If not, 401 is
-    returned so the frontend can force a fresh token-login, preventing
-    cross-tenant data leakage when a user switches between stores.
+    Optional query param ?store_id= — **required** for Salla embedded flows.
+    Verifies that the JWT's tenant owns this Salla store (canonical id or
+    config aliases). On mismatch returns 403 ``store_tenant_mismatch`` so the
+    frontend forces a fresh token-login — never silently continues with JWT
+    tenant only.
 
     Returns 200 {
-      connected, tenant_id, token,
+      connected, tenant_id, store_id, token,
       whatsapp_connected, has_automations, has_products, store_name
     }
-    Returns 401 if expired / missing / store mismatch.
+    Returns 401 if expired / missing.
+    Returns 403 if store_id missing or store_tenant_mismatch.
     """
     # ── Outer guard so any unhandled error returns clean JSON, not 500 ──────
     # (The previous version let exceptions propagate which surfaced as a
@@ -969,6 +1111,7 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
     # the frontend can act on.)
     import traceback as _tb  # noqa: PLC0415
     from core.auth import require_authenticated  # noqa: PLC0415
+    from services.salla_store_identity import verify_jwt_tenant_owns_salla_store  # noqa: PLC0415
 
     requested_store = str(request.query_params.get("store_id") or "").strip()
     tenant_id = 0
@@ -990,22 +1133,26 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
         if not tenant_id:
             raise HTTPException(status_code=401, detail="invalid_tenant")
 
-        # ── Store-isolation guard ──────────────────────────────────────────
-        # If the caller passed ?store_id=, verify the JWT's tenant actually
-        # owns that Salla store.  A mismatch means the old token is for a
-        # DIFFERENT store → reject so the frontend does a fresh token-login.
-        if requested_store:
-            matching_integ = db.query(Integration).filter(
-                Integration.tenant_id == tenant_id,
-                Integration.provider  == "salla",
-                Integration.external_store_id == requested_store,
-            ).first()
-            if not matching_integ:
-                logger.warning(
-                    "[SallaSession] store_id mismatch — JWT tenant=%s does not own store=%s",
-                    tenant_id, requested_store,
-                )
-                raise HTTPException(status_code=401, detail="store_mismatch")
+        if not requested_store:
+            raise HTTPException(status_code=403, detail="store_id_required")
+
+        # ── Store-isolation guard (fail closed) ───────────────────────────
+        guard = verify_jwt_tenant_owns_salla_store(
+            db,
+            jwt_tenant_id=tenant_id,
+            store_id=requested_store,
+            context="session_check",
+        )
+        if not guard.ok:
+            raise HTTPException(
+                status_code=403,
+                detail=guard.reason or "store_tenant_mismatch",
+            )
+
+        matching_integ = db.query(Integration).filter(
+            Integration.id == guard.integration_id,
+        ).first() if guard.integration_id else None
+        if matching_integ:
             integration_id    = matching_integ.id
             _cfg              = matching_integ.config or {}
             api_key_source    = (_cfg.get("api_key_source") or "").lower()
@@ -1022,6 +1169,7 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
             role=role,
             tenant_id=tenant_id,
             user_id=int(user_id) if user_id is not None else None,
+            extra_claims={"store_id": requested_store},
         )
 
         # ── Merchant readiness probes (cheap point-queries) ───────────────
@@ -1060,6 +1208,7 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
         return {
             "connected":          True,
             "tenant_id":          tenant_id,
+            "store_id":           requested_store,
             "token":              fresh_token,
             "whatsapp_connected": wa_connected,
             "has_automations":    has_automations,
@@ -1268,11 +1417,13 @@ async def salla_activate_from_email(request: Request, db: Session = Depends(get_
 
     # ── Issue JWT ─────────────────────────────────────────────────────────
     user_row2 = db.query(User).filter(User.tenant_id == tenant_id).first()
+    activate_store_id = str(merchant_id_str or store_id_hint or "").strip()
     jwt_token = create_token(
         email     = owner_email or (user_row2.email if user_row2 else ""),
         role      = "merchant",
         tenant_id = tenant_id,
         user_id   = user_row2.id if user_row2 else None,
+        extra_claims={"store_id": activate_store_id} if activate_store_id else None,
     )
 
     audit("salla_activate_from_email", tenant_id=tenant_id)
@@ -1284,6 +1435,7 @@ async def salla_activate_from_email(request: Request, db: Session = Depends(get_
     return {
         "access_token": jwt_token,
         "tenant_id":    tenant_id,
+        "store_id":     activate_store_id or None,
         "store_name":   store_name,
         "email":        owner_email,
         "is_new":       is_new,
@@ -1662,6 +1814,12 @@ async def salla_embedded_app(request: Request):
             new:          data.is_new ? '1' : '0',
             wa_connected: data.wa_connected ? '1' : '0',
           }});
+          if (data.store_id) {{
+            cbParams.set('store', String(data.store_id));
+          }}
+          if (data.store_name) {{
+            cbParams.set('name', String(data.store_name));
+          }}
           var dashLink = APP_URL + '/salla-callback?' + cbParams.toString();
 
           var greeting = data.is_new
@@ -1674,7 +1832,7 @@ async def salla_embedded_app(request: Request):
           ctaBtn.style.pointerEvents = 'auto';
 
           console.log('[Nahla] token-login OK', {{
-            is_new: data.is_new, tenant: data.tenant_id,
+            is_new: data.is_new, tenant: data.tenant_id, store: data.store_id,
           }});
 
           // ── Auto-redirect after 1.2 s ────────────────────────────────────
