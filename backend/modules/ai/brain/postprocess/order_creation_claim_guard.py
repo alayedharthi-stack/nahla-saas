@@ -99,7 +99,7 @@ def _resolve_evidence_with_persisted_draft(
                 reference=reference,
                 draft_order_id=str(draft.external_id or reference),
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — persisted draft evidence lookup is best-effort
         pass
     return evidence
 

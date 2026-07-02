@@ -24,7 +24,7 @@ def order_display_reference(order: Any, *, db: Any = None) -> str:
                 ref = str(getattr(row, "external_order_number", "") or "").strip()
                 if ref:
                     return ref
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — draft order reference read is best-effort
             pass
     ext = str(getattr(order, "external_id", "") or "").strip()
     return ext
@@ -83,7 +83,7 @@ def persist_checkout_draft_and_resolve_reference(
 
                 row = db.query(Order).filter_by(id=int(draft.order_id)).first()
                 reference = order_display_reference(row, db=db)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — draft order reference read is best-effort
             pass
 
     if reference:
