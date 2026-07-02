@@ -72,12 +72,21 @@ def build_salla_import_metadata(
     synced_at: datetime,
 ) -> Dict[str, Any]:
     """Full import taxonomy for coupons created from a Salla list pull."""
-    meta = dict(normalised)
-    meta["source"] = "salla"
-    meta["salla_synced"] = True
-    meta["sync_status"] = "synced"
-    meta["sync_direction"] = "salla_to_nahla"
-    meta["last_synced_at"] = synced_at.isoformat()
+    meta = {
+        "source": "salla",
+        "salla_synced": True,
+        "sync_status": "synced",
+        "sync_direction": "salla_to_nahla",
+        "last_synced_at": synced_at.isoformat(),
+    }
+    if normalised.get("starts_at"):
+        meta["starts_at"] = normalised["starts_at"]
+    usage_limit = normalised.get("usage_limit")
+    if usage_limit not in (None, "", 0):
+        meta["usage_limit"] = usage_limit
+    min_order = normalised.get("minimum_order")
+    if min_order not in (None, "", 0):
+        meta["min_order_amount"] = min_order
     salla_id = extract_salla_coupon_id(raw)
     if salla_id:
         meta["salla_coupon_id"] = salla_id

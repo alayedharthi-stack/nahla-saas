@@ -3131,6 +3131,11 @@ class SallaAdapter(BaseStoreAdapter):
         discount_type: str = "percentage",
         discount_value: int = 10,
         expiry_days: int = 3,
+        *,
+        start_date: Optional[str] = None,
+        expiry_date: Optional[str] = None,
+        usage_limit: Optional[int] = None,
+        minimum_order: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a coupon in Salla. Returns the created coupon data or None.
 
@@ -3139,18 +3144,21 @@ class SallaAdapter(BaseStoreAdapter):
         Salla Admin API v2 (verified live, April 2026) expects:
           type   = "percentage" | "fixed"   (lowercase)
           amount = numeric discount value   (single field; no percent_off/amount_off)
+          start_date / expiry_date = YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
+          usage_limit, minimum_amount (optional)
         The previous uppercase/split-field shape is rejected with
         422 alert.invalid_fields{type, amount}.
         """
+        self._last_coupon_create_error = None
         self._require_auth("create_coupon")
         start_dt = datetime.now(timezone.utc)
         expiry_dt = start_dt + timedelta(days=expiry_days)
-        start  = start_dt.strftime("%Y-%m-%d")
-        expiry = expiry_dt.strftime("%Y-%m-%d")
+        start = start_date or start_dt.strftime("%Y-%m-%d")
+        expiry = expiry_date or expiry_dt.strftime("%Y-%m-%d")
 
         salla_type = "percentage" if discount_type in ("percentage", "PERCENT", "percent") else "fixed"
 
-        payload = {
+        payload: Dict[str, Any] = {
             "code":                   code,
             "type":                   salla_type,
             "amount":                 int(discount_value),
@@ -3159,6 +3167,10 @@ class SallaAdapter(BaseStoreAdapter):
             "free_shipping":          False,
             "exclude_sale_products":  False,
         }
+        if usage_limit is not None and usage_limit > 0:
+            payload["usage_limit"] = int(usage_limit)
+        if minimum_order is not None and minimum_order > 0:
+            payload["minimum_amount"] = float(minimum_order)
         try:
             data = await self._post("/coupons", payload)
             if isinstance(data, dict) and isinstance(data.get("data"), dict):
@@ -3170,14 +3182,20 @@ class SallaAdapter(BaseStoreAdapter):
             return data.get("data", data)
         except httpx.HTTPStatusError as exc:
             self._log_error("create_coupon", exc)
+            err_text = exc.response.text[:500] if exc.response is not None else str(exc)
+            self._last_coupon_create_error = f"Salla HTTP {exc.response.status_code}: {err_text}"
             logger.error(
                 "Salla create_coupon HTTP %s: %s",
-                exc.response.status_code, exc.response.text[:500],
+                exc.response.status_code, err_text,
             )
             return None
         except Exception as exc:
             self._log_error("create_coupon", exc)
+            self._last_coupon_create_error = str(exc)[:500]
             return None
+
+    def get_last_coupon_create_error(self) -> Optional[str]:
+        return getattr(self, "_last_coupon_create_error", None)
 
     async def delete_coupon_by_code(self, code: str) -> bool:
         """

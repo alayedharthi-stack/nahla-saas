@@ -24,6 +24,14 @@ from services.coupon_sync_visibility import (
     normalize_coupon_usage_display,
     resolve_coupon_source_type,
 )
+from services.coupon_salla_push import (
+    FULL_API_INCOMPLETE_MSG_AR,
+    NO_SALLA_ADAPTER_MSG_AR,
+    apply_not_pushed_metadata,
+    evaluate_salla_coupon_sync_readiness,
+    is_pushable_manual_coupon,
+    push_coupon_to_salla,
+)
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
 
@@ -804,6 +812,21 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
     db.add(coupon)
     db.commit()
     db.refresh(coupon)
+
+    readiness = evaluate_salla_coupon_sync_readiness(db, tenant_id)
+    if readiness["full_api_ready"] and readiness["adapter_ready"]:
+        await push_coupon_to_salla(db, tenant_id, coupon, adapter=readiness.get("adapter"))
+        db.commit()
+        db.refresh(coupon)
+    elif not readiness["full_api_ready"]:
+        apply_not_pushed_metadata(
+            coupon,
+            reason=readiness["reason"] or FULL_API_INCOMPLETE_MSG_AR,
+        )
+        db.add(coupon)
+        db.commit()
+        db.refresh(coupon)
+
     meta = coupon.extra_metadata or {}
     source_type = resolve_coupon_source_type(
         column_source_type=coupon.source_type,
@@ -819,21 +842,74 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
     }
 
 
+@router.post("/{coupon_id}/push-salla")
+async def push_coupon_salla(coupon_id: int, request: Request, db: Session = Depends(get_db)):
+    """Push an existing local manual coupon to Salla."""
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    coupon = db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id).first()
+    if not coupon:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+
+    if not is_pushable_manual_coupon(coupon):
+        raise HTTPException(status_code=400, detail="يمكن إرسال الكوبونات اليدوية فقط إلى سلة")
+
+    readiness = evaluate_salla_coupon_sync_readiness(db, tenant_id)
+    if not readiness["full_api_ready"]:
+        raise HTTPException(
+            status_code=400,
+            detail=readiness["reason"] or FULL_API_INCOMPLETE_MSG_AR,
+        )
+
+    ok, result = await push_coupon_to_salla(db, tenant_id, coupon, adapter=readiness.get("adapter"))
+    db.commit()
+    db.refresh(coupon)
+
+    meta = coupon.extra_metadata or {}
+    source_type = resolve_coupon_source_type(
+        column_source_type=coupon.source_type,
+        meta=meta,
+        origin="manual",
+    )
+    sync_fields = derive_coupon_sync_visibility(source_type=source_type, meta=meta)
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail=result.get("sync_error") or "فشل إرسال الكوبون إلى سلة",
+        )
+
+    return {
+        "id": coupon.id,
+        "code": coupon.code,
+        "source_type": source_type,
+        **sync_fields,
+        **result,
+    }
+
+
 @router.post("/sync-salla")
 async def sync_salla_coupons(request: Request, db: Session = Depends(get_db)):
     """Import/refresh coupons from the connected Salla store only."""
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
+    readiness = evaluate_salla_coupon_sync_readiness(db, tenant_id)
+    if not readiness["full_api_ready"]:
+        raise HTTPException(
+            status_code=400,
+            detail=readiness["reason"] or FULL_API_INCOMPLETE_MSG_AR,
+        )
+    if not readiness["adapter_ready"]:
+        raise HTTPException(
+            status_code=400,
+            detail=NO_SALLA_ADAPTER_MSG_AR,
+        )
+
     from services.store_sync import StoreSyncService  # noqa: PLC0415
 
     svc = StoreSyncService(db, tenant_id)
-    adapter = svc._get_adapter()  # noqa: SLF001
-    if not adapter or not hasattr(adapter, "get_coupons"):
-        raise HTTPException(
-            status_code=400,
-            detail="لا يوجد متجر سلة متصل أو لا يدعم مزامنة الكوبونات",
-        )
+    svc._adapter = readiness["adapter"]  # noqa: SLF001
 
     try:
         synced = await svc.sync_coupons()

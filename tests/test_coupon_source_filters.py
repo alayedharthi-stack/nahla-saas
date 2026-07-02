@@ -182,6 +182,16 @@ def test_sync_salla_endpoint_imports_coupon(monkeypatch):
             return await self._inner.sync_coupons()
 
     monkeypatch.setattr(store_sync_mod, "StoreSyncService", _FakeSvc)
+    monkeypatch.setattr(
+        coupons_router,
+        "evaluate_salla_coupon_sync_readiness",
+        lambda _db, _tid: {
+            "full_api_ready": True,
+            "adapter_ready": True,
+            "reason": "",
+            "adapter": inner._adapter,
+        },
+    )
 
     result = asyncio.run(sync_salla_coupons(request=None, db=db))
     assert result["synced"] == 1
@@ -275,6 +285,16 @@ def test_sync_salla_endpoint_does_not_call_full_store_sync(monkeypatch):
             return None
 
     monkeypatch.setattr(store_sync_mod, "StoreSyncService", _FakeSvc)
+    monkeypatch.setattr(
+        coupons_router,
+        "evaluate_salla_coupon_sync_readiness",
+        lambda _db, _tid: {
+            "full_api_ready": True,
+            "adapter_ready": True,
+            "reason": "",
+            "adapter": inner._adapter,
+        },
+    )
     asyncio.run(sync_salla_coupons(request=None, db=db))
     assert full_sync_called["value"] is False
 

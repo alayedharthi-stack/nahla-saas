@@ -772,6 +772,30 @@ export const featureRealityApi = {
       method: 'POST',
     })
   },
+  pushSallaCoupon(couponId: string): Promise<{
+    id: number
+    code: string
+    source_type?: string
+    sync_badge?: DashboardCoupon['sync_badge']
+    sync_badge_label?: string
+    sync_status?: string | null
+    sync_error?: string | null
+    salla_synced?: boolean
+    salla_coupon_id?: string | null
+  }> {
+    return apiCall(`/coupons/${encodeURIComponent(couponId)}/push-salla`, {
+      method: 'POST',
+    })
+  },
+  sallaIntegrationStatus(): Promise<{
+    embedded_connected: boolean
+    api_sync_enabled: boolean
+    easy_mode: boolean
+    has_refresh_token: boolean
+    sync_app_configured: boolean
+  }> {
+    return apiCall('/api/salla/integration-status')
+  },
   conversations(opts?: {
     signal?: AbortSignal
     limit?: number
