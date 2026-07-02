@@ -810,6 +810,9 @@ class DefaultComposer:
                     _honest = resolve_track_order_fallback(
                         state=ctx.state,
                         history=ctx.history,
+                        db=getattr(ctx, "db", None),
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        conversation_id=getattr(ctx, "conversation_id", None),
                     )
                     if _honest:
                         return _honest

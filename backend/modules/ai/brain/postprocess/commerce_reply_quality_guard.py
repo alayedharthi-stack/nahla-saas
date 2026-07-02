@@ -325,7 +325,11 @@ def select_arabic_commerce_fallback(
             has_active_commerce_from_state,
         )
 
-        if is_catalog_selection_acknowledgment(inbound_text) and has_active_commerce_from_state(state):
+        from modules.ai.checkout_authority import state_has_local_draft_authority  # noqa: PLC0415
+
+        if is_catalog_selection_acknowledgment(inbound_text) and (
+            has_active_commerce_from_state(state) or state_has_local_draft_authority(state)
+        ):
             prep = dict(getattr(state, "order_prep", None) or {})
             if not prep and isinstance(state, dict):
                 prep = dict(state.get("order_prep") or {})
@@ -344,10 +348,12 @@ def select_arabic_commerce_fallback(
         from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
             has_active_commerce_from_state,
         )
+        from modules.ai.checkout_authority import state_has_local_draft_authority  # noqa: PLC0415
         from modules.ai.order_flow_v2.triggers import is_short_product_keyword_in_order_flow  # noqa: PLC0415
 
+        active_commerce = has_active_commerce_from_state(state) or state_has_local_draft_authority(state)
         if (
-            has_active_commerce_from_state(state)
+            active_commerce
             and not is_short_product_keyword_in_order_flow(inbound_text)
             and len(str(inbound_text or "").split()) >= 2
             and re.search(r"^[\u0600-\u06FF\s]+$", str(inbound_text or "").strip())

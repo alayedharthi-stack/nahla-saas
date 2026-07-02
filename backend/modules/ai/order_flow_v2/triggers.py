@@ -107,6 +107,13 @@ _CATALOG_SELECTION_ACK_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_DELIVERY_CONTINUATION_RE = re.compile(
+    r"(?:"
+    r"ودوه|وصلوه|سلموه|خليه|خليهم|وصلها|سلمها"
+    r")\s*(?:ل)?(?:عنواني|عندي|العنوان|موقعي)?",
+    re.I | re.UNICODE,
+)
+
 _ARABIC_MULTI_TOKEN_NAME_RE = re.compile(
     r"^[\u0600-\u06FF]{2,}(?:\s+[\u0600-\u06FF]{2,})+$",
     re.UNICODE,
@@ -277,3 +284,13 @@ def is_short_product_keyword_in_order_flow(message: str) -> bool:
         return inbound_is_short_product_inquiry(message)
     except Exception:  # noqa: BLE001
         return bool(re.search(r"[\u0600-\u06FFa-z]", text))
+
+
+def is_delivery_continuation_intent(message: str) -> bool:
+    """Customer confirms home delivery to saved address during checkout."""
+    text = _norm(message)
+    if not text:
+        return False
+    if _DELIVERY_CONTINUATION_RE.search(text):
+        return True
+    return bool(re.search(r"(?:ودوه|وصلوه|سلموه).*(?:عنواني|العنوان)", text, re.I | re.UNICODE))
