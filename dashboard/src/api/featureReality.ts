@@ -290,6 +290,19 @@ export interface DashboardCoupon {
   active: boolean
   /** Who created this code — drives the "نظام / يدوي / مستورد" chip. */
   source_type?: 'manual' | 'system' | 'imported'
+  /** Arabic source label from API (نظام / يدوي / مستورد من سلة). */
+  source_label?: string
+  /** Salla sync evidence from metadata — not inferred from code alone. */
+  salla_synced?: boolean
+  sync_status?: string | null
+  sync_error?: string | null
+  last_synced_at?: string | null
+  salla_coupon_id?: string | null
+  sync_direction?: string | null
+  /** Machine key: synced | not_pushed | failed | imported */
+  sync_badge?: 'synced' | 'not_pushed' | 'failed' | 'imported'
+  /** Arabic badge label from API. */
+  sync_badge_label?: string
   /** Bronze / silver / gold / vip — drives the level chip. */
   coupon_level?: CouponLevelId | null
   /** Where the code is allowed to be issued from. */
