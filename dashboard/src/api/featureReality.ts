@@ -374,6 +374,12 @@ export interface CouponsDashboard {
   global_defaults?: CouponGlobalDefaults
   ai_policy?: CouponAiPolicy
   coupons: DashboardCoupon[]
+  source_counts?: {
+    all: number
+    system: number
+    manual: number
+    imported: number
+  }
 }
 
 export interface CouponDashboardSettings {
@@ -759,6 +765,11 @@ export const featureRealityApi = {
   deleteCoupon(couponId: string): Promise<{ deleted: boolean }> {
     return apiCall(`/coupons/${couponId}`, {
       method: 'DELETE',
+    })
+  },
+  syncSallaCoupons(): Promise<{ status: string; synced: number }> {
+    return apiCall('/coupons/sync-salla', {
+      method: 'POST',
     })
   },
   conversations(opts?: {

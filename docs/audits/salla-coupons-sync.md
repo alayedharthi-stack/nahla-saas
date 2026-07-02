@@ -112,8 +112,36 @@
 
 ---
 
-## Validation checklist (platform-wide)
+## Validation checklist (post–Phase 1)
 
-1. Operational claims require metadata evidence — no “synced” badge without `salla_synced` or `sync_status=synced`.
-2. Fixes apply to all Salla merchants, not one store.
-3. Cross-tenant isolation: coupons scoped by `tenant_id`; sync never leaks codes across tenants.
+After deploy, verify on `/coupons` for a Salla-connected merchant:
+
+1. **سلة** column visible with sync badges.
+2. Manual dashboard coupons: source **يدوي**, badge **لم يُرسل إلى سلة**, filter count includes them.
+3. System pool coupons: source **نظام**, badge **متزامن مع سلة** when evidence exists; `metadata.source` preserved.
+4. Use **مزامنة كوبونات سلة** (`POST /coupons/sync-salla`) or wait for store sync to import Salla coupons.
+5. Imported coupons: `source_type=imported`, full Phase 1 taxonomy.
+
+---
+
+## Expired coupon cleanup policy (proposed — not implemented)
+
+Do **not** hard-delete expired coupons in Phase 1 or Phase 2.
+
+Proposed future behaviour:
+
+| Policy | Recommendation |
+|--------|----------------|
+| Immediate deletion | **No** — retain audit/history and campaign linkage |
+| `archived` flag | Add a future `archived` / `extra_metadata.archived_at` state |
+| Default list view | Hide expired coupons by default, or add an **include expired** toggle |
+| Auto-archive | After **30–60 days** past `expires_at`, move to archived (soft hide) |
+| Hard delete | Only when not linked to orders/campaigns/automation runs, after a longer retention window (e.g. 180+ days) |
+
+Rationale: pool coupons expire quickly; merchants still need to see recent history and Nahla must not claim operational facts without evidence.
+
+---
+
+## Phase 2 gate
+
+Dashboard → Salla push remains blocked until production `/coupons` checklist passes with corrected source filters and Salla import visibility.
