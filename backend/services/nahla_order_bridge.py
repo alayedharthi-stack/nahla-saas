@@ -13,12 +13,89 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.order_bridge")
 
 _NAHL_WA_EXT_PREFIX = "nahla-wa-"
+_NHL_ALLOC_MAX_RETRIES = 32
+
+
+def _nhl_number_pattern(tenant_id: int) -> re.Pattern[str]:
+    return re.compile(rf"^NHL-{int(tenant_id)}-(\d+)$")
+
+
+def _parse_nhl_sequence(external_order_number: str, tenant_id: int) -> Optional[int]:
+    match = _nhl_number_pattern(tenant_id).match(str(external_order_number or "").strip())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _max_nhl_sequence_for_tenant(db: Any, tenant_id: int) -> int:
+    """Highest NHL-{tenant}-{seq} sequence already assigned for this tenant."""
+    from models import Order  # noqa: PLC0415
+
+    tid = int(tenant_id)
+    prefix = f"NHL-{tid}-"
+    rows = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tid,
+            Order.external_order_number.isnot(None),
+            Order.external_order_number.like(f"{prefix}%"),
+        )
+        .all()
+    )
+    pattern = _nhl_number_pattern(tid)
+    max_seq = 0
+    for order in rows:
+        match = pattern.match(str(getattr(order, "external_order_number", "") or "").strip())
+        if match:
+            max_seq = max(max_seq, int(match.group(1)))
+    return max_seq
+
+
+def _nhl_number_taken(db: Any, tenant_id: int, number: str) -> bool:
+    from models import Order  # noqa: PLC0415
+
+    return (
+        db.query(Order.id)
+        .filter(
+            Order.tenant_id == int(tenant_id),
+            Order.external_order_number == str(number).strip(),
+        )
+        .first()
+        is not None
+    )
+
+
+def _allocate_nhl_number(db: Any, tenant_id: int) -> str:
+    """
+    Allocate the next human-visible Nahla order reference for a tenant.
+
+    Uses max(existing NHL sequence) + 1 across **all** tenant orders — never
+    count of WhatsApp external_id rows — so cancelled/archived drafts cannot
+    cause reference reuse.
+    """
+    tid = int(tenant_id)
+    seq = _max_nhl_sequence_for_tenant(db, tid)
+    for attempt in range(_NHL_ALLOC_MAX_RETRIES):
+        seq += 1
+        candidate = f"NHL-{tid}-{seq:06d}"
+        if not _nhl_number_taken(db, tid, candidate):
+            return candidate
+        logger.warning(
+            "[NAHLA_ORDER_BRIDGE] NHL collision tenant=%s number=%s attempt=%s — retrying",
+            tid,
+            candidate,
+            attempt + 1,
+        )
+    raise RuntimeError(
+        f"NHL number allocation exhausted for tenant={tid} after {_NHL_ALLOC_MAX_RETRIES} attempts"
+    )
 
 _PAID_STATUSES = frozenset({
     "paid", "completed", "complete", "confirmed", "delivered",
@@ -697,22 +774,6 @@ def _format_total_sar(amount: Optional[float]) -> Optional[str]:
     if amount is None or amount <= 0:
         return None
     return f"{amount:.2f} ر.س"
-
-
-def _allocate_nhl_number(db: Any, tenant_id: int) -> str:
-    from sqlalchemy import func  # noqa: PLC0415
-    from models import Order  # noqa: PLC0415
-
-    existing_count = (
-        db.query(func.count(Order.id))
-        .filter(
-            Order.tenant_id == tenant_id,
-            Order.external_id.like(f"{_NAHL_WA_EXT_PREFIX}{tenant_id}-%"),
-        )
-        .scalar()
-    ) or 0
-    seq = int(existing_count) + 1
-    return f"NHL-{tenant_id}-{seq:06d}"
 
 
 def _resolve_customer_name(
