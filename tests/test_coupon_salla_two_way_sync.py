@@ -26,8 +26,11 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from database.models import Base, Coupon, Tenant  # noqa: E402
 from services.coupon_salla_push import (  # noqa: E402
     FULL_API_INCOMPLETE_MSG_AR,
+    coerce_salla_coupon_date_string,
     evaluate_salla_coupon_sync_readiness,
+    format_salla_coupon_date,
     format_salla_datetime,
+    normalize_salla_coupon_push_dates,
     parse_salla_datetime,
     push_coupon_to_salla,
 )
@@ -134,6 +137,29 @@ def test_format_salla_datetime_preserves_time():
     assert format_salla_datetime(dt) == "2026-07-01 10:30:00"
 
 
+def test_normalize_push_dates_use_date_only_and_clamp_start_to_today():
+    now = datetime(2026, 7, 3, 15, 30, 0, tzinfo=timezone.utc)
+    start, expiry = normalize_salla_coupon_push_dates(
+        datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc),
+        datetime(2026, 12, 31, 23, 59, tzinfo=timezone.utc),
+        now=now,
+    )
+    assert start == "2026-07-03"
+    assert expiry == "2026-12-31"
+
+
+def test_coerce_salla_coupon_date_string_strips_time():
+    assert coerce_salla_coupon_date_string(
+        "2026-07-01 10:30:00",
+        fallback="2026-07-03",
+    ) == "2026-07-01"
+
+
+def test_format_salla_coupon_date_is_date_only():
+    dt = datetime(2026, 7, 1, 10, 30, 0, tzinfo=timezone.utc)
+    assert format_salla_coupon_date(dt) == "2026-07-01"
+
+
 def test_create_coupon_local_when_no_adapter(monkeypatch):
     from backend.routers import coupons as coupons_router  # noqa: E402
     from backend.routers.coupons import CouponCreateIn, create_coupon  # noqa: E402
@@ -188,6 +214,9 @@ def test_create_coupon_calls_salla_when_adapter_ready(monkeypatch):
     assert adapter.last_kwargs["code"] == "PUSH01"
     assert adapter.last_kwargs["discount_type"] == "percentage"
     assert adapter.last_kwargs["usage_limit"] == 5
+    assert len(adapter.last_kwargs["start_date"]) == 10
+    assert adapter.last_kwargs["start_date"].count("-") == 2
+    assert adapter.last_kwargs["expiry_date"] == "2026-12-31"
 
     row = db.query(Coupon).filter_by(tenant_id=tenant_id, code="PUSH01").one()
     assert row.source_type == "manual"

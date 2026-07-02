@@ -9,7 +9,7 @@ Coupon sync (import + push) requires the canonical Salla integration with
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -34,6 +34,67 @@ def format_salla_datetime(dt: datetime) -> str:
     if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
         return dt.strftime("%Y-%m-%d")
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_salla_coupon_date(dt: datetime) -> str:
+    """Date-only field for Salla coupon create (review-safe)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%d")
+
+
+def normalize_salla_coupon_push_dates(
+    start_dt: datetime,
+    expiry_dt: Optional[datetime],
+    *,
+    now: Optional[datetime] = None,
+) -> tuple[str, Optional[str]]:
+    """Build Salla coupon push dates: YYYY-MM-DD only; start not before today."""
+    now = now or datetime.now(timezone.utc)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    else:
+        start_dt = start_dt.astimezone(timezone.utc)
+
+    today = now.astimezone(timezone.utc).date()
+    start_day = max(start_dt.date(), today)
+
+    expiry_day: Optional[date] = None
+    if expiry_dt is not None:
+        if expiry_dt.tzinfo is None:
+            expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        else:
+            expiry_dt = expiry_dt.astimezone(timezone.utc)
+        expiry_day = expiry_dt.date()
+        if expiry_day < start_day:
+            expiry_day = start_day
+
+    return (
+        format_salla_coupon_date(datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)),
+        format_salla_coupon_date(datetime.combine(expiry_day, datetime.min.time(), tzinfo=timezone.utc))
+        if expiry_day
+        else None,
+    )
+
+
+def coerce_salla_coupon_date_string(raw: Optional[str], *, fallback: str) -> str:
+    """Strip a Nahla/Salla datetime down to YYYY-MM-DD for coupon create."""
+    text = str(raw or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(text[:19], fmt)
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.date().strftime("%Y-%m-%d")
+    except ValueError:
+        return fallback
 
 
 def parse_salla_datetime(raw: Any) -> Optional[str]:
@@ -161,12 +222,14 @@ def _coupon_push_kwargs(coupon: Coupon) -> Dict[str, Any]:
         except (ValueError, TypeError):
             minimum_order_float = None
 
+    start_str, expiry_str = normalize_salla_coupon_push_dates(start_dt, expiry_dt, now=now)
+
     return {
         "code": coupon.code,
         "discount_type": coupon.discount_type or "percentage",
         "discount_value": discount_value,
-        "start_date": format_salla_datetime(start_dt),
-        "expiry_date": format_salla_datetime(expiry_dt) if expiry_dt else None,
+        "start_date": start_str,
+        "expiry_date": expiry_str,
         "expiry_days": expiry_days,
         "usage_limit": usage_limit_int,
         "minimum_order": minimum_order_float,
