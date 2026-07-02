@@ -674,16 +674,32 @@ def _normalise_coupon(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
     discount_val = raw.get("amount", raw.get("percent", raw.get("value", "")))
+    raw_type = str(raw.get("type", raw.get("discount_type", "percentage")) or "").lower()
+    if raw_type in ("fixed", "amount"):
+        discount_type = "fixed"
+    elif raw.get("percent"):
+        discount_type = "percentage"
+    else:
+        discount_type = "percentage" if raw_type in ("percentage", "percent", "") else raw_type
     status = raw.get("status", "active")
+    min_order = raw.get("minimum_amount", raw.get("minimum_order", None))
+    if isinstance(min_order, dict):
+        min_order = min_order.get("amount")
+    usage_limit = raw.get("usage_limit", raw.get("maximum_uses", None))
+    start_raw = raw.get("start_date", raw.get("starts_at", None))
+    from services.coupon_salla_push import parse_salla_datetime  # noqa: PLC0415
+    expires_raw = raw.get("expire_date", raw.get("expiry_date", raw.get("expires_at", None)))
     return {
         "code":           raw.get("code", ""),
         "description":    raw.get("description", raw.get("name", "")),
-        "discount_type":  raw.get("type", raw.get("discount_type", "percentage")),
+        "discount_type":  discount_type,
         "discount_value": str(discount_val) if discount_val else "",
-        "expires_at":     raw.get("expire_date", raw.get("expiry_date", raw.get("expires_at", None))),
+        "starts_at":      parse_salla_datetime(start_raw),
+        "expires_at":     parse_salla_datetime(expires_raw) or expires_raw,
         "active":         status == "active" if isinstance(status, str) else raw.get("active", True),
-        "minimum_order":  raw.get("minimum_amount", raw.get("minimum_order", None)),
-        "maximum_uses":   raw.get("maximum_uses", None),
+        "minimum_order":  min_order,
+        "usage_limit":    usage_limit,
+        "maximum_uses":   usage_limit,
     }
 
 

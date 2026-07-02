@@ -303,6 +303,8 @@ export default function Coupons() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [syncingSalla, setSyncingSalla] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [apiSyncEnabled, setApiSyncEnabled] = useState<boolean | null>(null)
+  const [pushingId, setPushingId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const { t } = useLanguage()
 
@@ -322,6 +324,12 @@ export default function Coupons() {
   }
 
   useEffect(() => { load() }, [])
+
+  useEffect(() => {
+    featureRealityApi.sallaIntegrationStatus()
+      .then(s => setApiSyncEnabled(s.api_sync_enabled))
+      .catch(() => setApiSyncEnabled(null))
+  }, [])
 
   const persistSettings = async (patch: Partial<CouponsDashboard>) => {
     const next = { ...data, ...patch }
@@ -406,6 +414,10 @@ export default function Coupons() {
   }
 
   const handleSyncSallaCoupons = async () => {
+    if (apiSyncEnabled === false) {
+      setSyncMessage('أكمل ربط API الكامل من تطبيق سلة لتفعيل مزامنة الكوبونات.')
+      return
+    }
     setSyncingSalla(true)
     setSyncMessage(null)
     try {
@@ -417,6 +429,29 @@ export default function Coupons() {
     } finally {
       setSyncingSalla(false)
     }
+  }
+
+  const handlePushSalla = async (coupon: DashboardCoupon) => {
+    if (apiSyncEnabled === false) {
+      alert('أكمل ربط API الكامل من تطبيق سلة لتفعيل مزامنة الكوبونات.')
+      return
+    }
+    setPushingId(coupon.id)
+    try {
+      await featureRealityApi.pushSallaCoupon(coupon.id)
+      load()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'فشل إرسال الكوبون إلى سلة')
+      load()
+    } finally {
+      setPushingId(null)
+    }
+  }
+
+  const canPushToSalla = (c: DashboardCoupon) => {
+    if (sourceTypeOf(c) !== 'manual') return false
+    const badge = c.sync_badge || 'not_pushed'
+    return badge === 'not_pushed' || badge === 'failed'
   }
 
   const copyCode = (code: string, id: string) => {
@@ -653,6 +688,11 @@ export default function Coupons() {
 
       {/* Coupons table — with origin column */}
       <div className="card">
+        {apiSyncEnabled === false ? (
+          <div className="mx-5 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            أكمل ربط API الكامل من تطبيق سلة لتفعيل مزامنة الكوبونات.
+          </div>
+        ) : null}
         <div className="px-5 py-4 border-b border-slate-100 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-sm font-semibold text-slate-900">الأكواد الصادرة</h2>
@@ -660,9 +700,11 @@ export default function Coupons() {
               <button
                 type="button"
                 onClick={handleSyncSallaCoupons}
-                disabled={syncingSalla}
+                disabled={syncingSalla || apiSyncEnabled === false}
                 className="text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5 disabled:opacity-60"
-                title="استيراد أو تحديث كوبونات سلة فقط — دون مزامنة كاملة للمتجر"
+                title={apiSyncEnabled === false
+                  ? 'أكمل ربط API الكامل من تطبيق سلة لتفعيل مزامنة الكوبونات'
+                  : 'استيراد أو تحديث كوبونات سلة فقط — دون مزامنة كاملة للمتجر'}
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${syncingSalla ? 'animate-spin' : ''}`} />
                 مزامنة كوبونات سلة
@@ -816,9 +858,26 @@ export default function Coupons() {
                       </button>
                     </td>
                     <td className="px-5 py-3.5">
-                      <button className="text-slate-300 hover:text-red-500 transition-colors" onClick={() => handleDeleteCoupon(c)}>
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {canPushToSalla(c) ? (
+                          <button
+                            type="button"
+                            onClick={() => handlePushSalla(c)}
+                            disabled={pushingId === c.id || apiSyncEnabled === false}
+                            className="text-[10px] px-2 py-1 rounded-md border border-brand-200 text-brand-700 hover:bg-brand-50 disabled:opacity-50 whitespace-nowrap"
+                            title="إرسال إلى سلة"
+                          >
+                            {pushingId === c.id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin inline" />
+                            ) : (
+                              'إرسال إلى سلة'
+                            )}
+                          </button>
+                        ) : null}
+                        <button className="text-slate-300 hover:text-red-500 transition-colors" onClick={() => handleDeleteCoupon(c)}>
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
