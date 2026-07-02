@@ -135,6 +135,10 @@ def build_requested_bank_not_enabled_reply(
         for brand in enabled_brands
         if str(brand).strip()
     ]
+    if requested_bank == "rajhi" and not enabled_labels:
+        return (
+            "بيانات الراجحي غير مفعّلة حاليًا، تواصل مع المتجر لتأكيد بيانات التحويل."
+        )
     if enabled_labels:
         enabled_txt = " أو ".join(enabled_labels)
         return (

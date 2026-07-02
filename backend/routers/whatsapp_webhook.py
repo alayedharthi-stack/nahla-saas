@@ -6553,85 +6553,111 @@ async def _handle_merchant_message(
                 if _early_payment_asset else None,
             )
             if _early_payment_intent and _early_payment_asset:
-                # Validate the asset (HTTPS upgrade, tenant scope, file
-                # presence, mime check, size cap) before we touch
-                # WhatsApp. On any validation failure we fall through
-                # to the normal pipeline so the customer still gets a
-                # response.
-                _ok, _err, _normalised = _validate_media(
-                    _early_payment_asset,
-                    expected_tenant_id=tenant_id,
-                    db=db,
+                from modules.ai.checkout_authority import (  # noqa: PLC0415
+                    brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
                 )
-                if _ok and _normalised:
-                    _intro_text = (
-                        _barcode_intro_text(_early_payment_key or _normalised.get("media_key") or "")
-                        if _early_barcode_image else
-                        "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
-                    )
-                    _text_ok = await _send_whatsapp_message(
-                        phone_id=phone_id, to=to, text=_intro_text,
-                        _tenant_id=tenant_id, _db=db,
-                    )
-                    StateManager.save_message(
-                        db, to, _intro_text, "outbound",
-                        conversation_id=convo.id, tenant_id=tenant_id,
-                    )
-                    # 2) the media itself
-                    _media_ok = await _send_media_message(
-                        phone_id=phone_id, to=to,
-                        media_type=_normalised.get("media_type") or "image",
-                        media_url=_normalised.get("file_url") or "",
-                        caption=None,
-                        filename=_normalised.get("filename"),
-                        _tenant_id=tenant_id, _db=db,
-                    )
+                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
                     logger.info(
-                        "[PAYMENT_INFO] early-bypass APPLIED tenant=%s convo=%s "
-                        "asset_id=%s media_type=%s text_send_ok=%s "
-                        "media_send_ok=%s url_scheme=%s "
-                        "transfer_fallback_skipped=true hard_override=true",
-                        tenant_id, getattr(convo, "id", None),
-                        _normalised.get("id"),
-                        _normalised.get("media_type"),
-                        _text_ok, _media_ok,
-                        (_normalised.get("file_url") or "").split(":", 1)[0],
-                    )
-                    # Stamp the conversation so the brain knows we just
-                    # served the payment asset (used by future dedup +
-                    # by analytics).
-                    try:
-                        _meta = dict(getattr(convo, "extra_metadata", None) or {})
-                        from datetime import datetime as _dtn, timezone as _tzn  # noqa: PLC0415
-                        _meta["last_payment_asset_served_at"] = _dtn.now(_tzn.utc).isoformat()
-                        _meta["last_payment_asset_id"] = int(_normalised.get("id") or 0)
-                        convo.extra_metadata = _meta
-                        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-                        flag_modified(convo, "extra_metadata")
-                        db.add(convo)
-                        db.commit()
-                    except Exception as _stamp_exc:
-                        logger.debug(
-                            "[PAYMENT_INFO] stamp failed: %s — non-fatal",
-                            _stamp_exc,
-                        )
-                        try:
-                            db.rollback()
-                        except Exception as _rollback_exc:
-                            logger.exception(
-                                "[PAYMENT_INFO] rollback after stamp failure "
-                                "tenant=%s err=%s",
-                                tenant_id,
-                                _rollback_exc,
-                            )
-                    return  # short-circuit — never run the brain for this turn
-                else:
-                    logger.warning(
                         "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
-                        "asset_id=%s reason=validation_failed err=%s — "
-                        "falling through to normal pipeline",
+                        "reason=active_checkout_owner",
                         tenant_id, getattr(convo, "id", None),
-                        _early_payment_asset.get("id"), _err,
+                    )
+                else:
+                    # Validate the asset (HTTPS upgrade, tenant scope, file
+                    # presence, mime check, size cap) before we touch
+                    # WhatsApp. On any validation failure we fall through
+                    # to the normal pipeline so the customer still gets a
+                    # response.
+                    _ok, _err, _normalised = _validate_media(
+                        _early_payment_asset,
+                        expected_tenant_id=tenant_id,
+                        db=db,
+                    )
+                    if _ok and _normalised:
+                        _media_ok = await _send_media_message(
+                            phone_id=phone_id, to=to,
+                            media_type=_normalised.get("media_type") or "image",
+                            media_url=_normalised.get("file_url") or "",
+                            caption=None,
+                            filename=_normalised.get("filename"),
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                        if _media_ok:
+                            _intro_text = (
+                                _barcode_intro_text(_early_payment_key or _normalised.get("media_key") or "")
+                                if _early_barcode_image else
+                                "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                            )
+                            _text_ok = await _send_whatsapp_message(
+                                phone_id=phone_id, to=to, text=_intro_text,
+                                _tenant_id=tenant_id, _db=db,
+                            )
+                            StateManager.save_message(
+                                db, to, _intro_text, "outbound",
+                                conversation_id=convo.id, tenant_id=tenant_id,
+                            )
+                            logger.info(
+                                "[PAYMENT_INFO] early-bypass APPLIED tenant=%s convo=%s "
+                                "asset_id=%s media_type=%s text_send_ok=%s "
+                                "media_send_ok=%s url_scheme=%s "
+                                "transfer_fallback_skipped=true hard_override=true",
+                                tenant_id, getattr(convo, "id", None),
+                                _normalised.get("id"),
+                                _normalised.get("media_type"),
+                                _text_ok, _media_ok,
+                                (_normalised.get("file_url") or "").split(":", 1)[0],
+                            )
+                            # Stamp the conversation so the brain knows we just
+                            # served the payment asset (used by future dedup +
+                            # by analytics).
+                            try:
+                                _meta = dict(getattr(convo, "extra_metadata", None) or {})
+                                from datetime import datetime as _dtn, timezone as _tzn  # noqa: PLC0415
+                                _meta["last_payment_asset_served_at"] = _dtn.now(_tzn.utc).isoformat()
+                                _meta["last_payment_asset_id"] = int(_normalised.get("id") or 0)
+                                convo.extra_metadata = _meta
+                                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                                flag_modified(convo, "extra_metadata")
+                                db.add(convo)
+                                db.commit()
+                            except Exception as _stamp_exc:
+                                logger.debug(
+                                    "[PAYMENT_INFO] stamp failed: %s — non-fatal",
+                                    _stamp_exc,
+                                )
+                                try:
+                                    db.rollback()
+                                except Exception as _rollback_exc:
+                                    logger.exception(
+                                        "[PAYMENT_INFO] rollback after stamp failure "
+                                        "tenant=%s err=%s",
+                                        tenant_id,
+                                        _rollback_exc,
+                                    )
+                            return  # short-circuit — never run the brain for this turn
+                        logger.warning(
+                            "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
+                            "asset_id=%s reason=media_send_failed",
+                            tenant_id, getattr(convo, "id", None),
+                            _early_payment_asset.get("id"),
+                        )
+                    else:
+                        logger.warning(
+                            "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
+                            "asset_id=%s reason=validation_failed err=%s — "
+                            "falling through to normal pipeline",
+                            tenant_id, getattr(convo, "id", None),
+                            _early_payment_asset.get("id"), _err,
+                        )
+            elif _early_payment_intent and not _early_payment_asset:
+                from modules.ai.checkout_authority import (  # noqa: PLC0415
+                    brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
+                )
+                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
+                    logger.info(
+                        "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
+                        "reason=active_checkout_owner_no_asset",
+                        tenant_id, getattr(convo, "id", None),
                     )
         except Exception as _early_exc:  # noqa: BLE001
             logger.warning(
@@ -11577,102 +11603,116 @@ async def _handle_merchant_message(
                 conversation_id=getattr(convo, "id", None),
             )
             if _payment_intent:
-                from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
-                    split_inbound_text,
+                from modules.ai.checkout_authority import (  # noqa: PLC0415
+                    brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
                 )
-                _split_hard = split_inbound_text(
-                    text or "",
-                    inbound_metadata=_in_meta_hard,
-                    normalized_type=str(
-                        _in_meta_hard.get("normalized_type")
-                        or _in_meta_hard.get("source_type")
-                        or ""
-                    ) or None,
-                )
-                _origin_hard = _split_hard.customer_origin
-                _already_attached_ids = {a.get("id") for a in _media_attachments}
-                _payment_asset = _find_payment_asset(
-                    db, tenant_id, _origin_hard or "",
-                )
-                if _payment_asset and _payment_asset.get("id") not in _already_attached_ids:
-                    _media_attachments.append(_payment_asset)
+                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
                     logger.info(
                         "[PAYMENT_INFO] tenant=%s conversation_id=%s "
-                        "intent_detected=true asset_found=true asset_id=%s "
-                        "asset_score=%.2f transfer_fallback_skipped=true "
-                        "gpt_cited_marker=%s — hard override applied",
-                        tenant_id, getattr(convo, "id", None),
-                        _payment_asset.get("id"),
-                        float(_payment_asset.get("_relevance_score") or 0.0),
-                        bool(_already_attached_ids),
-                    )
-                    # If GPT's reply was a generic "I can't help" / contact
-                    # owner template, replace it with a warm short text so
-                    # the barcode lands with proper context. We detect that
-                    # by checking for canonical contact-owner phrases.
-                    _r_low = (reply or "").strip()
-                    _looks_like_owner_fallback = bool(_r_low) and any(
-                        marker in _r_low for marker in (
-                            # Direct refusals — GPT saying it doesn't have the info.
-                            "ما عندي بيانات الحساب",
-                            "ما عندي معلومات",
-                            "ما أقدر أوفرها",
-                            "ما اقدر اوفرها",
-                            "أعتذر إني ما أقدر",
-                            "اعتذر اني ما اقدر",
-                            "أعتذر، ما",
-                            "اعتذر، ما",
-                            "لا أستطيع تقديم",
-                            "لا استطيع تقديم",
-                            "لا أملك معلومات",
-                            "لا املك معلومات",
-                            # Generic owner-contact / handoff phrases.
-                            "هذه وسائل التواصل",
-                            "تواصل مع المتجر",
-                            "تواصلي مع المتجر",
-                            "سأحوّلك للفريق",
-                            "سأحولك للفريق",
-                            "أحوّلك للفريق",
-                            "احولك للفريق",
-                            "تواصل مع المالك",
-                            "الفريق راح يتواصل",
-                            "راح يتواصل معك",
-                            "سيتواصل معك الفريق",
-                            "وصل طلبك للفريق",
-                            "طلبك وصل للفريق",
-                            "وصلت رسالتك",
-                        )
-                    )
-                    if (_looks_like_owner_fallback or not _r_low) and bool(
-                        str(_payment_asset.get("media_id") or _payment_asset.get("whatsapp_media_id") or "").strip()
-                        or str(
-                            _payment_asset.get("media_url")
-                            or _payment_asset.get("url")
-                            or _payment_asset.get("file_url")
-                            or ""
-                        ).strip()
-                    ):
-                        reply = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
-                        logger.info(
-                            "[PAYMENT_INFO] tenant=%s replaced owner-fallback "
-                            "reply with payment intro text",
-                            tenant_id,
-                        )
-                elif _payment_asset is None:
-                    logger.info(
-                        "[PAYMENT_INFO] tenant=%s conversation_id=%s "
-                        "intent_detected=true asset_found=false — "
-                        "no relevant active media; letting GPT reply through",
+                        "intent_detected=true hard_override_skipped=true "
+                        "reason=active_checkout_owner",
                         tenant_id, getattr(convo, "id", None),
                     )
                 else:
-                    logger.info(
-                        "[PAYMENT_INFO] tenant=%s conversation_id=%s "
-                        "intent_detected=true asset_found=true asset_id=%s "
-                        "already_cited_by_gpt=true — no override needed",
-                        tenant_id, getattr(convo, "id", None),
-                        _payment_asset.get("id"),
+                    from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
+                        split_inbound_text,
                     )
+                    from core.ai_libraries import validate_media_for_send as _validate_media_hard  # noqa: PLC0415
+
+                    _split_hard = split_inbound_text(
+                        text or "",
+                        inbound_metadata=_in_meta_hard,
+                        normalized_type=str(
+                            _in_meta_hard.get("normalized_type")
+                            or _in_meta_hard.get("source_type")
+                            or ""
+                        ) or None,
+                    )
+                    _origin_hard = _split_hard.customer_origin
+                    _already_attached_ids = {a.get("id") for a in _media_attachments}
+                    _payment_asset = _find_payment_asset(
+                        db, tenant_id, _origin_hard or "",
+                    )
+                    if _payment_asset and _payment_asset.get("id") not in _already_attached_ids:
+                        _ok_hard, _err_hard, _normalised_hard = _validate_media_hard(
+                            _payment_asset,
+                            expected_tenant_id=tenant_id,
+                            db=db,
+                        )
+                        if _ok_hard and _normalised_hard:
+                            _media_attachments.append(_normalised_hard)
+                            logger.info(
+                                "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                                "intent_detected=true asset_found=true asset_id=%s "
+                                "asset_score=%.2f transfer_fallback_skipped=true "
+                                "gpt_cited_marker=%s — hard override applied",
+                                tenant_id, getattr(convo, "id", None),
+                                _normalised_hard.get("id"),
+                                float(_normalised_hard.get("_relevance_score") or 0.0),
+                                bool(_already_attached_ids),
+                            )
+                            _r_low = (reply or "").strip()
+                            _looks_like_owner_fallback = bool(_r_low) and any(
+                                marker in _r_low for marker in (
+                                    "ما عندي بيانات الحساب",
+                                    "ما عندي معلومات",
+                                    "ما أقدر أوفرها",
+                                    "ما اقدر اوفرها",
+                                    "أعتذر إني ما أقدر",
+                                    "اعتذر اني ما اقدر",
+                                    "أعتذر، ما",
+                                    "اعتذر، ما",
+                                    "لا أستطيع تقديم",
+                                    "لا استطيع تقديم",
+                                    "لا أملك معلومات",
+                                    "لا املك معلومات",
+                                    "هذه وسائل التواصل",
+                                    "تواصل مع المتجر",
+                                    "تواصلي مع المتجر",
+                                    "سأحوّلك للفريق",
+                                    "سأحولك للفريق",
+                                    "أحوّلك للفريق",
+                                    "احولك للفريق",
+                                    "تواصل مع المالك",
+                                    "الفريق راح يتواصل",
+                                    "راح يتواصل معك",
+                                    "سيتواصل معك الفريق",
+                                    "وصل طلبك للفريق",
+                                    "طلبك وصل للفريق",
+                                    "وصلت رسالتك",
+                                )
+                            )
+                            if _looks_like_owner_fallback:
+                                reply = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                                logger.info(
+                                    "[PAYMENT_INFO] tenant=%s replaced owner-fallback "
+                                    "reply with payment intro text",
+                                    tenant_id,
+                                )
+                        else:
+                            logger.info(
+                                "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                                "intent_detected=true asset_found=true asset_id=%s "
+                                "hard_override_skipped=true reason=asset_not_sendable err=%s",
+                                tenant_id, getattr(convo, "id", None),
+                                _payment_asset.get("id"),
+                                _err_hard,
+                            )
+                    elif _payment_asset is None:
+                        logger.info(
+                            "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                            "intent_detected=true asset_found=false — "
+                            "no relevant active media; letting GPT reply through",
+                            tenant_id, getattr(convo, "id", None),
+                        )
+                    else:
+                        logger.info(
+                            "[PAYMENT_INFO] tenant=%s conversation_id=%s "
+                            "intent_detected=true asset_found=true asset_id=%s "
+                            "already_cited_by_gpt=true — no override needed",
+                            tenant_id, getattr(convo, "id", None),
+                            _payment_asset.get("id"),
+                        )
         except Exception as _pi_exc:  # noqa: BLE001 — never crash on the override
             logger.warning(
                 "[PAYMENT_INFO] override failed tenant=%s err=%s",

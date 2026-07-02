@@ -254,10 +254,34 @@ def is_catalog_selection_acknowledgment(message: str) -> bool:
     return bool(_CATALOG_SELECTION_ACK_RE.search(_norm(message)))
 
 
+def is_city_or_location_term(message: str) -> bool:
+    """Known Saudi city / location token — not a product keyword during checkout."""
+    text = _norm(message)
+    if not text or len(text) > 24:
+        return False
+    try:
+        from modules.ai.brain.intent.ordering_extractor import _detect_city  # noqa: PLC0415
+
+        city = str(_detect_city(text) or "").strip()
+        if city:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — city probe must not block routing
+        pass
+    try:
+        from core.wa_address_ingestion import _CITY_ONLY_HINT_RE  # noqa: PLC0415
+
+        compact = re.sub(r"\s+", " ", text).strip()
+        return bool(_CITY_ONLY_HINT_RE.match(compact))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — city-only probe optional at trigger boundary
+        return False
+
+
 def is_short_product_keyword_in_order_flow(message: str) -> bool:
     """Short product-like token during order flow — not social/greeting."""
     text = _norm(message)
     if not text or len(text) > 16:
+        return False
+    if is_city_or_location_term(message):
         return False
     if _ARABIC_MULTI_TOKEN_NAME_RE.match(text):
         return False

@@ -14,6 +14,7 @@ from core.wa_native_catalog_order import (
 from .contract import build_contract
 from .checkout_context import (
     CheckoutReplyContext,
+    apply_delivery_continuation_address_patch,
     apply_previous_address_confirmation,
     load_checkout_reply_context,
     load_identity_first_name,
@@ -32,7 +33,9 @@ from .missing_fields import compute_v2_missing_fields
 from .payment import (
     apply_payment_method_selection,
     build_payment_bank_mismatch_reply,
+    build_payment_instruction_reply,
     default_payment_method_patch,
+    requested_bank_brand,
 )
 from .replies import (
     build_address_on_file_collect_reply,
@@ -420,6 +423,7 @@ def try_handle_order_flow_v2(
         and is_whatsapp_order_browse_context(order_prep, bs, meta)
         and not is_greeting_message(text)
         and not is_catalog_order_inbound(meta, text)
+        and not _checkout_active()
     ):
         reply = build_order_flow_product_keyword_reply(order_prep=order_prep)
         return _finalize_result(
@@ -612,6 +616,17 @@ def try_handle_order_flow_v2(
             patch.update(activate_checkout_patch())
         patch["delivery_method"] = "delivery"
         patch["fulfillment_intent"] = "delivery_to_saved_address"
+        addr_patch = apply_delivery_continuation_address_patch(
+            db,
+            tenant_id=int(tenant_id),
+            conversation=conversation,
+            customer_phone=customer_phone,
+            order_prep={**order_prep, **patch},
+            brain_state=bs,
+            inbound_metadata=meta,
+        )
+        if addr_patch:
+            patch.update(addr_patch)
         merged_prep = {**order_prep, **patch}
         missing = _missing(merged_prep)
         patch.update(stamp_last_field_patch(missing))
@@ -631,6 +646,104 @@ def try_handle_order_flow_v2(
             shadow_log=shadow_log,
             reply=reply,
             reason="delivery_continuation",
+            state_patch=patch,
+            skip_brain=True,
+        )
+
+    if _checkout_active() and (payment_attempt(text) or requested_bank_brand(text)):
+        merged_prep = {**order_prep, **patch}
+        missing = _missing(merged_prep)
+        if higher_priority_missing_before_payment(missing):
+            patch.update(stamp_last_field_patch(missing))
+            reply_ctx = _reply_ctx(merged_prep)
+            reply = build_next_field_reply(
+                order_prep=merged_prep,
+                brain_state=bs,
+                missing_fields=missing,
+                field_modes=reply_ctx.field_modes,
+                known_previous=reply_ctx.known_previous,
+            )
+            return _finalize_result(
+                live=live,
+                shadow_log=shadow_log,
+                reply=reply,
+                reason="payment_blocked_until_address_owned",
+                state_patch=patch,
+                skip_brain=True,
+            )
+        pay_patch, chosen = apply_payment_method_selection(
+            db, tenant_id=int(tenant_id), message=text,
+        )
+        if pay_patch and pay_patch.get("order_flow_v2_payment_rejected"):
+            reply = build_payment_bank_mismatch_reply(
+                db,
+                tenant_id=int(tenant_id),
+                rejection_reason=str(
+                    pay_patch.get("order_flow_v2_payment_rejection_reason") or ""
+                ),
+                requested_bank=str(pay_patch.get("requested_bank") or ""),
+            )
+            patch.update(pay_patch)
+            return _finalize_result(
+                live=live,
+                shadow_log=shadow_log,
+                reply=reply,
+                reason="payment_bank_rejected",
+                state_patch=patch,
+                skip_brain=True,
+            )
+        if pay_patch:
+            patch.update(pay_patch)
+            merged_prep = {**merged_prep, **pay_patch}
+            missing = _missing(merged_prep)
+        method = str(merged_prep.get("payment_method") or chosen or "").strip()
+        if method and not missing:
+            reply, ref_patch, completion_suffix = build_checkout_completion_reply(
+                db,
+                tenant_id=int(tenant_id),
+                conversation=conversation,
+                order_prep=merged_prep,
+                brain_state=bs,
+                payment_method=method,
+            )
+            if ref_patch:
+                patch.update(ref_patch)
+            return _finalize_result(
+                live=live,
+                shadow_log=shadow_log,
+                reply=reply,
+                reason=f"checkout_complete_{completion_suffix}",
+                state_patch=patch,
+                skip_brain=True,
+            )
+        if method:
+            reply = build_payment_instruction_reply(
+                db,
+                tenant_id=int(tenant_id),
+                order_prep=merged_prep,
+                brain_state=bs,
+                payment_method=method,
+            )
+            patch.update(stamp_last_field_patch(missing))
+            return _finalize_result(
+                live=live,
+                shadow_log=shadow_log,
+                reply=reply,
+                reason="checkout_payment_owned",
+                state_patch=patch,
+                skip_brain=True,
+            )
+        reply = build_payment_bank_mismatch_reply(
+            db,
+            tenant_id=int(tenant_id),
+            rejection_reason="requested_bank_not_enabled",
+            requested_bank=requested_bank_brand(text),
+        )
+        return _finalize_result(
+            live=live,
+            shadow_log=shadow_log,
+            reply=reply,
+            reason="checkout_payment_bank_unavailable",
             state_patch=patch,
             skip_brain=True,
         )
@@ -671,8 +784,9 @@ def try_handle_order_flow_v2(
     pre_missing = _missing({**order_prep, **patch})
     owner_patch, owner_reason = apply_slot_ownership(
         message=text,
-        order_prep=order_prep,
+        order_prep={**order_prep, **patch},
         missing_fields=pre_missing,
+        checkout_active=_checkout_active(),
     )
     if owner_patch:
         patch.update(owner_patch)
@@ -680,6 +794,8 @@ def try_handle_order_flow_v2(
     if owner_reason not in {
         "last_name_correction",
         "customer_name_owned",
+        "explicit_name_override",
+        "active_checkout_city_owned",
         "city_owned",
         "city_uncertain",
         "address_refusal",
