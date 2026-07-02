@@ -372,6 +372,39 @@ def build_order_created_reply(
     return body.strip()
 
 
+def try_attach_creation_ack_reply(
+    reply: str,
+    order_prep: Dict[str, Any],
+    *,
+    reference: str = "",
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Prepend one-time creation ACK when a persisted reference exists.
+
+    Never claims creation without ``external_order_number`` / draft reference evidence.
+    """
+    if order_prep.get("creation_ack_sent"):
+        return reply, {}
+    ref = str(reference or order_prep.get("draft_order_reference") or "").strip()
+    if not ref:
+        return reply, {}
+    if str(order_prep.get("order_creation_status") or "").strip().lower() not in {
+        "created",
+        "",
+    } and not order_prep.get("local_draft_authoritative"):
+        return reply, {}
+    ack = build_order_created_reply(reference=ref)
+    if not ack:
+        return reply, {}
+    body = (reply or "").strip()
+    combined = f"{ack}\n\n{body}".strip() if body else ack
+    return combined, {
+        "creation_ack_sent": True,
+        "draft_order_reference": ref,
+        "order_creation_status": "created",
+    }
+
+
 def build_checkout_completion_reply(
     db: Any,
     *,

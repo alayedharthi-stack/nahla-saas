@@ -152,6 +152,19 @@ def has_active_commerce_from_state(state: Any) -> bool:
         return True
     if order_status and order_status not in {"", "idle", "none", "closed", "cancelled"}:
         return True
+    if isinstance(op, dict):
+        if op.get("local_draft_authoritative"):
+            return True
+        if op.get("draft_order_reference") and op.get("order_creation_status") == "created":
+            return True
+    elif op is not None:
+        if getattr(op, "local_draft_authoritative", False):
+            return True
+        if (
+            str(getattr(op, "draft_order_reference", "") or "").strip()
+            and str(getattr(op, "order_creation_status", "") or "").strip() == "created"
+        ):
+            return True
 
     if isinstance(state, dict):
         if state.get("awaiting_option_confirmation"):

@@ -200,9 +200,34 @@ def resolve_track_order_fallback(
     state: Any = None,
     history: Optional[List[Any]] = None,
     handler_data: Optional[Dict[str, Any]] = None,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+    conversation_id: Optional[int] = None,
 ) -> Optional[str]:
     """Honest reply when store lookup finds no order but local evidence exists."""
     from modules.ai.brain.compose import templates as T  # noqa: PLC0415
+
+    if db is not None and tenant_id and conversation_id:
+        try:
+            from modules.ai.checkout_authority import (  # noqa: PLC0415
+                load_local_draft_evidence,
+                draft_display_reference,
+            )
+
+            draft = load_local_draft_evidence(
+                db,
+                tenant_id=int(tenant_id),
+                conversation_id=int(conversation_id),
+            )
+            ref = draft_display_reference(draft)
+            if ref:
+                return T.order_status(
+                    reference=ref,
+                    status="draft",
+                    status_label_ar="قيد الإكمال",
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — local draft lookup must not break track fallback
+            pass
 
     evidence = resolve_order_creation_evidence(
         state=state,
@@ -258,6 +283,16 @@ def resolve_track_order_fallback(
         items = prep_d.get("line_items") or []
         if items or prep_d.get("catalog_line_items_authoritative"):
             return NO_ORDER_NUMBER_YET_AR
+
+    if prep_d.get("local_draft_authoritative") or prep_d.get("draft_order_reference"):
+        ref = str(prep_d.get("draft_order_reference") or "").strip()
+        if ref:
+            return T.order_status(
+                reference=ref,
+                status="draft",
+                status_label_ar="قيد الإكمال",
+            )
+        return NO_ORDER_NUMBER_YET_AR
 
     return None
 

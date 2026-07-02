@@ -18,6 +18,14 @@ from .checkout_context import (
     load_checkout_reply_context,
     load_identity_first_name,
 )
+from modules.ai.checkout_authority import (
+    active_whatsapp_checkout,
+    checkout_has_items,
+    draft_display_reference,
+    load_local_draft_evidence,
+    rehydrate_order_prep_patch,
+)
+from .enforcement import operational_tuple
 from .flags import is_order_flow_v2_enabled, is_order_flow_v2_shadow_enabled
 from .ingest import apply_inbound_slots
 from .missing_fields import compute_v2_missing_fields
@@ -39,6 +47,7 @@ from .replies import (
     build_order_flow_product_keyword_reply,
     build_product_image_request_reply,
     build_resume_ack,
+    try_attach_creation_ack_reply,
 )
 from .state import (
     activate_checkout_patch,
@@ -63,6 +72,7 @@ from .triggers import (
     is_catalog_selection_acknowledgment,
     is_checkout_escape_inquiry,
     is_checkout_order_number_intent,
+    is_delivery_continuation_intent,
     is_explicit_purchase_intent,
     is_greeting_message,
     is_product_image_request_in_order_flow,
@@ -203,21 +213,27 @@ def _sync_draft_order(
 
 def _finalize_result(
     *,
-    enabled: bool,
-    shadow: bool,
+    live: bool,
+    shadow_log: bool,
     reply: str,
     reason: str,
     state_patch: Dict[str, Any],
     skip_brain: bool = True,
 ) -> OrderFlowV2Result:
-    if shadow and not enabled:
-        logger.info(
-            "[ORDER_FLOW_V2/shadow] reason=%s reply_preview=%r patch_keys=%s",
-            reason,
-            (reply or "")[:120],
-            sorted(state_patch.keys()),
+    if not live:
+        if shadow_log:
+            logger.info(
+                "[ORDER_FLOW_V2/shadow] reason=%s reply_preview=%r patch_keys=%s",
+                reason,
+                (reply or "")[:120],
+                sorted(state_patch.keys()),
+            )
+        return OrderFlowV2Result(
+            handled=False,
+            shadow_only=shadow_log,
+            reason=reason,
+            state_patch=state_patch,
         )
-        return OrderFlowV2Result(handled=False, shadow_only=True, reason=reason, state_patch=state_patch)
     return OrderFlowV2Result(
         handled=True,
         reply=reply,
@@ -237,17 +253,44 @@ def try_handle_order_flow_v2(
     inbound_normalized_type: str = "text",
 ) -> OrderFlowV2Result:
     """Deterministic checkout owner. Returns handled=False for inquiry/general AI."""
-    enabled = is_order_flow_v2_enabled()
-    shadow = is_order_flow_v2_shadow_enabled()
-    if not enabled and not shadow:
+    global_enabled = is_order_flow_v2_enabled()
+    shadow_env = is_order_flow_v2_shadow_enabled()
+    if not global_enabled and not shadow_env:
         return OrderFlowV2Result(handled=False)
 
     meta = dict(inbound_metadata or {})
     text = str(message or "").strip()
     conversation, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
+    live, shadow_log, _op_reason = operational_tuple(
+        db,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        conversation=conversation,
+    )
+    if not live and not shadow_log:
+        return OrderFlowV2Result(handled=False, reason=_op_reason)
+
     order_prep = prep_dict((brain_state or {}).get("order_prep") or {})
     bs = dict(brain_state or {})
     patch: Dict[str, Any] = {}
+
+    draft_ev = load_local_draft_evidence(
+        db,
+        tenant_id=int(tenant_id),
+        conversation_id=getattr(conversation, "id", None) if conversation is not None else None,
+    )
+    rehydrate = rehydrate_order_prep_patch(draft_ev, order_prep, bs)
+    if rehydrate:
+        patch.update(rehydrate)
+        order_prep = {**order_prep, **patch}
+
+    def _checkout_active() -> bool:
+        merged = {**order_prep, **patch}
+        return active_whatsapp_checkout(merged, bs, draft=draft_ev)
+
+    def _has_items() -> bool:
+        merged = {**order_prep, **patch}
+        return checkout_has_items(merged, bs, draft=draft_ev)
 
     def _missing(prep: Dict[str, Any]) -> List[str]:
         return compute_v2_missing_fields(
@@ -319,8 +362,8 @@ def try_handle_order_flow_v2(
                 ).to_patch())
                 reply = build_catalog_order_extraction_fallback_reply(order_prep=merged_prep)
                 return _finalize_result(
-                    enabled=enabled,
-                    shadow=shadow,
+                    live=live,
+                    shadow_log=shadow_log,
                     reply=reply,
                     reason="catalog_order_extraction_incomplete",
                     state_patch=patch,
@@ -340,8 +383,8 @@ def try_handle_order_flow_v2(
                 known_previous=reply_ctx.known_previous,
             )
             return _finalize_result(
-                enabled=enabled,
-                shadow=shadow,
+                live=live,
+                shadow_log=shadow_log,
                 reply=reply,
                 reason="catalog_order_start",
                 state_patch=patch,
@@ -364,8 +407,8 @@ def try_handle_order_flow_v2(
     ):
         reply = build_product_image_request_reply(order_prep=order_prep, brain_state=bs)
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="order_flow_product_image_request",
             state_patch={},
@@ -380,16 +423,16 @@ def try_handle_order_flow_v2(
     ):
         reply = build_order_flow_product_keyword_reply(order_prep=order_prep)
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="order_flow_product_keyword",
             state_patch={},
             skip_brain=True,
         )
 
-    if is_catalog_selection_acknowledgment(text) and incomplete_checkout_with_items(order_prep, bs):
-        merged_prep = dict(order_prep)
+    if is_catalog_selection_acknowledgment(text) and _has_items():
+        merged_prep = {**order_prep, **patch}
         missing = _missing(merged_prep)
         reply_ctx = _reply_ctx(merged_prep)
         reply = build_catalog_selection_ack_reply(
@@ -399,9 +442,12 @@ def try_handle_order_flow_v2(
             field_modes=reply_ctx.field_modes,
             known_previous=reply_ctx.known_previous,
         )
+        ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
+        reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
+        patch.update(ack_patch)
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="catalog_selection_acknowledged",
             state_patch={},
@@ -441,8 +487,8 @@ def try_handle_order_flow_v2(
             address_on_file_claim=False,
         )
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="greeting_checkout_resume",
             state_patch=patch,
@@ -463,8 +509,8 @@ def try_handle_order_flow_v2(
                 first_name=first_name,
             )
             return _finalize_result(
-                enabled=enabled,
-                shadow=shadow,
+                live=live,
+                shadow_log=shadow_log,
                 reply=reply,
                 reason="greeting_pending_hint",
                 state_patch={},
@@ -503,8 +549,8 @@ def try_handle_order_flow_v2(
             known_previous=reply_ctx.known_previous,
         )
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="resume_checkout",
             state_patch=patch,
@@ -533,14 +579,14 @@ def try_handle_order_flow_v2(
             known_previous=reply_ctx.known_previous,
         )
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason="explicit_purchase_start",
             state_patch=patch,
         )
 
-    if is_checkout_order_number_intent(text) and in_flight_catalog_checkout(order_prep, bs):
+    if is_checkout_order_number_intent(text) and _checkout_active():
         reply = build_checkout_order_number_reply(
             db,
             tenant_id=int(tenant_id),
@@ -553,15 +599,43 @@ def try_handle_order_flow_v2(
             if not checkout_active_now(order_prep):
                 active_patch.update(activate_checkout_patch())
             return _finalize_result(
-                enabled=enabled,
-                shadow=shadow,
+                live=live,
+                shadow_log=shadow_log,
                 reply=reply,
                 reason="checkout_order_number",
                 state_patch=active_patch,
                 skip_brain=True,
             )
 
-    if not in_flight_catalog_checkout(order_prep, bs):
+    if is_delivery_continuation_intent(text) and _checkout_active():
+        if not checkout_active_now(order_prep):
+            patch.update(activate_checkout_patch())
+        patch["delivery_method"] = "delivery"
+        patch["fulfillment_intent"] = "delivery_to_saved_address"
+        merged_prep = {**order_prep, **patch}
+        missing = _missing(merged_prep)
+        patch.update(stamp_last_field_patch(missing))
+        reply_ctx = _reply_ctx(merged_prep)
+        reply = build_next_field_reply(
+            order_prep=merged_prep,
+            brain_state=bs,
+            missing_fields=missing,
+            field_modes=reply_ctx.field_modes,
+            known_previous=reply_ctx.known_previous,
+        )
+        ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
+        reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
+        patch.update(ack_patch)
+        return _finalize_result(
+            live=live,
+            shadow_log=shadow_log,
+            reply=reply,
+            reason="delivery_continuation",
+            state_patch=patch,
+            skip_brain=True,
+        )
+
+    if not _checkout_active():
         try:
             from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
 
@@ -670,8 +744,8 @@ def try_handle_order_flow_v2(
                 )
                 patch.update(pay_patch)
                 return _finalize_result(
-                    enabled=enabled,
-                    shadow=shadow,
+                    live=live,
+                    shadow_log=shadow_log,
                     reply=reply,
                     reason="payment_bank_rejected",
                     state_patch=patch,
@@ -701,8 +775,8 @@ def try_handle_order_flow_v2(
         if ref_patch:
             patch.update(ref_patch)
         return _finalize_result(
-            enabled=enabled,
-            shadow=shadow,
+            live=live,
+            shadow_log=shadow_log,
             reply=reply,
             reason=f"checkout_complete_{completion_suffix}",
             state_patch=patch,
@@ -725,9 +799,12 @@ def try_handle_order_flow_v2(
             field_modes=reply_ctx.field_modes,
             known_previous=reply_ctx.known_previous,
         )
+    ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
+    reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
+    patch.update(ack_patch)
     return _finalize_result(
-        enabled=enabled,
-        shadow=shadow,
+        live=live,
+        shadow_log=shadow_log,
         reply=reply,
         reason="collect_next_field",
         state_patch=patch,
