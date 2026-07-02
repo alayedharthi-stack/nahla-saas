@@ -207,6 +207,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     from services.salla_store_identity import (  # noqa: PLC0415
         find_salla_integration_for_identity,
         promote_integration_canonical_store,
+        reject_merchant_account_only_alias_routing,
         resolve_salla_store_identity,
         resolve_tenant_for_salla_store,
         verify_jwt_tenant_owns_salla_store,
@@ -297,6 +298,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
 
     canonical_store_id = store_identity.store_id
     lookup_store_id = canonical_store_id or store_identity.merchant_account_id
+    identity_source = store_identity.identity_source
 
     # ══════════════════════════════════════════════════════════════
     # STEP 3 — Derive identity (fallback if introspect gave no email)
@@ -323,19 +325,34 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         )
 
     logger.info(
-        "[SallaLogin] ▶ STEP 4 — Resolving Nahla account | email=%s store_id=%s",
-        owner_email, canonical_store_id or lookup_store_id,
+        "[SallaLogin] ▶ STEP 4 — Resolving Nahla account | email=%s store_id=%s identity_source=%s",
+        owner_email, canonical_store_id or lookup_store_id, identity_source or "unknown",
     )
 
+    if identity_source == "merchant_account_only":
+        blocked = reject_merchant_account_only_alias_routing(
+            db,
+            merchant_account_id=lookup_store_id,
+            context="token_login",
+        )
+        if blocked is not None:
+            raise HTTPException(status_code=403, detail=blocked.reason)
+
     # ── Authoritative store owner (integration row wins over provisioning) ──
-    identity_for_lookup = (
-        store_identity
-        if store_identity.store_id
-        else SallaStoreIdentity(store_id=lookup_store_id)
+    allow_alias_for_owner = identity_source == "canonical_store_id"
+    identity_for_lookup = store_identity if canonical_store_id else SallaStoreIdentity(
+        store_id="",
+        merchant_account_id=lookup_store_id,
+        resolved_via="merchant_account_only",
     )
     owner_tenant_id, owner_integration, owner_matched_via = (
-        resolve_tenant_for_salla_store(db, identity_for_lookup, include_disabled=True)
-        if (canonical_store_id or lookup_store_id)
+        resolve_tenant_for_salla_store(
+            db,
+            identity_for_lookup,
+            include_disabled=True,
+            allow_alias_match=allow_alias_for_owner,
+        )
+        if lookup_store_id
         else (None, None, "")
     )
     if owner_tenant_id is not None:
@@ -344,6 +361,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             jwt_tenant_id=owner_tenant_id,
             store_id=canonical_store_id or lookup_store_id,
             context="token_login_owner_resolve",
+            allow_alias_match=allow_alias_for_owner,
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -371,6 +389,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             is_email_derived  = email_is_derived,
             issued_via        = "salla_token_login",
             request_ip        = client_ip,
+            allow_alias_match = allow_alias_for_owner,
         )
         tenant_id   = provision.tenant_id
         owner_email = provision.email   # canonical, may have been remapped
@@ -591,6 +610,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             jwt_tenant_id=tenant_id,
             store_id=jwt_store_id,
             context="token_login_issue",
+            allow_alias_match=allow_alias_for_owner,
         )
         if not final_guard.ok:
             if final_guard.reason == "store_not_registered":
@@ -599,6 +619,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     jwt_tenant_id=tenant_id,
                     store_id=jwt_store_id,
                     context="token_login_post_provision",
+                    allow_alias_match=allow_alias_for_owner,
                 )
                 if not retry.ok:
                     logger.error(
@@ -614,20 +635,24 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     "[SallaLogin] new store provisioned | tenant=%s store_id=%s",
                     tenant_id, jwt_store_id,
                 )
-            elif final_guard.owner_tenant_id:
-                tenant_id = final_guard.owner_tenant_id
             else:
                 raise HTTPException(
                     status_code=403,
                     detail=final_guard.reason or "store_tenant_mismatch",
                 )
 
+    jwt_extra: dict = {}
+    if jwt_store_id:
+        jwt_extra["store_id"] = jwt_store_id
+    if identity_source:
+        jwt_extra["store_id_source"] = identity_source
+
     nahla_jwt = create_token(
         email=owner_email,
         role=role,
         tenant_id=tenant_id,
         user_id=db_user_id,
-        extra_claims={"store_id": jwt_store_id} if jwt_store_id else None,
+        extra_claims=jwt_extra or None,
     )
     audit(
         "salla_oauth_login_success",

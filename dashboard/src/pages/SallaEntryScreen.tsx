@@ -22,6 +22,7 @@ import { API_BASE } from '../api/client'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 import { startEmbeddedSdkHandshake } from '../lib/embeddedSdkHandshake'
+import { clearSallaEmbeddedSession, isSallaRoutingBlockDetail } from '../lib/embeddedLogin'
 import type { EmbeddedStrings } from '../i18n/embedded'
 
 // ── Immediate ready re-signal ─────────────────────────────────────────────────
@@ -511,8 +512,15 @@ export default function SallaEntryScreen() {
           if (err?.detail) detail = err.detail
         } catch { /* ignore */ }
         console.error('[OpenAdvanced] launch-dashboard failed:', detail)
+        if (isSallaRoutingBlockDetail(detail)) {
+          clearSallaEmbeddedSession()
+          console.warn('[SallaEntry] routing block — session cleared | detail=%s', detail)
+        }
         alert(`${t.errors.title}: ${detail}`)
         setLaunching(null)
+        if (isSallaRoutingBlockDetail(detail)) {
+          navigate('/app/salla', { replace: true })
+        }
         return
       }
       const { launch_url } = await res.json() as { launch_url: string }

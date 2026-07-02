@@ -514,3 +514,276 @@ class TestLaunchTenantGuard:
         exc = asyncio.run(_run())
         assert exc.status_code == 403
         assert exc.detail == "store_tenant_mismatch"
+
+
+class TestMerchantOnlyAliasRouting:
+    """P0: merchant_id without store.id must not open tenants via salla_merchant_id_alt."""
+
+    def test_guard_rejects_alias_only_partner_alt(self, db):
+        from services.salla_store_identity import verify_jwt_tenant_owns_salla_store
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+
+        result = verify_jwt_tenant_owns_salla_store(
+            db,
+            jwt_tenant_id=PARTNER_TENANT,
+            store_id=PARTNER_ALT,
+            context="test",
+        )
+        assert result.ok is False
+        assert result.reason == "merchant_identity_not_canonical"
+        assert result.owner_tenant_id == PARTNER_TENANT
+
+    def test_guard_passes_canonical_external_store_id(self, db):
+        from services.salla_store_identity import verify_jwt_tenant_owns_salla_store
+
+        _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE)
+
+        result = verify_jwt_tenant_owns_salla_store(
+            db,
+            jwt_tenant_id=PARTNER_TENANT,
+            store_id=PARTNER_STORE,
+            context="test",
+        )
+        assert result.ok is True
+
+    def test_find_integration_alias_disabled_by_default(self, db):
+        from services.salla_store_identity import find_salla_integration_by_identity
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+
+        row, via = find_salla_integration_by_identity(db, PARTNER_ALT)
+        assert row is None
+        assert via == ""
+
+        row2, via2 = find_salla_integration_by_identity(
+            db, PARTNER_ALT, allow_alias_match=True,
+        )
+        assert row2 is not None
+        assert via2 == "config.salla_merchant_id_alt"
+
+    def test_token_login_merchant_only_alias_blocked(self, db):
+        from routers.salla_oauth import salla_token_login
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+
+        introspect_body = {
+            "success": True,
+            "data": {
+                "merchant_id": PARTNER_ALT,
+                "user_id": "embedded-user",
+                "exp": 9999999999,
+            },
+        }
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.test", "app_id": "app"})
+            request.headers = {}
+            request.client = None
+
+            mock_introspect_resp = MagicMock()
+            mock_introspect_resp.status_code = 200
+            mock_introspect_resp.json.return_value = introspect_body
+
+            with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client.post = AsyncMock(return_value=mock_introspect_resp)
+                mock_client.get = AsyncMock()
+                mock_client_cls.return_value = mock_client
+
+                with pytest.raises(HTTPException) as exc_info:
+                    await salla_token_login(request, db)
+                return exc_info.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_identity_not_canonical"
+
+    def test_token_login_merchant_id_matching_external_store_opens_tenant(self, db):
+        from routers.salla_oauth import salla_token_login
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+        db.add(User(
+            username="partner",
+            email=DERIVED_EMAIL,
+            password_hash="x",
+            role="merchant",
+            tenant_id=PARTNER_TENANT,
+            is_active=True,
+        ))
+        db.commit()
+
+        introspect_body = {
+            "success": True,
+            "data": {
+                "merchant_id": PARTNER_STORE,
+                "user_id": "embedded-user",
+                "exp": 9999999999,
+            },
+        }
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.test", "app_id": "app"})
+            request.headers = {}
+            request.client = None
+
+            mock_introspect_resp = MagicMock()
+            mock_introspect_resp.status_code = 200
+            mock_introspect_resp.json.return_value = introspect_body
+
+            with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client.post = AsyncMock(return_value=mock_introspect_resp)
+                mock_client.get = AsyncMock()
+                mock_client_cls.return_value = mock_client
+
+                with patch("routers.salla_oauth.create_token", return_value="jwt"):
+                    with patch("routers.salla_oauth.audit"):
+                        with patch(
+                            "core.salla_onboarding_email.queue_salla_onboarding_email",
+                        ):
+                            return await salla_token_login(request, db)
+
+        result = asyncio.run(_run())
+        assert result["tenant_id"] == PARTNER_TENANT
+        assert result["store_id"] == PARTNER_STORE
+
+    def test_token_login_unknown_merchant_only_provisions_new_tenant(self, db):
+        from routers.salla_oauth import salla_token_login
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+
+        introspect_body = {
+            "success": True,
+            "data": {
+                "merchant_id": UNKNOWN_STORE,
+                "user_id": "embedded-user",
+                "exp": 9999999999,
+            },
+        }
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.test", "app_id": "app"})
+            request.headers = {}
+            request.client = None
+
+            mock_introspect_resp = MagicMock()
+            mock_introspect_resp.status_code = 200
+            mock_introspect_resp.json.return_value = introspect_body
+
+            with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=None)
+                mock_client.post = AsyncMock(return_value=mock_introspect_resp)
+                mock_client.get = AsyncMock()
+                mock_client_cls.return_value = mock_client
+
+                with patch("routers.salla_oauth.create_token", return_value="jwt"):
+                    with patch("routers.salla_oauth.audit"):
+                        with patch(
+                            "core.salla_onboarding_email.queue_salla_onboarding_email",
+                        ):
+                            return await salla_token_login(request, db)
+
+        result = asyncio.run(_run())
+        assert result["tenant_id"] != PARTNER_TENANT
+        assert result["store_id"] == UNKNOWN_STORE
+
+    def test_session_rejects_partner_alt_for_tenant_one_jwt(self, db):
+        from routers.salla_oauth import salla_check_session
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+
+        async def _run():
+            request = MagicMock()
+            request.query_params = QueryParams(f"store_id={PARTNER_ALT}")
+            request.state = MagicMock()
+            request.state.jwt_payload = {
+                "tenant_id": PARTNER_TENANT,
+                "user_id": 15,
+                "sub": PARTNER_EMAIL,
+                "role": "merchant",
+                "store_id": PARTNER_ALT,
+            }
+            with pytest.raises(HTTPException) as exc_info:
+                await salla_check_session(request, db)
+            return exc_info.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_identity_not_canonical"
+
+    def test_launch_dashboard_rejects_partner_alt(self, db):
+        from routers.salla_oauth import launch_dashboard
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={
+                "token": "fake-jwt",
+                "store_id": PARTNER_ALT,
+            })
+            request.headers = {}
+            request.query_params = {"next": "/overview"}
+
+            with patch("jose.jwt.decode", return_value={
+                "tenant_id": PARTNER_TENANT,
+                "sub": PARTNER_EMAIL,
+                "role": "merchant",
+                "user_id": 15,
+                "store_id": PARTNER_ALT,
+            }):
+                with pytest.raises(HTTPException) as exc_info:
+                    await launch_dashboard(request, db)
+                return exc_info.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_identity_not_canonical"
