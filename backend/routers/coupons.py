@@ -18,6 +18,10 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.database import get_db
 from core.tenant import DEFAULT_AI, get_or_create_settings, get_or_create_tenant, merge_defaults, resolve_tenant_id
 from models import Coupon
+from services.coupon_sync_visibility import (
+    derive_coupon_sync_visibility,
+    normalize_coupon_usage_display,
+)
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
 
@@ -635,13 +639,16 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             delta = expires - now
             remaining_seconds = max(0, int(delta.total_seconds()))
 
+        usages, limit = normalize_coupon_usage_display(meta)
+        sync_fields = derive_coupon_sync_visibility(source_type=source_type, meta=meta)
+
         coupons.append({
             "id": str(coupon.id),
             "code": coupon.code,
             "type": coupon.discount_type or "percentage",
             "value": float(str(coupon.discount_value or "0").replace(",", ".")) if str(coupon.discount_value or "").replace(",", ".").replace(".", "", 1).isdigit() else coupon.discount_value,
-            "usages": int(meta.get("usage_count", 0)),
-            "limit": int(meta.get("usage_limit", 0) or 0),
+            "usages": usages,
+            "limit": limit,
             "expires": expires.isoformat() if expires else "",
             "remaining_seconds": remaining_seconds,
             "category": category,
@@ -652,6 +659,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             "automation_type": meta.get("automation_type") or None,
             "promotion_id":    meta.get("promotion_id") or None,
             "active": active,
+            **sync_fields,
         })
 
     # The merchant's manual on/off is now the source of truth. The previous

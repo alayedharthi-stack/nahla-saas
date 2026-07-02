@@ -1689,6 +1689,16 @@ class StoreSyncService:
 
         logger.info("tenant=%s syncing %d coupons", self.tenant_id, len(raw_list))
 
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        from services.coupon_sync_visibility import (  # noqa: PLC0415
+            build_salla_import_metadata,
+            build_salla_reconcile_metadata,
+            is_nahla_system_coupon,
+            merge_salla_import_metadata,
+            should_mark_imported_source_type,
+        )
+
         created = 0
         updated = 0
         for raw in raw_list:
@@ -1708,13 +1718,39 @@ class StoreSyncService:
                 except Exception:
                     pass
 
+            synced_at = datetime.now(timezone.utc)
+
             if existing:
+                preserve_origin = is_nahla_system_coupon(
+                    getattr(existing, "source_type", None),
+                    existing.extra_metadata,
+                )
+                if preserve_origin:
+                    import_meta = build_salla_reconcile_metadata(
+                        raw, synced_at, existing.extra_metadata,
+                    )
+                else:
+                    import_meta = build_salla_import_metadata(raw, normalised, synced_at)
+
                 existing.description    = normalised["description"]
                 existing.discount_type  = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
                 existing.expires_at     = exp
+                merged_meta = merge_salla_import_metadata(
+                    existing.extra_metadata,
+                    import_meta,
+                    preserve_origin=preserve_origin,
+                )
+                if should_mark_imported_source_type(
+                    getattr(existing, "source_type", None),
+                    existing.extra_metadata,
+                ):
+                    existing.source_type = "imported"
+                existing.extra_metadata = merged_meta
+                flag_modified(existing, "extra_metadata")
                 updated += 1
             else:
+                import_meta = build_salla_import_metadata(raw, normalised, synced_at)
                 self.db.add(Coupon(
                     tenant_id      = self.tenant_id,
                     code           = code,
@@ -1722,7 +1758,8 @@ class StoreSyncService:
                     discount_type  = normalised["discount_type"],
                     discount_value = normalised["discount_value"],
                     expires_at     = exp,
-                    extra_metadata = normalised,
+                    source_type    = "imported",
+                    extra_metadata = import_meta,
                 ))
                 created += 1
         self.db.flush()

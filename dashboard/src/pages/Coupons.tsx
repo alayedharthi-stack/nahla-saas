@@ -100,9 +100,16 @@ const LEVEL_BADGE_VARIANT: Record<CouponLevelId, 'amber' | 'slate' | 'purple' | 
 }
 
 const SOURCE_TYPE_LABEL: Record<NonNullable<DashboardCoupon['source_type']>, { label: string; variant: 'green' | 'slate' | 'blue' }> = {
-  system:   { label: 'نظام',    variant: 'green' },
-  manual:   { label: 'يدوي',    variant: 'slate' },
-  imported: { label: 'مستورد',  variant: 'blue'  },
+  system:   { label: 'نظام',           variant: 'green' },
+  manual:   { label: 'يدوي',           variant: 'slate' },
+  imported: { label: 'مستورد من سلة',  variant: 'blue'  },
+}
+
+const SYNC_BADGE_VARIANT: Record<NonNullable<DashboardCoupon['sync_badge']>, 'green' | 'slate' | 'red' | 'blue'> = {
+  synced:     'green',
+  not_pushed: 'slate',
+  failed:     'red',
+  imported:   'blue',
 }
 
 const CHANNEL_LABEL: Record<CouponChannel, { label: string; variant: 'purple' | 'blue' | 'amber' | 'slate' }> = {
@@ -261,7 +268,7 @@ const LEVEL_FILTERS: Array<{ key: LevelFilter; label: string }> = [
   { key: 'vip',    label: 'استثنائي' },
 ]
 
-const TABLE_HEADERS = ['الكود', 'المستوى', 'المصدر', 'القناة', 'الخصم', 'الاستخدامات', 'المتبقي', 'الحالة', '']
+const TABLE_HEADERS = ['الكود', 'المستوى', 'المصدر', 'سلة', 'القناة', 'الخصم', 'الاستخدامات', 'المتبقي', 'الحالة', '']
 
 function sourceTypeOf(c: DashboardCoupon): NonNullable<DashboardCoupon['source_type']> {
   if (c.source_type) return c.source_type
@@ -710,7 +717,24 @@ export default function Coupons() {
                         : <span className="text-xs text-slate-400">—</span>}
                     </td>
                     <td className="px-5 py-3.5" title={om.hint}>
-                      <Badge label={sMeta.label} variant={sMeta.variant} />
+                      <Badge label={c.source_label || sMeta.label} variant={sMeta.variant} />
+                    </td>
+                    <td className="px-5 py-3.5">
+                      {c.sync_badge_label ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge
+                            label={c.sync_badge_label}
+                            variant={SYNC_BADGE_VARIANT[c.sync_badge || 'not_pushed']}
+                          />
+                          {c.sync_error ? (
+                            <span className="text-[10px] text-red-500 max-w-[9rem] truncate" title={c.sync_error}>
+                              {c.sync_error}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="px-5 py-3.5">
                       {channel
