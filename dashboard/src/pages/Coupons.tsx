@@ -59,6 +59,11 @@ import {
   splitDatetimeLocal,
   validateCouponCode,
 } from '../utils/storeCouponCreate'
+import {
+  CouponSallaSyncErrorHint,
+  formatCouponSallaSyncError,
+  formatCouponSallaSyncErrorAlert,
+} from '../utils/couponSallaSyncError'
 
 const DEFAULT_LEVELS: CouponLevel[] = [
   { id: 'bronze', label: 'برونزي',   threshold: '+1 طلب',   discount_default: 5,  discount_min: 3,  discount_max: 5,  validity_hours: 24, max_uses: 1, per_customer_usage: 1, allowed_channels: ['ai', 'campaign', 'autopilot'], enabled: true },
@@ -425,7 +430,8 @@ export default function Coupons() {
       setSyncMessage(`تمت مزامنة ${result.synced} كوبون من سلة`)
       load()
     } catch (e) {
-      setSyncMessage(e instanceof Error ? e.message : 'تعذّرت مزامنة كوبونات سلة')
+      const raw = e instanceof Error ? e.message : 'تعذّرت مزامنة كوبونات سلة'
+      setSyncMessage(formatCouponSallaSyncErrorAlert(raw))
     } finally {
       setSyncingSalla(false)
     }
@@ -441,7 +447,8 @@ export default function Coupons() {
       await featureRealityApi.pushSallaCoupon(coupon.id)
       load()
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'فشل إرسال الكوبون إلى سلة')
+      const raw = e instanceof Error ? e.message : 'فشل إرسال الكوبون إلى سلة'
+      alert(formatCouponSallaSyncErrorAlert(raw))
       load()
     } finally {
       setPushingId(null)
@@ -710,9 +717,29 @@ export default function Coupons() {
                 مزامنة كوبونات سلة
               </button>
               {syncMessage ? (
-                <span className="text-[11px] text-slate-500 max-w-xs truncate" title={syncMessage}>
-                  {syncMessage}
-                </span>
+                syncMessage.startsWith('تمت مزامنة') ? (
+                  <span className="text-[11px] text-slate-500 max-w-xs truncate" title={syncMessage}>
+                    {syncMessage}
+                  </span>
+                ) : (() => {
+                  const formatted = formatCouponSallaSyncError(syncMessage)
+                  return (
+                    <span
+                      className="text-[11px] text-slate-500 max-w-sm whitespace-pre-line leading-snug"
+                      title={formatted.fullText}
+                    >
+                      {formatted.friendly}
+                      {formatted.technical ? (
+                        <>
+                          {'\n'}
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {formatted.technical}
+                          </span>
+                        </>
+                      ) : null}
+                    </span>
+                  )
+                })()
               ) : null}
             <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-lg">
               {FILTERS.map(f => {
@@ -821,9 +848,7 @@ export default function Coupons() {
                             variant={SYNC_BADGE_VARIANT[c.sync_badge || 'not_pushed']}
                           />
                           {c.sync_error ? (
-                            <span className="text-[10px] text-red-500 max-w-[9rem] truncate" title={c.sync_error}>
-                              {c.sync_error}
-                            </span>
+                            <CouponSallaSyncErrorHint error={c.sync_error} />
                           ) : null}
                         </div>
                       ) : (
