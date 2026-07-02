@@ -112,6 +112,17 @@
 
 ---
 
+## Two coupon concepts (do not mix)
+
+| Surface | Table / API | Purpose | Appears in `/coupons`? |
+|---------|-------------|---------|------------------------|
+| **صفحة الكوبونات** (`/coupons`) | `coupons` · `POST /coupons` | Store coupon management, Salla sync visibility, autopilot pool | Yes |
+| **نحلة الذكية → قوالب كوبونات الذكاء** | `manual_coupons` · `/intelligence/manual-coupons` | AI brain templates when customer asks for a discount (autopilot OFF fallback) | **No** |
+
+Production gap (2026-07): merchants used **إضافة كوبون** under Intelligence, so `/coupons` manual filter stayed at 0. UI follow-up centralizes store creation on `/coupons` and renames the Intelligence tab to **قوالب كوبونات الذكاء**.
+
+---
+
 ## Validation checklist (post–Phase 1)
 
 After deploy, verify on `/coupons` for a Salla-connected merchant:

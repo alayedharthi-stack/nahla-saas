@@ -1828,7 +1828,7 @@ export default function Intelligence() {
             }`}
           >
             <Tag className="w-4 h-4 shrink-0" />
-            الكوبونات اليدوية
+            قوالب كوبونات الذكاء
           </button>
           <button
             onClick={() => setActiveTab('media')}

@@ -24,6 +24,7 @@
 //      green success banner that auto-dismisses after a few seconds.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -240,13 +241,17 @@ export function ManualCouponsPanel() {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-slate-900">الكوبونات اليدوية</h2>
+          <h2 className="text-lg font-semibold text-slate-900">قوالب كوبونات الذكاء</h2>
           <p className="text-sm text-slate-500 mt-0.5">
-            أكواد خصم تستخدمها نحلة عند طلب العميل خصم — مستقلة عن الكوبونات التلقائية وعن سلة.
+            أكواد يقترحها الذكاء عند طلب العميل خصماً — مستقلة عن كوبونات المتجر وسلة.
+          </p>
+          <p className="text-xs text-slate-500 mt-2 leading-relaxed">
+            هذه القوالب يستخدمها الذكاء فقط، أما إدارة كوبونات المتجر وسلة فهي من{' '}
+            <Link to="/coupons" className="text-brand-600 font-semibold hover:underline">صفحة الكوبونات</Link>.
           </p>
         </div>
         <button onClick={openCreate} className="btn-primary text-sm flex items-center gap-2">
-          <Plus className="w-4 h-4" /> إضافة كوبون
+          <Plus className="w-4 h-4" /> إضافة قالب
         </button>
       </div>
 
@@ -264,7 +269,9 @@ export function ManualCouponsPanel() {
           </div>
         ) : items.length === 0 ? (
           <div className="p-8 text-center text-sm text-slate-500">
-            لا توجد كوبونات بعد. أضِف أول كوبون يدوي حتى تستطيع نحلة عرضه عند طلب العميل خصم.
+            لا توجد قوالب بعد. أضِف قالباً حتى يستطيع الذكاء اقتراحه عند طلب العميل خصماً.
+            {' '}
+            <Link to="/coupons" className="text-brand-600 font-semibold hover:underline">إدارة كوبونات المتجر</Link>
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -367,7 +374,7 @@ function CouponEditModal({
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
           <h3 className="text-base font-semibold text-slate-900">
-            {isEdit ? 'تعديل كوبون يدوي' : 'إضافة كوبون يدوي'}
+            {isEdit ? 'تعديل قالب كوبون' : 'إضافة قالب كوبون للذكاء'}
           </h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600" disabled={saving}>
             <X className="w-4 h-4" />

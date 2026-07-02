@@ -27,6 +27,7 @@ import {
   Server,
   Save,
   RefreshCw,
+  Loader2,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -291,6 +292,7 @@ export default function Coupons() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [syncingSalla, setSyncingSalla] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
   const { t } = useLanguage()
 
   const levels = data.levels && data.levels.length === 4 ? data.levels : DEFAULT_LEVELS
@@ -348,29 +350,29 @@ export default function Coupons() {
     return persistRules(nextRules)
   }
 
-  const handleCreateCoupon = async () => {
-    if (!window.confirm(
-      'الكوبونات اليدوية مخصّصة للحالات الاستثنائية فقط.\n'
-      + 'في الوضع الطبيعي، الطيار الآلي يولّد الأكواد تلقائياً عبر القواعد والعروض.\n\n'
-      + 'هل تريد المتابعة وإنشاء كود يدوي؟',
-    )) return
-    const code = window.prompt('أدخل كود الكوبون')
-    if (!code) return
-    const type = (window.prompt('نوع الخصم: percentage أو fixed', 'percentage') || 'percentage') as 'percentage' | 'fixed'
-    const value = window.prompt('قيمة الخصم')
-    if (!value) return
-    try {
-      await featureRealityApi.createCoupon({
-        code,
-        type,
-        value,
-        category: 'standard',
-        active: true,
-      })
-      load()
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'تعذّر إنشاء الكوبون')
-    }
+  const handleCreateCoupon = () => {
+    setCreateOpen(true)
+  }
+
+  const handleCreateCouponSubmit = async (payload: {
+    code: string
+    type: 'percentage' | 'fixed'
+    value: string
+    expires?: string
+    limit?: number
+  }) => {
+    await featureRealityApi.createCoupon({
+      code: payload.code,
+      type: payload.type,
+      value: payload.value,
+      expires: payload.expires,
+      limit: payload.limit,
+      category: 'standard',
+      active: true,
+    })
+    setCreateOpen(false)
+    setFilter('manual')
+    load()
   }
 
   const handleToggleCoupon = async (coupon: DashboardCoupon) => {
@@ -455,11 +457,12 @@ export default function Coupons() {
         subtitle={t(tr => tr.pages.coupons.subtitle)}
         action={
           <button
-            className="text-xs px-3 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5"
+            type="button"
+            className="btn-primary text-xs px-3 py-2 rounded-lg inline-flex items-center gap-1.5"
             onClick={handleCreateCoupon}
-            title="استخدم فقط في الحالات الاستثنائية — في الوضع الطبيعي يتولّى الطيار الآلي توليد الأكواد"
+            title="إنشاء كوبون متجر يدوي — يظهر هنا ولا يُرسل إلى سلة تلقائياً"
           >
-            <Plus className="w-3.5 h-3.5" /> كود يدوي
+            <Plus className="w-3.5 h-3.5" /> إضافة كوبون
           </button>
         }
       />
@@ -820,6 +823,213 @@ export default function Coupons() {
         <Link to="/smart-automations" className="text-brand-600 hover:underline font-medium">الطيار الآلي</Link>
         {' '}— ولتعريف العروض التلقائية بدون كود انتقل إلى{' '}
         <Link to="/promotions" className="text-brand-600 hover:underline font-medium">العروض</Link>.
+      </div>
+
+      <CreateStoreCouponModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreate={handleCreateCouponSubmit}
+      />
+    </div>
+  )
+}
+
+// ── Store coupon create modal ────────────────────────────────────────────────
+
+interface CreateStoreCouponModalProps {
+  open: boolean
+  onClose: () => void
+  onCreate: (payload: {
+    code: string
+    type: 'percentage' | 'fixed'
+    value: string
+    expires?: string
+    limit?: number
+  }) => void | Promise<void>
+}
+
+function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponModalProps) {
+  const [code, setCode] = useState('')
+  const [type, setType] = useState<'percentage' | 'fixed'>('percentage')
+  const [value, setValue] = useState('')
+  const [expiresLocal, setExpiresLocal] = useState('')
+  const [limit, setLimit] = useState('1')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (open) {
+      setCode('')
+      setType('percentage')
+      setValue('')
+      setExpiresLocal('')
+      setLimit('1')
+      setErr(null)
+      setSaving(false)
+    }
+  }, [open])
+
+  if (!open) return null
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setErr(null)
+    const trimmed = code.trim()
+    if (!trimmed) {
+      setErr('كود الكوبون مطلوب')
+      return
+    }
+    const numValue = Number(String(value).replace(',', '.'))
+    if (!Number.isFinite(numValue) || numValue <= 0) {
+      setErr('قيمة الخصم يجب أن تكون أكبر من صفر')
+      return
+    }
+    if (type === 'percentage' && numValue > 100) {
+      setErr('نسبة الخصم لا يمكن أن تتجاوز 100%')
+      return
+    }
+    let expiresIso: string | undefined
+    if (expiresLocal) {
+      const d = new Date(expiresLocal)
+      if (Number.isNaN(d.getTime())) {
+        setErr('تاريخ الانتهاء غير صالح')
+        return
+      }
+      expiresIso = d.toISOString()
+    }
+    const limitNum = limit.trim() === '' ? 0 : Number(limit)
+    if (!Number.isFinite(limitNum) || limitNum < 0) {
+      setErr('حد الاستخدام غير صالح')
+      return
+    }
+    setSaving(true)
+    try {
+      await onCreate({
+        code: trimmed,
+        type,
+        value: String(numValue),
+        expires: expiresIso,
+        limit: limitNum,
+      })
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : 'تعذّر إنشاء الكوبون')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+      <div className="card w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <div className="min-w-0">
+            <h2 className="text-base font-bold text-slate-900">إضافة كوبون</h2>
+            <p className="text-xs text-slate-500 mt-0.5">كوبون متجر يدوي — يُدار من هذه الصفحة ولا يُرسل إلى سلة تلقائياً</p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-600 leading-relaxed">
+            للقوالب التي يستخدمها الذكاء فقط (وليس كوبونات المتجر)، انتقل إلى{' '}
+            <Link to="/intelligence" className="text-brand-600 font-semibold hover:underline">نحلة الذكية</Link>
+            {' '}← تبويب قوالب كوبونات الذكاء.
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">كود الكوبون *</label>
+            <input
+              value={code}
+              onChange={e => setCode(e.target.value)}
+              className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200 font-mono"
+              dir="ltr"
+              placeholder="SUMMER25"
+              required
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">نوع الخصم *</label>
+            <div className="grid grid-cols-2 gap-2">
+              {(['percentage', 'fixed'] as const).map(k => {
+                const active = type === k
+                const Icon = k === 'percentage' ? Percent : Coins
+                const lbl = k === 'percentage' ? 'نسبة مئوية' : 'مبلغ ثابت'
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setType(k)}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition ${
+                      active
+                        ? 'border-brand-400 bg-brand-50 text-brand-700'
+                        : 'border-slate-200 hover:border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {lbl}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              {type === 'percentage' ? 'نسبة الخصم (%) *' : 'قيمة الخصم (ر.س) *'}
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={type === 'percentage' ? 100 : undefined}
+              step="any"
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+              required
+            />
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">تاريخ الانتهاء</label>
+              <input
+                type="datetime-local"
+                value={expiresLocal}
+                onChange={e => setExpiresLocal(e.target.value)}
+                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-700 mb-1">حد الاستخدام</label>
+              <input
+                type="number"
+                min={0}
+                value={limit}
+                onChange={e => setLimit(e.target.value)}
+                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                placeholder="1"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">0 = غير محدود</p>
+            </div>
+          </div>
+
+          {err ? (
+            <p className="text-xs text-red-600">{err}</p>
+          ) : null}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50">
+              إلغاء
+            </button>
+            <button type="submit" disabled={saving} className="btn-primary text-sm px-4 py-2 rounded-lg inline-flex items-center gap-2 disabled:opacity-60">
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              حفظ الكوبون
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   )
