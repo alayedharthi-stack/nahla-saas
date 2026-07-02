@@ -28,6 +28,23 @@ import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
   try { window.parent.postMessage({ type: 'app.ready' }, '*') } catch { /* cross-origin */ }
 })()
 
+function clearEmbeddedSession(): void {
+  ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
+    'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
+    'nahla_salla_store_name', 'nahla_store_name',
+    'nahla_salla_is_new', 'nahla_salla_wa_connected', 'nahla_salla_embedded',
+  ].forEach(k => { try { localStorage.removeItem(k) } catch { /* noop */ } })
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const parts = token.split('.')
+    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')))
+  } catch {
+    return {}
+  }
+}
+
 export default function SallaLaunch() {
   const navigate = useNavigate()
   const { isRTL, t } = useEmbeddedLocale()
@@ -71,12 +88,24 @@ export default function SallaLaunch() {
           email:        string
           role:         string
           store_name:   string
+          store_id?:    string | null
         }
 
-        // Persist the full session the same way the rest of the app expects.
-        // CRITICAL: must include `nahla_auth = '1'` — ProtectedRoute uses it
-        // (via isAuthenticated()) and will redirect to /landing without it,
-        // even if the JWT itself is valid.
+        const claims   = decodeJwtPayload(data.access_token)
+        const storeId  = String(data.store_id || claims.store_id || '').trim()
+        const prevStore = (() => {
+          try { return localStorage.getItem('nahla_salla_store_id') || '' } catch { return '' }
+        })()
+
+        if (prevStore && storeId && prevStore !== storeId) {
+          console.warn(
+            '[SallaLaunch] store switch detected — clearing previous session | %s → %s',
+            prevStore, storeId,
+          )
+        }
+
+        clearEmbeddedSession()
+
         try {
           localStorage.setItem('nahla_auth',             '1')
           localStorage.setItem('nahla_token',            data.access_token)
@@ -85,34 +114,24 @@ export default function SallaLaunch() {
           localStorage.setItem('nahla_role',             data.role)
           localStorage.setItem('nahla_salla_store_name', data.store_name)
           localStorage.setItem('nahla_salla_embedded',   '1')
-          // user_id is optional — pull from JWT payload if present so
-          // getUserId() in auth.ts returns a real number, not null.
-          try {
-            const parts   = data.access_token.split('.')
-            const payload = JSON.parse(
-              atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')),
-            ) as { user_id?: number | string }
-            if (payload?.user_id != null) {
-              localStorage.setItem('nahla_user_id', String(payload.user_id))
-            }
-          } catch { /* JWT parse — best effort */ }
+          if (storeId) {
+            localStorage.setItem('nahla_salla_store_id', storeId)
+          }
+          if (claims.user_id != null) {
+            localStorage.setItem('nahla_user_id', String(claims.user_id))
+          }
         } catch {
           // localStorage blocked (private browsing?) — navigate anyway
         }
 
         console.info(
-          '[SallaLaunch] session persisted | tenant_id=%s email=%s role=%s next=%s',
-          data.tenant_id, data.email, data.role, nextPath,
+          '[SallaLaunch] session persisted | tenant_id=%s store_id=%s email=%s role=%s next=%s',
+          data.tenant_id, storeId || '(missing)', data.email, data.role, nextPath,
         )
 
-        // Navigate to the requested destination (replaces this transient page
-        // so the user cannot "go back" to it).
         navigate(nextPath, { replace: true })
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
-        // If the backend already returned a localized error string (Arabic
-        // diacritics or Latin letters) surface it verbatim.  Otherwise fall
-        // back to a generic, locale-aware message.
         const looksLocalized = msg.length > 0 && /[\u0600-\u06FFa-zA-Z]/.test(msg)
         setErrorMsg(looksLocalized ? msg : t.launch.errorGeneric)
       }
@@ -150,7 +169,6 @@ export default function SallaLaunch() {
         <p style={{ fontSize: 12, color: '#94a3b8', margin: 0 }}>
           {t.launch.loadingSubtitle}
         </p>
-        {/* Spinner */}
         <div
           style={{
             width:         32,

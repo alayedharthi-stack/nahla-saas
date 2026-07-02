@@ -77,6 +77,7 @@ interface SessionResponse {
   connected:  boolean
   tenant_id:  number
   token:      string
+  store_id?:  string
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
@@ -90,16 +91,25 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   }
 }
 
-function persistSession(data: LoginResponse | SessionResponse) {
-  const jwt    = 'access_token' in data ? data.access_token : data.token
-  const claims = decodeJwtPayload(jwt)
+function jwtStoreId(token: string): string {
+  const sid = decodeJwtPayload(token).store_id
+  return sid != null ? String(sid).trim() : ''
+}
 
-  // Clear ALL old session keys before writing new ones — prevents cross-store leakage
+function clearEmbeddedSession(): void {
   ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
     'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
     'nahla_salla_store_name', 'nahla_store_name',
     'nahla_salla_is_new', 'nahla_salla_wa_connected',
   ].forEach(k => localStorage.removeItem(k))
+}
+
+function persistSession(data: LoginResponse | SessionResponse) {
+  const jwt    = 'access_token' in data ? data.access_token : data.token
+  const claims = decodeJwtPayload(jwt)
+
+  // Clear ALL old session keys before writing new ones — prevents cross-store leakage
+  clearEmbeddedSession()
 
   localStorage.setItem('nahla_auth',           '1')
   localStorage.setItem('nahla_token',          jwt)
@@ -114,7 +124,6 @@ function persistSession(data: LoginResponse | SessionResponse) {
     localStorage.setItem('nahla_store_name',       data.store_name)
   }
 
-  // store_id comes from salla_token_login response — the AUTHORITATIVE key
   if ('store_id' in data && data.store_id) {
     localStorage.setItem('nahla_salla_store_id', data.store_id)
   }
@@ -223,16 +232,29 @@ export default function SallaEmbedded() {
     // stored one, the cached session belongs to a DIFFERENT store. Clear it
     // and force a fresh token-login so we never leak cross-store data.
     const storedStoreId = localStorage.getItem('nahla_salla_store_id') || ''
+    const tokenStoreId  = jwtStoreId(stored)
+    const targetStoreId = storeId || storedStoreId || tokenStoreId
+
     if (storeId && storedStoreId && storeId !== storedStoreId) {
       console.warn(
         '[SallaEmbedded] ⚠️ store_id changed:',
         storedStoreId, '→', storeId, '— clearing stale session',
       )
-      ;['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email',
-        'nahla_tenant_id', 'nahla_user_id', 'nahla_salla_store_id',
-        'nahla_salla_store_name', 'nahla_store_name',
-        'nahla_salla_is_new', 'nahla_salla_wa_connected',
-      ].forEach(k => localStorage.removeItem(k))
+      clearEmbeddedSession()
+      return false
+    }
+
+    if (tokenStoreId && targetStoreId && tokenStoreId !== targetStoreId) {
+      console.warn(
+        '[SallaEmbedded] ⚠️ JWT store_id mismatch:',
+        tokenStoreId, '≠', targetStoreId, '— clearing stale session',
+      )
+      clearEmbeddedSession()
+      return false
+    }
+
+    if (!targetStoreId) {
+      console.info('[SallaEmbedded] no store_id for session check — skipping cached session')
       return false
     }
 
@@ -252,9 +274,7 @@ export default function SallaEmbedded() {
     }, EMBEDDED_SESSION_TIMEOUT_MS)
 
     try {
-      const sessionUrl = storeId
-        ? `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(storeId)}`
-        : `${API_BASE}/api/salla/session`
+      const sessionUrl = `${API_BASE}/api/salla/session?store_id=${encodeURIComponent(targetStoreId)}`
       const res = await fetch(sessionUrl, {
         headers: { Authorization: `Bearer ${stored}` },
         signal:  ctrl.signal,
@@ -274,7 +294,10 @@ export default function SallaEmbedded() {
         markReady()
         return true
       }
-      // 401 → token expired, fall through
+      if (res.status === 403 || res.status === 401) {
+        console.warn('[SallaEmbedded] session rejected — clearing stale session | status=%s', res.status)
+        clearEmbeddedSession()
+      }
     } catch (e) {
       console.warn('[SallaEmbedded] session check failed (will try token-login):', e)
     }
