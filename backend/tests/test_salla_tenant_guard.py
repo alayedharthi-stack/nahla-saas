@@ -617,7 +617,13 @@ class TestMerchantOnlyAliasRouting:
 
         exc = asyncio.run(_run())
         assert exc.status_code == 403
-        assert exc.detail == "merchant_identity_not_canonical"
+        assert isinstance(exc.detail, dict)
+        assert exc.detail["detail"] == "merchant_identity_not_canonical"
+        assert exc.detail["code"] == "salla_store_link_required"
+        assert exc.detail["next_action"] == "oauth_sync"
+        assert exc.detail["oauth_start_path"] == "/api/salla/oauth/start?embedded_reconcile=1"
+        assert exc.detail["has_canonical_store_id"] is False
+        assert exc.detail["identity_source"] == "merchant_account_only"
 
     def test_token_login_merchant_id_matching_external_store_opens_tenant(self, db):
         from routers.salla_oauth import salla_token_login
@@ -787,3 +793,48 @@ class TestMerchantOnlyAliasRouting:
         exc = asyncio.run(_run())
         assert exc.status_code == 403
         assert exc.detail == "merchant_identity_not_canonical"
+
+
+class TestSallaStoreLinkOnboarding:
+    def test_build_merchant_identity_not_canonical_detail(self):
+        from services.salla_store_identity import (
+            SALLA_EMBEDDED_OAUTH_START_PATH,
+            SALLA_OAUTH_SYNC_NEXT_ACTION,
+            SALLA_STORE_LINK_REQUIRED_CODE,
+            build_merchant_identity_not_canonical_detail,
+        )
+
+        payload = build_merchant_identity_not_canonical_detail(
+            merchant_account_id="1979048767",
+        )
+        assert payload["detail"] == "merchant_identity_not_canonical"
+        assert payload["code"] == SALLA_STORE_LINK_REQUIRED_CODE
+        assert payload["next_action"] == SALLA_OAUTH_SYNC_NEXT_ACTION
+        assert payload["oauth_start_path"] == SALLA_EMBEDDED_OAUTH_START_PATH
+        assert payload["merchant_account_id"] == "1979048767"
+        assert payload["has_canonical_store_id"] is False
+
+    def test_embedded_oauth_start_without_jwt_redirects(self):
+        from routers.salla_oauth import salla_api_oauth_start
+
+        request = MagicMock()
+
+        with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "test-client-id"):
+            with patch("routers.salla_oauth.SALLA_OAUTH_REDIRECT_URI", "https://api.example/oauth/callback"):
+                response = asyncio.run(
+                    salla_api_oauth_start(request, token=None, embedded_reconcile=True),
+                )
+
+        assert response.status_code == 302
+        assert "accounts.salla.sa/oauth2/auth" in response.headers["location"]
+
+    def test_embedded_oauth_start_still_requires_jwt_without_flag(self):
+        from routers.salla_oauth import salla_api_oauth_start
+
+        request = MagicMock()
+
+        with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "test-client-id"):
+            with patch("routers.salla_oauth.SALLA_OAUTH_REDIRECT_URI", "https://api.example/oauth/callback"):
+                with pytest.raises(HTTPException) as exc_info:
+                    asyncio.run(salla_api_oauth_start(request, token=None, embedded_reconcile=False))
+        assert exc_info.value.status_code == 401

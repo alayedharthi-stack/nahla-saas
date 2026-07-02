@@ -31,8 +31,13 @@ import {
   EMBEDDED_SESSION_TIMEOUT_MS,
   EMBEDDED_WATCHDOG_TIMEOUT_MS,
   shouldRetryEmbeddedLogin,
-  isSallaRoutingBlockDetail,
+  isSallaRoutingBlockResponse,
+  isSallaStoreLinkRequired,
   clearSallaEmbeddedSession,
+  parseSallaStoreLinkPayload,
+  resolveOauthReconcileStartUrl,
+  extractApiErrorDetail,
+  type SallaStoreLinkPayload,
 } from '../lib/embeddedLogin'
 import {
   signalEmbeddedReady,
@@ -58,7 +63,8 @@ import {
 //                         gating after a fresh install.
 //   success             → user clicked, we're navigating to /app/entry
 //   error               → inline error UI
-type Phase = 'init' | 'checking' | 'login' | 'ready' | 'success' | 'error'
+//   onboarding          → store-link reconcile CTA (merchant-only identity)
+type Phase = 'init' | 'checking' | 'login' | 'ready' | 'success' | 'error' | 'onboarding'
 
 interface LoginResponse {
   access_token: string
@@ -142,6 +148,7 @@ export default function SallaEmbedded() {
   const [phase, setPhase]               = useState<Phase>('init')
   const [statusText, setStatusText]     = useState(t.loader.initializing)
   const [errorDetail, setErrorDetail]   = useState('')
+  const [storeLinkPayload, setStoreLinkPayload] = useState<SallaStoreLinkPayload | null>(null)
   const bootedRef                       = useRef(false)
   const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loginFlightRef                  = useRef<AbortController | null>(null)
@@ -172,9 +179,36 @@ export default function SallaEmbedded() {
   const showError = useCallback((msg: string) => {
     clearWatchdog()
     console.error('[SallaEmbedded] ✗ error:', msg)
+    setStoreLinkPayload(null)
     setPhase('error')
     setErrorDetail(msg)
   }, [clearWatchdog])
+
+  const showOnboarding = useCallback((payload: SallaStoreLinkPayload) => {
+    clearWatchdog()
+    clearEmbeddedSession()
+    console.warn(
+      '[SallaEmbedded] store link required — onboarding | code=%s',
+      payload.code ?? 'merchant_identity_not_canonical',
+    )
+    setStoreLinkPayload(payload)
+    setErrorDetail('')
+    setPhase('onboarding')
+  }, [clearWatchdog])
+
+  const openOauthReconcile = useCallback(() => {
+    const startUrl = resolveOauthReconcileStartUrl(API_BASE, storeLinkPayload)
+    console.info(
+      '[SallaEmbedded] OAuth reconcile CTA | url=%s | has_jwt=false',
+      startUrl,
+    )
+    clearEmbeddedSession()
+    if (window.top) {
+      window.top.location.href = startUrl
+    } else {
+      window.location.href = startUrl
+    }
+  }, [storeLinkPayload])
 
   // How long the brief welcome card stays on screen before we auto-navigate
   // the merchant into /app/entry.  Long enough to register the success state,
@@ -365,18 +399,25 @@ export default function SallaEmbedded() {
         }
 
         if (!res.ok || !data.access_token) {
-          const detail = data?.detail || `HTTP ${res.status}`
+          const detail = extractApiErrorDetail(data) || `HTTP ${res.status}`
           console.error('[SallaEmbedded] token-login failed:', detail, data)
-          if (isSallaRoutingBlockDetail(detail)) {
+          if (isSallaStoreLinkRequired(data)) {
+            const payload = parseSallaStoreLinkPayload(data)
+            if (payload) {
+              showOnboarding(payload)
+              return
+            }
+          }
+          if (isSallaRoutingBlockResponse(data)) {
             clearEmbeddedSession()
             console.warn('[SallaEmbedded] routing block — session cleared | detail=%s', detail)
           }
           showError(
-            isSallaRoutingBlockDetail(detail)
+            isSallaRoutingBlockResponse(data)
               ? (lang === 'ar'
                 ? 'تعذّر فتح هذا المتجر — هوية المتجر غير مكتملة. أعد فتح التطبيق من سلة.'
                 : 'Could not open this store — store identity is incomplete. Re-open the app from Salla.')
-              : (data?.detail || t.errors.verifyFailed),
+              : (typeof data?.detail === 'string' ? data.detail : t.errors.verifyFailed),
           )
           return
         }
@@ -435,7 +476,7 @@ export default function SallaEmbedded() {
         return
       }
     }
-  }, [sallaToken, appId, cancelActiveLogin, showError, markReady, clearWatchdog, t, lang])
+  }, [sallaToken, appId, cancelActiveLogin, showError, showOnboarding, markReady, clearWatchdog, t, lang])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -508,6 +549,7 @@ export default function SallaEmbedded() {
     console.info('[SallaEmbedded] retry triggered')
     clearWatchdog()
     cancelActiveLogin('user_retry')
+    setStoreLinkPayload(null)
     setPhase('init')
     setStatusText(t.loader.retrying)
     setErrorDetail('')
@@ -601,6 +643,37 @@ export default function SallaEmbedded() {
           boxShadow:      isDark ? undefined : '0 1px 3px rgba(15,23,42,0.06)',
         }}
       >
+        {/* ── Onboarding: complete Salla store link ─────────────────────── */}
+        {phase === 'onboarding' && (
+          <div className="text-center space-y-4">
+            <div className="text-5xl">🔗</div>
+            <p className="font-semibold text-base" style={{ color: shell.title }}>
+              {lang === 'ar' ? 'يلزم إكمال ربط متجر سلة' : 'Complete your Salla store link'}
+            </p>
+            <p className="text-sm leading-relaxed" style={{ color: shell.muted }}>
+              {lang === 'ar'
+                ? 'لم تصلنا هوية المتجر الكاملة من سلة. لإكمال الدخول إلى نحلة، أعد تفويض الربط من سلة حتى نتحقق من المتجر بشكل آمن.'
+                : 'We did not receive the full store identity from Salla. To continue into Nahla, re-authorize the link from Salla so we can verify your store securely.'}
+            </p>
+            <div className="flex flex-col gap-3 pt-2">
+              <button
+                type="button"
+                onClick={openOauthReconcile}
+                className="w-full py-3 px-6 rounded-xl font-bold text-sm"
+                style={{ background: '#f59e0b', color: '#0f172a', boxShadow: '0 4px 20px rgba(245,158,11,0.35)' }}
+              >
+                {lang === 'ar' ? 'إكمال الربط من سلة' : 'Complete link from Salla'}
+              </button>
+              <a
+                href="mailto:support@nahlah.ai"
+                className="text-slate-500 text-xs text-center hover:text-slate-400"
+              >
+                {lang === 'ar' ? 'تواصل مع الدعم' : t.errors.contactSupport}
+              </a>
+            </div>
+          </div>
+        )}
+
         {/* ── Error ─────────────────────────────────────────────────────── */}
         {phase === 'error' && (
           <div className="text-center space-y-4">

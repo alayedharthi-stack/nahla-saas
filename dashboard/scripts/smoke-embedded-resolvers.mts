@@ -16,6 +16,12 @@ import {
 import {
   shouldRetryEmbeddedLogin,
   EMBEDDED_LOGIN_MAX_ATTEMPTS,
+  isSallaStoreLinkRequired,
+  isSallaRoutingBlockResponse,
+  parseSallaStoreLinkPayload,
+  resolveOauthReconcileStartUrl,
+  clearSallaEmbeddedSession,
+  SALLA_STORE_LINK_REQUIRED_CODE,
 } from '../src/lib/embeddedLogin.ts'
 
 type Lang  = 'ar' | 'en'
@@ -193,6 +199,60 @@ if (shouldRetryEmbeddedLogin(abortErr, EMBEDDED_LOGIN_MAX_ATTEMPTS)) {
   console.error('FAIL [login] should not retry after max attempts')
 } else {
   console.log('OK   [login] max attempts → no retry')
+}
+
+const storeLinkBody = {
+  detail: {
+    detail: 'merchant_identity_not_canonical',
+    code: SALLA_STORE_LINK_REQUIRED_CODE,
+    next_action: 'oauth_sync',
+    oauth_start_path: '/api/salla/oauth/start?embedded_reconcile=1',
+  },
+}
+if (!isSallaStoreLinkRequired(storeLinkBody)) {
+  failed++
+  console.error('FAIL [onboarding] structured store-link payload not detected')
+} else {
+  console.log('OK   [onboarding] structured store-link payload detected')
+}
+
+const oauthUrl = resolveOauthReconcileStartUrl(
+  'https://api.nahlah.ai',
+  parseSallaStoreLinkPayload(storeLinkBody),
+)
+if (!oauthUrl.includes('/api/salla/oauth/start?embedded_reconcile=1')) {
+  failed++
+  console.error('FAIL [onboarding] OAuth reconcile URL missing embedded flag')
+} else {
+  console.log('OK   [onboarding] OAuth reconcile URL built without JWT')
+}
+
+if (!isSallaRoutingBlockResponse(storeLinkBody)) {
+  failed++
+  console.error('FAIL [onboarding] routing block response not detected')
+} else {
+  console.log('OK   [onboarding] routing block clears session path armed')
+}
+
+try {
+  localStorage.setItem('nahla_token', 'stale')
+  localStorage.setItem('nahla_tenant_id', '1')
+  localStorage.setItem('nahla_salla_store_id', '22825873')
+  sessionStorage.setItem('nahla_salla_embedded', '1')
+  clearSallaEmbeddedSession()
+  if (
+    localStorage.getItem('nahla_token')
+    || localStorage.getItem('nahla_tenant_id')
+    || localStorage.getItem('nahla_salla_store_id')
+    || sessionStorage.getItem('nahla_salla_embedded')
+  ) {
+    failed++
+    console.error('FAIL [onboarding] clearSallaEmbeddedSession left stale keys')
+  } else {
+    console.log('OK   [onboarding] clearSallaEmbeddedSession removed stale keys')
+  }
+} catch {
+  console.log('OK   [onboarding] clearSallaEmbeddedSession skipped (no storage)')
 }
 
 if (failed > 0) {

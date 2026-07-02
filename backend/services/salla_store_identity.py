@@ -222,6 +222,32 @@ def reject_merchant_account_only_alias_routing(
     return result
 
 
+SALLA_STORE_LINK_REQUIRED_CODE = "salla_store_link_required"
+SALLA_OAUTH_SYNC_NEXT_ACTION = "oauth_sync"
+SALLA_EMBEDDED_OAUTH_START_PATH = "/api/salla/oauth/start?embedded_reconcile=1"
+
+
+def build_merchant_identity_not_canonical_detail(
+    *,
+    identity_source: str = "merchant_account_only",
+    merchant_account_id: str = "",
+    has_canonical_store_id: bool = False,
+) -> dict:
+    """Structured 403 payload for embedded merchant-only identity gaps."""
+    payload: dict = {
+        "detail": "merchant_identity_not_canonical",
+        "code": SALLA_STORE_LINK_REQUIRED_CODE,
+        "identity_source": identity_source,
+        "has_canonical_store_id": has_canonical_store_id,
+        "next_action": SALLA_OAUTH_SYNC_NEXT_ACTION,
+        "oauth_start_path": SALLA_EMBEDDED_OAUTH_START_PATH,
+    }
+    mid = _str_id(merchant_account_id)
+    if mid:
+        payload["merchant_account_id"] = mid
+    return payload
+
+
 @dataclass
 class SallaStoreIdentity:
     """Canonical + auxiliary Salla identifiers for one logical store."""
