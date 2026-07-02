@@ -30,6 +30,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { getTenantId } from '../auth'
 import Badge from '../components/ui/Badge'
 import AiBanner from '../components/ui/AiBanner'
 import PageHeader from '../components/ui/PageHeader'
@@ -48,6 +49,16 @@ import {
   type CouponsDashboard,
   type DashboardCoupon,
 } from '../api/featureReality'
+import {
+  COUPON_CODE_VALIDATION_AR,
+  combineDatetimeLocal,
+  defaultExpiryLocalValue,
+  formatExpiryLocalAr,
+  generateStoreCouponCode,
+  normalizeCouponCode,
+  splitDatetimeLocal,
+  validateCouponCode,
+} from '../utils/storeCouponCreate'
 
 const DEFAULT_LEVELS: CouponLevel[] = [
   { id: 'bronze', label: 'برونزي',   threshold: '+1 طلب',   discount_default: 5,  discount_min: 3,  discount_max: 5,  validity_hours: 24, max_uses: 1, per_customer_usage: 1, allowed_channels: ['ai', 'campaign', 'autopilot'], enabled: true },
@@ -852,33 +863,65 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
   const [code, setCode] = useState('')
   const [type, setType] = useState<'percentage' | 'fixed'>('percentage')
   const [value, setValue] = useState('')
-  const [expiresLocal, setExpiresLocal] = useState('')
+  const [expiresDate, setExpiresDate] = useState('')
+  const [expiresTime, setExpiresTime] = useState('23:59')
   const [limit, setLimit] = useState('1')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [codeErr, setCodeErr] = useState<string | null>(null)
+
+  const expiresLocal = combineDatetimeLocal(expiresDate, expiresTime)
 
   useEffect(() => {
     if (open) {
       setCode('')
       setType('percentage')
       setValue('')
-      setExpiresLocal('')
+      const def = defaultExpiryLocalValue()
+      const { date, time } = splitDatetimeLocal(def)
+      setExpiresDate(date)
+      setExpiresTime(time)
       setLimit('1')
       setErr(null)
+      setCodeErr(null)
       setSaving(false)
     }
   }, [open])
 
   if (!open) return null
 
+  const handleGenerateCode = () => {
+    setCode(generateStoreCouponCode(getTenantId()))
+    setCodeErr(null)
+    setErr(null)
+  }
+
+  const handleCodeChange = (raw: string) => {
+    const normalized = normalizeCouponCode(raw)
+    setCode(normalized)
+    if (codeErr && normalized) {
+      setCodeErr(validateCouponCode(normalized))
+    }
+  }
+
+  const handleCodeBlur = () => {
+    if (!code) {
+      setCodeErr('كود الكوبون مطلوب')
+      return
+    }
+    setCodeErr(validateCouponCode(code))
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setErr(null)
-    const trimmed = code.trim()
-    if (!trimmed) {
-      setErr('كود الكوبون مطلوب')
+    const codeValidation = validateCouponCode(code)
+    if (codeValidation) {
+      setCodeErr(codeValidation)
+      setErr(codeValidation)
       return
     }
+    const trimmed = normalizeCouponCode(code)
     const numValue = Number(String(value).replace(',', '.'))
     if (!Number.isFinite(numValue) || numValue <= 0) {
       setErr('قيمة الخصم يجب أن تكون أكبر من صفر')
@@ -940,14 +983,34 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
 
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">كود الكوبون *</label>
-            <input
-              value={code}
-              onChange={e => setCode(e.target.value)}
-              className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200 font-mono"
-              dir="ltr"
-              placeholder="SUMMER25"
-              required
-            />
+            <div className="flex gap-2">
+              <input
+                value={code}
+                onChange={e => handleCodeChange(e.target.value)}
+                onBlur={handleCodeBlur}
+                maxLength={20}
+                className={`flex-1 min-w-0 text-sm px-3 py-2 rounded-lg border font-mono ${
+                  codeErr ? 'border-red-300 focus:border-red-400' : 'border-slate-200'
+                }`}
+                dir="ltr"
+                placeholder="NH33K7P9"
+                required
+                aria-invalid={codeErr ? true : undefined}
+              />
+              <button
+                type="button"
+                onClick={handleGenerateCode}
+                className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                توليد تلقائي
+              </button>
+            </div>
+            {codeErr ? (
+              <p className="text-[11px] text-red-600 mt-1">{codeErr}</p>
+            ) : (
+              <p className="text-[10px] text-slate-400 mt-1">{COUPON_CODE_VALIDATION_AR}</p>
+            )}
           </div>
 
           <div>
@@ -993,14 +1056,37 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">تاريخ الانتهاء</label>
-              <input
-                type="datetime-local"
-                value={expiresLocal}
-                onChange={e => setExpiresLocal(e.target.value)}
-                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
-              />
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-slate-700 mb-1">تاريخ ووقت الانتهاء</label>
+              <p className="text-[10px] text-slate-500 mb-2">سيصبح الكوبون غير نشط بعد هذا الوقت.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <span className="block text-[10px] text-slate-400 mb-1">التاريخ</span>
+                  <input
+                    type="date"
+                    value={expiresDate}
+                    onChange={e => setExpiresDate(e.target.value)}
+                    className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                    dir="ltr"
+                  />
+                </div>
+                <div>
+                  <span className="block text-[10px] text-slate-400 mb-1">الوقت</span>
+                  <input
+                    type="time"
+                    value={expiresTime}
+                    onChange={e => setExpiresTime(e.target.value)}
+                    className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                    dir="ltr"
+                  />
+                </div>
+              </div>
+              {expiresLocal ? (
+                <p className="text-[11px] text-slate-600 mt-2 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span>ينتهي في: {formatExpiryLocalAr(expiresLocal)}</span>
+                </p>
+              ) : null}
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-700 mb-1">حد الاستخدام</label>
