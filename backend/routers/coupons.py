@@ -19,8 +19,10 @@ from core.database import get_db
 from core.tenant import DEFAULT_AI, get_or_create_settings, get_or_create_tenant, merge_defaults, resolve_tenant_id
 from models import Coupon
 from services.coupon_sync_visibility import (
+    compute_source_type_counts,
     derive_coupon_sync_visibility,
     normalize_coupon_usage_display,
+    resolve_coupon_source_type,
 )
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
@@ -621,11 +623,11 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
         if isinstance(active_override, bool):
             active = active_override
 
-        # Prefer the new first-class taxonomy columns; fall back to metadata
-        # for rows written before migration 0038 backfilled them.
-        source_type = (
-            getattr(coupon, "source_type", None)
-            or ("system" if origin in {"automation", "promotion", "vip"} else "manual")
+        # Prefer taxonomy columns, then metadata evidence, then legacy origin.
+        source_type = resolve_coupon_source_type(
+            column_source_type=getattr(coupon, "source_type", None),
+            meta=meta,
+            origin=origin,
         )
         coupon_level = getattr(coupon, "coupon_level", None) or _infer_level_from_meta(meta)
         allocation_channel = (
@@ -676,6 +678,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
         "global_defaults": coupon_dash.get("global_defaults") or dict(DEFAULT_GLOBAL_DEFAULTS),
         "ai_policy":       coupon_dash.get("ai_policy") or dict(DEFAULT_AI_POLICY),
         "coupons": coupons,
+        "source_counts": compute_source_type_counts(coupons),
     }
 
 
@@ -789,6 +792,7 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
         discount_type=body.type,
         discount_value=str(body.value),
         expires_at=expires_at,
+        source_type="manual",
         extra_metadata={
             "usage_count": 0,
             "usage_limit": body.limit,
@@ -800,7 +804,48 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
     db.add(coupon)
     db.commit()
     db.refresh(coupon)
-    return {"id": coupon.id}
+    meta = coupon.extra_metadata or {}
+    source_type = resolve_coupon_source_type(
+        column_source_type=coupon.source_type,
+        meta=meta,
+        origin="manual",
+    )
+    sync_fields = derive_coupon_sync_visibility(source_type=source_type, meta=meta)
+    return {
+        "id": coupon.id,
+        "code": coupon.code,
+        "source_type": source_type,
+        **sync_fields,
+    }
+
+
+@router.post("/sync-salla")
+async def sync_salla_coupons(request: Request, db: Session = Depends(get_db)):
+    """Import/refresh coupons from the connected Salla store only."""
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+
+    from services.store_sync import StoreSyncService  # noqa: PLC0415
+
+    svc = StoreSyncService(db, tenant_id)
+    adapter = svc._get_adapter()  # noqa: SLF001
+    if not adapter or not hasattr(adapter, "get_coupons"):
+        raise HTTPException(
+            status_code=400,
+            detail="لا يوجد متجر سلة متصل أو لا يدعم مزامنة الكوبونات",
+        )
+
+    try:
+        synced = await svc.sync_coupons()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail=f"فشلت مزامنة كوبونات سلة: {exc}",
+        ) from exc
+
+    return {"status": "ok", "synced": synced}
 
 
 @router.patch("/{coupon_id}")

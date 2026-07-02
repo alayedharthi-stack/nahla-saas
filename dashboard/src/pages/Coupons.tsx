@@ -26,6 +26,7 @@ import {
   Brain,
   Server,
   Save,
+  RefreshCw,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
@@ -271,10 +272,11 @@ const LEVEL_FILTERS: Array<{ key: LevelFilter; label: string }> = [
 const TABLE_HEADERS = ['الكود', 'المستوى', 'المصدر', 'سلة', 'القناة', 'الخصم', 'الاستخدامات', 'المتبقي', 'الحالة', '']
 
 function sourceTypeOf(c: DashboardCoupon): NonNullable<DashboardCoupon['source_type']> {
-  if (c.source_type) return c.source_type
-  const o = c.origin
-  if (o === 'manual') return 'manual'
-  if (o) return 'system'
+  if (c.source_type === 'manual' || c.source_type === 'system' || c.source_type === 'imported') {
+    return c.source_type
+  }
+  if (c.origin === 'manual') return 'manual'
+  if (c.origin) return 'system'
   return c.category === 'auto' ? 'system' : 'manual'
 }
 
@@ -287,6 +289,8 @@ export default function Coupons() {
   const [levelFilter, setLevelFilter] = useState<LevelFilter>('all')
   const [editingRule, setEditingRule] = useState<CouponRule | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [syncingSalla, setSyncingSalla] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
   const { t } = useLanguage()
 
   const levels = data.levels && data.levels.length === 4 ? data.levels : DEFAULT_LEVELS
@@ -388,6 +392,20 @@ export default function Coupons() {
     }
   }
 
+  const handleSyncSallaCoupons = async () => {
+    setSyncingSalla(true)
+    setSyncMessage(null)
+    try {
+      const result = await featureRealityApi.syncSallaCoupons()
+      setSyncMessage(`تمت مزامنة ${result.synced} كوبون من سلة`)
+      load()
+    } catch (e) {
+      setSyncMessage(e instanceof Error ? e.message : 'تعذّرت مزامنة كوبونات سلة')
+    } finally {
+      setSyncingSalla(false)
+    }
+  }
+
   const copyCode = (code: string, id: string) => {
     navigator.clipboard.writeText(code)
     setCopiedId(id)
@@ -419,13 +437,16 @@ export default function Coupons() {
 
   // KPI counts per source so the merchant sees the breakdown at a glance.
   const sourceCounts = useMemo(() => {
+    if (data.source_counts) {
+      return data.source_counts
+    }
     const out = { all: data.coupons.length, system: 0, manual: 0, imported: 0 }
     for (const c of data.coupons) {
       const s = sourceTypeOf(c)
       out[s] = (out[s] || 0) + 1
     }
     return out
-  }, [data.coupons])
+  }, [data.coupons, data.source_counts])
 
   return (
     <div className="space-y-5">
@@ -621,6 +642,22 @@ export default function Coupons() {
         <div className="px-5 py-4 border-b border-slate-100 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="text-sm font-semibold text-slate-900">الأكواد الصادرة</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSyncSallaCoupons}
+                disabled={syncingSalla}
+                className="text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5 disabled:opacity-60"
+                title="استيراد أو تحديث كوبونات سلة فقط — دون مزامنة كاملة للمتجر"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingSalla ? 'animate-spin' : ''}`} />
+                مزامنة كوبونات سلة
+              </button>
+              {syncMessage ? (
+                <span className="text-[11px] text-slate-500 max-w-xs truncate" title={syncMessage}>
+                  {syncMessage}
+                </span>
+              ) : null}
             <div className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-lg">
               {FILTERS.map(f => {
                 const active = filter === f.key
@@ -643,6 +680,7 @@ export default function Coupons() {
                   </button>
                 )
               })}
+            </div>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-1.5">

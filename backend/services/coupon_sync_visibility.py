@@ -23,7 +23,10 @@ SYNC_BADGE_AR: Dict[str, str] = {
     "imported": "مستورد من سلة",
 }
 
-_NAHALA_SYSTEM_SOURCES = frozenset({"auto", "pool", "automation", "system"})
+_NAHALA_SYSTEM_SOURCES = frozenset({"auto", "pool", "automation", "system", "promotion"})
+_IMPORT_META_SOURCES = frozenset({"salla", "zid", "imported"})
+_DASHBOARD_MANUAL_SOURCES = frozenset({"dashboard", "manual"})
+_VALID_SOURCE_TYPES = frozenset({"manual", "system", "imported"})
 
 
 def extract_salla_coupon_id(raw: Dict[str, Any]) -> Optional[str]:
@@ -34,15 +37,33 @@ def extract_salla_coupon_id(raw: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def is_nahla_system_coupon(
+def _is_nahla_system_pool_coupon(
     source_type: Optional[str],
     existing_meta: Optional[Dict[str, Any]],
 ) -> bool:
-    """Nahla-generated system coupons (pool/automation) — origin must not be overwritten."""
     if source_type != "system":
         return False
     src = str((existing_meta or {}).get("source") or "").lower()
     return src in _NAHALA_SYSTEM_SOURCES
+
+
+def is_nahla_origin_coupon(
+    source_type: Optional[str],
+    existing_meta: Optional[Dict[str, Any]],
+) -> bool:
+    """Nahla-originated coupons that must not be reclassified as Salla imports."""
+    if source_type == "manual":
+        src = str((existing_meta or {}).get("source") or "").lower()
+        return src in _DASHBOARD_MANUAL_SOURCES or not src
+    return _is_nahla_system_pool_coupon(source_type, existing_meta)
+
+
+def is_nahla_system_coupon(
+    source_type: Optional[str],
+    existing_meta: Optional[Dict[str, Any]],
+) -> bool:
+    """Store-sync hook: preserve Nahla origin metadata on Salla reconcile."""
+    return is_nahla_origin_coupon(source_type, existing_meta)
 
 
 def build_salla_import_metadata(
@@ -106,8 +127,51 @@ def should_mark_imported_source_type(
     existing_source_type: Optional[str],
     existing_meta: Optional[Dict[str, Any]],
 ) -> bool:
-    """Preserve Nahla-generated system coupons when the same code is re-synced."""
-    return not is_nahla_system_coupon(existing_source_type, existing_meta)
+    """Preserve Nahla-originated coupons when the same code is re-synced from Salla."""
+    return not is_nahla_origin_coupon(existing_source_type, existing_meta)
+
+
+def resolve_coupon_source_type(
+    *,
+    column_source_type: Optional[str],
+    meta: Dict[str, Any],
+    origin: str,
+) -> str:
+    """Single source of truth for manual/system/imported filter chips and counts."""
+    meta_source = str(meta.get("source") or "").lower()
+    col = str(column_source_type or "").strip().lower()
+
+    if meta_source in _DASHBOARD_MANUAL_SOURCES:
+        return "manual"
+
+    if col == "imported" or (
+        meta_source in _IMPORT_META_SOURCES
+        and str(meta.get("sync_direction") or "").lower() == "salla_to_nahla"
+    ):
+        return "imported"
+
+    if is_nahla_system_coupon(col or None, meta) or col == "system":
+        return "system"
+
+    if meta_source in _NAHALA_SYSTEM_SOURCES:
+        return "system"
+
+    if origin in ("automation", "promotion", "vip", "widget"):
+        return "system"
+
+    if col in _VALID_SOURCE_TYPES:
+        return col
+
+    return "manual"
+
+
+def compute_source_type_counts(coupons: list[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"all": len(coupons), "system": 0, "manual": 0, "imported": 0}
+    for coupon in coupons:
+        source_type = str(coupon.get("source_type") or "manual")
+        if source_type in counts:
+            counts[source_type] += 1
+    return counts
 
 
 def _coerce_used_bool(value: Any) -> Optional[bool]:
