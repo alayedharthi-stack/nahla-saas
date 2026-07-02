@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -205,6 +205,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     # STEP 2 — Introspect the Salla embedded token
     # ══════════════════════════════════════════════════════════════
     from services.salla_store_identity import (  # noqa: PLC0415
+        build_merchant_identity_not_canonical_detail,
         find_salla_integration_for_identity,
         promote_integration_canonical_store,
         reject_merchant_account_only_alias_routing,
@@ -336,7 +337,14 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             context="token_login",
         )
         if blocked is not None:
-            raise HTTPException(status_code=403, detail=blocked.reason)
+            raise HTTPException(
+                status_code=403,
+                detail=build_merchant_identity_not_canonical_detail(
+                    identity_source="merchant_account_only",
+                    merchant_account_id=lookup_store_id,
+                    has_canonical_store_id=False,
+                ),
+            )
 
     # ── Authoritative store owner (integration row wins over provisioning) ──
     allow_alias_for_owner = identity_source == "canonical_store_id"
@@ -636,10 +644,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     tenant_id, jwt_store_id,
                 )
             else:
-                raise HTTPException(
-                    status_code=403,
-                    detail=final_guard.reason or "store_tenant_mismatch",
-                )
+                guard_reason = final_guard.reason or "store_tenant_mismatch"
+                if guard_reason == "merchant_identity_not_canonical":
+                    raise HTTPException(
+                        status_code=403,
+                        detail=build_merchant_identity_not_canonical_detail(
+                            identity_source=identity_source or "merchant_account_only",
+                            merchant_account_id=lookup_store_id,
+                            has_canonical_store_id=bool(canonical_store_id),
+                        ),
+                    )
+                raise HTTPException(status_code=403, detail=guard_reason)
 
     jwt_extra: dict = {}
     if jwt_store_id:
@@ -2213,7 +2228,11 @@ def _resolve_tenant_from_query_token(token: str) -> int:
 
 
 @router.get("/api/salla/oauth/start")
-async def salla_api_oauth_start(request: Request, token: Optional[str] = None):
+async def salla_api_oauth_start(
+    request: Request,
+    token: Optional[str] = None,
+    embedded_reconcile: bool = Query(False),
+):
     """
     Start the Custom OAuth flow for the SECOND ("Sync") Salla app.
 
@@ -2222,6 +2241,10 @@ async def salla_api_oauth_start(request: Request, token: Optional[str] = None):
     The JWT is decoded server-side to extract ``tenant_id`` which is then
     embedded in the OAuth ``state`` so the callback can recover it without
     re-authenticating the user.
+
+    When ``embedded_reconcile=1`` and no JWT is supplied, starts a
+    tenant-less reconcile flow for merchants whose embedded introspect
+    returned only ``merchant_id`` (no canonical ``store.id``).
 
     Returns: 302 redirect to ``https://accounts.salla.sa/oauth2/auth``.
     """
@@ -2233,11 +2256,19 @@ async def salla_api_oauth_start(request: Request, token: Optional[str] = None):
                    "SALLA_OAUTH_CLIENT_SECRET, and SALLA_OAUTH_REDIRECT_URI.",
         )
 
-    tenant_id = _resolve_tenant_from_query_token(token or "")
-
+    embedded_mode = bool(embedded_reconcile) and not (token or "").strip()
+    tenant_id = 0
+    if embedded_mode:
+        state = f"embedded_{_secrets.token_urlsafe(8)}{_API_SYNC_STATE_SUFFIX}"
+        logger.info(
+            "[Salla API OAuth] embedded reconcile start (no JWT) | state=%r",
+            state,
+        )
+    else:
+        tenant_id = _resolve_tenant_from_query_token(token or "")
+        state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}{_API_SYNC_STATE_SUFFIX}"
     normalized_redirect = (SALLA_OAUTH_REDIRECT_URI or "").strip().rstrip("/")
     scope_value = "offline_access"
-    state  = f"t{tenant_id}_{_secrets.token_urlsafe(6)}{_API_SYNC_STATE_SUFFIX}"
     oauth_params = {
         "client_id":     SALLA_OAUTH_CLIENT_ID,
         "redirect_uri":  normalized_redirect,
@@ -2360,19 +2391,28 @@ async def salla_api_oauth_callback(
     raw_state = (state or "").strip() or cookie_state.strip()
     state_source = "query" if state else ("cookie" if cookie_state else "missing")
 
+    embedded_reconcile = (
+        raw_state.startswith("embedded_") and raw_state.endswith(_API_SYNC_STATE_SUFFIX)
+    )
     tenant_id = 0
-    if raw_state.startswith("t") and "_" in raw_state:
+    if embedded_reconcile:
+        logger.info(
+            "[Salla API OAuth] embedded reconcile callback | source=%s raw_state=%r",
+            state_source, raw_state,
+        )
+    elif raw_state.startswith("t") and "_" in raw_state:
         try:
             tenant_id = int(raw_state.split("_", 1)[0][1:])
         except ValueError:
             tenant_id = 0
 
     logger.info(
-        "[Salla API OAuth] state resolution | source=%s tenant_resolved=%s raw_state=%r",
-        state_source, tenant_id, raw_state,
+        "[Salla API OAuth] state resolution | source=%s tenant_resolved=%s "
+        "embedded_reconcile=%s raw_state=%r",
+        state_source, tenant_id, embedded_reconcile, raw_state,
     )
 
-    if tenant_id <= 0:
+    if not embedded_reconcile and tenant_id <= 0:
         logger.error(
             "[Salla API OAuth] no tenant resolvable | query_state=%r cookie_state=%r",
             state, cookie_state,
@@ -2489,13 +2529,62 @@ async def salla_api_oauth_callback(
 
     # ── Persist as the canonical Sync integration ───────────────────────────
     try:
+        from core.merchant_provisioning import get_or_create_merchant_user  # noqa: PLC0415
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
         from services.salla_store_identity import (  # noqa: PLC0415
             assert_oauth_tenant_matches_store_owner,
             promote_integration_canonical_store,
+            resolve_tenant_for_salla_store,
             SallaStoreIdentity,
         )
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        if embedded_reconcile:
+            if not salla_store_id:
+                logger.error(
+                    "[Salla API OAuth] embedded reconcile missing canonical store_id",
+                )
+                return RedirectResponse(
+                    url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'missing_store_id'})}",
+                    status_code=302,
+                )
+
+            owner_tid, _, _ = resolve_tenant_for_salla_store(
+                db,
+                SallaStoreIdentity(store_id=salla_store_id, store_name=store_name),
+                include_disabled=True,
+                allow_alias_match=False,
+            )
+            if owner_tid:
+                tenant_id = owner_tid
+                logger.info(
+                    "[Salla API OAuth] embedded reconcile matched existing tenant | "
+                    "tenant=%s store_id=%s",
+                    tenant_id, salla_store_id,
+                )
+            else:
+                safe_name = "".join(
+                    c for c in (store_name or "") if c.isalnum() or c in "-_"
+                ).lower()[:30]
+                owner_email = (
+                    f"{safe_name or 'store'}-{salla_store_id}@salla-merchant.nahlah.ai"
+                )
+                provision = get_or_create_merchant_user(
+                    db,
+                    provider="salla",
+                    external_store_id=salla_store_id,
+                    owner_email=owner_email,
+                    store_name=store_name or f"Store {salla_store_id}",
+                    is_email_derived=True,
+                    issued_via="salla_oauth_embedded_reconcile",
+                    allow_alias_match=False,
+                )
+                tenant_id = provision.tenant_id
+                logger.info(
+                    "[Salla API OAuth] embedded reconcile provisioned tenant | "
+                    "tenant=%s store_id=%s is_new=%s",
+                    tenant_id, salla_store_id, provision.is_brand_new,
+                )
 
         if salla_store_id:
             ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
@@ -2602,10 +2691,16 @@ async def salla_api_oauth_callback(
             status_code=302,
         )
 
-    success_url = _api_oauth_redirect_url("success", store=salla_store_id or "")
+    if embedded_reconcile:
+        success_url = (
+            f"{_DASHBOARD_ORIGIN}/app/salla?"
+            f"{urllib.parse.urlencode({'salla_oauth': 'success', 'store': salla_store_id or ''})}"
+        )
+    else:
+        success_url = _api_oauth_redirect_url("success", store=salla_store_id or "")
     logger.info(
-        "[Salla API OAuth] CALLBACK COMPLETE | tenant=%s store_id=%s -> %s",
-        tenant_id, salla_store_id, success_url,
+        "[Salla API OAuth] CALLBACK COMPLETE | tenant=%s store_id=%s embedded=%s -> %s",
+        tenant_id, salla_store_id, embedded_reconcile, success_url,
     )
     response = RedirectResponse(url=success_url, status_code=302)
     # Clear the state cookie — flow is complete.
