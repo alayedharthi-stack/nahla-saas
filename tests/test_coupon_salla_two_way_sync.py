@@ -26,13 +26,16 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from database.models import Base, Coupon, Tenant  # noqa: E402
 from services.coupon_salla_push import (  # noqa: E402
     FULL_API_INCOMPLETE_MSG_AR,
+    apply_salla_coupon_name_fields,
     coerce_salla_coupon_date_string,
     evaluate_salla_coupon_sync_readiness,
+    extract_salla_coupon_name,
     format_salla_coupon_date,
     format_salla_datetime,
     normalize_salla_coupon_push_dates,
     parse_salla_datetime,
     push_coupon_to_salla,
+    resolve_nahla_coupon_push_name,
 )
 from services.coupon_sync_visibility import derive_coupon_sync_visibility  # noqa: E402
 from services.store_sync import StoreSyncService  # noqa: E402
@@ -111,6 +114,7 @@ SALLA_PERCENT = {
     "code": "PCT10",
     "type": "percentage",
     "amount": 10,
+    "name": "خصم 10٪",
     "start_date": "2026-07-01",
     "expiry_date": "2026-12-31",
     "usage_limit": 50,
@@ -434,3 +438,150 @@ def test_evaluate_readiness_without_integration(monkeypatch):
     )
     result = evaluate_salla_coupon_sync_readiness(db, tenant_id)
     assert result["full_api_ready"] is False
+
+
+def test_extract_salla_coupon_name_prefers_name_over_code():
+    assert extract_salla_coupon_name({"code": "SAVE10", "name": "خصم عام"}) == "خصم عام"
+    assert extract_salla_coupon_name({"code": "SAVE10", "description": "وصف"}) == "وصف"
+
+
+def test_resolve_nahla_coupon_push_name_default():
+    db, tenant_id = _make_db()
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="NAHLA01",
+        description="",
+        discount_type="percentage",
+        discount_value="10",
+        source_type="manual",
+        extra_metadata={"source": "dashboard"},
+    )
+    db.add(row)
+    db.commit()
+    assert resolve_nahla_coupon_push_name(row) == "كوبون NAHLA01"
+
+
+def test_resolve_nahla_coupon_push_name_from_metadata():
+    db, tenant_id = _make_db()
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="NAHLA02",
+        description="ignored if meta present",
+        discount_type="percentage",
+        discount_value="10",
+        source_type="manual",
+        extra_metadata={"source": "dashboard", "salla_coupon_name": "Special Offer"},
+    )
+    db.add(row)
+    db.commit()
+    assert resolve_nahla_coupon_push_name(row) == "Special Offer"
+
+
+def test_push_payload_includes_name_when_available():
+    db, tenant_id = _make_db()
+    push_name = "Welcome Offer"
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="PUSHNM",
+        description="",
+        discount_type="percentage",
+        discount_value="10",
+        source_type="manual",
+        extra_metadata={"source": "dashboard", "name": push_name},
+    )
+    db.add(row)
+    db.commit()
+
+    adapter = _FakePushAdapter(result={"id": 123, "code": "PUSHNM", "name": push_name})
+    ok, _ = asyncio.run(push_coupon_to_salla(db, tenant_id, row, adapter=adapter))
+    assert ok is True
+    assert adapter.last_kwargs is not None
+    assert adapter.last_kwargs["name"] == push_name
+    db.commit()
+    db.refresh(row)
+    assert row.extra_metadata["salla_coupon_name"] == push_name
+
+
+def test_push_payload_default_name_when_not_provided():
+    db, tenant_id = _make_db()
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="DEF01",
+        description="",
+        discount_type="percentage",
+        discount_value="10",
+        source_type="manual",
+        extra_metadata={"source": "dashboard"},
+    )
+    db.add(row)
+    db.commit()
+
+    adapter = _FakePushAdapter(result={"id": 124, "code": "DEF01"})
+    asyncio.run(push_coupon_to_salla(db, tenant_id, row, adapter=adapter))
+    assert adapter.last_kwargs["name"] == "كوبون DEF01"
+
+
+def test_import_stores_salla_coupon_name():
+    db, tenant_id = _make_db()
+    svc = StoreSyncService(db, tenant_id)
+    svc._adapter = _FakeImportAdapter([SALLA_PERCENT])
+    asyncio.run(svc.sync_coupons())
+    row = db.query(Coupon).filter_by(tenant_id=tenant_id, code="PCT10").one()
+    assert row.extra_metadata["salla_coupon_name"] == "خصم 10٪"
+    assert row.extra_metadata["name"] == "خصم 10٪"
+    fields = derive_coupon_sync_visibility(source_type="imported", meta=row.extra_metadata)
+    assert fields["salla_coupon_name"] == "خصم 10٪"
+
+
+def test_reimport_updates_name_without_duplicate():
+    db, tenant_id = _make_db()
+    svc = StoreSyncService(db, tenant_id)
+    svc._adapter = _FakeImportAdapter([SALLA_PERCENT])
+    asyncio.run(svc.sync_coupons())
+
+    updated = dict(SALLA_PERCENT)
+    updated["name"] = "خصم محدّث"
+    svc._adapter = _FakeImportAdapter([updated])
+    asyncio.run(svc.sync_coupons())
+
+    assert db.query(Coupon).filter_by(tenant_id=tenant_id, code="PCT10").count() == 1
+    meta = db.query(Coupon).filter_by(tenant_id=tenant_id, code="PCT10").one().extra_metadata
+    assert meta["salla_coupon_name"] == "خصم محدّث"
+
+
+def test_reimport_preserves_manual_origin_and_updates_name():
+    db, tenant_id = _make_db()
+    db.add(Coupon(
+        tenant_id=tenant_id,
+        code="PCT10",
+        description="manual",
+        discount_type="percentage",
+        discount_value="5",
+        source_type="manual",
+        extra_metadata={"source": "dashboard"},
+    ))
+    db.commit()
+
+    svc = StoreSyncService(db, tenant_id)
+    svc._adapter = _FakeImportAdapter([SALLA_PERCENT])
+    asyncio.run(svc.sync_coupons())
+
+    row = db.query(Coupon).filter_by(tenant_id=tenant_id, code="PCT10").one()
+    assert row.source_type == "manual"
+    assert row.extra_metadata["source"] == "dashboard"
+    assert row.extra_metadata["salla_coupon_name"] == "خصم 10٪"
+
+
+def test_coupon_sync_timeout_friendly_message_in_dashboard_util():
+    util_path = REPO_ROOT / "dashboard" / "src" / "utils" / "couponSallaSyncError.tsx"
+    text = util_path.read_text(encoding="utf-8")
+    assert "استغرقت مزامنة كوبونات سلة وقتًا أطول من المتوقع" in text
+    assert "request timeout after 25s" in text
+    assert "isCouponSallaSyncTimeout" in text
+
+
+def test_apply_salla_coupon_name_fields():
+    meta: dict = {}
+    apply_salla_coupon_name_fields(meta, "عرض")
+    assert meta["salla_coupon_name"] == "عرض"
+    assert meta["name"] == "عرض"
