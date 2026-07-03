@@ -244,6 +244,7 @@ def prior_outbound_was_wrong_social_only_reply(outbound: str) -> bool:
             return False
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional commerce inquiry probe
         pass
+    social_markers = (
         "صباح النور",
         "صباح الخير",
         "مساء النور",
@@ -303,3 +304,42 @@ def should_restore_brain_reply_after_dedup_silence(
         return True
     # Any commerce inquiry must not end in zero outbound when brain composed text.
     return True
+
+
+_LOCAL_ORDER_STATUS_MARKERS = (
+    "وين طلبي",
+    "فين طلبي",
+    "كم رقم الطلب",
+    "رقم الطلب",
+    "حالة الطلب",
+    "تتبع الطلب",
+    "track my order",
+    "order status",
+)
+
+
+def is_local_order_status_inquiry(message: str) -> bool:
+    """True when inbound is a track/order-number question (not social/general)."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.order_flow_v2.triggers import (  # noqa: PLC0415
+            is_checkout_order_number_intent,
+        )
+
+        if is_checkout_order_number_intent(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional trigger import
+        pass
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            is_order_tracking_follow_up,
+        )
+
+        if is_order_tracking_follow_up(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional tracking guard import
+        pass
+    norm = _norm(raw)
+    return any(marker in norm for marker in _LOCAL_ORDER_STATUS_MARKERS)

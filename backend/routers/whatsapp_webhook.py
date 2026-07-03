@@ -9453,15 +9453,45 @@ async def _handle_merchant_message(
                             )
                             _outbound_abort_suppressor = "chat_dedup_hard"
                             try:
+                                from core.order_status_dedup_reply import (  # noqa: PLC0415
+                                    build_dedup_local_order_short_reply,
+                                )
                                 from modules.ai.brain.commerce.dedup_operational_delta import (  # noqa: PLC0415
                                     last_outbound_body as _dedup_last_outbound_body,
                                     should_restore_brain_reply_after_dedup_silence,
                                 )
 
-                                if should_restore_brain_reply_after_dedup_silence(
+                                _dedup_prev_outbound = _dedup_last_outbound_body(
+                                    history,
+                                )
+                                _order_status_alt = (
+                                    build_dedup_local_order_short_reply(
+                                        db,
+                                        tenant_id=tenant_id,
+                                        phone=to,
+                                        conversation_id=(
+                                            getattr(convo, "id", None)
+                                            if convo is not None
+                                            else None
+                                        ),
+                                        inbound_text=text or "",
+                                        previous_outbound=_dedup_prev_outbound,
+                                    )
+                                )
+                                if _order_status_alt:
+                                    reply = _order_status_alt
+                                    _outbound_abort_suppressor = None
+                                    logger.info(
+                                        "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                                        "order_status_dedup_alt=true reply_len=%d",
+                                        tenant_id,
+                                        to,
+                                        len(reply or ""),
+                                    )
+                                elif should_restore_brain_reply_after_dedup_silence(
                                     current_inbound=text or "",
                                     candidate_reply=_po_reply_before_dedup,
-                                    previous_outbound=_dedup_last_outbound_body(history),
+                                    previous_outbound=_dedup_prev_outbound,
                                 ):
                                     reply = _po_reply_before_dedup
                                     _outbound_abort_suppressor = None
