@@ -455,33 +455,25 @@ def build_checkout_order_number_reply(
     conversation: Any,
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
+    customer_phone: str = "",
 ) -> str:
     """Honest order-number answer during active checkout — never generic no-orders."""
-    from core.order_context_builder import _load_active_draft  # noqa: PLC0415
+    from core.local_order_resolver import resolve_customer_order_context  # noqa: PLC0415
 
     from .state import line_items_from_state
 
     conv_id = getattr(conversation, "id", None) if conversation is not None else None
-    draft = _load_active_draft(
+    customer_id = getattr(conversation, "customer_id", None) if conversation is not None else None
+    ctx = resolve_customer_order_context(
         db,
         tenant_id=int(tenant_id),
         conversation_id=conv_id,
+        customer_id=int(customer_id) if customer_id else None,
+        phone=str(customer_phone or "").strip() or None,
+        intent="order_number",
     )
-    if draft is not None:
-        reference = str(draft.external_id or "").strip()
-        if draft.order_id:
-            try:
-                from models import Order  # noqa: PLC0415
-
-                row = db.query(Order).filter_by(id=int(draft.order_id)).first()
-                if row is not None:
-                    reference = str(
-                        getattr(row, "external_order_number", None)
-                        or getattr(row, "external_id", None)
-                        or reference
-                    ).strip()
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — draft order reference read is best-effort
-                pass
+    if ctx.selected_order is not None:
+        reference = ctx.selected_order.display_reference
         if reference:
             return f"رقم طلبك الحالي {reference}."
 

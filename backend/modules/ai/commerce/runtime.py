@@ -331,22 +331,53 @@ class CommerceToolRuntime:
         )
 
     async def _tool_track_order(self, payload: Dict[str, Any]) -> ToolExecutionResult:
-        from store_integration.order_service import get_customer_orders, get_order  # noqa: PLC0415
+        from core.local_order_resolver import (  # noqa: PLC0415
+            local_order_to_track_payload,
+            resolve_customer_order_context,
+        )
 
         order_number = str(payload.get("order_number") or "").strip()
+        conversation_id = payload.get("conversation_id")
 
-        # Step 1: Try direct lookup if customer mentioned a specific order number
+        local_ctx = resolve_customer_order_context(
+            self.db,
+            tenant_id=self.tenant_id,
+            conversation_id=int(conversation_id) if conversation_id else None,
+            customer_id=self.customer_id,
+            phone=self.customer_phone,
+            intent="track_order",
+            order_number=order_number or None,
+        )
+        if local_ctx.selected_order is not None:
+            matched = local_order_to_track_payload(local_ctx.selected_order)
+            return ToolExecutionResult(
+                ok=True,
+                tool_name="track_order",
+                payload={
+                    "order": matched,
+                    "orders_count": len(local_ctx.orders_by_priority),
+                    "matched_by_ref": local_ctx.selected_reason == "explicit_order_number",
+                    "local_resolver": True,
+                    "selected_reason": local_ctx.selected_reason,
+                },
+                audit={
+                    "customer_phone": self.customer_phone,
+                    "order_number": order_number,
+                    "lookup": "local_db_first",
+                },
+            )
+
+        from store_integration.order_service import get_customer_orders, get_order  # noqa: PLC0415
+
+        # Adapter fallback only when local DB has no matching order.
         matched: Dict[str, Any] | None = None
         if order_number:
             direct = await get_order(self.tenant_id, order_number)
             if direct:
                 matched = direct.model_dump()
 
-        # Step 2: Fetch customer's recent orders for fallback / list matching
         orders = await get_customer_orders(self.tenant_id, self.customer_phone)
 
-        # Step 3: If we got a direct match, verify it belongs to this customer.
-        # If not, search the customer's order list by reference_id / id.
         if not matched and orders:
             if order_number:
                 for o in orders:
@@ -364,9 +395,14 @@ class CommerceToolRuntime:
                 "order":         matched,
                 "orders_count":  len(orders),
                 "matched_by_ref": bool(order_number and matched),
+                "local_resolver": False,
             },
             error=None if matched else "no_orders_found",
-            audit={"customer_phone": self.customer_phone, "order_number": order_number},
+            audit={
+                "customer_phone": self.customer_phone,
+                "order_number": order_number,
+                "lookup": "adapter_fallback",
+            },
         )
 
     async def _tool_get_store_info(self, payload: Dict[str, Any]) -> ToolExecutionResult:

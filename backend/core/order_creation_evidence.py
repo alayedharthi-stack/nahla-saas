@@ -203,9 +203,40 @@ def resolve_track_order_fallback(
     db: Any = None,
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    phone: Optional[str] = None,
 ) -> Optional[str]:
     """Honest reply when store lookup finds no order but local evidence exists."""
     from modules.ai.brain.compose import templates as T  # noqa: PLC0415
+
+    resolved_phone = str(phone or "").strip()
+    if not resolved_phone and state is not None:
+        resolved_phone = str(getattr(state, "customer_phone", "") or "").strip()
+
+    if db is not None and tenant_id:
+        try:
+            from core.local_order_resolver import (  # noqa: PLC0415
+                resolve_customer_order_context,
+            )
+
+            local_ctx = resolve_customer_order_context(
+                db,
+                tenant_id=int(tenant_id),
+                conversation_id=int(conversation_id) if conversation_id else None,
+                phone=resolved_phone or None,
+                intent="track_order",
+            )
+            if local_ctx.selected_order is not None:
+                ref = local_ctx.selected_order.display_reference
+                if ref:
+                    status = local_ctx.selected_order.status or "draft"
+                    label = "قيد الإكمال" if local_ctx.selected_order.is_open else status
+                    return T.order_status(
+                        reference=ref,
+                        status=status,
+                        status_label_ar=label,
+                    )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — local resolver must not break track fallback
+            pass
 
     if db is not None and tenant_id and conversation_id:
         try:
