@@ -60,6 +60,8 @@ _TEMPLATE_ACTIONS = frozenset({
     "stash_address_pre_product",
     "variant_pricing",
     "payment_transfer_promise",
+    "customer_ledger_reply",
+    "payment_continuation_reply",
 })
 
 

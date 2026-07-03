@@ -62,6 +62,7 @@ from ..decision.actions import (
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_CUSTOMER_LEDGER_REPLY,
+    ACTION_PAYMENT_CONTINUATION_REPLY,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
     ACTION_PAYMENT_TRANSFER_PROMISE,
@@ -809,6 +810,27 @@ class DefaultComposer:
                     customer_identity=CustomerIdentity(phone=ctx.customer_phone or ""),
                     order_counts=OrderCounts(),
                 ),
+            )
+
+        if action == ACTION_PAYMENT_CONTINUATION_REPLY:
+            reply = str(data.get("reply") or "").strip()
+            if reply:
+                return reply
+            from core.payment_continuation_policy import (  # noqa: PLC0415
+                resolve_payment_continuation_reply,
+            )
+
+            return resolve_payment_continuation_reply(
+                getattr(ctx, "db", None) or getattr(ctx, "_db", None),
+                tenant_id=int(ctx.tenant_id),
+                conversation_id=getattr(ctx, "conversation_id", None),
+                customer_id=getattr(ctx, "customer_id", None),
+                phone=str(ctx.customer_phone or ""),
+                message=str(ctx.message or ""),
+                state=ctx.state,
+                history=getattr(ctx, "history", None),
+                commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                intent_slots=dict(getattr(ctx.intent, "slots", None) or {}),
             )
 
         if action == ACTION_TRACK_ORDER:

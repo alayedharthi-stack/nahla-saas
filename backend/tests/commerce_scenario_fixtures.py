@@ -211,6 +211,7 @@ def seed_order(
     customer_info: Optional[Dict[str, Any]] = None,
     source: str = "whatsapp",
     extra_metadata: Optional[Dict[str, Any]] = None,
+    checkout_url: Optional[str] = None,
 ) -> Order:
     created = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     meta = {
@@ -228,6 +229,7 @@ def seed_order(
         line_items=line_items or [{"title": "عسل طلح", "quantity": 2, "unit_price": "120"}],
         customer_info=customer_info or {"phone": DEFAULT_PHONE_E164},
         customer_name="فايز الصبحي",
+        checkout_url=checkout_url,
         extra_metadata=meta,
     )
     db.add(order)
