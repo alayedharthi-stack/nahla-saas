@@ -6556,7 +6556,13 @@ async def _handle_merchant_message(
                 from modules.ai.checkout_authority import (  # noqa: PLC0415
                     brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
                 )
-                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
+                if _defer_payment_to_checkout(
+                    db,
+                    tenant_id=tenant_id,
+                    conversation=convo,
+                    message=text or "",
+                    inbound_metadata=inbound_metadata,
+                ):
                     logger.info(
                         "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
                         "reason=active_checkout_owner",
@@ -6653,7 +6659,13 @@ async def _handle_merchant_message(
                 from modules.ai.checkout_authority import (  # noqa: PLC0415
                     brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
                 )
-                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
+                if _defer_payment_to_checkout(
+                    db,
+                    tenant_id=tenant_id,
+                    conversation=convo,
+                    message=text or "",
+                    inbound_metadata=inbound_metadata,
+                ):
                     logger.info(
                         "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
                         "reason=active_checkout_owner_no_asset",
@@ -11638,7 +11650,13 @@ async def _handle_merchant_message(
                 from modules.ai.checkout_authority import (  # noqa: PLC0415
                     brain_payment_paths_should_defer_to_checkout_owner as _defer_payment_to_checkout,
                 )
-                if _defer_payment_to_checkout(db, tenant_id=tenant_id, conversation=convo):
+                if _defer_payment_to_checkout(
+                    db,
+                    tenant_id=tenant_id,
+                    conversation=convo,
+                    message=text or "",
+                    inbound_metadata=_in_meta_hard,
+                ):
                     logger.info(
                         "[PAYMENT_INFO] tenant=%s conversation_id=%s "
                         "intent_detected=true hard_override_skipped=true "

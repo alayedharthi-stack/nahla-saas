@@ -213,6 +213,8 @@ def brain_payment_paths_should_defer_to_checkout_owner(
     *,
     tenant_id: int,
     conversation: Any,
+    message: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """True when Brain/webhook payment bypass must not preempt checkout owner."""
     if conversation is None:
@@ -225,7 +227,27 @@ def brain_payment_paths_should_defer_to_checkout_owner(
         tenant_id=int(tenant_id),
         conversation_id=getattr(conversation, "id", None),
     )
-    return active_whatsapp_checkout(prep, bs, draft=draft)
+    checkout_active = active_whatsapp_checkout(prep, bs, draft=draft)
+    if not checkout_active:
+        return False
+    if (message or "").strip():
+        try:
+            from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: PLC0415
+                should_suppress_stale_checkout_for_message,
+            )
+
+            if should_suppress_stale_checkout_for_message(
+                message=message,
+                inbound_metadata=inbound_metadata,
+                order_prep=prep,
+                brain_state=bs,
+                checkout_active=True,
+                draft_active=bool(draft is not None and draft.active),
+            ):
+                return False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — suppression probe must not open payment path
+            pass
+    return True
 
 
 def resolve_local_draft_reference_from_db(
