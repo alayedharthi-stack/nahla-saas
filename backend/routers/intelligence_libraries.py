@@ -91,7 +91,10 @@ def _ensure_upload_dir(tenant_id: int) -> Path:
     return target
 
 
-_PROD_HTTPS_HOSTS = ("railway.app", "herokuapp.com", "vercel.app", "fly.dev", "render.com")
+_PROD_HTTPS_HOSTS = (
+    "railway.app", "herokuapp.com", "vercel.app", "fly.dev", "render.com",
+    "nahlah.ai",
+)
 
 
 def _force_https_for_production(url: str) -> str:
@@ -128,8 +131,8 @@ def _public_file_url(request: Request, media_id: int) -> str:
     Uses ``NAHLA_PUBLIC_BASE_URL`` if set, otherwise derives from the
     incoming request. WhatsApp Cloud requires HTTPS-accessible URLs, so
     we force-upgrade ``http://`` to ``https://`` for managed-platform
-    hosts (Railway / Heroku / Vercel / Fly / Render) where the platform
-    terminates TLS upstream.
+    hosts (Railway / Heroku / Vercel / Fly / Render / nahlah.ai) where
+    the platform terminates TLS upstream.
     """
     base = (os.environ.get("NAHLA_PUBLIC_BASE_URL") or "").rstrip("/")
     if not base:

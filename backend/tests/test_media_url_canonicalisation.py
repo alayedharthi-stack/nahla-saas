@@ -278,3 +278,88 @@ def test_validate_canonicalise_skipped_without_env(
     assert item["file_url"].startswith("https://")
     # But host is untouched because the canonicaliser is opt-in.
     assert "railway.app" in item["file_url"]
+
+
+# ── _maybe_force_https — Nahla public domain + dev safety ────────────────
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        (
+            "http://api.nahlah.ai/intelligence/ai-media/file/5",
+            "https://api.nahlah.ai/intelligence/ai-media/file/5",
+        ),
+        (
+            "http://nahla-saas-production.up.railway.app/intelligence/ai-media/file/1",
+            "https://nahla-saas-production.up.railway.app/intelligence/ai-media/file/1",
+        ),
+        (
+            "https://api.nahlah.ai/intelligence/ai-media/file/5",
+            "https://api.nahlah.ai/intelligence/ai-media/file/5",
+        ),
+        ("http://localhost:8000/intelligence/ai-media/file/1", "http://localhost:8000/intelligence/ai-media/file/1"),
+        ("http://127.0.0.1:8000/intelligence/ai-media/file/1", "http://127.0.0.1:8000/intelligence/ai-media/file/1"),
+    ],
+)
+def test_maybe_force_https_production_domains(
+    url: str, expected: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rajhi payment-media case: api.nahlah.ai http rows upgrade to
+    direct HTTPS. Railway behaviour unchanged. Local dev untouched."""
+    monkeypatch.delenv("NAHLA_FORCE_HTTPS_MEDIA", raising=False)
+    from core.ai_libraries import _maybe_force_https
+
+    assert _maybe_force_https(url) == expected
+
+
+def test_force_https_for_production_nahlah_api() -> None:
+    """Upload-time URL builder uses the same host allowlist."""
+    from routers.intelligence_libraries import _force_https_for_production
+
+    url = "http://api.nahlah.ai/intelligence/ai-media/file/5"
+    assert _force_https_for_production(url) == (
+        "https://api.nahlah.ai/intelligence/ai-media/file/5"
+    )
+
+
+def test_validate_media_nahlah_http_upgrades_without_public_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+) -> None:
+    """Tenant-style local row: http://api.nahlah.ai must validate as
+    https:// even when NAHLA_PUBLIC_BASE_URL is unset (production today)."""
+    monkeypatch.delenv("NAHLA_PUBLIC_BASE_URL", raising=False)
+    monkeypatch.delenv("NAHLA_FORCE_HTTPS_MEDIA", raising=False)
+
+    media_file = tmp_path / "rajhi.jpeg"
+    media_file.write_bytes(b"\xff\xd8\xff" + b"\x00" * 64)
+
+    class _LocalRow(_FakeAIMediaRow):
+        def __init__(self) -> None:
+            super().__init__(
+                id=5,
+                tenant_id=33,
+                file_url="http://api.nahlah.ai/intelligence/ai-media/file/5",
+            )
+            self.storage_kind = "local"
+            self.storage_path = str(media_file)
+            self.media_type = "image"
+            self.file_size_bytes = media_file.stat().st_size
+
+    from core.ai_libraries import validate_media_for_send
+
+    ok, err, item = validate_media_for_send(
+        {
+            "id": 5,
+            "media_type": "image",
+            "tenant_id": 33,
+            "storage_kind": "local",
+            "storage_path": str(media_file),
+            "file_url": "http://api.nahlah.ai/intelligence/ai-media/file/5",
+        },
+        expected_tenant_id=33,
+        db=_FakeDB(_LocalRow()),
+    )
+    assert ok, f"validate returned err={err}"
+    assert item is not None
+    assert item["file_url"] == "https://api.nahlah.ai/intelligence/ai-media/file/5"
