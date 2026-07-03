@@ -1327,3 +1327,121 @@ class TestSupersededSuppression:
         # The newer row keeps working normally
         assert _reload(db, new_intg).get("api_key") == "fresh-key"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# J — Ops vs merchant reauth email scope
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReauthEmailScope:
+    """Ops alerts stay internal; merchant email helper is isolated and unwired."""
+
+    def test_ops_subject_uses_ops_tag_not_merchant_wording(self):
+        from core.salla_token_alerts import OPS_REAUTH_TAG, build_ops_reauth_subject
+
+        subject = build_ops_reauth_subject(tenant_id=1, store_id="22825873")
+        assert OPS_REAUTH_TAG in subject
+        assert "[SALLA TOKEN]" not in subject
+        assert "Merchant Needs Reauth" not in subject
+        assert "Tenant 1" in subject
+        assert "22825873" in subject
+
+    def test_ops_alert_sent_only_to_alerts_inbox(self):
+        from core.salla_token_alerts import ALERT_EMAIL, maybe_send_reauth_alert
+
+        now = _now()
+        cfg = {
+            "store_id":               "S-OPS",
+            "expires_at":             (now + timedelta(hours=5)).isoformat(),
+            "token_refresh_attempts": 3,
+            "token_refresh_error":    "invalid_grant",
+            "needs_reauth_reason":    "invalid_grant",
+        }
+        captured: dict = {}
+
+        async def _capture(**kwargs):
+            captured.update(kwargs)
+            return True
+
+        async def _run():
+            with patch("core.notifications.send_email", side_effect=_capture):
+                return await maybe_send_reauth_alert(
+                    tenant_id=1, integration_id=3, cfg=cfg, now=now,
+                )
+
+        assert asyncio.run(_run()) is True
+        assert captured.get("to") == ALERT_EMAIL
+        assert "[OPS]" in captured.get("subject", "")
+        assert "Merchant Needs Reauth" not in captured.get("html", "")
+        assert "Internal Salla Token Reauth Required" in captured.get("html", "")
+        assert "invalid_grant" in captured.get("html", "")
+
+    def test_normalize_merchant_reauth_locale(self):
+        from core.salla_token_alerts import normalize_merchant_reauth_locale
+
+        assert normalize_merchant_reauth_locale(None) == "ar"
+        assert normalize_merchant_reauth_locale("") == "ar"
+        assert normalize_merchant_reauth_locale("ar") == "ar"
+        assert normalize_merchant_reauth_locale("en") == "en"
+        assert normalize_merchant_reauth_locale("en-US") == "en"
+
+    def test_merchant_email_ar_has_no_technical_fields(self):
+        from core.salla_token_alerts import build_merchant_reauth_email
+
+        subject, html = build_merchant_reauth_email(
+            locale="ar",
+            reconnect_url="https://salla.sa/oauth/authorize",
+        )
+        assert subject == "يلزم إعادة ربط متجر سلة مع نحلة"
+        assert "تعذر تحديث اتصال متجر سلة" in html
+        assert "إعادة الربط من سلة" in html
+        for forbidden in (
+            "invalid_grant", "tenant_id", "integration_id",
+            "Refresh Attempts", "token-status", "Open Token Status",
+        ):
+            assert forbidden not in html
+            assert forbidden not in subject
+
+    def test_merchant_email_en_copy(self):
+        from core.salla_token_alerts import build_merchant_reauth_email
+
+        subject, html = build_merchant_reauth_email(
+            locale="en",
+            reconnect_url="https://salla.sa/oauth/authorize",
+        )
+        assert subject == "Reconnect your Salla store to Nahla"
+        assert "re-authorize the Nahla app" in html
+        assert "Reconnect Salla" in html
+        assert 'dir="ltr"' in html
+
+    async def _run_send_merchant(self, **kwargs):
+        from core.salla_token_alerts import send_merchant_salla_reauth_email
+        with patch("core.notifications.send_email", AsyncMock(return_value=True)) as mock_send:
+            sent = await send_merchant_salla_reauth_email(**kwargs)
+        return sent, mock_send
+
+    def test_send_merchant_reauth_skips_empty_recipient(self):
+        sent, mock_send = asyncio.run(
+            self._run_send_merchant(
+                to="",
+                reconnect_url="https://salla.sa/oauth/authorize",
+                locale="ar",
+            )
+        )
+        assert sent is False
+        mock_send.assert_not_called()
+
+    def test_send_merchant_reauth_dispatches_to_merchant(self):
+        sent, mock_send = asyncio.run(
+            self._run_send_merchant(
+                to="merchant@example.com",
+                reconnect_url="https://salla.sa/oauth/authorize",
+                locale="ar",
+            )
+        )
+        assert sent is True
+        mock_send.assert_called_once()
+        call_kw = mock_send.call_args.kwargs
+        assert call_kw["to"] == "merchant@example.com"
+        assert call_kw["to"] != "alerts@nahlah.ai"
+        assert "يلزم إعادة ربط متجر سلة مع نحلة" in call_kw["subject"]
+

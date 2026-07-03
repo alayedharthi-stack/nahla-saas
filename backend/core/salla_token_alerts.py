@@ -18,10 +18,16 @@ Grace Window
 The grace window prevents false alarms from intermittent Salla outages or
 brief network hiccups that self-heal before the token expires.
 
-Internal Alert
-──────────────
-When ``needs_reauth`` transitions to ``True``, an email is sent to
-``ALERT_EMAIL`` via the project's existing Resend integration.
+Internal Ops Alert
+──────────────────
+When ``needs_reauth`` transitions to ``True``, an **internal ops-only**
+email is sent to ``ALERT_EMAIL`` via the project's existing Resend
+integration.  Merchants are **not** emailed on this path.
+
+Merchant-facing reauth email is prepared separately in
+``send_merchant_salla_reauth_email()`` but is **not** invoked by the
+token refresh scheduler or admin refresh endpoints until recipient and
+locale resolution are wired explicitly.
 
 Deduplication:
   • The alert is *not* re-sent within ``ALERT_COOLDOWN_HOURS`` (24 h).
@@ -46,9 +52,30 @@ from typing import Any, Optional
 logger = logging.getLogger("nahla.salla_alerts")
 
 ALERT_EMAIL            = "alerts@nahlah.ai"
+OPS_REAUTH_TAG         = "[OPS]"
 GRACE_HOURS: int       = 24   # failure cluster window to trigger escalation
 EXPIRY_THRESHOLD_HOURS = 24.0 # escalate only when token expires within this window
 ALERT_COOLDOWN_HOURS   = 24.0 # minimum hours between duplicate alert emails
+
+# Merchant copy — no technical fields; used only by send_merchant_salla_reauth_email().
+_MERCHANT_REAUTH_COPY: dict[str, dict[str, str]] = {
+    "ar": {
+        "subject": "يلزم إعادة ربط متجر سلة مع نحلة",
+        "body": (
+            "تعذر تحديث اتصال متجر سلة تلقائيًا. لإبقاء الطلبات والمزامنة "
+            "تعمل بشكل صحيح، يرجى إعادة تفويض تطبيق نحلة من سلة."
+        ),
+        "button": "إعادة الربط من سلة",
+    },
+    "en": {
+        "subject": "Reconnect your Salla store to Nahla",
+        "body": (
+            "We could not refresh your Salla connection automatically. "
+            "Please re-authorize the Nahla app from Salla to keep your store sync working."
+        ),
+        "button": "Reconnect Salla",
+    },
+}
 
 
 # ── Counter normalisation ─────────────────────────────────────────────────────
@@ -231,7 +258,110 @@ def should_send_alert(cfg: dict, now: datetime) -> bool:
         return True  # Unreadable → send
 
 
-# ── Internal alert email ──────────────────────────────────────────────────────
+# ── Ops alert copy helpers ────────────────────────────────────────────────────
+
+def build_ops_reauth_subject(*, tenant_id: int, store_id: str) -> str:
+    """Subject line for the internal ops reauth alert."""
+    store = str(store_id)
+    return (
+        f"{OPS_REAUTH_TAG} Tenant {tenant_id} Salla token requires reauth "
+        f"— store {store}"
+    )
+
+
+def normalize_merchant_reauth_locale(language: Optional[str]) -> str:
+    """Map a merchant language hint to ``ar`` (default) or ``en``."""
+    if not language:
+        return "ar"
+    lang = str(language).strip().lower().replace("_", "-")
+    if lang.startswith("en"):
+        return "en"
+    return "ar"
+
+
+def build_merchant_reauth_email(
+    *,
+    locale: str,
+    reconnect_url: str,
+) -> tuple[str, str]:
+    """Return ``(subject, html)`` for a merchant-facing Salla reauth email.
+
+    Deliberately excludes ops fields (tenant_id, integration_id,
+    invalid_grant, refresh attempts, token metadata, admin links).
+    """
+    loc = normalize_merchant_reauth_locale(locale)
+    copy = _MERCHANT_REAUTH_COPY[loc]
+    rtl = loc == "ar"
+    direction = "rtl" if rtl else "ltr"
+    align = "right" if rtl else "left"
+    font = "Arial,sans-serif"
+
+    html = f"""
+<div dir="{direction}" style="font-family:{font};max-width:520px;margin:0 auto;
+            padding:28px;color:#1e293b;text-align:{align}">
+  <h2 style="color:#1e293b;margin-top:0;font-size:20px">{copy["subject"]}</h2>
+  <p style="color:#475569;font-size:15px;line-height:1.6">{copy["body"]}</p>
+  <div style="margin-top:24px">
+    <a href="{reconnect_url}"
+       style="display:inline-block;background:#f59e0b;color:#fff;padding:12px 28px;
+              border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px">
+      {copy["button"]}
+    </a>
+  </div>
+  <hr style="border:none;border-top:1px solid #e2e8f0;margin:28px 0">
+  <p style="color:#94a3b8;font-size:12px">نحلة AI · Nahla</p>
+</div>
+"""
+    return copy["subject"], html
+
+
+async def send_merchant_salla_reauth_email(
+    *,
+    to: str,
+    reconnect_url: str,
+    locale: str = "ar",
+) -> bool:
+    """Send a merchant-facing Salla reauth email.
+
+    **Not wired** to ``maybe_send_reauth_alert()`` or the token refresh
+    scheduler.  Call only when ``to`` and ``locale`` are resolved explicitly
+    (e.g. merchant ``User.email`` + dashboard language).
+
+    Returns ``True`` when the email was dispatched.
+    """
+    recipient = (to or "").strip()
+    if not recipient:
+        logger.warning("[SALLA ALERT] merchant reauth email skipped — empty recipient")
+        return False
+    if not (reconnect_url or "").strip():
+        logger.warning("[SALLA ALERT] merchant reauth email skipped — empty reconnect_url")
+        return False
+
+    try:
+        from core.notifications import send_email  # noqa: PLC0415
+    except ImportError:
+        logger.warning("[SALLA ALERT] send_email unavailable — merchant reauth skipped")
+        return False
+
+    subject, html = build_merchant_reauth_email(
+        locale=locale,
+        reconnect_url=reconnect_url.strip(),
+    )
+    sent = await send_email(to=recipient, subject=subject, html=html)
+    if sent:
+        logger.info(
+            "[SALLA ALERT] merchant reauth email sent | to=%s locale=%s",
+            recipient, normalize_merchant_reauth_locale(locale),
+        )
+    else:
+        logger.warning(
+            "[SALLA ALERT] merchant reauth email failed | to=%s locale=%s",
+            recipient, normalize_merchant_reauth_locale(locale),
+        )
+    return sent
+
+
+# ── Internal ops alert email ──────────────────────────────────────────────────
 
 async def maybe_send_reauth_alert(
     *,
@@ -305,10 +435,11 @@ async def maybe_send_reauth_alert(
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;
             padding:28px;color:#1e293b;border:1px solid #fca5a5;
             border-radius:8px;background:#fff5f5">
-  <h2 style="color:#dc2626;margin-top:0">⚠️ [SALLA TOKEN] Merchant Needs Reauth</h2>
+  <h2 style="color:#dc2626;margin-top:0">⚠️ Internal Salla Token Reauth Required {OPS_REAUTH_TAG}</h2>
   <p style="color:#475569">
-    An integration can no longer refresh its Salla access token automatically.
-    The merchant must reinstall or reauthorise the Nahla app.
+    <strong>Internal Ops Alert</strong> — a tenant integration can no longer refresh
+    its Salla access token automatically. The merchant must reinstall or
+    reauthorise the Nahla app. This message is for Nahla ops only.
   </p>
   {revoked_note}
   <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px">
@@ -376,7 +507,7 @@ async def maybe_send_reauth_alert(
 </div>
 """
 
-    subject = f"[SALLA TOKEN] Tenant {tenant_id} needs reauth — store {store_id}"
+    subject = build_ops_reauth_subject(tenant_id=tenant_id, store_id=store_id)
     sent = await send_email(to=ALERT_EMAIL, subject=subject, html=html)
 
     if sent:
