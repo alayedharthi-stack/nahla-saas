@@ -11895,6 +11895,9 @@ async def _handle_merchant_message(
                     has_product_card=_has_product_card_queued,
                     tenant_id=tenant_id,
                     recipient=to,
+                    skip_asset_promise_scrub=(
+                        str(_br_dec_action or "") == "customer_ledger_reply"
+                    ),
                 )
                 if _scrubbed_promise:
                     logger.info(
