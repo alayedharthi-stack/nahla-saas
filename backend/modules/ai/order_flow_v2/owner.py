@@ -317,6 +317,34 @@ def try_handle_order_flow_v2(
             inbound_metadata=meta,
         )
 
+    if draft_ev is not None and draft_ev.active and _checkout_active():
+        from .explicit_intent_checkout_suppression import (  # noqa: PLC0415
+            evaluate_stale_checkout_suppression,
+            log_checkout_suppressed_by_explicit_intent,
+        )
+
+        suppression = evaluate_stale_checkout_suppression(
+            message=text,
+            inbound_metadata=meta,
+            order_prep={**order_prep, **patch},
+            brain_state=bs,
+            missing_fields=_missing({**order_prep, **patch}),
+            checkout_active=True,
+            draft_active=True,
+        )
+        if suppression.suppress:
+            log_checkout_suppressed_by_explicit_intent(
+                tenant_id=int(tenant_id),
+                conversation_id=getattr(conversation, "id", None),
+                detected_intent=suppression.detected_intent,
+                checkout_ref=draft_display_reference(draft_ev),
+                reason=suppression.reason,
+            )
+            return OrderFlowV2Result(
+                handled=False,
+                reason=f"explicit_intent_suppressed:{suppression.detected_intent}",
+            )
+
     if is_catalog_order_inbound(meta, text):
         try:
             patch.update(_catalog_order_patch(

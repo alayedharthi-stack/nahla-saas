@@ -37,6 +37,7 @@ from ..decision.actions import (
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_CUSTOMER_LEDGER_REPLY,
+    ACTION_PAYMENT_CONTINUATION_REPLY,
     ACTION_VARIANT_PRICING,
     ACTION_WEB_SEARCH,
 )
@@ -425,6 +426,36 @@ class _CustomerLedgerReplyHandler:
         )
 
 
+class _PaymentContinuationReplyHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from core.payment_continuation_policy import (  # noqa: PLC0415
+            resolve_payment_continuation_reply,
+        )
+
+        reply = str((decision.args or {}).get("reply") or "").strip()
+        if not reply:
+            reply = resolve_payment_continuation_reply(
+                getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+                tenant_id=int(ctx.tenant_id),
+                conversation_id=getattr(ctx, "conversation_id", None),
+                customer_id=getattr(ctx, "customer_id", None),
+                phone=str(ctx.customer_phone or ""),
+                message=str(ctx.message or ""),
+                state=ctx.state,
+                history=getattr(ctx, "history", None),
+                commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                intent_slots=dict(getattr(ctx.intent, "slots", None) or {}),
+            )
+        return ActionResult(
+            success=bool(reply),
+            data={
+                "type": "payment_continuation_reply",
+                "continuation_case": (decision.args or {}).get("continuation_case", ""),
+                "reply": reply,
+            },
+        )
+
+
 class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
@@ -444,6 +475,7 @@ class DefaultActionExecutor:
             ACTION_SUGGEST_COUPON:      _SuggestCouponHandler(),
             ACTION_TRACK_ORDER:         TrackOrderHandler(),
             ACTION_CUSTOMER_LEDGER_REPLY: _CustomerLedgerReplyHandler(),
+            ACTION_PAYMENT_CONTINUATION_REPLY: _PaymentContinuationReplyHandler(),
             ACTION_HANDOFF:             _HandoffHandler(),
             ACTION_CLARIFY:             _ClarifyHandler(),
             ACTION_NARROW:              _NarrowHandler(),

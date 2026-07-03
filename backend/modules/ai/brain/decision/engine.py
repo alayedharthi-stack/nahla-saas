@@ -42,6 +42,7 @@ from .actions import (
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_CUSTOMER_LEDGER_REPLY,
+    ACTION_PAYMENT_CONTINUATION_REPLY,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
     ACTION_PAYMENT_TRANSFER_PROMISE,
@@ -1909,6 +1910,46 @@ class DefaultDecisionEngine:
                     args={"product": state.current_product_focus},
                     reason="pay_now with product focus + no checkout_url → retry order creation",
                     confidence=0.92,
+                )
+            try:
+                from core.payment_continuation_policy import (  # noqa: PLC0415
+                    evaluate_payment_continuation,
+                )
+
+                _pc = evaluate_payment_continuation(
+                    getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+                    tenant_id=int(ctx.tenant_id),
+                    conversation_id=getattr(ctx, "conversation_id", None),
+                    customer_id=getattr(ctx, "customer_id", None),
+                    phone=str(ctx.customer_phone or ""),
+                    message=str(ctx.message or ""),
+                    state=state,
+                    history=getattr(ctx, "history", None),
+                    commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                    intent_slots=dict(getattr(intent, "slots", None) or {}),
+                )
+                if _pc.handled:
+                    if _pc.use_send_payment_link and _pc.payment_url:
+                        return Decision(
+                            action=ACTION_SEND_PAYMENT_LINK,
+                            args={"checkout_url": _pc.payment_url},
+                            reason="payment continuation — verified payment link",
+                            confidence=0.94,
+                        )
+                    return Decision(
+                        action=ACTION_PAYMENT_CONTINUATION_REPLY,
+                        args={
+                            "reply": _pc.reply,
+                            "continuation_case": _pc.case,
+                        },
+                        reason=f"payment continuation — {_pc.case}",
+                        confidence=0.94,
+                    )
+            except Exception as _pc_exc:  # noqa: BLE001  # noqa: silent-ok — payment continuation best-effort
+                logger.debug(
+                    "[PAYMENT_CONTINUATION] skipped tenant=%s err=%s",
+                    ctx.tenant_id,
+                    _pc_exc,
                 )
 
         # ── 2.9 Customer commerce ledger (order history — phase 1) ───────
