@@ -61,6 +61,7 @@ from ..decision.actions import (
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_CUSTOMER_LEDGER_REPLY,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
     ACTION_PAYMENT_TRANSFER_PROMISE,
@@ -788,6 +789,28 @@ class DefaultComposer:
             return T.payment_link(checkout_url=data.get("checkout_url", ""))
 
         # ── Track order ────────────────────────────────────────────────────
+        if action == ACTION_CUSTOMER_LEDGER_REPLY:
+            reply = str(data.get("reply") or "").strip()
+            if reply:
+                return reply
+            from core.customer_commerce_answerer import (  # noqa: PLC0415
+                render_customer_commerce_reply,
+                TOPIC_ORDER_HISTORY_COUNT,
+            )
+            from core.customer_commerce_ledger import (  # noqa: PLC0415
+                CustomerCommerceProfile,
+                CustomerIdentity,
+                OrderCounts,
+            )
+
+            return render_customer_commerce_reply(
+                str(decision.args.get("ledger_topic") or TOPIC_ORDER_HISTORY_COUNT),
+                CustomerCommerceProfile(
+                    customer_identity=CustomerIdentity(phone=ctx.customer_phone or ""),
+                    order_counts=OrderCounts(),
+                ),
+            )
+
         if action == ACTION_TRACK_ORDER:
             try:
                 from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415

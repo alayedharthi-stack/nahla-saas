@@ -43,6 +43,8 @@ from ..types import (
     INTENT_EMPLOYEE_NOT_RESPONDING,
     INTENT_PERSONA_INTERACTION,
     INTENT_TRACK_ORDER,
+    INTENT_ORDER_HISTORY_COUNT,
+    INTENT_LATEST_ORDER_SUMMARY,
     INTENT_COMPLAINT_REFUND,
     INTENT_WHO_ARE_YOU,
     Intent,
@@ -456,6 +458,35 @@ _register(RuleSet(
         r"(expensive|too much|maybe later|not sure|i'll think)",
     ],
     confidence=0.85,
+))
+
+# ── Customer order history (ledger — phase 1) ────────────────────────────────
+# Distinct from INTENT_TRACK_ORDER: asks about history/count/latest summary,
+# not shipment status for a specific active order.
+_register(RuleSet(
+    intent=INTENT_ORDER_HISTORY_COUNT,
+    patterns=[
+        r"طلباتي السابقة كم",
+        r"كم طلب لي",
+        r"كم طلب عندي",
+        r"عندي طلبات سابقة",
+        r"كم طلب مسجل",
+        r"how many orders do i have",
+    ],
+    confidence=0.94,
+))
+_register(RuleSet(
+    intent=INTENT_LATEST_ORDER_SUMMARY,
+    patterns=[
+        r"وش آخر طلباتي",
+        r"وش اخر طلباتي",
+        r"آخر طلب لي",
+        r"اخر طلب لي",
+        r"آخر طلب وش",
+        r"وش آخر طلب",
+        r"what(?:'s| is) my latest order",
+    ],
+    confidence=0.94,
 ))
 
 # ── Track order ───────────────────────────────────────────────────────────────
@@ -1107,6 +1138,8 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
     INTENT_TRACK_ORDER,
+    INTENT_ORDER_HISTORY_COUNT,
+    INTENT_LATEST_ORDER_SUMMARY,
     INTENT_PLATFORM_INQUIRY,
     INTENT_NEED_BASED_PRODUCT_ADVICE,
 })
