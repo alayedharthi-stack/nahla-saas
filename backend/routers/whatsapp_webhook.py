@@ -8591,6 +8591,8 @@ async def _handle_merchant_message(
                                 inbound_text=text or "",
                                 state=(convo.extra_metadata or {}).get("brain_state"),
                                 history=_hist,
+                                tenant_id=tenant_id,
+                                db=db,
                             )
                             if _recovery.reply:
                                 reply = _recovery.reply

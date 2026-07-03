@@ -147,6 +147,8 @@ def try_guard_recovery_reply(
     inbound_text: str = "",
     state: Any = None,
     history: Optional[list] = None,
+    tenant_id: Optional[int] = None,
+    db: Any = None,
 ) -> ConversationRecoveryResult:
     """
     Synchronous contextual recovery for post-compose guards.
@@ -157,6 +159,25 @@ def try_guard_recovery_reply(
     raw = (inbound_text or "").strip()
     if not raw:
         return ConversationRecoveryResult(needs_persona_compose=True, source="empty_inbound")
+
+    try:
+        from modules.ai.brain.postprocess.catalog_browse_silent_recovery import (  # noqa: PLC0415
+            RECOVERY_SOURCE,
+            try_catalog_browse_silent_recovery,
+        )
+
+        catalog_reply = try_catalog_browse_silent_recovery(
+            inbound_text=raw,
+            tenant_id=tenant_id,
+            db=db,
+        )
+        if catalog_reply:
+            return ConversationRecoveryResult(
+                reply=catalog_reply,
+                source=RECOVERY_SOURCE,
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog browse recovery must not break path
+        pass
 
     try:
         from modules.ai.brain.commerce.conversation_state_isolation import (  # noqa: PLC0415
