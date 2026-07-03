@@ -36,6 +36,7 @@ from ..decision.actions import (
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_CUSTOMER_LEDGER_REPLY,
     ACTION_VARIANT_PRICING,
     ACTION_WEB_SEARCH,
 )
@@ -398,6 +399,32 @@ class _StashAddressPreProductHandler:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+class _CustomerLedgerReplyHandler:
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from core.customer_commerce_answerer import (  # noqa: PLC0415
+            TOPIC_ORDER_HISTORY_COUNT,
+            resolve_customer_commerce_reply,
+        )
+
+        topic = str((decision.args or {}).get("ledger_topic") or TOPIC_ORDER_HISTORY_COUNT)
+        reply = resolve_customer_commerce_reply(
+            getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+            topic=topic,
+            tenant_id=int(ctx.tenant_id),
+            conversation_id=getattr(ctx, "conversation_id", None),
+            customer_id=getattr(ctx, "customer_id", None),
+            phone=str(ctx.customer_phone or ""),
+        )
+        return ActionResult(
+            success=True,
+            data={
+                "type": "customer_ledger_reply",
+                "ledger_topic": topic,
+                "reply": reply,
+            },
+        )
+
+
 class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
@@ -416,6 +443,7 @@ class DefaultActionExecutor:
             ACTION_SEND_PAYMENT_LINK:   _SendPaymentLinkHandler(),
             ACTION_SUGGEST_COUPON:      _SuggestCouponHandler(),
             ACTION_TRACK_ORDER:         TrackOrderHandler(),
+            ACTION_CUSTOMER_LEDGER_REPLY: _CustomerLedgerReplyHandler(),
             ACTION_HANDOFF:             _HandoffHandler(),
             ACTION_CLARIFY:             _ClarifyHandler(),
             ACTION_NARROW:              _NarrowHandler(),

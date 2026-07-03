@@ -41,6 +41,7 @@ from .actions import (
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_CUSTOMER_LEDGER_REPLY,
     ACTION_WEB_SEARCH,
     ACTION_OUT_OF_SCOPE,
     ACTION_PAYMENT_TRANSFER_PROMISE,
@@ -65,6 +66,8 @@ from ..types import (
     INTENT_SOCIAL,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
+    INTENT_ORDER_HISTORY_COUNT,
+    INTENT_LATEST_ORDER_SUMMARY,
     INTENT_GENERAL,
     INTENT_WHO_ARE_YOU,
     INTENT_COMPLAINT_REFUND,
@@ -1907,6 +1910,15 @@ class DefaultDecisionEngine:
                     reason="pay_now with product focus + no checkout_url → retry order creation",
                     confidence=0.92,
                 )
+
+        # ── 2.9 Customer commerce ledger (order history — phase 1) ───────
+        if intent.name in (INTENT_ORDER_HISTORY_COUNT, INTENT_LATEST_ORDER_SUMMARY):
+            return Decision(
+                action=ACTION_CUSTOMER_LEDGER_REPLY,
+                args={"ledger_topic": intent.name},
+                reason="customer commerce ledger history inquiry",
+                confidence=float(intent.confidence or 0.94),
+            )
 
         # ── 3. Track order ────────────────────────────────────────────────
         if intent.name == INTENT_TRACK_ORDER:

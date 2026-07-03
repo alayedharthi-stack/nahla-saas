@@ -30,6 +30,7 @@ ACTION_PROPOSE_DRAFT_ORDER = "propose_draft_order"
 ACTION_SEND_PAYMENT_LINK   = "send_payment_link"
 ACTION_SUGGEST_COUPON      = "suggest_coupon"
 ACTION_TRACK_ORDER         = "track_order"
+ACTION_CUSTOMER_LEDGER_REPLY = "customer_ledger_reply"
 ACTION_HANDOFF             = "handoff_to_human"
 ACTION_LLM_REPLY           = "llm_reply"    # catch-all — routes to orchestrator
 ACTION_RECOMMEND_ADDON     = "recommend_addon"
@@ -95,6 +96,7 @@ ALL_ACTIONS = [
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
+    ACTION_CUSTOMER_LEDGER_REPLY,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
     ACTION_RECOMMEND_ADDON,
