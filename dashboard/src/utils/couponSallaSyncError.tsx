@@ -10,6 +10,11 @@ import type { ReactNode } from 'react'
 /** Temporary: show short technical hints during Salla integration testing. */
 export const SHOW_COUPON_SYNC_TECH_DETAILS = true
 
+export const COUPON_SALLA_SYNC_TIMEOUT_FRIENDLY =
+  'استغرقت مزامنة كوبونات سلة وقتًا أطول من المتوقع. قد تكتمل العملية بعد لحظات، حدّث الصفحة أو أعد المحاولة.'
+
+export const COUPON_SALLA_SYNC_TIMEOUT_TECHNICAL = 'request timeout after 25s'
+
 const FIELD_LABEL_AR: Record<string, string> = {
   start_date: 'تاريخ بداية الكوبون غير مقبول من سلة',
   expiry_date: 'تاريخ انتهاء الكوبون غير مقبول من سلة',
@@ -132,6 +137,12 @@ function _looksArabic(text: string): boolean {
   return /[\u0600-\u06FF]/.test(text)
 }
 
+export function isCouponSallaSyncTimeout(raw: string | null | undefined): boolean {
+  const trimmed = String(raw || '').trim()
+  if (!trimmed) return false
+  return /انتهت مهلة الطلب|request timeout|signal timed out|aborted|timed out/i.test(trimmed)
+}
+
 export function formatCouponSallaSyncError(
   raw: string | null | undefined,
 ): CouponSallaSyncErrorDisplay {
@@ -141,6 +152,21 @@ export function formatCouponSallaSyncError(
       friendly: 'تعذر إرسال الكوبون إلى سلة. تحقق من ربط API الكامل أو حاول مرة أخرى.',
       fullText: 'تعذر إرسال الكوبون إلى سلة. تحقق من ربط API الكامل أو حاول مرة أخرى.',
     }
+  }
+
+  if (isCouponSallaSyncTimeout(trimmed)) {
+    const friendly = COUPON_SALLA_SYNC_TIMEOUT_FRIENDLY
+    const technical = SHOW_COUPON_SYNC_TECH_DETAILS
+      ? COUPON_SALLA_SYNC_TIMEOUT_TECHNICAL
+      : undefined
+    if (technical) {
+      return {
+        friendly,
+        technical,
+        fullText: `${friendly}\n\nتفاصيل تقنية للاختبار:\n${technical}`,
+      }
+    }
+    return { friendly, fullText: friendly }
   }
 
   const fields = _extractInvalidFields(trimmed)

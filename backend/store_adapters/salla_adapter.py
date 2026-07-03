@@ -3132,6 +3132,7 @@ class SallaAdapter(BaseStoreAdapter):
         discount_value: int = 10,
         expiry_days: int = 3,
         *,
+        name: Optional[str] = None,
         start_date: Optional[str] = None,
         expiry_date: Optional[str] = None,
         usage_limit: Optional[int] = None,
@@ -3177,6 +3178,8 @@ class SallaAdapter(BaseStoreAdapter):
             "free_shipping":          False,
             "exclude_sale_products":  False,
         }
+        if name and str(name).strip():
+            payload["name"] = str(name).strip()[:200]
         if usage_limit is not None and usage_limit > 0:
             payload["usage_limit"] = int(usage_limit)
         if minimum_order is not None and minimum_order > 0:

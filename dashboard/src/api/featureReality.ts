@@ -298,6 +298,8 @@ export interface DashboardCoupon {
   sync_error?: string | null
   last_synced_at?: string | null
   salla_coupon_id?: string | null
+  /** Salla coupon display name when known (from import or push). */
+  salla_coupon_name?: string | null
   sync_direction?: string | null
   /** Machine key: synced | not_pushed | failed | imported */
   sync_badge?: 'synced' | 'not_pushed' | 'failed' | 'imported'

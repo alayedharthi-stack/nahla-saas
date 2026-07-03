@@ -63,6 +63,7 @@ import {
   CouponSallaSyncErrorHint,
   formatCouponSallaSyncError,
   formatCouponSallaSyncErrorAlert,
+  isCouponSallaSyncTimeout,
 } from '../utils/couponSallaSyncError'
 
 const DEFAULT_LEVELS: CouponLevel[] = [
@@ -432,6 +433,9 @@ export default function Coupons() {
     } catch (e) {
       const raw = e instanceof Error ? e.message : 'تعذّرت مزامنة كوبونات سلة'
       setSyncMessage(formatCouponSallaSyncErrorAlert(raw))
+      if (isCouponSallaSyncTimeout(raw)) {
+        load()
+      }
     } finally {
       setSyncingSalla(false)
     }
@@ -821,7 +825,14 @@ export default function Coupons() {
                   <tr key={c.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-semibold text-slate-800" dir="ltr">{c.code}</span>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs font-mono font-semibold text-slate-800" dir="ltr">{c.code}</span>
+                          {c.salla_coupon_name && c.salla_coupon_name !== c.code ? (
+                            <span className="text-[10px] text-slate-500 truncate max-w-[10rem]" title={c.salla_coupon_name}>
+                              {c.salla_coupon_name}
+                            </span>
+                          ) : null}
+                        </div>
                         <button
                           onClick={() => copyCode(c.code, c.id)}
                           className="text-slate-300 hover:text-slate-500 transition-colors"

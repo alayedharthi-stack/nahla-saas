@@ -24,6 +24,54 @@ FULL_API_INCOMPLETE_MSG_AR = "ربط API الكامل من تطبيق سلة غ�
 NO_SALLA_ADAPTER_MSG_AR = "لا يوجد متجر سلة متصل أو لا يدعم مزامنة الكوبونات"
 NOT_MANUAL_COUPON_MSG_AR = "يمكن إرسال الكوبونات اليدوية فقط إلى سلة"
 
+_SALLA_NAME_KEYS = ("name", "title", "description")
+
+
+def extract_salla_coupon_name(raw: Dict[str, Any]) -> Optional[str]:
+    """Best-effort Salla coupon display name (separate from code)."""
+    if not isinstance(raw, dict):
+        return None
+    code = str(raw.get("code") or "").strip()
+    for key in _SALLA_NAME_KEYS:
+        val = raw.get(key)
+        if val in (None, ""):
+            continue
+        text = str(val).strip()
+        if text and text != code:
+            return text[:200]
+    if raw.get("marketing_active") and raw.get("marketing_name"):
+        text = str(raw.get("marketing_name")).strip()
+        if text:
+            return text[:200]
+    if raw.get("is_group") and raw.get("group_name"):
+        text = str(raw.get("group_name")).strip()
+        if text:
+            return text[:200]
+    return None
+
+
+def apply_salla_coupon_name_fields(meta: Dict[str, Any], name: Optional[str]) -> None:
+    """Persist Salla coupon name in Nahla metadata."""
+    if not name or not str(name).strip():
+        return
+    clean = str(name).strip()[:200]
+    meta["salla_coupon_name"] = clean
+    meta["name"] = clean
+
+
+def resolve_nahla_coupon_push_name(coupon: Coupon) -> str:
+    """Name/title sent to Salla on push; safe default when Nahla has none."""
+    meta = coupon.extra_metadata or {}
+    for key in ("salla_coupon_name", "name", "title"):
+        val = meta.get(key)
+        if val and str(val).strip():
+            return str(val).strip()[:200]
+    desc = (coupon.description or "").strip()
+    code = (coupon.code or "").strip()
+    if desc and desc != code:
+        return desc[:200]
+    return f"كوبون {code}"[:200]
+
 
 def format_salla_datetime(dt: datetime) -> str:
     """Format for Salla coupon API (date-only or datetime per docs)."""
@@ -223,9 +271,11 @@ def _coupon_push_kwargs(coupon: Coupon) -> Dict[str, Any]:
             minimum_order_float = None
 
     start_str, expiry_str = normalize_salla_coupon_push_dates(start_dt, expiry_dt, now=now)
+    push_name = resolve_nahla_coupon_push_name(coupon)
 
     return {
         "code": coupon.code,
+        "name": push_name,
         "discount_type": coupon.discount_type or "percentage",
         "discount_value": discount_value,
         "start_date": start_str,
@@ -252,6 +302,7 @@ def apply_nahla_push_metadata(
     synced_at: datetime,
     salla_raw: Optional[Dict[str, Any]] = None,
     sync_error: Optional[str] = None,
+    push_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     meta = dict(coupon.extra_metadata or {})
     meta["sync_direction"] = "nahla_to_salla"
@@ -265,6 +316,12 @@ def apply_nahla_push_metadata(
         if salla_id:
             meta["salla_coupon_id"] = salla_id
             meta["external_id"] = salla_id
+        resolved_name = (
+            extract_salla_coupon_name(salla_raw or {})
+            or push_name
+            or resolve_nahla_coupon_push_name(coupon)
+        )
+        apply_salla_coupon_name_fields(meta, resolved_name)
     else:
         meta["salla_synced"] = False
         meta["sync_status"] = "failed"
@@ -366,6 +423,7 @@ async def push_coupon_to_salla(
         success=True,
         synced_at=synced_at,
         salla_raw=salla_raw if isinstance(salla_raw, dict) else None,
+        push_name=kwargs.get("name"),
     )
     if not meta.get("starts_at"):
         meta["starts_at"] = synced_at.isoformat()

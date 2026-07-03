@@ -72,6 +72,8 @@ def build_salla_import_metadata(
     synced_at: datetime,
 ) -> Dict[str, Any]:
     """Full import taxonomy for coupons created from a Salla list pull."""
+    from services.coupon_salla_push import extract_salla_coupon_name  # noqa: PLC0415
+
     meta = {
         "source": "salla",
         "salla_synced": True,
@@ -79,6 +81,10 @@ def build_salla_import_metadata(
         "sync_direction": "salla_to_nahla",
         "last_synced_at": synced_at.isoformat(),
     }
+    coupon_name = normalised.get("name") or extract_salla_coupon_name(raw)
+    if coupon_name:
+        meta["salla_coupon_name"] = coupon_name
+        meta["name"] = coupon_name
     if normalised.get("starts_at"):
         meta["starts_at"] = normalised["starts_at"]
     usage_limit = normalised.get("usage_limit")
@@ -100,11 +106,17 @@ def build_salla_reconcile_metadata(
     existing_meta: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Sync evidence only — preserves Nahla origin metadata such as source=pool."""
+    from services.coupon_salla_push import extract_salla_coupon_name  # noqa: PLC0415
+
     meta: Dict[str, Any] = {
         "salla_synced": True,
         "sync_status": "synced",
         "last_synced_at": synced_at.isoformat(),
     }
+    coupon_name = extract_salla_coupon_name(raw)
+    if coupon_name:
+        meta["salla_coupon_name"] = coupon_name
+        meta["name"] = coupon_name
     prior_synced = (existing_meta or {}).get("salla_synced") is True
     prior_source = str((existing_meta or {}).get("source") or "").lower()
     if prior_synced and prior_source in _NAHALA_SYSTEM_SOURCES:
@@ -273,6 +285,7 @@ def derive_coupon_sync_visibility(
         "sync_error": meta.get("sync_error"),
         "last_synced_at": meta.get("last_synced_at"),
         "salla_coupon_id": meta.get("salla_coupon_id") or meta.get("external_id"),
+        "salla_coupon_name": meta.get("salla_coupon_name") or meta.get("name"),
         "sync_direction": meta.get("sync_direction"),
         "sync_badge": sync_badge,
         "sync_badge_label": SYNC_BADGE_AR.get(sync_badge, SYNC_BADGE_AR["not_pushed"]),

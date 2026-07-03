@@ -687,11 +687,14 @@ def _normalise_coupon(raw: Any) -> Dict:
         min_order = min_order.get("amount")
     usage_limit = raw.get("usage_limit", raw.get("maximum_uses", None))
     start_raw = raw.get("start_date", raw.get("starts_at", None))
-    from services.coupon_salla_push import parse_salla_datetime  # noqa: PLC0415
+    from services.coupon_salla_push import extract_salla_coupon_name, parse_salla_datetime  # noqa: PLC0415
     expires_raw = raw.get("expire_date", raw.get("expiry_date", raw.get("expires_at", None)))
+    raw_dict = raw if isinstance(raw, dict) else {}
+    coupon_name = extract_salla_coupon_name(raw_dict)
     return {
         "code":           raw.get("code", ""),
-        "description":    raw.get("description", raw.get("name", "")),
+        "name":           coupon_name or "",
+        "description":    coupon_name or raw.get("description", raw.get("name", "")),
         "discount_type":  discount_type,
         "discount_value": str(discount_val) if discount_val else "",
         "starts_at":      parse_salla_datetime(start_raw),
@@ -1748,7 +1751,7 @@ class StoreSyncService:
                 else:
                     import_meta = build_salla_import_metadata(raw, normalised, synced_at)
 
-                existing.description    = normalised["description"]
+                existing.description    = normalised.get("name") or normalised["description"]
                 existing.discount_type  = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
                 existing.expires_at     = exp
@@ -1770,7 +1773,7 @@ class StoreSyncService:
                 self.db.add(Coupon(
                     tenant_id      = self.tenant_id,
                     code           = code,
-                    description    = normalised["description"],
+                    description    = normalised.get("name") or normalised["description"],
                     discount_type  = normalised["discount_type"],
                     discount_value = normalised["discount_value"],
                     expires_at     = exp,
