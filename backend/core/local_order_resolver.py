@@ -465,10 +465,14 @@ def local_order_to_track_payload(snapshot: LocalOrderSnapshot) -> Dict[str, Any]
             "product_name": name,
             "quantity": it.get("quantity", 1),
         })
+    from core.order_status_label import order_status_label_ar  # noqa: PLC0415
+
+    status = str(snapshot.status or "").strip()
     return {
         "id": snapshot.order_id,
         "reference_id": snapshot.display_reference,
-        "status": snapshot.status,
+        "status": status,
+        "status_label_ar": order_status_label_ar(status, source=snapshot.source),
         "total": snapshot.total,
         "currency": "SAR",
         "items": items,

@@ -574,8 +574,10 @@ def order_status(
     item_titles: list | None = None,
     **_: Any,
 ) -> str:
+    from core.order_status_label import order_status_label_ar  # noqa: PLC0415
+
     ref_part = f"رقم الطلب {reference}" if reference else "آخر طلب"
-    label = status_label_ar or status or "—"
+    label = status_label_ar or order_status_label_ar(status) or "—"
     lines = [
         f"حالة {ref_part}: *{label}*",
         f"الإجمالي: {total:.2f} {currency}",

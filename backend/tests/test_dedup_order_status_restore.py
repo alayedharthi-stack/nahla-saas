@@ -193,7 +193,7 @@ class TestDedupLocalOrderShortReply:
         reply = _short_reply(db, tenant_ctx, "وين طلبي")
         assert reply
         assert "GEN-MAN-9001" in reply
-        assert "تحت المراجعة" in reply
+        assert "تحت المراجعة" in reply or "قيد المراجعة" in reply
 
 
 class TestOptionARegression:
