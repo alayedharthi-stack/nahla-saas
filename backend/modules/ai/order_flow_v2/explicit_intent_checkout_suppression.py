@@ -77,6 +77,25 @@ def _prep_dict(order_prep: Any) -> Dict[str, Any]:
     return {}
 
 
+def _message_has_explicit_order_reference(message: str) -> bool:
+    """True when inbound names a specific order number (not the active draft ask)."""
+    try:
+        from core.order_status_dedup_reply import (  # noqa: PLC0415
+            _extract_order_ref_from_inbound,
+        )
+
+        return bool(_extract_order_ref_from_inbound(message))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional ref extractor
+        return False
+
+
+def is_active_checkout_draft_order_number_question(message: str) -> bool:
+    """Bare «كم رقم الطلب؟» during checkout — not a named historical order ref."""
+    if not is_checkout_order_number_intent(message):
+        return False
+    return not _message_has_explicit_order_reference(message)
+
+
 def is_checkout_payment_method_answer(
     message: str,
     order_prep: Dict[str, Any],
@@ -156,8 +175,14 @@ def detect_explicit_non_checkout_intent(
     if is_checkout_payment_method_answer(text, prep, missing_fields):
         return ""
 
-    if is_checkout_order_number_intent(text):
+    if is_active_checkout_draft_order_number_question(text):
         return ""
+
+    if (
+        is_checkout_order_number_intent(text)
+        and _message_has_explicit_order_reference(text)
+    ):
+        return INTENT_TRACK_ORDER
 
     if is_checkout_escape_inquiry(text, inbound_metadata):
         return "catalog_browse"
@@ -211,7 +236,7 @@ def is_checkout_continuation_turn(
     prep = _prep_dict(order_prep)
     missing = list(missing_fields or [])
 
-    if is_checkout_order_number_intent(text):
+    if is_active_checkout_draft_order_number_question(text):
         return True
 
     if detect_explicit_non_checkout_intent(
@@ -371,6 +396,7 @@ __all__ = [
     "PAYMENT_BARCODE_IMAGE_REQUEST",
     "detect_explicit_non_checkout_intent",
     "evaluate_stale_checkout_suppression",
+    "is_active_checkout_draft_order_number_question",
     "is_checkout_continuation_turn",
     "is_checkout_payment_method_answer",
     "is_explicit_payment_info_request",

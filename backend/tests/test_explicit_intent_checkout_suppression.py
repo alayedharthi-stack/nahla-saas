@@ -107,6 +107,15 @@ class TestExplicitIntentDetection:
     def test_catalog_browse_detected(self) -> None:
         assert detect_explicit_non_checkout_intent("وش عندكم منتجات؟") == "catalog_browse"
 
+    def test_latest_order_summary_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("وش آخر طلباتي؟") == "latest_order_summary"
+
+    def test_explicit_order_ref_question_routes_track_not_checkout(self) -> None:
+        assert detect_explicit_non_checkout_intent("كم رقم الطلب 269866315؟") == "track_order"
+
+    def test_bare_order_number_question_is_checkout_not_bypass(self) -> None:
+        assert detect_explicit_non_checkout_intent("كم رقم الطلب؟") == ""
+
 
 class TestStaleCheckoutSuppression:
     @pytest.mark.parametrize(
@@ -158,6 +167,29 @@ class TestStaleCheckoutSuppression:
         )
         assert decision.suppress is False
 
+    def test_bare_order_number_question_not_suppressed_with_active_draft(self) -> None:
+        decision = evaluate_stale_checkout_suppression(
+            message="كم رقم الطلب؟",
+            order_prep={"order_flow_v2_active": True, "line_items": [_GENERIC_ITEM]},
+            missing_fields=["payment_method"],
+            checkout_active=True,
+            draft_active=True,
+        )
+        assert decision.suppress is False
+        assert decision.reason == "checkout_continuation_turn"
+
+    def test_named_order_ref_question_suppresses_checkout(self) -> None:
+        decision = evaluate_stale_checkout_suppression(
+            message="كم رقم الطلب 269866315؟",
+            order_prep={"order_flow_v2_active": True, "line_items": [_GENERIC_ITEM]},
+            missing_fields=["payment_method"],
+            checkout_active=True,
+            draft_active=True,
+        )
+        assert decision.suppress is True
+        assert decision.detected_intent == "track_order"
+
+
 class TestOrderFlowV2BypassWithActiveDraft:
     def test_ledger_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("طلباتي السابقة كم؟")
@@ -183,6 +215,24 @@ class TestOrderFlowV2BypassWithActiveDraft:
         result = _run_v2("وش عندكم منتجات؟")
         assert not result.handled
         assert "catalog_browse" in (result.reason or "")
+
+    def test_named_order_ref_bypasses_order_flow_v2(self) -> None:
+        result = _run_v2("كم رقم الطلب 269866315؟")
+        assert not result.handled
+        assert "track_order" in (result.reason or "")
+
+    def test_draft_order_number_still_owned_by_order_flow_v2(self) -> None:
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_ITEM)],
+        }
+        with patch(
+            "modules.ai.order_flow_v2.owner.build_checkout_order_number_reply",
+            return_value="رقم طلبك الحالي NHL-1-000099.",
+        ):
+            result = _run_v2("كم رقم الطلب؟", prep=prep)
+        assert result.handled
+        assert "NHL-1-000099" in result.reply
 
     def test_yes_still_owned_by_order_flow_v2(self) -> None:
         prep = {
