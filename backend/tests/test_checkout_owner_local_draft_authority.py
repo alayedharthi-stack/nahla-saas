@@ -14,6 +14,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from core.order_creation_evidence import resolve_track_order_fallback  # noqa: E402
+from core.local_order_resolver import CustomerOrderContext, LocalOrderSnapshot  # noqa: E402
 from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: E402
     select_arabic_commerce_fallback,
 )
@@ -87,6 +88,28 @@ def _mock_order_row(ref: str):
     )
 
 
+def _resolver_order_ctx(*, ref: str, items=None, order_id: int = 88) -> CustomerOrderContext:
+    snap = LocalOrderSnapshot(
+        order_id=order_id,
+        external_id="nahla-wa-1-42",
+        external_order_number=ref,
+        status="pending_payment",
+        source="whatsapp",
+        total="249.00",
+        customer_name="أحمد سالم",
+        line_items=list(items or [_GENERIC_ITEM]),
+    )
+    return CustomerOrderContext(
+        active_whatsapp_draft=snap,
+        latest_open_order=snap,
+        latest_paid_order=None,
+        latest_shipped_order=None,
+        orders_by_priority=[snap],
+        selected_order=snap,
+        selected_reason="active_whatsapp_draft",
+    )
+
+
 class TestLocalDraftCheckoutAuthority:
     def test_empty_order_prep_active_when_local_draft_exists(self) -> None:
         draft = _draft_evidence()
@@ -95,29 +118,16 @@ class TestLocalDraftCheckoutAuthority:
         assert patch.get("line_items")
         assert active_whatsapp_checkout(patch, {}, draft=draft)
 
-    @patch("core.order_context_builder._load_active_draft")
+    @patch("core.local_order_resolver.resolve_customer_order_context")
     @patch("modules.ai.order_flow_v2.owner.operational_tuple", return_value=(True, False, "test_mode_canary_enforcement"))
     @patch("modules.ai.order_flow_v2.owner.load_local_draft_evidence")
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
     def test_active_local_draft_wins_before_brain_on_order_number(
-        self, load_state, draft_mock, _op, active_draft_mock,
+        self, load_state, draft_mock, _op, resolver_mock,
     ) -> None:
         draft_mock.return_value = _draft_evidence(ref="NHL-1-000088")
-        active_draft_mock.return_value = SimpleNamespace(
-            order_id=88,
-            external_id="nahla-wa-1-42",
-            line_items=[_GENERIC_ITEM],
-            total=249.0,
-            currency="SAR",
-            missing_fields=[],
-            status="draft",
-            lifecycle="whatsapp_draft",
-            merchant_edit_locked=False,
-        )
+        resolver_mock.return_value = _resolver_order_ctx(ref="NHL-1-000088")
         db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.return_value = _mock_order_row(
-            "NHL-1-000088"
-        )
         conv = _conversation()
         load_state.return_value = (conv, {"order_prep": {}})
         result = try_handle_order_flow_v2(
@@ -209,23 +219,10 @@ class TestLocalDraftCheckoutAuthority:
         assert "NHL-1-000077" in reply
         assert "لم أجد" not in reply
 
-    @patch("core.order_context_builder._load_active_draft")
-    def test_build_checkout_order_number_reply_from_db(self, draft_mock) -> None:
-        draft_mock.return_value = SimpleNamespace(
-            order_id=88,
-            external_id="nahla-wa-1-42",
-            line_items=[_GENERIC_ITEM],
-            total=249.0,
-            currency="SAR",
-            missing_fields=[],
-            status="draft",
-            lifecycle="whatsapp_draft",
-            merchant_edit_locked=False,
-        )
+    @patch("core.local_order_resolver.resolve_customer_order_context")
+    def test_build_checkout_order_number_reply_from_db(self, resolver_mock) -> None:
+        resolver_mock.return_value = _resolver_order_ctx(ref="NHL-1-000066")
         db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.return_value = _mock_order_row(
-            "NHL-1-000066"
-        )
         reply = build_checkout_order_number_reply(
             db,
             tenant_id=1,
@@ -261,32 +258,22 @@ class TestLocalDraftCheckoutAuthority:
         assert reply == ""
         assert kind == "checkout_name_owned_suppressed"
 
-    @patch("core.order_context_builder._load_active_draft")
+    @patch("core.local_order_resolver.resolve_customer_order_context")
     @patch("modules.ai.order_flow_v2.owner.operational_tuple", return_value=(True, False, "test_mode_canary_enforcement"))
     @patch("modules.ai.order_flow_v2.owner.load_local_draft_evidence")
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
     def test_generic_perfume_merchant_draft_not_honey_specific(
-        self, load_state, draft_mock, _op, active_draft_mock,
+        self, load_state, draft_mock, _op, resolver_mock,
     ) -> None:
         draft_mock.return_value = _draft_evidence(
             ref="NHL-1-000044",
             items=[_PERFUME_ITEM],
         )
-        active_draft_mock.return_value = SimpleNamespace(
-            order_id=88,
-            external_id="nahla-wa-1-42",
-            line_items=[_PERFUME_ITEM],
-            total=180.0,
-            currency="SAR",
-            missing_fields=[],
-            status="draft",
-            lifecycle="whatsapp_draft",
-            merchant_edit_locked=False,
+        resolver_mock.return_value = _resolver_order_ctx(
+            ref="NHL-1-000044",
+            items=[_PERFUME_ITEM],
         )
         db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.return_value = _mock_order_row(
-            "NHL-1-000044"
-        )
         conv = _conversation()
         load_state.return_value = (conv, {"order_prep": {}})
         result = try_handle_order_flow_v2(

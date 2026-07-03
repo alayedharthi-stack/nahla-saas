@@ -597,6 +597,7 @@ def try_handle_order_flow_v2(
             conversation=conversation,
             order_prep=order_prep,
             brain_state=bs,
+            customer_phone=str(customer_phone or ""),
         )
         if reply:
             active_patch: Dict[str, Any] = {}

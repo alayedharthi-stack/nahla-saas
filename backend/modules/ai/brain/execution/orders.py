@@ -1625,7 +1625,13 @@ class TrackOrderHandler:
             customer_id=ctx.customer_id,
             tenant_context=ctx.tenant_context,
         )
-        runtime_result = await runtime.execute("track_order", {"order_number": order_number})
+        runtime_result = await runtime.execute(
+            "track_order",
+            {
+                "order_number": order_number,
+                "conversation_id": ctx.conversation_id,
+            },
+        )
         latest: dict = runtime_result.payload.get("order") if runtime_result.ok else {}
 
         if not latest:
