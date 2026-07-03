@@ -704,6 +704,28 @@ def _is_product_option_number_context(text: str) -> bool:
     return bool(_PRODUCT_OPTION_NUMBER_RE.search(text))
 
 
+# Customer commerce ledger replies refer to the customer's WhatsApp
+# identity («على هذا الرقم») — not a staff-contact phone promise.
+# Without this guard, ``_PROMISE_VERB``'s «هذا» + ``_PHONE_NOUN``'s
+# «رقم» false-positive and rewrite the span to the staff-contact
+# fallback («حالياً لا يوجد رقم تواصل مهيأ لإرساله.»).
+_CUSTOMER_LEDGER_PHONE_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"ما\s+ظهر\s+لي\s+طلبات\s+مسجلة\s+على\s+هذا\s+الرقم"
+    r"|طلبات\s+مسجلة\s+عندنا\s+على\s+هذا\s+الرقم"
+    r"|طلبات\s+مسجلة\s+على\s+هذا\s+الرقم"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_customer_ledger_phone_context(text: str) -> bool:
+    """True when «هذا الرقم» is the customer's identity, not a contact promise."""
+    if not text:
+        return False
+    return bool(_CUSTOMER_LEDGER_PHONE_CONTEXT_RE.search(text))
+
+
 # Phone shape — Saudi mobile (05XXXXXXXX / +9665XXXXXXXX / 9665XXXXXXXX),
 # plus generic international (+\d{7,15}) as a permissive fallback.
 _PHONE_DIGITS_RE = re.compile(
@@ -773,7 +795,10 @@ def contains_promised_asset(text: str) -> Optional[str]:
     """
     if not text or not isinstance(text, str):
         return None
-    skip_phone = _is_product_option_number_context(text)
+    skip_phone = (
+        _is_product_option_number_context(text)
+        or _is_customer_ledger_phone_context(text)
+    )
     for asset_class, patterns in _PROMISE_PATTERNS.items():
         if skip_phone and asset_class == ASSET_PHONE:
             continue
@@ -803,6 +828,7 @@ def maybe_scrub_unkept_asset_promise(
     has_product_card: bool = False,
     tenant_id: Optional[int] = None,
     recipient: Optional[str] = None,
+    skip_asset_promise_scrub: bool = False,
 ) -> Tuple[str, bool, Optional[str]]:
     """Return ``(text_out, was_scrubbed, asset_class)``.
 
@@ -835,6 +861,9 @@ def maybe_scrub_unkept_asset_promise(
     """
     if not text or not isinstance(text, str):
         return text or "", False, None
+
+    if skip_asset_promise_scrub:
+        return text, False, None
 
     asset_class = contains_promised_asset(text)
     if not asset_class:
