@@ -1042,6 +1042,11 @@ def find_best_payment_asset(
 
 _PROD_HTTPS_HOSTS = (
     "railway.app", "herokuapp.com", "vercel.app", "fly.dev", "render.com",
+    # Nahla public API / app domains — persisted rows often carry
+    # http://api.nahlah.ai/... because the edge terminates TLS upstream.
+    # Meta fetches media links without following redirects, so we must
+    # emit a direct https:// URL at validate/send time.
+    "nahlah.ai",
 )
 
 
