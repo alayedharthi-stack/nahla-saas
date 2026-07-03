@@ -769,7 +769,7 @@ class DefaultComposer:
                 product=data.get("product", {}),
                 reference=_order_ref,
                 checkout_url=data.get("checkout_url", ""),
-                total=float(data.get("total") or 0),
+                total=data.get("total"),
                 currency=data.get("currency", "SAR"),
             )
 
@@ -869,7 +869,7 @@ class DefaultComposer:
                     reference=str(data.get("reference", "")),
                     status=data.get("status", ""),
                     status_label_ar=data.get("status_label_ar", ""),
-                    total=float(data.get("total") or 0),
+                    total=data.get("total"),
                     currency=data.get("currency", "SAR"),
                     item_titles=data.get("item_titles") or [],
                 ),

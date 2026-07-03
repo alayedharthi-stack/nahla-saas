@@ -202,13 +202,16 @@ def draft_order_created(
     product: Dict[str, Any],
     reference: str = "",
     checkout_url: str = "",
-    total: float = 0.0,
+    total: float | str = 0.0,
     currency: str = "SAR",
     **_: Any,
 ) -> str:
+    from core.compose_amount import format_order_total_display  # noqa: PLC0415
+
     title     = product.get("title", "المنتج المحدد")
     ref_part  = f"رقم الطلب: *{reference}*" if reference else ""
-    total_str = f"المبلغ: *{total:.2f} {currency}*" if total else ""
+    total_display = format_order_total_display(total, currency)
+    total_str = f"المبلغ: *{total_display}*" if total_display else ""
 
     header = f"✅ تم إنشاء طلبك بنجاح!"
     details_lines = [f"المنتج: *{title}*"]
@@ -569,19 +572,20 @@ def order_status(
     reference: str = "",
     status: str = "",
     status_label_ar: str = "",
-    total: float = 0,
+    total: float | str = 0,
     currency: str = "SAR",
     item_titles: list | None = None,
     **_: Any,
 ) -> str:
+    from core.compose_amount import format_order_total_display  # noqa: PLC0415
     from core.order_status_label import order_status_label_ar  # noqa: PLC0415
 
     ref_part = f"رقم الطلب {reference}" if reference else "آخر طلب"
     label = status_label_ar or order_status_label_ar(status) or "—"
-    lines = [
-        f"حالة {ref_part}: *{label}*",
-        f"الإجمالي: {total:.2f} {currency}",
-    ]
+    lines = [f"حالة {ref_part}: *{label}*"]
+    total_display = format_order_total_display(total, currency)
+    if total_display:
+        lines.append(f"الإجمالي: {total_display}")
     if item_titles:
         items_str = " | ".join(item_titles)
         lines.append(f"المنتجات: {items_str}")
