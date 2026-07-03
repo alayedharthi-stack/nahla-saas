@@ -1034,6 +1034,27 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
                 await _handle_message_status(status)
 
 
+def _sanitize_status_webhook_errors(errors: Any) -> List[Dict[str, Any]]:
+    """Extract safe diagnostic fields from Meta/360dialog status errors[]."""
+    if not isinstance(errors, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in errors:
+        if not isinstance(item, dict):
+            out.append({"raw": str(item)[:500]})
+            continue
+        row: Dict[str, Any] = {}
+        for key in ("code", "title", "message", "error_subcode", "href"):
+            val = item.get(key)
+            if val is not None:
+                row[key] = val
+        details = item.get("error_data") or item.get("details")
+        if details is not None:
+            row["details"] = details
+        out.append(row)
+    return out
+
+
 async def _handle_message_status(status: Dict[str, Any]) -> None:
     """Process the four WhatsApp delivery-status webhook events from
     Meta / 360dialog (``sent``, ``delivered``, ``read``, ``failed``)
@@ -1131,6 +1152,21 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             resolved_tenant_id = log_row.tenant_id
         elif evt_row and evt_row.tenant_id:
             resolved_tenant_id = evt_row.tenant_id
+
+        if st == "failed":
+            logger.info(
+                "[PAYMENT_MEDIA_DIAG] status_failed wamid=%s status=%s "
+                "recipient_id=%s timestamp=%s tenant_id=%s "
+                "message_event=%s campaign_send_log=%s errors=%s",
+                wamid,
+                st,
+                status.get("recipient_id"),
+                status.get("timestamp"),
+                resolved_tenant_id,
+                "matched" if evt_row else "orphan",
+                "matched" if log_row else "orphan",
+                _sanitize_status_webhook_errors(status.get("errors")),
+            )
 
         # ── Delivery Quality Intelligence Layer (May 2026) ──
         # Best-effort append-only event capture. NEVER let this fail
