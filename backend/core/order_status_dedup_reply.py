@@ -22,12 +22,6 @@ _ORDER_REF_IN_TEXT_RE = re.compile(
 )
 _TRAILING_DIGITS_RE = re.compile(r"(\d{6,})\s*$")
 
-_DEDUP_STATUS_EXTRA_AR = {
-    "payment_pending": "قيد إكمال الدفع",
-    "pending_payment": "قيد إكمال الدفع",
-}
-
-
 def _extract_order_ref_from_inbound(text: str) -> Optional[str]:
     raw = (text or "").strip()
     if not raw:
@@ -39,23 +33,6 @@ def _extract_order_ref_from_inbound(text: str) -> Optional[str]:
     if tail:
         return str(tail.group(1) or "").strip() or None
     return None
-
-
-def _status_label_ar(status: str) -> str:
-    slug = str(status or "").strip().lower()
-    if not slug:
-        return "غير معروفة"
-    if slug in _DEDUP_STATUS_EXTRA_AR:
-        return _DEDUP_STATUS_EXTRA_AR[slug]
-    try:
-        from modules.ai.brain.execution.orders import _ORDER_STATUS_AR  # noqa: PLC0415
-
-        mapped = _ORDER_STATUS_AR.get(slug)
-        if mapped:
-            return mapped
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional status map import
-        pass
-    return f"حالة طلبك الحالية: {status}"
 
 
 def build_dedup_local_order_short_reply(
@@ -112,8 +89,11 @@ def build_dedup_local_order_short_reply(
     if not ref:
         return ""
 
+    from core.order_status_label import order_status_label_ar  # noqa: PLC0415
+
     status = str(getattr(selected, "status", "") or "").strip()
-    label = _status_label_ar(status)
+    source = str(getattr(selected, "source", "") or "").strip() or None
+    label = order_status_label_ar(status, source=source)
     prev = (previous_outbound or "").strip()
     ref_in_prev = ref in prev
 

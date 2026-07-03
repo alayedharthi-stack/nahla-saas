@@ -207,6 +207,7 @@ def resolve_track_order_fallback(
 ) -> Optional[str]:
     """Honest reply when store lookup finds no order but local evidence exists."""
     from modules.ai.brain.compose import templates as T  # noqa: PLC0415
+    from core.order_status_label import order_status_label_ar  # noqa: PLC0415
 
     resolved_phone = str(phone or "").strip()
     if not resolved_phone and state is not None:
@@ -229,7 +230,10 @@ def resolve_track_order_fallback(
                 ref = local_ctx.selected_order.display_reference
                 if ref:
                     status = local_ctx.selected_order.status or "draft"
-                    label = "قيد الإكمال" if local_ctx.selected_order.is_open else status
+                    label = order_status_label_ar(
+                        status,
+                        source=local_ctx.selected_order.source,
+                    )
                     return T.order_status(
                         reference=ref,
                         status=status,

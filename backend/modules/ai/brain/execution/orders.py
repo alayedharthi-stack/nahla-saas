@@ -1578,23 +1578,7 @@ class DraftOrderHandler:
         )
 
 
-_ORDER_STATUS_AR: dict = {
-    "pending":           "قيد الانتظار",
-    "in_progress":       "قيد التنفيذ",
-    "under_review":      "تحت المراجعة",
-    "processing":        "جاري المعالجة",
-    "confirmed":         "مؤكّد",
-    "shipped":           "تم الشحن",
-    "on_the_way":        "في الطريق",
-    "out_for_delivery":  "خارج للتوصيل",
-    "delivered":         "تم التسليم",
-    "completed":         "مكتمل",
-    "cancelled":         "ملغي",
-    "refunded":          "مُسترجع",
-    "returned":          "مُرتجع",
-    "failed":            "فشل",
-    "cod":               "دفع عند الاستلام",
-}
+from core.order_status_label import ORDER_STATUS_LABELS_AR as _ORDER_STATUS_AR  # noqa: E402
 
 
 class TrackOrderHandler:
@@ -1641,8 +1625,15 @@ class TrackOrderHandler:
                 data={"message": "no_orders_found"},
             )
 
-        raw_status = str(latest.get("status") or "").lower().replace(" ", "_")
-        status_ar = _ORDER_STATUS_AR.get(raw_status) or latest.get("status") or "—"
+        from core.order_status_label import order_status_label_ar  # noqa: PLC0415
+
+        raw_status = str(latest.get("status") or "").strip()
+        status_ar = str(latest.get("status_label_ar") or "").strip()
+        if not status_ar:
+            status_ar = order_status_label_ar(
+                raw_status,
+                source=str(latest.get("source") or "").strip() or None,
+            )
 
         # Summarise items (max 3 titles) for the response template
         items = latest.get("items") or []
