@@ -1,14 +1,13 @@
 /**
  * Coupon ↔ Salla sync error display helpers.
  *
- * TODO before Salla sign-off / merchant release:
- * Hide technical error details from merchant-facing UI and keep only the Arabic
- * friendly summary. Set SHOW_COUPON_SYNC_TECH_DETAILS to false.
+ * Merchant-facing UI shows Arabic-friendly summaries only. Technical hints
+ * (HTTP codes, field keys) are gated behind SHOW_COUPON_SYNC_TECH_DETAILS.
  */
 import type { ReactNode } from 'react'
 
-/** Temporary: show short technical hints during Salla integration testing. */
-export const SHOW_COUPON_SYNC_TECH_DETAILS = true
+/** Off for merchant release / Salla review sign-off. */
+export const SHOW_COUPON_SYNC_TECH_DETAILS = false
 
 export const COUPON_SALLA_SYNC_TIMEOUT_FRIENDLY =
   'استغرقت مزامنة كوبونات سلة وقتًا أطول من المتوقع. قد تكتمل العملية بعد لحظات، حدّث الصفحة أو أعد المحاولة.'
