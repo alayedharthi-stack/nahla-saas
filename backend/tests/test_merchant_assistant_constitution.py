@@ -505,12 +505,10 @@ class TestMarketingEmojiVocabularyPolicy:
         )
 
     @pytest.mark.constitution_target
-    @pytest.mark.xfail(
-        reason="Phase 2: composer chooses optional context emoji — no fixed surface→emoji map",
-        strict=False,
-    )
     def test_composer_selects_emoji_by_context_not_fixed_rose(self) -> None:
-        raise NotImplementedError("pending FactBoundPersonaComposer optional emoji_context runtime")
+        greeting = try_compose_persona_samples("social_greeting", "السلام عليكم")
+        assert len(greeting) >= 3
+        assert not looks_like_fixed_emoji_marker_across_replies(greeting)
 
 
 # ─── B. Checkout still owns true continuation ─────────────────────────────────
@@ -898,10 +896,6 @@ class TestSaudiDialectPolicyHelpers:
 
 class TestSaudiDialectPolicyTargets:
     @pytest.mark.persona_policy
-    @pytest.mark.xfail(
-        reason="pending FactBoundPersonaComposer runtime",
-        strict=False,
-    )
     def test_arabic_social_output_no_non_saudi_dialect(self) -> None:
         replies = try_compose_persona_samples("social_greeting", "كيف الحال")
         for text in replies:
@@ -971,19 +965,11 @@ class TestSocialNonDeterminismHelpers:
 
 class TestSocialNonDeterminismTargets:
     @pytest.mark.persona_policy
-    @pytest.mark.xfail(
-        reason="pending FactBoundPersonaComposer runtime",
-        strict=False,
-    )
     def test_social_checkin_not_always_same_phrase(self) -> None:
         replies = try_compose_persona_samples("social_greeting", "كيف الحال")
         assert social_replies_are_non_deterministic(replies)
 
     @pytest.mark.persona_policy
-    @pytest.mark.xfail(
-        reason="pending FactBoundPersonaComposer runtime",
-        strict=False,
-    )
     def test_thanks_dua_not_fixed_global_string(self) -> None:
         thanks = try_compose_persona_samples("thanks", "شكراً")
         dua = try_compose_persona_samples("dua", "الله يعطيك العافية")
@@ -991,20 +977,12 @@ class TestSocialNonDeterminismTargets:
         assert social_replies_are_non_deterministic(dua)
 
     @pytest.mark.persona_policy
-    @pytest.mark.xfail(
-        reason="pending FactBoundPersonaComposer runtime",
-        strict=False,
-    )
     def test_social_output_rejects_banned_support_bot_openers(self) -> None:
         for inbound in ("كيف الحال", "شكراً", "الله يعطيك العافية"):
             for text in try_compose_persona_samples("social_greeting", inbound):
                 assert not rejects_social_support_bot_phrase(text)
 
     @pytest.mark.persona_policy
-    @pytest.mark.xfail(
-        reason="pending FactBoundPersonaComposer runtime",
-        strict=False,
-    )
     def test_social_output_rejects_checkout_pressure(self) -> None:
         cases = (
             ("كيف الحال", "social_greeting"),
