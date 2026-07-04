@@ -50,6 +50,7 @@ export interface EmbeddedStrings {
     section:           string
     sallaEmbedded:     string
     apiFull:           string
+    needsReauth:       string
     whatsapp:          string
     subscription:      string
     nahla:             string
@@ -93,9 +94,14 @@ export interface EmbeddedStrings {
     opening:       string
     connectWhatsapp: string
     connectStore:    string
+    reconnectStore:  string
     syncAppNotReady: string
     storeLinkBlurb:  string
     storeLinkLead:   string
+    linkComplete:    string
+    reauthMessage:   string
+    couponSyncReady: string
+    openedFromSalla: string
   }
   sub: {
     active:        string
@@ -216,8 +222,9 @@ const ar: EmbeddedStrings = {
   },
   status: {
     section:        'الحالة',
-    sallaEmbedded:  'سلة Embedded',
-    apiFull:        'ربط API الكامل',
+    sallaEmbedded:  'سلة',
+    apiFull:        'ربط سلة',
+    needsReauth:    'يحتاج إعادة ربط',
     whatsapp:       'واتساب',
     subscription:   'الاشتراك',
     nahla:          'نحلة',
@@ -260,10 +267,15 @@ const ar: EmbeddedStrings = {
     openAdvanced:    '🚀 فتح لوحة نحلة المتقدمة',
     opening:         '⏳ جارٍ الفتح...',
     connectWhatsapp: '💬 ربط واتساب الآن',
-    connectStore:    'ربط المتجر لتفعيل جميع الميزات',
+    connectStore:    'إكمال ربط سلة',
+    reconnectStore:  'إعادة ربط سلة',
     syncAppNotReady: 'لم يتم تكوين تطبيق المزامنة بعد. تواصل مع الدعم لإكمال الإعداد.',
-    storeLinkBlurb:  'اربط متجرك عبر OAuth لتفعيل: مزامنة المنتجات والعملاء، إنشاء الطلبات من المحادثة، تتبع الطلبات، وتشغيل الأتمتة في الخلفية بدون انقطاع.',
-    storeLinkLead:   '🔑 لتمكين المزامنة الكاملة للمنتجات والطلبات والعملاء',
+    storeLinkBlurb:  'مطلوب لمزامنة الكوبونات والطلبات والمنتجات مع سلة.',
+    storeLinkLead:   'أكمل ربط سلة لتفعيل المزامنة',
+    linkComplete:    'الربط مكتمل',
+    reauthMessage:   'انتهت صلاحية ربط سلة. أعد الربط لتفعيل المزامنة.',
+    couponSyncReady: 'مزامنة الكوبونات جاهزة.',
+    openedFromSalla: 'تم فتح تطبيق نحلة من سلة',
   },
   sub: {
     active:       'نشط',
@@ -376,8 +388,9 @@ const en: EmbeddedStrings = {
   },
   status: {
     section:        'Status',
-    sallaEmbedded:  'Salla Embedded',
-    apiFull:        'Full API connection',
+    sallaEmbedded:  'Salla',
+    apiFull:        'Salla sync link',
+    needsReauth:    'Needs re-link',
     whatsapp:       'WhatsApp',
     subscription:   'Subscription',
     nahla:          'Nahla',
@@ -420,10 +433,15 @@ const en: EmbeddedStrings = {
     openAdvanced:    '🚀 Open advanced Nahla dashboard',
     opening:         '⏳ Opening…',
     connectWhatsapp: '💬 Connect WhatsApp now',
-    connectStore:    'Link store to enable all features',
+    connectStore:    'Complete Salla link',
+    reconnectStore:  'Re-link Salla',
     syncAppNotReady: 'Sync app is not configured yet. Contact support to finish setup.',
-    storeLinkBlurb:  'Link your store via OAuth to enable product & customer sync, in-chat order creation, order tracking, and uninterrupted background automations.',
-    storeLinkLead:   '🔑 Enable full sync for products, orders, and customers',
+    storeLinkBlurb:  'Required to sync coupons, orders, and products with Salla.',
+    storeLinkLead:   'Complete Salla link to enable sync',
+    linkComplete:    'Link complete',
+    reauthMessage:   'Your Salla link expired. Re-link to restore sync.',
+    couponSyncReady: 'Coupon sync is ready.',
+    openedFromSalla: 'Nahla opened from Salla',
   },
   sub: {
     active:       'Active',
