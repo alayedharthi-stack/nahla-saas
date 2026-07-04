@@ -400,18 +400,17 @@ def try_compose_persona_samples(
     *,
     samples: int = 5,
 ) -> list[str]:
-    """Target API for FactBoundPersonaComposer — runtime not implemented yet."""
-    _ = (surface, inbound, samples)
-    try:
-        from modules.ai.brain.persona.fact_bound_composer import (  # noqa: PLC0415
-            FactBoundPersonaComposer,
-        )
-    except ImportError as exc:
-        raise NotImplementedError(
-            "pending FactBoundPersonaComposer runtime"
-        ) from exc
-    composer = FactBoundPersonaComposer()
-    raise NotImplementedError("pending FactBoundPersonaComposer runtime")
+    """Probe FactBoundPersonaComposer for constitution / policy regressions."""
+    import asyncio  # noqa: PLC0415
+
+    from modules.ai.brain.persona.fact_bound_composer import (  # noqa: PLC0415
+        FactBoundPersonaComposer,
+    )
+
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    return asyncio.run(
+        composer.compose_samples(surface, inbound, samples=samples),
+    )
 
 
 def looks_like_invented_payment_credential(text: str) -> bool:

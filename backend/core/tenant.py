@@ -104,6 +104,16 @@ DEFAULT_AI: Dict[str, Any] = {
     "max_order_value":           0,
     # context_verbosity: "full" (default) or "compact" (A/B test smaller context)
     "context_verbosity":        "full",
+    # FactBoundPersonaComposer — Phase 2 social surfaces (test mode only).
+    "persona_composer_enabled": False,
+    "persona_composer_enforce_test_mode": True,
+    "persona_composer_surfaces": [
+        "social_greeting",
+        "social_checkin",
+        "thanks",
+        "dua",
+    ],
+    "persona_composer_allowlist_tenants": [33],
 }
 
 DEFAULT_STORE: Dict[str, Any] = {
