@@ -83,6 +83,39 @@ _PRESSURE_TAIL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# Incomplete name-slot tails left when pressure strip removes «اسمك الكامل…» only.
+_DANGLING_PRESSURE_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:\s*[—\-–]\s*)?(?:بس|لكن)\s+محتاجين\s*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:\s*[—\-–]\s*)?(?:بس|لكن)\s+نحتاجك\s*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:\s*[—\-–]\s*)?(?:بس|لكن)\s+محتاج\s*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:\s*[—\-–]\s*)?(?:بس|لكن)\s+نحتاج\s*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:\s*[—\-–]\s*)(?:محتاج|نحتاج)\s*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"\s+(?:محتاج|نحتاج)\s*$",
+        re.I | re.UNICODE,
+    ),
+)
+
+_DANGLING_TRAILING_CONNECTOR = re.compile(
+    r"(?:\s*[—\-–]\s*)?(?:بس|لكن)\s*$",
+    re.I | re.UNICODE,
+)
+
 
 @dataclass(frozen=True)
 class SocialCheckoutPressureGuardResult:
@@ -189,6 +222,43 @@ def _strip_pressure_tail_from_line(line: str) -> tuple[str, bool]:
     return best, stripped
 
 
+def _strip_dangling_pressure_remants(text: str) -> tuple[str, bool]:
+    """Remove incomplete checkout-pressure clause tails after name-slot strip."""
+    result = str(text or "").strip()
+    if not result:
+        return "", False
+
+    stripped = False
+    while True:
+        prev = result
+        for pattern in _DANGLING_PRESSURE_FRAGMENT_PATTERNS:
+            match = pattern.search(result)
+            if not match:
+                continue
+            kept = result[: match.start()].strip()
+            if kept != result:
+                result = kept
+                stripped = True
+                break
+        else:
+            connector = _DANGLING_TRAILING_CONNECTOR.search(result)
+            if connector:
+                kept = result[: connector.start()].strip()
+                if kept != result:
+                    result = kept
+                    stripped = True
+                    continue
+            trimmed = re.sub(r"\s*[—\-–]\s*$", "", result).strip()
+            if trimmed != result:
+                result = trimmed
+                stripped = True
+                continue
+        if result == prev:
+            break
+
+    return result, stripped
+
+
 def strip_checkout_pressure_segments(text: str) -> tuple[str, bool]:
     """Remove checkout-pressure lines while preserving social acknowledgement."""
     raw = str(text or "").strip()
@@ -220,7 +290,11 @@ def strip_checkout_pressure_segments(text: str) -> tuple[str, bool]:
         if kept_lines:
             kept_paragraphs.append("\n".join(kept_lines))
 
-    return "\n\n".join(kept_paragraphs).strip(), stripped_any
+    merged = "\n\n".join(kept_paragraphs).strip()
+    cleaned, dangling_stripped = _strip_dangling_pressure_remants(merged)
+    if dangling_stripped:
+        stripped_any = True
+    return cleaned, stripped_any
 
 
 def is_pure_phatic_bypass_turn(inbound_text: str) -> bool:
