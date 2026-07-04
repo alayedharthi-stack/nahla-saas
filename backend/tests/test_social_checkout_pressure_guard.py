@@ -262,6 +262,22 @@ def test_guard_ignores_checkout_continuation_yes() -> None:
     assert "نكمل الدفع" in result.reply
 
 
+def test_guard_ignores_explicit_confirm_inbound() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "تمام، نكمل معك الطلب؟",
+        inbound_text="اعتمد",
+    )
+    assert not result.stripped
+
+
+def test_guard_ignores_payment_method_inbound() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "تمام، أرسل إيصال التحويل عند الانتهاء",
+        inbound_text="تحويل بنكي",
+    )
+    assert not result.stripped
+
+
 def test_guard_output_has_no_generic_product_placeholder() -> None:
     result = apply_social_checkout_pressure_guard(
         "محتاج اسمك الكامل عشان نكمل الطلب",
@@ -269,3 +285,55 @@ def test_guard_output_has_no_generic_product_placeholder() -> None:
     )
     assert result.reply.strip()
     assert "منتج" not in result.reply
+
+
+# ─── Dangling pressure tails (post-#445/#447 smoke regressions) ───────────────
+
+
+@pytest.mark.parametrize(
+    ("inbound", "reply", "expected"),
+    [
+        ("كيف الحال", "الحمد لله تمام 🌷 — بس محتاج", "الحمد لله تمام 🌷"),
+        ("انت وش أخبارك؟", "الحمد لله بخير 🌷 — بس نحتاج", "الحمد لله بخير 🌷"),
+        ("شكراً", "عفواً يا الغالي 🌷 بس محتاج", "عفواً يا الغالي 🌷"),
+    ],
+)
+def test_guard_strips_dangling_pressure_fragments(
+    inbound: str, reply: str, expected: str
+) -> None:
+    result = apply_social_checkout_pressure_guard(reply, inbound_text=inbound)
+    assert result.stripped
+    assert result.reply == expected
+
+
+def test_dangling_cleanup_leaves_no_connector_remnants() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "الحمد لله تمام 🌷 — بس محتاج",
+        inbound_text="كيف الحال",
+    )
+    assert result.reply == "الحمد لله تمام 🌷"
+    assert not result.reply.rstrip().endswith("بس")
+    assert not result.reply.rstrip().endswith("لكن")
+    assert not result.reply.rstrip().endswith("—")
+
+
+def test_dangling_only_reply_uses_no_silence_fallback() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "بس محتاج",
+        inbound_text="كيف الحال",
+    )
+    assert result.stripped
+    assert result.empty_fallback
+    assert result.reply.strip()
+    assert result.reply != "بس محتاج"
+
+
+def test_smoke_helper_detects_dangling_tails() -> None:
+    from tests.constitution_helpers import (  # noqa: PLC0415
+        contains_dangling_checkout_pressure_fragment,
+    )
+
+    assert contains_dangling_checkout_pressure_fragment("الحمد لله تمام 🌷 — بس محتاج")
+    assert contains_dangling_checkout_pressure_fragment("الحمد لله بخير 🌷 — بس نحتاج")
+    assert contains_dangling_checkout_pressure_fragment("عفواً يا الغالي 🌷 لكن محتاج")
+    assert not contains_dangling_checkout_pressure_fragment("الحمد لله تمام 🌷")

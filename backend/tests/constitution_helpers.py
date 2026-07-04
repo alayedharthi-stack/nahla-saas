@@ -55,6 +55,18 @@ CHECKOUT_PRESSURE_AFTER_SOCIAL_PHRASES: FrozenSet[str] = frozenset(
     }
 )
 
+# Incomplete name-slot tails after social guard strip (post-#445 smoke false-negatives).
+DANGLING_CHECKOUT_PRESSURE_FRAGMENTS: FrozenSet[str] = frozenset(
+    {
+        "بس محتاج",
+        "بس نحتاج",
+        "لكن محتاج",
+        "لكن نحتاج",
+        "بس محتاجين",
+        "بس نحتاجك",
+    }
+)
+
 _PURE_SOCIAL_INBOUND_MARKERS: FrozenSet[str] = frozenset(
     {
         "كيف الحال",
@@ -145,7 +157,25 @@ def rejects_checkout_pressure_after_social(reply: str, inbound_social: str) -> b
     if inbound not in _PURE_SOCIAL_INBOUND_MARKERS:
         return False
     raw = str(reply or "")
-    return any(phrase in raw for phrase in CHECKOUT_PRESSURE_AFTER_SOCIAL_PHRASES)
+    if any(phrase in raw for phrase in CHECKOUT_PRESSURE_AFTER_SOCIAL_PHRASES):
+        return True
+    return contains_dangling_checkout_pressure_fragment(raw)
+
+
+def contains_dangling_checkout_pressure_fragment(text: str) -> bool:
+    """True when reply ends with an incomplete checkout-pressure clause tail."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    norm = unicodedata.normalize("NFKC", raw)
+    for fragment in DANGLING_CHECKOUT_PRESSURE_FRAGMENTS:
+        if norm.rstrip().endswith(fragment):
+            return True
+    if re.search(r"(?:[—\-–]\s*)?(?:محتاج|نحتاج)\s*$", norm):
+        return True
+    if re.search(r"(?:[—\-–]\s*)?(?:بس|لكن)\s*$", norm):
+        return True
+    return False
 
 
 def contains_known_customer_name_reask(reply: str) -> bool:
