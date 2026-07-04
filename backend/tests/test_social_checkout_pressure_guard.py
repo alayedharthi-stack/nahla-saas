@@ -29,6 +29,9 @@ from modules.ai.order_flow_v2.state import should_resume_checkout_on_greeting  #
         "وش طريقة الدفع المناسبة لك؟",
         "أعتمد التوصيل لعنوانك",
         "نكمل طلبك السابق",
+        "محتاج اسمك الكامل عشان نكمل الطلب",
+        "اسمك الكامل لو تكرمت؟",
+        "نحتاج اسمك الكامل عشان نخلص الطلب",
     ],
 )
 def test_checkout_pressure_lines_detected(line: str) -> None:
@@ -177,3 +180,81 @@ def test_should_resume_true_for_explicit_resume_not_pure_phatic() -> None:
         {},
         message="كمل الطلب",
     )
+
+
+# ─── Name-slot pressure (post-#444 smoke regressions) ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("inbound", "reply", "kept_fragment"),
+    [
+        (
+            "كيف الحال",
+            "الحمد لله تمام 🌷 بس محتاج اسمك الكامل عشان نكمل الطلب بإذن الله 😊",
+            "الحمد لله تمام",
+        ),
+        (
+            "شكراً",
+            "عفواً يا الغالي 🌷 اسمك الكامل لو تكرمت؟",
+            "عفواً يا الغالي",
+        ),
+        (
+            "الله يعطيك العافية",
+            "الله يعافيك 😊 اسمك الكامل عشان نخلص الطلب؟",
+            "الله يعافيك",
+        ),
+        (
+            "انت وش أخبارك؟",
+            "الحمد لله بخير 🌷 بس نحتاج اسمك الكامل عشان نكمل معك، ممكن؟",
+            "الحمد لله بخير",
+        ),
+    ],
+)
+def test_guard_strips_name_slot_pressure_from_smoke_replies(
+    inbound: str, reply: str, kept_fragment: str
+) -> None:
+    result = apply_social_checkout_pressure_guard(reply, inbound_text=inbound)
+    assert result.stripped
+    assert result.reply.strip()
+    assert kept_fragment in result.reply
+    assert "اسمك الكامل" not in result.reply
+    assert "نكمل الطلب" not in result.reply
+    assert "نخلص الطلب" not in result.reply
+
+
+def test_guard_name_only_pressure_uses_no_silence_fallback() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "اسمك الكامل لو تكرمت؟",
+        inbound_text="شكراً",
+    )
+    assert result.stripped
+    assert result.reply.strip()
+    assert "اسمك الكامل" not in result.reply
+
+
+def test_guard_ignores_explicit_name_slot_answer() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "تمام يا هشام، وش طريقة الدفع المناسبة لك؟",
+        inbound_text="اسمي هشام العتيبي",
+    )
+    assert not result.stripped
+    assert "هشام" in result.reply
+    assert "الدفع" in result.reply
+
+
+def test_guard_ignores_checkout_continuation_yes() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "تمام، نكمل الدفع؟",
+        inbound_text="نعم",
+    )
+    assert not result.stripped
+    assert "نكمل الدفع" in result.reply
+
+
+def test_guard_output_has_no_generic_product_placeholder() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "محتاج اسمك الكامل عشان نكمل الطلب",
+        inbound_text="كيف الحال",
+    )
+    assert result.reply.strip()
+    assert "منتج" not in result.reply
