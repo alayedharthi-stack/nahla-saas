@@ -157,6 +157,87 @@ class TestSocialPersonaNotCheckout:
         assert not result.handled or "order" not in (result.reason or "").lower()
 
 
+# ─── A.1 Social context bleed cleanup ───────────────────────────────────────
+
+
+class TestSocialContextBleedCleanup:
+    """Phase A.1 — pure phatic turns must not append checkout slot pressure."""
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "شكراً",
+            "الله يعطيك العافية",
+            "كيف الحال",
+            "السلام عليكم",
+        ],
+    )
+    def test_active_draft_phatic_not_handled_by_v2(self, message: str) -> None:
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+        }
+        result = _run_v2(message, prep=prep)
+        assert not result.handled, (
+            f"OrderFlowV2 must not own phatic turn {message!r} with stale checkout"
+        )
+        assert "explicit_intent_suppressed" in (result.reason or "")
+
+    def test_should_not_resume_checkout_on_pure_salaam(self) -> None:
+        from modules.ai.order_flow_v2.state import should_resume_checkout_on_greeting  # noqa: PLC0415
+
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+        }
+        assert not should_resume_checkout_on_greeting(
+            prep,
+            {},
+            message="السلام عليكم",
+        )
+
+    def test_guard_strips_checkout_pressure_from_social_reply(self) -> None:
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            apply_social_checkout_pressure_guard,
+        )
+
+        result = apply_social_checkout_pressure_guard(
+            "العفو 🌷\nأرسل عنوانك",
+            inbound_text="شكراً",
+        )
+        assert result.stripped
+        assert not rejects_checkout_pressure_after_social(result.reply, "شكراً")
+
+    def test_checkout_continuation_yes_still_owned_with_active_draft(self) -> None:
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+            "customer_first_name": "أحمد",
+            "city": "الرياض",
+            "short_address_code": "RRRD1234",
+        }
+        result = _run_v2("نعم", prep=prep)
+        assert result.handled
+
+    def test_payment_method_answer_still_owned_at_payment_prompt(self) -> None:
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+            "customer_first_name": "أحمد",
+            "city": "الرياض",
+            "short_address_code": "RRRD1234",
+            "order_flow_v2_last_field": "payment_method",
+        }
+        decision = evaluate_stale_checkout_suppression(
+            message="تحويل بنكي",
+            order_prep=prep,
+            missing_fields=["payment_method"],
+            checkout_active=True,
+            draft_active=True,
+        )
+        assert decision.suppress is False
+
+
 # ─── B. Checkout still owns true continuation ─────────────────────────────────
 
 

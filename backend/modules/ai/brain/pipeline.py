@@ -3526,6 +3526,26 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+                apply_social_checkout_pressure_guard,
+            )
+
+            _scpg = apply_social_checkout_pressure_guard(
+                reply=reply or "",
+                inbound_text=message or "",
+                tenant_id=tenant_id,
+            )
+            if _scpg.stripped:
+                reply = _scpg.reply
+                _guard_replaced["social_checkout_pressure_guard"] = True
+        except Exception as _scpg_exc:  # noqa: BLE001
+            logger.warning(
+                "[SOCIAL_CHECKOUT_PRESSURE_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id,
+                _scpg_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
                 apply_commerce_reply_quality_guard,
             )

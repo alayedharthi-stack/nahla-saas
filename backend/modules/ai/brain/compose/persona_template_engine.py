@@ -415,6 +415,17 @@ def _active_commerce_greeting_stage(ctx: BrainContext) -> Optional[str]:
 
 
 def pick_persona_greeting(ctx: BrainContext, *, re_greet: bool = False) -> str:
+    inbound = str(getattr(ctx, "message", "") or "").strip()
+    try:
+        from ..postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            is_pure_phatic_bypass_turn,
+        )
+
+        if is_pure_phatic_bypass_turn(inbound):
+            pool = PERSONA_GREETING_REGREET if re_greet else PERSONA_GREETING_COLD
+            return pick_persona_variant(pool, ctx)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — phatic greet pool must not break compose
+        pass
     commerce_ctx = _active_commerce_greeting_stage(ctx)
     if commerce_ctx == "checkout":
         return pick_persona_variant(PERSONA_GREETING_CHECKOUT_AWARE, ctx)

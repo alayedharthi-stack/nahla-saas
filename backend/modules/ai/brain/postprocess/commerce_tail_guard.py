@@ -15,6 +15,16 @@ from typing import Any, Optional
 
 from core.fallback_policy import strip_closer_segments
 
+try:
+    from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+        is_pure_phatic_bypass_turn,
+    )
+except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import boundary
+
+    def is_pure_phatic_bypass_turn(inbound_text: str) -> bool:  # type: ignore[misc]
+        return False
+
+
 logger = logging.getLogger("nahla.brain.postprocess.commerce_tail_guard")
 
 _OPERATIONAL_TAIL_MARKERS: tuple[str, ...] = (
@@ -105,7 +115,11 @@ def _should_strip_tail(
     reply_type: str,
     conversation_objective: str,
     chosen_path: str,
+    inbound_text: str = "",
 ) -> tuple[bool, str]:
+    if is_pure_phatic_bypass_turn(inbound_text):
+        return True, "phatic_bypass_checkout_pressure"
+
     if reply_type in {"commerce", "operational", "mixed"}:
         return False, f"reply_type:{reply_type}"
 
@@ -167,6 +181,7 @@ def apply_commerce_tail_guard(
         reply_type=reply_type,
         conversation_objective=conversation_objective,
         chosen_path=chosen_path,
+        inbound_text=inbound_text,
     )
     if not should_strip:
         return CommerceTailGuardResult(reply=text, stripped=False, reason=reason)

@@ -317,7 +317,13 @@ def try_handle_order_flow_v2(
             inbound_metadata=meta,
         )
 
-    if draft_ev is not None and draft_ev.active and _checkout_active():
+    _stale_checkout_context = (
+        _checkout_active() or (draft_ev is not None and draft_ev.active)
+    ) and (
+        _has_items()
+        or pending_order_exists(order_prep, bs)
+    )
+    if _stale_checkout_context:
         from .explicit_intent_checkout_suppression import (  # noqa: PLC0415
             evaluate_stale_checkout_suppression,
             log_checkout_suppressed_by_explicit_intent,
@@ -527,7 +533,7 @@ def try_handle_order_flow_v2(
         )
 
     if is_greeting_message(text):
-        if should_resume_checkout_on_greeting(order_prep, bs):
+        if should_resume_checkout_on_greeting(order_prep, bs, message=text):
             return _handle_greeting_checkout_resume()
         if pending_order_exists(order_prep, bs):
             first_name = load_identity_first_name(
