@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import FrozenSet
 
 NON_SAUDI_ARABIC_DIALECT_TERMS: FrozenSet[str] = frozenset(
@@ -57,6 +58,57 @@ KNOWN_CUSTOMER_BLUNT_ADDRESS_ASK_PHRASES: FrozenSet[str] = frozenset(
 )
 
 _FIXED_EMOJI_OPENER = "أكيد 🌷 تفضل"
+
+# Rare valid tokens ending in كا (not second-person possessive artifacts).
+_VALID_KA_TERMINATIONS: FrozenSet[str] = frozenset()
+
+# Second-person possessive with an extra attached alif (e.g. كيفكا → كيفك).
+_MALFORMED_POSSESSIVE_KA = re.compile(
+    r"(?<![\u0600-\u06FF])([\u0621-\u064A\u0671-\u06D3\u06FA\u06FF]{1,40})كا(?![\u0600-\u06FF\u064B-\u065F])",
+    re.UNICODE,
+)
+
+
+def _normalize_arabic_scan_text(text: str) -> str:
+    return unicodedata.normalize("NFKC", str(text or "")).replace("\u0640", "")
+
+
+def find_malformed_saudi_ka_suffix_tokens(text: str) -> list[str]:
+    """Tokens with abnormal attached كا suffix (composer artifact)."""
+    raw = _normalize_arabic_scan_text(text)
+    if not raw.strip():
+        return []
+    found: list[str] = []
+    for match in _MALFORMED_POSSESSIVE_KA.finditer(raw):
+        token = match.group(0)
+        if token in _VALID_KA_TERMINATIONS:
+            continue
+        found.append(token)
+    return found
+
+
+def repair_malformed_saudi_ka_suffix(text: str) -> tuple[str, bool]:
+    """Repair spurious final ا on second-person ك suffixes."""
+    raw = str(text or "")
+    if not raw.strip():
+        return raw, False
+    working = _normalize_arabic_scan_text(raw)
+    changed = False
+
+    def _repl(match: re.Match[str]) -> str:
+        nonlocal changed
+        token = match.group(0)
+        stem = match.group(1)
+        if token in _VALID_KA_TERMINATIONS:
+            return token
+        changed = True
+        return f"{stem}ك"
+
+    repaired = _MALFORMED_POSSESSIVE_KA.sub(_repl, working)
+    if not changed:
+        return raw, False
+    repaired = re.sub(r"\s{2,}", " ", repaired).strip()
+    return repaired, True
 
 
 def find_non_saudi_arabic_terms(text: str) -> list[str]:
