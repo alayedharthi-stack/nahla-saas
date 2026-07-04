@@ -78,18 +78,44 @@ class TestSallaDatetime:
         utc_dt, stamps = parse_salla_order_datetime(SALLA_WEBHOOK_ORDER)
         assert utc_dt is not None
         assert stamps["salla_timezone"] == "Asia/Riyadh"
-        assert stamps["salla_created_at"].startswith("2026-07-02 14:20")
-        # Stored UTC should be 3h behind Riyadh wall clock for this fixture.
+        assert stamps["salla_local_at"].startswith("2026-07-02 14:20")
+        assert stamps["salla_created_at"].endswith("11:20:00Z")
         assert utc_dt.hour == 11
         assert utc_dt.minute == 20
 
     def test_naive_salla_datetime_assumes_riyadh(self):
-        utc_dt, _ = parse_salla_order_datetime(
-            {"created_at": "2026-07-02 14:20:00"},
+        utc_dt, stamps = parse_salla_order_datetime(
+            {"created_at": "2026-07-02 14:20:00", "reference_id": 269977976},
         )
         assert utc_dt is not None
-        # UTC storage should be 3 hours behind Riyadh wall clock.
-        assert utc_dt.hour in (11, 14)
+        assert utc_dt.hour == 11
+        assert utc_dt.minute == 20
+        assert stamps["salla_created_at"].endswith("11:20:00Z")
+
+    def test_flat_salla_z_suffix_is_local_not_utc(self):
+        """Salla listing API may append Z to Riyadh wall clock."""
+        utc_dt, stamps = parse_salla_order_datetime({
+            "reference_id": 269977976,
+            "created_at": "2026-07-02T14:20:00.000000Z",
+        })
+        assert utc_dt is not None
+        assert utc_dt.hour == 11
+        assert utc_dt.minute == 20
+        assert stamps["salla_local_at"].startswith("2026-07-02T14:20:00")
+
+    def test_explicit_utc_z_displays_riyadh_afternoon(self):
+        utc_dt, stamps = parse_salla_order_datetime(
+            {"created_at": "2026-07-02T11:20:00Z"},
+        )
+        assert utc_dt is not None
+        assert utc_dt.hour == 11
+        assert stamps["salla_created_at"] == "2026-07-02T11:20:00Z"
+
+    def test_riyadh_display_from_stored_utc(self):
+        """11:20 UTC must present as 14:20 in Asia/Riyadh."""
+        utc_dt, _ = parse_salla_order_datetime(SALLA_WEBHOOK_ORDER)
+        riyadh_hour = (utc_dt.hour + 3) % 24
+        assert riyadh_hour == 14
 
 
 class TestSallaLineItems:
@@ -130,7 +156,8 @@ class TestOrderMetadataMerge:
         )
         assert merged["merchant_post_confirm_notice"] == "keep me"
         assert merged["salla_amounts"]["total"] == "164"
-        assert merged["salla_created_at"].startswith("2026-07-02")
+        assert merged["salla_created_at"].endswith("11:20:00Z")
+        assert merged["salla_local_at"].startswith("2026-07-02 14:20")
 
 
 class TestOrderListSort:

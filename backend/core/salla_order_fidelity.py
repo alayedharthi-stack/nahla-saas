@@ -130,10 +130,13 @@ def extract_salla_amounts_breakdown(raw: Dict[str, Any]) -> Dict[str, str]:
 
 def parse_salla_order_datetime(raw: Dict[str, Any]) -> Tuple[Optional[datetime], Dict[str, str]]:
     """
-  Return UTC ``datetime`` plus metadata stamps:
-  ``salla_created_at``, ``salla_date``, ``salla_timezone``.
+    Return UTC ``datetime`` plus metadata stamps.
+
+    ``created_at`` / ``salla_created_at`` store canonical UTC ISO.
+    ``salla_date`` / ``salla_local_at`` keep the original Salla wall clock.
     """
     stamps: Dict[str, str] = {}
+    salla_flat = bool(raw.get("reference_id") or raw.get("amounts"))
     candidates: List[Any] = [
         raw.get("created_at"),
         raw.get("date"),
@@ -143,50 +146,116 @@ def parse_salla_order_datetime(raw: Dict[str, Any]) -> Tuple[Optional[datetime],
         if not value:
             continue
         tz_name = SALLA_DEFAULT_TZ
-        text = ""
+        local_text = ""
         if isinstance(value, dict):
-            text = str(value.get("date") or value.get("iso") or value.get("formatted") or "").strip()
+            local_text = str(
+                value.get("date") or value.get("iso") or value.get("formatted") or ""
+            ).strip()
             tz_name = str(value.get("timezone") or SALLA_DEFAULT_TZ).strip() or SALLA_DEFAULT_TZ
         else:
-            text = str(value).strip()
-        if not text:
+            local_text = str(value).strip()
+        if not local_text:
             continue
 
-        stamps["salla_created_at"] = text
         stamps["salla_timezone"] = tz_name
-        if "T" in text or " " in text:
-            stamps["salla_date"] = text.split("T", 1)[0].split(" ", 1)[0]
+        stamps["salla_local_at"] = local_text
+        if "T" in local_text or " " in local_text:
+            stamps["salla_date"] = local_text.split("T", 1)[0].split(" ", 1)[0]
         else:
-            stamps["salla_date"] = text[:10]
+            stamps["salla_date"] = local_text[:10]
 
-        parsed = _parse_datetime_to_utc(text, tz_name)
+        parsed = _parse_datetime_to_utc(
+            local_text,
+            tz_name,
+            salla_flat_timestamp=salla_flat and not isinstance(value, dict),
+        )
         if parsed is not None:
-            stamps["created_at"] = parsed.isoformat()
+            utc_iso = _to_utc_iso(parsed)
+            stamps["created_at"] = utc_iso
+            stamps["salla_created_at"] = utc_iso
             return parsed, stamps
     return None, stamps
 
 
-def _parse_datetime_to_utc(text: str, tz_name: str) -> Optional[datetime]:
-    has_offset = text.endswith("Z") or "+" in text[10:] or text.count("-") > 2
-    variants = [text.replace("Z", "+00:00"), text.replace(" ", "T", 1)]
-    if "." in text:
-        variants.append(text.split(".", 1)[0].replace(" ", "T", 1))
+def _to_utc_iso(dt: datetime) -> str:
+    """Stable UTC ISO for API + dashboard (always includes offset)."""
+    aware = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return aware.isoformat().replace("+00:00", "Z")
 
-    for variant in variants:
+
+def _parse_datetime_to_utc(
+    text: str,
+    tz_name: str,
+    *,
+    salla_flat_timestamp: bool = False,
+) -> Optional[datetime]:
+    """
+    Parse Salla timestamps into UTC.
+
+    • Dict / naive strings → wall clock in ``tz_name`` (default Asia/Riyadh).
+    • Explicit ``Z`` / ``+00:00`` → true UTC instant.
+    • Salla flat API strings with a bogus trailing ``Z`` → local wall clock.
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    if salla_flat_timestamp and text.endswith(("Z", "z")):
+        text = text.rstrip("Zz").strip()
+
+    if _is_explicit_utc_marker(text):
+        for variant in _iso_variants(text):
+            try:
+                dt = datetime.fromisoformat(variant)
+                if dt.tzinfo is not None:
+                    return dt.astimezone(timezone.utc)
+                return dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return None
+
+    if _has_fixed_offset(text):
+        for variant in _iso_variants(text):
+            try:
+                dt = datetime.fromisoformat(variant)
+                if dt.tzinfo is not None:
+                    return dt.astimezone(timezone.utc)
+            except ValueError:
+                continue
+        return None
+
+    for variant in _iso_variants(text):
         try:
             dt = datetime.fromisoformat(variant)
-            if dt.tzinfo is not None:
-                return dt.astimezone(timezone.utc)
-            if has_offset:
-                return dt.replace(tzinfo=timezone.utc)
-            try:
-                local_tz = ZoneInfo(tz_name) if ZoneInfo is not None else _riyadh_tz()
-            except (KeyError, OSError):
-                local_tz = _riyadh_tz()
-            return dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
         except ValueError:
             continue
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc)
+        try:
+            local_tz = ZoneInfo(tz_name) if ZoneInfo is not None else _riyadh_tz()
+        except (KeyError, OSError):
+            local_tz = _riyadh_tz()
+        return dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
     return None
+
+
+def _iso_variants(text: str) -> List[str]:
+    variants = [text.replace("Z", "+00:00").replace("z", "+00:00")]
+    variants.append(text.replace(" ", "T", 1))
+    if "." in text:
+        variants.append(text.split(".", 1)[0].replace(" ", "T", 1))
+    return variants
+
+
+def _is_explicit_utc_marker(text: str) -> bool:
+    lowered = text.lower()
+    return lowered.endswith("z") or lowered.endswith("+00:00") or lowered.endswith("-00:00")
+
+
+def _has_fixed_offset(text: str) -> bool:
+    """Non-UTC explicit offset (e.g. +03:00)."""
+    tail = text[-6:]
+    return len(tail) >= 6 and tail[0] in "+-" and tail[3] == ":"
 
 
 def normalize_salla_line_items(items: Any) -> List[Dict[str, Any]]:
@@ -317,7 +386,7 @@ def build_salla_order_metadata(raw: Dict[str, Any]) -> Dict[str, Any]:
     amounts = extract_salla_amounts_breakdown(raw)
     meta: Dict[str, Any] = dict(time_stamps)
     if utc_dt is not None and "created_at" not in meta:
-        meta["created_at"] = utc_dt.isoformat()
+        meta["created_at"] = _to_utc_iso(utc_dt)
     if amounts:
         meta["salla_amounts"] = amounts
     payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
@@ -354,7 +423,7 @@ def apply_salla_order_normalisation(raw: Dict[str, Any], base: Dict[str, Any]) -
     salla_meta = build_salla_order_metadata(raw)
     utc_dt, _ = parse_salla_order_datetime(raw)
     if utc_dt is not None:
-        merged["created_at"] = utc_dt.isoformat()
+        merged["created_at"] = _to_utc_iso(utc_dt)
     elif salla_meta.get("created_at"):
         merged["created_at"] = salla_meta["created_at"]
 

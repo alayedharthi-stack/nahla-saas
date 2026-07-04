@@ -593,6 +593,7 @@ def _merge_order_extra_metadata(
     for key in (
         "created_at",
         "salla_created_at",
+        "salla_local_at",
         "salla_date",
         "salla_timezone",
         "salla_amounts",
