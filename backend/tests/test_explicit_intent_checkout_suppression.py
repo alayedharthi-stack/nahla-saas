@@ -116,6 +116,21 @@ class TestExplicitIntentDetection:
     def test_bare_order_number_question_is_checkout_not_bypass(self) -> None:
         assert detect_explicit_non_checkout_intent("كم رقم الطلب؟") == ""
 
+    def test_social_phatic_kayf_alhal_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("كيف الحال") == "social_greeting"
+
+    def test_social_phatic_news_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("انت وش اخبارك؟") == "social_greeting"
+
+    def test_social_thanks_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("شكراً") == "social_thanks"
+
+    def test_social_dua_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("الله يعطيك العافية") == "social_dua"
+
+    def test_salaam_greeting_detected(self) -> None:
+        assert detect_explicit_non_checkout_intent("السلام عليكم") == "greeting"
+
 
 class TestStaleCheckoutSuppression:
     @pytest.mark.parametrize(
@@ -215,6 +230,21 @@ class TestOrderFlowV2BypassWithActiveDraft:
         result = _run_v2("وش عندكم منتجات؟")
         assert not result.handled
         assert "catalog_browse" in (result.reason or "")
+
+    @pytest.mark.parametrize(
+        "message,expected",
+        [
+            ("كيف الحال", "social_greeting"),
+            ("انت وش اخبارك؟", "social_greeting"),
+            ("شكراً", "social_thanks"),
+            ("الله يعطيك العافية", "social_dua"),
+            ("السلام عليكم", "greeting"),
+        ],
+    )
+    def test_social_phatic_bypasses_order_flow_v2(self, message: str, expected: str) -> None:
+        result = _run_v2(message)
+        assert not result.handled
+        assert expected in (result.reason or "")
 
     def test_named_order_ref_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("كم رقم الطلب 269866315؟")
