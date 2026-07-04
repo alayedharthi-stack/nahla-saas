@@ -100,16 +100,10 @@ interface SyncStats {
 
 interface IntegrationStatus {
   embedded_connected:   boolean
-  embedded_store_name:  string
   api_sync_enabled:     boolean
-  api_canonical:        boolean
-  api_connected_at:     string
-  easy_mode:            boolean
-  has_refresh_token:    boolean
-  has_api_key:          boolean
-  whatsapp_connected:   boolean
+  needs_reauth:         boolean
+  easy_mode?:           boolean
   sync_app_configured:  boolean
-  oauth_start_url:      string
 }
 
 type StepState = 'completed' | 'current' | 'locked'
@@ -727,35 +721,30 @@ export default function SallaEntryScreen() {
     if (status === 'success') {
       console.info('[SallaEntry] OAuth API sync success — reloading integration status')
       alert(lang === 'ar'
-        ? 'تم ربط المتجر عبر OAuth بنجاح. تم تفعيل المزامنة الكاملة.'
-        : 'Store linked via OAuth. Full sync is now active.')
+        ? `${t.cta.linkComplete} — ${t.cta.couponSyncReady}`
+        : `${t.cta.linkComplete} — ${t.cta.couponSyncReady}`)
     } else {
-      const reason = params.get('reason') || 'unknown'
-      console.warn('[SallaEntry] OAuth API sync failed | reason=%s', reason)
+      console.warn('[SallaEntry] OAuth API sync failed | reason=%s', params.get('reason') || 'unknown')
       alert(lang === 'ar'
-        ? `تعذّر إكمال ربط OAuth: ${reason}. أعد المحاولة من زر "ربط المتجر".`
-        : `OAuth link failed: ${reason}. Retry from the "Link store" button.`)
+        ? 'تعذّر إكمال ربط سلة. أعد المحاولة من زر إعادة الربط.'
+        : 'Could not complete Salla link. Retry from the re-link button.')
     }
     // Strip the query so a manual refresh doesn't re-show the alert.
     const cleanUrl = window.location.pathname + window.location.hash
     window.history.replaceState({}, '', cleanUrl)
     load()
-  }, [load, lang])
+  }, [load, lang, t])
 
   // ── Derived state ────────────────────────────────────────────────────────────
 
   const waOk         = status?.whatsapp_connected ?? false
   const autoOk       = status?.auto_reply_enabled ?? false
   const nahlaOk      = waOk && autoOk
-  // Dual Integration: embedded session is implicit when token-login succeeded;
-  // API Sync is true only when the Sync OAuth app has delivered a refresh_token.
-  // Fallback for older backends that don't yet expose /api/salla/integration-status:
-  // assume embedded=true (we have a JWT) and apiSync=false (so banner shows).
   const embeddedOk     = integration?.embedded_connected ?? true
-  const apiSyncOk      = integration?.api_sync_enabled ?? false
-  const apiSyncEasy    = integration?.easy_mode ?? false
-  const apiSyncCounts  = apiSyncOk || apiSyncEasy   // either path gives us refresh
+  const needsReauth    = integration?.needs_reauth ?? false
+  const apiSyncOk      = (integration?.api_sync_enabled ?? false) && !needsReauth
   const syncAppReady   = integration?.sync_app_configured ?? true
+  const showApiCta     = !apiSyncOk
   const subStatus    = sub?.billing_status ?? 'none'
   const trialBlocked = subStatus === 'trial_blocked'
   const subActive    = subStatus === 'active' || subStatus === 'trial'
@@ -963,18 +952,19 @@ export default function SallaEntryScreen() {
                   C={C}
                   icon="🏪"
                   label={t.status.sallaEmbedded}
-                  active={embeddedOk}
-                  activeText={t.status.connected}
-                  inactiveText={t.status.notConnected}
+                  active={embeddedOk && !needsReauth}
+                  activeText={t.cta.openedFromSalla}
+                  inactiveText={needsReauth ? t.status.needsReauth : t.status.notConnected}
+                  warning={needsReauth}
                 />
                 <MiniStatusCard
                   C={C}
                   icon="🔑"
                   label={t.status.apiFull}
-                  active={apiSyncCounts}
-                  activeText={apiSyncEasy && !apiSyncOk ? t.status.easyMode : t.status.complete}
-                  inactiveText={t.status.incomplete}
-                  warning={!apiSyncCounts}
+                  active={apiSyncOk}
+                  activeText={t.status.complete}
+                  inactiveText={needsReauth ? t.status.needsReauth : t.status.incomplete}
+                  warning={!apiSyncOk}
                 />
                 <MiniStatusCard C={C} icon="💬" label={t.status.whatsapp}    active={waOk}      activeText={t.status.connected} inactiveText={t.status.notConnected} />
                 <MiniStatusCard C={C} icon="💳" label={t.subscription.name}  active={subActive} activeText={subLabel}            inactiveText={subLabel} warning={trialBlocked} />
@@ -985,7 +975,7 @@ export default function SallaEntryScreen() {
             </section>
 
             {/* ─ API Sync OAuth CTA (Dual Integration) ─ */}
-            {!apiSyncCounts && (
+            {showApiCta && (
               <div
                 style={{
                   background:    C.warnBg,
@@ -998,7 +988,7 @@ export default function SallaEntryScreen() {
                 }}
               >
                 <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: C.warnTextStrong }}>
-                  {t.cta.storeLinkLead}
+                  {needsReauth ? t.cta.reauthMessage : t.cta.storeLinkLead}
                 </p>
                 <p style={{ margin: 0, fontSize: 12, color: C.warnText, lineHeight: 1.7 }}>
                   {t.cta.storeLinkBlurb}
@@ -1023,13 +1013,31 @@ export default function SallaEntryScreen() {
                     fontFamily:     'inherit',
                   }}
                 >
-                  {t.cta.connectStore}
+                  {needsReauth ? t.cta.reconnectStore : t.cta.connectStore}
                 </button>
                 {!syncAppReady && (
                   <p style={{ margin: 0, fontSize: 11, color: C.warnTextStrong, lineHeight: 1.6 }}>
                     {t.cta.syncAppNotReady}
                   </p>
                 )}
+              </div>
+            )}
+
+            {apiSyncOk && (
+              <div
+                style={{
+                  background:   '#ecfdf5',
+                  border:       '1.5px solid #a7f3d0',
+                  borderRadius: 14,
+                  padding:      '12px 16px',
+                }}
+              >
+                <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: '#065f46' }}>
+                  {t.cta.linkComplete}
+                </p>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: '#047857', lineHeight: 1.6 }}>
+                  {t.cta.couponSyncReady}
+                </p>
               </div>
             )}
 

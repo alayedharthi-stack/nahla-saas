@@ -791,9 +791,12 @@ export const featureRealityApi = {
   },
   sallaIntegrationStatus(): Promise<{
     embedded_connected: boolean
+    embedded_store_name?: string
     api_sync_enabled: boolean
+    api_connected_at?: string
     easy_mode: boolean
     has_refresh_token: boolean
+    needs_reauth?: boolean
     sync_app_configured: boolean
   }> {
     return apiCall('/api/salla/integration-status')

@@ -2734,6 +2734,7 @@ async def salla_integration_status(request: Request, db: Session = Depends(get_d
     is_easy_mode         = False
     has_refresh_token    = False
     has_any_api_key      = False
+    needs_reauth         = False
 
     if integration:
         cfg = integration.config or {}
@@ -2742,7 +2743,8 @@ async def salla_integration_status(request: Request, db: Session = Depends(get_d
         embedded_store_id    = cfg.get("store_id", "") or (integration.external_store_id or "")
         has_refresh_token    = bool(cfg.get("refresh_token"))
         has_any_api_key      = bool(cfg.get("api_key"))
-        api_sync_enabled     = bool(cfg.get("api_sync_enabled")) and has_refresh_token and bool(integration.enabled)
+        needs_reauth         = bool(cfg.get("needs_reauth"))
+        api_sync_enabled     = bool(cfg.get("api_sync_enabled")) and has_refresh_token and bool(integration.enabled) and not needs_reauth
         api_canonical        = bool(cfg.get("api_canonical"))
         api_connected_at     = cfg.get("api_connected_at", "") or ""
         is_easy_mode         = (
@@ -2772,6 +2774,7 @@ async def salla_integration_status(request: Request, db: Session = Depends(get_d
         "easy_mode":           is_easy_mode,
         "has_refresh_token":   has_refresh_token,
         "has_api_key":         has_any_api_key,
+        "needs_reauth":        needs_reauth,
         "whatsapp_connected":  wa_connected,
         "sync_app_configured": sync_app_configured,
         "oauth_start_url":     "/api/salla/oauth/start",
