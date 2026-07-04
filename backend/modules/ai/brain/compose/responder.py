@@ -169,13 +169,25 @@ class DefaultComposer:
 
                     text = pick_persona_greeting(ctx, re_greet=re_greet_requested)
             else:
+                from ..persona.integration import try_enforce_persona_compose  # noqa: PLC0415
+                from ..persona.surface_resolver import resolve_greet_surface  # noqa: PLC0415
                 from ..persona_expression import (  # noqa: PLC0415
                     PERSONA_KIND_GREETING,
                     PERSONA_TOPIC_SOCIAL,
                     is_established_greet_persona_compose_enabled,
                 )
 
-                if is_established_greet_persona_compose_enabled():
+                _greet_surface = resolve_greet_surface(ctx, re_greet=re_greet_requested)
+                _persona_result = None
+                if _greet_surface:
+                    _persona_result = await try_enforce_persona_compose(
+                        ctx,
+                        surface=_greet_surface,
+                        action_result=result,
+                    )
+                if _persona_result and (_persona_result.text or "").strip():
+                    text = _persona_result.text
+                elif is_established_greet_persona_compose_enabled():
                     _greet_decision = Decision(
                         action=ACTION_LLM_REPLY,
                         args={
@@ -942,14 +954,26 @@ class DefaultComposer:
             from ..cost.intent_cost_policy import is_routine_llm_avoid_enabled  # noqa: PLC0415
 
             if is_template_only_social_category(category):
-                v_main = self._variant_idx(ctx)
-                v_secondary = (len(ctx.history or []) // 3) % 5
-                reply = T.social_reply(
-                    category=category,
-                    variant=v_main,
-                    sub_variant=v_secondary,
-                    inbound_text=(ctx.message or ""),
-                )
+                reply = ""
+                if category == "dua":
+                    from ..persona.integration import try_enforce_persona_compose  # noqa: PLC0415
+
+                    _dua_persona = await try_enforce_persona_compose(
+                        ctx,
+                        surface="dua",
+                        action_result=result,
+                    )
+                    if _dua_persona and (_dua_persona.text or "").strip():
+                        reply = _dua_persona.text
+                if not (reply or "").strip():
+                    v_main = self._variant_idx(ctx)
+                    v_secondary = (len(ctx.history or []) // 3) % 5
+                    reply = T.social_reply(
+                        category=category,
+                        variant=v_main,
+                        sub_variant=v_secondary,
+                        inbound_text=(ctx.message or ""),
+                    )
             elif is_routine_llm_avoid_enabled():
                 from ..persona.integration import try_enforce_persona_compose  # noqa: PLC0415
                 from ..persona.surface_resolver import resolve_social_surface  # noqa: PLC0415

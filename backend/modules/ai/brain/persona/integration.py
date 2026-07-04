@@ -20,6 +20,12 @@ def _ai_settings_from_ctx(ctx: BrainContext) -> dict[str, Any]:
     ai = mc.get("ai_settings")
     if isinstance(ai, dict) and ai:
         return merge_ai_defaults(ai)
+    rs = getattr(ctx, "reply_state", None)
+    if rs is not None:
+        rmc = dict(getattr(rs, "merchant_context", None) or {})
+        ai_rs = rmc.get("ai_settings")
+        if isinstance(ai_rs, dict) and ai_rs:
+            return merge_ai_defaults(ai_rs)
     tc = getattr(ctx, "tenant_context", None)
     if tc is not None:
         stored = getattr(tc, "ai_settings", None)

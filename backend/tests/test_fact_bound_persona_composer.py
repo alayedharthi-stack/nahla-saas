@@ -27,9 +27,10 @@ from modules.ai.brain.persona.surface_resolver import (
     resolve_phatic_llm_surface,
     resolve_social_surface,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+from modules.ai.brain.decision.actions import ACTION_GREET, ACTION_LLM_REPLY, ACTION_SOCIAL_REPLY
 from modules.ai.brain.types import (
     BrainContext,
+    BrainReplyState,
     CommerceFacts,
     INTENT_GENERAL,
     ActionResult,
@@ -644,5 +645,237 @@ class TestPhaticLlmPersonaComposeRouting:
             assert text == "legacy llm reply"
             assert "fact_bound_persona_compose" not in str(result.data.get("chosen_path") or "")
             llm_mock.assert_called_once()
+
+        asyncio.run(_run())
+
+
+def _ctx_reply_state_only(
+    *,
+    tenant_id: int = 33,
+    phone: str = "966542980511",
+    message: str = "كيف الحال",
+    ai_settings: dict | None = None,
+) -> BrainContext:
+    """Production-shaped ctx: ai_settings only on reply_state.merchant_context."""
+    ctx = BrainContext(
+        tenant_id=tenant_id,
+        customer_phone=phone,
+        message=message,
+        intent=Intent(name=INTENT_GENERAL, confidence=0.9, raw_message=message),
+        state=MerchantConversationState(),
+        facts=CommerceFacts(),
+        merchant_context={},
+    )
+    ctx.reply_state = BrainReplyState(
+        merchant_context={
+            "ai_settings": merge_ai_defaults(ai_settings or _enabled_ai_settings()),
+        },
+    )
+    return ctx
+
+
+def _assert_fact_bound_metadata(action: ActionResult) -> None:
+    assert action.data.get("chosen_path") == "fact_bound_persona_compose"
+    pc = action.data.get("persona_compose") or {}
+    assert pc
+    assert pc.get("surface")
+    assert pc.get("source")
+    assert pc.get("guard_passed") is True
+    assert pc.get("facts_hash")
+
+
+class TestProdShapedAiSettingsLookup:
+    def test_gate_opens_from_reply_state_merchant_context(self) -> None:
+        ctx = _ctx_reply_state_only(message="كيف الحال")
+        assert should_enforce_persona_compose(ctx, surface="social_checkin")
+
+    def test_gate_closed_when_reply_state_missing_settings(self) -> None:
+        ctx = _ctx_reply_state_only(
+            ai_settings={
+                "persona_composer_enabled": False,
+                "store_ai_mode": STORE_AI_MODE_TEST,
+                "ai_test_allowed_numbers": ["966542980511"],
+            },
+        )
+        assert not should_enforce_persona_compose(ctx, surface="social_checkin")
+
+    def test_phatic_llm_persists_metadata_reply_state_only(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="بخير الله يسعدك",
+            source="persona_llm",
+            surface="social_checkin",
+            facts_hash="stub-hash",
+            guard_passed=True,
+            language="ar",
+            dialect="saudi",
+        )
+
+        async def _fake_compose(_self, _bundle, ctx=None, db=None):
+            return stub_result
+
+        async def _run() -> None:
+            ctx = _ctx_reply_state_only(message="كيف الحال")
+            action = ActionResult(success=True, data={})
+            out = await try_enforce_phatic_llm_persona_compose(
+                ctx,
+                decision=_llm_social_decision(message="كيف الحال"),
+                action_result=action,
+            )
+            assert out is not None
+            _assert_fact_bound_metadata(action)
+
+        with patch.object(FactBoundPersonaComposer, "compose", _fake_compose):
+            asyncio.run(_run())
+
+    @pytest.mark.parametrize(
+        "message,category,surface",
+        [
+            ("كيف الحال", "wellbeing_check", "social_checkin"),
+            ("شكراً", "thanks", "thanks"),
+            ("انت وش أخبارك؟", "wellbeing_check", "social_checkin"),
+        ],
+    )
+    def test_phatic_llm_turns_persist_metadata_prod_shaped(
+        self, message: str, category: str, surface: str,
+    ) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="رد تجريبي",
+            source="persona_llm",
+            surface=surface,
+            facts_hash="hash",
+            guard_passed=True,
+        )
+
+        async def _fake_compose(_self, _bundle, ctx=None, db=None):
+            return stub_result
+
+        async def _run() -> None:
+            ctx = _ctx_reply_state_only(message=message)
+            action = ActionResult(success=True, data={})
+            out = await try_enforce_phatic_llm_persona_compose(
+                ctx,
+                decision=_llm_social_decision(message=message, social_category=category),
+                action_result=action,
+            )
+            assert out is not None
+            _assert_fact_bound_metadata(action)
+            assert (action.data.get("persona_compose") or {}).get("surface") == surface
+
+        with patch.object(FactBoundPersonaComposer, "compose", _fake_compose):
+            asyncio.run(_run())
+
+    def test_greet_path_persists_metadata_prod_shaped(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="وعليكم السلام",
+            source="persona_llm",
+            surface="social_greeting",
+            facts_hash="greet-hash",
+            guard_passed=True,
+        )
+
+        async def _run() -> None:
+            ctx = _ctx_reply_state_only(message="السلام عليكم")
+            result = ActionResult(success=True, data={})
+            decision = Decision(
+                action=ACTION_GREET,
+                args={},
+                reason="test greet",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+            with patch.object(
+                FactBoundPersonaComposer,
+                "compose",
+                AsyncMock(return_value=stub_result),
+            ):
+                with patch.object(
+                    DefaultComposer,
+                    "_llm_compose",
+                    AsyncMock(return_value="should-not-run"),
+                ) as llm_mock:
+                    text = await composer.compose(decision, result, ctx)
+            assert text == "وعليكم السلام"
+            _assert_fact_bound_metadata(result)
+            llm_mock.assert_not_called()
+
+        asyncio.run(_run())
+
+    def test_dua_social_reply_persists_metadata_prod_shaped(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="الله يعافيك يا الغالي",
+            source="persona_llm",
+            surface="dua",
+            facts_hash="dua-hash",
+            guard_passed=True,
+        )
+
+        async def _run() -> None:
+            ctx = _ctx_reply_state_only(message="الله يعطيك العافية")
+            result = ActionResult(success=True, data={})
+            decision = Decision(
+                action=ACTION_SOCIAL_REPLY,
+                args={"social_category": "dua"},
+                reason="test dua",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+            with patch.object(
+                FactBoundPersonaComposer,
+                "compose",
+                AsyncMock(return_value=stub_result),
+            ):
+                with patch.object(
+                    DefaultComposer,
+                    "_compose_social_persona_ack",
+                    AsyncMock(return_value="should-not-run"),
+                ) as ack_mock:
+                    text = await composer.compose(decision, result, ctx)
+            assert text == "الله يعافيك يا الغالي"
+            _assert_fact_bound_metadata(result)
+            ack_mock.assert_not_called()
+
+        asyncio.run(_run())
+
+    @pytest.mark.parametrize("message", ["نعم", "اعتمد", "تحويل بنكي"])
+    def test_checkout_continuation_not_forced_into_composer(self, message: str) -> None:
+        ctx = _ctx_reply_state_only(message=message)
+        ctx.state.stage = "checkout"
+        assert resolve_phatic_llm_surface(
+            ctx,
+            decision=_llm_social_decision(message=message),
+        ) is None
+
+    def test_blocked_phone_skips_enforce_reply_state_only(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _ctx_reply_state_only(
+                phone="966500000099",
+                message="كيف الحال",
+            )
+            action = ActionResult(success=True, data={})
+            out = await try_enforce_phatic_llm_persona_compose(
+                ctx,
+                decision=_llm_social_decision(message="كيف الحال"),
+                action_result=action,
+            )
+            assert out is None
+            assert "chosen_path" not in action.data
 
         asyncio.run(_run())
