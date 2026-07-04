@@ -221,6 +221,28 @@ class TestSocialContextBleedCleanup:
         assert result.empty_fallback
         assert not rejects_checkout_pressure_after_social(result.reply, "شكراً")
 
+    def test_guard_strips_name_slot_from_mixed_social_reply(self) -> None:
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            apply_social_checkout_pressure_guard,
+        )
+
+        result = apply_social_checkout_pressure_guard(
+            "الحمد لله تمام 🌷 بس محتاج اسمك الكامل عشان نكمل الطلب بإذن الله 😊",
+            inbound_text="كيف الحال",
+        )
+        assert result.stripped
+        assert "الحمد لله تمام" in result.reply
+        assert not rejects_checkout_pressure_after_social(result.reply, "كيف الحال")
+
+    def test_name_answer_still_owned_by_v2_with_active_draft(self) -> None:
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+            "customer_first_name": "",
+        }
+        result = _run_v2("اسمي هشام العتيبي", prep=prep)
+        assert result.handled
+
     def test_checkout_continuation_yes_still_owned_with_active_draft(self) -> None:
         prep = {
             "order_flow_v2_active": True,
@@ -675,6 +697,8 @@ class TestSocialNonDeterminismHelpers:
         [
             ("كيف الحال", "بخير، وش طريقة الدفع المناسبة لك؟"),
             ("الله يعطيك العافية", "الله يعافيك، أرسل عنوانك"),
+            ("شكراً", "عفواً 🌷 اسمك الكامل لو تكرمت؟"),
+            ("كيف الحال", "الحمد لله تمام بس محتاج اسمك الكامل عشان نكمل الطلب"),
         ],
     )
     def test_checkout_pressure_after_pure_social_detected(

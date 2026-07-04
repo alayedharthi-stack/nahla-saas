@@ -4,7 +4,7 @@ social_checkout_pressure_guard.py
 Phase A.1 — strip checkout slot pressure from replies to pure phatic turns.
 
 When OrderFlowV2 correctly bypasses social/phatic inbound, Brain replies must not
-append address / payment / aggressive checkout resume prompts.
+append address / payment / name-slot / aggressive checkout resume prompts.
 
 If stripping removes the entire reply, ``_phatic_no_silence_fallback`` applies
 existing emergency paths only (mirror / thanks / salaam) — **not** the product
@@ -31,11 +31,56 @@ _CHECKOUT_PRESSURE_LINE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"نكمل\s*الدفع", re.I | re.UNICODE),
     re.compile(r"نكمل\s*بيانات\s*الطلب", re.I | re.UNICODE),
     re.compile(r"جاهزين\s*نكمل\s*طلبك", re.I | re.UNICODE),
+    re.compile(r"^نكمل\s*(?:ال)?طلب", re.I | re.UNICODE),
+    re.compile(r"^نخلص\s*(?:ال)?طلب", re.I | re.UNICODE),
+    re.compile(r"^نكمل\s+معك", re.I | re.UNICODE),
+    re.compile(r"^(?:محتاج|نحتاج)\s+اسمك?\s*(?:ال)?كامل", re.I | re.UNICODE),
+    re.compile(r"^اسمك?\s*(?:ال)?كامل", re.I | re.UNICODE),
+    re.compile(r"^(?:ال)?اسم\s+الكامل\s+لو\s+تكرمت", re.I | re.UNICODE),
+    re.compile(r"^ممكن\s+اسمك", re.I | re.UNICODE),
+    re.compile(r"^عشان\s+نكمل\s*(?:ال)?طلب", re.I | re.UNICODE),
+    re.compile(r"^عشان\s+نخلص\s*(?:ال)?طلب", re.I | re.UNICODE),
 )
 
 _GENTLE_OPEN_ORDER_HINT = re.compile(
     r"و?عندك\s+طلب\s+سابق",
     re.I | re.UNICODE,
+)
+
+# Strip mixed social+pressure lines without dropping the social acknowledgement.
+_PRESSURE_TAIL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:بس|لكن)\s+(?:محتاج|نحتاج)\s+اسمك?\s*(?:ال)?كامل.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"\s+اسمك?\s*(?:ال)?كامل.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:ال)?اسم\s+الكامل\s+لو\s+تكرمت.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"\s+ممكن\s+اسمك.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:بس|لكن)\s+عشان\s+نكمل.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:بس|لكن)\s+عشان\s+نخلص.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:بس|لكن)\s+نحتاج\s+اسمك?\s*(?:ال)?كامل.*$",
+        re.I | re.UNICODE,
+    ),
+    re.compile(
+        r"(?:بس|لكن)\s+نكمل\s+معك.*$",
+        re.I | re.UNICODE,
+    ),
 )
 
 
@@ -126,6 +171,24 @@ def is_checkout_pressure_line(line: str) -> bool:
     return any(p.search(raw) for p in _CHECKOUT_PRESSURE_LINE_PATTERNS)
 
 
+def _strip_pressure_tail_from_line(line: str) -> tuple[str, bool]:
+    """Remove checkout-pressure tail clauses from a mixed social+pressure line."""
+    raw = str(line or "").strip()
+    if not raw:
+        return "", False
+    best = raw
+    stripped = False
+    for pattern in _PRESSURE_TAIL_PATTERNS:
+        match = pattern.search(raw)
+        if not match:
+            continue
+        kept = raw[: match.start()].strip()
+        if kept and len(kept) < len(best):
+            best = kept
+            stripped = True
+    return best, stripped
+
+
 def strip_checkout_pressure_segments(text: str) -> tuple[str, bool]:
     """Remove checkout-pressure lines while preserving social acknowledgement."""
     raw = str(text or "").strip()
@@ -142,6 +205,12 @@ def strip_checkout_pressure_segments(text: str) -> tuple[str, bool]:
         lines = [ln.strip() for ln in p.splitlines() if ln.strip()]
         kept_lines: list[str] = []
         for ln in lines:
+            trimmed, tail_stripped = _strip_pressure_tail_from_line(ln)
+            if tail_stripped:
+                stripped_any = True
+                if trimmed:
+                    kept_lines.append(trimmed)
+                continue
             if is_checkout_pressure_line(ln):
                 stripped_any = True
                 continue
