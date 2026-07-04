@@ -980,16 +980,18 @@ class TestStateDrivenSimplification:
         assert decision.action == ACTION_GREET
         assert decision.action != ACTION_LLM_REPLY
 
-    def test_composer_downgrades_greet_when_mid_order(
+    def test_composer_mid_order_phatic_greet_is_warm_without_checkout_pressure(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
-        """Mid-order greet → order-aware local template when avoid is on."""
+        """Mid-order phatic greet → natural warm reply; no checkout slot pressure (#443)."""
         monkeypatch.setenv("NAHLA_ROUTINE_LLM_AVOID_ENABLED", "true")
         from modules.ai.brain.compose.persona_template_engine import (
             PERSONA_ALLOWED_EMOJI,
-            PERSONA_GREETING_ORDER_AWARE,
+            PERSONA_GREETING_COLD,
+            PERSONA_GREETING_REGREET,
             persona_reply_has_light_emoji,
             persona_reply_is_order_aware_greeting,
+            persona_reply_is_warm_greeting,
         )
         from modules.ai.brain.compose.responder import DefaultComposer
         composer = DefaultComposer()
@@ -1009,8 +1011,16 @@ class TestStateDrivenSimplification:
             reply = _run(composer.compose(decision, ActionResult(success=True), ctx))
         llm_mock.assert_not_called()
         assert reply.strip()
-        assert reply in PERSONA_GREETING_ORDER_AWARE or persona_reply_is_order_aware_greeting(reply)
-        assert persona_reply_is_order_aware_greeting(reply)
+        assert (
+            reply in PERSONA_GREETING_REGREET
+            or reply in PERSONA_GREETING_COLD
+            or persona_reply_is_warm_greeting(reply)
+        )
+        assert not persona_reply_is_order_aware_greeting(reply)
+        assert "نكمل طلبك" not in reply
+        assert "أرسل عنوان" not in reply
+        assert "الدفع" not in reply
+        assert "اسمك" not in reply
         assert persona_reply_has_light_emoji(reply)
         assert sum(reply.count(e) for e in PERSONA_ALLOWED_EMOJI) <= 1
         assert decision.action == ACTION_GREET
