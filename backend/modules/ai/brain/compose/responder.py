@@ -151,9 +151,23 @@ class DefaultComposer:
 
             persona = getattr(ctx.facts, "assistant_name", "") or ""
             if is_routine_llm_avoid_enabled():
-                from .persona_template_engine import pick_persona_greeting  # noqa: PLC0415
+                from ..persona.integration import try_enforce_persona_compose  # noqa: PLC0415
+                from ..persona.surface_resolver import resolve_greet_surface  # noqa: PLC0415
 
-                text = pick_persona_greeting(ctx, re_greet=re_greet_requested)
+                _greet_surface = resolve_greet_surface(ctx, re_greet=re_greet_requested)
+                _persona_result = None
+                if _greet_surface:
+                    _persona_result = await try_enforce_persona_compose(
+                        ctx,
+                        surface=_greet_surface,
+                        action_result=result,
+                    )
+                if _persona_result and (_persona_result.text or "").strip():
+                    text = _persona_result.text
+                else:
+                    from .persona_template_engine import pick_persona_greeting  # noqa: PLC0415
+
+                    text = pick_persona_greeting(ctx, re_greet=re_greet_requested)
             else:
                 from ..persona_expression import (  # noqa: PLC0415
                     PERSONA_KIND_GREETING,
@@ -937,13 +951,30 @@ class DefaultComposer:
                     inbound_text=(ctx.message or ""),
                 )
             elif is_routine_llm_avoid_enabled():
-                from .persona_template_engine import pick_persona_social_reply  # noqa: PLC0415
+                from ..persona.integration import try_enforce_persona_compose  # noqa: PLC0415
+                from ..persona.surface_resolver import resolve_social_surface  # noqa: PLC0415
 
-                reply = pick_persona_social_reply(
-                    ctx,
+                _social_surface = resolve_social_surface(
                     category,
                     inbound_text=(ctx.message or ""),
                 )
+                _persona_result = None
+                if _social_surface:
+                    _persona_result = await try_enforce_persona_compose(
+                        ctx,
+                        surface=_social_surface,
+                        action_result=result,
+                    )
+                if _persona_result and (_persona_result.text or "").strip():
+                    reply = _persona_result.text
+                else:
+                    from .persona_template_engine import pick_persona_social_reply  # noqa: PLC0415
+
+                    reply = pick_persona_social_reply(
+                        ctx,
+                        category,
+                        inbound_text=(ctx.message or ""),
+                    )
                 try:
                     from ..postprocess.conversation_recovery import (  # noqa: PLC0415
                         is_generic_ack_stub_text,
