@@ -41,10 +41,14 @@ from tests.constitution_helpers import (  # noqa: E402
     NON_SAUDI_ARABIC_DIALECT_TERMS,
     assert_no_non_saudi_arabic,
     contains_banned_template_opener,
+    contains_known_customer_name_reask,
+    contains_phone_number_reask,
     find_non_saudi_arabic_terms,
+    is_blunt_address_collect_ask,
     is_generic_placeholder_product_name,
     line_items_contain_only_generic_placeholders,
     looks_like_invented_payment_credential,
+    prefers_saved_address_confirm,
     rejects_checkout_pressure_after_social,
     rejects_social_support_bot_phrase,
     social_replies_are_non_deterministic,
@@ -271,6 +275,127 @@ class TestSocialContextBleedCleanup:
             draft_active=True,
         )
         assert decision.suppress is False
+
+
+# ─── A.2 Known customer information (policy §5.1) ───────────────────────────
+
+
+class TestKnownCustomerInformationPolicy:
+    """Do not re-ask customer facts already known and valid in system state."""
+
+    _STORED_NAME_PREP = {
+        "order_flow_v2_active": True,
+        "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+        "customer_first_name": "هشام",
+        "customer_last_name": "العتيبي",
+        "city": "الرياض",
+        "short_address_code": "RRRD1234",
+    }
+
+    def test_policy_doc_has_known_customer_information_section(self) -> None:
+        from pathlib import Path
+
+        policy = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "architecture"
+            / "nahla-ai-merchant-assistant-policy.md"
+        )
+        text = policy.read_text(encoding="utf-8")
+        assert "Known Customer Information Policy" in text
+        assert "Never ask for the WhatsApp phone number" in text
+        assert "Social/phatic turns must not trigger slot questions" in text
+
+    def test_social_turn_strips_name_reask_even_when_name_known_in_prep(self) -> None:
+        """#445 guard + §5.1: phatic turn must not get name-slot pressure."""
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            apply_social_checkout_pressure_guard,
+        )
+
+        bleed = "الحمد لله تمام 🌷 بس محتاج اسمك الكامل عشان نكمل الطلب بإذن الله 😊"
+        result = apply_social_checkout_pressure_guard(
+            bleed,
+            inbound_text="كيف الحال",
+        )
+        assert result.stripped
+        assert not contains_known_customer_name_reask(result.reply)
+        assert not rejects_checkout_pressure_after_social(result.reply, "كيف الحال")
+        _ = self._STORED_NAME_PREP  # documents stored-name context for reviewers
+
+    def test_checkout_yes_with_stored_full_name_does_not_reask_name(self) -> None:
+        result = _run_v2("نعم", prep=dict(self._STORED_NAME_PREP))
+        assert result.handled
+        assert not contains_known_customer_name_reask(result.reply or "")
+
+    def test_saved_address_uses_confirm_not_blunt_collect(self) -> None:
+        from core.order_context_prefill import MODE_CONFIRM  # noqa: PLC0415
+        from modules.ai.order_flow_v2.replies import build_next_field_reply  # noqa: PLC0415
+
+        prep = {
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+            "city": "الرياض",
+            "short_address_code": "RRRD1234",
+        }
+        known = {"city": "الرياض", "short_address": "RRRD1234"}
+        reply = build_next_field_reply(
+            order_prep=prep,
+            brain_state={"order_prep": prep},
+            missing_fields=["city"],
+            field_modes={"city": MODE_CONFIRM},
+            known_previous=known,
+        )
+        assert prefers_saved_address_confirm(reply)
+        assert not is_blunt_address_collect_ask(reply)
+
+    def test_checkout_flow_does_not_reask_whatsapp_phone(self) -> None:
+        result = _run_v2("نعم", prep=dict(self._STORED_NAME_PREP))
+        assert result.handled
+        assert not contains_phone_number_reask(result.reply or "")
+
+    def test_missing_name_may_ask_only_in_checkout_slot_context(self) -> None:
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            apply_social_checkout_pressure_guard,
+        )
+        from modules.ai.order_flow_v2.replies import build_next_field_reply  # noqa: PLC0415
+
+        prep = {"line_items": [dict(_GENERIC_GROUNDED_ITEM)]}
+        reply = build_next_field_reply(
+            order_prep=prep,
+            brain_state={},
+            missing_fields=["customer_name"],
+        )
+        assert contains_known_customer_name_reask(reply)
+
+        social_guarded = apply_social_checkout_pressure_guard(
+            reply,
+            inbound_text="شكراً",
+        )
+        assert social_guarded.stripped
+        assert not contains_known_customer_name_reask(social_guarded.reply)
+
+    def test_cleared_or_missing_name_may_ask_in_checkout_not_on_social(self) -> None:
+        from modules.ai.order_flow_v2.replies import build_next_field_reply  # noqa: PLC0415
+
+        prep = {
+            "line_items": [dict(_GENERIC_GROUNDED_ITEM)],
+            "customer_first_name": "",
+            "customer_last_name": "",
+        }
+        reply = build_next_field_reply(
+            order_prep=prep,
+            brain_state={"order_prep": prep},
+            missing_fields=["customer_name"],
+        )
+        assert contains_known_customer_name_reask(reply)
+
+    @pytest.mark.constitution_target
+    @pytest.mark.xfail(
+        reason="Phase A.2 follow-up: Brain compose must check stored customer facts before slot prompts",
+        strict=False,
+    )
+    def test_brain_compose_must_not_emit_name_reask_when_name_stored(self) -> None:
+        """Raw compose (pre-guard) must be fact-aware — guard strip is safety net only."""
+        raise NotImplementedError("pending fact-aware compose slot prompts")
 
 
 # ─── B. Checkout still owns true continuation ─────────────────────────────────

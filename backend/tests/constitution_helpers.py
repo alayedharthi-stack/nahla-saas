@@ -65,6 +65,47 @@ _PURE_SOCIAL_INBOUND_MARKERS: FrozenSet[str] = frozenset(
     }
 )
 
+# Policy §5.1 — re-asking known customer facts (anti-patterns).
+KNOWN_CUSTOMER_NAME_REASK_PHRASES: FrozenSet[str] = frozenset(
+    {
+        "اسمك الكامل",
+        "وش اسمك الكامل",
+        "ممكن تذكر اسمك",
+        "اكتب اسمك",
+        "محتاج اسمك الكامل",
+        "نحتاج اسمك الكامل",
+    }
+)
+
+KNOWN_CUSTOMER_PHONE_REASK_PHRASES: FrozenSet[str] = frozenset(
+    {
+        "رقم جوالك",
+        "رقم الجوال",
+        "رقم هاتفك",
+        "الجوال للتواصل",
+        "رقم جوال",
+    }
+)
+
+KNOWN_CUSTOMER_BLUNT_ADDRESS_ASK_PHRASES: FrozenSet[str] = frozenset(
+    {
+        "أرسل عنوانك",
+        "أرسل لي عنوانك",
+        "شاركنا عنوانك",
+    }
+)
+
+_SAVED_ADDRESS_CONFIRM_MARKERS: FrozenSet[str] = frozenset(
+    {
+        "نعتمده",
+        "نعتمد نفس العنوان",
+        "العنوان المسجل",
+        "العنوان السابق",
+        "المحفوظ عندنا",
+        "هل نعتمد",
+    }
+)
+
 
 def contains_banned_template_opener(text: str) -> bool:
     raw = str(text or "")
@@ -104,6 +145,32 @@ def rejects_checkout_pressure_after_social(reply: str, inbound_social: str) -> b
         return False
     raw = str(reply or "")
     return any(phrase in raw for phrase in CHECKOUT_PRESSURE_AFTER_SOCIAL_PHRASES)
+
+
+def contains_known_customer_name_reask(reply: str) -> bool:
+    """True when outbound asks for full name (policy §5.1 anti-pattern)."""
+    raw = str(reply or "")
+    return any(phrase in raw for phrase in KNOWN_CUSTOMER_NAME_REASK_PHRASES)
+
+
+def contains_phone_number_reask(reply: str) -> bool:
+    """True when outbound asks for phone (policy §5.1 — use WhatsApp sender)."""
+    raw = str(reply or "")
+    return any(phrase in raw for phrase in KNOWN_CUSTOMER_PHONE_REASK_PHRASES)
+
+
+def is_blunt_address_collect_ask(reply: str) -> bool:
+    """True when outbound bluntly demands address without saved-address confirm."""
+    raw = str(reply or "")
+    if not any(phrase in raw for phrase in KNOWN_CUSTOMER_BLUNT_ADDRESS_ASK_PHRASES):
+        return False
+    return not any(marker in raw for marker in _SAVED_ADDRESS_CONFIRM_MARKERS)
+
+
+def prefers_saved_address_confirm(reply: str) -> bool:
+    """True when outbound confirms a saved/on-file address instead of blunt collect."""
+    raw = str(reply or "")
+    return any(marker in raw for marker in _SAVED_ADDRESS_CONFIRM_MARKERS)
 
 
 def social_replies_are_non_deterministic(replies: Sequence[str], *, min_unique: int = 2) -> bool:

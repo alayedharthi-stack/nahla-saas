@@ -200,6 +200,45 @@ Unless the user is **clearly continuing checkout**:
 
 Explicit bypass intents (ledger, track, payment, browse) are necessary but **not sufficient**. Social and phatic turns require the same stale-checkout suppression before OrderFlowV2 handles the turn.
 
+### Known Customer Information Policy
+
+Nahla AI must **not** ask the customer for information that is already known, valid, and available from system-owned sources.
+
+**System-owned customer facts include:**
+
+- WhatsApp phone (sender number)
+- Verified or manually stored customer name
+- Saved delivery address
+- National short address
+- Maps link
+- City / district / street
+- Current order state
+- Selected payment method (current checkout)
+- Customer commerce ledger
+
+**Rules:**
+
+1. Do not re-ask known valid information.
+2. Use known information when safe.
+3. Ask for confirmation only when the action requires confirmation.
+4. Ask for missing information only when it is genuinely absent or stale.
+5. If multiple saved values exist, ask the customer to choose.
+6. If data is stale, invalid, or incomplete, ask a focused clarification.
+7. Never overwrite manually edited customer data from weak signals.
+8. Never ask for the WhatsApp phone number — use the WhatsApp sender number.
+9. In checkout, slot prompts must check existing customer/order facts before asking.
+10. Social/phatic turns must not trigger slot questions for known information.
+
+**Examples:**
+
+| Bad | Good |
+|-----|------|
+| «اسمك الكامل لو تكرمت؟» when customer name is already stored | «الاسم عندي: هشام العتيبي. نعتمده للطلب؟» |
+| «أرسل عنوانك» when a saved address exists | «العنوان السابق موجود عندي، نعتمده أو تحب تغيره؟» |
+| «رقم جوالك؟» | Use WhatsApp number automatically — do not ask |
+
+**PR #445 note:** Social turns that bleed «اسمك الكامل…» violate this policy twice — (1) slot pressure on a phatic turn, and (2) re-asking a name that may already be stored. Post-compose guards strip the bleed; fact-aware slot prompting before compose remains a separate runtime follow-up.
+
 ---
 
 ## 6. Product grounding policy
@@ -307,6 +346,7 @@ Use neutral merchants and products (`متجر تجريبي عام`, `حذاء ر
 12. **Is language natural and non-deterministic** when safe — not another rigid script?
 13. **Is there a safe deterministic fallback** when persona compose fails?
 14. **Are there automated regression tests** that lock the behavior and prevent rollback?
+15. **Does the assistant re-ask customer facts** (name, phone, address, payment) already known and valid in system state?
 
 ### PR rejection signals
 
