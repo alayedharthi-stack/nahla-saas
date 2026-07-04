@@ -5,6 +5,10 @@ Phase A.1 — strip checkout slot pressure from replies to pure phatic turns.
 
 When OrderFlowV2 correctly bypasses social/phatic inbound, Brain replies must not
 append address / payment / aggressive checkout resume prompts.
+
+If stripping removes the entire reply, ``_phatic_no_silence_fallback`` applies
+existing emergency paths only (mirror / thanks / salaam) — **not** the product
+persona path and not new checkout prompts.
 """
 from __future__ import annotations
 
@@ -44,7 +48,7 @@ class SocialCheckoutPressureGuardResult:
 
 
 def _phatic_no_silence_fallback(inbound: str) -> str:
-    """Existing emergency paths only — never leave phatic turns silent after strip."""
+    """Emergency no-silence safety net after full strip — not FactBoundPersonaComposer."""
     raw = str(inbound or "").strip()
     if not raw:
         return ""
