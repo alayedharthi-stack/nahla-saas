@@ -320,6 +320,44 @@ def accepts_context_appropriate_light_emoji(text: str) -> bool:
     return all(_emoji_in_approved_set(ch) for ch in emojis)
 
 
+def accepts_warm_reply_without_emoji(text: str) -> bool:
+    """True when a natural warm reply needs no emoji (policy §11.3 — 0 emoji valid)."""
+    raw = str(text or "").strip()
+    if not raw or count_emojis(raw) > 0:
+        return False
+    if rejects_fixed_emoji_template_opener(raw) or rejects_social_support_bot_phrase(raw):
+        return False
+    warm_markers = (
+        "حياك",
+        "الله",
+        "أبشر",
+        "تمام",
+        "العفو",
+        "بخير",
+        "يسعدك",
+        "يعافيك",
+    )
+    return any(marker in raw for marker in warm_markers)
+
+
+def looks_like_fixed_emoji_marker_across_replies(
+    replies: Sequence[str],
+    *,
+    min_replies: int = 3,
+) -> bool:
+    """True when varied replies all end with the same emoji — template marker."""
+    normalized = [str(r or "").strip() for r in replies if str(r or "").strip()]
+    if len(normalized) < min_replies:
+        return False
+    trailing: list[str] = []
+    for reply in normalized:
+        units = _emoji_units_for_policy(reply)
+        if not units:
+            return False
+        trailing.append(units[-1])
+    return len(set(trailing)) == 1 and bool(trailing[0])
+
+
 def social_replies_are_non_deterministic(replies: Sequence[str], *, min_unique: int = 2) -> bool:
     """True when compose outputs show wording variation (policy §11.2)."""
     normalized = {str(r or "").strip() for r in replies if str(r or "").strip()}

@@ -170,7 +170,27 @@ Fallback must pass `payment_credential_guard` unchanged.
 
 Nahla is a WhatsApp **commerce and marketing** platform. Emoji supports real commercial contexts — not only smile/heart/rose.
 
-The composer (and `marketing_emoji_policy` post-polish) must choose emoji **by verified surface/context**, not randomly and not as a fixed opener.
+The composer (and `marketing_emoji_policy` post-polish) may choose emoji **by verified surface/context** when appropriate — not randomly, not as a fixed opener, and **not on every reply**.
+
+Emoji guidance does **not** replace non-deterministic persona. The composer should **not** be forced to attach an emoji to every surface. Emoji selection should be **optional**, context-aware, and guard-validated. Runtime emoji polish may assist weak models, but it must **not** become a fixed mapping from surface to emoji.
+
+### Correct flow
+
+1. Persona/AI composes natural text from verified facts.
+2. Persona may choose **0–1** context-appropriate emoji.
+3. Vocabulary guides suitable emoji **when** the model uses one.
+4. Guards reject spam, fixed openers, wrong context, unverified payment-success emoji, excessive density.
+5. Optional `marketing_emoji_policy` polish may suggest one emoji for weak output — **not** mandatory per surface.
+6. Deterministic emoji insertion = fallback/polish only.
+
+### Anti-pattern (reject in design reviews)
+
+```
+delivery  → always 🚚
+payment   → always 🧾
+offers    → always 🔥
+social    → always 🌷
+```
 
 ### Categories (policy §11.3)
 
@@ -191,9 +211,10 @@ The composer (and `marketing_emoji_policy` post-polish) must choose emoji **by v
 ### Composer constraints (extend `PersonaConstraints`)
 
 ```python
-emoji_context: str = "general_warmth"  # maps to §11.3 category
-max_emojis: int = 1                    # 2 only for campaign/offer surfaces
+emoji_context: str = "general_warmth"  # maps to §11.3 category — guidance, not forced output
+max_emojis: int = 1                    # 2 only for campaign/offer surfaces; 0 is valid
 allow_claim_sensitive_emoji: bool = False  # ✅ 🚚 only when facts confirm
+require_emoji: bool = False            # persona may omit emoji entirely
 ```
 
 ### Rules
@@ -208,7 +229,7 @@ allow_claim_sensitive_emoji: bool = False  # ✅ 🚚 only when facts confirm
 
 ### Alignment with existing runtime
 
-`modules/ai/postprocess/marketing_emoji_policy.py` already maps **purposes** → emoji pools. Phase 2 composer should use the same semantic buckets and expand pools per §11.3 — not duplicate 🌷 as default social marker.
+`modules/ai/postprocess/marketing_emoji_policy.py` maps **purposes** → emoji pools for **optional** post-compose polish. Phase 2 composer uses the same semantic buckets per §11.3 — vocabulary informs choice; guards validate output. **No** fixed surface→emoji injection.
 
 ---
 

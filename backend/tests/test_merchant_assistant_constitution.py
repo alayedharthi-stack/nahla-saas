@@ -41,6 +41,7 @@ from tests.constitution_helpers import (  # noqa: E402
     NON_SAUDI_ARABIC_DIALECT_TERMS,
     assert_no_non_saudi_arabic,
     accepts_context_appropriate_light_emoji,
+    accepts_warm_reply_without_emoji,
     contains_banned_template_opener,
     contains_known_customer_name_reask,
     contains_phone_number_reask,
@@ -51,6 +52,7 @@ from tests.constitution_helpers import (  # noqa: E402
     is_generic_placeholder_product_name,
     line_items_contain_only_generic_placeholders,
     looks_like_invented_payment_credential,
+    looks_like_fixed_emoji_marker_across_replies,
     payment_emoji_implies_success_without_evidence,
     prefers_saved_address_confirm,
     rejects_checkout_pressure_after_social,
@@ -408,7 +410,7 @@ class TestKnownCustomerInformationPolicy:
 
 
 class TestMarketingEmojiVocabularyPolicy:
-    """Context-aware marketing emoji — not fixed 🌷 template marker."""
+    """Context-aware marketing emoji — guidance/guards, not deterministic templates."""
 
     def test_policy_doc_has_marketing_emoji_vocabulary_section(self) -> None:
         from pathlib import Path
@@ -430,6 +432,22 @@ class TestMarketingEmojiVocabularyPolicy:
         assert "Marketing Emoji Vocabulary" in policy_text
         assert "Emoji Vocabulary by Context" in composer_text
         assert "🛒" in policy_text and "🚚" in policy_text and "🏷️" in policy_text
+        assert "replace non-deterministic persona" in policy_text
+        assert "fixed mapping from surface to emoji" in policy_text
+        assert "require_emoji: bool = False" in composer_text
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "بخير الله يسعدك",
+            "العفو يا غالي، حياك الله",
+            "أبشر، نكمل متى ما تحب",
+        ],
+    )
+    def test_warm_reply_without_emoji_is_valid(self, reply: str) -> None:
+        assert accepts_warm_reply_without_emoji(reply)
+        assert count_emojis(reply) == 0
+        assert accepts_context_appropriate_light_emoji(reply)
 
     @pytest.mark.parametrize(
         "reply",
@@ -443,6 +461,21 @@ class TestMarketingEmojiVocabularyPolicy:
     def test_context_appropriate_light_emoji_accepted(self, reply: str) -> None:
         assert accepts_context_appropriate_light_emoji(reply)
         assert count_emojis(reply) <= 2
+
+    def test_fixed_surface_emoji_mapping_detected_across_replies(self) -> None:
+        templated = [
+            "نوصل للبيت 🚚",
+            "بعد التحويل أرسل الإيصال 🚚",
+            "العرض متاح اليوم 🚚",
+        ]
+        varied = [
+            "نوصل للبيت 🚚",
+            "بعد التحويل أرسل الإيصال 🧾",
+            "حياك الله 🌷",
+            "بخير الله يسعدك",
+        ]
+        assert looks_like_fixed_emoji_marker_across_replies(templated)
+        assert not looks_like_fixed_emoji_marker_across_replies(varied)
 
     @pytest.mark.parametrize(
         "spam",
@@ -473,11 +506,11 @@ class TestMarketingEmojiVocabularyPolicy:
 
     @pytest.mark.constitution_target
     @pytest.mark.xfail(
-        reason="Phase 2: FactBoundPersonaComposer must select emoji by context surface",
+        reason="Phase 2: composer chooses optional context emoji — no fixed surface→emoji map",
         strict=False,
     )
     def test_composer_selects_emoji_by_context_not_fixed_rose(self) -> None:
-        raise NotImplementedError("pending FactBoundPersonaComposer emoji_context runtime")
+        raise NotImplementedError("pending FactBoundPersonaComposer optional emoji_context runtime")
 
 
 # ─── B. Checkout still owns true continuation ─────────────────────────────────

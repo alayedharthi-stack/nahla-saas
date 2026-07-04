@@ -553,6 +553,30 @@ Nahla AI may use **light, context-aware marketing emojis** on WhatsApp. Emoji mu
 
 `FactBoundPersonaComposer` and `marketing_emoji_policy` should draw from this vocabulary — not default to 🌷 on every reply.
 
+**Emoji vocabulary is guidance and guardrails — not a deterministic emoji template layer.** Nahla persona remains **non-deterministic**. The AI/persona layer owns natural wording and may choose **whether** to use emoji (including **zero** emoji) based on context.
+
+Emoji guidance does **not** replace non-deterministic persona. The composer should **not** be forced to attach an emoji to every surface. Emoji selection should be **optional**, context-aware, and guard-validated. Runtime emoji polish may assist weak models, but it must **not** become a fixed mapping from surface to emoji.
+
+### Correct architecture
+
+1. Persona/AI composes natural text from verified facts.
+2. Persona may choose **0–1** context-appropriate emoji.
+3. Emoji vocabulary helps the model choose suitable emojis **when needed**.
+4. Emoji guard validates: no spam; no repeated fixed opener; no wrong context; no payment-success implication without verified payment; density within limits.
+5. If the model is weak or output has no warmth, a light emoji polish layer may **suggest** one suitable emoji — optional polish only, **not** mandatory injection.
+6. Deterministic emoji insertion is **fallback/polish only**, not the product experience.
+
+### Anti-pattern: fixed surface → emoji mapping
+
+Do **not** implement runtime as:
+
+- delivery always adds 🚚
+- payment always adds 🧾
+- offers always add 🔥
+- every social reply gets 🌷
+
+That recreates a template system disguised as emoji policy.
+
 ### General warmth / friendly tone
 
 `😊` `🙂` `😄` `🤍` `🌷` `✨`
@@ -649,8 +673,9 @@ Use for: apology, appreciation, human support, escalation warmth.
 | `أكيد 🌷 تفضل...` repeated every turn | `العرض متاح اليوم 🏷️` |
 | `هلاااا 😍😍😍🔥🔥🔥🚀🚀🚀` | `نوصله لك للبيت 🚚` |
 | `✅` on pending payment | `بعد التحويل أرسل الإيصال 🧾` |
+| delivery **always** 🚚 / social **always** 🌷 | varied, optional emoji per turn |
 
-**Runtime note:** `marketing_emoji_policy` is the current post-compose polish layer. `FactBoundPersonaComposer` should adopt this vocabulary at compose time — not rely on 🌷 as a universal marker.
+**Runtime note:** `marketing_emoji_policy` is the current **optional** post-compose polish layer — not a mandatory surface→emoji mapper. `FactBoundPersonaComposer` may draw from this vocabulary when emoji fits the composed reply; **zero emoji** is valid.
 
 ---
 
