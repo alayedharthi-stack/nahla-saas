@@ -220,6 +220,17 @@ def test_guard_strips_name_slot_pressure_from_smoke_replies(
     assert "اسمك الكامل" not in result.reply
     assert "نكمل الطلب" not in result.reply
     assert "نخلص الطلب" not in result.reply
+    assert not result.reply.rstrip().endswith("بس")
+    assert not result.reply.rstrip().endswith("لكن")
+
+
+def test_guard_tail_strip_leaves_clean_social_prefix_not_dangling_bس() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "الحمد لله تمام 🌷 بس محتاج اسمك الكامل عشان نكمل الطلب بإذن الله 😊",
+        inbound_text="كيف الحال",
+    )
+    assert result.reply == "الحمد لله تمام 🌷"
+    assert "بس" not in result.reply
 
 
 def test_guard_name_only_pressure_uses_no_silence_fallback() -> None:
