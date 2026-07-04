@@ -319,10 +319,13 @@ class TestCommerceSafety:
 
 
 class TestOrderAwareGreeting:
-    def test_mid_order_greeting_is_order_aware_not_generic(self) -> None:
+    def test_mid_order_phatic_greeting_is_natural_not_checkout_pressure(self) -> None:
+        """Phatic «هلا» mid-order uses warm greet pool, not order-aware pressure (#443)."""
         from modules.ai.brain.compose.persona_template_engine import (
-            PERSONA_GREETING_ORDER_AWARE,
+            PERSONA_GREETING_COLD,
+            PERSONA_GREETING_REGREET,
             persona_reply_is_order_aware_greeting,
+            persona_reply_is_warm_greeting,
         )
         from modules.ai.brain.state.stages import STAGE_ORDERING
 
@@ -336,16 +339,82 @@ class TestOrderAwareGreeting:
             facts=_facts(),
         )
         reply = pick_persona_greeting(ctx, re_greet=True)
+        assert (
+            reply in PERSONA_GREETING_REGREET
+            or reply in PERSONA_GREETING_COLD
+            or persona_reply_is_warm_greeting(reply)
+        )
+        assert not persona_reply_is_order_aware_greeting(reply)
+        assert "نكمل طلبك" not in reply
+
+    def test_checkout_phatic_greeting_is_natural_not_payment_pressure(self) -> None:
+        """Phatic «هلا» at checkout uses warm greet pool, not payment-pressure lines (#443)."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_GREETING_COLD,
+            PERSONA_GREETING_REGREET,
+            persona_reply_is_order_aware_greeting,
+            persona_reply_is_warm_greeting,
+        )
+        from modules.ai.brain.state.stages import STAGE_CHECKOUT
+
+        state = MerchantConversationState(greeted=True, stage=STAGE_CHECKOUT)
+        ctx = BrainContext(
+            tenant_id=7,
+            customer_phone="+966555555555",
+            message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.95, slots={}, raw_message="هلا"),
+            state=state,
+            facts=_facts(),
+        )
+        reply = pick_persona_greeting(ctx, re_greet=True)
+        assert (
+            reply in PERSONA_GREETING_REGREET
+            or reply in PERSONA_GREETING_COLD
+            or persona_reply_is_warm_greeting(reply)
+        )
+        assert not persona_reply_is_order_aware_greeting(reply)
+        assert "نكمل الدفع" not in reply
+
+    def test_mid_order_non_phatic_still_uses_order_aware_pool(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Commerce-stage pool remains wired for non-phatic greet compose paths."""
+        from modules.ai.brain.compose.persona_template_engine import (
+            PERSONA_GREETING_ORDER_AWARE,
+            persona_reply_is_order_aware_greeting,
+        )
+        from modules.ai.brain.state.stages import STAGE_ORDERING
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.social_checkout_pressure_guard.is_pure_phatic_bypass_turn",
+            lambda _text: False,
+        )
+        state = MerchantConversationState(greeted=True, stage=STAGE_ORDERING)
+        ctx = BrainContext(
+            tenant_id=7,
+            customer_phone="+966555555555",
+            message="هلا",
+            intent=Intent(name=INTENT_GREETING, confidence=0.95, slots={}, raw_message="هلا"),
+            state=state,
+            facts=_facts(),
+        )
+        reply = pick_persona_greeting(ctx, re_greet=True)
         assert reply in PERSONA_GREETING_ORDER_AWARE
         assert persona_reply_is_order_aware_greeting(reply)
-        assert reply not in ("أهلًا فيك 😊", "حياك الله 🌷")
 
-    def test_checkout_greeting_uses_checkout_pool(self) -> None:
+    def test_checkout_non_phatic_still_uses_checkout_pool(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Checkout-stage pool remains wired for non-phatic greet compose paths."""
         from modules.ai.brain.compose.persona_template_engine import (
             PERSONA_GREETING_CHECKOUT_AWARE,
         )
         from modules.ai.brain.state.stages import STAGE_CHECKOUT
 
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.social_checkout_pressure_guard.is_pure_phatic_bypass_turn",
+            lambda _text: False,
+        )
         state = MerchantConversationState(greeted=True, stage=STAGE_CHECKOUT)
         ctx = BrainContext(
             tenant_id=7,
