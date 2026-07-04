@@ -111,9 +111,8 @@ def _run_v2(message: str, *, prep: dict | None = None, draft=None, conv_id: int 
 # ─── A. Social/persona should not become checkout ───────────────────────────
 
 
-@pytest.mark.constitution_target
 class TestSocialPersonaNotCheckout:
-    """Phase A — social/phatic bypass over stale checkout (target behavior)."""
+    """Phase A — social/phatic bypass over stale checkout."""
 
     @pytest.mark.parametrize(
         "message",
@@ -124,10 +123,6 @@ class TestSocialPersonaNotCheckout:
             "الله يعطيك العافية",
         ],
     )
-    @pytest.mark.xfail(
-        reason="Phase A pending: social/phatic not in explicit checkout suppression",
-        strict=False,
-    )
     def test_social_with_active_draft_not_handled_by_v2(self, message: str) -> None:
         prep = {
             "order_flow_v2_active": True,
@@ -137,23 +132,18 @@ class TestSocialPersonaNotCheckout:
         assert not result.handled, (
             f"OrderFlowV2 must not own social turn {message!r} with stale draft"
         )
-        assert "explicit_intent_suppressed" in (result.reason or "") or not result.handled
+        assert "explicit_intent_suppressed" in (result.reason or "")
 
-    @pytest.mark.xfail(
-        reason="Phase A pending: social intent detection for suppression",
-        strict=False,
-    )
     def test_social_intent_detected_for_suppression(self) -> None:
-        for message in ("كيف الحال", "انت وش اخبارك؟", "شكراً"):
-            intent = detect_explicit_non_checkout_intent(message)
-            assert intent in {"social_greeting", "social_thanks", "social_dua", "social"}, (
-                message
-            )
+        from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: PLC0415
+            detect_social_phatic_intent,
+        )
 
-    @pytest.mark.xfail(
-        reason="Phase A pending: question mark after social should not finalize order",
-        strict=False,
-    )
+        assert detect_social_phatic_intent("كيف الحال") == "social_greeting"
+        assert detect_social_phatic_intent("انت وش اخبارك؟") == "social_greeting"
+        assert detect_social_phatic_intent("شكراً") == "social_thanks"
+        assert detect_social_phatic_intent("الله يعطيك العافية") == "social_dua"
+
     def test_question_mark_after_social_not_order_finalization(self) -> None:
         prep = {"order_flow_v2_active": True, "line_items": [dict(_GENERIC_GROUNDED_ITEM)]}
         result = _run_v2("؟", prep=prep)
@@ -419,7 +409,7 @@ class TestNoSilence:
 
     @pytest.mark.constitution_target
     @pytest.mark.xfail(
-        reason="Phase A pending: كيف الحال needs social intent classification",
+        reason="Phase A pending: كيف الحال needs social intent classification in rules.match",
         strict=False,
     )
     def test_social_how_are_you_has_route(self) -> None:

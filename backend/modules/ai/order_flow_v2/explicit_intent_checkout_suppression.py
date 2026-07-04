@@ -10,8 +10,10 @@ from modules.ai.brain.types import (
     INTENT_ASK_OWNER_CONTACT,
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRODUCT,
+    INTENT_GREETING,
     INTENT_LATEST_ORDER_SUMMARY,
     INTENT_ORDER_HISTORY_COUNT,
+    INTENT_SOCIAL,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
 )
@@ -27,6 +29,10 @@ from .triggers import (
 logger = logging.getLogger("nahla.order_flow_v2.explicit_intent")
 
 PAYMENT_BARCODE_IMAGE_REQUEST = "payment_barcode_image_request"
+SOCIAL_GREETING = "social_greeting"
+SOCIAL_THANKS = "social_thanks"
+SOCIAL_DUA = "social_dua"
+SOCIAL_PHATIC = "social_phatic"
 
 _BYPASS_INTENTS = frozenset(
     {
@@ -39,7 +45,24 @@ _BYPASS_INTENTS = frozenset(
         INTENT_ASK_OWNER_CONTACT,
         PAYMENT_BARCODE_IMAGE_REQUEST,
         "catalog_browse",
+        INTENT_GREETING,
+        INTENT_SOCIAL,
+        SOCIAL_GREETING,
+        SOCIAL_THANKS,
+        SOCIAL_DUA,
+        SOCIAL_PHATIC,
     }
+)
+
+_PHATIC_GREETING_RE = re.compile(
+    r"^(?:"
+    r"كيف\s*الحال|كيف\s*حالك|كيفك|كيف\s*أحوالك|كيف\s*احوالك|"
+    r"(?:انت|أنت|انتي|أنتِ)\s*وش\s*(?:أ|ا|إ)?خبارك|"
+    r"وش\s*(?:أ|ا|إ)?خبارك|كيف\s*(?:أ|ا|إ)?خبارك|"
+    r"(?:أ|ا|إ)?خبارك\s*كيف|"
+    r"هاي|هلو|hello|hi\b|hey\b"
+    r")\s*[!.؟?]*\s*$",
+    re.I | re.UNICODE,
 )
 
 _SHORT_AFFIRMATION_RE = re.compile(
@@ -134,6 +157,63 @@ def is_payment_barcode_image_request(message: str) -> bool:
         return False
 
 
+def detect_social_phatic_intent(message: str) -> str:
+    """Return a bypass key when the turn is social/phatic — not checkout continuation."""
+    text = str(message or "").strip()
+    if not text:
+        return ""
+
+    try:
+        from .triggers import is_greeting_message  # noqa: PLC0415
+
+        if is_greeting_message(text):
+            return INTENT_GREETING
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional greeting probe
+        pass
+
+    if _PHATIC_GREETING_RE.match(text):
+        return SOCIAL_GREETING
+
+    try:
+        from modules.ai.brain.intent.social_classifier import (  # noqa: PLC0415
+            SOCIAL_BASMALA,
+            SOCIAL_BLESSING,
+            SOCIAL_PROPHET_INVOCATION,
+            SOCIAL_THANKS as CLASSIFIER_SOCIAL_THANKS,
+            classify_social,
+        )
+
+        social = classify_social(text)
+        if social is not None:
+            category = str(getattr(social, "category", "") or "")
+            if category == CLASSIFIER_SOCIAL_THANKS:
+                return SOCIAL_THANKS
+            if category in {
+                SOCIAL_BLESSING,
+                SOCIAL_BASMALA,
+                SOCIAL_PROPHET_INVOCATION,
+            }:
+                return SOCIAL_DUA
+            return INTENT_SOCIAL
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional social classifier
+        pass
+
+    try:
+        from modules.ai.brain.intent.rules import match as match_intent  # noqa: PLC0415
+
+        matched = match_intent(text)
+        if matched is not None and float(getattr(matched, "confidence", 0) or 0) >= 0.85:
+            name = str(getattr(matched, "name", "") or "")
+            if name == INTENT_GREETING:
+                return INTENT_GREETING
+            if name == INTENT_SOCIAL:
+                return INTENT_SOCIAL
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional intent match
+        pass
+
+    return ""
+
+
 def is_explicit_payment_info_request(
     message: str,
     *,
@@ -174,6 +254,10 @@ def detect_explicit_non_checkout_intent(
 
     if is_checkout_payment_method_answer(text, prep, missing_fields):
         return ""
+
+    social_phatic = detect_social_phatic_intent(text)
+    if social_phatic:
+        return social_phatic
 
     if is_active_checkout_draft_order_number_question(text):
         return ""
@@ -394,7 +478,12 @@ def log_checkout_suppressed_by_explicit_intent(
 __all__ = [
     "CheckoutSuppressionDecision",
     "PAYMENT_BARCODE_IMAGE_REQUEST",
+    "SOCIAL_DUA",
+    "SOCIAL_GREETING",
+    "SOCIAL_PHATIC",
+    "SOCIAL_THANKS",
     "detect_explicit_non_checkout_intent",
+    "detect_social_phatic_intent",
     "evaluate_stale_checkout_suppression",
     "is_active_checkout_draft_order_number_question",
     "is_checkout_continuation_turn",

@@ -24,6 +24,16 @@ _ADDRESS_CLUE_RE = re.compile(
     re.I | re.UNICODE,
 )
 _ARABIC_TEXT_RE = re.compile(r"^[\u0600-\u06FF\s]+$", re.UNICODE)
+_PHATIC_NOT_NAME_RE = re.compile(
+    r"^(?:"
+    r"كيف\s*الحال|كيف\s*حالك|كيفك|كيف\s*أحوالك|كيف\s*احوالك|"
+    r"(?:انت|أنت|انتي|أنتِ)\s*وش\s*(?:أ|ا|إ)?خبارك|"
+    r"وش\s*(?:أ|ا|إ)?خبارك|كيف\s*(?:أ|ا|إ)?خبارك|"
+    r"شكرا|شكراً|مشكور|الله\s*يعطيك\s*العافيه|الله\s*يعطيك\s*العافية|"
+    r"الله\s*يعافيك|جزاك\s*الله\s*خير|بارك\s*الله\s*فيك"
+    r")\s*[!.؟?]*\s*$",
+    re.I | re.UNICODE,
+)
 
 
 def _city_and_hint_from_text(text: str) -> Tuple[str, str]:
@@ -87,9 +97,11 @@ def _stored_customer_name(prep: Dict[str, Any]) -> str:
 
 
 def is_explicit_customer_name_turn(message: str) -> bool:
-    """Two-token Arabic full-name turn (not payment/city)."""
+    """Two-token Arabic full-name turn (not payment/city/phatic)."""
     text = str(message or "").strip()
     if not text or payment_attempt(text):
+        return False
+    if _PHATIC_NOT_NAME_RE.match(text):
         return False
     if not _ARABIC_SHORT_TEXT_RE.match(text):
         return False
