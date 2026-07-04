@@ -1148,6 +1148,21 @@ class DefaultComposer:
 
                 result.data["chosen_path"] = "support_complaint_refund"
                 return COMPLAINT_INTAKE_REPLY_AR
+            from ..persona.integration import (  # noqa: PLC0415
+                try_enforce_phatic_llm_persona_compose,
+            )
+
+            _phatic_persona = await try_enforce_phatic_llm_persona_compose(
+                ctx,
+                decision=decision,
+                action_result=result,
+            )
+            if _phatic_persona and (_phatic_persona.text or "").strip():
+                return self._apply_established_greeting_etiquette(
+                    _phatic_persona.text,
+                    ctx,
+                    decision,
+                )
             text = await self._llm_compose(ctx, result, decision=decision)
             if _topic == "social_persona_ack":
                 text = self._social_persona_emergency_fallback_if_needed(

@@ -101,6 +101,27 @@ def merge_persona_compose_into_extra_metadata(
     return merged
 
 
+async def try_enforce_phatic_llm_persona_compose(
+    ctx: BrainContext,
+    *,
+    decision: Any = None,
+    action_result: Optional[Any] = None,
+    db: Any = None,
+) -> Optional[PersonaComposeResult]:
+    """Intercept ACTION_LLM_REPLY phatic turns for test-mode FactBoundPersonaComposer."""
+    from .surface_resolver import resolve_phatic_llm_surface  # noqa: PLC0415
+
+    surface = resolve_phatic_llm_surface(ctx, decision=decision)
+    if not surface:
+        return None
+    return await try_enforce_persona_compose(
+        ctx,
+        surface=surface,
+        action_result=action_result,
+        db=db,
+    )
+
+
 async def try_enforce_persona_compose(
     ctx: BrainContext,
     *,
