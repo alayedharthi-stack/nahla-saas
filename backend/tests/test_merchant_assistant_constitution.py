@@ -38,10 +38,17 @@ from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # n
 from modules.ai.order_flow_v2.owner import try_handle_order_flow_v2  # noqa: E402
 from tests.constitution_helpers import (  # noqa: E402
     CONSTITUTION_BANNED_CUSTOMER_OPENERS,
+    NON_SAUDI_ARABIC_DIALECT_TERMS,
+    assert_no_non_saudi_arabic,
     contains_banned_template_opener,
+    find_non_saudi_arabic_terms,
     is_generic_placeholder_product_name,
     line_items_contain_only_generic_placeholders,
     looks_like_invented_payment_credential,
+    rejects_checkout_pressure_after_social,
+    rejects_social_support_bot_phrase,
+    social_replies_are_non_deterministic,
+    try_compose_persona_samples,
 )
 
 _GENERIC_GROUNDED_ITEM = {
@@ -455,3 +462,159 @@ class TestAntiTemplatePolicy:
         body = policy.read_text(encoding="utf-8")
         assert "template engine" in body.lower()
         assert "FactBoundPersonaComposer" in body
+
+
+# ─── I. Saudi dialect policy ──────────────────────────────────────────────────
+
+
+class TestSaudiDialectPolicyHelpers:
+    def test_non_saudi_terms_catalog_matches_policy(self) -> None:
+        assert "إزاي" in NON_SAUDI_ARABIC_DIALECT_TERMS
+        assert "شو" in NON_SAUDI_ARABIC_DIALECT_TERMS
+
+    def test_find_non_saudi_arabic_detects_egyptian(self) -> None:
+        assert "إزاي" in find_non_saudi_arabic_terms("إزاي أطلب؟")
+        assert "عايز" in find_non_saudi_arabic_terms("عايز حذاء")
+
+    def test_find_non_saudi_arabic_detects_levantine(self) -> None:
+        assert "شو" in find_non_saudi_arabic_terms("شو عندكم؟")
+        assert "كيفك" in find_non_saudi_arabic_terms("كيفك اليوم")
+
+    def test_assert_no_non_saudi_passes_saudi_sample(self) -> None:
+        assert_no_non_saudi_arabic("أبشر يا غالي، عندنا حذاء رياضي أبيض")
+        assert_no_non_saudi_arabic("تمام، وش تحتاج؟")
+
+    def test_english_not_scanned_for_saudi_dialect_terms(self) -> None:
+        # English policy is separate — dialect helper is Arabic-surface only.
+        assert_no_non_saudi_arabic("Sure, how can I help with your order?")
+
+    def test_policy_doc_has_language_and_dialect_section(self) -> None:
+        from pathlib import Path
+
+        policy = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "architecture"
+            / "nahla-ai-merchant-assistant-policy.md"
+        )
+        body = policy.read_text(encoding="utf-8")
+        assert "## 11.1 Language and Dialect Policy" in body
+        assert "Saudi Arabic" in body
+        assert "## 11.2 Social Persona Policy" in body
+
+
+class TestSaudiDialectPolicyTargets:
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_arabic_social_output_no_non_saudi_dialect(self) -> None:
+        replies = try_compose_persona_samples("social_greeting", "كيف الحال")
+        for text in replies:
+            assert_no_non_saudi_arabic(text)
+
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_arabic_operational_output_no_non_saudi_dialect(self) -> None:
+        replies = try_compose_persona_samples(
+            "payment_media_intro",
+            "أرسل باركود الراجحي",
+        )
+        for text in replies:
+            assert_no_non_saudi_arabic(text)
+
+
+# ─── J. Social non-determinism targets ────────────────────────────────────────
+
+
+class TestSocialNonDeterminismHelpers:
+    def test_banned_support_bot_openers_flagged(self) -> None:
+        assert rejects_social_support_bot_phrase("كيف أقدر أساعدك اليوم؟")
+        assert rejects_social_support_bot_phrase("تم استلام رسالتك، شكراً")
+
+    def test_saudi_social_reply_not_flagged_as_support_bot(self) -> None:
+        assert not rejects_social_support_bot_phrase("بخير الله يسعدك، وش تحتاج؟")
+
+    @pytest.mark.parametrize(
+        ("inbound", "bad_reply"),
+        [
+            ("كيف الحال", "بخير، وش طريقة الدفع المناسبة لك؟"),
+            ("الله يعطيك العافية", "الله يعافيك، أرسل عنوانك"),
+        ],
+    )
+    def test_checkout_pressure_after_pure_social_detected(
+        self, inbound: str, bad_reply: str
+    ) -> None:
+        assert rejects_checkout_pressure_after_social(bad_reply, inbound)
+
+    def test_non_determinism_helper_requires_variation(self) -> None:
+        assert social_replies_are_non_deterministic(
+            ["أبشر، بخير", "تمام الحمد لله"]
+        )
+        assert not social_replies_are_non_deterministic(
+            ["بخير الله يسعدك", "بخير الله يسعدك"]
+        )
+
+    def test_composer_design_doc_has_language_policy(self) -> None:
+        from pathlib import Path
+
+        design = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "architecture"
+            / "fact-bound-persona-composer-design.md"
+        )
+        body = design.read_text(encoding="utf-8")
+        assert "language_policy" in body
+        assert 'dialect: str = "saudi_arabic"' in body
+        assert "Non-determinism requirement" in body
+
+
+class TestSocialNonDeterminismTargets:
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_social_checkin_not_always_same_phrase(self) -> None:
+        replies = try_compose_persona_samples("social_greeting", "كيف الحال")
+        assert social_replies_are_non_deterministic(replies)
+
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_thanks_dua_not_fixed_global_string(self) -> None:
+        thanks = try_compose_persona_samples("thanks", "شكراً")
+        dua = try_compose_persona_samples("dua", "الله يعطيك العافية")
+        assert social_replies_are_non_deterministic(thanks)
+        assert social_replies_are_non_deterministic(dua)
+
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_social_output_rejects_banned_support_bot_openers(self) -> None:
+        for inbound in ("كيف الحال", "شكراً", "الله يعطيك العافية"):
+            for text in try_compose_persona_samples("social_greeting", inbound):
+                assert not rejects_social_support_bot_phrase(text)
+
+    @pytest.mark.persona_policy
+    @pytest.mark.xfail(
+        reason="pending FactBoundPersonaComposer runtime",
+        strict=False,
+    )
+    def test_social_output_rejects_checkout_pressure(self) -> None:
+        cases = (
+            ("كيف الحال", "social_greeting"),
+            ("الله يعطيك العافية", "dua"),
+        )
+        for inbound, surface in cases:
+            for text in try_compose_persona_samples(surface, inbound):
+                assert not rejects_checkout_pressure_after_social(text, inbound)
