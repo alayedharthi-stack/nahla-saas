@@ -736,6 +736,7 @@ Early payment bypass (`whatsapp_webhook.py`) short-circuits Brain and uses `paym
 
 - `AGENTS.md` — engineering doctrine
 - `docs/architecture/fact-bound-persona-composer-design.md` — persona composer design (Phase 1)
+- `docs/architecture/fact-bound-persona-composer-runtime-rollout.md` — Phase 2 runtime rollout plan
 - `backend/tests/test_merchant_assistant_constitution.py` — automated constitution regressions
 - `backend/modules/ai/checkout_authority/DESIGN.md` — checkout ownership design
 - `docs/audits/customer-commerce-ledger-phase1-production-pass-2026-07-03.md` — ledger Phase 1 scope
