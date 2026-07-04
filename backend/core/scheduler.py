@@ -1279,9 +1279,7 @@ async def _refresh_all_salla_tokens() -> None:
 
     from core.database import SessionLocal  # noqa: PLC0415
     from models import Integration  # noqa: PLC0415
-
-    client_id     = _os.environ.get("SALLA_CLIENT_ID", "")
-    client_secret = _os.environ.get("SALLA_CLIENT_SECRET", "")
+    from core.salla_oauth_credentials import resolve_salla_oauth_client  # noqa: PLC0415
 
     try:
         db = SessionLocal()
@@ -1347,9 +1345,12 @@ async def _refresh_all_salla_tokens() -> None:
                 skipped += 1
                 continue
 
+            client_id, client_secret, client_kind = resolve_salla_oauth_client(cfg)
             if not client_id or not client_secret:
                 logger.warning(
-                    "[Salla Token Refresh] SALLA_CLIENT_ID/SECRET not configured — skipping all",
+                    "[Salla Token Refresh] missing oauth env client_kind=%s — "
+                    "tenant=%s store=%s",
+                    client_kind, intg.tenant_id, store_id,
                 )
                 skipped += 1
                 continue
@@ -1406,8 +1407,8 @@ async def _refresh_all_salla_tokens() -> None:
 
             due += 1
             logger.info(
-                "[SALLA TOKEN] refresh due | tenant=%s store=%s reason=%s",
-                intg.tenant_id, store_id, refresh_reason,
+                "[SALLA TOKEN] refresh due | tenant=%s store=%s reason=%s client_kind=%s",
+                intg.tenant_id, store_id, refresh_reason, client_kind,
             )
 
             # ── Acquire two-layer lock before touching OAuth endpoint ─────────
