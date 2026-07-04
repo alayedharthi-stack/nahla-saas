@@ -1042,6 +1042,10 @@ def _serialise_order(
         "parsed_receipt_fields": order_meta.get("parsed_receipt_fields")
         or (order_meta.get("payment_receipt_metadata") or {}).get("parsed_receipt_fields"),
     }
+    salla_amounts = order_meta.get("salla_amounts")
+    if isinstance(salla_amounts, dict) and salla_amounts:
+        payload["salla_amounts"] = salla_amounts
+        payload["currency"] = salla_amounts.get("currency") or "SAR"
 
     if detailed:
         payload["line_items"] = detailed_items
@@ -1239,7 +1243,7 @@ async def list_orders(
     today           = now.date()
     rows.sort(
         key=lambda o: (
-            _read_last_updated_at(o, created_at=_read_created_at(o, fallback=now)),
+            _read_created_at(o, fallback=now),
             int(getattr(o, "id", 0) or 0),
         ),
         reverse=True,

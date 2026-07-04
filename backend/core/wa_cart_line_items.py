@@ -115,6 +115,16 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
         item["variant_id"] = variant_id
     for price_key in ("unit_price", "price"):
         if raw.get(price_key) is not None:
+            if isinstance(raw.get(price_key), dict):
+                from core.salla_order_fidelity import extract_salla_money_amount  # noqa: PLC0415
+
+                parsed = extract_salla_money_amount(raw.get(price_key))
+                if parsed is not None:
+                    try:
+                        item[price_key] = float(parsed)
+                        continue
+                    except (TypeError, ValueError):
+                        pass
             try:
                 item[price_key] = float(
                     str(raw.get(price_key)).replace("ر.س", "").replace(",", "").split()[0]

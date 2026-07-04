@@ -478,13 +478,22 @@ def _extract_amount_string(value: Any) -> str:
     Salla sometimes sends monetary fields as:
       • a plain number/string  → return as-is
       • a dict {"amount": 100, "currency": "SAR"} → extract amount
+      • an ``amounts`` container → extract grand total
 
     Always returns a string safe for the VARCHAR `total` column.
     """
-    if isinstance(value, dict):
-        amount = value.get("amount") or value.get("value") or ""
-        return str(amount)
-    return str(value) if value is not None else ""
+    from core.salla_order_fidelity import (  # noqa: PLC0415
+        extract_salla_grand_total,
+        extract_salla_money_amount,
+    )
+
+    if isinstance(value, dict) and (
+        "total" in value or "sub_total" in value or "tax" in value or "shipping" in value
+    ):
+        nested = extract_salla_grand_total({"amounts": value})
+        return nested or ""
+    amt = extract_salla_money_amount(value)
+    return amt if amt is not None else (str(value) if value is not None else "")
 
 
 def _normalise_order(raw: Any) -> Dict:
@@ -507,7 +516,16 @@ def _normalise_order(raw: Any) -> Dict:
             customer_info["mobile"] = normalized_phone
             customer_info["phone"] = normalized_phone
     order_dt = _extract_order_datetime(raw)
-    raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amounts", {})
+    from core.salla_order_fidelity import (  # noqa: PLC0415
+        apply_salla_order_normalisation,
+        extract_salla_grand_total,
+        looks_like_salla_order,
+    )
+
+    if looks_like_salla_order(raw):
+        raw_total = extract_salla_grand_total(raw)
+    else:
+        raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amounts", {})
 
     external_id = str(raw.get("id", raw.get("external_id", ""))).strip()
     # Human-visible order number — prefer the platform's explicit
@@ -544,7 +562,7 @@ def _normalise_order(raw: Any) -> Dict:
         or ""
     ).strip().lower()
 
-    return {
+    result = {
         "external_id":           external_id,
         "external_order_number": external_order_number,
         "status":                _extract_status_string(raw.get("status"), fallback="unknown"),
@@ -558,6 +576,33 @@ def _normalise_order(raw: Any) -> Dict:
         "created_at":            order_dt.isoformat() if order_dt else raw.get("created_at"),
         "payment_method":        payment_method,
     }
+    return apply_salla_order_normalisation(raw, result)
+
+
+def _merge_order_extra_metadata(
+    existing: Optional[Dict[str, Any]],
+    normalised: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge Salla fidelity metadata without clobbering merchant-only fields."""
+    merged = dict(existing or {})
+    for key in ("created_at", "payment_method"):
+        val = normalised.get(key)
+        if val:
+            merged[key] = val
+    salla_meta = normalised.get("salla_metadata") or {}
+    for key in (
+        "created_at",
+        "salla_created_at",
+        "salla_date",
+        "salla_timezone",
+        "salla_amounts",
+        "payment_method",
+        "shipping_method",
+        "tracking_number",
+    ):
+        if salla_meta.get(key) is not None:
+            merged[key] = salla_meta[key]
+    return merged
 
 
 def _flatten_salla_datetime(value: Any) -> str:
@@ -1238,10 +1283,9 @@ class StoreSyncService:
                 if normalised["customer_name"]:
                     existing.customer_name = normalised["customer_name"]
                 existing.source = adapter_source
-                existing.extra_metadata = {
-                    **(existing.extra_metadata or {}),
-                    "created_at": normalised.get("created_at"),
-                }
+                existing.extra_metadata = _merge_order_extra_metadata(
+                    existing.extra_metadata, normalised,
+                )
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
                 updated += 1
@@ -1258,10 +1302,9 @@ class StoreSyncService:
                     checkout_url          = normalised["checkout_url"],
                     is_abandoned          = normalised["is_abandoned"],
                     source                = adapter_source,
-                    extra_metadata        = {
-                        "created_at":     normalised.get("created_at"),
-                        "payment_method": normalised.get("payment_method") or "",
-                    },
+                    extra_metadata        = _merge_order_extra_metadata(
+                        None, normalised,
+                    ),
                 )
                 self.db.add(new_row)
                 self.db.flush()  # assign PK so we can reference new_row.id below
@@ -2355,10 +2398,9 @@ class StoreSyncService:
             if normalised["customer_name"]:
                 order_row.customer_name = normalised["customer_name"]
             order_row.source = webhook_source
-            order_row.extra_metadata = {
-                **(order_row.extra_metadata or {}),
-                "created_at": normalised.get("created_at"),
-            }
+            order_row.extra_metadata = _merge_order_extra_metadata(
+                order_row.extra_metadata, normalised,
+            )
             from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
             stamp_order_delivered_at_if_needed(order_row, previous_status=prev_status)
             try:
@@ -2379,10 +2421,9 @@ class StoreSyncService:
                 checkout_url          = normalised["checkout_url"],
                 is_abandoned          = normalised["is_abandoned"],
                 source                = webhook_source,
-                extra_metadata        = {
-                    "created_at":     normalised.get("created_at"),
-                    "payment_method": normalised.get("payment_method") or "",
-                },
+                extra_metadata        = _merge_order_extra_metadata(
+                    None, normalised,
+                ),
             )
             self.db.add(order_row)
             from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
@@ -2416,6 +2457,9 @@ class StoreSyncService:
                 if normalised["customer_name"]:
                     order_row.customer_name = normalised["customer_name"]
                 order_row.source = webhook_source
+                order_row.extra_metadata = _merge_order_extra_metadata(
+                    order_row.extra_metadata, normalised,
+                )
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(order_row, previous_status=prev_status)
                 try:
