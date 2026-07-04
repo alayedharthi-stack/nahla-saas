@@ -22,6 +22,17 @@ def parse_unit_price(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         amt = float(value)
         return amt if amt > 0 else None
+    if isinstance(value, dict):
+        from core.salla_order_fidelity import extract_salla_money_amount  # noqa: PLC0415
+
+        parsed = extract_salla_money_amount(value)
+        if parsed is None:
+            return None
+        try:
+            amt = float(str(parsed).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+        return amt if amt > 0 else None
     text = str(value).replace("ر.س", "").replace("SAR", "").replace(",", "").strip()
     if not text:
         return None
