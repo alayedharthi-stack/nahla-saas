@@ -1,7 +1,7 @@
 # FactBoundPersonaComposer — Design Audit
 
 **Status:** Phase 1 design (no runtime behavior)  
-**Policy:** `docs/architecture/nahla-ai-merchant-assistant-policy.md` §11–§12  
+**Policy:** `docs/architecture/nahla-ai-merchant-assistant-policy.md` §11–§11.2, §12  
 **Companion:** `AGENTS.md`
 
 ---
@@ -58,12 +58,50 @@ class PersonaConstraints:
     max_chars: int = 220
     allow_emoji: bool = True
     tone: str = "saudi_merchant_short"
+    language_policy: str = "dominant_customer_language"
+    dialect: str = "saudi_arabic"  # Arabic surfaces only; English uses language="en"
+    language: str = "ar"  # "ar" | "en" — set from inbound dominance
     banned_claims: frozenset[str] = frozenset()  # iban, account_number, payment_link, ...
-    banned_phrases: frozenset[str] = frozenset() # support-bot openers
+    banned_phrases: frozenset[str] = frozenset() # support-bot openers + non-Saudi dialect
     guard_requirements: frozenset[str] = frozenset({"payment_credential"})
 ```
 
-### 2.3 Output
+### 2.3 Language policy
+
+| Field | Arabic customer | English customer |
+|-------|-----------------|------------------|
+| `language` | `ar` | `en` |
+| `dialect` | `saudi_arabic` | *(not applied)* |
+| `tone` | `saudi_merchant_short` | `professional_natural` |
+
+**`language_policy` rules:**
+
+- Arabic inbound → Saudi Arabic phrasing (`dialect=saudi_arabic`).
+- English inbound → natural professional English (`language=en`); no Saudi expressions forced into English.
+- Mixed inbound → dominant language; Arabic portions remain Saudi when Arabic is used.
+
+**Banned phrase guard (non-Saudi Arabic — extend in runtime):**
+
+`شنو`, `بتاعك`, `إزاي`, `عامل إيه`, `دلوقتي`, `عايز`, `كيفك`, `شو`, `هلأ`, `بدك`
+
+Plus support-bot openers from policy §11.1 (`كيف أقدر أساعدك اليوم؟`, `تم استلام رسالتك`, …).
+
+**Social surface examples** in policy and tests are **illustrative**, not fixed outputs.
+
+### 2.4 Non-determinism requirement
+
+The same verified facts bundle may produce **different safe wording** across compose calls.
+
+| Invariant | Must hold |
+|-----------|-----------|
+| Operational facts | Unchanged |
+| Allowed action | Unchanged |
+| Asset / method selection | Unchanged |
+| Exact customer-facing string | **May vary** when persona compose succeeds |
+
+Deterministic fallback strings are **not** the product target — only the safety net.
+
+### 2.5 Output
 
 ```python
 @dataclass(frozen=True)
