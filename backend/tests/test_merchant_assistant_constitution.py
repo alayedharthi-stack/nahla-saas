@@ -196,7 +196,7 @@ class TestSocialContextBleedCleanup:
             message="السلام عليكم",
         )
 
-    def test_guard_strips_checkout_pressure_from_social_reply(self) -> None:
+    def test_guard_strips_checkout_pressure_from_mixed_social_reply(self) -> None:
         from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
             apply_social_checkout_pressure_guard,
         )
@@ -206,6 +206,19 @@ class TestSocialContextBleedCleanup:
             inbound_text="شكراً",
         )
         assert result.stripped
+        assert not rejects_checkout_pressure_after_social(result.reply, "شكراً")
+
+    def test_guard_all_pressure_uses_fallback_not_empty(self) -> None:
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            apply_social_checkout_pressure_guard,
+        )
+
+        result = apply_social_checkout_pressure_guard(
+            "أرسل عنوانك",
+            inbound_text="شكراً",
+        )
+        assert result.reply.strip()
+        assert result.empty_fallback
         assert not rejects_checkout_pressure_after_social(result.reply, "شكراً")
 
     def test_checkout_continuation_yes_still_owned_with_active_draft(self) -> None:

@@ -73,6 +73,57 @@ def test_guard_strips_payment_after_thanks_inbound() -> None:
     assert "الدفع" not in result.reply
 
 
+def test_guard_all_pressure_reply_uses_no_silence_fallback() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "أرسل عنوانك",
+        inbound_text="شكراً",
+    )
+    assert result.stripped
+    assert result.empty_fallback
+    assert result.reply.strip()
+    assert "أرسل عنوان" not in result.reply
+
+
+def test_guard_all_pressure_dua_inbound_non_empty() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "وش طريقة الدفع المناسبة لك؟",
+        inbound_text="الله يعطيك العافية",
+    )
+    assert result.stripped
+    assert result.reply.strip()
+    assert "الدفع" not in result.reply
+
+
+@pytest.mark.parametrize(
+    ("reply", "inbound"),
+    [
+        ("أرسل عنوانك", "الله يعطيك العافية"),
+        ("وش طريقة الدفع المناسبة لك؟", "شكراً"),
+        ("نكمل الدفع؟", "كيف الحال"),
+    ],
+)
+def test_empty_strip_uses_emergency_fallback_not_silence(reply: str, inbound: str) -> None:
+    """Full checkout-pressure-only replies must not become reply_len=0 on phatic turns."""
+    result = apply_social_checkout_pressure_guard(reply, inbound_text=inbound)
+    assert result.stripped
+    assert result.empty_fallback
+    assert result.reply.strip()
+    assert not is_checkout_pressure_line(result.reply)
+    assert "أرسل عنوان" not in result.reply
+    assert "الدفع" not in result.reply
+    assert "نكمل الدفع" not in result.reply
+
+
+def test_emergency_fallback_is_not_checkout_pressure() -> None:
+    result = apply_social_checkout_pressure_guard(
+        "أرسل عنوانك",
+        inbound_text="شكراً",
+    )
+    assert result.empty_fallback
+    assert result.reason == "phatic_bypass_checkout_pressure_empty_fallback"
+    assert "منتج" not in result.reply
+
+
 def test_guard_ignores_non_phatic_inbound() -> None:
     result = apply_social_checkout_pressure_guard(
         "تمام، وش طريقة الدفع المناسبة لك؟",
