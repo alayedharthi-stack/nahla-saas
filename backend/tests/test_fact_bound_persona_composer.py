@@ -16,6 +16,7 @@ from modules.ai.brain.persona.integration import (
     merge_persona_compose_into_extra_metadata,
     should_enforce_persona_compose,
     try_enforce_persona_compose,
+    try_enforce_phatic_llm_persona_compose,
 )
 from modules.ai.brain.persona.policy_terms import (
     find_malformed_saudi_ka_suffix_tokens,
@@ -23,12 +24,16 @@ from modules.ai.brain.persona.policy_terms import (
 )
 from modules.ai.brain.persona.surface_resolver import (
     resolve_greet_surface,
+    resolve_phatic_llm_surface,
     resolve_social_surface,
 )
+from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
 from modules.ai.brain.types import (
     BrainContext,
     CommerceFacts,
     INTENT_GENERAL,
+    ActionResult,
+    Decision,
     Intent,
     MerchantConversationState,
 )
@@ -432,3 +437,212 @@ class TestMalformedSaudiKaSuffix:
         assert "أخباركا" not in guard.text
         assert "حالك" in guard.text
         assert "أخبارك" in guard.text
+
+
+def _llm_social_decision(
+    *,
+    message: str,
+    social_category: str = "wellbeing_check",
+) -> Decision:
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "persona_social",
+            "social_category": social_category,
+            "block_commerce_escalation": True,
+        },
+        reason="test phatic llm",
+        confidence=0.9,
+    )
+
+
+def _enabled_ai_settings() -> dict:
+    return {
+        "persona_composer_enabled": True,
+        "store_ai_mode": STORE_AI_MODE_TEST,
+        "ai_test_allowed_numbers": ["966542980511"],
+    }
+
+
+class TestPhaticLlmSurfaceResolver:
+    @pytest.mark.parametrize(
+        "message,category,expected",
+        [
+            ("السلام عليكم", "greeting", "social_greeting"),
+            ("كيف الحال", "wellbeing_check", "social_checkin"),
+            ("شكراً", "thanks", "thanks"),
+            ("الله يعطيك العافية", "blessing", "thanks"),
+            ("انت وش أخبارك؟", "wellbeing_check", "social_checkin"),
+        ],
+    )
+    def test_resolves_phase2_surfaces_for_phatic_llm(
+        self,
+        message: str,
+        category: str,
+        expected: str,
+    ) -> None:
+        ctx = _ctx(message=message, ai_settings=_enabled_ai_settings())
+        surface = resolve_phatic_llm_surface(
+            ctx,
+            decision=_llm_social_decision(message=message, social_category=category),
+        )
+        assert surface == expected
+
+    @pytest.mark.parametrize(
+        "message",
+        ["نعم", "اعتمد", "تحويل بنكي", "اسمي هشام"],
+    )
+    def test_checkout_continuation_skips_phatic_surface(self, message: str) -> None:
+        ctx = _ctx(message=message, ai_settings=_enabled_ai_settings())
+        surface = resolve_phatic_llm_surface(ctx, decision=_llm_social_decision(message=message))
+        assert surface is None
+
+    def test_non_test_mode_gate_blocks_enforce(self) -> None:
+        ctx = _ctx(
+            message="كيف الحال",
+            ai_settings={
+                "persona_composer_enabled": True,
+                "store_ai_mode": "on",
+                "ai_test_allowed_numbers": ["966542980511"],
+            },
+        )
+        assert resolve_phatic_llm_surface(ctx, decision=_llm_social_decision(message="كيف الحال"))
+        assert not should_enforce_persona_compose(ctx, surface="social_checkin")
+
+    def test_composer_disabled_skips_enforce(self) -> None:
+        ctx = _ctx(
+            message="كيف الحال",
+            ai_settings={
+                "persona_composer_enabled": False,
+                "store_ai_mode": STORE_AI_MODE_TEST,
+                "ai_test_allowed_numbers": ["966542980511"],
+            },
+        )
+        assert resolve_phatic_llm_surface(ctx, decision=_llm_social_decision(message="كيف الحال"))
+        assert not should_enforce_persona_compose(ctx, surface="social_checkin")
+
+
+class TestPhaticLlmPersonaComposeRouting:
+    def test_phatic_llm_path_persists_metadata(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="بخير الله يسعدك",
+            source="persona_llm",
+            surface="social_checkin",
+            facts_hash="stub-hash",
+            guard_passed=True,
+            language="ar",
+            dialect="saudi",
+        )
+
+        async def _fake_compose(_self, _bundle, ctx=None, db=None):
+            return stub_result
+
+        async def _run() -> None:
+            ctx = _ctx(message="كيف الحال", ai_settings=_enabled_ai_settings())
+            action = ActionResult(success=True, data={})
+            decision = _llm_social_decision(message="كيف الحال")
+            with patch.object(FactBoundPersonaComposer, "compose", _fake_compose):
+                out = await try_enforce_phatic_llm_persona_compose(
+                    ctx,
+                    decision=decision,
+                    action_result=action,
+                )
+            assert out is not None
+            assert action.data.get("chosen_path") == "fact_bound_persona_compose"
+            pc = action.data.get("persona_compose") or {}
+            assert pc.get("surface") == "social_checkin"
+            assert pc.get("source") == "persona_llm"
+            assert pc.get("guard_passed") is True
+            assert pc.get("tenant_id") == 33
+            assert pc.get("allowlist_result") == "allowed"
+
+        asyncio.run(_run())
+
+    def test_non_allowlisted_phone_skips_enforce(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _ctx(
+                phone="966500000099",
+                message="كيف الحال",
+                ai_settings=_enabled_ai_settings(),
+            )
+            action = ActionResult(success=True, data={})
+            out = await try_enforce_phatic_llm_persona_compose(
+                ctx,
+                decision=_llm_social_decision(message="كيف الحال"),
+                action_result=action,
+            )
+            assert out is None
+            assert "chosen_path" not in action.data
+
+        asyncio.run(_run())
+
+    def test_responder_llm_reply_uses_fact_bound_before_llm(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="بخير الله يسعدك",
+            source="persona_llm",
+            surface="social_checkin",
+            facts_hash="stub-hash",
+            guard_passed=True,
+        )
+
+        async def _run() -> None:
+            ctx = _ctx(message="كيف الحال", ai_settings=_enabled_ai_settings())
+            result = ActionResult(success=True, data={})
+            decision = _llm_social_decision(message="كيف الحال")
+            composer = DefaultComposer()
+            with patch.object(
+                FactBoundPersonaComposer,
+                "compose",
+                AsyncMock(return_value=stub_result),
+            ):
+                with patch.object(
+                    DefaultComposer,
+                    "_llm_compose",
+                    AsyncMock(return_value="should-not-run"),
+                ) as llm_mock:
+                    text = await composer.compose(decision, result, ctx)
+            assert text == "بخير الله يسعدك"
+            assert result.data.get("chosen_path") == "fact_bound_persona_compose"
+            llm_mock.assert_not_called()
+
+        asyncio.run(_run())
+
+    def test_responder_llm_reply_falls_back_to_llm_when_gate_off(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _ctx(
+                message="كيف الحال",
+                ai_settings={
+                    "persona_composer_enabled": False,
+                    "store_ai_mode": STORE_AI_MODE_TEST,
+                    "ai_test_allowed_numbers": ["966542980511"],
+                },
+            )
+            result = ActionResult(success=True, data={})
+            decision = _llm_social_decision(message="كيف الحال")
+            composer = DefaultComposer()
+            with patch.object(
+                DefaultComposer,
+                "_llm_compose",
+                AsyncMock(return_value="legacy llm reply"),
+            ) as llm_mock:
+                text = await composer.compose(decision, result, ctx)
+            assert text == "legacy llm reply"
+            assert "fact_bound_persona_compose" not in str(result.data.get("chosen_path") or "")
+            llm_mock.assert_called_once()
+
+        asyncio.run(_run())

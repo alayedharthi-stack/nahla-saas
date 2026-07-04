@@ -1,7 +1,7 @@
 """Map Brain compose paths to FactBoundPersonaComposer surfaces."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from ..types import BrainContext
 from .facts_bundle import PHASE2_SOCIAL_SURFACES
@@ -114,3 +114,68 @@ def resolve_social_surface(category: str, *, inbound_text: str = "") -> Optional
 
 def is_allowed_phase2_surface(surface: str) -> bool:
     return str(surface or "").strip() in PHASE2_SOCIAL_SURFACES
+
+
+def resolve_phatic_llm_surface(
+    ctx: BrainContext,
+    *,
+    decision: Any = None,
+) -> Optional[str]:
+    """Phase-2 surface for ACTION_LLM_REPLY phatic turns, or None to keep LLM path."""
+    from ..persona_expression import (  # noqa: PLC0415
+        PERSONA_KIND_GREETING,
+        PERSONA_TOPIC_CONVERSATION_RECOVERY,
+        PERSONA_TOPIC_IDENTITY,
+        PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+        PERSONA_TOPIC_SOCIAL,
+        PERSONA_TOPIC_SOCIAL_PERSONA_ACK,
+    )
+    from ..postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+        is_pure_phatic_bypass_turn,
+    )
+
+    if getattr(ctx, "human_priority", False):
+        return None
+
+    if _active_commerce_greeting_stage(ctx) in {"checkout", "ordering"}:
+        return None
+
+    inbound = str(getattr(ctx, "message", "") or "").strip()
+    if not inbound or not is_pure_phatic_bypass_turn(inbound):
+        return None
+
+    args = dict(getattr(decision, "args", None) or {})
+    topic = str(args.get("topic") or "").strip()
+    blocked_topics = {
+        PERSONA_TOPIC_IDENTITY,
+        PERSONA_TOPIC_CONVERSATION_RECOVERY,
+        PERSONA_TOPIC_NON_SALES_AMBIGUOUS,
+        "selection_context_price",
+        "support_complaint_refund",
+    }
+    if topic in blocked_topics:
+        return None
+    if topic and topic not in {
+        PERSONA_TOPIC_SOCIAL,
+        PERSONA_TOPIC_SOCIAL_PERSONA_ACK,
+        "",
+    }:
+        if not args.get("social_category") and args.get("persona_kind") != PERSONA_KIND_GREETING:
+            return None
+
+    cat = str(args.get("social_category") or "").strip()
+    if cat:
+        surface = resolve_social_surface(cat, inbound_text=inbound)
+        if surface:
+            return surface
+
+    if str(args.get("persona_kind") or "").strip() == PERSONA_KIND_GREETING:
+        return resolve_greet_surface(ctx) or "social_greeting"
+
+    if _is_checkin_inbound(inbound):
+        return "social_checkin"
+    if _is_thanks_inbound(inbound):
+        return "thanks"
+    if _is_dua_inbound(inbound):
+        return "dua"
+    return "social_greeting"
