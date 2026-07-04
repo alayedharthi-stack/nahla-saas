@@ -336,6 +336,62 @@ def test_draft_skipped_when_flag_disabled(monkeypatch: pytest.MonkeyPatch) -> No
     db.query.assert_not_called()
 
 
+def test_draft_skipped_for_generic_only_line_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = None
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state={"stage": "ordering"},
+        order_prep=_draft_prep(
+            line_items=[{"product_name": "منتج", "quantity": 1}],
+            product_id="",
+        ),
+        trigger="generic_guard_test",
+    )
+    assert result is None
+
+
+def test_grounded_line_items_still_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_draft_bridge(monkeypatch)
+    db = MagicMock()
+    db.query.return_value.filter_by.return_value.first.return_value = None
+
+    class _Order:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            self.id = 301
+
+    import models  # noqa: WPS433
+
+    monkeypatch.setattr(models, "Order", _Order)
+    monkeypatch.setattr(
+        "services.nahla_order_bridge._allocate_nhl_number",
+        lambda _db, _tid: "NHL-33-000301",
+    )
+
+    result = sync_nahla_wa_order(
+        db,
+        tenant_id=33,
+        conversation=_conv(),
+        brain_state=_brain(),
+        order_prep=_draft_prep(
+            line_items=[
+                {
+                    "product_id": "prod-99",
+                    "product_name": "Honey",
+                    "quantity": 1,
+                }
+            ],
+        ),
+        trigger="grounded_guard_test",
+    )
+    assert result is not None
+
+
 def test_draft_skipped_for_non_allowlisted_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable_draft_bridge(monkeypatch)
     db = MagicMock()
