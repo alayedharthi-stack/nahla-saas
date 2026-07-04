@@ -49,6 +49,22 @@ def persist_checkout_draft_and_resolve_reference(
 
     merged_bs = {**(brain_state or {}), "order_prep": dict(order_prep or {})}
     prep = dict(order_prep or {})
+    from core.generic_line_item_guard import (  # noqa: PLC0415
+        evaluate_order_prep_line_item_grounding,
+    )
+
+    grounding = evaluate_order_prep_line_item_grounding(prep, brain_state)
+    if not grounding.allowed:
+        logger.info(
+            "[ORDER_FLOW_V2] checkout draft sync blocked tenant=%s reason=%s "
+            "grounded=%s generic=%s",
+            tenant_id,
+            grounding.reason,
+            grounding.grounded_count,
+            grounding.generic_count,
+        )
+        return "", patch
+
     order = None
     try:
         from services.nahla_order_bridge import sync_nahla_wa_order  # noqa: PLC0415

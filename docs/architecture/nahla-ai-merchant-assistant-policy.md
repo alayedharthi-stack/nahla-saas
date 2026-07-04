@@ -214,6 +214,8 @@ Blocked placeholders (non-exhaustive):
 - شيء
 - غير محدد
 - المطلوب
+- صنف
+- سلعة
 
 If a line item is not grounded to catalog evidence (`product_id`, resolved title, or explicit customer-named SKU):
 
@@ -541,11 +543,20 @@ Early payment bypass (`whatsapp_webhook.py`) short-circuits Brain and uses `paym
 |-------|--------|------------------|
 | **0** | Policy update — Non-Deterministic Merchant Persona (this document) | No |
 | **1** | `FactBoundPersonaComposer` design audit — contracts, surfaces, guards, fallbacks | No |
+| **A** | Turn ownership — social/phatic bypass over stale checkout (PR #440) | Yes (ownership) |
+| **A.1** | Social context bleed cleanup — thanks/dua without address/payment append; greeting resume tone; `MERCHANT_AI_SEND_FAILED` on news-check-in | Yes (persona routing, not templates) |
+| **B** | Generic line-item guard before order create/sync | Yes (safety) |
 | **2** | Apply to low-risk surfaces: payment media intro, greetings/social, thanks/dua — strict guards + deterministic fallback | Yes (phrasing only) |
 | **3** | Apply to KB/product answers with retrieved facts | Yes |
 | **4** | Apply to checkout/order replies — **only after** generic line-item guard and turn-ownership fixes (social/phatic bypass) | Yes |
 
-**Do not** open Phase 2 until Phase 1 design is reviewed. **Do not** ship Phase 4 before OrderFlowV2 hijack and placeholder-product guards land.
+**Do not** open Phase 2 until Phase 1 design is reviewed. **Do not** ship Phase 4 before Phase B (generic line-item guard) lands. Phase A core ownership (PR #440) is accepted as partial validation — persona quality and social context bleed remain Phase A.1.
+
+### Phase A.1 follow-up (not mixed with Phase B)
+
+- Social/thanks/dua must not append address or payment prompts unless the customer explicitly resumes checkout.
+- `السلام عليكم` should greet naturally and mention an open order gently — not force checkout resume.
+- Investigate `MERCHANT_AI_SEND_FAILED` for phatic news-check-in turns (e.g. `انت وش اخبارك؟`).
 
 ---
 

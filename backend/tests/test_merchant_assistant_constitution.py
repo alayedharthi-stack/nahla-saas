@@ -204,7 +204,16 @@ class TestCheckoutContinuationOwned:
 class TestGenericLineItemGuard:
     @pytest.mark.parametrize(
         "name",
-        ["منتج", "product", "item", "شيء", "غير محدد", "المطلوب"],
+        [
+            "منتج",
+            "product",
+            "item",
+            "شيء",
+            "غير محدد",
+            "المطلوب",
+            "صنف",
+            "سلعة",
+        ],
     )
     def test_placeholder_names_detected(self, name: str) -> None:
         assert is_generic_placeholder_product_name(name)
@@ -216,18 +225,46 @@ class TestGenericLineItemGuard:
         items = [{"product_name": "منتج", "quantity": 1}, {"product_name": "منتج"}]
         assert line_items_contain_only_generic_placeholders(items)
 
-    @pytest.mark.constitution_target
-    @pytest.mark.xfail(
-        reason="Phase B pending: sync_nahla_wa_order must reject all-generic line items",
-        strict=False,
-    )
-    def test_order_sync_rejects_generic_only_cart(self) -> None:
+    def test_order_sync_rejects_generic_only_cart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from types import SimpleNamespace
+
         from services.nahla_order_bridge import sync_nahla_wa_order  # noqa: PLC0415
 
-        # Target: calling sync with only placeholder names raises or returns blocked.
-        items = [{"product_name": "منتج", "quantity": 2}]
-        assert line_items_contain_only_generic_placeholders(items)
-        pytest.fail("Phase B guard not wired — sync must block generic-only carts")
+        monkeypatch.setenv("NAHLA_ORDER_DRAFT_BRIDGE_ENABLED", "1")
+        monkeypatch.setenv("NAHLA_ORDER_DRAFT_BRIDGE_TENANTS", "33")
+
+        db = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()
+        db.query.return_value.filter_by.return_value.first.return_value = None
+
+        conv = SimpleNamespace(
+            id=9063,
+            tenant_id=33,
+            customer_id=1,
+            customer=SimpleNamespace(
+                id=1,
+                tenant_id=33,
+                phone="966500000001",
+                name="Customer",
+                extra_metadata={},
+            ),
+            extra_metadata={},
+        )
+
+        result = sync_nahla_wa_order(
+            db,
+            tenant_id=33,
+            conversation=conv,
+            brain_state={"stage": "ordering"},
+            order_prep={
+                "line_items": [{"product_name": "منتج", "quantity": 2}],
+                "customer_first_name": "أحمد",
+                "city": "الرياض",
+            },
+            trigger="constitution_generic_guard",
+        )
+        assert result is None
 
 
 # ─── D. KB questions should not become checkout ─────────────────────────────

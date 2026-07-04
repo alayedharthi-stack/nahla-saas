@@ -1133,6 +1133,22 @@ def sync_nahla_wa_order(
             existing_line_items=existing_line_items,
         )
 
+        from core.generic_line_item_guard import evaluate_line_item_grounding  # noqa: PLC0415
+
+        grounding = evaluate_line_item_grounding(line_items)
+        if not grounding.allowed:
+            _log_bridge(
+                external_id=external_id,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="skip",
+                reason=grounding.reason,
+                eligibility_reason=eligibility_reason,
+                skip_reason=grounding.reason,
+                trigger=trigger,
+            )
+            return existing
+
         resolved_status, missing_fields, delivery_address_status = resolve_wa_order_status(
             order_prep,
             brain_state,
