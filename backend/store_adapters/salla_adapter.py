@@ -251,6 +251,22 @@ class SallaAdapter(BaseStoreAdapter):
         # accurate without re-reading the DB on every call.
         self._expires_at: Optional[str] = expires_at
 
+    def _get_integration_config(self) -> Dict[str, Any]:
+        """Load the integration config row this adapter was built from."""
+        if not self._integration_id:
+            return {}
+        try:
+            from database.session import SessionLocal  # noqa: PLC0415
+            from database.models import Integration as _Integration  # noqa: PLC0415
+            _db = SessionLocal()
+            try:
+                row = _db.query(_Integration).filter(_Integration.id == self._integration_id).first()
+                return dict(row.config or {}) if row else {}
+            finally:
+                _db.close()
+        except Exception:
+            return {}
+
     def _headers(self) -> Dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -340,13 +356,15 @@ class SallaAdapter(BaseStoreAdapter):
             )
             return False
 
-        client_id     = os.environ.get("SALLA_CLIENT_ID", "")
-        client_secret = os.environ.get("SALLA_CLIENT_SECRET", "")
+        from core.salla_oauth_credentials import resolve_salla_oauth_client  # noqa: PLC0415
+
+        cfg = self._get_integration_config()
+        client_id, client_secret, client_kind = resolve_salla_oauth_client(cfg)
         if not client_id or not client_secret:
             logger.error(
                 "[Salla Token] refresh failed tenant=%s reason=missing_oauth_env "
-                "(SALLA_CLIENT_ID/SALLA_CLIENT_SECRET not configured)",
-                self._tenant_id,
+                "client_kind=%s integration_id=%s",
+                self._tenant_id, client_kind, self._integration_id,
             )
             # Config issue, not a token problem — don't set needs_reauth
             return False
@@ -366,8 +384,8 @@ class SallaAdapter(BaseStoreAdapter):
                 return True
 
             logger.info(
-                "[Salla Token] refresh started tenant=%s integration_id=%s",
-                self._tenant_id, self._integration_id,
+                "[Salla Token] refresh started tenant=%s integration_id=%s client_kind=%s",
+                self._tenant_id, self._integration_id, client_kind,
             )
             try:
                 async with httpx.AsyncClient(timeout=15) as client:

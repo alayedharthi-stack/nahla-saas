@@ -252,3 +252,243 @@ class TestTokenLoginFlagsLogic:
         )
         assert needs_oauth is True
         assert needs_api_sync is True
+
+
+class TestSallaOAuthClientResolution:
+    """Sync vs legacy refresh credential selection."""
+
+    @staticmethod
+    def _env(monkeypatch, *, sync_id="sync-client", legacy_id="legacy-client"):
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_ID", sync_id)
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_SECRET", "sync-secret")
+        monkeypatch.setenv("SALLA_CLIENT_ID", legacy_id)
+        monkeypatch.setenv("SALLA_CLIENT_SECRET", "legacy-secret")
+
+    def test_sync_row_uses_oauth_client(self, monkeypatch):
+        from core.salla_oauth_credentials import resolve_salla_oauth_client
+
+        self._env(monkeypatch)
+        cid, secret, kind = resolve_salla_oauth_client({
+            "app_type": "custom_oauth_sync",
+            "api_key_source": "custom_oauth_sync",
+            "api_sync_enabled": True,
+            "api_client_id": "sync-client",
+        })
+        assert kind == "sync_oauth"
+        assert cid == "sync-client"
+        assert secret == "sync-secret"
+
+    def test_embedded_row_uses_legacy_client(self, monkeypatch):
+        from core.salla_oauth_credentials import resolve_salla_oauth_client
+
+        self._env(monkeypatch)
+        cid, secret, kind = resolve_salla_oauth_client({
+            "api_key_source": "embedded_token",
+            "api_key": "sess",
+        })
+        assert kind == "legacy"
+        assert cid == "legacy-client"
+        assert secret == "legacy-secret"
+
+    def test_easy_mode_uses_legacy_client(self, monkeypatch):
+        from core.salla_oauth_credentials import resolve_salla_oauth_client
+
+        self._env(monkeypatch)
+        cid, _, kind = resolve_salla_oauth_client({
+            "app_type": "easy",
+            "api_key_source": "easy_mode_webhook",
+            "refresh_token": "rt",
+        })
+        assert kind == "legacy"
+        assert cid == "legacy-client"
+
+    def test_api_client_id_match_selects_sync(self, monkeypatch):
+        from core.salla_oauth_credentials import resolve_salla_oauth_client
+
+        self._env(monkeypatch)
+        _, _, kind = resolve_salla_oauth_client({
+            "api_sync_enabled": True,
+            "api_client_id": "sync-client",
+        })
+        assert kind == "sync_oauth"
+
+
+class TestSyncOAuthBootstrapMetadata:
+    def test_sets_expiry_and_refresh_history(self):
+        from datetime import datetime, timezone
+        from core.salla_oauth_credentials import bootstrap_sync_oauth_token_metadata
+
+        now = datetime(2026, 7, 5, 10, 0, 0, tzinfo=timezone.utc)
+        out = bootstrap_sync_oauth_token_metadata(
+            {"api_sync_enabled": True},
+            expires_in=3600,
+            now=now,
+        )
+        assert out["last_token_refresh_at"] == now.isoformat()
+        assert out["token_refresh_status"] == "success"
+        assert out["expires_at"].startswith("2026-07-05T11:00:00")
+        assert out["token_expires_at"] == out["expires_at"]
+
+
+class TestSchedulerRefreshClientSelection:
+    def test_scheduler_resolver_picks_sync_for_custom_oauth_row(self, monkeypatch):
+        from core.salla_oauth_credentials import resolve_salla_oauth_client
+
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_ID", "sync-cid")
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_SECRET", "sync-sec")
+        monkeypatch.setenv("SALLA_CLIENT_ID", "legacy-cid")
+        monkeypatch.setenv("SALLA_CLIENT_SECRET", "legacy-sec")
+
+        cfg = {
+            "api_key": "ak",
+            "refresh_token": "rt",
+            "app_type": "custom_oauth_sync",
+            "api_key_source": "custom_oauth_sync",
+            "api_sync_enabled": True,
+            "api_client_id": "sync-cid",
+        }
+        cid, secret, kind = resolve_salla_oauth_client(cfg)
+        assert kind == "sync_oauth"
+        assert cid == "sync-cid"
+        assert secret == "sync-sec"
+
+    def test_sync_integration_refresh_uses_oauth_client(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from store_adapters.salla_adapter import SallaAdapter
+
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_ID", "sync-cid")
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_SECRET", "sync-sec")
+        monkeypatch.setenv("SALLA_CLIENT_ID", "legacy-cid")
+        monkeypatch.setenv("SALLA_CLIENT_SECRET", "legacy-sec")
+
+        adapter = SallaAdapter(
+            api_key="access",
+            refresh_token="sync-refresh",
+            tenant_id=1,
+            integration_id=3,
+        )
+        adapter._get_integration_config = lambda: {  # noqa: SLF001
+            "app_type": "custom_oauth_sync",
+            "api_key_source": "custom_oauth_sync",
+            "api_sync_enabled": True,
+            "api_client_id": "sync-cid",
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 1209600,
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        async def _run():
+            with patch("store_adapters.salla_adapter.httpx.AsyncClient", return_value=mock_client):
+                with patch.object(adapter, "_persist_refreshed_tokens"):
+                    with patch("core.salla_token_lock.salla_asyncio_lock") as lock_ctx:
+                        lock_ctx.return_value.__aenter__ = AsyncMock(return_value=True)
+                        lock_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+                        return await adapter._refresh_access_token()
+
+        ok = asyncio.run(_run())
+        assert ok is True
+        posted = mock_client.post.call_args
+        assert posted.kwargs["data"]["client_id"] == "sync-cid"
+        assert posted.kwargs["data"]["client_secret"] == "sync-sec"
+
+    def test_invalid_grant_still_marks_needs_reauth(self, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from store_adapters.salla_adapter import SallaAdapter, SallaTokenRevokedException
+
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_ID", "sync-cid")
+        monkeypatch.setenv("SALLA_OAUTH_CLIENT_SECRET", "sync-sec")
+        monkeypatch.setenv("SALLA_CLIENT_ID", "legacy-cid")
+        monkeypatch.setenv("SALLA_CLIENT_SECRET", "legacy-sec")
+
+        adapter = SallaAdapter(
+            api_key="access",
+            refresh_token="sync-refresh",
+            tenant_id=1,
+            integration_id=3,
+        )
+        adapter._get_integration_config = lambda: {"app_type": "custom_oauth_sync"}  # noqa: SLF001
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 400
+        mock_resp.text = '{"error":"invalid_grant"}'
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        async def _run():
+            with patch("store_adapters.salla_adapter.httpx.AsyncClient", return_value=mock_client):
+                with patch("core.salla_token_lock.salla_asyncio_lock") as lock_ctx:
+                    lock_ctx.return_value.__aenter__ = AsyncMock(return_value=True)
+                    lock_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+                    with pytest.raises(SallaTokenRevokedException):
+                        await adapter._refresh_access_token()
+
+        with patch.object(adapter, "_mark_needs_reauth") as mark_reauth:
+            asyncio.run(_run())
+            mark_reauth.assert_called_once_with("invalid_grant")
+
+
+class TestTokenLoginSyncPreservation:
+    def test_sync_refresh_not_overwritten_by_introspect(self):
+        from core.salla_oauth_credentials import is_sync_oauth_integration
+
+        cfg = {
+            "api_sync_enabled": True,
+            "app_type": "custom_oauth_sync",
+            "api_key_source": "custom_oauth_sync",
+            "api_client_id": "sync-client",
+            "refresh_token": "sync-refresh-token",
+            "needs_reauth": True,
+            "needs_reauth_reason": "invalid_grant",
+        }
+        sync_protected = is_sync_oauth_integration(cfg)
+        introspect_refresh_token = "embedded-refresh"
+
+        if introspect_refresh_token and not sync_protected:
+            cfg["refresh_token"] = introspect_refresh_token
+
+        assert cfg["refresh_token"] == "sync-refresh-token"
+        assert cfg.get("needs_reauth") is True
+
+    def test_sync_clears_reauth_only_when_refresh_present(self):
+        cfg = {
+            "app_type": "custom_oauth_sync",
+            "refresh_token": "sync-refresh",
+            "needs_reauth": True,
+        }
+        existing_refresh = cfg.get("refresh_token", "")
+        reauth_clear_keys = ("needs_reauth", "needs_reauth_at", "needs_reauth_reason")
+        if existing_refresh:
+            for k in reauth_clear_keys:
+                cfg.pop(k, None)
+        assert "needs_reauth" not in cfg
+
+    def test_sync_without_refresh_keeps_needs_reauth(self):
+        cfg = {
+            "app_type": "custom_oauth_sync",
+            "refresh_token": "",
+            "needs_reauth": True,
+            "needs_reauth_reason": "invalid_grant",
+        }
+        existing_refresh = cfg.get("refresh_token", "")
+        reauth_clear_keys = ("needs_reauth", "needs_reauth_reason")
+        if existing_refresh:
+            for k in reauth_clear_keys:
+                cfg.pop(k, None)
+        assert cfg.get("needs_reauth") is True
+        assert cfg.get("needs_reauth_reason") == "invalid_grant"
+

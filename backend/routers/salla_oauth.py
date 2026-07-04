@@ -498,6 +498,9 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             if integration:
                 promote_integration_canonical_store(db, integration, identity_for_save)
                 cfg = dict(integration.config or {})
+                from core.salla_oauth_credentials import is_sync_oauth_integration  # noqa: PLC0415
+
+                sync_protected = is_sync_oauth_integration(cfg)
                 existing_refresh = cfg.get("refresh_token", "")
                 cfg.update({
                     "store_id":          persist_store_id,
@@ -513,18 +516,27 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     cfg["api_key"]             = api_key_to_persist
                     cfg["api_key_source"]      = api_key_source
                     cfg["api_key_received_at"] = now_iso
-                if introspect_refresh_token:
+                elif not sync_protected:
+                    cfg["api_key"]             = api_key_to_persist
+                    cfg["api_key_received_at"] = now_iso
+                if introspect_refresh_token and not sync_protected:
                     cfg["refresh_token"] = introspect_refresh_token
                     cfg["api_key_source"] = "introspect"
                     if introspect_expires_in:
                         cfg["expires_in"] = introspect_expires_in
-                for k in (
+                reauth_clear_keys = (
                     "needs_reauth", "needs_reauth_at", "needs_reauth_reason",
                     "no_auto_refresh", "no_auto_refresh_reason", "no_auto_refresh_at",
                     "soft_disabled", "uninstalled_at", "superseded_by_oauth_reconnect",
                     "disabled_reason", "disabled_at",
-                ):
-                    cfg.pop(k, None)
+                )
+                if sync_protected:
+                    if existing_refresh:
+                        for k in reauth_clear_keys:
+                            cfg.pop(k, None)
+                elif introspect_refresh_token or existing_refresh:
+                    for k in reauth_clear_keys:
+                        cfg.pop(k, None)
                 integration.tenant_id = tenant_id
                 integration.config = cfg
                 integration.external_store_id = persist_store_id
@@ -2639,6 +2651,12 @@ async def salla_api_oauth_callback(
             "api_connected_at":    now_iso,
             "api_key_received_at": now_iso,
         })
+        from core.salla_oauth_credentials import bootstrap_sync_oauth_token_metadata  # noqa: PLC0415
+        merged_config = bootstrap_sync_oauth_token_metadata(
+            merged_config,
+            expires_in=expires_in,
+            now=datetime.now(timezone.utc),
+        )
         # Clear stale reauth flags — we just refreshed.
         for k in (
             "needs_reauth", "needs_reauth_at", "needs_reauth_reason",
