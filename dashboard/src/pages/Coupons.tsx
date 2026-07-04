@@ -131,6 +131,10 @@ const SYNC_BADGE_VARIANT: Record<NonNullable<DashboardCoupon['sync_badge']>, 'gr
   imported:   'blue',
 }
 
+/** Imported Salla coupons may carry advanced rules managed only in Salla admin. */
+const SALLA_IMPORTED_ADVANCED_RULES_NOTE_AR =
+  'قد تحتوي بعض كوبونات سلة على شروط متقدمة تُدار من سلة.'
+
 const CHANNEL_LABEL: Record<CouponChannel, { label: string; variant: 'purple' | 'blue' | 'amber' | 'slate' }> = {
   ai:        { label: 'ذكاء',      variant: 'purple' },
   campaign:  { label: 'حملة',      variant: 'blue'   },
@@ -858,6 +862,14 @@ export default function Coupons() {
                             label={c.sync_badge_label}
                             variant={SYNC_BADGE_VARIANT[c.sync_badge || 'not_pushed']}
                           />
+                          {c.sync_badge === 'imported' ? (
+                            <span
+                              className="text-[10px] text-slate-500 leading-snug max-w-[11rem]"
+                              title={SALLA_IMPORTED_ADVANCED_RULES_NOTE_AR}
+                            >
+                              {SALLA_IMPORTED_ADVANCED_RULES_NOTE_AR}
+                            </span>
+                          ) : null}
                           {c.sync_error ? (
                             <CouponSallaSyncErrorHint error={c.sync_error} />
                           ) : null}
