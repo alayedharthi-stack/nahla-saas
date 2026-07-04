@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import FrozenSet, Sequence
 
 from core.generic_line_item_guard import (  # noqa: F401
@@ -171,6 +172,152 @@ def prefers_saved_address_confirm(reply: str) -> bool:
     """True when outbound confirms a saved/on-file address instead of blunt collect."""
     raw = str(reply or "")
     return any(marker in raw for marker in _SAVED_ADDRESS_CONFIRM_MARKERS)
+
+
+_EMOJI_CHAR_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E0-\U0001F1FF"
+    "]+",
+    flags=re.UNICODE,
+)
+_EMOJI_UNIT_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F1E0-\U0001F1FF"
+    "\uFE0F"
+    "]",
+    flags=re.UNICODE,
+)
+
+# Policy §11.3 — context buckets for marketing emoji vocabulary.
+MARKETING_EMOJI_WARMTH: FrozenSet[str] = frozenset({"😊", "🙂", "😄", "🤍", "🌷", "✨"})
+MARKETING_EMOJI_SHOPPING: FrozenSet[str] = frozenset(
+    {"🛒", "🛍️", "🛍", "🧺", "🏷️", "🏷", "💳", "💰"}
+)
+MARKETING_EMOJI_OFFERS: FrozenSet[str] = frozenset(
+    {"🔥", "⚡", "🚀", "⏳", "⏰", "🎯", "💥", "✨", "🏷️", "🏷"}
+)
+MARKETING_EMOJI_DELIVERY: FrozenSet[str] = frozenset(
+    {"🚚", "📦", "🛵", "🚛", "🏠", "🚪", "📍", "🗺️"}
+)
+MARKETING_EMOJI_CONFIRMATION: FrozenSet[str] = frozenset({"✅", "☑️", "👍", "👌"})
+MARKETING_EMOJI_PAYMENT: FrozenSet[str] = frozenset({"💳", "🧾", "🏦", "✅"})
+MARKETING_EMOJI_ALL_APPROVED: FrozenSet[str] = frozenset().union(
+    MARKETING_EMOJI_WARMTH,
+    MARKETING_EMOJI_SHOPPING,
+    MARKETING_EMOJI_OFFERS,
+    MARKETING_EMOJI_DELIVERY,
+    MARKETING_EMOJI_CONFIRMATION,
+    MARKETING_EMOJI_PAYMENT,
+    frozenset({"🎁", "🎉", "🎊", "💝", "🔔", "📣", "👀", "⭐", "🌟", "👑", "💎", "🍯", "🐝", "🤝", "🙏"}),
+)
+
+_PAYMENT_SUCCESS_EMOJI: FrozenSet[str] = frozenset({"✅", "☑️", "👍", "👌"})
+_PAYMENT_SUCCESS_CLAIMS: FrozenSet[str] = frozenset(
+    {
+        "تم الدفع",
+        "تم استلام الدفع",
+        "تم التحويل بنجاح",
+        "تم الدفع بنجاح",
+        "استلمنا الدفع",
+    }
+)
+
+
+def _emoji_in_approved_set(segment: str) -> bool:
+    seg = unicodedata.normalize("NFC", str(segment or ""))
+    if seg in MARKETING_EMOJI_ALL_APPROVED:
+        return True
+    if seg == "\ufe0f":
+        return True
+    base = seg.replace("\ufe0f", "").replace("\uFE0F", "")
+    return base in MARKETING_EMOJI_ALL_APPROVED
+
+
+def _emoji_units_for_policy(text: str) -> list[str]:
+    """Collapse base emoji + optional FE0F into single units for approval checks."""
+    raw = unicodedata.normalize("NFC", str(text or ""))
+    units: list[str] = []
+    i = 0
+    chars = list(raw)
+    while i < len(chars):
+        ch = chars[i]
+        if _EMOJI_UNIT_RE.fullmatch(ch):
+            if ch == "\ufe0f" and units:
+                units[-1] = unicodedata.normalize("NFC", units[-1] + ch)
+            elif ch != "\ufe0f":
+                if i + 1 < len(chars) and chars[i + 1] == "\ufe0f":
+                    units.append(unicodedata.normalize("NFC", ch + chars[i + 1]))
+                    i += 1
+                else:
+                    units.append(ch)
+            i += 1
+            continue
+        i += 1
+    return units
+
+
+def count_emojis(text: str) -> int:
+    """Count emoji graphemes in outbound text (policy §11.3 density rules)."""
+    return len(_emoji_units_for_policy(text))
+
+
+def is_excessive_emoji_density(text: str, *, max_emojis: int = 2) -> bool:
+    """True when emoji count exceeds normal/campaign limits."""
+    return count_emojis(text) > max_emojis
+
+
+def rejects_emoji_spam(text: str) -> bool:
+    """True when outbound has spammy emoji repetition or density."""
+    raw = str(text or "")
+    if is_excessive_emoji_density(raw, max_emojis=3):
+        return True
+    for emoji in MARKETING_EMOJI_ALL_APPROVED:
+        if raw.count(emoji) >= 3:
+            return True
+    if re.search(r"(.)\1{4,}", raw):
+        return True
+    return False
+
+
+def rejects_fixed_emoji_template_opener(text: str) -> bool:
+    """True when text uses banned fixed emoji opener patterns."""
+    raw = str(text or "")
+    if contains_banned_template_opener(raw):
+        return True
+    return raw.strip().startswith("أكيد 🌷")
+
+
+def payment_emoji_implies_success_without_evidence(
+    text: str,
+    *,
+    payment_confirmed: bool = False,
+) -> bool:
+    """True when success emoji accompanies an unverified payment-success claim."""
+    if payment_confirmed:
+        return False
+    raw = str(text or "")
+    if not any(e in raw for e in _PAYMENT_SUCCESS_EMOJI):
+        return False
+    return any(claim in raw for claim in _PAYMENT_SUCCESS_CLAIMS)
+
+
+def accepts_context_appropriate_light_emoji(text: str) -> bool:
+    """True when reply has light approved emoji and no spam/fixed opener."""
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if rejects_emoji_spam(raw) or rejects_fixed_emoji_template_opener(raw):
+        return False
+    emojis = _emoji_units_for_policy(raw)
+    if not emojis:
+        return True
+    if len(emojis) > 2:
+        return False
+    return all(_emoji_in_approved_set(ch) for ch in emojis)
 
 
 def social_replies_are_non_deterministic(replies: Sequence[str], *, min_unique: int = 2) -> bool:

@@ -166,6 +166,52 @@ Fallback must pass `payment_credential_guard` unchanged.
 
 ---
 
+## 5.1 Emoji Vocabulary by Context
+
+Nahla is a WhatsApp **commerce and marketing** platform. Emoji supports real commercial contexts — not only smile/heart/rose.
+
+The composer (and `marketing_emoji_policy` post-polish) must choose emoji **by verified surface/context**, not randomly and not as a fixed opener.
+
+### Categories (policy §11.3)
+
+| Context | Emoji pool (examples) |
+|---------|----------------------|
+| General warmth | 😊 🙂 😄 🤍 🌷 ✨ |
+| Shopping / commerce | 🛒 🛍️ 🛍 🧺 🏷️ 💳 💰 |
+| Offers / urgency | 🔥 ⚡ 🚀 ⏳ ⏰ 🎯 💥 ✨ 🏷️ |
+| Delivery / shipping / home | 🚚 📦 🛵 🚛 🏠 🚪 📍 🗺️ |
+| Confirmation | ✅ ☑️ 👍 👌 |
+| Gifts / occasions | 🎁 🎉 🎊 💝 |
+| Attention / reminders | 🔔 📣 👀 ✨ |
+| Quality / premium | ⭐ 🌟 👑 💎 |
+| Honey / bee (category-relevant) | 🍯 🐝 |
+| Payment / receipt | 💳 🧾 🏦 ✅ |
+| Customer care | 🤝 🙏 😊 |
+
+### Composer constraints (extend `PersonaConstraints`)
+
+```python
+emoji_context: str = "general_warmth"  # maps to §11.3 category
+max_emojis: int = 1                    # 2 only for campaign/offer surfaces
+allow_claim_sensitive_emoji: bool = False  # ✅ 🚚 only when facts confirm
+```
+
+### Rules
+
+- Normal replies: **0–1 emoji**.
+- Campaign/offer surfaces: up to **2** when appropriate.
+- Payment/error/safety: calm emoji only, 0–1.
+- No emoji spam; no repeated fixed opener (`أكيد 🌷 تفضل`).
+- Emoji must **not** imply unverified facts (especially payment success).
+- Examples in policy are **illustrative**, not fixed outputs.
+- Arabic: Saudi merchant tone. English: light emoji only if appropriate.
+
+### Alignment with existing runtime
+
+`modules/ai/postprocess/marketing_emoji_policy.py` already maps **purposes** → emoji pools. Phase 2 composer should use the same semantic buckets and expand pools per §11.3 — not duplicate 🌷 as default social marker.
+
+---
+
 ## 6. Preventing invention
 
 ### Pre-compose
