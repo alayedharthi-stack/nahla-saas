@@ -117,9 +117,24 @@ def apply_persona_compose_guards(
     repaired = False
     lang = str(bundle.language or "ar").lower()
 
-    # 1–2 Language / non-Saudi dialect
+    # 1–2 Language / non-Saudi dialect + malformed كا suffix repair
     if lang.startswith("ar"):
-        from .policy_terms import find_non_saudi_arabic_terms  # noqa: PLC0415
+        from .policy_terms import (  # noqa: PLC0415
+            find_malformed_saudi_ka_suffix_tokens,
+            find_non_saudi_arabic_terms,
+            repair_malformed_saudi_ka_suffix,
+        )
+
+        repaired_ka, did_ka = repair_malformed_saudi_ka_suffix(working)
+        if did_ka and repaired_ka.strip():
+            working = repaired_ka
+            repaired = True
+        elif find_malformed_saudi_ka_suffix_tokens(working):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="malformed_saudi_ka_suffix",
+            )
 
         if find_non_saudi_arabic_terms(working):
             scrubbed, did = _scrub_non_saudi_terms(working)
