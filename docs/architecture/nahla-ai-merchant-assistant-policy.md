@@ -547,6 +547,138 @@ Post-compose: operational guards (`payment_credential_guard`, `shipment_truth_gu
 
 ---
 
+## 11.3 Marketing Emoji Vocabulary
+
+Nahla AI may use **light, context-aware marketing emojis** on WhatsApp. Emoji must be selected by **context**, not repeated as a fixed template marker.
+
+`FactBoundPersonaComposer` and `marketing_emoji_policy` should draw from this vocabulary — not default to 🌷 on every reply.
+
+**Emoji vocabulary is guidance and guardrails — not a deterministic emoji template layer.** Nahla persona remains **non-deterministic**. The AI/persona layer owns natural wording and may choose **whether** to use emoji (including **zero** emoji) based on context.
+
+Emoji guidance does **not** replace non-deterministic persona. The composer should **not** be forced to attach an emoji to every surface. Emoji selection should be **optional**, context-aware, and guard-validated. Runtime emoji polish may assist weak models, but it must **not** become a fixed mapping from surface to emoji.
+
+### Correct architecture
+
+1. Persona/AI composes natural text from verified facts.
+2. Persona may choose **0–1** context-appropriate emoji.
+3. Emoji vocabulary helps the model choose suitable emojis **when needed**.
+4. Emoji guard validates: no spam; no repeated fixed opener; no wrong context; no payment-success implication without verified payment; density within limits.
+5. If the model is weak or output has no warmth, a light emoji polish layer may **suggest** one suitable emoji — optional polish only, **not** mandatory injection.
+6. Deterministic emoji insertion is **fallback/polish only**, not the product experience.
+
+### Anti-pattern: fixed surface → emoji mapping
+
+Do **not** implement runtime as:
+
+- delivery always adds 🚚
+- payment always adds 🧾
+- offers always add 🔥
+- every social reply gets 🌷
+
+That recreates a template system disguised as emoji policy.
+
+### General warmth / friendly tone
+
+`😊` `🙂` `😄` `🤍` `🌷` `✨`
+
+Use for: greetings, thanks, dua, light social replies, friendly merchant tone.
+
+Examples (illustrative): حياك الله 🌷 — الله يعافيك ويسعدك 😊 — أبشرك الطلب موجود 🤍
+
+### Shopping / commerce
+
+`🛒` `🛍️` `🛍` `🧺` `🏷️` `💳` `💰`
+
+Use for: products, cart, offers, checkout, payment intent, shopping.
+
+Examples: أضفنا المنتج للسلة 🛒 — العرض متاح الآن 🏷️ — اختيار موفق 🛍️
+
+### Offers / discounts / urgency
+
+`🔥` `⚡` `🚀` `⏳` `⏰` `🎯` `💥` `✨` `🏷️`
+
+Use for: limited-time offers, discounts, campaigns, flash sales — urgency **without** checkout pressure.
+
+Examples: العرض لفترة محدودة ⏳ — خصم اليوم متاح الآن 🏷️
+
+Avoid: `🔥🔥🔥🔥` `🚀🚀🚀`
+
+### Delivery / shipping / home
+
+`🚚` `📦` `🛵` `🚛` `🏠` `🚪` `📍` `🗺️`
+
+Use for: delivery, shipping, address, home delivery, location, tracking.
+
+Examples: نوصلها لك للبيت 🚚 — العنوان السابق موجود عندي 📍 — الشحنة في الطريق 📦
+
+### Confirmation / completion
+
+`✅` `☑️` `👍` `👌`
+
+Use for: confirmed action, order created, payment received, address confirmed, catalog selection — **only when system confirms the fact**.
+
+Examples: تم اعتماد الطلب ✅ — وصل الإيصال، بنراجعه لك ✅
+
+### Gifts / special occasions
+
+`🎁` `🎉` `🎊` `💝`
+
+Use for: gift orders, celebrations, new product launch, customer delight, campaign messages.
+
+### Attention / reminder
+
+`🔔` `📣` `👀` `✨`
+
+Use for: restock alert, follow-up, customer interest, reminders.
+
+### Time / speed
+
+`⏳` `⏰` `⚡` `🚀`
+
+Use for: limited time, fast delivery, quick confirmation.
+
+### Quality / premium / trust
+
+`⭐` `🌟` `👑` `💎` `🐝` `🍯`
+
+Use for: premium products, verified quality claims, honey/bee products when category-relevant.
+
+### Payment / transfer
+
+`💳` `🧾` `🏦` `✅`
+
+Use for: receipt request, bank transfer intro, payment confirmation — **do not use ✅ to imply payment succeeded unless system confirms it**.
+
+### Customer care / support
+
+`🤝` `🙏` `😊`
+
+Use for: apology, appreciation, human support, escalation warmth.
+
+### Emoji rules
+
+1. **0–1 emoji** in normal replies.
+2. **Up to 2 emojis** only in campaign/offer messages when appropriate.
+3. Do not repeat the same emoji excessively.
+4. Do not use emoji as a replacement for facts.
+5. Do not use emoji to decorate a fixed template repeatedly.
+6. Do not use emoji heavily in serious error/safety/payment-failure contexts.
+7. Match emoji to context (delivery → 🚚 📦 🏠 — shopping → 🛒 🛍️ — offer → ⏳ 🏷️ — thanks → 😊 🌷).
+8. Avoid childish or awkward combinations.
+9. Avoid making every reply start with the same emoji.
+10. Emoji is marketing warmth — not the product experience by itself.
+
+| Bad | Good |
+|-----|------|
+| `أكيد 🌷 تفضل...` repeated every turn | `العرض متاح اليوم 🏷️` |
+| `هلاااا 😍😍😍🔥🔥🔥🚀🚀🚀` | `نوصله لك للبيت 🚚` |
+| `✅` on pending payment | `بعد التحويل أرسل الإيصال 🧾` |
+| delivery **always** 🚚 / social **always** 🌷 | varied, optional emoji per turn |
+
+**Runtime note:** `marketing_emoji_policy` is the current **optional** post-compose polish layer — not a mandatory surface→emoji mapper. `FactBoundPersonaComposer` may draw from this vocabulary when emoji fits the composed reply; **zero emoji** is valid.
+
+---
+
 ## 12. Payment Media Reply Policy
 
 Payment media is a **reference implementation** of the broader persona goal — not a one-off copy patch.
