@@ -23,7 +23,7 @@ def _riyadh_tz() -> timezone:
     if ZoneInfo is not None:
         try:
             return ZoneInfo(SALLA_DEFAULT_TZ)  # type: ignore[return-value]
-        except Exception:
+        except (KeyError, OSError):
             pass
     return timezone(timedelta(hours=3))
 
@@ -181,10 +181,10 @@ def _parse_datetime_to_utc(text: str, tz_name: str) -> Optional[datetime]:
                 return dt.replace(tzinfo=timezone.utc)
             try:
                 local_tz = ZoneInfo(tz_name) if ZoneInfo is not None else _riyadh_tz()
-            except Exception:
+            except (KeyError, OSError):
                 local_tz = _riyadh_tz()
             return dt.replace(tzinfo=local_tz).astimezone(timezone.utc)
-        except Exception:
+        except ValueError:
             continue
     return None
 
