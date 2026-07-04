@@ -220,6 +220,17 @@ def _is_commerce_context(state: Optional[MerchantConversationState]) -> bool:
     return False
 
 
+def _is_phatic_checkout_bypass_turn(message: str) -> bool:
+    try:
+        from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
+            is_pure_phatic_bypass_turn,
+        )
+
+        return is_pure_phatic_bypass_turn(message)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional import boundary
+        return False
+
+
 def _has_actionable_substance(message: str) -> bool:
     try:
         from .decision.engine import _first_turn_has_actionable_substance  # noqa: PLC0415
@@ -452,6 +463,7 @@ def compute_social_human_context(
     meta = dict(inbound_metadata or {})
     slots = dict(getattr(intent, "slots", None) or {})
     in_commerce = _is_commerce_context(state)
+    phatic_bypass = _is_phatic_checkout_bypass_turn(raw)
 
     category, confidence, source = _detect_sticker_category(
         metadata=meta,
@@ -487,9 +499,13 @@ def compute_social_human_context(
         intent=intent,
         intent_priority=intent_priority,
     )
-    is_pure_social = not commercial_primary and not in_commerce
-    if commercial_primary:
-        is_pure_social = False
+    if phatic_bypass:
+        is_pure_social = True
+        commercial_primary = False
+    else:
+        is_pure_social = not commercial_primary and not in_commerce
+        if commercial_primary:
+            is_pure_social = False
 
     primary_goal = _primary_goal_from_sources(
         intent=intent,
@@ -523,11 +539,15 @@ def compute_social_human_context(
         and category in COMMERCE_TAIL_BLOCK_CATEGORIES
         and category != SHC_JOB_HELP_REQUEST
     )
+    if phatic_bypass:
+        block_tail = True
     block_commerce = bool(
         is_pure_social
         and category not in {SHC_WELLBEING_CHECK}
         and category != SHC_JOB_HELP_REQUEST
     )
+    if phatic_bypass:
+        block_commerce = True
     if category == SHC_JOB_HELP_REQUEST and is_pure_social:
         block_commerce = True
         block_tail = True
@@ -607,7 +627,10 @@ def try_social_human_context_decision(ctx: Any) -> Any:
     shc: Optional[SocialHumanContext] = getattr(ctx, "social_human_context", None)
     if shc is None or not shc.active:
         return None
-    if not shc.is_pure_social_turn or shc.in_commerce_context:
+    if not shc.is_pure_social_turn:
+        return None
+    inbound = str(getattr(ctx, "message", "") or "").strip()
+    if shc.in_commerce_context and not _is_phatic_checkout_bypass_turn(inbound):
         return None
 
     intent = ctx.intent

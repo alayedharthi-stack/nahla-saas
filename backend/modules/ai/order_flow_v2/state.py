@@ -97,8 +97,24 @@ def incomplete_checkout_with_items(order_prep: Dict[str, Any], brain_state: Dict
     )
 
 
-def should_resume_checkout_on_greeting(order_prep: Dict[str, Any], brain_state: Dict[str, Any]) -> bool:
+def should_resume_checkout_on_greeting(
+    order_prep: Dict[str, Any],
+    brain_state: Dict[str, Any],
+    *,
+    message: str = "",
+) -> bool:
     """True when a greeting should resume an in-flight checkout instead of falling through to brain."""
+    text = str(message or "").strip()
+    if text:
+        try:
+            from .explicit_intent_checkout_suppression import (  # noqa: PLC0415
+                detect_social_phatic_intent,
+            )
+
+            if detect_social_phatic_intent(text):
+                return False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional phatic probe
+            pass
     if not incomplete_checkout_with_items(order_prep, brain_state):
         return False
     if checkout_active_now(order_prep):

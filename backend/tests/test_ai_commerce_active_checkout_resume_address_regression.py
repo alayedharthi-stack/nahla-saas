@@ -174,10 +174,9 @@ class TestActiveCheckoutResumeAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message="السلام عليكم",
         )
-        assert result.handled, result.reason
-        assert result.reason == "greeting_checkout_resume"
-        assert "نكمل طلبك السابق" in result.reply
-        _assert_saved_address_confirm(result.reply, scenario)
+        assert not result.handled or result.reason != "greeting_checkout_resume", (
+            "Pure salaam must not force aggressive checkout resume (Phase A.1)"
+        )
 
     @pytest.mark.parametrize(
         "message",
@@ -249,7 +248,7 @@ class TestActiveCheckoutResumeAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message="السلام عليكم",
         )
-        assert result.handled, result.reason
-        assert result.reason == "greeting_checkout_resume"
-        _assert_saved_address_confirm(result.reply, scenario)
+        assert not result.handled or result.reason != "greeting_checkout_resume", (
+            "Pure salaam must not force aggressive checkout resume (Phase A.1)"
+        )
         assert tenant.name == scenario.tenant_name
