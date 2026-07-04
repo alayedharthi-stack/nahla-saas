@@ -9,8 +9,18 @@ from modules.ai.brain.persona.fact_bound_composer import (
     FactBoundPersonaComposer,
     build_social_facts_bundle,
 )
+from modules.ai.brain.persona.facts_bundle import PersonaComposeResult
 from modules.ai.brain.persona.flags import is_persona_composer_enforce_enabled
-from modules.ai.brain.persona.integration import should_enforce_persona_compose
+from modules.ai.brain.persona.integration import (
+    build_persona_compose_event_metadata,
+    merge_persona_compose_into_extra_metadata,
+    should_enforce_persona_compose,
+    try_enforce_persona_compose,
+)
+from modules.ai.brain.persona.policy_terms import (
+    find_malformed_saudi_ka_suffix_tokens,
+    repair_malformed_saudi_ka_suffix,
+)
 from modules.ai.brain.persona.surface_resolver import (
     resolve_greet_surface,
     resolve_social_surface,
@@ -231,3 +241,194 @@ class TestConstitutionProbeSamples:
         dua = try_compose_persona_samples("dua", "الله يعطيك العافية")
         assert social_replies_are_non_deterministic(thanks)
         assert social_replies_are_non_deterministic(dua)
+
+
+def _compose_result(**overrides) -> PersonaComposeResult:
+    base = dict(
+        text="بخير الله يسعدك",
+        source="persona_llm",
+        surface="social_checkin",
+        facts_hash="abc123",
+        guard_passed=True,
+        language="ar",
+        dialect="saudi",
+        emoji_count=1,
+        latency_ms=42,
+        model="test-model",
+    )
+    base.update(overrides)
+    return PersonaComposeResult(**base)
+
+
+class TestPersonaComposeEventMetadata:
+    def test_build_event_metadata_includes_required_fields(self) -> None:
+        result = _compose_result()
+        meta = build_persona_compose_event_metadata(
+            result,
+            tenant_id=33,
+            allowlist_result="allowed",
+        )
+        assert meta["chosen_path"] == "fact_bound_persona_compose"
+        pc = meta["persona_compose"]
+        assert pc["surface"] == "social_checkin"
+        assert pc["source"] == "persona_llm"
+        assert pc["guard_passed"] is True
+        assert pc["tenant_id"] == 33
+        assert pc["allowlist_result"] == "allowed"
+        assert pc["facts_hash"] == "abc123"
+
+    def test_merge_into_extra_metadata_for_persist(self) -> None:
+        event = build_persona_compose_event_metadata(
+            _compose_result(fallback_reason="timeout", guard_passed=False),
+            tenant_id=33,
+            allowlist_result="allowed",
+        )
+        merged = merge_persona_compose_into_extra_metadata(
+            {"persona_ownership": {"persona_stamped": True}, "is_ai": True},
+            event,
+        )
+        assert merged["chosen_path"] == "fact_bound_persona_compose"
+        assert merged["persona_compose"]["fallback_reason"] == "timeout"
+        assert merged["persona_ownership"]["persona_stamped"] is True
+
+    def test_merge_skips_when_gate_not_used(self) -> None:
+        merged = merge_persona_compose_into_extra_metadata(
+            {"is_ai": True},
+            None,
+        )
+        assert "chosen_path" not in merged
+        assert "persona_compose" not in merged
+
+    def test_brain_result_hydration_shape(self) -> None:
+        brain = {
+            "chosen_path": "fact_bound_persona_compose",
+            "persona_compose": build_persona_compose_event_metadata(
+                _compose_result(),
+                tenant_id=33,
+                allowlist_result="allowed",
+            )["persona_compose"],
+        }
+        merged = merge_persona_compose_into_extra_metadata({}, brain)
+        assert merged["chosen_path"] == "fact_bound_persona_compose"
+        assert merged["persona_compose"]["surface"] == "social_checkin"
+
+    def test_compose_disabled_does_not_persist_chosen_path(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.types import ActionResult  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _ctx(
+                ai_settings={
+                    "persona_composer_enabled": False,
+                    "store_ai_mode": STORE_AI_MODE_TEST,
+                    "ai_test_allowed_numbers": ["966542980511"],
+                }
+            )
+            action = ActionResult(success=True, data={})
+            out = await try_enforce_persona_compose(
+                ctx,
+                surface="social_checkin",
+                action_result=action,
+            )
+            assert out is None
+            assert "chosen_path" not in action.data
+            assert "persona_compose" not in action.data
+
+        asyncio.run(_run())
+
+    def test_compose_enabled_persists_metadata_on_action_result(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from modules.ai.brain.types import ActionResult  # noqa: PLC0415
+
+        stub_result = PersonaComposeResult(
+            text="بخير الله يسعدك",
+            source="persona_llm",
+            surface="social_checkin",
+            facts_hash="stub-hash",
+            guard_passed=True,
+            language="ar",
+            dialect="saudi",
+        )
+
+        async def _fake_compose(_self, _bundle, ctx=None, db=None):
+            return stub_result
+
+        async def _run() -> None:
+            ctx = _ctx(
+                ai_settings={
+                    "persona_composer_enabled": True,
+                    "store_ai_mode": STORE_AI_MODE_TEST,
+                    "ai_test_allowed_numbers": ["966542980511"],
+                }
+            )
+            action = ActionResult(success=True, data={})
+            with patch.object(FactBoundPersonaComposer, "compose", _fake_compose):
+                out = await try_enforce_persona_compose(
+                    ctx,
+                    surface="social_checkin",
+                    action_result=action,
+                )
+            assert out is not None
+            assert action.data.get("chosen_path") == "fact_bound_persona_compose"
+            pc = action.data.get("persona_compose") or {}
+            assert pc.get("surface") == "social_checkin"
+            assert pc.get("guard_passed") is True
+            assert pc.get("source") == "persona_llm"
+            assert pc.get("tenant_id") == 33
+            assert pc.get("allowlist_result") == "allowed"
+
+        asyncio.run(_run())
+
+
+class TestMalformedSaudiKaSuffix:
+    @pytest.mark.parametrize(
+        "broken,fixed",
+        [
+            ("كيفكا وش أخباركا", "كيفك وش أخبارك"),
+            ("حالكا", "حالك"),
+            ("حالكـا", "حالك"),
+            ("طلبكا", "طلبك"),
+            ("عنوانكا", "عنوانك"),
+            ("اسمكا", "اسمك"),
+        ],
+    )
+    def test_repair_malformed_ka_suffix(self, broken: str, fixed: str) -> None:
+        repaired, changed = repair_malformed_saudi_ka_suffix(broken)
+        assert changed
+        assert repaired == fixed
+        assert not find_malformed_saudi_ka_suffix_tokens(repaired)
+
+    @pytest.mark.parametrize(
+        "valid",
+        [
+            "كيفك",
+            "وش أخبارك",
+            "حياك الله",
+            "الله يعافيك",
+            "أبشرك بخير",
+        ],
+    )
+    def test_valid_saudi_wording_unchanged(self, valid: str) -> None:
+        repaired, changed = repair_malformed_saudi_ka_suffix(valid)
+        assert not changed
+        assert repaired == valid
+        assert not find_malformed_saudi_ka_suffix_tokens(valid)
+
+    def test_guard_repairs_malformed_compose_output(self) -> None:
+        bundle = build_social_facts_bundle(
+            surface="social_checkin",
+            inbound_text="كيف الحال",
+        )
+        guard = apply_persona_compose_guards(
+            "حالكا وش أخباركا 🌷",
+            bundle,
+        )
+        assert guard.passed
+        assert guard.repaired
+        assert "حالكا" not in guard.text
+        assert "أخباركا" not in guard.text
+        assert "حالك" in guard.text
+        assert "أخبارك" in guard.text

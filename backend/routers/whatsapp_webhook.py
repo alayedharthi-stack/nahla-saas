@@ -301,10 +301,18 @@ def _otp_record_metadata_mutation(
 def _otp_merge_save_metadata(
     tracker: Any,
     persona_meta: Optional[Dict[str, Any]] = None,
+    *,
+    persona_compose_event: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from core.outbound_text_policy import merge_policy_into_extra_metadata  # noqa: PLC0415
+    from modules.ai.brain.persona.integration import (  # noqa: PLC0415
+        merge_persona_compose_into_extra_metadata,
+    )
 
-    base = dict(persona_meta or {})
+    base = merge_persona_compose_into_extra_metadata(
+        dict(persona_meta or {}),
+        persona_compose_event,
+    )
     if tracker is None:
         return base
     try:
@@ -6818,6 +6826,7 @@ async def _handle_merchant_message(
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
+        _brain_persona_compose_event: Optional[Dict[str, Any]] = None
         _brain_handoff: bool = False  # set True only by the brain handoff branch
         _brain_nc_block: bool = False
         _brain_nc_category: str = ""
@@ -8378,6 +8387,19 @@ async def _handle_merchant_message(
                         _persona_ownership.merge_from_dict(
                             brain_result.get("persona_ownership")
                         )
+                        _brain_chosen_path = str(brain_result.get("chosen_path") or "").strip()
+                        _brain_persona_compose = brain_result.get("persona_compose")
+                        if (
+                            _brain_chosen_path == "fact_bound_persona_compose"
+                            and isinstance(_brain_persona_compose, dict)
+                            and _brain_persona_compose
+                        ):
+                            _brain_persona_compose_event = {
+                                "chosen_path": _brain_chosen_path,
+                                "persona_compose": dict(_brain_persona_compose),
+                            }
+                        else:
+                            _brain_persona_compose_event = None
                         _brain_nc_block = bool(
                             brain_result.get("non_commerce_block_mode")
                         )
@@ -10249,6 +10271,7 @@ async def _handle_merchant_message(
                 extra_metadata=_otp_merge_save_metadata(
                     _outbound_text_tracker,
                     _persona_ownership.to_metadata(),
+                    persona_compose_event=_brain_persona_compose_event,
                 ),
             )
 
