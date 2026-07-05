@@ -8,6 +8,7 @@ from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
 from modules.ai.brain.persona.fact_bound_composer import (
     FactBoundPersonaComposer,
     build_social_facts_bundle,
+    resolve_persona_compose_model_route,
 )
 from modules.ai.brain.persona.facts_bundle import PersonaComposeResult
 from modules.ai.brain.persona.flags import is_persona_composer_enforce_enabled
@@ -229,6 +230,115 @@ class TestFactBoundPersonaComposer:
             assert result.text.strip()
             assert result.source == "fallback_deterministic"
             assert result.fallback_reason == "timeout"
+
+        asyncio.run(_run())
+
+
+class TestPersonaComposeModelRouting:
+    def test_platform_default_uses_tiny_tier_openai_model(self, monkeypatch) -> None:
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_MODEL", raising=False)
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_PROVIDER", raising=False)
+        bundle = build_social_facts_bundle(
+            surface="social_checkin",
+            inbound_text="كيف الحال",
+        )
+        route = resolve_persona_compose_model_route(bundle)
+        assert route.source == "platform_default"
+        assert route.provider == "openai_compatible"
+        assert route.model == "gpt-4o-mini"
+
+    def test_env_override_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_PROVIDER", "openai_compatible")
+        bundle = build_social_facts_bundle(
+            surface="thanks",
+            inbound_text="شكراً",
+        )
+        route = resolve_persona_compose_model_route(bundle)
+        assert route.source == "env"
+        assert route.model == "gpt-4o-mini"
+        assert route.provider == "openai_compatible"
+
+    def test_tenant_override_respected(self) -> None:
+        bundle = build_social_facts_bundle(
+            surface="dua",
+            inbound_text="الله يعطيك العافية",
+            merchant_persona={"persona_composer_model": "gpt-4o-mini"},
+        )
+        route = resolve_persona_compose_model_route(bundle)
+        assert route.source == "tenant_override"
+        assert route.model == "gpt-4o-mini"
+        assert route.provider == "openai_compatible"
+
+    def test_stale_model_provider_failure_falls_back_with_reason(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        async def _run() -> None:
+            bundle = build_social_facts_bundle(
+                surface="social_checkin",
+                inbound_text="كيف الحال",
+                merchant_persona={"persona_composer_model": "claude-3-5-haiku-20241022"},
+            )
+
+            def _empty_provider_call(*_args, **_kwargs):
+                return {
+                    "provider": "anthropic",
+                    "model": "claude-3-5-haiku-20241022",
+                    "reply_text": "",
+                    "status": "call_error",
+                }
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            with patch(
+                "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.is_configured",
+                return_value=True,
+            ):
+                with patch(
+                    "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    side_effect=_empty_provider_call,
+                ):
+                    result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert result.guard_passed is False
+            assert result.fallback_reason == "empty_llm"
+            assert result.facts_hash
+            assert result.surface == "social_checkin"
+
+        asyncio.run(_run())
+
+    def test_configured_model_path_sets_persona_llm_metadata(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        async def _run() -> None:
+            bundle = build_social_facts_bundle(
+                surface="social_greeting",
+                inbound_text="السلام عليكم",
+            )
+
+            def _good_provider_call(*_args, **_kwargs):
+                return {
+                    "provider": "openai_compatible",
+                    "model": "gpt-4o-mini",
+                    "reply_text": "وعليكم السلام ورحمة الله 😊",
+                    "status": "ok",
+                }
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            with patch(
+                "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.is_configured",
+                return_value=True,
+            ):
+                with patch(
+                    "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
+                    side_effect=_good_provider_call,
+                ):
+                    result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert result.model == "gpt-4o-mini"
+            assert result.facts_hash
 
         asyncio.run(_run())
 

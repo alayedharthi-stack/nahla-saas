@@ -7,7 +7,11 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Sequence
+
+from core.tenant import merge_ai_defaults
+from modules.ai.brain.cost.model_router_audit import TIER_TINY, _env_tier_default
 
 from .compose_guards import apply_guards_or_fallback, apply_persona_compose_guards
 from .facts_bundle import (
@@ -22,6 +26,63 @@ from .prompts import build_system_prompt, build_user_prompt
 logger = logging.getLogger("nahla.brain.persona.fact_bound_composer")
 
 _LLMCallable = Callable[[PersonaFactsBundle], Awaitable[str]]
+
+_PERSONA_COMPOSE_CALL_SITE = "brain.persona.fact_bound_composer"
+
+
+@dataclass(frozen=True)
+class PersonaComposeModelRoute:
+    provider: str
+    model: str
+    tier: str
+    source: str
+
+
+def _infer_provider_for_model(model: str) -> str:
+    name = str(model or "").strip().lower()
+    if name.startswith("claude"):
+        return "anthropic"
+    return "openai_compatible"
+
+
+def resolve_persona_compose_model_route(
+    bundle: PersonaFactsBundle,
+) -> PersonaComposeModelRoute:
+    """Resolve provider/model for persona compose via env, tenant override, or platform tiny tier."""
+    env_model = os.environ.get("NAHLA_PERSONA_COMPOSE_MODEL", "").strip()
+    if env_model:
+        provider = (
+            os.environ.get("NAHLA_PERSONA_COMPOSE_PROVIDER", "").strip()
+            or _infer_provider_for_model(env_model)
+        )
+        return PersonaComposeModelRoute(
+            provider=provider,
+            model=env_model,
+            tier=TIER_TINY,
+            source="env",
+        )
+
+    settings = merge_ai_defaults(dict(bundle.merchant_persona or {}))
+    tenant_model = str(settings.get("persona_composer_model") or "").strip()
+    if tenant_model:
+        provider = (
+            str(settings.get("persona_composer_provider") or "").strip()
+            or _infer_provider_for_model(tenant_model)
+        )
+        return PersonaComposeModelRoute(
+            provider=provider,
+            model=tenant_model,
+            tier=TIER_TINY,
+            source="tenant_override",
+        )
+
+    tiny = _env_tier_default(TIER_TINY)
+    return PersonaComposeModelRoute(
+        provider=str(tiny.suggested_provider or "openai_compatible"),
+        model=str(tiny.suggested_model or "gpt-4o-mini"),
+        tier=TIER_TINY,
+        source="platform_default",
+    )
 
 _CONSTITUTION_STUB_REPLIES: dict[str, tuple[str, ...]] = {
     "social_greeting": (
@@ -162,7 +223,7 @@ class FactBoundPersonaComposer:
         fallback_reason = ""
 
         try:
-            raw_text = await self._invoke_llm(bundle)
+            raw_text, model = await self._invoke_llm(bundle)
             if (raw_text or "").strip():
                 source = "persona_llm"
             else:
@@ -268,76 +329,74 @@ class FactBoundPersonaComposer:
 
         return _stub
 
-    async def _invoke_llm(self, bundle: PersonaFactsBundle) -> str:
+    async def _invoke_llm(self, bundle: PersonaFactsBundle) -> tuple[str, Optional[str]]:
         if self._llm_callable is not None:
             import asyncio  # noqa: PLC0415
 
-            return (
+            text = (
                 await asyncio.wait_for(
                     self._llm_callable(bundle),
                     timeout=self._timeout_seconds,
                 )
             ).strip()
+            return text, None
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return ""
+        route = resolve_persona_compose_model_route(bundle)
+        system = build_system_prompt(bundle)
+        user = build_user_prompt(bundle)
+        audit_context = {
+            "reason": _PERSONA_COMPOSE_CALL_SITE,
+            "surface": bundle.surface,
+            "tenant_id": bundle.tenant_id,
+            "model_override": route.model,
+            "model_tier": route.tier,
+        }
 
         import asyncio  # noqa: PLC0415
 
-        import anthropic  # noqa: PLC0415
+        def _call_provider_sync() -> tuple[str, str]:
+            provider_key = str(route.provider or "").strip().lower()
+            if provider_key == "openai_compatible":
+                from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+                    OpenAICompatibleProvider,
+                )
 
-        client = anthropic.AsyncAnthropic(
-            api_key=api_key,
+                provider = OpenAICompatibleProvider()
+                if not provider.is_configured():
+                    return "", route.model
+                result = provider.call(
+                    user,
+                    system,
+                    audit_context=audit_context,
+                )
+                return (
+                    str(result.get("reply_text") or "").strip(),
+                    str(result.get("model") or route.model),
+                )
+            if provider_key == "anthropic":
+                from modules.ai.orchestrator.providers.anthropic_provider import (  # noqa: PLC0415
+                    AnthropicProvider,
+                )
+
+                provider = AnthropicProvider()
+                if not provider.is_configured():
+                    return "", route.model
+                result = provider.call(
+                    user,
+                    system,
+                    audit_context=audit_context,
+                )
+                return (
+                    str(result.get("reply_text") or "").strip(),
+                    str(result.get("model") or route.model),
+                )
+            return "", route.model
+
+        text, used_model = await asyncio.wait_for(
+            asyncio.to_thread(_call_provider_sync),
             timeout=self._timeout_seconds,
         )
-        system = build_system_prompt(bundle)
-        user = build_user_prompt(bundle)
-        model = (
-            os.environ.get("NAHLA_PERSONA_COMPOSE_MODEL")
-            or os.environ.get("ANTHROPIC_SLOT_MODEL")
-            or "claude-3-5-haiku-20241022"
-        )
-
-        from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
-
-        emit_llm_cost_audit(
-            model=model,
-            provider="anthropic",
-            messages_count=1,
-            system_chars=len(system),
-            messages_chars=len(user),
-            total_prompt_chars=len(system) + len(user),
-            estimated_input_tokens=(len(system) + len(user)) // 4,
-            reason="brain.persona.fact_bound_composer",
-        )
-
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model=model,
-                max_tokens=120,
-                temperature=0.9,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            ),
-            timeout=self._timeout_seconds,
-        )
-        from modules.ai.orchestrator.ai_usage_ledger import (  # noqa: PLC0415
-            record_ai_usage_from_anthropic,
-        )
-
-        reply_text = response.content[0].text if response.content else ""
-        record_ai_usage_from_anthropic(
-            audit_extra={
-                "reason": "brain.persona.fact_bound_composer",
-                "surface": bundle.surface,
-            },
-            model=model,
-            response=response,
-            reply_text=reply_text,
-            total_prompt_chars=len(system) + len(user),
-        )
-        return str(reply_text or "").strip()
+        return text, used_model or route.model
 
     def _result_from_fallback(
         self,
