@@ -29,6 +29,33 @@ _LLMCallable = Callable[[PersonaFactsBundle], Awaitable[str]]
 
 _PERSONA_COMPOSE_CALL_SITE = "brain.persona.fact_bound_composer"
 
+_PERSONA_COMPOSE_TIMEOUT_ENV = "NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS"
+_PERSONA_COMPOSE_TIMEOUT_DEFAULT = 3.0
+_PERSONA_COMPOSE_TIMEOUT_MIN = 0.5
+_PERSONA_COMPOSE_TIMEOUT_MAX = 10.0
+
+
+def resolve_persona_compose_timeout_seconds(
+    override: Optional[float] = None,
+) -> float:
+    """Resolve persona LLM timeout from explicit override, env, or platform default."""
+    if override is not None:
+        return _clamp_persona_compose_timeout(float(override))
+    raw = os.environ.get(_PERSONA_COMPOSE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _PERSONA_COMPOSE_TIMEOUT_DEFAULT
+    try:
+        return _clamp_persona_compose_timeout(float(raw))
+    except ValueError:
+        return _PERSONA_COMPOSE_TIMEOUT_DEFAULT
+
+
+def _clamp_persona_compose_timeout(value: float) -> float:
+    return max(
+        _PERSONA_COMPOSE_TIMEOUT_MIN,
+        min(_PERSONA_COMPOSE_TIMEOUT_MAX, float(value)),
+    )
+
 
 @dataclass(frozen=True)
 class PersonaComposeModelRoute:
@@ -198,11 +225,11 @@ class FactBoundPersonaComposer:
         *,
         enforce_gate: bool = True,
         llm_callable: Optional[_LLMCallable] = None,
-        timeout_seconds: float = 1.5,
+        timeout_seconds: Optional[float] = None,
     ) -> None:
         self._enforce_gate = enforce_gate
         self._llm_callable = llm_callable
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = resolve_persona_compose_timeout_seconds(timeout_seconds)
 
     async def compose(
         self,
