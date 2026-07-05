@@ -8436,6 +8436,17 @@ async def _handle_merchant_message(
                                 "chosen_path": _brain_chosen_path,
                                 "persona_compose": dict(_brain_persona_compose),
                             }
+                            for _kb_meta_key in (
+                                "knowledge_source",
+                                "kb_section_ids",
+                                "question_kind",
+                                "catalog_product_id",
+                                "price_source",
+                                "availability_source",
+                            ):
+                                _kb_meta_val = brain_result.get(_kb_meta_key)
+                                if _kb_meta_val is not None:
+                                    _brain_persona_compose_event[_kb_meta_key] = _kb_meta_val
                         else:
                             _brain_persona_compose_event = None
                         _brain_nc_block = bool(
@@ -8559,6 +8570,14 @@ async def _handle_merchant_message(
                         isinstance(brain_result, dict)
                         and brain_result.get("shipment_claim_scrubbed_empty")
                     )
+                    if not _skip_silent_ack and isinstance(brain_result, dict):
+                        _kb_pc = brain_result.get("persona_compose") or {}
+                        if (
+                            str(brain_result.get("chosen_path") or "")
+                            == "fact_bound_persona_compose"
+                            and str(_kb_pc.get("surface") or "") == "kb_product_answer"
+                        ):
+                            _skip_silent_ack = True
                     if _skip_silent_ack:
                         logger.info(
                             "[BRAIN_SILENT_REPLY] tenant=%s skipped="

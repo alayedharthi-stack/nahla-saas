@@ -3305,6 +3305,7 @@ class MerchantBrain:
                     availability_context=_availability_ctx,
                     inbound_text=message or "",
                     chosen_path=_chosen_path,
+                    decision_topic=str((decision.args or {}).get("topic") or ""),
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                 )
@@ -3941,6 +3942,9 @@ class MerchantBrain:
             "persona_ownership": _persona_ownership_dict,
             "chosen_path": _chosen_path,
             "persona_compose": dict(result.data.get("persona_compose") or {}),
+            "knowledge_source": result.data.get("knowledge_source"),
+            "kb_section_ids": list(result.data.get("kb_section_ids") or []),
+            "question_kind": result.data.get("question_kind"),
             "non_commerce_block_mode": bool(
                 getattr(ctx, "block_commerce_escalation", False)
             ),

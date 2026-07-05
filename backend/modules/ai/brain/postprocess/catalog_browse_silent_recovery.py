@@ -170,6 +170,16 @@ def try_catalog_browse_silent_recovery(
     if not raw or not is_catalog_browse_silent_recovery_message(raw):
         return None
 
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            is_product_knowledge_message,
+        )
+
+        if is_product_knowledge_message(raw):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product-knowledge probe
+        pass
+
     has_products = _tenant_has_catalog_products(db, int(tenant_id or 0))
     reply = resolve_catalog_browse_silent_recovery_reply(has_products=has_products)
     logger.info(

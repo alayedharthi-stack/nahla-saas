@@ -119,6 +119,16 @@ def merge_persona_compose_into_extra_metadata(
     pc = event_meta.get("persona_compose")
     if isinstance(pc, dict) and pc:
         merged["persona_compose"] = dict(pc)
+    for key in (
+        "knowledge_source",
+        "kb_section_ids",
+        "question_kind",
+        "catalog_product_id",
+        "price_source",
+        "availability_source",
+    ):
+        if event_meta.get(key) is not None:
+            merged[key] = event_meta.get(key)
     return merged
 
 
