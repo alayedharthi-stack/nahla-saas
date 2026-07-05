@@ -9,6 +9,7 @@ from modules.ai.brain.persona.fact_bound_composer import (
     FactBoundPersonaComposer,
     build_social_facts_bundle,
     resolve_persona_compose_model_route,
+    resolve_persona_compose_timeout_seconds,
 )
 from modules.ai.brain.persona.facts_bundle import PersonaComposeResult
 from modules.ai.brain.persona.flags import is_persona_composer_enforce_enabled
@@ -232,6 +233,34 @@ class TestFactBoundPersonaComposer:
             assert result.fallback_reason == "timeout"
 
         asyncio.run(_run())
+
+
+class TestPersonaComposeTimeoutConfig:
+    def test_default_timeout_is_three_seconds(self, monkeypatch) -> None:
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
+        assert resolve_persona_compose_timeout_seconds() == 3.0
+        composer = FactBoundPersonaComposer(enforce_gate=False)
+        assert composer._timeout_seconds == 3.0  # noqa: SLF001
+
+    def test_env_override_respected(self, monkeypatch) -> None:
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "5")
+        assert resolve_persona_compose_timeout_seconds() == 5.0
+        composer = FactBoundPersonaComposer(enforce_gate=False)
+        assert composer._timeout_seconds == 5.0  # noqa: SLF001
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "not-a-number")
+        assert resolve_persona_compose_timeout_seconds() == 3.0
+
+    def test_timeout_clamped_to_bounds(self, monkeypatch) -> None:
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
+        assert resolve_persona_compose_timeout_seconds(override=0.1) == 0.5
+        assert resolve_persona_compose_timeout_seconds(override=99.0) == 10.0
+
+    def test_explicit_constructor_override_wins_over_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "8")
+        composer = FactBoundPersonaComposer(enforce_gate=False, timeout_seconds=2.0)
+        assert composer._timeout_seconds == 2.0  # noqa: SLF001
 
 
 class TestPersonaComposeModelRouting:
