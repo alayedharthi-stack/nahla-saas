@@ -450,3 +450,11 @@ class TestDecisionEngineLedgerRoute:
         )
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action == ACTION_CUSTOMER_LEDGER_REPLY
+
+
+class TestExplicitIntentPublicExports:
+    def test_social_dua_exported_in_module_all(self) -> None:
+        import modules.ai.order_flow_v2.explicit_intent_checkout_suppression as mod
+
+        assert "SOCIAL_DUA" in mod.__all__
+        assert mod.SOCIAL_DUA == "social_dua"
