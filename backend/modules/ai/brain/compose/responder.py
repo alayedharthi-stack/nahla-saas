@@ -543,18 +543,41 @@ class DefaultComposer:
                     )
 
             from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                active_category_from_state,
                 filter_products_for_browse_turn,
+                resolve_browse_category_scope,
             )
 
+            _pre_category_count = len(safe_products)
+            _search_query = str(
+                (decision.args or {}).get("query") or data.get("query") or ""
+            ).strip()
+            _search_source = str(
+                (decision.args or {}).get("source") or ""
+            ).strip().lower()
             safe_products = filter_products_for_browse_turn(
                 safe_products,
                 message=ctx.message or "",
-                query=str((decision.args or {}).get("query") or data.get("query") or ""),
-                source=str((decision.args or {}).get("source") or "").strip().lower(),
+                query=_search_query,
+                source=_search_source,
                 last_browse_query=str(
                     getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""
                 ),
                 state=getattr(ctx, "state", None),
+                db=getattr(ctx, "_db", None),
+                tenant_id=getattr(ctx, "tenant_id", None),
+            )
+            _category_filter_dropped = max(0, _pre_category_count - len(safe_products))
+            _category_scope = (
+                resolve_browse_category_scope(
+                    ctx.message or "",
+                    _search_query,
+                    active_category=active_category_from_state(
+                        getattr(ctx, "state", None),
+                    ),
+                    source=_search_source,
+                )
+                or str((decision.args or {}).get("category_scope") or "").strip()
             )
 
             if not safe_products:
@@ -576,6 +599,59 @@ class DefaultComposer:
             )
             result.data["product_breadth"] = breadth.to_log_dict()
             result.data["product_breadth_meta"] = breadth_meta
+
+            _catalog_text: str | None = None
+            _catalog_event: dict | None = None
+            try:
+                from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    classify_catalog_question_kind,
+                    try_compose_catalog_product_answer,
+                )
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                _catalog_text, _catalog_result, _catalog_event = (
+                    await try_compose_catalog_product_answer(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        products=list(candidates),
+                        catalog_search_query=_search_query,
+                        search_result_count=len(safe_products),
+                        category_scope=_category_scope,
+                        allowed_category=_category_scope,
+                        question_kind=classify_catalog_question_kind(
+                            str(getattr(ctx, "message", "") or ""),
+                            query=_search_query,
+                            decision_args=dict(decision.args or {}),
+                        ),
+                        category_filter_dropped=_category_filter_dropped,
+                        display_count=len(candidates),
+                        decision_args=dict(decision.args or {}),
+                        ai_settings=_ai_settings_from_ctx(ctx),
+                    )
+                )
+                if _catalog_result is not None and (_catalog_text or "").strip():
+                    if isinstance(_catalog_event, dict):
+                        result.data.update(_catalog_event)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
+                logger.exception("[RESPONDER] catalog_product_answer compose failed")
+
+            if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
+                wa_buttons = []
+                for i, p in enumerate(candidates[:3], 1):
+                    from core.product_button_label import (  # noqa: PLC0415
+                        compact_whatsapp_product_button_title,
+                    )
+
+                    raw_title = str(p.get("title") or "")
+                    title = compact_whatsapp_product_button_title(raw_title)
+                    wa_buttons.append({
+                        "type": "reply",
+                        "reply": {"id": f"pick_{i}", "title": title or str(i)},
+                    })
+                result.data["pending_buttons"] = wa_buttons
+                result.data["pending_candidates"] = candidates
+                return (_catalog_text or "").strip()
 
             # INVARIANT: pending_candidates = EXACTLY the products shown in
             # the numbered list.  The customer reads "1. بنطلون" and expects

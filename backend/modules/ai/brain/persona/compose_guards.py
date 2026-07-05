@@ -9,6 +9,7 @@ from typing import Any, Optional
 from .facts_bundle import (
     PersonaFactsBundle,
     PHASE2_SOCIAL_SURFACES,
+    PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
     PERSONA_SURFACE_KB_PRODUCT_ANSWER,
     PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
 )
@@ -206,6 +207,140 @@ def _apply_kb_product_answer_guards(
     return PersonaGuardResult(text=working, passed=True)
 
 
+def _apply_catalog_product_answer_guards(
+    text: str,
+    facts: dict[str, Any],
+) -> PersonaGuardResult:
+    working = str(text or "").strip()
+    if not working:
+        return PersonaGuardResult(text="", passed=False, failed_reason="empty_compose")
+
+    if not facts.get("allow_slot_prompts", False):
+        slot_markers = (
+            "اسمك",
+            "اسمك الكريم",
+            "عنوانك",
+            "وين تسكن",
+            "رقم الحساب",
+            "الآيبان",
+            "ايبان",
+            "كم الكمية",
+            "كم الحبة",
+            "طريقة الدفع",
+            "اطلبه",
+            "اطلب الآن",
+            "نكمل الطلب",
+        )
+        if any(m in working for m in slot_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="slot_prompt",
+            )
+
+    order_markers = ("تم إنشاء طلبك", "رقم الطلب", "NHL-")
+    if any(m in working for m in order_markers):
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="order_confirmation_claim",
+        )
+
+    if not facts.get("allow_price_mention"):
+        price_markers = ("ريال", "ر.س", "السعر", "بكم", "كم سعر")
+        if any(m in working for m in price_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="invented_price",
+            )
+    else:
+        allowed_prices = {
+            str(p.get("price"))
+            for p in (facts.get("catalog_products") or [])
+            if isinstance(p, dict) and p.get("price") is not None
+        }
+        for match in re.findall(r"(\d+(?:\.\d+)?)\s*ريال", working):
+            if allowed_prices and not any(
+                match == ap or match == ap.split(".")[0] or ap.startswith(match)
+                for ap in allowed_prices
+            ):
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="invented_price_amount",
+                )
+
+    if not facts.get("allow_availability_mention"):
+        availability_markers = (
+            "متوفر",
+            "غير متوفر",
+            "نفذ",
+            "available",
+            "out of stock",
+        )
+        if any(m in working.lower() for m in availability_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="invented_availability",
+            )
+    elif "متوفر" in working and not facts.get("has_positive_availability"):
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="unsupported_available_claim",
+        )
+
+    if not facts.get("allow_superiority_claims", False):
+        for term in ("الأفضل", "الأصلي", "مضمون", "أفضل عسل"):
+            if term in working:
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="unsupported_superiority_claim",
+                )
+
+    discount_markers = ("خصم", "تخفيض", "عرض", "%")
+    if any(m in working for m in discount_markers):
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="invented_offer",
+        )
+
+    allowed_titles = [
+        str(p.get("title") or "").strip()
+        for p in (facts.get("catalog_products") or [])
+        if isinstance(p, dict) and str(p.get("title") or "").strip()
+    ]
+    scope = str(facts.get("category_scope") or facts.get("allowed_category") or "")
+    if scope == "عسل":
+        cross_markers = ("كريم", "زيت", "سم النحل", "عكبر")
+        inbound = str(facts.get("inbound_text") or "")
+        for marker in cross_markers:
+            if marker in working and marker not in inbound:
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="category_drift",
+                )
+
+    if working.strip() in {"منتج", "المنتج", "منتجات", "المنتجات"}:
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="generic_product_label",
+        )
+
+    if allowed_titles and len(allowed_titles) == 1:
+        title = allowed_titles[0]
+        if title and title not in working and len(working) > 40:
+            pass  # composer may paraphrase; titles not strictly required in short replies
+
+    return PersonaGuardResult(text=working, passed=True)
+
+
 def apply_persona_compose_guards(
     text: str,
     bundle: PersonaFactsBundle,
@@ -347,8 +482,17 @@ def apply_persona_compose_guards(
             return kb_guard
         working = kb_guard.text
 
+    if bundle.surface == PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER:
+        catalog_guard = _apply_catalog_product_answer_guards(working, facts)
+        if not catalog_guard.passed:
+            return catalog_guard
+        working = catalog_guard.text
+
     # 5 Checkout-pressure guard
-    if bundle.surface in PHASE2_SOCIAL_SURFACES or bundle.surface == PERSONA_SURFACE_KB_PRODUCT_ANSWER:
+    if bundle.surface in PHASE2_SOCIAL_SURFACES or bundle.surface in {
+        PERSONA_SURFACE_KB_PRODUCT_ANSWER,
+        PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+    }:
         try:
             from ..postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
                 apply_social_checkout_pressure_guard,

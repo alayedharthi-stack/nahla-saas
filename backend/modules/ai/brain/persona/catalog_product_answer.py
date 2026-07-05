@@ -1,0 +1,282 @@
+"""Fact-bound persona compose for catalog search / browse answers (P0)."""
+from __future__ import annotations
+
+import re
+from typing import Any, Optional
+
+from .facts_bundle import (
+    PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+    PersonaComposeResult,
+    PersonaConstraints,
+    PersonaFactsBundle,
+)
+from .integration import (
+    build_persona_compose_event_metadata,
+    should_enforce_persona_compose_for_surface,
+)
+
+_PRICE_ASK_RE = re.compile(
+    r"(?:بكم|كم\s*سعر|سعر|ثمن|تكلفة|how\s*much|price)",
+    re.UNICODE | re.IGNORECASE,
+)
+_AVAILABILITY_ASK_RE = re.compile(
+    r"(?:عندكم|عندك|لديكم|لديك|هل\s+.*متوفر|فيه|في\s+عندكم|available)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+_SOFT_BROWSE_RE = re.compile(
+    r"(?:وش|ايش|ايه|ما)\s+عندكم",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def classify_catalog_question_kind(
+    message: str,
+    *,
+    query: str = "",
+    decision_args: Optional[dict[str, Any]] = None,
+) -> str:
+    """Classify P0 catalog turns: browse | availability | price."""
+    msg = str(message or "").strip()
+    args = dict(decision_args or {})
+    if str(args.get("question_kind") or "").strip() in {
+        "browse",
+        "availability",
+        "price",
+    }:
+        return str(args["question_kind"]).strip()
+
+    if _SOFT_BROWSE_RE.search(msg) and not _PRICE_ASK_RE.search(msg):
+        return "browse"
+
+    if _PRICE_ASK_RE.search(msg):
+        return "price"
+    if _AVAILABILITY_ASK_RE.search(msg) and not _PRICE_ASK_RE.search(msg):
+        return "availability"
+    q = str(query or args.get("query") or "").strip()
+    if q and _PRICE_ASK_RE.search(f"{msg} {q}"):
+        return "price"
+    return "browse"
+
+
+def _catalog_rows_from_products(
+    products: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[Any], list[Any], bool, bool]:
+    catalog_product_ids: list[Any] = []
+    variant_ids: list[Any] = []
+    rows: list[dict[str, Any]] = []
+    any_price = False
+    any_availability = False
+    any_positive_availability = False
+    for raw in products or []:
+        if not isinstance(raw, dict):
+            continue
+        pid = raw.get("id")
+        if pid is not None:
+            catalog_product_ids.append(pid)
+        vid = raw.get("variant_id")
+        if vid is not None:
+            variant_ids.append(vid)
+        row: dict[str, Any] = {
+            "id": pid,
+            "title": str(raw.get("title") or "").strip(),
+        }
+        category = str(raw.get("category") or "").strip()
+        if category:
+            row["category"] = category
+        price = raw.get("price")
+        if price is not None:
+            row["price"] = price
+            any_price = True
+        orderable = raw.get("can_checkout", raw.get("orderable"))
+        if orderable is not None:
+            row["orderable"] = bool(orderable)
+            row["available"] = bool(orderable)
+            any_availability = True
+            if bool(orderable):
+                any_positive_availability = True
+        if row.get("title"):
+            rows.append(row)
+    return rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive_availability
+
+
+def build_catalog_product_answer_facts_bundle(
+    *,
+    inbound_text: str,
+    tenant_id: int = 0,
+    customer_phone: str = "",
+    products: Optional[list[dict[str, Any]]] = None,
+    catalog_search_query: str = "",
+    search_result_count: int = 0,
+    category_scope: str = "",
+    allowed_category: str = "",
+    question_kind: str = "",
+    category_filter_dropped: int = 0,
+    display_count: int = 0,
+    decision_args: Optional[dict[str, Any]] = None,
+    merchant_persona: Optional[dict[str, Any]] = None,
+) -> PersonaFactsBundle:
+    from .fact_bound_composer import detect_language  # noqa: PLC0415
+
+    inbound = str(inbound_text or "").strip()
+    language = detect_language(inbound)
+    args = dict(decision_args or {})
+    items = [dict(p) for p in (products or []) if isinstance(p, dict)]
+    rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive = (
+        _catalog_rows_from_products(items)
+    )
+    qkind = str(question_kind or "").strip() or classify_catalog_question_kind(
+        inbound,
+        query=catalog_search_query,
+        decision_args=args,
+    )
+    scope = str(category_scope or args.get("category_scope") or "").strip()
+    allowed = str(allowed_category or scope or "").strip()
+    include_price = qkind == "price" and any_price
+    include_availability = qkind in {"availability", "price"} and any_availability
+
+    verified_facts: dict[str, Any] = {
+        "surface": PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        "inbound_text": inbound,
+        "question_kind": qkind,
+        "catalog_search_query": str(catalog_search_query or args.get("query") or "").strip(),
+        "search_result_count": int(search_result_count or len(items)),
+        "category_scope": scope,
+        "allowed_category": allowed,
+        "catalog_products": rows,
+        "catalog_product_ids": catalog_product_ids,
+        "variant_ids": variant_ids,
+        "display_count": int(display_count or len(items)),
+        "category_filter_dropped": int(category_filter_dropped or 0),
+        "allow_price_mention": include_price and any_price,
+        "allow_availability_mention": include_availability and any_availability,
+        "has_positive_availability": any_positive,
+        "allow_checkout_pressure": False,
+        "allow_slot_prompts": False,
+        "allow_superiority_claims": False,
+        "has_catalog_products": bool(rows),
+    }
+    if include_price and any_price:
+        verified_facts["price_source"] = "catalog"
+    if include_availability and any_availability:
+        verified_facts["availability_source"] = "catalog"
+    return PersonaFactsBundle(
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        inbound_text=inbound,
+        language=language,
+        dialect="saudi_arabic" if language == "ar" else None,
+        verified_facts=verified_facts,
+        customer_context={},
+        merchant_persona=dict(merchant_persona or {}),
+        constraints=PersonaConstraints(max_chars=420, max_emojis=2),
+        tenant_id=int(tenant_id or 0),
+        customer_phone=str(customer_phone or ""),
+    )
+
+
+def build_catalog_product_answer_event_metadata(
+    result: PersonaComposeResult,
+    *,
+    tenant_id: int,
+    allowlist_result: str,
+    catalog_facts: dict[str, Any],
+) -> dict[str, Any]:
+    """Outbound metadata for catalog-grounded persona compose."""
+    meta = build_persona_compose_event_metadata(
+        result,
+        tenant_id=int(tenant_id),
+        allowlist_result=str(allowlist_result or ""),
+    )
+    facts = dict(catalog_facts or {})
+    meta["question_kind"] = str(facts.get("question_kind") or "").strip()
+    meta["catalog_search_query"] = str(facts.get("catalog_search_query") or "").strip()
+    meta["search_result_count"] = int(facts.get("search_result_count") or 0)
+    meta["category_scope"] = str(facts.get("category_scope") or "").strip()
+    meta["allowed_category"] = str(facts.get("allowed_category") or "").strip()
+    meta["checkout_pressure_allowed"] = False
+    ids = list(facts.get("catalog_product_ids") or [])
+    if ids:
+        meta["catalog_product_ids"] = ids
+    vids = list(facts.get("variant_ids") or [])
+    if vids:
+        meta["variant_ids"] = vids
+    if facts.get("price_source"):
+        meta["price_source"] = facts["price_source"]
+    if facts.get("availability_source"):
+        meta["availability_source"] = facts["availability_source"]
+    return meta
+
+
+async def try_compose_catalog_product_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    catalog_search_query: str = "",
+    search_result_count: int = 0,
+    category_scope: str = "",
+    allowed_category: str = "",
+    question_kind: str = "",
+    category_filter_dropped: int = 0,
+    display_count: int = 0,
+    decision_args: Optional[dict[str, Any]] = None,
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], Optional[PersonaComposeResult], Optional[dict[str, Any]]]:
+    """Compose catalog-grounded search answer when test-mode gate passes."""
+    from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
+
+    settings = dict(ai_settings or {})
+    if not should_enforce_persona_compose_for_surface(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        ai_settings=settings,
+    ):
+        return None, None, None
+
+    if not products:
+        return None, None, None
+
+    bundle = build_catalog_product_answer_facts_bundle(
+        inbound_text=inbound_text,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        products=products,
+        catalog_search_query=catalog_search_query,
+        search_result_count=search_result_count,
+        category_scope=category_scope,
+        allowed_category=allowed_category,
+        question_kind=question_kind,
+        category_filter_dropped=category_filter_dropped,
+        display_count=display_count,
+        decision_args=dict(decision_args or {}),
+        merchant_persona=settings,
+    )
+    if not bundle.verified_facts.get("has_catalog_products"):
+        return None, None, None
+
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    allowlist_result = persona_composer_allowlist_result(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=settings,
+    )
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    result = await composer.compose(bundle)
+    if (
+        result.source != "persona_llm"
+        or not result.guard_passed
+        or not (result.text or "").strip()
+    ):
+        return None, None, None
+
+    event_meta = build_catalog_product_answer_event_metadata(
+        result,
+        tenant_id=int(tenant_id),
+        allowlist_result=allowlist_result,
+        catalog_facts=bundle.verified_facts,
+    )
+    return result.text.strip(), result, event_meta

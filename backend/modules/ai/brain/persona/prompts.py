@@ -67,6 +67,33 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             "checkout pressure, name/address/payment/quantity asks; "
             "no unsupported الأفضل/الأصلي/مضمون unless present in kb_sections"
         )
+    elif bundle.surface == "catalog_product_answer":
+        lines.append(f"question_kind: {facts.get('question_kind') or ''}")
+        if facts.get("category_scope"):
+            lines.append(f"category_scope: {facts.get('category_scope')}")
+        if facts.get("catalog_search_query"):
+            lines.append(f"catalog_search_query: {facts.get('catalog_search_query')}")
+        lines.append(f"search_result_count: {facts.get('search_result_count')}")
+        for product in facts.get("catalog_products") or []:
+            if not isinstance(product, dict):
+                continue
+            title = str(product.get("title") or "").strip()
+            if not title:
+                continue
+            parts = [f"product: {title}"]
+            if product.get("category"):
+                parts.append(f"category={product.get('category')}")
+            if facts.get("allow_price_mention") and product.get("price") is not None:
+                parts.append(f"price={product.get('price')} ريال")
+            if facts.get("allow_availability_mention") and "available" in product:
+                parts.append(f"available={product.get('available')}")
+            lines.append(" | ".join(parts))
+        lines.append(
+            "rules: use only supplied catalog products; brief Saudi merchant tone; "
+            "mention prices only when listed; mention availability only when available flag is set; "
+            "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
+            "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
+        )
     else:
         lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
     return "\n".join(lines)
