@@ -16,6 +16,8 @@ from modules.ai.brain.cost.model_router_audit import TIER_TINY, _env_tier_defaul
 from .compose_guards import apply_guards_or_fallback, apply_persona_compose_guards
 from .facts_bundle import (
     PHASE2_SOCIAL_SURFACES,
+    PERSONA_COMPOSER_SURFACES,
+    PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
     PersonaComposeResult,
     PersonaConstraints,
     PersonaFactsBundle,
@@ -240,7 +242,7 @@ class FactBoundPersonaComposer:
     ) -> PersonaComposeResult:
         t0 = time.monotonic()
         surface = str(bundle.surface or "").strip()
-        if surface not in PHASE2_SOCIAL_SURFACES:
+        if surface not in PERSONA_COMPOSER_SURFACES:
             fb = deterministic_fallback(bundle, ctx=ctx, reason="unsupported_surface")
             return self._result_from_fallback(bundle, fb, t0, reason="unsupported_surface")
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..types import BrainContext
-from .facts_bundle import PHASE2_SOCIAL_SURFACES
+from .facts_bundle import PHASE2_SOCIAL_SURFACES, PERSONA_COMPOSER_SURFACES
 
 
 def _active_commerce_greeting_stage(ctx: BrainContext) -> Optional[str]:
@@ -114,6 +114,10 @@ def resolve_social_surface(category: str, *, inbound_text: str = "") -> Optional
 
 def is_allowed_phase2_surface(surface: str) -> bool:
     return str(surface or "").strip() in PHASE2_SOCIAL_SURFACES
+
+
+def is_allowed_persona_compose_surface(surface: str) -> bool:
+    return str(surface or "").strip() in PERSONA_COMPOSER_SURFACES
 
 
 def resolve_phatic_llm_surface(

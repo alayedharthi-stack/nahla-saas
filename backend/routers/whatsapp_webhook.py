@@ -6633,11 +6633,41 @@ async def _handle_merchant_message(
                             _tenant_id=tenant_id, _db=db,
                         )
                         if _media_ok:
-                            _intro_text = (
-                                _barcode_intro_text(_early_payment_key or _normalised.get("media_key") or "")
-                                if _early_barcode_image else
-                                "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                            _early_mk = (
+                                _early_payment_key
+                                or _normalised.get("media_key")
+                                or ""
                             )
+                            _early_persona_event = None
+                            if _early_barcode_image:
+                                from core.tenant import (  # noqa: PLC0415
+                                    get_or_create_settings,
+                                    merge_ai_defaults,
+                                )
+                                from modules.ai.brain.persona.payment_media_intro import (  # noqa: PLC0415
+                                    try_compose_payment_media_intro,
+                                )
+
+                                _early_ai = merge_ai_defaults(
+                                    dict(
+                                        get_or_create_settings(db, tenant_id).ai_settings
+                                        or {}
+                                    )
+                                )
+                                _intro_text, _, _early_persona_event = (
+                                    await try_compose_payment_media_intro(
+                                        tenant_id=tenant_id,
+                                        customer_phone=to,
+                                        inbound_text=text or "",
+                                        media_key=_early_mk,
+                                        media_url_present=True,
+                                        ai_settings=_early_ai,
+                                    )
+                                )
+                            else:
+                                _intro_text = (
+                                    "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                                )
                             _text_ok = await _send_whatsapp_message(
                                 phone_id=phone_id, to=to, text=_intro_text,
                                 _tenant_id=tenant_id, _db=db,
@@ -6645,6 +6675,13 @@ async def _handle_merchant_message(
                             StateManager.save_message(
                                 db, to, _intro_text, "outbound",
                                 conversation_id=convo.id, tenant_id=tenant_id,
+                                extra_metadata=_otp_merge_save_metadata(
+                                    None,
+                                    {},
+                                    persona_compose_event=_early_persona_event,
+                                )
+                                if _early_persona_event
+                                else None,
                             )
                             logger.info(
                                 "[PAYMENT_INFO] early-bypass APPLIED tenant=%s convo=%s "
@@ -6827,6 +6864,7 @@ async def _handle_merchant_message(
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
         _brain_persona_compose_event: Optional[Dict[str, Any]] = None
+        _payment_persona_compose_event: Optional[Dict[str, Any]] = None
         _brain_handoff: bool = False  # set True only by the brain handoff branch
         _brain_nc_block: bool = False
         _brain_nc_category: str = ""
@@ -10271,7 +10309,9 @@ async def _handle_merchant_message(
                 extra_metadata=_otp_merge_save_metadata(
                     _outbound_text_tracker,
                     _persona_ownership.to_metadata(),
-                    persona_compose_event=_brain_persona_compose_event,
+                    persona_compose_event=(
+                        _payment_persona_compose_event or _brain_persona_compose_event
+                    ),
                 ),
             )
 
@@ -11305,7 +11345,29 @@ async def _handle_merchant_message(
                     ) or None,
                 )
                 if _pbr.rewrote_reply:
-                    reply = _barcode_intro_text(_pbr.media_key)
+                    from core.tenant import get_or_create_settings, merge_ai_defaults  # noqa: PLC0415
+                    from modules.ai.brain.persona.payment_media_intro import (  # noqa: PLC0415
+                        try_compose_payment_media_intro,
+                    )
+
+                    _pbr_ai = merge_ai_defaults(
+                        dict(get_or_create_settings(db, tenant_id).ai_settings or {})
+                    )
+                    _pbr_media_url_present = bool(
+                        _pbr.asset_found
+                        and isinstance(_pbr.attachment, dict)
+                        and str(_pbr.attachment.get("file_url") or "").strip()
+                    )
+                    reply, _, _payment_persona_compose_event = (
+                        await try_compose_payment_media_intro(
+                            tenant_id=tenant_id,
+                            customer_phone=to,
+                            inbound_text=text or "",
+                            media_key=_pbr.media_key or "",
+                            media_url_present=_pbr_media_url_present,
+                            ai_settings=_pbr_ai,
+                        )
+                    )
             except Exception as _pbr_exc:  # noqa: BLE001
                 logger.warning(
                     "[PAYMENT_BARCODE] route failed tenant=%s err=%s",
@@ -12141,6 +12203,9 @@ async def _handle_merchant_message(
                         _outbound_text_tracker.to_metadata()
                         if _outbound_text_tracker is not None
                         else None
+                    ),
+                    persona_compose_event=(
+                        _payment_persona_compose_event or _brain_persona_compose_event
                     ),
                 )
                 if _outbound_text_tracker is not None:

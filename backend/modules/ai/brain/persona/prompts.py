@@ -29,7 +29,25 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
         lines.append(f"assistant_name: {assistant}")
     if facts.get("is_pure_phatic"):
         lines.append("context: pure_social_phatic_turn")
-    lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
+    if bundle.surface == "payment_media_intro":
+        for key in (
+            "media_kind",
+            "media_url_present",
+            "payment_method",
+            "payment_status",
+            "order_id",
+            "amount",
+        ):
+            if key in facts:
+                lines.append(f"{key}: {facts.get(key)}")
+        lines.append(
+            "rules: short intro only; no IBAN/account/QR contents; "
+            "no invented amount/order; no paid claim unless payment_status=confirmed; "
+            "if media_url_present ask for receipt after transfer when pending; "
+            "if payment confirmed do not ask for receipt again"
+        )
+    else:
+        lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
     return "\n".join(lines)
 
 

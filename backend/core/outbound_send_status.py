@@ -515,6 +515,7 @@ def sync_outbound_body_to_final(
     reason: str = "post_safety_nets",
     cta_metadata: Optional[Dict[str, Any]] = None,
     outbound_text_policy: Optional[Dict[str, Any]] = None,
+    persona_compose_event: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Update the body of the most recent queued outbound MessageEvent
     for ``(tenant_id, recipient)`` so the dashboard sees what the
@@ -627,6 +628,15 @@ def sync_outbound_body_to_final(
                 meta["cta_delivery"] = dict(cta_metadata)
             if outbound_text_policy:
                 meta["outbound_text_policy"] = dict(outbound_text_policy)
+            if persona_compose_event:
+                from modules.ai.brain.persona.integration import (  # noqa: PLC0415
+                    merge_persona_compose_into_extra_metadata,
+                )
+
+                meta = merge_persona_compose_into_extra_metadata(
+                    meta,
+                    persona_compose_event,
+                )
             row.extra_metadata = meta
             flag_modified(row, "extra_metadata")
             db.add(row)

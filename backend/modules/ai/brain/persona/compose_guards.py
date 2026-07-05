@@ -6,7 +6,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .facts_bundle import PersonaFactsBundle, PHASE2_SOCIAL_SURFACES
+from .facts_bundle import PersonaFactsBundle, PHASE2_SOCIAL_SURFACES, PERSONA_SURFACE_PAYMENT_MEDIA_INTRO
 from .fallback_catalog import deterministic_fallback
 
 
@@ -178,7 +178,8 @@ def apply_persona_compose_guards(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — guard import must not break chain
         pass
 
-    # 4 Fake operational claims on social surfaces
+    # 4 Fake operational claims on social / payment intro surfaces
+    facts = bundle.verified_facts or {}
     if bundle.surface in PHASE2_SOCIAL_SURFACES:
         fake_markers = (
             "تم الشحن",
@@ -192,6 +193,49 @@ def apply_persona_compose_guards(
                 passed=False,
                 failed_reason="fake_operational_claim",
             )
+
+    if bundle.surface == PERSONA_SURFACE_PAYMENT_MEDIA_INTRO:
+        if not facts.get("allow_paid_claim"):
+            paid_markers = (
+                "تم الدفع",
+                "تم تأكيد الدفع",
+                "تم استلام الدفع",
+                "تم اعتماد الدفع",
+            )
+            if any(m in working for m in paid_markers):
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="fake_paid_claim",
+                )
+        if not facts.get("media_url_present"):
+            sent_markers = (
+                "تفضل الباركود",
+                "هذا الباركود",
+                "هذا باركود",
+                "تفضل رمز",
+                "هذا رمز الدفع",
+                "صورة الباركود",
+                "تفضل صورة",
+            )
+            if any(m in working for m in sent_markers):
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="media_not_present_claim",
+                )
+        if not facts.get("allow_receipt_request"):
+            receipt_markers = (
+                "أرسل الإيصال",
+                "أرسل صورة الإيصال",
+                "بعد التحويل أرسل",
+            )
+            if any(m in working for m in receipt_markers):
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="receipt_ask_on_confirmed",
+                )
 
     # 5 Checkout-pressure guard
     if bundle.surface in PHASE2_SOCIAL_SURFACES:
