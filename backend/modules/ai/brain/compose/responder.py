@@ -1172,6 +1172,21 @@ class DefaultComposer:
 
                 result.data["chosen_path"] = "support_complaint_refund"
                 return COMPLAINT_INTAKE_REPLY_AR
+            if _topic == "product_knowledge_facts":
+                from ..persona.kb_product_answer import try_compose_kb_product_answer  # noqa: PLC0415
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                _kb_text, _kb_result, _kb_event = await try_compose_kb_product_answer(
+                    tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                    customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                    inbound_text=str(getattr(ctx, "message", "") or ""),
+                    decision_args=dict(decision.args or {}),
+                    ai_settings=_ai_settings_from_ctx(ctx),
+                )
+                if _kb_result is not None and (_kb_text or "").strip():
+                    if isinstance(_kb_event, dict):
+                        result.data.update(_kb_event)
+                    return (_kb_text or "").strip()
             from ..persona.integration import (  # noqa: PLC0415
                 try_enforce_phatic_llm_persona_compose,
             )

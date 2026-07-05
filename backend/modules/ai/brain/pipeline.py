@@ -4227,6 +4227,11 @@ def _build_reply_state(
             (decision.args or {}).get("allowed_facts") or {}
         )
 
+    if str((decision.args or {}).get("topic") or "") == "product_knowledge_facts":
+        known_facts["kb_product_answer"] = dict(
+            (decision.args or {}).get("allowed_facts") or {}
+        )
+
     if str((decision.args or {}).get("topic") or "") == "image_ack_or_clarify":
         _safe_image_facts = dict((decision.args or {}).get("safe_image_facts") or {})
         if _safe_image_facts:

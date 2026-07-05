@@ -1189,3 +1189,297 @@ class TestPaymentMediaIntroPersonaCompose:
             assert event is None
 
         asyncio.run(_run())
+
+
+def _enabled_kb_ai_settings() -> dict:
+    return {
+        "persona_composer_enabled": True,
+        "store_ai_mode": STORE_AI_MODE_TEST,
+        "ai_test_allowed_numbers": ["966542980511"],
+        "persona_composer_surfaces": [
+            "social_greeting",
+            "social_checkin",
+            "thanks",
+            "dua",
+            "payment_media_intro",
+            "kb_product_answer",
+        ],
+    }
+
+
+def _kb_decision_args(
+    *,
+    kb_sections: list[dict] | None = None,
+    missing_facts: list[str] | None = None,
+    question_kind: str = "features",
+) -> dict:
+    allowed: dict = {
+        "product_title": "عسل السدر القيضي",
+        "kb_sections": kb_sections or [],
+    }
+    return {
+        "topic": "product_knowledge_facts",
+        "question_kind": question_kind,
+        "subject_product": {"title_hint_from_message": "عسل السدر القيضي"},
+        "allowed_facts": allowed,
+        "missing_facts": list(missing_facts or []),
+    }
+
+
+class TestKbProductAnswerPersonaCompose:
+    def test_compose_success_metadata(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            build_kb_product_answer_facts_bundle,
+            try_compose_kb_product_answer,
+        )
+
+        kb_sections = [
+            {
+                "section_id": 501,
+                "title": "عسل السدر القيضي",
+                "body": "مميزاته: ندرة القطف، طعم غني، من مصادر جبلية.",
+                "kind": "product_info",
+                "match_score": 0.95,
+            }
+        ]
+        message = "ما هي مميزات عسل السدر القيضي؟"
+
+        async def _run() -> None:
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text=message,
+                tenant_id=33,
+                customer_phone="966542980511",
+                question_kind="features",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": kb_sections,
+                },
+                subject_product={"title_hint_from_message": "عسل السدر القيضي"},
+            )
+
+            async def _good_llm(_bundle):
+                return (
+                    "عسل السدر القيضي مميز بندرته وطعمه الغني من مصادر جبلية 🍯"
+                )
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert result.surface == "kb_product_answer"
+            assert result.facts_hash
+            assert "ندرة" in result.text or "جبلية" in result.text
+            assert "ريال" not in result.text
+            assert "متوفر" not in result.text
+
+            with patch.object(FactBoundPersonaComposer, "compose", return_value=result):
+                text, compose_result, event = await try_compose_kb_product_answer(
+                    tenant_id=33,
+                    customer_phone="966542980511",
+                    inbound_text=message,
+                    decision_args=_kb_decision_args(kb_sections=kb_sections),
+                    ai_settings=_enabled_kb_ai_settings(),
+                )
+            assert text
+            assert compose_result is not None
+            assert event is not None
+            assert event["chosen_path"] == "fact_bound_persona_compose"
+            assert event["persona_compose"]["source"] == "persona_llm"
+            assert event["persona_compose"]["surface"] == "kb_product_answer"
+            assert event["persona_compose"]["guard_passed"] is True
+            assert event["persona_compose"]["facts_hash"]
+            assert event["knowledge_source"] == "tenant_knowledge_base"
+            assert event["kb_section_ids"] == [501]
+            assert event["question_kind"] == "features"
+            assert "catalog_product_id" not in event
+            assert "price_source" not in event
+
+        asyncio.run(_run())
+
+    def test_missing_kb_returns_safe_clarification(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            MISSING_KB_CLARIFICATION_AR,
+            try_compose_kb_product_answer,
+        )
+
+        async def _run() -> None:
+            text, result, event = await try_compose_kb_product_answer(
+                tenant_id=33,
+                customer_phone="966542980511",
+                inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                decision_args=_kb_decision_args(
+                    kb_sections=[],
+                    missing_facts=["kb_product_facts"],
+                ),
+                ai_settings=_enabled_kb_ai_settings(),
+            )
+            assert text == MISSING_KB_CLARIFICATION_AR
+            assert result is not None
+            assert result.source == "fallback_deterministic"
+            assert result.fallback_reason == "missing_kb_sections"
+            assert event is not None
+            assert event["knowledge_source"] == "missing_kb"
+            assert event["kb_section_ids"] == []
+
+        asyncio.run(_run())
+
+    def test_medical_claim_guard_blocks_invented_cure(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            build_kb_product_answer_facts_bundle,
+        )
+
+        async def _run() -> None:
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                question_kind="features",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": [
+                        {
+                            "section_id": 1,
+                            "title": "عسل السدر القيضي",
+                            "body": "طعم غني وندرة قطف.",
+                            "kind": "product_info",
+                        }
+                    ],
+                },
+            )
+
+            async def _bad_llm(_bundle):
+                return "هذا العسل يشفي الأمراض ويعالج السكر"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _bad_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert "يشفي" not in result.text
+
+        asyncio.run(_run())
+
+    def test_informational_question_no_slot_prompts(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            build_kb_product_answer_facts_bundle,
+        )
+
+        async def _run() -> None:
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                question_kind="features",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": [
+                        {
+                            "section_id": 2,
+                            "title": "عسل السدر القيضي",
+                            "body": "ندرة القطف وطعم غني.",
+                            "kind": "product_info",
+                        }
+                    ],
+                },
+            )
+
+            async def _bad_llm(_bundle):
+                return "ممتاز! وش اسمك وعنوانك وطريقة الدفع؟"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _bad_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert "اسمك" not in result.text
+            assert "عنوانك" not in result.text
+            assert "طريقة الدفع" not in result.text
+
+        asyncio.run(_run())
+
+    def test_non_allowlisted_phone_skips_persona_compose_no_metadata(self) -> None:
+        """Gate returns None — responder falls through; no persona_compose metadata."""
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            try_compose_kb_product_answer,
+        )
+
+        async def _run() -> None:
+            text, result, event = await try_compose_kb_product_answer(
+                tenant_id=33,
+                customer_phone="966500000099",
+                inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                decision_args=_kb_decision_args(
+                    kb_sections=[
+                        {
+                            "section_id": 501,
+                            "title": "عسل السدر القيضي",
+                            "body": "مميزاته: ندرة القطف.",
+                            "kind": "product_info",
+                        }
+                    ]
+                ),
+                ai_settings=_enabled_kb_ai_settings(),
+            )
+            assert text is None
+            assert result is None
+            assert event is None
+
+        asyncio.run(_run())
+
+    def test_health_benefits_question_not_features_kind(self) -> None:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (
+            ProductKnowledgeKind,
+            classify_product_knowledge_kind,
+        )
+
+        message = "ما هي فوائد عسل السدر القيضي؟"
+        assert classify_product_knowledge_kind(message) == ProductKnowledgeKind.HEALTH
+        assert classify_product_knowledge_kind(message) != ProductKnowledgeKind.FEATURES
+
+    def test_health_benefits_blocks_cure_without_kb_support(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            build_kb_product_answer_facts_bundle,
+        )
+
+        async def _run() -> None:
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text="ما هي فوائد عسل السدر القيضي؟",
+                question_kind="health",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": [
+                        {
+                            "section_id": 31,
+                            "title": "عسل السدر القيضي",
+                            "body": "قد يفيد كمصدر طاقة طبيعي.",
+                            "kind": "product_benefit",
+                        }
+                    ],
+                },
+            )
+            assert bundle.verified_facts.get("question_kind") == "health"
+            assert bundle.verified_facts.get("allow_medical_claims") is True
+
+            async def _bad_llm(_bundle):
+                return "هذا العسل يشفي السكر ويعالج الأمراض"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _bad_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert "يشفي" not in result.text
+            assert "يعالج" not in result.text
+
+        asyncio.run(_run())
+
+    def test_surface_allowed_in_persona_composer_surfaces(self) -> None:
+        from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES
+
+        assert "kb_product_answer" in PERSONA_COMPOSER_SURFACES
