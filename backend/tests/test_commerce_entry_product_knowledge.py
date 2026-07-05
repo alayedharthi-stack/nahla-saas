@@ -29,11 +29,15 @@ from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noq
 from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: E402
     ProductKnowledgeKind,
     TOPIC_PRODUCT_KNOWLEDGE_FACTS,
+    _retrieve_product_kb_sections,
     classify_product_knowledge_kind,
+    extract_features_subject,
     get_product_knowledge_session,
     pin_product_knowledge_session,
+    resolve_subject_product,
     try_product_knowledge_decision,
 )
+from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.commerce.status_reply_product_context import (  # noqa: E402
     try_status_reply_product_decision,
 )
@@ -53,6 +57,7 @@ from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    Intent,
     MerchantConversationState,
 )
 
@@ -196,7 +201,11 @@ def _ctx(
     db: Any = None,
     inbound_metadata: Optional[dict] = None,
 ) -> BrainContext:
-    intent = intent_rules.match(message)
+    intent = intent_rules.match(message) or Intent(
+        name="general",
+        confidence=0.5,
+        raw_message=message,
+    )
     ctx = BrainContext(
         tenant_id=33,
         customer_phone="966500000001",
@@ -227,6 +236,39 @@ class TestProductKnowledgeClassification:
 
     def test_features_kind(self) -> None:
         assert classify_product_knowledge_kind("وش يميزه؟") == ProductKnowledgeKind.FEATURES
+
+    def test_features_kind_ma_hiya_mumayizat(self) -> None:
+        assert classify_product_knowledge_kind(
+            "ما هي مميزات عسل السدر القيضي؟"
+        ) == ProductKnowledgeKind.FEATURES
+
+    def test_features_kind_wesh_mumayizat(self) -> None:
+        assert classify_product_knowledge_kind(
+            "وش مميزات عسل السدر القيضي؟"
+        ) == ProductKnowledgeKind.FEATURES
+
+    def test_features_kind_khasais(self) -> None:
+        assert classify_product_knowledge_kind(
+            "ما هي خصائص عسل السدر القيضي؟"
+        ) == ProductKnowledgeKind.FEATURES
+
+    def test_features_kind_what_are_the_features(self) -> None:
+        assert classify_product_knowledge_kind(
+            "what are the features of white sports shoes?"
+        ) == ProductKnowledgeKind.FEATURES
+
+    def test_features_kind_wesh_yumayiz_product(self) -> None:
+        assert classify_product_knowledge_kind(
+            "وش يميز عسل السدر القيضي؟"
+        ) == ProductKnowledgeKind.FEATURES
+
+    def test_health_ma_hiya_fawaid_not_features(self) -> None:
+        assert classify_product_knowledge_kind(
+            "ما هي فوائد عسل السدر القيضي؟"
+        ) == ProductKnowledgeKind.HEALTH
+
+    def test_generic_mumayizat_without_product_not_features_subject(self) -> None:
+        assert extract_features_subject("ما هي المميزات؟") == ""
 
     def test_price_query_not_knowledge(self) -> None:
         assert classify_product_knowledge_kind("كم سعرhe") is None
@@ -468,3 +510,103 @@ class TestCommerceEntryProductKnowledge:
         assert result.action == "allowed_product_knowledge"
         assert result.replaced is False
         assert "فوائد صحية" not in result.reply
+
+
+class TestProductKnowledgeFeaturesRouting:
+    """Slice 0/1 — Arabic features questions route to CE4 with subject + KB facts."""
+
+    def test_extract_features_subject_smoke_question(self) -> None:
+        assert extract_features_subject("ما هي مميزات عسل السدر القيضي؟") == (
+            "عسل السدر القيضي"
+        )
+
+    def test_extract_features_subject_wesh_variant(self) -> None:
+        assert extract_features_subject("وش مميزات عسل السدر القيضي؟") == (
+            "عسل السدر القيضي"
+        )
+
+    def test_extract_features_subject_khasais(self) -> None:
+        subj = extract_features_subject("ما هي خصائص السدر القيضي؟")
+        assert "السدر" in subj
+        assert "القيضي" in subj
+
+    def test_resolve_subject_without_focus_uses_message(self) -> None:
+        ctx = _ctx("ما هي مميزات عسل السدر القيضي؟")
+        subject = resolve_subject_product(ctx, ctx.message or "")
+        assert subject.get("title_hint_from_message") == "عسل السدر القيضي"
+
+    def test_generic_mumayizat_without_focus_has_no_subject(self) -> None:
+        ctx = _ctx("ما هي المميزات؟")
+        subject = resolve_subject_product(ctx, ctx.message or "")
+        assert not subject.get("title")
+        assert not subject.get("title_hint_from_message")
+
+    def test_smoke_question_routes_to_ce4(self) -> None:
+        message = "ما هي مميزات عسل السدر القيضي؟"
+        ctx = _ctx(message)
+        decision = try_product_knowledge_decision(ctx)
+        assert decision is not None
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == TOPIC_PRODUCT_KNOWLEDGE_FACTS
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.FEATURES.value
+        subject = decision.args.get("subject_product") or {}
+        hint = str(subject.get("title_hint_from_message") or subject.get("title") or "")
+        assert "القيضي" in hint
+        assert "السدر" in hint
+
+    def test_smoke_question_engine_decision_not_non_sales_ambiguous(self) -> None:
+        message = "ما هي مميزات عسل السدر القيضي؟"
+        ctx = _ctx(message)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == TOPIC_PRODUCT_KNOWLEDGE_FACTS
+        assert decision.args.get("topic") != "non_sales_ambiguous"
+
+    def test_wesh_mumayizat_still_routes_to_ce4(self) -> None:
+        message = "وش مميزات عسل السدر القيضي؟"
+        ctx = _ctx(message)
+        decision = try_product_knowledge_decision(ctx)
+        assert decision is not None
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.FEATURES.value
+
+    def test_khasais_routes_to_ce4(self) -> None:
+        message = "ما هي خصائص عسل السدر القيضي؟"
+        ctx = _ctx(message)
+        decision = try_product_knowledge_decision(ctx)
+        assert decision is not None
+        assert decision.args.get("topic") == TOPIC_PRODUCT_KNOWLEDGE_FACTS
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.FEATURES.value
+
+    def test_kb_retrieval_returns_sidr_qaidhi_section(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        kb = _StubKBSection(
+            section_id=501,
+            kind="product_info",
+            title="عسل السدر القيضي",
+            body="مميزاته: ندرة القطف، طعم غني، من مصادر جبلية.",
+        )
+        db = _install_kb_stubs(monkeypatch, [kb])
+        message = "ما هي مميزات عسل السدر القيضي؟"
+        ctx = _ctx(message, db=db)
+        sections = _retrieve_product_kb_sections(
+            db,
+            33,
+            subject="عسل السدر القيضي",
+            message=message,
+        )
+        assert len(sections) == 1
+        assert sections[0]["section_id"] == 501
+        assert sections[0]["title"] == "عسل السدر القيضي"
+        assert sections[0]["match_score"] >= 0.35
+
+        decision = try_product_knowledge_decision(ctx)
+        assert decision is not None
+        allowed = decision.args.get("allowed_facts") or {}
+        kb_sections = allowed.get("kb_sections") or []
+        assert len(kb_sections) == 1
+        assert kb_sections[0]["section_id"] == 501
+        assert kb_sections[0]["title"] == "عسل السدر القيضي"
+        assert kb_sections[0]["body"]
+        assert kb_sections[0]["kind"] == "product_info"
+        assert kb_sections[0]["match_score"] >= 0.35

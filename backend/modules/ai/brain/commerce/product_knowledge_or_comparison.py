@@ -37,11 +37,32 @@ _COMPARISON_RE = re.compile(
 
 _FEATURES_RE = re.compile(
     r"(?:"
-    r"(?:وش|ما|what)\s*(?:يميز(?:ه|ها)?|مميز(?:ات)?|خصائص|features?)"
+    r"(?:وش|ايش|ما|what)\s+(?:هي\s+)?(?:ال)?(?:يميز(?:ه|ها)?|مميز(?:ات)?|خصائص|features?)"
+    r"|(?:وش|ايش|ما)\s+يميز\s+(?!ه(?:ا)?\b)"
+    r"|what\s+are\s+the\s+features?"
     r"|(?:what\s+makes|what\s+distinguishes)"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
+
+_FEATURES_SUBJECT_RE = re.compile(
+    r"(?:"
+    r"(?:وش|ايش|ما|what)\s+(?:هي\s+)?(?:ال)?(?:مميز(?:ات)?|خصائص|features?)\s+"
+    r"(?!المميزات\b|الخصائص\b|features?\b)(.+?)(?:\?|؟|$)"
+    r"|(?:وش|ايش|ما)\s+يميز\s+(?!ه(?:ا)?\b)(.+?)(?:\?|؟|$)"
+    r"|what\s+are\s+the\s+features?\s+(?:of\s+)?(.+?)(?:\?|$)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_GENERIC_FEATURES_SUBJECTS = frozenset({
+    "المميزات",
+    "الخصائص",
+    "مميزات",
+    "خصائص",
+    "features",
+    "feature",
+})
 
 _VALUE_PRICE_RE = re.compile(
     r"(?:"
@@ -91,7 +112,7 @@ _MEANING_RE = re.compile(
 
 _EXPLICIT_HEALTH_BENEFITS_RE = re.compile(
     r"(?:"
-    r"(?:وش|ما|what)\s*(?:فوائد(?:ه|ها)?(?:\s*(?:ال)?(?:صح(?:ية|يه|ية)?))?"
+    r"(?:وش|ما|what)\s+(?:هي\s+)?(?:فوائد(?:ه|ها)?(?:\s*(?:ال)?(?:صح(?:ية|يه|ية)?))?"
     r"|فايد(?:ت(?:ه|ها)?)(?:\s*(?:ال)?(?:صح(?:ية|يه|ية)?))?)"
     r"|(?:فوائد|فايد)\s*(?:ال)?(?:صح(?:ية|يه|ية)?)"
     r"|(?:يفيد|ينفع|يفيدني|ينفعني)\s*(?:في|ل)"
@@ -331,6 +352,25 @@ def extract_comparison_reference(message: str) -> str:
     return ref
 
 
+def extract_features_subject(message: str) -> str:
+    """Extract product subject from a features/attributes question."""
+    raw = (message or "").strip()
+    if not raw or not _FEATURES_RE.search(raw):
+        return ""
+    m = _FEATURES_SUBJECT_RE.search(raw)
+    if not m:
+        return ""
+    subj = (m.group(1) or m.group(2) or m.group(3) or "").strip(" ؟?!.")
+    if not subj:
+        return ""
+    if _norm(subj) in _GENERIC_FEATURES_SUBJECTS:
+        return ""
+    tokens = _subject_tokens(subj)
+    if not tokens or all(_norm(t) in _GENERIC_FEATURES_SUBJECTS for t in tokens):
+        return ""
+    return subj
+
+
 def _ensure_status_product_focus(ctx: Any) -> None:
     state = getattr(ctx, "state", None)
     if state is None:
@@ -399,6 +439,10 @@ def resolve_subject_product(ctx: Any, message: str) -> Dict[str, Any]:
     ref = extract_comparison_reference(message)
     if ref:
         return {"title_hint_from_message": ref, "resolved": False}
+
+    features_subject = extract_features_subject(message)
+    if features_subject:
+        return {"title_hint_from_message": features_subject, "resolved": False}
 
     return {}
 
@@ -733,6 +777,7 @@ __all__ = [
     "compose_product_knowledge_response_goal",
     "detect_explicit_health_benefits_question",
     "extract_comparison_reference",
+    "extract_features_subject",
     "gather_product_knowledge_facts",
     "get_product_knowledge_session",
     "is_product_knowledge_message",
