@@ -10,7 +10,7 @@ from ..types import BrainContext
 from .fact_bound_composer import FactBoundPersonaComposer, build_social_facts_bundle
 from .facts_bundle import PersonaComposeResult
 from .flags import is_persona_composer_enforce_enabled, persona_composer_allowlist_result
-from .surface_resolver import is_allowed_phase2_surface
+from .surface_resolver import is_allowed_persona_compose_surface
 
 logger = logging.getLogger("nahla.brain.persona.integration")
 
@@ -35,7 +35,7 @@ def _ai_settings_from_ctx(ctx: BrainContext) -> dict[str, Any]:
 
 
 def _surface_allowed(ai_settings: dict[str, Any], surface: str) -> bool:
-    if not is_allowed_phase2_surface(surface):
+    if not is_allowed_persona_compose_surface(surface):
         return False
     raw = ai_settings.get("persona_composer_surfaces")
     if isinstance(raw, list) and raw:
@@ -44,16 +44,31 @@ def _surface_allowed(ai_settings: dict[str, Any], surface: str) -> bool:
     return True
 
 
-def should_enforce_persona_compose(ctx: BrainContext, *, surface: str) -> bool:
-    if getattr(ctx, "human_priority", False):
-        return False
-    ai = _ai_settings_from_ctx(ctx)
+def should_enforce_persona_compose_for_surface(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    surface: str,
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> bool:
+    ai = merge_ai_defaults(dict(ai_settings or {}))
     if not _surface_allowed(ai, surface):
         return False
     return is_persona_composer_enforce_enabled(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=ai,
+    )
+
+
+def should_enforce_persona_compose(ctx: BrainContext, *, surface: str) -> bool:
+    if getattr(ctx, "human_priority", False):
+        return False
+    return should_enforce_persona_compose_for_surface(
         tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
         customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
-        ai_settings=ai,
+        surface=surface,
+        ai_settings=_ai_settings_from_ctx(ctx),
     )
 
 

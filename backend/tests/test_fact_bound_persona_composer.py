@@ -1018,3 +1018,174 @@ class TestProdShapedAiSettingsLookup:
             assert "chosen_path" not in action.data
 
         asyncio.run(_run())
+
+
+def _enabled_payment_ai_settings() -> dict:
+    return {
+        "persona_composer_enabled": True,
+        "store_ai_mode": STORE_AI_MODE_TEST,
+        "ai_test_allowed_numbers": ["966542980511"],
+        "persona_composer_surfaces": [
+            "social_greeting",
+            "social_checkin",
+            "thanks",
+            "dua",
+            "payment_media_intro",
+        ],
+    }
+
+
+class TestPaymentMediaIntroPersonaCompose:
+    def test_compose_success_metadata(self) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        from modules.ai.brain.persona.payment_media_intro import (
+            build_payment_media_intro_facts_bundle,
+            try_compose_payment_media_intro,
+        )
+
+        async def _run() -> None:
+            bundle = build_payment_media_intro_facts_bundle(
+                inbound_text="أرسل باركود الراجحي",
+                tenant_id=33,
+                customer_phone="966542980511",
+                media_key="payment_rajhi_barcode",
+                media_url_present=True,
+            )
+
+            async def _good_llm(_bundle):
+                return "تفضل باركود التحويل، وبعد التحويل أرسل الإيصال 🧾"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert result.surface == "payment_media_intro"
+            assert result.facts_hash
+
+            with patch.object(FactBoundPersonaComposer, "compose", return_value=result):
+                text, compose_result, event = await try_compose_payment_media_intro(
+                    tenant_id=33,
+                    customer_phone="966542980511",
+                    inbound_text="أرسل باركود الراجحي",
+                    media_key="payment_rajhi_barcode",
+                    media_url_present=True,
+                    ai_settings=_enabled_payment_ai_settings(),
+                )
+            assert text
+            assert compose_result is not None
+            assert event is not None
+            assert event["chosen_path"] == "fact_bound_persona_compose"
+            assert event["persona_compose"]["source"] == "persona_llm"
+            assert event["persona_compose"]["surface"] == "payment_media_intro"
+
+        asyncio.run(_run())
+
+    def test_timeout_fallback_stays_safe(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.payment_media_intro import (
+            build_payment_media_intro_facts_bundle,
+        )
+
+        async def _run() -> None:
+            composer = FactBoundPersonaComposer(enforce_gate=False, timeout_seconds=0.01)
+
+            async def _slow(_bundle):
+                await asyncio.sleep(1.0)
+                return "late"
+
+            composer._llm_callable = _slow  # noqa: SLF001
+            bundle = build_payment_media_intro_facts_bundle(
+                inbound_text="أرسل باركود الراجحي",
+                media_key="payment_rajhi_barcode",
+                media_url_present=True,
+            )
+            result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert result.fallback_reason == "timeout"
+            assert result.guard_passed is False
+            assert "باركود" in result.text or "الإيصال" in result.text
+
+        asyncio.run(_run())
+
+    def test_missing_media_url_fallback_does_not_claim_sent(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.payment_media_intro import (
+            build_payment_media_intro_facts_bundle,
+        )
+
+        async def _run() -> None:
+            bundle = build_payment_media_intro_facts_bundle(
+                inbound_text="أرسل باركود الراجحي",
+                media_key="payment_rajhi_barcode",
+                media_url_present=False,
+            )
+
+            async def _bad_llm(_bundle):
+                return "تفضل الباركود هذا للتحويل"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _bad_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert "غير متوفرة" in result.text or result.guard_passed is False
+
+        asyncio.run(_run())
+
+    def test_pending_transfer_allows_receipt_language_in_fallback(self) -> None:
+        from modules.ai.brain.persona.fallback_catalog import deterministic_fallback
+        from modules.ai.brain.persona.payment_media_intro import (
+            build_payment_media_intro_facts_bundle,
+        )
+
+        bundle = build_payment_media_intro_facts_bundle(
+            inbound_text="أرسل باركود الراجحي",
+            media_key="payment_rajhi_barcode",
+            media_url_present=True,
+            payment_status="pending",
+        )
+        text = deterministic_fallback(bundle, reason="test")
+        assert "تم الدفع" not in text
+        assert "الإيصال" in text
+
+    def test_confirmed_payment_fallback_skips_receipt_ask(self) -> None:
+        from modules.ai.brain.persona.fallback_catalog import deterministic_fallback
+        from modules.ai.brain.persona.payment_media_intro import (
+            build_payment_media_intro_facts_bundle,
+        )
+
+        bundle = build_payment_media_intro_facts_bundle(
+            inbound_text="أرسل باركود الراجحي",
+            media_key="payment_rajhi_barcode",
+            media_url_present=True,
+            payment_status="confirmed",
+        )
+        text = deterministic_fallback(bundle, reason="test")
+        assert "أرسل الإيصال" not in text
+        assert "تم الدفع" not in text
+
+    def test_non_allowlisted_phone_uses_legacy_intro(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.payment_media_intro import (
+            try_compose_payment_media_intro,
+        )
+
+        async def _run() -> None:
+            text, result, event = await try_compose_payment_media_intro(
+                tenant_id=33,
+                customer_phone="966500000099",
+                inbound_text="أرسل باركود الراجحي",
+                media_key="payment_rajhi_barcode",
+                media_url_present=True,
+                ai_settings=_enabled_payment_ai_settings(),
+            )
+            assert text
+            assert result is None
+            assert event is None
+
+        asyncio.run(_run())

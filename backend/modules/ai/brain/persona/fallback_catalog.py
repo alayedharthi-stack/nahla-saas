@@ -24,6 +24,8 @@ def deterministic_fallback(
         return _dua_fallback(inbound)
     if surface == "social_checkin":
         return _checkin_fallback(ctx, inbound)
+    if surface == "payment_media_intro":
+        return _payment_media_intro_fallback(bundle)
     return _greeting_fallback(ctx, inbound)
 
 
@@ -61,3 +63,15 @@ def _dua_fallback(inbound: str) -> str:
     if "الله" in inbound:
         return "الله يعافيك ويبارك فيك 🤍"
     return "أبشر، حياك الله 😊"
+
+
+def _payment_media_intro_fallback(bundle: PersonaFactsBundle) -> str:
+    facts = bundle.verified_facts or {}
+    if not facts.get("media_url_present"):
+        return "حالياً بيانات الدفع غير متوفرة، تواصل مع فريق المتجر 🌷"
+    if not facts.get("allow_receipt_request"):
+        return "تم استلام بيانات الدفع، وفريق المتجر يراجع الطلب 🌷"
+    media_kind = str(facts.get("media_kind") or "barcode")
+    if media_kind == "qr":
+        return "تفضل رمز الدفع، وبعد التحويل أرسل الإيصال 🧾"
+    return "تفضل باركود التحويل، وبعد التحويل أرسل الإيصال 🧾"

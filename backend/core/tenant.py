@@ -112,6 +112,7 @@ DEFAULT_AI: Dict[str, Any] = {
         "social_checkin",
         "thanks",
         "dua",
+        "payment_media_intro",
     ],
     "persona_composer_allowlist_tenants": [33],
 }

@@ -13,6 +13,12 @@ PHASE2_SOCIAL_SURFACES: FrozenSet[str] = frozenset(
     }
 )
 
+PERSONA_SURFACE_PAYMENT_MEDIA_INTRO = "payment_media_intro"
+
+PERSONA_COMPOSER_SURFACES: FrozenSet[str] = PHASE2_SOCIAL_SURFACES | frozenset(
+    {PERSONA_SURFACE_PAYMENT_MEDIA_INTRO}
+)
+
 
 @dataclass(frozen=True)
 class PersonaConstraints:
