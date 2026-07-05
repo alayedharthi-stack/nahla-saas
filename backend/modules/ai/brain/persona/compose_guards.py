@@ -178,6 +178,23 @@ def _apply_kb_product_answer_guards(
             )
 
     kb_text = str(facts.get("kb_text") or "")
+    cure_markers = (
+        "يشفي",
+        "يعالج",
+        "شفاء",
+        "يقضي على",
+        "يقتل الفيروس",
+        "cure",
+        "treat",
+    )
+    if any(m in working for m in cure_markers):
+        if not any(m in kb_text for m in cure_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="unsupported_cure_claim",
+            )
+
     for term in ("الأفضل", "الأصلي", "مضمون"):
         if term in working and term not in kb_text:
             return PersonaGuardResult(

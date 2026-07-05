@@ -1400,7 +1400,8 @@ class TestKbProductAnswerPersonaCompose:
 
         asyncio.run(_run())
 
-    def test_non_allowlisted_phone_falls_back_to_legacy_path(self) -> None:
+    def test_non_allowlisted_phone_skips_persona_compose_no_metadata(self) -> None:
+        """Gate returns None — responder falls through; no persona_compose metadata."""
         import asyncio  # noqa: PLC0415
 
         from modules.ai.brain.persona.kb_product_answer import (
@@ -1427,6 +1428,54 @@ class TestKbProductAnswerPersonaCompose:
             assert text is None
             assert result is None
             assert event is None
+
+        asyncio.run(_run())
+
+    def test_health_benefits_question_not_features_kind(self) -> None:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (
+            ProductKnowledgeKind,
+            classify_product_knowledge_kind,
+        )
+
+        message = "ما هي فوائد عسل السدر القيضي؟"
+        assert classify_product_knowledge_kind(message) == ProductKnowledgeKind.HEALTH
+        assert classify_product_knowledge_kind(message) != ProductKnowledgeKind.FEATURES
+
+    def test_health_benefits_blocks_cure_without_kb_support(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        from modules.ai.brain.persona.kb_product_answer import (
+            build_kb_product_answer_facts_bundle,
+        )
+
+        async def _run() -> None:
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text="ما هي فوائد عسل السدر القيضي؟",
+                question_kind="health",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": [
+                        {
+                            "section_id": 31,
+                            "title": "عسل السدر القيضي",
+                            "body": "قد يفيد كمصدر طاقة طبيعي.",
+                            "kind": "product_benefit",
+                        }
+                    ],
+                },
+            )
+            assert bundle.verified_facts.get("question_kind") == "health"
+            assert bundle.verified_facts.get("allow_medical_claims") is True
+
+            async def _bad_llm(_bundle):
+                return "هذا العسل يشفي السكر ويعالج الأمراض"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _bad_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "fallback_deterministic"
+            assert "يشفي" not in result.text
+            assert "يعالج" not in result.text
 
         asyncio.run(_run())
 
