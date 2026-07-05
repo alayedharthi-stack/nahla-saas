@@ -292,6 +292,27 @@ class TestOrderFlowV2Owner:
         assert result.reason == "inquiry_escape"
         assert _STALE_CHECKOUT_PROMPT not in result.reply
 
+    @patch("modules.ai.order_flow_v2.owner._load_brain_state")
+    def test_product_knowledge_escapes_active_checkout_to_brain(self, _load, monkeypatch):
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
+        monkeypatch.setattr("core.config.ORDER_FLOW_V2_SHADOW_ENABLED", False, raising=False)
+        prep = {
+            "order_flow_v2_active": True,
+            "line_items": [{"product_id": "p1", "product_name": "عسل", "quantity": 1}],
+        }
+        _load.return_value = (None, {"order_prep": prep, "cart_items": prep["line_items"]})
+
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966501234567",
+            message="ما هي مميزات عسل السدر القيضي؟",
+        )
+
+        assert not result.handled
+        assert result.reason == "inquiry_escape"
+        assert "تم إنشاء طلبك" not in result.reply
+
     @patch("modules.ai.order_flow_v2.owner.build_line_items_from_payload")
     @patch("modules.ai.order_flow_v2.owner.apply_state_patch")
     def test_catalog_order_event_priority_over_browse_shapes(self, _patch, _items, monkeypatch):

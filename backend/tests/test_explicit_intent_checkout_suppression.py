@@ -20,6 +20,7 @@ from modules.ai.checkout_authority import (  # noqa: E402
 )
 from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: E402
     PAYMENT_BARCODE_IMAGE_REQUEST,
+    PRODUCT_KNOWLEDGE_FACTS,
     detect_explicit_non_checkout_intent,
     evaluate_stale_checkout_suppression,
 )
@@ -107,6 +108,18 @@ class TestExplicitIntentDetection:
     def test_catalog_browse_detected(self) -> None:
         assert detect_explicit_non_checkout_intent("وش عندكم منتجات؟") == "catalog_browse"
 
+    def test_product_knowledge_features_detected(self) -> None:
+        assert (
+            detect_explicit_non_checkout_intent("ما هي مميزات عسل السدر القيضي؟")
+            == PRODUCT_KNOWLEDGE_FACTS
+        )
+
+    def test_product_knowledge_generic_merchant_detected(self) -> None:
+        assert (
+            detect_explicit_non_checkout_intent("ما هي مميزات عطر ورد 100ml؟")
+            == PRODUCT_KNOWLEDGE_FACTS
+        )
+
     def test_latest_order_summary_detected(self) -> None:
         assert detect_explicit_non_checkout_intent("وش آخر طلباتي؟") == "latest_order_summary"
 
@@ -141,6 +154,8 @@ class TestStaleCheckoutSuppression:
             "أرسل باركود الراجحي",
             "كيف أحول على الراجحي؟",
             "وش عندكم منتجات؟",
+            "ما هي مميزات عسل السدر القيضي؟",
+            "ما هي مميزات عطر ورد 100ml؟",
         ],
     )
     def test_explicit_intents_suppress_with_active_draft(self, message: str) -> None:
@@ -230,6 +245,42 @@ class TestOrderFlowV2BypassWithActiveDraft:
         result = _run_v2("وش عندكم منتجات؟")
         assert not result.handled
         assert "catalog_browse" in (result.reason or "")
+
+    def test_product_knowledge_bypasses_order_flow_v2_observed_case(self) -> None:
+        result = _run_v2("ما هي مميزات عسل السدر القيضي؟")
+        assert not result.handled
+        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+
+    def test_product_knowledge_bypasses_order_flow_v2_generic_merchant(self) -> None:
+        result = _run_v2("ما هي مميزات عطر ورد 100ml؟")
+        assert not result.handled
+        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+
+    def test_product_knowledge_wsh_variant_bypasses_order_flow_v2(self) -> None:
+        result = _run_v2("وش مميزات عسل السدر القيضي؟")
+        assert not result.handled
+        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+
+    def test_product_knowledge_khasais_variant_bypasses_order_flow_v2(self) -> None:
+        result = _run_v2("ما هي خصائص عسل السدر القيضي؟")
+        assert not result.handled
+        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+
+    def test_barcode_request_not_product_knowledge_bypass(self) -> None:
+        result = _run_v2("أرسل باركود الراجحي")
+        assert not result.handled
+        assert PAYMENT_BARCODE_IMAGE_REQUEST in (result.reason or "")
+        assert PRODUCT_KNOWLEDGE_FACTS not in (result.reason or "")
+
+    def test_ambiguous_product_token_not_product_knowledge_bypass(self) -> None:
+        decision = evaluate_stale_checkout_suppression(
+            message="عسل السدر",
+            order_prep={"order_flow_v2_active": True, "line_items": [_GENERIC_ITEM]},
+            missing_fields=["customer_name", "city", "delivery_address", "payment_method"],
+            checkout_active=True,
+            draft_active=True,
+        )
+        assert decision.suppress is False
 
     @pytest.mark.parametrize(
         "message,expected",

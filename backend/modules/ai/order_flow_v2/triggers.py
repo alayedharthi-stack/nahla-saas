@@ -212,6 +212,15 @@ def is_checkout_escape_inquiry(
         return False
     if is_explicit_purchase_intent(text) or is_resume_order_command(text):
         return False
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            is_product_knowledge_message,
+        )
+
+        if is_product_knowledge_message(message):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product-knowledge probe
+        pass
     return bool(is_inquiry_message(text) or _BROWSE_ESCAPE_RE.search(text))
 
 

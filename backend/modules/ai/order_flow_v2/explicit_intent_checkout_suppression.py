@@ -33,6 +33,7 @@ SOCIAL_GREETING = "social_greeting"
 SOCIAL_THANKS = "social_thanks"
 SOCIAL_DUA = "social_dua"
 SOCIAL_PHATIC = "social_phatic"
+PRODUCT_KNOWLEDGE_FACTS = "product_knowledge_facts"
 
 _BYPASS_INTENTS = frozenset(
     {
@@ -51,6 +52,7 @@ _BYPASS_INTENTS = frozenset(
         SOCIAL_THANKS,
         SOCIAL_DUA,
         SOCIAL_PHATIC,
+        PRODUCT_KNOWLEDGE_FACTS,
     }
 )
 
@@ -261,6 +263,16 @@ def detect_explicit_non_checkout_intent(
 
     if is_active_checkout_draft_order_number_question(text):
         return ""
+
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            is_product_knowledge_message,
+        )
+
+        if is_product_knowledge_message(text):
+            return PRODUCT_KNOWLEDGE_FACTS
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product-knowledge probe
+        pass
 
     if (
         is_checkout_order_number_intent(text)
@@ -478,7 +490,7 @@ def log_checkout_suppressed_by_explicit_intent(
 __all__ = [
     "CheckoutSuppressionDecision",
     "PAYMENT_BARCODE_IMAGE_REQUEST",
-    "SOCIAL_DUA",
+    "PRODUCT_KNOWLEDGE_FACTS",
     "SOCIAL_GREETING",
     "SOCIAL_PHATIC",
     "SOCIAL_THANKS",
