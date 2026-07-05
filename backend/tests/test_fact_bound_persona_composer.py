@@ -457,6 +457,27 @@ class TestPersonaComposeEventMetadata:
         assert merged["chosen_path"] == "fact_bound_persona_compose"
         assert merged["persona_compose"]["surface"] == "social_checkin"
 
+    def test_merge_preserves_kb_product_answer_grounding(self) -> None:
+        from modules.ai.brain.persona.kb_product_answer import (  # noqa: PLC0415
+            build_kb_product_answer_event_metadata,
+        )
+
+        event = build_kb_product_answer_event_metadata(
+            _compose_result(surface="kb_product_answer"),
+            tenant_id=33,
+            allowlist_result="allowed",
+            decision_args={
+                "question_kind": "features",
+                "allowed_facts": {
+                    "kb_sections": [{"section_id": 213, "title": "t", "body": "b"}],
+                },
+            },
+        )
+        merged = merge_persona_compose_into_extra_metadata({}, event)
+        assert merged["knowledge_source"] == "tenant_knowledge_base"
+        assert merged["kb_section_ids"] == [213]
+        assert merged["question_kind"] == "features"
+
     def test_compose_disabled_does_not_persist_chosen_path(self) -> None:
         import asyncio  # noqa: PLC0415
 

@@ -545,6 +545,7 @@ def apply_product_availability_truth_guard(
     availability_context: Optional[Dict[str, Any]] = None,
     inbound_text: str = "",
     chosen_path: str = "",
+    decision_topic: str = "",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
 ) -> ProductAvailabilityTruthGuardResult:
@@ -553,6 +554,28 @@ def apply_product_availability_truth_guard(
 
     if mode == "off":
         return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
+
+    topic = str(decision_topic or "").strip()
+    if topic == "product_knowledge_facts":
+        return ProductAvailabilityTruthGuardResult(
+            reply=original,
+            action="allowed_product_knowledge_facts",
+        )
+    try:
+        from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            TOPIC_PRODUCT_KNOWLEDGE_FACTS,
+            is_product_knowledge_message,
+        )
+
+        if topic == TOPIC_PRODUCT_KNOWLEDGE_FACTS or is_product_knowledge_message(
+            inbound_text,
+        ):
+            return ProductAvailabilityTruthGuardResult(
+                reply=original,
+                action="allowed_product_knowledge_facts",
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product-knowledge probe
+        pass
 
     try:
         if not original.strip():
