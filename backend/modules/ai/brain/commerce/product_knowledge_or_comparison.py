@@ -615,6 +615,9 @@ def gather_product_knowledge_facts(
     if question_kind == ProductKnowledgeKind.COMPARISON and not kb_sections:
         missing.append("comparison_facts")
 
+    if question_kind == ProductKnowledgeKind.FEATURES and not kb_sections:
+        missing.append("kb_product_facts")
+
     return ProductKnowledgeFactsBundle(
         subject_product=dict(subject_product),
         comparison_reference=comparison_ref,

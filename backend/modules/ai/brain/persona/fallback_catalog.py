@@ -26,6 +26,8 @@ def deterministic_fallback(
         return _checkin_fallback(ctx, inbound)
     if surface == "payment_media_intro":
         return _payment_media_intro_fallback(bundle)
+    if surface == "kb_product_answer":
+        return _kb_product_answer_fallback(bundle)
     return _greeting_fallback(ctx, inbound)
 
 
@@ -75,3 +77,20 @@ def _payment_media_intro_fallback(bundle: PersonaFactsBundle) -> str:
     if media_kind == "qr":
         return "تفضل رمز الدفع، وبعد التحويل أرسل الإيصال 🧾"
     return "تفضل باركود التحويل، وبعد التحويل أرسل الإيصال 🧾"
+
+
+def _kb_product_answer_fallback(bundle: PersonaFactsBundle) -> str:
+    missing_kb = "ما عندي تفاصيل مؤكدة عن هذا المنتج في قاعدة المعرفة حاليًا."
+    facts = bundle.verified_facts or {}
+    if not facts.get("has_kb_sections"):
+        return missing_kb
+    kb_sections = facts.get("kb_sections") or []
+    if isinstance(kb_sections, list) and kb_sections:
+        first = kb_sections[0] if isinstance(kb_sections[0], dict) else {}
+        body = str(first.get("body") or "").strip()
+        title = str(first.get("title") or facts.get("subject_title") or "").strip()
+        if body:
+            return body[:380]
+        if title:
+            return f"عندنا معلومات عن {title} في قاعدة المعرفة، بس ما عندي تفاصيل إضافية مؤكدة حالياً."
+    return missing_kb

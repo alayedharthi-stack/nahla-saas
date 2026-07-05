@@ -6,7 +6,12 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .facts_bundle import PersonaFactsBundle, PHASE2_SOCIAL_SURFACES, PERSONA_SURFACE_PAYMENT_MEDIA_INTRO
+from .facts_bundle import (
+    PersonaFactsBundle,
+    PHASE2_SOCIAL_SURFACES,
+    PERSONA_SURFACE_KB_PRODUCT_ANSWER,
+    PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
+)
 from .fallback_catalog import deterministic_fallback
 
 
@@ -100,6 +105,88 @@ def _truncate_safe(text: str, max_chars: int) -> str:
     if cut and cut[-1] in "،.!?":
         return cut
     return cut.rstrip("،. ") + "…"
+
+
+def _apply_kb_product_answer_guards(
+    text: str,
+    facts: dict[str, Any],
+) -> PersonaGuardResult:
+    working = str(text or "").strip()
+    if not working:
+        return PersonaGuardResult(text="", passed=False, failed_reason="empty_compose")
+
+    if not facts.get("allow_slot_prompts", False):
+        slot_markers = (
+            "اسمك",
+            "اسمك الكريم",
+            "عنوانك",
+            "وين تسكن",
+            "رقم الحساب",
+            "الآيبان",
+            "ايبان",
+            "كم الكمية",
+            "كم الحبة",
+            "طريقة الدفع",
+        )
+        if any(m in working for m in slot_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="slot_prompt",
+            )
+
+    if not facts.get("allow_price_mention"):
+        price_markers = ("ريال", "ر.س", "السعر", "بكم", "كم سعر")
+        if any(m in working for m in price_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="invented_price",
+            )
+
+    if not facts.get("allow_availability_mention"):
+        availability_markers = (
+            "متوفر",
+            "غير متوفر",
+            "نفذ",
+            "available",
+            "out of stock",
+        )
+        if any(m in working.lower() for m in availability_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="invented_availability",
+            )
+
+    if not facts.get("allow_medical_claims"):
+        medical_markers = (
+            "يشفي",
+            "يعالج",
+            "علاج",
+            "شفاء",
+            "يقضي على",
+            "يقتل الفيروس",
+            "cure",
+            "treat",
+        )
+        if any(m in working for m in medical_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="medical_claim",
+            )
+
+    kb_text = str(facts.get("kb_text") or "")
+    for term in ("الأفضل", "الأصلي", "مضمون"):
+        if term in working and term not in kb_text:
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="unsupported_superiority_claim",
+            )
+
+    return PersonaGuardResult(text=working, passed=True)
 
 
 def apply_persona_compose_guards(
@@ -237,8 +324,14 @@ def apply_persona_compose_guards(
                     failed_reason="receipt_ask_on_confirmed",
                 )
 
+    if bundle.surface == PERSONA_SURFACE_KB_PRODUCT_ANSWER:
+        kb_guard = _apply_kb_product_answer_guards(working, facts)
+        if not kb_guard.passed:
+            return kb_guard
+        working = kb_guard.text
+
     # 5 Checkout-pressure guard
-    if bundle.surface in PHASE2_SOCIAL_SURFACES:
+    if bundle.surface in PHASE2_SOCIAL_SURFACES or bundle.surface == PERSONA_SURFACE_KB_PRODUCT_ANSWER:
         try:
             from ..postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
                 apply_social_checkout_pressure_guard,

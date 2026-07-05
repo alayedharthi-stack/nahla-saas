@@ -46,6 +46,27 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             "if media_url_present ask for receipt after transfer when pending; "
             "if payment confirmed do not ask for receipt again"
         )
+    elif bundle.surface == "kb_product_answer":
+        lines.append(f"question_kind: {facts.get('question_kind') or ''}")
+        if facts.get("subject_title"):
+            lines.append(f"subject_product: {facts.get('subject_title')}")
+        for section in facts.get("kb_sections") or []:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("title") or "").strip()
+            body = str(section.get("body") or "").strip()
+            if title or body:
+                lines.append(f"kb_section: {title} — {body}")
+        if facts.get("allow_price_mention") and facts.get("catalog_price") is not None:
+            lines.append(f"catalog_price: {facts.get('catalog_price')}")
+        if facts.get("allow_availability_mention") and facts.get("availability") is not None:
+            lines.append(f"availability: {facts.get('availability')}")
+        lines.append(
+            "rules: answer only from kb_sections and verified catalog facts; "
+            "no invented benefits, price, availability, medical cure claims, "
+            "checkout pressure, name/address/payment/quantity asks; "
+            "no unsupported الأفضل/الأصلي/مضمون unless present in kb_sections"
+        )
     else:
         lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
     return "\n".join(lines)
