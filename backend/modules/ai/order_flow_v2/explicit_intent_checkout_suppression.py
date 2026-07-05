@@ -492,6 +492,7 @@ __all__ = [
     "PAYMENT_BARCODE_IMAGE_REQUEST",
     "PRODUCT_KNOWLEDGE_FACTS",
     "SOCIAL_GREETING",
+    "SOCIAL_DUA",
     "SOCIAL_PHATIC",
     "SOCIAL_THANKS",
     "detect_explicit_non_checkout_intent",
