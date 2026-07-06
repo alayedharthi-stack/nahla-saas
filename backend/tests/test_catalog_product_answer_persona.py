@@ -540,6 +540,26 @@ class TestCatalogPriceNonOrderableFacts:
         assert merged["checkout_pressure_allowed"] is False
         assert merged["persona_compose"]["surface"] == "catalog_product_answer"
 
+    def test_compose_guard_accepts_ascii_price_for_arabic_formatted_catalog_fact(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[{
+                "id": 109,
+                "title": "عسل طلح نجد البري",
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+            }],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        guard = apply_persona_compose_guards(
+            "عسل طلح نجد البري سعره 387 ريال، والمنتج غير متاح للطلب حالياً",
+            bundle,
+        )
+        assert guard.passed is True
+
     def test_availability_non_orderable_no_mتوفر_claim(self) -> None:
         products = [
             {
