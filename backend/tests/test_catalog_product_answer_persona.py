@@ -345,3 +345,140 @@ class TestCatalogProductAnswerPersonaCompose:
 class TestCatalogSurfaceRegistration:
     def test_surface_in_persona_composer_surfaces(self) -> None:
         assert "catalog_product_answer" in PERSONA_COMPOSER_SURFACES
+
+
+class TestCatalogComposeProductLists:
+    def test_price_uses_category_filtered_facts_not_display_candidates(self) -> None:
+        from modules.ai.brain.compose.responder import (  # noqa: PLC0415
+            catalog_compose_products_for_search_turn,
+        )
+
+        non_orderable = {
+            "id": 501,
+            "title": "عسل الطلح",
+            "price": 387,
+            "can_checkout": False,
+            "in_stock": False,
+        }
+        orderable_other = {
+            "id": 502,
+            "title": "عسل سدر",
+            "price": 400,
+            "can_checkout": True,
+        }
+        facts = [non_orderable]
+        candidates = [orderable_other]
+        selected = catalog_compose_products_for_search_turn(
+            question_kind="price",
+            category_filtered_facts=facts,
+            display_candidates=candidates,
+        )
+        assert selected == facts
+        assert selected[0]["id"] == 501
+
+    def test_browse_uses_display_candidates_only(self) -> None:
+        from modules.ai.brain.compose.responder import (  # noqa: PLC0415
+            catalog_compose_products_for_search_turn,
+        )
+
+        candidates = list(_HONEY_PRODUCTS)
+        selected = catalog_compose_products_for_search_turn(
+            question_kind="browse",
+            category_filtered_facts=candidates,
+            display_candidates=candidates,
+        )
+        assert selected == candidates
+
+
+class TestCatalogPriceNonOrderableFacts:
+    def test_price_non_orderable_facts_bundle_and_compose(self) -> None:
+        talh = {
+            "id": 501,
+            "title": "عسل الطلح",
+            "category": "عسل",
+            "price": 387,
+            "can_checkout": False,
+            "in_stock": False,
+        }
+        message = "كم سعر الطلح؟"
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text=message,
+            tenant_id=33,
+            customer_phone="966542980511",
+            products=[talh],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        assert facts["question_kind"] == "price"
+        assert facts["catalog_product_ids"] == [501]
+        assert facts["price_source"] == "catalog"
+        assert facts["allow_checkout_pressure"] is False
+        assert facts["has_positive_availability"] is False
+
+        async def _run() -> None:
+            async def _good_llm(_bundle):
+                return "عسل الطلح سعره 387 ريال 🍯"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.guard_passed is True
+            assert "387" in result.text
+            assert "اسمك" not in result.text
+            assert "عنوانك" not in result.text
+
+            with patch.object(FactBoundPersonaComposer, "compose", return_value=result):
+                text, compose_result, event = await try_compose_catalog_product_answer(
+                    tenant_id=33,
+                    customer_phone="966542980511",
+                    inbound_text=message,
+                    products=[talh],
+                    catalog_search_query="طلح",
+                    question_kind="price",
+                    ai_settings=_enabled_catalog_ai_settings(),
+                )
+            assert text
+            assert compose_result is not None
+            assert event is not None
+            assert event["persona_compose"]["surface"] == "catalog_product_answer"
+            assert event["persona_compose"]["source"] == "persona_llm"
+            assert event["price_source"] == "catalog"
+            assert event["catalog_product_ids"] == [501]
+            assert event["checkout_pressure_allowed"] is False
+
+        asyncio.run(_run())
+
+    def test_availability_non_orderable_no_mتوفر_claim(self) -> None:
+        products = [
+            {
+                "id": 601,
+                "title": "عسل سدر صيفي",
+                "category": "عسل",
+                "price": 380,
+                "can_checkout": False,
+                "in_stock": False,
+            }
+        ]
+
+        async def _run() -> None:
+            bundle = build_catalog_product_answer_facts_bundle(
+                inbound_text="عندكم سدر؟",
+                products=products,
+                catalog_search_query="سدر",
+                category_scope="عسل",
+                question_kind="availability",
+            )
+            assert bundle.verified_facts["has_positive_availability"] is False
+
+            async def _safe_llm(_bundle):
+                return "عسل السدر الصيفي موجود ضمن تشكيلتنا لكن التوفر حالياً غير مؤكد"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _safe_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.guard_passed is True
+            assert "متوفر" not in result.text
+
+        asyncio.run(_run())

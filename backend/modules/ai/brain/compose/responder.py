@@ -42,6 +42,21 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger("nahla.brain.responder")
 
+_CATALOG_QA_QUESTION_KINDS = frozenset({"price", "availability"})
+
+
+def catalog_compose_products_for_search_turn(
+    *,
+    question_kind: str,
+    category_filtered_facts: list[Dict[str, Any]],
+    display_candidates: list[Dict[str, Any]],
+) -> list[Dict[str, Any]]:
+    """Truth-only compose rows (price/availability) vs orderable display slice (browse)."""
+    if question_kind in _CATALOG_QA_QUESTION_KINDS:
+        return list(category_filtered_facts)
+    return list(display_candidates)
+
+
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
     ACTION_CATALOG_NAVIGATE,
@@ -529,45 +544,27 @@ class DefaultComposer:
             # can_checkout=True, log it as a catalog bug and exclude it.
             # This prevents "product listed then immediately rejected" UX.
             raw_products = list(data.get("products") or [])
-            safe_products: list = []
-            for _p in raw_products:
-                if _p.get("can_checkout", _p.get("orderable", True)):
-                    safe_products.append(_p)
-                else:
-                    logger.warning(
-                        "[CATALOG] listed product failed validation | bug=True "
-                        "name=%r external_id=%s can_checkout=%s orderable=%s "
-                        "— removed from displayed list",
-                        _p.get("title"), _p.get("external_id"),
-                        _p.get("can_checkout"), _p.get("orderable"),
-                    )
-
-            from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-                active_category_from_state,
-                filter_products_for_browse_turn,
-                resolve_browse_category_scope,
-            )
-
-            _pre_category_count = len(safe_products)
             _search_query = str(
                 (decision.args or {}).get("query") or data.get("query") or ""
             ).strip()
             _search_source = str(
                 (decision.args or {}).get("source") or ""
             ).strip().lower()
-            safe_products = filter_products_for_browse_turn(
-                safe_products,
-                message=ctx.message or "",
-                query=_search_query,
-                source=_search_source,
-                last_browse_query=str(
-                    getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""
-                ),
-                state=getattr(ctx, "state", None),
-                db=getattr(ctx, "_db", None),
-                tenant_id=getattr(ctx, "tenant_id", None),
+            from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                classify_catalog_question_kind,
+                try_compose_catalog_product_answer,
             )
-            _category_filter_dropped = max(0, _pre_category_count - len(safe_products))
+            from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                active_category_from_state,
+                filter_products_for_browse_turn,
+                resolve_browse_category_scope,
+            )
+
+            _question_kind = classify_catalog_question_kind(
+                str(getattr(ctx, "message", "") or ""),
+                query=_search_query,
+                decision_args=dict(decision.args or {}),
+            )
             _category_scope = (
                 resolve_browse_category_scope(
                     ctx.message or "",
@@ -579,8 +576,61 @@ class DefaultComposer:
                 )
                 or str((decision.args or {}).get("category_scope") or "").strip()
             )
+            _browse_filter_kwargs = {
+                "message": ctx.message or "",
+                "query": _search_query,
+                "source": _search_source,
+                "last_browse_query": str(
+                    getattr(getattr(ctx, "state", None), "last_browse_query", "") or ""
+                ),
+                "state": getattr(ctx, "state", None),
+                "db": getattr(ctx, "_db", None),
+                "tenant_id": getattr(ctx, "tenant_id", None),
+            }
 
-            if not safe_products:
+            safe_products: list = []
+            for _p in raw_products:
+                if _p.get("can_checkout", _p.get("orderable", True)):
+                    safe_products.append(_p)
+                elif _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                    logger.info(
+                        "[CATALOG] non-orderable product kept for Q&A facts only | "
+                        "name=%r external_id=%s can_checkout=%s",
+                        _p.get("title"),
+                        _p.get("external_id"),
+                        _p.get("can_checkout"),
+                    )
+                else:
+                    logger.warning(
+                        "[CATALOG] listed product failed validation | bug=True "
+                        "name=%r external_id=%s can_checkout=%s orderable=%s "
+                        "— removed from displayed list",
+                        _p.get("title"), _p.get("external_id"),
+                        _p.get("can_checkout"), _p.get("orderable"),
+                    )
+
+            _pre_category_count = len(safe_products)
+            safe_products = filter_products_for_browse_turn(
+                safe_products,
+                **_browse_filter_kwargs,
+            )
+            _category_filter_dropped = max(0, _pre_category_count - len(safe_products))
+
+            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                _pre_facts_count = len(raw_products)
+                facts_products = filter_products_for_browse_turn(
+                    list(raw_products),
+                    **_browse_filter_kwargs,
+                )
+                _facts_category_dropped = max(0, _pre_facts_count - len(facts_products))
+            else:
+                facts_products = list(safe_products)
+                _facts_category_dropped = _category_filter_dropped
+
+            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                if not facts_products:
+                    return T.no_products(variant=self._variant_idx(ctx))
+            elif not safe_products:
                 return T.no_products(variant=self._variant_idx(ctx))
 
             from ..commerce.product_breadth_policy import (  # noqa: PLC0415
@@ -589,24 +639,30 @@ class DefaultComposer:
                 resolve_product_breadth_from_context,
             )
             breadth = resolve_product_breadth_from_context(ctx, decision)
-            candidates, breadth_meta = apply_display_slice(safe_products, breadth)
-            log_product_breadth(
-                tenant_id=getattr(ctx, "tenant_id", None),
-                breadth=breadth,
-                total=len(safe_products),
-                shown=len(candidates),
-                action=action,
-            )
+            if safe_products:
+                candidates, breadth_meta = apply_display_slice(safe_products, breadth)
+                log_product_breadth(
+                    tenant_id=getattr(ctx, "tenant_id", None),
+                    breadth=breadth,
+                    total=len(safe_products),
+                    shown=len(candidates),
+                    action=action,
+                )
+            else:
+                candidates = []
+                breadth_meta = {}
             result.data["product_breadth"] = breadth.to_log_dict()
             result.data["product_breadth_meta"] = breadth_meta
+
+            compose_products = catalog_compose_products_for_search_turn(
+                question_kind=_question_kind,
+                category_filtered_facts=facts_products,
+                display_candidates=candidates,
+            )
 
             _catalog_text: str | None = None
             _catalog_event: dict | None = None
             try:
-                from ..persona.catalog_product_answer import (  # noqa: PLC0415
-                    classify_catalog_question_kind,
-                    try_compose_catalog_product_answer,
-                )
                 from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
 
                 _catalog_text, _catalog_result, _catalog_event = (
@@ -614,17 +670,13 @@ class DefaultComposer:
                         tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
                         customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
                         inbound_text=str(getattr(ctx, "message", "") or ""),
-                        products=list(candidates),
+                        products=list(compose_products),
                         catalog_search_query=_search_query,
-                        search_result_count=len(safe_products),
+                        search_result_count=len(facts_products),
                         category_scope=_category_scope,
                         allowed_category=_category_scope,
-                        question_kind=classify_catalog_question_kind(
-                            str(getattr(ctx, "message", "") or ""),
-                            query=_search_query,
-                            decision_args=dict(decision.args or {}),
-                        ),
-                        category_filter_dropped=_category_filter_dropped,
+                        question_kind=_question_kind,
+                        category_filter_dropped=_facts_category_dropped,
                         display_count=len(candidates),
                         decision_args=dict(decision.args or {}),
                         ai_settings=_ai_settings_from_ctx(ctx),
@@ -637,21 +689,25 @@ class DefaultComposer:
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
-                wa_buttons = []
-                for i, p in enumerate(candidates[:3], 1):
-                    from core.product_button_label import (  # noqa: PLC0415
-                        compact_whatsapp_product_button_title,
-                    )
+                if candidates:
+                    wa_buttons = []
+                    for i, p in enumerate(candidates[:3], 1):
+                        from core.product_button_label import (  # noqa: PLC0415
+                            compact_whatsapp_product_button_title,
+                        )
 
-                    raw_title = str(p.get("title") or "")
-                    title = compact_whatsapp_product_button_title(raw_title)
-                    wa_buttons.append({
-                        "type": "reply",
-                        "reply": {"id": f"pick_{i}", "title": title or str(i)},
-                    })
-                result.data["pending_buttons"] = wa_buttons
-                result.data["pending_candidates"] = candidates
+                        raw_title = str(p.get("title") or "")
+                        title = compact_whatsapp_product_button_title(raw_title)
+                        wa_buttons.append({
+                            "type": "reply",
+                            "reply": {"id": f"pick_{i}", "title": title or str(i)},
+                        })
+                    result.data["pending_buttons"] = wa_buttons
+                    result.data["pending_candidates"] = candidates
                 return (_catalog_text or "").strip()
+
+            if not candidates:
+                return T.no_products(variant=self._variant_idx(ctx))
 
             # INVARIANT: pending_candidates = EXACTLY the products shown in
             # the numbered list.  The customer reads "1. بنطلون" and expects
