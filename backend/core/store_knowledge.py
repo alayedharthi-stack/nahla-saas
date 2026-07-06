@@ -104,6 +104,36 @@ def _clean_description(raw: str, max_length: int = 200) -> str:
     return text
 
 
+def _coerce_price_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_product_price_str(
+    *,
+    price: Any,
+    sale_price: Any = None,
+    regular_price: Any = None,
+) -> str:
+    """Format a catalog listing price line (sale vs regular).
+
+  When Salla sends ``price == sale_price`` (current offer) and a distinct
+  ``regular_price``, show the struck-through reference from ``regular_price``
+  rather than ``price`` so we don't render "74 بدلاً من 74".
+    """
+    if sale_price not in (None, ""):
+        sale_f = _coerce_price_float(sale_price)
+        regular_f = _coerce_price_float(regular_price)
+        if regular_f is not None and sale_f is not None and regular_f != sale_f:
+            return f"{sale_price} ريال (بدلاً من {regular_price} ريال)"
+        return f"{sale_price} ريال"
+    return f"{price} ريال"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # StoreKnowledgeLoader — single access point for the snapshot
 # ─────────────────────────────────────────────────────────────────────────────
@@ -435,6 +465,7 @@ class CatalogContextBuilder:
             "description":     _clean_description(p.description or meta.get("description", "")),
             "price":           p.price,
             "sale_price":      meta.get("sale_price"),
+            "regular_price":   meta.get("regular_price"),
             "category":        meta.get("category", ""),
             "brand":           meta.get("brand", ""),
             "in_stock":        in_stock_flag,
@@ -538,9 +569,11 @@ class CatalogContextBuilder:
 
         lines = ["### المنتجات المتاحة للبيع (متوفرة فعلياً في المخزون):"]
         for p in products:
-            price_str = f"{p['price']} ريال"
-            if p.get("sale_price"):
-                price_str = f"{p['sale_price']} ريال (بدلاً من {p['price']} ريال)"
+            price_str = format_product_price_str(
+                price=p["price"],
+                sale_price=p.get("sale_price"),
+                regular_price=p.get("regular_price"),
+            )
             stock_str = ""
             if p.get("stock_qty") is not None:
                 stock_str = f" ({p['stock_qty']} قطعة)"
