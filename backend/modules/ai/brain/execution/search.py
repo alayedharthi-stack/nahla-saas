@@ -118,6 +118,7 @@ class ProductSearchHandler:
             browse_pool: List[Dict[str, Any]] | None = None,
             browse_offset: int | None = None,
             attach_discovery_presentation: bool = False,
+            catalog_fact_products: List[Dict[str, Any]] | None = None,
         ) -> ActionResult:
             lines = []
             for p in products:
@@ -143,6 +144,8 @@ class ProductSearchHandler:
                 payload["browse_pool"] = browse_pool
             if browse_offset is not None:
                 payload["browse_offset"] = browse_offset
+            if catalog_fact_products:
+                payload["catalog_fact_products"] = list(catalog_fact_products)
             if attach_discovery_presentation:
                 payload = _attach_discovery_presentation(
                     payload,
@@ -299,6 +302,15 @@ class ProductSearchHandler:
             )
 
         try:
+            from ..persona.catalog_product_answer import classify_catalog_question_kind  # noqa: PLC0415
+
+            _qa_kind = classify_catalog_question_kind(
+                str(ctx.message or ""),
+                query=str(query or (decision.args or {}).get("query") or ""),
+                decision_args=dict(decision.args or {}),
+            )
+            _include_catalog_facts = _qa_kind in {"price", "availability"}
+
             runtime = CommerceToolRuntime(
                 ctx._db,  # type: ignore[attr-defined]
                 tenant_id=ctx.tenant_id,
@@ -306,34 +318,45 @@ class ProductSearchHandler:
                 customer_id=ctx.customer_id,
                 tenant_context=ctx.tenant_context,
             )
-            runtime_result = await runtime.execute(
-                "search_products",
-                {"query": query, "limit": fetch_limit},
-            )
-            products = list(runtime_result.payload.get("products") or [])
+
+            async def _run_catalog_search(search_query: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                tool_payload: Dict[str, Any] = {
+                    "query": search_query,
+                    "limit": fetch_limit,
+                }
+                if _include_catalog_facts:
+                    tool_payload["include_non_orderable_facts"] = True
+                runtime_result = await runtime.execute("search_products", tool_payload)
+                return (
+                    list(runtime_result.payload.get("products") or []),
+                    list(runtime_result.payload.get("catalog_fact_products") or []),
+                )
+
+            products, catalog_fact_products = await _run_catalog_search(str(query or ""))
 
             # Intelligent retry when exact FTS misses but subject is resolved.
-            if not products and str(query or "").strip():
+            if not products and not catalog_fact_products and str(query or "").strip():
                 from ..clarification.resolved_product_guard import (  # noqa: PLC0415
                     search_retry_queries,
                 )
                 for alt_query in search_retry_queries(str(query)):
-                    retry_result = await runtime.execute(
-                        "search_products",
-                        {"query": alt_query, "limit": fetch_limit},
-                    )
-                    retry_products = list(retry_result.payload.get("products") or [])
-                    if retry_products:
+                    retry_products, retry_facts = await _run_catalog_search(alt_query)
+                    if retry_products or retry_facts:
                         logger.info(
                             "[SearchHandler] retry_hit | tenant=%s orig=%r "
-                            "alt=%r count=%d",
-                            ctx.tenant_id, query, alt_query, len(retry_products),
+                            "alt=%r count=%d facts=%d",
+                            ctx.tenant_id,
+                            query,
+                            alt_query,
+                            len(retry_products),
+                            len(retry_facts),
                         )
                         products = retry_products
+                        catalog_fact_products = retry_facts
                         break
 
             # If search produced nothing but products exist → fallback to top sellers
-            if not products:
+            if not products and not catalog_fact_products:
                 if allows_search_top_products_fallback(
                     ctx,
                     query=str(query or ""),
@@ -352,7 +375,7 @@ class ProductSearchHandler:
                         data={"message": "no_search_hits_no_top_fallback"},
                     )
 
-            if not products:
+            if not products and not catalog_fact_products:
                 return ActionResult(
                     success=False,
                     error="no_products",
@@ -360,6 +383,8 @@ class ProductSearchHandler:
                 )
 
             products = _apply_category_scope(products)
+            if catalog_fact_products:
+                catalog_fact_products = _apply_category_scope(catalog_fact_products)
             strategy_result = _apply_discovery_strategy(
                 products,
                 decision=decision,
@@ -378,6 +403,7 @@ class ProductSearchHandler:
                 query=str(query or ""),
                 browse_pool=products,
                 browse_offset=0,
+                catalog_fact_products=catalog_fact_products,
             )
 
         except Exception as exc:

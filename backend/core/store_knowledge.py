@@ -25,8 +25,9 @@ import logging
 import os
 import re as _re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy.orm import Session
 
@@ -162,6 +163,14 @@ class StoreKnowledgeLoader:
         return age < max_age_hours
 
 
+@dataclass(frozen=True)
+class CatalogSearchProductsResult:
+    """Orderable search hits plus optional non-orderable fact rows for Q&A."""
+
+    products: List[Dict[str, Any]]
+    catalog_fact_products: List[Dict[str, Any]] = field(default_factory=list)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CatalogContextBuilder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,7 +185,13 @@ class CatalogContextBuilder:
         self.db        = db
         self.tenant_id = tenant_id
 
-    def search_products(self, query: str, limit: int = 10) -> List[Dict]:
+    def search_products(
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        include_non_orderable_facts: bool = False,
+    ) -> Union[List[Dict], CatalogSearchProductsResult]:
         """
         Search synced products by keyword.
 
@@ -184,14 +199,54 @@ class CatalogContextBuilder:
           1. PostgreSQL full-text search on title + description (supports Arabic)
           2. ILIKE fallback on title for very short queries or FTS failures
         Only returns **orderable** products (has external_id + in_stock).
+
+        When ``include_non_orderable_facts`` is True, also returns skipped
+        formatted rows in ``catalog_fact_products`` (price/availability Q&A).
         """
         from sqlalchemy import text as sa_text  # noqa: PLC0415
         q_clean = query.strip()
         if not q_clean:
+            if include_non_orderable_facts:
+                return CatalogSearchProductsResult(products=[], catalog_fact_products=[])
             return []
 
+        def _finalize(rows: List[Product], *, source: str, method: str) -> Union[List[Dict], CatalogSearchProductsResult]:
+            _raw_count = len(rows)
+            filtered = self._filter_orderable(
+                rows,
+                source=source,
+                collect_non_orderable_facts=include_non_orderable_facts,
+            )
+            if include_non_orderable_facts:
+                orderable, fact_rows = filtered
+                logger.info(
+                    "[CATALOG SEARCH] tenant=%s query=%r method=%s "
+                    "db_rows=%d returned=%d fact_rows=%d filtered_unsynced=%d",
+                    self.tenant_id,
+                    q_clean,
+                    method,
+                    _raw_count,
+                    len(orderable),
+                    len(fact_rows),
+                    _raw_count - len(orderable) - len(fact_rows),
+                )
+                return CatalogSearchProductsResult(
+                    products=orderable,
+                    catalog_fact_products=fact_rows,
+                )
+            logger.info(
+                "[CATALOG SEARCH] tenant=%s query=%r method=%s "
+                "db_rows=%d returned=%d filtered_unsynced=%d",
+                self.tenant_id,
+                q_clean,
+                method,
+                _raw_count,
+                len(filtered),
+                _raw_count - len(filtered),
+            )
+            return filtered
+
         # -- Full-text search (tsvector, works with Arabic tokens) ------------
-        _results: List[Dict] = []
         try:
             fts_sql = sa_text("""
                 SELECT id FROM products
@@ -209,15 +264,7 @@ class CatalogContextBuilder:
                     .filter(Product.id.in_(ids))
                     .all()
                 )
-                _raw_count = len(rows)
-                _results = self._filter_orderable(rows, source="search")
-                logger.info(
-                    "[CATALOG SEARCH] tenant=%s query=%r method=fts "
-                    "db_rows=%d returned=%d filtered_unsynced=%d",
-                    self.tenant_id, q_clean, _raw_count, len(_results),
-                    _raw_count - len(_results),
-                )
-                return _results
+                return _finalize(rows, source="search", method="fts")
         except Exception:
             pass  # fall through to ILIKE
 
@@ -233,15 +280,7 @@ class CatalogContextBuilder:
             .limit(limit)
             .all()
         )
-        _raw_count = len(rows)
-        _results = self._filter_orderable(rows, source="search_ilike")
-        logger.info(
-            "[CATALOG SEARCH] tenant=%s query=%r method=ilike "
-            "db_rows=%d returned=%d filtered_unsynced=%d",
-            self.tenant_id, q_clean, _raw_count, len(_results),
-            _raw_count - len(_results),
-        )
-        return _results
+        return _finalize(rows, source="search_ilike", method="ilike")
 
     def get_by_external_id(self, ext_id: str) -> Optional[Dict]:
         p = (
@@ -427,15 +466,23 @@ class CatalogContextBuilder:
         }
 
     def _filter_orderable(
-        self, rows: List[Product], *, source: str = ""
-    ) -> List[Dict]:
+        self,
+        rows: List[Product],
+        *,
+        source: str = "",
+        collect_non_orderable_facts: bool = False,
+    ) -> List[Dict] | tuple[List[Dict], List[Dict]]:
         """Format product rows and drop non-orderable ones.
 
         Every product is logged with a [CATALOG] line for diagnostics.
         Products that pass are assigned a 1-based display_index matching
         the numbered list shown to the customer.
+
+        When ``collect_non_orderable_facts`` is True, skipped formatted rows
+        are returned separately for price/availability Q&A (not checkout).
         """
         result: List[Dict] = []
+        fact_rows: List[Dict] = []
         display_index = 0
         for p in rows:
             fmt = self._format(p)
@@ -463,6 +510,10 @@ class CatalogContextBuilder:
                     fmt["stock_qty"], fmt["in_stock"], fmt["status"],
                     bool(fmt["external_id"]), fmt.get("variants_in_stock", 0),
                 )
+                if collect_non_orderable_facts:
+                    fact_rows.append(fmt)
+        if collect_non_orderable_facts:
+            return result, fact_rows
         return result
 
     def build_context_block(self, query: str = "") -> str:

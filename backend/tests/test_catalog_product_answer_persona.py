@@ -482,3 +482,39 @@ class TestCatalogPriceNonOrderableFacts:
             assert "متوفر" not in result.text
 
         asyncio.run(_run())
+
+
+class TestResponderCatalogFactProductsSideChannel:
+    def test_facts_products_merge_catalog_fact_products_for_price(self) -> None:
+        from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            filter_products_for_browse_turn,
+        )
+
+        talh = {
+            "id": 501,
+            "title": "عسل الطلح",
+            "category": "عسل",
+            "price": 387,
+            "can_checkout": False,
+            "in_stock": False,
+        }
+        orderable = {
+            "id": 502,
+            "title": "عسل سدر",
+            "category": "عسل",
+            "price": 400,
+            "can_checkout": True,
+        }
+        raw_products = [orderable]
+        catalog_fact_products = [talh]
+        merged = list(raw_products) + list(catalog_fact_products)
+        facts = filter_products_for_browse_turn(
+            merged,
+            message="كم سعر الطلح؟",
+            query="طلح",
+            source="search",
+        )
+        ids = {p["id"] for p in facts}
+        assert 501 in ids
+        assert all(p.get("can_checkout") for p in raw_products)
+        assert not talh.get("can_checkout")
