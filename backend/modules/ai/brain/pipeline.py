@@ -3300,6 +3300,7 @@ class MerchantBrain:
                     focus_product=getattr(new_state, "current_product_focus", None),
                     recommended_product_ids=_pavg_rec_ids,
                 )
+                _pavg_pc = dict(result.data.get("persona_compose") or {})
                 _pavg = apply_product_availability_truth_guard(
                     reply=reply or "",
                     availability_context=_availability_ctx,
@@ -3308,6 +3309,10 @@ class MerchantBrain:
                     decision_topic=str((decision.args or {}).get("topic") or ""),
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
+                    question_kind=str(result.data.get("question_kind") or ""),
+                    catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
+                    checkout_pressure_allowed=result.data.get("checkout_pressure_allowed"),
+                    surface=str(_pavg_pc.get("surface") or ""),
                 )
                 if _pavg.replaced:
                     reply = _pavg.reply
@@ -3945,6 +3950,9 @@ class MerchantBrain:
             "knowledge_source": result.data.get("knowledge_source"),
             "kb_section_ids": list(result.data.get("kb_section_ids") or []),
             "question_kind": result.data.get("question_kind"),
+            "catalog_product_ids": list(result.data.get("catalog_product_ids") or []),
+            "price_source": result.data.get("price_source"),
+            "checkout_pressure_allowed": result.data.get("checkout_pressure_allowed"),
             "non_commerce_block_mode": bool(
                 getattr(ctx, "block_commerce_escalation", False)
             ),

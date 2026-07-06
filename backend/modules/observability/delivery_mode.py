@@ -387,11 +387,51 @@ def customer_wants_product_or_image(
 # Guard — was this an acceptable mode for the inferred intent?
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CATALOG_FACT_PRESSURE_MARKERS = (
+    "اختر رقم",
+    "اسمك",
+    "عنوانك",
+    "طريقة الدفع",
+    "نكمل الطلب",
+)
+
+
+def is_text_only_catalog_fact_answer_acceptable(
+    catalog_fact_meta: Optional[dict[str, Any]],
+    *,
+    reply_body: str = "",
+) -> bool:
+    """Narrow text-only acceptance for catalog price/availability fact answers."""
+    meta = dict(catalog_fact_meta or {})
+    if not str(reply_body or "").strip():
+        return False
+    pc = meta.get("persona_compose")
+    surface = str(meta.get("surface") or (pc or {}).get("surface") or "").strip()
+    if surface != "catalog_product_answer":
+        return False
+    qkind = str(meta.get("question_kind") or "").strip()
+    if qkind not in {"price", "availability"}:
+        return False
+    ids = meta.get("catalog_product_ids")
+    if not isinstance(ids, list) or not ids:
+        return False
+    if meta.get("checkout_pressure_allowed") is not False:
+        return False
+    if qkind == "price" and str(meta.get("price_source") or "") != "catalog":
+        return False
+    body = str(reply_body or "")
+    if any(marker in body for marker in _CATALOG_FACT_PRESSURE_MARKERS):
+        return False
+    return True
+
+
 def is_acceptable_mode_for_product_intent(
     mode: str,
     *,
     audit: Optional[DeliveryAudit] = None,
     brain_action: str = "",
+    catalog_fact_meta: Optional[dict[str, Any]] = None,
+    reply_body: str = "",
 ) -> bool:
     """``True`` when *mode* satisfies a product / image request.
 
@@ -415,6 +455,14 @@ def is_acceptable_mode_for_product_intent(
         and isinstance(audit, dict)
         and audit.get("interactive_buttons_sent")
         and action in _PRODUCT_BRAIN_ACTIONS
+    ):
+        return True
+    if (
+        mode == DELIVERY_MODE_TEXT_ONLY
+        and is_text_only_catalog_fact_answer_acceptable(
+            catalog_fact_meta,
+            reply_body=reply_body,
+        )
     ):
         return True
     return False

@@ -8441,12 +8441,22 @@ async def _handle_merchant_message(
                                 "kb_section_ids",
                                 "question_kind",
                                 "catalog_product_id",
+                                "catalog_product_ids",
                                 "price_source",
                                 "availability_source",
+                                "checkout_pressure_allowed",
                             ):
                                 _kb_meta_val = brain_result.get(_kb_meta_key)
                                 if _kb_meta_val is not None:
                                     _brain_persona_compose_event[_kb_meta_key] = _kb_meta_val
+                            if _brain_persona_compose.get("surface"):
+                                _brain_persona_compose_event["surface"] = _brain_persona_compose.get(
+                                    "surface"
+                                )
+                            if _brain_persona_compose.get("source"):
+                                _brain_persona_compose_event["source"] = _brain_persona_compose.get(
+                                    "source"
+                                )
                         else:
                             _brain_persona_compose_event = None
                         _brain_nc_block = bool(
@@ -13771,10 +13781,17 @@ async def _handle_merchant_message(
                         "[PRESENTATION_MODE_SHADOW] tenant=%s skipped: %s",
                         tenant_id, _pm_shadow_exc,
                     )
+                _catalog_fact_meta = (
+                    dict(_brain_persona_compose_event)
+                    if isinstance(_brain_persona_compose_event, dict)
+                    else None
+                )
                 if _wants and not _mode_ok(
                     _final_mode,
                     audit=_delivery_audit,
                     brain_action=_br_action or "",
+                    catalog_fact_meta=_catalog_fact_meta,
+                    reply_body=reply or "",
                 ):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
@@ -13818,6 +13835,11 @@ async def _handle_merchant_message(
                     inbound_text=text or "",
                     brain_action=_br_action or "",
                 )
+                _catalog_fact_meta = (
+                    dict(_brain_persona_compose_event)
+                    if isinstance(_brain_persona_compose_event, dict)
+                    else None
+                )
                 logger.info(
                     "[FINAL_DELIVERY] tenant=%s to=*%s mode=%s "
                     "wants_product_or_image=%s brain_action=%s "
@@ -13833,6 +13855,8 @@ async def _handle_merchant_message(
                     _final_mode,
                     audit=_delivery_audit,
                     brain_action=_br_action or "",
+                    catalog_fact_meta=_catalog_fact_meta,
+                    reply_body=reply or "",
                 ):
                     logger.error(
                         "[DELIVERY_GUARD_FAIL] tenant=%s to=*%s "
