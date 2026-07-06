@@ -31,6 +31,28 @@ _SOFT_BROWSE_RE = re.compile(
 )
 
 
+def catalog_fact_product_rows(products: Any) -> list[dict[str, Any]]:
+    """Normalize compose/catalog rows for grounding evidence (price-bearing)."""
+    rows: list[dict[str, Any]] = []
+    for item in list(products or []):
+        if isinstance(item, dict):
+            rows.append(dict(item))
+            continue
+        try:
+            if hasattr(item, "items"):
+                rows.append(dict(item))  # type: ignore[arg-type]
+                continue
+            attrs = getattr(item, "__dict__", None)
+            if isinstance(attrs, dict) and attrs:
+                rows.append({
+                    k: v for k, v in attrs.items()
+                    if not str(k).startswith("_")
+                })
+        except Exception:  # noqa: BLE001
+            continue
+    return rows
+
+
 def classify_catalog_question_kind(
     message: str,
     *,
@@ -122,7 +144,7 @@ def build_catalog_product_answer_facts_bundle(
     inbound = str(inbound_text or "").strip()
     language = detect_language(inbound)
     args = dict(decision_args or {})
-    items = [dict(p) for p in (products or []) if isinstance(p, dict)]
+    items = catalog_fact_product_rows(products)
     rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive = (
         _catalog_rows_from_products(items)
     )
@@ -181,6 +203,7 @@ def build_catalog_product_answer_event_metadata(
     tenant_id: int,
     allowlist_result: str,
     catalog_facts: dict[str, Any],
+    catalog_fact_products: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Outbound metadata for catalog-grounded persona compose."""
     meta = build_persona_compose_event_metadata(
@@ -205,6 +228,11 @@ def build_catalog_product_answer_event_metadata(
         meta["price_source"] = facts["price_source"]
     if facts.get("availability_source"):
         meta["availability_source"] = facts["availability_source"]
+    qkind = str(facts.get("question_kind") or meta.get("question_kind") or "").strip()
+    if qkind in _CATALOG_QA_KINDS:
+        fact_rows = catalog_fact_product_rows(catalog_fact_products)
+        if fact_rows:
+            meta["catalog_fact_products"] = fact_rows
     return meta
 
 
@@ -327,6 +355,7 @@ async def try_compose_catalog_product_answer(
     if not products:
         return None, None, None
 
+    compose_fact_rows = catalog_fact_product_rows(products)
     bundle = build_catalog_product_answer_facts_bundle(
         inbound_text=inbound_text,
         tenant_id=tenant_id,
@@ -364,6 +393,7 @@ async def try_compose_catalog_product_answer(
             tenant_id=int(tenant_id),
             allowlist_result=allowlist_result,
             catalog_facts=bundle.verified_facts,
+            catalog_fact_products=compose_fact_rows,
         )
         return result.text.strip(), result, event_meta
 
@@ -381,6 +411,7 @@ async def try_compose_catalog_product_answer(
                 tenant_id=int(tenant_id),
                 allowlist_result=allowlist_result,
                 catalog_facts=bundle.verified_facts,
+                catalog_fact_products=compose_fact_rows,
             )
             return fallback_text.strip(), fallback_result, event_meta
 
