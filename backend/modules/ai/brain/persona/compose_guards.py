@@ -255,16 +255,22 @@ def _apply_catalog_product_answer_guards(
                 failed_reason="invented_price",
             )
     else:
-        allowed_prices = {
-            str(p.get("price"))
-            for p in (facts.get("catalog_products") or [])
-            if isinstance(p, dict) and p.get("price") is not None
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            parse_price_amount,
+        )
+
+        allowed_amounts = {
+            amt
+            for amt in (
+                parse_price_amount(p.get("price"))
+                for p in (facts.get("catalog_products") or [])
+                if isinstance(p, dict)
+            )
+            if amt is not None
         }
         for match in re.findall(r"(\d+(?:\.\d+)?)\s*ريال", working):
-            if allowed_prices and not any(
-                match == ap or match == ap.split(".")[0] or ap.startswith(match)
-                for ap in allowed_prices
-            ):
+            claimed = parse_price_amount(match) or parse_price_amount(f"{match} ريال")
+            if allowed_amounts and claimed not in allowed_amounts:
                 return PersonaGuardResult(
                     text=working,
                     passed=False,

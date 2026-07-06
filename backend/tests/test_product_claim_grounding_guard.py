@@ -230,3 +230,97 @@ class TestApplyGuard:
         )
         assert result.replaced is False
         assert result.action == "allowed"
+
+
+class TestPriceNormalization:
+    def test_parse_price_amount_arabic_formatted(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            parse_price_amount,
+        )
+
+        assert parse_price_amount("387") == 387
+        assert parse_price_amount("387.00") == 387
+        assert parse_price_amount("ر.س. ٣٨٧٫٠٠") == 387
+        assert parse_price_amount("١٬٤٧٥٫٠٠") == 1475
+        assert parse_price_amount("1,475.00") == 1475
+
+
+class TestCatalogFactPriceGrounding:
+    def test_catalog_fact_products_prices_in_evidence(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            build_product_claim_grounding_evidence,
+        )
+
+        evidence = build_product_claim_grounding_evidence(
+            None,
+            33,
+            availability_context={"catalog_skus": []},
+            executor_products=[],
+            catalog_fact_products=[{
+                "id": 109,
+                "title": "عسل طلح نجد البري",
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+            }],
+            inbound_metadata={
+                "price_source": "catalog",
+                "catalog_product_ids": [109],
+            },
+        )
+        assert 387 in evidence.grounded_prices
+
+    def test_talh_deterministic_fallback_not_rewritten(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        reply = (
+            "من الكتالوج:\n"
+            "• عسل طلح نجد البري إنتاج منحلنا  1 كيلو سعره 387 ريال، "
+            "والمنتج غير متاح للطلب حالياً"
+        )
+        result = apply_product_claim_grounding_guard(
+            reply=reply,
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            catalog_fact_products=[{
+                "id": 109,
+                "title": "عسل طلح نجد البري",
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+            }],
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "catalog_deterministic_fallback",
+                },
+            },
+        )
+        assert result.replaced is False
+        assert "387" in result.reply
+        assert "ما ظهر عندي سعر مؤكد" not in result.reply
+
+    def test_generic_ungrounded_price_still_rewrites(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        def _fake_build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+            return _evidence(grounded_prices=frozenset({300, 400}))
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+            _fake_build,
+        )
+        result = apply_product_claim_grounding_guard(
+            reply="سعر المنتج 999 ريال",
+            tenant_id=1,
+            chosen_path="search_products",
+        )
+        assert result.replaced is True
+        assert "ما ظهر عندي سعر مؤكد" in result.reply

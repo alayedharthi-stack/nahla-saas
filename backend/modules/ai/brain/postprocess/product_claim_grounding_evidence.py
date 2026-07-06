@@ -63,6 +63,47 @@ _NUMERIC_CANDIDATE_RE = re.compile(
     r"(\d{2,5})(?:\.\d{1,2})?",
 )
 
+_ARABIC_DIGIT_TRANS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+
+
+def _normalize_price_text(raw: str) -> str:
+    """Map Arabic-Indic digits and decimal separators to ASCII for price parsing."""
+    text = str(raw or "").translate(_ARABIC_DIGIT_TRANS)
+    return text.replace("٬", ",").replace("٫", ".")
+
+
+def parse_price_amount(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float):
+        if value <= 0:
+            return None
+        whole = int(value)
+        return whole if float(whole) == float(value) else int(round(value))
+    normalized = _normalize_price_text(str(value))
+    stripped = re.sub(r"[^\d,.\s]", "", normalized)
+    compact = stripped.replace(",", "").strip()
+    if not compact:
+        return None
+    match = re.search(r"(\d{1,6})(?:\.\d{1,2})?", compact)
+    if not match:
+        return None
+    try:
+        val = float(match.group(0))
+        if val <= 0:
+            return None
+        whole = int(val)
+        return whole if float(whole) == val else int(round(val))
+    except (TypeError, ValueError):
+        return None
+
 
 def _norm(text: Optional[str]) -> str:
     if not text or not isinstance(text, str):
@@ -76,21 +117,6 @@ def _norm(text: Optional[str]) -> str:
     return t.lower().strip()
 
 
-def parse_price_amount(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    raw = str(value).replace(",", "").strip()
-    if not raw:
-        return None
-    match = _PRICE_PARSE_RE.search(raw)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
-
-
 def _span_in_short_address_token(text: str, start: int, end: int) -> bool:
     for token in _SHORT_ADDRESS_TOKEN_RE.finditer(text or ""):
         if token.start() <= start and end <= token.end():
@@ -101,7 +127,7 @@ def _span_in_short_address_token(text: str, start: int, end: int) -> bool:
 def extract_reply_prices(reply: str) -> Set[int]:
     """Return explicit price claims in outbound text (not address digits)."""
     prices: Set[int] = set()
-    text = reply or ""
+    text = _normalize_price_text(reply or "")
     if not text.strip():
         return prices
 
@@ -351,12 +377,50 @@ class ProductClaimGroundingEvidence:
     reason: str = ""
 
 
+def _catalog_product_ids_from_metadata(
+    inbound_metadata: Optional[Dict[str, Any]],
+) -> Set[int]:
+    ids: Set[int] = set()
+    for raw in (inbound_metadata or {}).get("catalog_product_ids") or []:
+        try:
+            ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _add_catalog_row_prices(
+    row: Dict[str, Any],
+    *,
+    grounded_prices: Set[int],
+    corpus_parts: List[str],
+    executor_ids: Set[int],
+) -> None:
+    pid = row.get("id")
+    if isinstance(pid, int):
+        executor_ids.add(pid)
+    for key in ("title", "description", "body"):
+        val = row.get(key)
+        if val:
+            corpus_parts.append(str(val))
+    price = parse_price_amount(row.get("price"))
+    if price is not None:
+        grounded_prices.add(price)
+    for variant in row.get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        vp = parse_price_amount(variant.get("price"))
+        if vp is not None:
+            grounded_prices.add(vp)
+
+
 def build_product_claim_grounding_evidence(
     db: Optional[Session],
     tenant_id: Optional[int],
     *,
     availability_context: Optional[Dict[str, Any]] = None,
     executor_products: Optional[Sequence[Dict[str, Any]]] = None,
+    catalog_fact_products: Optional[Sequence[Dict[str, Any]]] = None,
     chosen_path: str = "",
     history: Optional[Sequence[Any]] = None,
     order_state: Any = None,
@@ -406,6 +470,33 @@ def build_product_claim_grounding_evidence(
     corpus_parts: List[str] = []
     kb_ids: Set[int] = set()
     executor_ids: Set[int] = set()
+
+    meta = dict(inbound_metadata or {})
+    fact_rows = [
+        dict(p) for p in (catalog_fact_products or [])
+        if isinstance(p, dict)
+    ]
+    if not fact_rows:
+        fact_rows = [
+            dict(p) for p in (meta.get("catalog_fact_products") or [])
+            if isinstance(p, dict)
+        ]
+    catalog_fact_ids = _catalog_product_ids_from_metadata(meta)
+
+    for row in fact_rows:
+        pid = row.get("id")
+        if catalog_fact_ids and pid is not None:
+            try:
+                if int(pid) not in catalog_fact_ids:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        _add_catalog_row_prices(
+            row,
+            grounded_prices=grounded_prices,
+            corpus_parts=corpus_parts,
+            executor_ids=executor_ids,
+        )
 
     for row in executor_rows:
         pid = row.get("id")
