@@ -498,6 +498,39 @@ def _resolve_price_objection_context(
     return is_objection, claimed, inbound_text
 
 
+def _is_catalog_product_price_fact_answer_allowed(
+    *,
+    reply: str,
+    chosen_path: str,
+    inbound_metadata: Optional[Dict[str, Any]],
+    evidence: ProductClaimGroundingEvidence,
+) -> bool:
+    """Allow grounded catalog fact price answers for narrow price Q&A only."""
+    meta = dict(inbound_metadata or {})
+    path = str(chosen_path or meta.get("chosen_path") or "").strip()
+    if path != "fact_bound_persona_compose":
+        return False
+    pc = meta.get("persona_compose")
+    surface = ""
+    if isinstance(pc, dict):
+        surface = str(pc.get("surface") or "").strip()
+    if surface != "catalog_product_answer":
+        return False
+    if str(meta.get("question_kind") or "") != "price":
+        return False
+    if str(meta.get("price_source") or "") != "catalog":
+        return False
+    if meta.get("checkout_pressure_allowed") is not False:
+        return False
+    ids = [x for x in (meta.get("catalog_product_ids") or []) if x is not None]
+    if not ids:
+        return False
+    reply_prices = extract_reply_prices(reply)
+    if not reply_prices:
+        return False
+    return all(price in evidence.grounded_prices for price in reply_prices)
+
+
 def apply_product_claim_grounding_guard(
     *,
     reply: str,
@@ -506,6 +539,7 @@ def apply_product_claim_grounding_guard(
     conversation_id: Optional[int] = None,
     availability_context: Optional[Dict[str, Any]] = None,
     executor_products: Optional[Sequence[Dict[str, Any]]] = None,
+    catalog_fact_products: Optional[Sequence[Dict[str, Any]]] = None,
     chosen_path: str = "",
     history: Optional[Sequence[Any]] = None,
     order_state: Any = None,
@@ -555,12 +589,23 @@ def apply_product_claim_grounding_guard(
             tenant_id,
             availability_context=availability_context,
             executor_products=executor_products,
+            catalog_fact_products=catalog_fact_products,
             chosen_path=path,
             history=history,
             order_state=order_state,
             inbound_metadata=inbound_metadata,
             conversation_id=conversation_id,
         )
+        if _is_catalog_product_price_fact_answer_allowed(
+            reply=original,
+            chosen_path=path,
+            inbound_metadata=inbound_metadata,
+            evidence=evidence,
+        ):
+            return ProductClaimGroundingGuardResult(
+                reply=original,
+                action="allowed_catalog_product_price_fact",
+            )
         is_price_objection, customer_claimed, _inbound_text = _resolve_price_objection_context(
             inbound_metadata,
         )
