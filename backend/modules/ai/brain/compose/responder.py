@@ -694,14 +694,22 @@ class DefaultComposer:
                 if _catalog_result is not None and (_catalog_text or "").strip():
                     if isinstance(_catalog_event, dict):
                         result.data.update(_catalog_event)
-                    if _catalog_fact_rows:
-                        result.data["catalog_fact_products"] = _catalog_fact_rows
+                    if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                        _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
+                            compose_products,
+                        )
+                        if _persist_fact_rows:
+                            result.data["catalog_fact_products"] = _persist_fact_rows
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
-                if _catalog_fact_rows:
-                    result.data["catalog_fact_products"] = _catalog_fact_rows
+                if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                    _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
+                        compose_products,
+                    )
+                    if _persist_fact_rows:
+                        result.data["catalog_fact_products"] = _persist_fact_rows
                 if candidates and _question_kind not in _CATALOG_QA_QUESTION_KINDS:
                     wa_buttons = []
                     for i, p in enumerate(candidates[:3], 1):

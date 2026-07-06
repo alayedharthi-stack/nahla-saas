@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from .types import (
     ActionResult,
@@ -81,6 +81,113 @@ _CATALOG_QTY_RE      = _re_catalog.compile(r"عدد المنتجات:\s*(\d+)")
 _CATALOG_NAME_RE     = _re_catalog.compile(r"^اسم المنتج:\s*(.+?)\s*$", _re_catalog.MULTILINE)
 # Strip every non-alphanumeric character for fuzzy SKU comparison.
 _CATALOG_NORM_RE     = _re_catalog.compile(r"[^a-z0-9]")
+
+
+def _catalog_product_ids_as_int_set(catalog_product_ids: Any) -> Set[int]:
+    ids: Set[int] = set()
+    for raw in list(catalog_product_ids or []):
+        try:
+            ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _catalog_guard_fact_row_from_product(
+    item: Dict[str, Any],
+    *,
+    pid_int: int,
+) -> Optional[Dict[str, Any]]:
+    """Grounding-only row; requires an explicit catalog price field."""
+    if item.get("price") is None:
+        return None
+    row: Dict[str, Any] = {"id": pid_int, "price": item.get("price")}
+    title = str(item.get("title") or "").strip()
+    if title:
+        row["title"] = title
+    orderable = item.get("can_checkout", item.get("orderable"))
+    if orderable is not None:
+        row["can_checkout"] = bool(orderable)
+        row["available"] = bool(orderable)
+    return row
+
+
+def _rebuild_catalog_price_guard_fact_rows(
+    result_data: Dict[str, Any],
+    *,
+    catalog_product_ids: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    """Rebuild guard-only catalog fact rows from in-process executor/compose pools."""
+    id_set = _catalog_product_ids_as_int_set(catalog_product_ids)
+    if not id_set:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    seen: Set[int] = set()
+
+    def _ingest_pool(pool: Any) -> None:
+        for item in list(pool or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                pid_int = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if pid_int not in id_set or pid_int in seen:
+                continue
+            row = _catalog_guard_fact_row_from_product(item, pid_int=pid_int)
+            if row is None:
+                continue
+            rows.append(row)
+            seen.add(pid_int)
+
+    _ingest_pool(result_data.get("catalog_fact_products"))
+    _ingest_pool(result_data.get("products"))
+    return rows
+
+
+def _catalog_price_guard_needs_fact_rebuild(result_data: Dict[str, Any]) -> bool:
+    pc = result_data.get("persona_compose")
+    surface = str(pc.get("surface") or "").strip() if isinstance(pc, dict) else ""
+    if surface != "catalog_product_answer":
+        return False
+    if str(result_data.get("question_kind") or "").strip() != "price":
+        return False
+    if str(result_data.get("price_source") or "").strip() != "catalog":
+        return False
+    if not [x for x in (result_data.get("catalog_product_ids") or []) if x is not None]:
+        return False
+    return not list(result_data.get("catalog_fact_products") or [])
+
+
+def _catalog_fact_guard_diagnostics(result_data: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    fact_rows = [
+        dict(row)
+        for row in (result_data.get("catalog_fact_products") or [])
+        if isinstance(row, dict)
+    ]
+    ids: List[int] = []
+    prices: List[int] = []
+    for row in fact_rows:
+        pid = row.get("id")
+        if pid is not None:
+            try:
+                ids.append(int(pid))
+            except (TypeError, ValueError):
+                pass
+        parsed = parse_price_amount(row.get("price"))
+        if parsed is not None:
+            prices.append(parsed)
+    fallback_ids = _catalog_product_ids_as_int_set(result_data.get("catalog_product_ids"))
+    return {
+        "catalog_fact_products_len": len(fact_rows),
+        "catalog_fact_product_ids": ids or sorted(fallback_ids),
+        "catalog_fact_price_values": sorted(set(prices)),
+    }
 
 
 def _normalize_sku_token(s: Any) -> str:
@@ -3412,6 +3519,14 @@ class MerchantBrain:
                 _pcgg_chosen_path = str(
                     result.data.get("chosen_path") or _chosen_path or ""
                 ).strip()
+                if _catalog_price_guard_needs_fact_rebuild(result.data):
+                    _rebuilt_catalog_facts = _rebuild_catalog_price_guard_fact_rows(
+                        result.data,
+                        catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
+                    )
+                    if _rebuilt_catalog_facts:
+                        result.data["catalog_fact_products"] = _rebuilt_catalog_facts
+                        _pcgg_meta["catalog_fact_products"] = _rebuilt_catalog_facts
                 _pcgg_catalog_facts = list(result.data.get("catalog_fact_products") or [])
                 _pcgg = apply_product_claim_grounding_guard(
                     reply=reply or "",
@@ -3955,6 +4070,8 @@ class MerchantBrain:
                 _ofe_exc,
             )
 
+        _catalog_fact_diag = _catalog_fact_guard_diagnostics(result.data)
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
@@ -3969,6 +4086,7 @@ class MerchantBrain:
             "catalog_product_ids": list(result.data.get("catalog_product_ids") or []),
             "price_source": result.data.get("price_source"),
             "checkout_pressure_allowed": result.data.get("checkout_pressure_allowed"),
+            **_catalog_fact_diag,
             "non_commerce_block_mode": bool(
                 getattr(ctx, "block_commerce_escalation", False)
             ),
