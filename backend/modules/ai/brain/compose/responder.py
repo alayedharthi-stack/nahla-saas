@@ -565,6 +565,9 @@ class DefaultComposer:
                 query=_search_query,
                 decision_args=dict(decision.args or {}),
             )
+            _catalog_fact_products: list = []
+            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                _catalog_fact_products = list(data.get("catalog_fact_products") or [])
             _category_scope = (
                 resolve_browse_category_scope(
                     ctx.message or "",
@@ -617,9 +620,9 @@ class DefaultComposer:
             _category_filter_dropped = max(0, _pre_category_count - len(safe_products))
 
             if _question_kind in _CATALOG_QA_QUESTION_KINDS:
-                _pre_facts_count = len(raw_products)
+                _pre_facts_count = len(raw_products) + len(_catalog_fact_products)
                 facts_products = filter_products_for_browse_turn(
-                    list(raw_products),
+                    list(raw_products) + list(_catalog_fact_products),
                     **_browse_filter_kwargs,
                 )
                 _facts_category_dropped = max(0, _pre_facts_count - len(facts_products))

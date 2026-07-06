@@ -119,12 +119,39 @@ class CommerceToolRuntime:
     async def _tool_search_products(self, payload: Dict[str, Any]) -> ToolExecutionResult:
         query = str(payload.get("query") or "").strip()
         limit = int(payload.get("limit") or 8)
-        products = self.catalog.search_products(query, limit=limit) if query else self.catalog.get_top_products(limit=limit)
+        include_facts = bool(payload.get("include_non_orderable_facts"))
+        catalog_fact_products: List[Dict[str, Any]] = []
+        if query:
+            search_result = self.catalog.search_products(
+                query,
+                limit=limit,
+                include_non_orderable_facts=include_facts,
+            )
+            from core.store_knowledge import CatalogSearchProductsResult  # noqa: PLC0415
+
+            if isinstance(search_result, CatalogSearchProductsResult):
+                products = list(search_result.products or [])
+                catalog_fact_products = list(search_result.catalog_fact_products or [])
+            else:
+                products = list(search_result or [])
+        else:
+            products = self.catalog.get_top_products(limit=limit)
+        result_payload: Dict[str, Any] = {
+            "products": products,
+            "count": len(products),
+            "query": query,
+        }
+        if catalog_fact_products:
+            result_payload["catalog_fact_products"] = catalog_fact_products
         return ToolExecutionResult(
             ok=True,
             tool_name="search_products",
-            payload={"products": products, "count": len(products), "query": query},
-            audit={"query": query, "count": len(products)},
+            payload=result_payload,
+            audit={
+                "query": query,
+                "count": len(products),
+                "catalog_fact_products": len(catalog_fact_products),
+            },
         )
 
     async def _tool_get_product_details(self, payload: Dict[str, Any]) -> ToolExecutionResult:

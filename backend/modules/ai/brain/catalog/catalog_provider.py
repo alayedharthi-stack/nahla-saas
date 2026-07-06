@@ -12,9 +12,11 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger("nahla.brain.catalog.provider")
+
+_CatalogSearchReturn = Union[List[Dict[str, Any]], Any]
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,13 @@ class GroupProductsFetchResult:
 
 class CatalogProvider(ABC):
     @abstractmethod
-    def search_products(self, query: str, *, limit: int = 12) -> List[Dict[str, Any]]:
+    def search_products(
+        self,
+        query: str,
+        *,
+        limit: int = 12,
+        include_non_orderable_facts: bool = False,
+    ) -> _CatalogSearchReturn:
         raise NotImplementedError
 
     @abstractmethod
@@ -74,11 +82,25 @@ class LocalCatalogProvider(CatalogProvider):
         self._tenant_id = tenant_id
         self._builder = CatalogContextBuilder(db, tenant_id)
 
-    def search_products(self, query: str, *, limit: int = 12) -> List[Dict[str, Any]]:
+    def search_products(
+        self,
+        query: str,
+        *,
+        limit: int = 12,
+        include_non_orderable_facts: bool = False,
+    ) -> _CatalogSearchReturn:
         q = str(query or "").strip()
         if not q:
+            if include_non_orderable_facts:
+                from core.store_knowledge import CatalogSearchProductsResult  # noqa: PLC0415
+
+                return CatalogSearchProductsResult(products=[], catalog_fact_products=[])
             return self.get_top_products(limit=limit)
-        return list(self._builder.search_products(q, limit=limit) or [])
+        return self._builder.search_products(
+            q,
+            limit=limit,
+            include_non_orderable_facts=include_non_orderable_facts,
+        )
 
     def get_top_products(self, *, limit: int = 12) -> List[Dict[str, Any]]:
         return list(self._builder.get_top_products(limit=limit) or [])
