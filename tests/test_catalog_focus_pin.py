@@ -435,21 +435,21 @@ class TestResolveNormalizedStrategy:
 
 
 class TestResolveUniquePriceStrategy:
-    def test_unique_price_match_returns_row(self):
-        """When SKU misses entirely AND no payload name was supplied,
-        a single tenant product at the matching price wins."""
+    def test_unique_price_disabled_even_when_single_price_match(self):
+        """Price-only fallback is off — unknown SKU must not bind a row."""
         from modules.ai.brain.pipeline import _resolve_catalog_product
-        row = _fake_product(id_=99, title="كريم سم النحل", price="79.0",
+        row = _fake_product(id_=99, title="حذاء رياضي أبيض", price="79.0",
                             external_id="ext-NEHEL")
-        confounder = _fake_product(id_=100, title="عسل", price="120.0",
-                                   external_id="ext-honey")
+        confounder = _fake_product(id_=100, title="قميص قطني", price="120.0",
+                                   external_id="ext-shirt")
         db = _wire_db(direct_hit=None, all_rows=[row, confounder])
         out_row, strategy = _resolve_catalog_product(
             db=db, tenant_id=1, sku="totally-unknown",
-            unit_price=79.0, allow_price_fallback=True,
+            unit_price=79.0, allow_price_fallback=False,
         )
-        assert strategy == "unique_price"
-        assert out_row is row
+        assert strategy != "unique_price"
+        assert strategy == "miss"
+        assert out_row is None
 
     def test_two_products_with_same_price_refuse_to_guess(self):
         """If multiple products share the price, the resolver must
@@ -554,14 +554,11 @@ class TestPinIntegrationWithEnhancedLookup:
     """End-to-end checks at the ``_maybe_pin_catalog_focus`` boundary —
     the resolver wiring must surface the right title."""
 
-    def test_pin_picks_unique_price_match_when_sku_unknown(self):
+    def test_pin_does_not_bind_product_by_price_when_sku_unknown(self):
         from modules.ai.brain.pipeline import _maybe_pin_catalog_focus
         from modules.ai.brain.types import MerchantConversationState
 
-        # The screenshot scenario: WhatsApp gave us a SKU we don't
-        # know, no payload name, but the merchant has exactly ONE
-        # product at 79 SAR — "كريم سم النحل".
-        unique = _fake_product(id_=33, title="كريم سم النحل",
+        unique = _fake_product(id_=33, title="حذاء رياضي أبيض",
                                price="79.0", external_id="real-id")
         db = _wire_db(direct_hit=None, all_rows=[unique])
         msg = "\n".join([
@@ -575,9 +572,10 @@ class TestPinIntegrationWithEnhancedLookup:
             db=db, tenant_id=1, message=msg, state=state,
         )
         f = state.current_product_focus
-        assert f, "focus must be pinned"
-        assert f["title"] == "كريم سم النحل"
-        assert f["id"] == 33
+        assert f, "focus must still be pinned as placeholder"
+        assert f["title"] == ""
+        assert f["id"] == "bsp-divergent-id"
+        assert f["external_id"] == "bsp-divergent-id"
         assert f["from_catalog_order"] is True
 
     def test_pin_does_not_use_price_fallback_when_payload_name_exists(self):

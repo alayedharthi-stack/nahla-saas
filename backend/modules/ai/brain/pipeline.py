@@ -311,9 +311,8 @@ def _maybe_pin_catalog_focus(
         unit_price = round(total_price / qty, 2)
 
     # Best-effort lookup against the merchant's catalog so we can populate
-    # title / numeric id. Unique-price fallback only when WhatsApp itself
-    # gave us no name AND the SKU lookup found nothing — we never want
-    # to guess on top of a label the BSP already supplied.
+    # title / numeric id. Price-only fallback is disabled — identity must
+    # come from SKU / external_id / meta_retailer_id / normalized match.
     resolved_id: Any = None
     resolved_title: str = ""
     resolved_price: Optional[float] = None
@@ -324,7 +323,7 @@ def _maybe_pin_catalog_focus(
             tenant_id=tenant_id,
             sku=sku,
             unit_price=unit_price,
-            allow_price_fallback=not bool(payload_name),
+            allow_price_fallback=False,
         )
         if row is not None:
             resolved_id    = getattr(row, "id", None)
