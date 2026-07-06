@@ -208,6 +208,94 @@ def build_catalog_product_answer_event_metadata(
     return meta
 
 
+_CATALOG_QA_KINDS = frozenset({"price", "availability"})
+_PRESSURE_MARKERS = (
+    "اختر رقم",
+    "اسمك",
+    "عنوانك",
+    "طريقة الدفع",
+    "نكمل الطلب",
+    "كم الكمية",
+)
+
+
+def catalog_product_answer_deterministic_fallback(
+    bundle: PersonaFactsBundle,
+) -> str:
+    """Fact-bound price/availability reply when LLM compose is unavailable."""
+    facts = bundle.verified_facts or {}
+    qkind = str(facts.get("question_kind") or "").strip()
+    if qkind not in _CATALOG_QA_KINDS:
+        return ""
+
+    rows = [
+        dict(row)
+        for row in (facts.get("catalog_products") or [])
+        if isinstance(row, dict) and str(row.get("title") or "").strip()
+    ]
+    if not rows:
+        return ""
+
+    lines: list[str] = []
+    if qkind == "price":
+        if not facts.get("allow_price_mention"):
+            return ""
+        for row in rows[:3]:
+            title = str(row.get("title") or "").strip()
+            price = row.get("price")
+            if price is None:
+                continue
+            price_text = str(price).strip()
+            if not price_text:
+                continue
+            line = f"{title} سعره {price_text}"
+            if row.get("orderable") is False:
+                line += "، والمنتج غير متاح للطلب حالياً"
+            lines.append(line)
+    else:
+        if not facts.get("allow_availability_mention"):
+            return ""
+        for row in rows[:3]:
+            title = str(row.get("title") or "").strip()
+            if row.get("orderable") is True:
+                lines.append(f"{title} متوفر للطلب حالياً")
+            else:
+                lines.append(f"{title} موجود في الكتالوج لكن غير متاح للطلب حالياً")
+
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        text = lines[0]
+    else:
+        text = "من الكتالوج:\n" + "\n".join(f"• {line}" for line in lines)
+    lower = text.lower()
+    if any(marker in text or marker in lower for marker in _PRESSURE_MARKERS):
+        return ""
+    return text
+
+
+def _catalog_deterministic_compose_result(
+    *,
+    bundle: PersonaFactsBundle,
+    text: str,
+    prior: PersonaComposeResult,
+) -> PersonaComposeResult:
+    return PersonaComposeResult(
+        text=text.strip(),
+        source="catalog_deterministic_fallback",
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        facts_hash=prior.facts_hash,
+        guard_passed=False,
+        guard_failed_reason=prior.guard_failed_reason or "llm_or_guard_failed",
+        fallback_reason="catalog_deterministic_fallback",
+        language=prior.language,
+        dialect=prior.dialect,
+        emoji_count=sum(1 for ch in text if ch in {"😊", "🌷", "🤍", "🍯"}),
+        latency_ms=prior.latency_ms,
+        model=prior.model,
+    )
+
+
 async def try_compose_catalog_product_answer(
     *,
     tenant_id: int,
@@ -267,16 +355,33 @@ async def try_compose_catalog_product_answer(
     composer = FactBoundPersonaComposer(enforce_gate=False)
     result = await composer.compose(bundle)
     if (
-        result.source != "persona_llm"
-        or not result.guard_passed
-        or not (result.text or "").strip()
+        result.source == "persona_llm"
+        and result.guard_passed
+        and (result.text or "").strip()
     ):
-        return None, None, None
+        event_meta = build_catalog_product_answer_event_metadata(
+            result,
+            tenant_id=int(tenant_id),
+            allowlist_result=allowlist_result,
+            catalog_facts=bundle.verified_facts,
+        )
+        return result.text.strip(), result, event_meta
 
-    event_meta = build_catalog_product_answer_event_metadata(
-        result,
-        tenant_id=int(tenant_id),
-        allowlist_result=allowlist_result,
-        catalog_facts=bundle.verified_facts,
-    )
-    return result.text.strip(), result, event_meta
+    qkind = str(bundle.verified_facts.get("question_kind") or "").strip()
+    if qkind in _CATALOG_QA_KINDS:
+        fallback_text = catalog_product_answer_deterministic_fallback(bundle)
+        if fallback_text.strip():
+            fallback_result = _catalog_deterministic_compose_result(
+                bundle=bundle,
+                text=fallback_text,
+                prior=result,
+            )
+            event_meta = build_catalog_product_answer_event_metadata(
+                fallback_result,
+                tenant_id=int(tenant_id),
+                allowlist_result=allowlist_result,
+                catalog_facts=bundle.verified_facts,
+            )
+            return fallback_text.strip(), fallback_result, event_meta
+
+    return None, None, None
