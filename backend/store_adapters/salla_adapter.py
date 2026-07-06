@@ -223,6 +223,20 @@ def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
     return missing
 
 
+def _coerce_salla_price_amount(value: Any) -> Optional[float]:
+    """Extract a numeric price from a Salla price field (dict/number/string)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("amount")
+    if value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @register_adapter("salla")
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
@@ -1191,11 +1205,11 @@ class SallaAdapter(BaseStoreAdapter):
 
     def _normalize_product(self, raw: Dict[str, Any]) -> NormalizedProduct:
         price_block = raw.get("price") or {}
-        price_amount = price_block.get("amount") if isinstance(price_block, dict) else raw.get("price")
-        try:
-            price_f = float(price_amount) if price_amount is not None else None
-        except (TypeError, ValueError):
-            price_f = None
+        price_f = _coerce_salla_price_amount(
+            price_block if isinstance(price_block, dict) else raw.get("price")
+        )
+        sale_price_f = _coerce_salla_price_amount(raw.get("sale_price"))
+        regular_price_f = _coerce_salla_price_amount(raw.get("regular_price"))
 
         variants = [
             self._normalize_variant(v)
@@ -1208,6 +1222,8 @@ class SallaAdapter(BaseStoreAdapter):
             id=str(raw.get("id", "")),
             title=raw.get("name") or raw.get("title") or "",
             price=price_f,
+            sale_price=sale_price_f,
+            regular_price=regular_price_f,
             currency=(price_block.get("currency") if isinstance(price_block, dict) else "SAR") or "SAR",
             sku=raw.get("sku") or "",
             in_stock=(raw.get("quantity", 1) or 0) > 0,
