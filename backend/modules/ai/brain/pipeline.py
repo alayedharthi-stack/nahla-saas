@@ -3398,15 +3398,21 @@ class MerchantBrain:
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
                     pass
                 for _compose_meta_key in (
+                    "chosen_path",
                     "question_kind",
                     "price_source",
                     "checkout_pressure_allowed",
                     "catalog_product_ids",
+                    "catalog_fact_products",
                     "persona_compose",
                 ):
                     _compose_meta_val = result.data.get(_compose_meta_key)
                     if _compose_meta_val is not None:
                         _pcgg_meta[_compose_meta_key] = _compose_meta_val
+                _pcgg_chosen_path = str(
+                    result.data.get("chosen_path") or _chosen_path or ""
+                ).strip()
+                _pcgg_catalog_facts = list(result.data.get("catalog_fact_products") or [])
                 _pcgg = apply_product_claim_grounding_guard(
                     reply=reply or "",
                     db=db,
@@ -3414,8 +3420,8 @@ class MerchantBrain:
                     conversation_id=conversation_id,
                     availability_context=_availability_ctx,
                     executor_products=list(result.data.get("products") or []),
-                    catalog_fact_products=list(result.data.get("catalog_fact_products") or []),
-                    chosen_path=_chosen_path,
+                    catalog_fact_products=_pcgg_catalog_facts,
+                    chosen_path=_pcgg_chosen_path,
                     history=history,
                     order_state=new_state,
                     inbound_metadata=_pcgg_meta,

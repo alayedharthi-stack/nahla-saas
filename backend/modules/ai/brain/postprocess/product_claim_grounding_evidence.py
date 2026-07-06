@@ -498,6 +498,9 @@ def build_product_claim_grounding_evidence(
             executor_ids=executor_ids,
         )
 
+    if fact_rows:
+        catalog_hit_turn = True
+
     for row in executor_rows:
         pid = row.get("id")
         if isinstance(pid, int):

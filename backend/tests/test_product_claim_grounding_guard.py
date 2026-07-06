@@ -324,3 +324,87 @@ class TestCatalogFactPriceGrounding:
         )
         assert result.replaced is True
         assert "ما ظهر عندي سعر مؤكد" in result.reply
+
+    def test_pipeline_catalog_price_facts_survive_guard_with_miss_history(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pipeline-shaped: compose metadata + fact rows, empty executor, miss history."""
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        talh_facts = [
+            {
+                "id": 109,
+                "title": "عسل طلح نجد البري إنتاج منحلنا  1 كيلو",
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+                "in_stock": False,
+            },
+            {
+                "id": 121,
+                "title": "عسل طلح نجد البري إنتاج منحلنا  5 كيلو",
+                "price": "ر.س. ١٬٤٧٥٫٠٠",
+                "can_checkout": False,
+                "in_stock": False,
+            },
+        ]
+        history: List[Dict[str, Any]] = [
+            {
+                "direction": "outbound",
+                "body": "ما ظهر عندي في الكتالوج منتجات مطابقة لطلبك.",
+            },
+        ]
+        reply = (
+            "من الكتالوج:\n"
+            "• عسل طلح نجد البري إنتاج منحلنا  1 كيلو سعره 387 ريال، "
+            "والمنتج غير متاح للطلب حالياً"
+        )
+        result = apply_product_claim_grounding_guard(
+            reply=reply,
+            tenant_id=33,
+            chosen_path="search_products",
+            executor_products=[],
+            catalog_fact_products=talh_facts,
+            history=history,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                    "guard_passed": True,
+                },
+            },
+        )
+        assert result.replaced is False
+        assert "387" in result.reply or "٣٨٧" in result.reply
+        assert "ما ظهر عندي سعر مؤكد" not in result.reply
+
+    def test_catalog_fact_rows_set_catalog_products_this_turn(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            build_product_claim_grounding_evidence,
+        )
+
+        evidence = build_product_claim_grounding_evidence(
+            None,
+            33,
+            availability_context={"catalog_skus": []},
+            executor_products=[],
+            catalog_fact_products=[{
+                "id": 109,
+                "title": "عسل طلح",
+                "price": 387,
+                "can_checkout": False,
+            }],
+            history=[{
+                "direction": "outbound",
+                "body": "ما ظهر عندي في الكتالوج منتجات مطابقة.",
+            }],
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+            },
+        )
+        assert evidence.catalog_products_this_turn is True
+        assert 387 in evidence.grounded_prices
