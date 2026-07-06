@@ -688,6 +688,10 @@ class DefaultComposer:
                 if _catalog_result is not None and (_catalog_text or "").strip():
                     if isinstance(_catalog_event, dict):
                         result.data.update(_catalog_event)
+                    if _question_kind in _CATALOG_QA_QUESTION_KINDS and compose_products:
+                        result.data["catalog_fact_products"] = [
+                            dict(p) for p in compose_products if isinstance(p, dict)
+                        ]
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 

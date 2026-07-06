@@ -507,9 +507,6 @@ def _is_catalog_product_price_fact_answer_allowed(
 ) -> bool:
     """Allow grounded catalog fact price answers for narrow price Q&A only."""
     meta = dict(inbound_metadata or {})
-    path = str(chosen_path or meta.get("chosen_path") or "").strip()
-    if path != "fact_bound_persona_compose":
-        return False
     pc = meta.get("persona_compose")
     surface = ""
     if isinstance(pc, dict):
