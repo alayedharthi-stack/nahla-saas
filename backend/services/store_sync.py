@@ -126,6 +126,7 @@ def _normalise_product(raw: Any) -> Dict:
         "description":   raw.get("description", ""),
         "price":         str(raw.get("price", raw.get("regular_price", ""))),
         "sale_price":    str(raw.get("sale_price", raw.get("promo_price", "")) or ""),
+        "regular_price": str(raw.get("regular_price", "") or ""),
         "status":        _extract_status_string(raw.get("status"), fallback="active"),
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
