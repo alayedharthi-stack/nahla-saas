@@ -336,11 +336,21 @@ class TestCatalogProductAnswerPersonaCompose:
             tenant_id=33,
             allowlist_result="allowed",
             catalog_facts=bundle.verified_facts,
+            catalog_fact_products=[
+                {
+                    "id": 101,
+                    "title": "عسل سدر",
+                    "price": "ر.س. ٣٨٧٫٠٠",
+                    "can_checkout": False,
+                },
+            ],
         )
         merged = merge_persona_compose_into_extra_metadata({}, event)
         assert merged["catalog_product_ids"] == [101, 102]
         assert merged["category_scope"] == "عسل"
         assert merged["price_source"] == "catalog"
+        assert merged["catalog_fact_products"][0]["id"] == 101
+        assert merged["catalog_fact_products"][0]["price"] == "ر.س. ٣٨٧٫٠٠"
 
 
 class TestCatalogSurfaceRegistration:
@@ -628,3 +638,24 @@ class TestResponderCatalogFactProductsSideChannel:
         assert 501 in ids
         assert all(p.get("can_checkout") for p in raw_products)
         assert not talh.get("can_checkout")
+
+
+class TestCatalogFactProductRows:
+    def test_catalog_fact_product_rows_coerces_namespace(self) -> None:
+        from types import SimpleNamespace
+
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            catalog_fact_product_rows,
+        )
+
+        row = SimpleNamespace(
+            id=109,
+            title="عسل طلح",
+            price="ر.س. ٣٨٧٫٠٠",
+            can_checkout=False,
+        )
+        rows = catalog_fact_product_rows([row])
+        assert len(rows) == 1
+        assert rows[0]["id"] == 109
+        assert rows[0]["price"] == "ر.س. ٣٨٧٫٠٠"
+        assert rows[0]["can_checkout"] is False

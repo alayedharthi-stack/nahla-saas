@@ -120,7 +120,9 @@ class DefaultComposer:
         ctx: BrainContext,
     ) -> str:
         action = decision.action
-        data   = result.data or {}
+        if not isinstance(result.data, dict):
+            result.data = {}
+        data = result.data
 
         # ── State guard (defense-in-depth) ─────────────────────────────────
         # The DecisionEngine already gates greetings on `state.greeted` and
@@ -551,6 +553,7 @@ class DefaultComposer:
                 (decision.args or {}).get("source") or ""
             ).strip().lower()
             from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                catalog_fact_product_rows,
                 classify_catalog_question_kind,
                 try_compose_catalog_product_answer,
             )
@@ -662,6 +665,9 @@ class DefaultComposer:
                 category_filtered_facts=facts_products,
                 display_candidates=candidates,
             )
+            _catalog_fact_rows: list[dict[str, Any]] = []
+            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                _catalog_fact_rows = catalog_fact_product_rows(compose_products)
 
             _catalog_text: str | None = None
             _catalog_event: dict | None = None
@@ -688,14 +694,14 @@ class DefaultComposer:
                 if _catalog_result is not None and (_catalog_text or "").strip():
                     if isinstance(_catalog_event, dict):
                         result.data.update(_catalog_event)
-                    if _question_kind in _CATALOG_QA_QUESTION_KINDS and compose_products:
-                        result.data["catalog_fact_products"] = [
-                            dict(p) for p in compose_products if isinstance(p, dict)
-                        ]
+                    if _catalog_fact_rows:
+                        result.data["catalog_fact_products"] = _catalog_fact_rows
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
+                if _catalog_fact_rows:
+                    result.data["catalog_fact_products"] = _catalog_fact_rows
                 if candidates and _question_kind not in _CATALOG_QA_QUESTION_KINDS:
                     wa_buttons = []
                     for i, p in enumerate(candidates[:3], 1):
