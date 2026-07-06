@@ -417,3 +417,68 @@ class TestInactiveCatalogLineStrip:
         )
         assert result.replaced is False
         assert result.reply == reply
+
+
+class TestCatalogProductFactAnswerExempt:
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def test_price_fact_answer_preserves_non_orderable_talh_line(self) -> None:
+        reply = (
+            "من الكتالوج:\n"
+            "• عسل طلح نجد البري إنتاج منحلنا  1 كيلو سعره 387 ريال، "
+            "والمنتج غير متاح للطلب حالياً"
+        )
+        ctx = _ctx(
+            skus=[
+                _sku(
+                    109,
+                    "عسل طلح نجد البري إنتاج منحلنا  1 كيلو",
+                    checkout=False,
+                )
+            ],
+        )
+        result = apply_product_availability_truth_guard(
+            reply=reply,
+            availability_context=ctx,
+            inbound_text="كم سعر الطلح؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="price",
+            catalog_product_ids=[109],
+            checkout_pressure_allowed=False,
+            surface="catalog_product_answer",
+            tenant_id=33,
+        )
+        assert result.replaced is False
+        assert "387" in result.reply
+        assert "غير متاح للطلب" in result.reply
+
+    def test_browse_availability_list_still_strips_non_orderable(self) -> None:
+        raw = (
+            "عندنا حالياً:\n\n"
+            "• عسل طلح نجد البري\n"
+            "• عسل سمر الحجاز\n"
+            "• عسل الضُرم الجبلي"
+        )
+        ctx = _ctx(
+            skus=[
+                _sku(109, "عسل طلح نجد البري", checkout=False),
+                _sku(111, "عسل سمر الحجاز", checkout=True),
+                _sku(103, "عسل الضُرم الجبلي", checkout=False),
+            ],
+        )
+        result = apply_product_availability_truth_guard(
+            reply=raw,
+            availability_context=ctx,
+            inbound_text="وش المتوفر الان؟",
+            tenant_id=33,
+        )
+        assert result.replaced is True
+        assert "الضُرم" not in result.reply

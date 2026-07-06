@@ -517,6 +517,29 @@ class TestCatalogPriceNonOrderableFacts:
         assert "غير متاح للطلب" in text
         assert "متوفر" not in text
 
+    def test_persona_compose_event_metadata_merge_includes_catalog_ids(self) -> None:
+        from modules.ai.brain.persona.integration import (  # noqa: PLC0415
+            merge_persona_compose_into_extra_metadata,
+        )
+
+        event = {
+            "chosen_path": "fact_bound_persona_compose",
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "catalog_deterministic_fallback",
+                "guard_passed": False,
+            },
+            "question_kind": "price",
+            "catalog_product_ids": [109, 121],
+            "price_source": "catalog",
+            "checkout_pressure_allowed": False,
+        }
+        merged = merge_persona_compose_into_extra_metadata({}, event)
+        assert merged["catalog_product_ids"] == [109, 121]
+        assert merged["price_source"] == "catalog"
+        assert merged["checkout_pressure_allowed"] is False
+        assert merged["persona_compose"]["surface"] == "catalog_product_answer"
+
     def test_availability_non_orderable_no_mتوفر_claim(self) -> None:
         products = [
             {

@@ -178,6 +178,34 @@ def strip_non_checkout_catalog_product_lines(
     return "\n".join(kept).strip(), True
 
 
+_CATALOG_FACT_QA_KINDS = frozenset({"price", "availability"})
+
+
+def is_catalog_product_fact_answer_exempt(
+    *,
+    chosen_path: str = "",
+    question_kind: str = "",
+    catalog_product_ids: Optional[Sequence[Any]] = None,
+    checkout_pressure_allowed: Optional[bool] = None,
+    surface: str = "",
+) -> bool:
+    """Allow non-orderable catalog fact lines for narrow price/availability Q&A."""
+    if str(chosen_path or "").strip() != "fact_bound_persona_compose":
+        return False
+    qkind = str(question_kind or "").strip()
+    if qkind not in _CATALOG_FACT_QA_KINDS:
+        return False
+    surf = str(surface or "").strip()
+    if surf and surf != "catalog_product_answer":
+        return False
+    ids = [x for x in (catalog_product_ids or []) if x is not None]
+    if not ids:
+        return False
+    if checkout_pressure_allowed is not False:
+        return False
+    return True
+
+
 def product_availability_guard_mode() -> str:
     mode = os.environ.get(
         "NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", "off",
@@ -548,6 +576,10 @@ def apply_product_availability_truth_guard(
     decision_topic: str = "",
     tenant_id: Optional[int] = None,
     conversation_id: Optional[int] = None,
+    question_kind: str = "",
+    catalog_product_ids: Optional[Sequence[Any]] = None,
+    checkout_pressure_allowed: Optional[bool] = None,
+    surface: str = "",
 ) -> ProductAvailabilityTruthGuardResult:
     mode = product_availability_guard_mode()
     original = str(reply or "")
@@ -588,11 +620,18 @@ def apply_product_availability_truth_guard(
         catalog_skus = list((availability_context or {}).get("catalog_skus") or [])
         working = original
         stripped_inactive = False
-        if mode == "enforce":
+        _catalog_fact_exempt = is_catalog_product_fact_answer_exempt(
+            chosen_path=path,
+            question_kind=question_kind,
+            catalog_product_ids=catalog_product_ids,
+            checkout_pressure_allowed=checkout_pressure_allowed,
+            surface=surface,
+        )
+        if mode == "enforce" and not _catalog_fact_exempt:
             working, stripped_inactive = strip_non_checkout_catalog_product_lines(
                 working, catalog_skus,
             )
-        elif mode == "shadow":
+        elif mode == "shadow" and not _catalog_fact_exempt:
             _, stripped_inactive = strip_non_checkout_catalog_product_lines(
                 original, catalog_skus,
             )
@@ -620,6 +659,14 @@ def apply_product_availability_truth_guard(
                 replaced=True,
                 reason="removed_non_checkout_catalog_product_lines",
                 availability_claim_blocked=True,
+            )
+
+        if _catalog_fact_exempt:
+            return ProductAvailabilityTruthGuardResult(
+                reply=working,
+                action="allowed_catalog_product_fact_answer",
+                replaced=False,
+                reason="catalog_product_fact_answer_exempt",
             )
 
         claim_polarity = reply_availability_polarity(working)

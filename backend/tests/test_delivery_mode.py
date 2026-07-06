@@ -305,6 +305,34 @@ class TestGuardRule:
         about should err on the side of alerting, not silence."""
         assert is_acceptable_mode_for_product_intent("future_mode_xyz") is False
 
+    def test_text_only_catalog_price_fact_answer_is_acceptable(self):
+        meta = {
+            "surface": "catalog_product_answer",
+            "question_kind": "price",
+            "catalog_product_ids": [109],
+            "price_source": "catalog",
+            "checkout_pressure_allowed": False,
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "catalog_deterministic_fallback",
+            },
+        }
+        body = "عسل طلح نجد سعره 387 ريال، والمنتج غير متاح للطلب حالياً"
+        assert is_acceptable_mode_for_product_intent(
+            DELIVERY_MODE_TEXT_ONLY,
+            brain_action="search_products",
+            catalog_fact_meta=meta,
+            reply_body=body,
+        ) is True
+
+    def test_text_only_generic_search_still_not_acceptable(self):
+        assert is_acceptable_mode_for_product_intent(
+            DELIVERY_MODE_TEXT_ONLY,
+            brain_action="search_products",
+            catalog_fact_meta=None,
+            reply_body="نعم، عندنا خيارين قد يناسبونك",
+        ) is False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. End-to-end — pin the production regression
