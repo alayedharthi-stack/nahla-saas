@@ -113,6 +113,16 @@ def _coerce_price_float(value: Any) -> Optional[float]:
         return None
 
 
+def _format_price_display(value: Any) -> str:
+    """Format a price for catalog display only (not DB storage)."""
+    parsed = _coerce_price_float(value)
+    if parsed is not None:
+        if parsed == int(parsed):
+            return str(int(parsed))
+        return f"{parsed:.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
 def format_product_price_str(
     *,
     price: Any,
@@ -128,10 +138,12 @@ def format_product_price_str(
     if sale_price not in (None, ""):
         sale_f = _coerce_price_float(sale_price)
         regular_f = _coerce_price_float(regular_price)
+        sale_disp = _format_price_display(sale_price)
         if regular_f is not None and sale_f is not None and regular_f != sale_f:
-            return f"{sale_price} ريال (بدلاً من {regular_price} ريال)"
-        return f"{sale_price} ريال"
-    return f"{price} ريال"
+            regular_disp = _format_price_display(regular_price)
+            return f"{sale_disp} ريال (بدلاً من {regular_disp} ريال)"
+        return f"{sale_disp} ريال"
+    return f"{_format_price_display(price)} ريال"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
