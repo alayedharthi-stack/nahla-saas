@@ -17,6 +17,8 @@ class NormalizedProduct(BaseModel):
     id: str
     title: str
     price: Optional[float] = None
+    sale_price: Optional[float] = None
+    regular_price: Optional[float] = None
     currency: str = "SAR"
     sku: Optional[str] = None
     in_stock: bool = True
