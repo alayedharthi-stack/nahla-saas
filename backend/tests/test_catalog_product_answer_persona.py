@@ -9,11 +9,12 @@ import pytest
 from modules.ai.brain.persona.catalog_product_answer import (
     build_catalog_product_answer_facts_bundle,
     build_catalog_product_answer_event_metadata,
+    catalog_product_answer_deterministic_fallback,
     classify_catalog_question_kind,
     try_compose_catalog_product_answer,
 )
 from modules.ai.brain.persona.fact_bound_composer import FactBoundPersonaComposer
-from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES
+from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES, PersonaComposeResult
 
 
 def _enabled_catalog_ai_settings() -> dict:
@@ -449,6 +450,72 @@ class TestCatalogPriceNonOrderableFacts:
             assert event["checkout_pressure_allowed"] is False
 
         asyncio.run(_run())
+
+    def test_price_deterministic_fallback_when_llm_compose_fails(self) -> None:
+        talh = {
+            "id": 501,
+            "title": "عسل الطلح",
+            "category": "عسل",
+            "price": 387,
+            "can_checkout": False,
+            "in_stock": False,
+        }
+        message = "كم سعر الطلح؟"
+        failed = PersonaComposeResult(
+            text="ياهلا ومرحبا",
+            source="fallback_deterministic",
+            surface="catalog_product_answer",
+            facts_hash="abc123",
+            guard_passed=False,
+            guard_failed_reason="guard_failed",
+        )
+
+        async def _run() -> None:
+            with patch.object(FactBoundPersonaComposer, "compose", return_value=failed):
+                text, compose_result, event = await try_compose_catalog_product_answer(
+                    tenant_id=33,
+                    customer_phone="966542980511",
+                    inbound_text=message,
+                    products=[talh],
+                    catalog_search_query="طلح",
+                    question_kind="price",
+                    ai_settings=_enabled_catalog_ai_settings(),
+                )
+            assert text
+            assert "387" in text
+            assert "غير متاح للطلب" in text
+            assert "اختر رقم" not in text
+            assert compose_result is not None
+            assert compose_result.source == "catalog_deterministic_fallback"
+            assert event is not None
+            assert event["chosen_path"] == "fact_bound_persona_compose"
+            assert event["persona_compose"]["surface"] == "catalog_product_answer"
+            assert event["persona_compose"]["source"] == "catalog_deterministic_fallback"
+            assert event["question_kind"] == "price"
+            assert event["price_source"] == "catalog"
+            assert event["catalog_product_ids"] == [501]
+            assert event["checkout_pressure_allowed"] is False
+
+        asyncio.run(_run())
+
+    def test_catalog_product_answer_deterministic_fallback_price_only(self) -> None:
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[
+                {
+                    "id": 501,
+                    "title": "عسل الطلح",
+                    "price": 387,
+                    "can_checkout": False,
+                }
+            ],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        text = catalog_product_answer_deterministic_fallback(bundle)
+        assert "387" in text
+        assert "غير متاح للطلب" in text
+        assert "متوفر" not in text
 
     def test_availability_non_orderable_no_mتوفر_claim(self) -> None:
         products = [

@@ -692,7 +692,7 @@ class DefaultComposer:
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
-                if candidates:
+                if candidates and _question_kind not in _CATALOG_QA_QUESTION_KINDS:
                     wa_buttons = []
                     for i, p in enumerate(candidates[:3], 1):
                         from core.product_button_label import (  # noqa: PLC0415
