@@ -985,24 +985,61 @@ def _apply_studio_filters(
     return query
 
 
+def _normalize_catalog_price_amount(value: Any) -> Optional[str]:
+    """Normalize catalog price metadata to a plain numeric string, or None.
+
+    Accepts numbers, numeric strings, and ``{amount, currency}`` dicts.
+    Never returns ``str(dict)`` or other raw technical reprs.
+    """
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, dict):
+        return _normalize_catalog_price_amount(value.get("amount"))
+
+    if isinstance(value, (int, float)):
+        try:
+            if float(value) == 0.0:
+                return None
+        except (TypeError, ValueError):
+            return None
+        if float(value).is_integer():
+            return str(int(value))
+        return str(float(value))
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            import ast  # noqa: PLC0415
+
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return None
+        if isinstance(parsed, dict):
+            return _normalize_catalog_price_amount(parsed)
+        return None
+
+    try:
+        num = float(text.replace(",", ""))
+        if num == 0.0:
+            return None
+        if num.is_integer():
+            return str(int(num))
+        return str(num)
+    except (TypeError, ValueError):
+        return None
+
+
 def _catalog_list_sale_fields(meta: Dict[str, Any]) -> Dict[str, Any]:
     """Read-only sale flags for catalog list rows (any Salla-synced product)."""
     sale_raw = meta.get("sale_price")
     regular_raw = meta.get("regular_price")
 
-    def _nonzero_amount(value: Any) -> Optional[str]:
-        if value is None or value == "":
-            return None
-        try:
-            if float(value) == 0.0:
-                return None
-        except (TypeError, ValueError):
-            pass
-        text = str(value).strip()
-        return text or None
-
-    sale_price = _nonzero_amount(sale_raw)
-    regular_price = _nonzero_amount(regular_raw)
+    sale_price = _normalize_catalog_price_amount(sale_raw)
+    regular_price = _normalize_catalog_price_amount(regular_raw)
     is_on_sale = False
     if sale_price and regular_price:
         try:
@@ -1122,12 +1159,12 @@ def _product_diag_rows(
         image_url   = resolve_product_image_url(meta=meta, variants=variants_rel)
         product_url = meta.get("product_url") or meta.get("url") or ""
         currency    = meta.get("currency") or ""
-        price_val   = getattr(p, "price", None)
+        price_val   = _normalize_catalog_price_amount(getattr(p, "price", None))
         if not price_val:
             price_val = (
-                meta.get("price")
-                or meta.get("sale_price")
-                or meta.get("regular_price")
+                _normalize_catalog_price_amount(meta.get("price"))
+                or _normalize_catalog_price_amount(meta.get("sale_price"))
+                or _normalize_catalog_price_amount(meta.get("regular_price"))
             )
 
         # Variant intelligence layer (migration 0064). Surface the

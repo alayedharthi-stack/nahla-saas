@@ -1961,6 +1961,7 @@ const en: Translations = {
       colRetailerId: 'retailer_id',
       colSource:     'Source',
       noImage:       'No image',
+      discountedPriceBadge: 'Discounted price',
     },
     testSend: {
       title:                'Test send',

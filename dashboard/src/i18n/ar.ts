@@ -1965,6 +1965,7 @@ const ar: Translations = {
       colRetailerId: 'retailer_id',
       colSource:     'المصدر',
       noImage:       'بدون صورة',
+      discountedPriceBadge: 'سعر مخفّض',
     },
     testSend: {
       title:                'إرسال تجريبي',
