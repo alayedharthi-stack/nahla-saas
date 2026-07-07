@@ -30,7 +30,7 @@
  * Each of those needs its own diagnostic surface — collapsing them
  * into the generic Integrations row would hide the actionable bits.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Loader2,
   Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
@@ -41,7 +41,6 @@ import {
   catalogApi,
   type CatalogDiagnostics,
   type CatalogProductDiagResponse,
-  type CatalogProductDiagRow,
   type CatalogResyncReport,
   type CatalogStatus,
   type CatalogTestSendResult,
@@ -50,7 +49,6 @@ import {
   type MetaImportReport,
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
-import { ProductThumbnail } from '../components/catalog/ProductThumbnail'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -70,56 +68,6 @@ function fmtImportAt(iso: string | null, lang: Lang): string {
   } catch {
     return iso
   }
-}
-
-function fmtProductPrice(
-  price: string | null,
-  currency: string | null | undefined,
-): string {
-  if (!price) return '—'
-  const amount = formatCatalogPriceAmount(price)
-  if (!amount) return '—'
-  const c = currency?.trim()
-  return c ? `${amount} ${c}` : amount
-}
-
-function formatCatalogPriceAmount(value: string | null | undefined): string {
-  if (!value) return ''
-  const n = Number(value)
-  if (!Number.isFinite(n)) return ''
-  if (Number.isInteger(n)) return String(n)
-  return String(parseFloat(n.toFixed(2)))
-}
-
-function CatalogProductPriceCell({ row }: { row: CatalogProductDiagRow }) {
-  const { tStatic } = useLanguage()
-  const discountedBadge = tStatic(tr => tr.catalogMgmt.importedProducts.discountedPriceBadge)
-  const sale = formatCatalogPriceAmount(row.sale_price)
-  const regular = formatCatalogPriceAmount(row.regular_price)
-  if (
-    row.is_on_sale
-    && sale
-    && regular
-    && sale !== regular
-  ) {
-    const suffix = row.currency?.trim() ? ` ${row.currency.trim()}` : ' ريال'
-    return (
-      <div className="flex flex-col gap-1 min-w-[7rem]">
-        <span className="text-[10px] font-semibold text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-0.5 w-fit shrink-0">
-          {discountedBadge}
-        </span>
-        <div className="flex items-baseline gap-2 flex-wrap">
-          <span className="text-slate-400 text-sm line-through whitespace-nowrap">
-            {regular}{suffix}
-          </span>
-          <span className="font-semibold text-slate-900 text-sm whitespace-nowrap">
-            {sale}{suffix}
-          </span>
-        </div>
-      </div>
-    )
-  }
-  return <span className="whitespace-nowrap">{fmtProductPrice(row.price, row.currency)}</span>
 }
 
 type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
@@ -215,7 +163,7 @@ export default function WhatsAppCatalog() {
   // card if this is null, so the legacy status surface keeps working.
   const [diagnostics, setDiagnostics] = useState<CatalogDiagnostics | null>(null)
 
-  // Bumps ImportedProductsSection after import / resync / manual add.
+  // Bumps ProductStudio after import / resync / manual add.
   const [productsRefresh, setProductsRefresh] = useState(0)
   const bumpProductList = () => setProductsRefresh(v => v + 1)
 
@@ -719,7 +667,7 @@ export default function WhatsAppCatalog() {
           </div>
         </div>
         <div className="p-5">
-          <ProductStudio />
+          <ProductStudio refreshTrigger={productsRefresh} />
         </div>
       </section>
 
@@ -868,9 +816,6 @@ export default function WhatsAppCatalog() {
           }}
         />
       )}
-
-      {/* ── Imported products grid (read-only confirmation) ─────── */}
-      <ImportedProductsSection refreshTrigger={productsRefresh} />
 
       {/* ── Test send ────────────────────────────────────────────── */}
       <Card title={cm.testSend.title} icon={<Send className="w-5 h-5 text-emerald-600" />}>
@@ -1291,126 +1236,6 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
       </div>
     </Card>
     </div>
-  )
-}
-
-
-// ─────────────────────────────────────────────────────────────────────
-// Imported products grid — read-only confirmation below Meta import
-// ─────────────────────────────────────────────────────────────────────
-
-function ImportedProductsSection(props: { refreshTrigger: number }) {
-  const { tStatic, lang, dir } = useLanguage()
-  const ip = tStatic(tr => tr.catalogMgmt.importedProducts)
-
-  const [rows, setRows]       = useState<CatalogProductDiagRow[]>([])
-  const [total, setTotal]     = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const r = await catalogApi.products(200, 0)
-      setRows(r.rows)
-      setTotal(r.tenant_total ?? r.total)
-    } catch (e: any) {
-      setRows([])
-      setTotal(0)
-      setError(e?.message ?? ip.loadFailed)
-    } finally {
-      setLoading(false)
-    }
-  }, [ip.loadFailed])
-
-  useEffect(() => { void load() }, [load, props.refreshTrigger])
-
-  return (
-    <Card title={ip.title} icon={<Package className="w-5 h-5 text-emerald-600" />}>
-      <div className="space-y-4" dir={dir}>
-        <p className="text-xs text-slate-600 leading-relaxed">{ip.intro}</p>
-
-        {!loading && total > 0 && (
-          <p className="text-xs font-semibold text-slate-500">
-            {ip.count.replace('{count}', fmtCount(total, lang))}
-          </p>
-        )}
-
-        {error && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
-            <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-16 text-slate-500">
-            <Loader2 className="w-7 h-7 animate-spin mb-3 text-emerald-500" />
-            <p className="text-sm">{ip.loading}</p>
-          </div>
-        ) : rows.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="w-16 h-16 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center mb-4">
-              <Package className="w-8 h-8 text-slate-400" />
-            </div>
-            <h4 className="text-base font-bold text-slate-800 mb-1">{ip.emptyTitle}</h4>
-            <p className="text-sm text-slate-500 max-w-md leading-relaxed">{ip.emptyDesc}</p>
-          </div>
-        ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-xs text-slate-600 uppercase tracking-wide">
-                <tr>
-                  <th className="text-start py-3 px-3 font-semibold w-16"></th>
-                  <th className="text-start py-3 px-3 font-semibold">{ip.colProduct}</th>
-                  <th className="text-start py-3 px-3 font-semibold">{ip.colPrice}</th>
-                  <th className="text-start py-3 px-3 font-semibold">{ip.colRetailerId}</th>
-                  <th className="text-start py-3 px-3 font-semibold">{ip.colSource}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(row => {
-                  const retailerId = row.meta_retailer_id || row.effective_retailer_id || '—'
-                  return (
-                    <tr key={row.id} className="border-t border-slate-100 hover:bg-slate-50/60">
-                      <td className="py-3 px-3">
-                        <div
-                          className="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0"
-                          title={row.image_url ? undefined : ip.noImage}
-                        >
-                          <ProductThumbnail row={row} />
-                        </div>
-                      </td>
-                      <td className="py-3 px-3">
-                        <div className="font-semibold text-slate-900 leading-snug">{row.title}</div>
-                        <div className="text-[11px] text-slate-400 font-mono mt-0.5" dir="ltr">
-                          #{row.id}
-                        </div>
-                      </td>
-                      <td className="py-3 px-3 text-slate-700 font-medium">
-                        <CatalogProductPriceCell row={row} />
-                      </td>
-                      <td className="py-3 px-3">
-                        <code
-                          dir="ltr"
-                          className="text-[11px] font-mono text-slate-700 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 break-all"
-                        >
-                          {retailerId}
-                        </code>
-                      </td>
-                      <td className="py-3 px-3">
-                        <SourceBadge source={row.source} />
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </Card>
   )
 }
 
