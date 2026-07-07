@@ -9,6 +9,7 @@ from services.meta_catalog_export import (
     build_meta_variant_payload,
     format_meta_price,
     meta_price_amount,
+    meta_price_minor_units,
     preview_meta_variant_payload,
     resolve_variant_image_url,
 )
@@ -59,14 +60,22 @@ def test_variant_payload_uses_variant_retailer_id():
     assert payload["retailer_id"] != "88001"
 
 
-def test_meta_price_amount_numeric_for_graph():
+def test_meta_price_amount_numeric_for_display():
     assert meta_price_amount("59") == 59.0
     assert meta_price_amount("59.5") == 59.5
 
 
+def test_meta_price_minor_units_for_graph():
+    assert meta_price_minor_units("59") == 5900
+    assert meta_price_minor_units("59.0") == 5900
+    assert meta_price_minor_units("59.5") == 5950
+    assert meta_price_minor_units("59.99") == 5999
+
+
 def test_variant_payload_price_and_availability_from_variant():
     payload = build_meta_variant_payload(_parent(), _variant())
-    assert payload["price"] == 59.0
+    assert payload["price"] == 5900
+    assert isinstance(payload["price"], int)
     assert payload["currency"] == "SAR"
     assert payload["availability"] == "in stock"
 
