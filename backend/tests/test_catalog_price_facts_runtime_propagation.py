@@ -76,6 +76,72 @@ def _minimal_search_ctx(*, message: str = "كم سعر الطلح؟") -> BrainCo
 
 
 class TestResponderCatalogPriceFactPersist:
+    def test_responder_persists_compose_products_before_catalog_compose(self) -> None:
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        talh_rows = [_TALH_1KG]
+        compose_result = PersonaComposeResult(
+            text="عسل طلح نجد البري سعره 387 ريال",
+            source="persona_llm",
+            surface="catalog_product_answer",
+            facts_hash="talh-price",
+            guard_passed=True,
+        )
+        event = _catalog_compose_event_without_fact_rows()
+        seen_before_compose: dict[str, Any] = {}
+
+        async def _run() -> None:
+            ctx = _minimal_search_ctx()
+            result = ActionResult(
+                success=True,
+                data={
+                    "products": [],
+                    "catalog_fact_products": list(talh_rows),
+                    "query": "طلح",
+                },
+            )
+            decision = Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "طلح", "source": "search"},
+                reason="test talh price",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+
+            async def _capture_persisted_facts(**_kwargs: Any) -> tuple[str, PersonaComposeResult, Dict[str, Any]]:
+                seen_before_compose["fact_len"] = len(
+                    result.data.get("catalog_fact_products") or []
+                )
+                seen_before_compose["fact_ids"] = {
+                    int(row["id"])
+                    for row in (result.data.get("catalog_fact_products") or [])
+                    if isinstance(row, dict) and row.get("id") is not None
+                }
+                seen_before_compose["pending_buttons"] = result.data.get("pending_buttons")
+                seen_before_compose["pending_candidates"] = result.data.get("pending_candidates")
+                return compose_result.text, compose_result, event
+
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                AsyncMock(side_effect=_capture_persisted_facts),
+            ):
+                with patch(
+                    "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                    side_effect=lambda products, **_kw: list(products),
+                ):
+                    text = await composer.compose(decision, result, ctx)
+
+            assert "387" in text
+            assert seen_before_compose["fact_len"] > 0
+            assert 109 in seen_before_compose["fact_ids"]
+            assert seen_before_compose["pending_buttons"] is None
+            assert seen_before_compose["pending_candidates"] is None
+            facts = list(result.data.get("catalog_fact_products") or [])
+            assert len(facts) > 0
+            assert 109 in {int(row["id"]) for row in facts if isinstance(row, dict)}
+
+        asyncio.run(_run())
+
     def test_responder_catalog_price_persists_fact_rows_on_action_result(self) -> None:
         from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
 
@@ -130,6 +196,44 @@ class TestResponderCatalogPriceFactPersist:
 
 
 class TestPipelineGuardCatalogPriceFacts:
+    def test_pipeline_rebuild_finds_side_channel_facts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Side-channel catalog_fact_products on result.data grounds price 387."""
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        result_data: Dict[str, Any] = {
+            **_catalog_compose_event_without_fact_rows(),
+            "catalog_fact_products": [_TALH_1KG, _TALH_5KG],
+            "products": [],
+        }
+        reply = (
+            "من الكتالوج:\n"
+            "• عسل طلح نجد البري إنتاج منحلنا  1 كيلو سعره 387 ريال، "
+            "والمنتج غير متاح للطلب حالياً"
+        )
+        guard = apply_product_claim_grounding_guard(
+            reply=reply,
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            executor_products=[],
+            catalog_fact_products=list(result_data.get("catalog_fact_products") or []),
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                    "guard_passed": True,
+                },
+            },
+        )
+        assert guard.replaced is False
+        assert "387" in guard.reply or "٣٨٧" in guard.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guard.reply
+
     def test_pipeline_guard_receives_catalog_facts_for_price_qa(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -226,3 +330,20 @@ class TestBrainResultCatalogFactDiagnostics:
         assert 121 in brain_result["catalog_fact_product_ids"]
         assert 387 in brain_result["catalog_fact_price_values"]
         assert 1475 in brain_result["catalog_fact_price_values"]
+
+    def test_brain_result_exports_zero_len_diagnostics_when_rows_absent(self) -> None:
+        from modules.ai.brain.pipeline import _catalog_fact_guard_diagnostics  # noqa: PLC0415
+
+        result_data = {
+            "catalog_product_ids": [109, 121],
+            "catalog_fact_products": [],
+        }
+        diag = _catalog_fact_guard_diagnostics(result_data)
+        brain_result = {
+            "catalog_product_ids": list(result_data["catalog_product_ids"]),
+            **diag,
+        }
+        assert "catalog_fact_products_len" in brain_result
+        assert brain_result["catalog_fact_products_len"] == 0
+        assert brain_result["catalog_fact_product_ids"] == [109, 121]
+        assert brain_result["catalog_fact_price_values"] == []
