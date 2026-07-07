@@ -71,7 +71,7 @@ def _preview_ok():
             "description": "وصف عام للمنتج",
             "image_url": "https://cdn.example/parent.jpg",
             "url": "https://store.example/p/88001",
-            "price": "120.00 SAR",
+            "price": 120.0,
             "currency": "SAR",
             "availability": "in stock",
         },
@@ -117,7 +117,7 @@ def test_dry_run_builds_payload_without_httpx():
     assert result["action"] == "dry_run"
     assert result["dry_run"] is True
     assert result["ok"] is True
-    assert result["payload"]["price"] == "120.00 SAR"
+    assert result["payload"]["price"] == 120.0
     client_cls.assert_not_called()
 
 
@@ -146,6 +146,7 @@ def test_confirm_get_empty_then_create():
     assert "/CAT-GENERIC-001/products" in post_url
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     assert post_body["currency"] == "SAR"
+    assert post_body["price"] == 120.0
     assert "sale_price" not in post_body
     assert "regular_price" not in post_body
 
@@ -178,6 +179,7 @@ def test_confirm_get_existing_then_update():
     assert post_url.endswith("/META-ITEM-EXISTING")
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     assert post_body["currency"] == "SAR"
+    assert post_body["price"] == 120.0
 
 
 def test_fatal_preview_does_not_call_graph():

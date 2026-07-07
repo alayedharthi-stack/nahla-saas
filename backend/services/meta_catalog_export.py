@@ -197,18 +197,25 @@ def _row_metadata(row: Any) -> Dict[str, Any]:
 
 
 def format_meta_price(amount: Any, currency: str = "SAR") -> Optional[str]:
-    """Format a Nahla price for Meta review (e.g. ``59.00 SAR``)."""
+    """Format a Nahla price for human review (e.g. ``59.00 SAR``)."""
+    numeric = meta_price_amount(amount)
+    if numeric is None:
+        return None
+    cur = (currency or "SAR").strip().upper() or "SAR"
+    return f"{numeric:.2f} {cur}"
+
+
+def meta_price_amount(amount: Any) -> Optional[float]:
+    """Normalize a Nahla price to a Graph-compatible numeric amount."""
     if amount is None:
         return None
     text = str(amount).strip()
     if not text:
         return None
-    cur = (currency or "SAR").strip().upper() or "SAR"
     try:
-        value = float(text.replace(",", ""))
-        return f"{value:.2f} {cur}"
+        return float(text.replace(",", ""))
     except (TypeError, ValueError):
-        return f"{text} {cur}"
+        return None
 
 
 def _looks_like_raw_option_ids(text: str) -> bool:
@@ -292,7 +299,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         "description": description,
         "image_url": image_url,
         "url": product_url,
-        "price": format_meta_price(getattr(variant, "price", None), currency),
+        "price": meta_price_amount(getattr(variant, "price", None)),
         "currency": currency,
         "availability": "in stock" if in_stock else "out of stock",
     }
@@ -307,7 +314,7 @@ def preview_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
     warnings: List[str] = []
     if not payload.get("retailer_id"):
         warnings.append("missing_retailer_id")
-    if not payload.get("price"):
+    if payload.get("price") is None:
         warnings.append("missing_price")
     if not payload.get("image_url"):
         warnings.append("missing_image_url")
@@ -417,6 +424,7 @@ __all__ = [
     "build_meta_variant_payload",
     "build_meta_variant_display_name",
     "format_meta_price",
+    "meta_price_amount",
     "preview_meta_variant_payload",
     "resolve_variant_image_url",
     "export_to_meta",
