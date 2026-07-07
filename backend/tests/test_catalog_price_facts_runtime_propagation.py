@@ -522,3 +522,73 @@ class TestCatalogPriceGuardDbFallback:
         assert brain_result["catalog_fact_product_ids"] == [109]
         assert brain_result["catalog_fact_price_values"] == [387]
         assert brain_result["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
+
+
+class TestCatalogPriceGuardDbImportPath:
+    def test_db_rebuild_uses_models_product_import_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from models import Product  # noqa: PLC0415
+
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        product = MagicMock()
+        product.id = 109
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [product]
+
+        monkeypatch.setattr(
+            "core.store_knowledge.CatalogContextBuilder._format",
+            lambda _self, _p: {
+                "id": 109,
+                "title": _TALH_1KG["title"],
+                "price": 387,
+                "can_checkout": False,
+            },
+        )
+
+        rows = pl._rebuild_catalog_price_guard_fact_rows_from_db(
+            db,
+            tenant_id=33,
+            catalog_product_ids=[109, 121],
+        )
+        assert len(rows) == 1
+        assert rows[0]["id"] == 109
+        assert rows[0]["price"] == 387
+        assert db.query.call_args[0][0] is Product
+
+    def test_db_rebuild_import_failure_returns_empty_without_crash(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import builtins
+
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        real_import = builtins.__import__
+
+        def _fail_models_import(name: str, *args: Any, **kwargs: Any):
+            if name == "models":
+                raise ImportError("simulated_models_import_failure")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fail_models_import)
+
+        with caplog.at_level("WARNING"):
+            rows = pl._rebuild_catalog_price_guard_fact_rows_from_db(
+                object(),
+                tenant_id=33,
+                catalog_product_ids=[109, 121],
+            )
+
+        assert rows == []
+        joined = " ".join(caplog.messages)
+        assert "_rebuild_catalog_price_guard_fact_rows_from_db" in joined
+        assert "stage=import_product_model" in joined
+        assert "tenant_id=33" in joined
+        assert "catalog_product_ids_count=2" in joined
+        assert "ImportError" in joined

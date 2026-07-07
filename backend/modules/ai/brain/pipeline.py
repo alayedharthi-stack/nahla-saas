@@ -181,6 +181,23 @@ def _catalog_guard_fact_rows_have_grounded_price(rows: Any) -> bool:
     return False
 
 
+def _log_catalog_price_guard_db_failure(
+    *,
+    stage: str,
+    tenant_id: Optional[int],
+    catalog_product_ids: Sequence[Any],
+    exc: Optional[BaseException] = None,
+) -> None:
+    logger.warning(
+        "[CATALOG_PRICE_GUARD_DB] function=_rebuild_catalog_price_guard_fact_rows_from_db "
+        "stage=%s tenant_id=%s catalog_product_ids_count=%d exc=%s",
+        stage,
+        tenant_id,
+        len(list(catalog_product_ids or [])),
+        type(exc).__name__ if exc is not None else "n/a",
+    )
+
+
 def _rebuild_catalog_price_guard_fact_rows_from_db(
     db: Any,
     *,
@@ -192,9 +209,15 @@ def _rebuild_catalog_price_guard_fact_rows_from_db(
     if not id_set or db is None or tenant_id is None:
         return []
     try:
-        from database.models import Product  # noqa: PLC0415
+        from models import Product  # noqa: PLC0415
         from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _log_catalog_price_guard_db_failure(
+            stage="import_product_model",
+            tenant_id=tenant_id,
+            catalog_product_ids=catalog_product_ids,
+            exc=exc,
+        )
         return []
     try:
         products = (
@@ -206,10 +229,11 @@ def _rebuild_catalog_price_guard_fact_rows_from_db(
             .all()
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[CATALOG_PRICE_GUARD_DB] product lookup failed tenant=%s err=%s",
-            tenant_id,
-            exc,
+        _log_catalog_price_guard_db_failure(
+            stage="query_catalog_product_ids",
+            tenant_id=tenant_id,
+            catalog_product_ids=catalog_product_ids,
+            exc=exc,
         )
         return []
     if not products:
