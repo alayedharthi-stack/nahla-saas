@@ -93,15 +93,40 @@ def _catalog_product_ids_as_int_set(catalog_product_ids: Any) -> Set[int]:
     return ids
 
 
+def _resolve_guard_price_from_catalog_item(item: Dict[str, Any]) -> Optional[Any]:
+    """Resolve a parseable catalog price from formatted product fields only."""
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for key in ("price", "sale_price", "regular_price"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if parse_price_amount(value) is not None:
+            return value
+    return None
+
+
+def _catalog_price_checkout_pressure_disallowed(value: Any) -> bool:
+    """True when checkout pressure must stay off for catalog price Q&A."""
+    if value is False:
+        return True
+    if value in (0, "false", "False"):
+        return True
+    return False
+
+
 def _catalog_guard_fact_row_from_product(
     item: Dict[str, Any],
     *,
     pid_int: int,
 ) -> Optional[Dict[str, Any]]:
     """Grounding-only row; requires an explicit catalog price field."""
-    if item.get("price") is None:
+    resolved_price = _resolve_guard_price_from_catalog_item(item)
+    if resolved_price is None:
         return None
-    row: Dict[str, Any] = {"id": pid_int, "price": item.get("price")}
+    row: Dict[str, Any] = {"id": pid_int, "price": resolved_price}
     title = str(item.get("title") or "").strip()
     if title:
         row["title"] = title
@@ -161,7 +186,9 @@ def _is_catalog_product_price_guard_context(result_data: Dict[str, Any]) -> bool
         return False
     if str(result_data.get("price_source") or "").strip() != "catalog":
         return False
-    if result_data.get("checkout_pressure_allowed") is not False:
+    if not _catalog_price_checkout_pressure_disallowed(
+        result_data.get("checkout_pressure_allowed"),
+    ):
         return False
     if not [x for x in (result_data.get("catalog_product_ids") or []) if x is not None]:
         return False

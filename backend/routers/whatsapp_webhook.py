@@ -8445,6 +8445,7 @@ async def _handle_merchant_message(
                                 "catalog_fact_products_len",
                                 "catalog_fact_product_ids",
                                 "catalog_fact_price_values",
+                                "catalog_fact_rebuild_source",
                                 "price_source",
                                 "availability_source",
                                 "checkout_pressure_allowed",

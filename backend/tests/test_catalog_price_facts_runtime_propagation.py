@@ -592,3 +592,227 @@ class TestCatalogPriceGuardDbImportPath:
         assert "tenant_id=33" in joined
         assert "catalog_product_ids_count=2" in joined
         assert "ImportError" in joined
+
+
+class TestCatalogPriceGuardFieldExtraction:
+    def test_guard_fact_row_resolves_sale_price_when_price_null(self) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        formatted = {
+            "id": 109,
+            "title": _TALH_1KG["title"],
+            "price": None,
+            "sale_price": "ر.س. ٣٨٧٫٠٠",
+            "regular_price": None,
+            "can_checkout": False,
+        }
+        row = pl._catalog_guard_fact_row_from_product(formatted, pid_int=109)
+        assert row is not None
+        assert row["id"] == 109
+        assert pl._catalog_guard_fact_rows_have_grounded_price([row]) is True
+        assert 387 in pl._catalog_fact_guard_diagnostics(
+            {"catalog_fact_products": [row]},
+        )["catalog_fact_price_values"]
+
+    def test_guard_fact_row_resolves_regular_price_when_price_and_sale_null(self) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        formatted = {
+            "id": 121,
+            "title": _TALH_5KG["title"],
+            "price": None,
+            "sale_price": None,
+            "regular_price": "١٬٤٧٥٫٠٠",
+            "can_checkout": False,
+        }
+        row = pl._catalog_guard_fact_row_from_product(formatted, pid_int=121)
+        assert row is not None
+        assert row["id"] == 121
+        assert pl._catalog_guard_fact_rows_have_grounded_price([row]) is True
+        assert 1475 in pl._catalog_fact_guard_diagnostics(
+            {"catalog_fact_products": [row]},
+        )["catalog_fact_price_values"]
+
+    def test_db_rebuild_survives_sale_price_only_format_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from models import Product  # noqa: PLC0415
+
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        product = MagicMock()
+        product.id = 109
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [product]
+
+        monkeypatch.setattr(
+            "core.store_knowledge.CatalogContextBuilder._format",
+            lambda _self, _p: {
+                "id": 109,
+                "title": _TALH_1KG["title"],
+                "price": None,
+                "sale_price": 387,
+                "regular_price": None,
+                "can_checkout": False,
+            },
+        )
+
+        rows = pl._rebuild_catalog_price_guard_fact_rows_from_db(
+            db,
+            tenant_id=33,
+            catalog_product_ids=[109],
+        )
+        assert len(rows) == 1
+        assert rows[0]["price"] == 387
+        assert 387 in pl._catalog_fact_guard_diagnostics(
+            {"catalog_fact_products": rows},
+        )["catalog_fact_price_values"]
+        assert db.query.call_args[0][0] is Product
+
+    def test_db_fallback_sale_price_grounds_reply_not_rewritten(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+        from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+            apply_product_claim_grounding_guard,
+        )
+
+        db_rows = [
+            {
+                "id": 109,
+                "title": _TALH_1KG["title"],
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+            },
+        ]
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: list(db_rows),
+        )
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        result_data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+                "guard_passed": True,
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109, 121],
+            "checkout_pressure_allowed": False,
+            "catalog_fact_products": [],
+            "products": [],
+        }
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        guard = apply_product_claim_grounding_guard(
+            reply="عسل طلح نجد البري سعره 387 ريال",
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            executor_products=[],
+            catalog_fact_products=resolved,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                },
+            },
+        )
+        assert guard.replaced is False
+        assert "387" in guard.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guard.reply
+
+    def test_db_fallback_still_rewrites_ungrounded_999(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+        from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+            apply_product_claim_grounding_guard,
+        )
+
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: [
+                {
+                    "id": 109,
+                    "title": _TALH_1KG["title"],
+                    "price": "ر.س. ٣٨٧٫٠٠",
+                    "can_checkout": False,
+                },
+            ],
+        )
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        result_data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109],
+            "checkout_pressure_allowed": False,
+            "catalog_fact_products": [],
+            "products": [],
+        }
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        guard = apply_product_claim_grounding_guard(
+            reply="سعر الطلح 999 ريال",
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            executor_products=[],
+            catalog_fact_products=resolved,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                },
+            },
+        )
+        assert guard.replaced is True
+        assert "ما ظهر عندي سعر مؤكد" in guard.reply
+
+    def test_guard_context_accepts_string_false_checkout_pressure(self) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        base = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109, 121],
+            "catalog_fact_products": [],
+        }
+        for value in (False, "false", "False", 0):
+            data = dict(base)
+            data["checkout_pressure_allowed"] = value
+            assert pl._is_catalog_product_price_guard_context(data) is True
+        for value in (True, None, "true", 1):
+            data = dict(base)
+            data["checkout_pressure_allowed"] = value
+            assert pl._is_catalog_product_price_guard_context(data) is False
