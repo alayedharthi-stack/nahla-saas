@@ -1968,7 +1968,7 @@ class StoreSyncService:
             )
             try:
                 self.db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — best-effort rollback after pages persist failure
                 pass
 
         return len(pages)
