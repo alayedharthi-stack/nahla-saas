@@ -280,6 +280,55 @@ def test_native_catalog_true_with_one_verified_id():
     assert cap.thumbnail_retailer_id == "live-ok"
 
 
+def test_local_not_in_meta_omits_parent_when_variant_is_live():
+    products = [
+        _Product(id=32, tenant_id=9, meta_retailer_id="88001", title="قميص قطني أزرق"),
+    ]
+    variants = [
+        _Variant(id=207, tenant_id=9, product_id=32, retailer_id="88001-591001"),
+    ]
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        if model.__name__ == "ProductVariant":
+            q.filter.return_value.all.return_value = variants
+        elif model.__name__ == "Product":
+            q.filter.return_value.order_by.return_value.all.return_value = products
+        return q
+
+    db.query.side_effect = _query
+
+    _, _, local_missing, _, _ = build_meta_catalog_reconcile_plan(
+        db, 9, {"88001-591001"},
+    )
+    assert local_missing == []
+
+
+def test_local_not_in_meta_includes_parent_when_no_ids_live():
+    products = [
+        _Product(id=32, tenant_id=9, meta_retailer_id="88001", title="قميص قطني أزرق"),
+    ]
+    variants = [
+        _Variant(id=207, tenant_id=9, product_id=32, retailer_id="88001-591001"),
+    ]
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        if model.__name__ == "ProductVariant":
+            q.filter.return_value.all.return_value = variants
+        elif model.__name__ == "Product":
+            q.filter.return_value.order_by.return_value.all.return_value = products
+        return q
+
+    db.query.side_effect = _query
+
+    _, _, local_missing, _, _ = build_meta_catalog_reconcile_plan(db, 9, set())
+    assert len(local_missing) == 1
+    assert local_missing[0].meta_retailer_id == "88001"
+
+
 def test_reconcile_plan_is_platform_generic():
     products = [
         _Product(id=100, tenant_id=999, meta_retailer_id="x1"),
