@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -206,7 +207,7 @@ def format_meta_price(amount: Any, currency: str = "SAR") -> Optional[str]:
 
 
 def meta_price_amount(amount: Any) -> Optional[float]:
-    """Normalize a Nahla price to a Graph-compatible numeric amount."""
+    """Normalize a Nahla price to a major-unit float for human display."""
     if amount is None:
         return None
     text = str(amount).strip()
@@ -216,6 +217,21 @@ def meta_price_amount(amount: Any) -> Optional[float]:
         return float(text.replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def meta_price_minor_units(amount: Any) -> Optional[int]:
+    """Normalize a Nahla price to Meta Graph minor units (e.g. 59.00 SAR -> 5900)."""
+    if amount is None:
+        return None
+    text = str(amount).strip()
+    if not text:
+        return None
+    try:
+        major = Decimal(text.replace(",", ""))
+    except (TypeError, ValueError, InvalidOperation):
+        return None
+    minor = (major * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(minor)
 
 
 def _looks_like_raw_option_ids(text: str) -> bool:
@@ -299,7 +315,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         "description": description,
         "image_url": image_url,
         "url": product_url,
-        "price": meta_price_amount(getattr(variant, "price", None)),
+        "price": meta_price_minor_units(getattr(variant, "price", None)),
         "currency": currency,
         "availability": "in stock" if in_stock else "out of stock",
     }
@@ -425,6 +441,7 @@ __all__ = [
     "build_meta_variant_display_name",
     "format_meta_price",
     "meta_price_amount",
+    "meta_price_minor_units",
     "preview_meta_variant_payload",
     "resolve_variant_image_url",
     "export_to_meta",
