@@ -1825,6 +1825,7 @@ export interface Translations {
       colRetailerId: string
       colSource:    string
       noImage:      string
+      discountedPriceBadge: string
     }
     testSend: {
       title:                string
