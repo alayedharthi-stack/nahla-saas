@@ -211,18 +211,37 @@ def format_meta_price(amount: Any, currency: str = "SAR") -> Optional[str]:
         return f"{text} {cur}"
 
 
+def _looks_like_raw_option_ids(text: str) -> bool:
+    """True when *text* is a raw id/list repr, not a human option label."""
+    text = (text or "").strip()
+    if not text:
+        return True
+    if text.isdigit():
+        return True
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return True
+        parts = [part.strip().strip("'\"") for part in inner.split(",") if part.strip()]
+        if parts and all(part.isdigit() for part in parts):
+            return True
+    return False
+
+
+def _human_option_summary(variant: Any) -> Optional[str]:
+    summary = (getattr(variant, "option_summary", None) or "").strip()
+    if not summary or _looks_like_raw_option_ids(summary):
+        return None
+    return summary
+
+
 def build_meta_variant_display_name(parent: Any, variant: Any) -> str:
     """Human-facing catalog name — identity remains ``retailer_id``."""
-    title = (getattr(parent, "title", None) or "").strip()
-    summary = (getattr(variant, "option_summary", None) or "").strip()
-    if title and summary:
-        return f"{title} - {summary}"[:150]
-    options = getattr(variant, "options", None) or {}
-    if isinstance(options, dict):
-        ids = options.get("option_value_ids") or []
-        if title and ids:
-            return f"{title} - خيار {ids[0]}"[:150]
-    return (title or "Product")[:150]
+    title = (getattr(parent, "title", None) or "").strip() or "Product"
+    label = _human_option_summary(variant)
+    if label:
+        return f"{title} - {label}"[:150]
+    return title[:150]
 
 
 def resolve_variant_image_url(parent: Any, variant: Any) -> tuple[Optional[str], str]:
