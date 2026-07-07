@@ -282,7 +282,24 @@ export default function WhatsAppCatalog() {
     void loadDiagnostics()
   }, [])
 
+  const catalogIdMissingForEnable = enabled && !catalogId.trim()
+
+  const onToggleEnabled = () => {
+    if (!enabled && !catalogId.trim()) {
+      setError(cm.messages.catalogIdRequired)
+      setSuccess(null)
+      return
+    }
+    setError(null)
+    setEnabled(prev => !prev)
+  }
+
   const onSave = async () => {
+    if (enabled && !catalogId.trim()) {
+      setError(cm.messages.catalogIdRequired)
+      setSuccess(null)
+      return
+    }
     setSaving(true)
     setError(null)
     setSuccess(null)
@@ -300,8 +317,12 @@ export default function WhatsAppCatalog() {
         setSuccess(cm.messages.settingsSaved)
       }
     } catch (e: any) {
-      // Surface the structured 400 (catalog_id_required) clearly.
-      if (e?.code === 'catalog_id_required' || (e?.message ?? '').includes('Catalog ID')) {
+      if (
+        e?.code === 'catalog_id_required'
+        || e?.error === 'catalog_id_required'
+        || (e?.message ?? '').includes('Catalog ID')
+        || (e?.message ?? '').includes('Meta Catalog ID')
+      ) {
         setError(cm.messages.catalogIdRequired)
       } else {
         setError(e?.message ?? cm.messages.saveFailed)
@@ -724,6 +745,11 @@ export default function WhatsAppCatalog() {
             <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
               {cm.channelBinding.catalogIdHint}
             </p>
+            {catalogIdMissingForEnable && (
+              <p className="text-xs text-amber-700 mt-1.5 leading-relaxed">
+                {cm.messages.catalogIdRequired}
+              </p>
+            )}
           </div>
 
           <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
@@ -735,7 +761,7 @@ export default function WhatsAppCatalog() {
             </div>
             <button
               type="button"
-              onClick={() => setEnabled(p => !p)}
+              onClick={onToggleEnabled}
               className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-semibold transition ${enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}
               aria-pressed={enabled}
             >
@@ -747,7 +773,7 @@ export default function WhatsAppCatalog() {
           <div className="flex justify-end">
             <button
               onClick={onSave}
-              disabled={saving}
+              disabled={saving || catalogIdMissingForEnable}
               className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
             >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />}

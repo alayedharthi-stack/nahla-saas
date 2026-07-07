@@ -2044,7 +2044,7 @@ const ar: Translations = {
       settingsAlreadySaved: 'الإعدادات محدّثة مسبقاً.',
       settingsSaved:        'تم حفظ إعدادات الكتالوج.',
       testFailed:           'تعذّر تنفيذ الإرسال التجريبي.',
-      catalogIdRequired:    'لا يمكن تفعيل الكتالوج بدون إدخال Catalog ID صحيح من Meta Commerce Manager.',
+      catalogIdRequired:    'أدخل Meta Catalog ID أولاً من Meta Commerce Manager قبل تفعيل إرسال الكتالوج.',
       addProductSuccess:    'تم إضافة "{title}" بنجاح إلى الكتالوج.',
       addProductFailed:     'تعذّر إضافة المنتج.',
       unexpectedImport:     'تعذّر تنفيذ الاستيراد.',
