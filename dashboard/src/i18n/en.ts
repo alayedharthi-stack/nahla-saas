@@ -2040,7 +2040,7 @@ const en: Translations = {
       settingsAlreadySaved: 'Settings are already up to date.',
       settingsSaved:        'Catalog settings saved.',
       testFailed:           'Could not run test send.',
-      catalogIdRequired:    'Cannot enable the catalog without a valid Catalog ID from Meta Commerce Manager.',
+      catalogIdRequired:    'Enter a Meta Catalog ID from Meta Commerce Manager before enabling catalog send.',
       addProductSuccess:    'Added "{title}" to the catalog successfully.',
       addProductFailed:     'Could not add product.',
       unexpectedImport:     'Could not run import.',

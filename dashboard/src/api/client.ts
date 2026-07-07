@@ -149,8 +149,10 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
       }
     } else if (d && typeof d === 'object') {
       if (typeof d.message === 'string' && d.message.trim()) msg = d.message
+      else if (typeof d.message_ar === 'string' && d.message_ar.trim()) msg = d.message_ar
       else if (typeof d.detail === 'string') msg = d.detail
       if (typeof d.code === 'string') code = d.code
+      else if (typeof d.error === 'string') code = d.error
       // Stash the structured payload so callers (e.g. the Meta catalog
       // import diagnostic panel) can read fields like ``token_source``,
       // ``meta_message``, ``fbtrace_id``, ``hint`` directly off the
