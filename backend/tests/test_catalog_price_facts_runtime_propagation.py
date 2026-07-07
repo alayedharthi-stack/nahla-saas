@@ -347,3 +347,178 @@ class TestBrainResultCatalogFactDiagnostics:
         assert brain_result["catalog_fact_products_len"] == 0
         assert brain_result["catalog_fact_product_ids"] == [109, 121]
         assert brain_result["catalog_fact_price_values"] == []
+
+
+class TestCatalogPriceGuardDbFallback:
+    def _catalog_price_result_data(self) -> Dict[str, Any]:
+        return {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+                "guard_passed": True,
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109, 121],
+            "checkout_pressure_allowed": False,
+            "catalog_fact_products": [],
+            "products": [],
+        }
+
+    def test_pipeline_guard_rebuild_empty_pools_triggers_db_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+        from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+            apply_product_claim_grounding_guard,
+        )
+
+        db_rows = [
+            {
+                "id": 109,
+                "title": _TALH_1KG["title"],
+                "price": 387,
+                "can_checkout": False,
+            },
+            {
+                "id": 121,
+                "title": _TALH_5KG["title"],
+                "price": 1475,
+                "can_checkout": False,
+            },
+        ]
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: list(db_rows),
+        )
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        result_data = self._catalog_price_result_data()
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        assert resolved
+        assert result_data["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
+        assert 387 in pl._catalog_fact_guard_diagnostics(result_data)["catalog_fact_price_values"]
+
+        reply = "عسل طلح نجد البري إنتاج منحلنا  1 كيلو سعره 387 ريال"
+        guard = apply_product_claim_grounding_guard(
+            reply=reply,
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            executor_products=[],
+            catalog_fact_products=resolved,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                },
+            },
+        )
+        assert guard.replaced is False
+        assert "387" in guard.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guard.reply
+
+    def test_pipeline_guard_db_fallback_skipped_without_catalog_price_metadata(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        calls: list[Any] = []
+
+        def _db_stub(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            calls.append(True)
+            return [{"id": 109, "price": 387, "can_checkout": False}]
+
+        monkeypatch.setattr(pl, "_rebuild_catalog_price_guard_fact_rows_from_db", _db_stub)
+
+        result_data = {
+            "persona_compose": {
+                "surface": "kb_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "features",
+            "catalog_product_ids": [109],
+            "catalog_fact_products": [],
+            "products": [],
+        }
+        pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        assert calls == []
+        assert "catalog_fact_rebuild_source" not in result_data
+
+    def test_pipeline_guard_db_fallback_blocks_ungrounded_reply_price(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+        from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+            apply_product_claim_grounding_guard,
+        )
+
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: [
+                {"id": 109, "title": _TALH_1KG["title"], "price": 387, "can_checkout": False},
+            ],
+        )
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        result_data = self._catalog_price_result_data()
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        guard = apply_product_claim_grounding_guard(
+            reply="سعر الطلح 999 ريال",
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            executor_products=[],
+            catalog_fact_products=resolved,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                },
+            },
+        )
+        assert guard.replaced is True
+        assert "ما ظهر عندي سعر مؤكد" in guard.reply
+
+    def test_brain_result_exports_db_rebuild_diagnostics(self) -> None:
+        from modules.ai.brain.pipeline import _catalog_fact_guard_diagnostics  # noqa: PLC0415
+
+        result_data = {
+            "catalog_product_ids": [109, 121],
+            "catalog_fact_products": [
+                {"id": 109, "price": 387, "can_checkout": False},
+            ],
+            "catalog_fact_rebuild_source": "db_by_catalog_product_ids",
+        }
+        diag = _catalog_fact_guard_diagnostics(result_data)
+        brain_result = {
+            "catalog_product_ids": list(result_data["catalog_product_ids"]),
+            **diag,
+        }
+        assert brain_result["catalog_fact_products_len"] == 1
+        assert brain_result["catalog_fact_product_ids"] == [109]
+        assert brain_result["catalog_fact_price_values"] == [387]
+        assert brain_result["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
