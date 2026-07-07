@@ -81,6 +81,36 @@ function fmtProductPrice(
   return c ? `${price} ${c}` : price
 }
 
+function formatCatalogPriceAmount(value: string | null | undefined): string {
+  if (!value) return ''
+  const n = Number(value)
+  if (!Number.isFinite(n)) return value
+  if (Number.isInteger(n)) return String(n)
+  return String(parseFloat(n.toFixed(2)))
+}
+
+function CatalogProductPriceCell({ row }: { row: CatalogProductDiagRow }) {
+  if (row.is_on_sale && row.sale_price && row.regular_price) {
+    const sale = formatCatalogPriceAmount(row.sale_price)
+    const regular = formatCatalogPriceAmount(row.regular_price)
+    const suffix = row.currency?.trim() ? ` ${row.currency.trim()}` : ' ريال'
+    return (
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 shrink-0">
+          عرض
+        </span>
+        <span className="font-semibold text-emerald-700 whitespace-nowrap">
+          {sale}{suffix}
+        </span>
+        <span className="text-slate-400 text-[11px] whitespace-nowrap">
+          (بدلاً من {regular}{suffix})
+        </span>
+      </div>
+    )
+  }
+  return <span className="whitespace-nowrap">{fmtProductPrice(row.price, row.currency)}</span>
+}
+
 type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
 
 const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
@@ -1321,8 +1351,8 @@ function ImportedProductsSection(props: { refreshTrigger: number }) {
                           #{row.id}
                         </div>
                       </td>
-                      <td className="py-3 px-3 text-slate-700 font-medium whitespace-nowrap">
-                        {fmtProductPrice(row.price, row.currency)}
+                      <td className="py-3 px-3 text-slate-700 font-medium">
+                        <CatalogProductPriceCell row={row} />
                       </td>
                       <td className="py-3 px-3">
                         <code

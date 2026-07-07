@@ -200,6 +200,9 @@ export interface CatalogProductDiagRow {
   stock_quantity:        number | null
   price:                 string | null
   currency:              string | null
+  sale_price?:           string | null
+  regular_price?:        string | null
+  is_on_sale?:           boolean
   image_url:             string
   product_url:           string
   source:                ProductSource
