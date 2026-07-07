@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from services.meta_catalog_export import (
+    build_meta_variant_display_name,
     build_meta_variant_payload,
     format_meta_price,
     preview_meta_variant_payload,
@@ -95,3 +96,21 @@ def test_preview_fatal_when_retailer_id_missing():
     report = preview_meta_variant_payload(_parent(), _variant(retailer_id=None))
     assert "missing_retailer_id" in report["warnings"]
     assert report["fatal"] is True
+
+
+def test_display_name_uses_human_option_summary():
+    parent = _parent(title="قميص قطني أزرق")
+    variant = _variant(option_summary="مقاس 36", options=None)
+    assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق - مقاس 36"
+
+
+def test_display_name_ignores_raw_option_summary_list_repr():
+    parent = _parent(title="قميص قطني أزرق")
+    variant = _variant(option_summary="['2019873167']", options=None)
+    assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
+
+
+def test_display_name_ignores_raw_option_value_ids_only():
+    parent = _parent(title="قميص قطني أزرق")
+    variant = _variant(option_summary=None, options={"option_value_ids": ["2019873167"]})
+    assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
