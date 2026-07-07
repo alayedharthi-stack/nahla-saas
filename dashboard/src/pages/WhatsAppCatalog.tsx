@@ -90,21 +90,28 @@ function formatCatalogPriceAmount(value: string | null | undefined): string {
 }
 
 function CatalogProductPriceCell({ row }: { row: CatalogProductDiagRow }) {
-  if (row.is_on_sale && row.sale_price && row.regular_price) {
+  if (
+    row.is_on_sale
+    && row.sale_price
+    && row.regular_price
+    && row.sale_price !== row.regular_price
+  ) {
     const sale = formatCatalogPriceAmount(row.sale_price)
     const regular = formatCatalogPriceAmount(row.regular_price)
     const suffix = row.currency?.trim() ? ` ${row.currency.trim()}` : ' ريال'
     return (
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 shrink-0">
-          عرض
+      <div className="flex flex-col gap-1 min-w-[7rem]">
+        <span className="text-[10px] font-semibold text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-0.5 w-fit shrink-0">
+          مشمول بعرض خاص
         </span>
-        <span className="font-semibold text-emerald-700 whitespace-nowrap">
-          {sale}{suffix}
-        </span>
-        <span className="text-slate-400 text-[11px] whitespace-nowrap">
-          (بدلاً من {regular}{suffix})
-        </span>
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-slate-400 text-sm line-through whitespace-nowrap">
+            {regular}{suffix}
+          </span>
+          <span className="font-semibold text-slate-900 text-sm whitespace-nowrap">
+            {sale}{suffix}
+          </span>
+        </div>
       </div>
     )
   }
