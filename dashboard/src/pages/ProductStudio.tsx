@@ -53,6 +53,7 @@ import {
   type StudioProduct,
   type CatalogVisibility,
 } from '../api/catalog'
+import { CatalogProductPriceCell } from '../components/catalog/CatalogProductPriceCell'
 import { ProductThumbnail } from '../components/catalog/ProductThumbnail'
 import { useLanguage } from '../i18n/context'
 import type { Lang, Translations } from '../i18n/types'
@@ -550,7 +551,9 @@ function ProductGridRow(props: {
           </div>
         </td>
         <td className="py-3 px-3"><SourcePill source={row.source} /></td>
-        <td className="py-3 px-3 text-slate-700 font-medium">{row.price ?? '—'}</td>
+        <td className="py-3 px-3 text-slate-700 font-medium">
+          <CatalogProductPriceCell row={row} />
+        </td>
         <td className="py-3 px-3">
           {row.in_stock
             ? <span className="text-xs text-emerald-700 inline-flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> {g.inStock}</span>
@@ -1257,7 +1260,7 @@ function ProductDrawer(props: {
 // Public component — the Studio as one unit
 // ─────────────────────────────────────────────────────────────────────
 
-export default function ProductStudio() {
+export default function ProductStudio(props: { refreshTrigger?: number }) {
   const [filters, setFilters] = useState<StudioFilters>({})
   const [offset, setOffset]   = useState(0)
   const [limit]               = useState(50)
@@ -1288,6 +1291,10 @@ export default function ProductStudio() {
   // then narrowing to 5 results would show an empty grid).
   useEffect(() => { setOffset(0) }, [filters])
   useEffect(() => { void reload() }, [reload])
+  useEffect(() => {
+    if (props.refreshTrigger === undefined || props.refreshTrigger === 0) return
+    void reload()
+  }, [props.refreshTrigger, reload])
 
   return (
     <div className="space-y-4">
