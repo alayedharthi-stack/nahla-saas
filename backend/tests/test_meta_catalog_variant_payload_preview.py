@@ -11,6 +11,7 @@ from services.meta_catalog_export import (
     meta_price_amount,
     meta_price_minor_units,
     preview_meta_variant_payload,
+    resolve_meta_item_group_id,
     resolve_variant_image_url,
 )
 
@@ -124,6 +125,35 @@ def test_display_name_ignores_raw_option_summary_list_repr():
     parent = _parent(title="قميص قطني أزرق")
     variant = _variant(option_summary="['2019873167']", options=None)
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
+
+
+def test_variant_payload_includes_item_group_id_for_real_variant():
+    parent = _parent(external_id="88001", meta_retailer_id="88001")
+    variant = _variant(retailer_id="88001-591539870", salla_variant_id="591539870")
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["item_group_id"] == "88001"
+    assert payload["item_group_id"] != payload["retailer_id"]
+    assert payload["price"] == 5900
+    assert payload["currency"] == "SAR"
+
+
+def test_variant_payload_prefers_external_id_for_item_group_id():
+    parent = _parent(external_id="88001", meta_retailer_id="override-parent")
+    variant = _variant(retailer_id="88001-591539870", salla_variant_id="591539870")
+    assert resolve_meta_item_group_id(parent, variant) == "88001"
+
+
+def test_simple_default_variant_omits_item_group_id():
+    parent = _parent(external_id="99001", meta_retailer_id="99001")
+    variant = _variant(
+        retailer_id="99001",
+        salla_variant_id=None,
+        is_default=True,
+        option_summary=None,
+        options={},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert "item_group_id" not in payload
 
 
 def test_display_name_ignores_raw_option_value_ids_only():

@@ -267,6 +267,26 @@ def build_meta_variant_display_name(parent: Any, variant: Any) -> str:
     return title[:150]
 
 
+def resolve_meta_item_group_id(parent: Any, variant: Any) -> Optional[str]:
+    """Return shared Meta ``item_group_id`` for real multi-SKU variants only.
+
+    Simple default-only products omit the field. Group id is the parent
+    product identifier (Salla ``external_id``, else ``meta_retailer_id``).
+    """
+    salla_vid = str(getattr(variant, "salla_variant_id", "") or "").strip()
+    if not salla_vid:
+        return None
+    group = str(getattr(parent, "external_id", "") or "").strip()
+    if not group:
+        group = str(getattr(parent, "meta_retailer_id", "") or "").strip()
+    if not group:
+        return None
+    variant_rid = str(getattr(variant, "retailer_id", "") or "").strip()
+    if variant_rid and group == variant_rid:
+        return None
+    return group
+
+
 def resolve_variant_image_url(parent: Any, variant: Any) -> tuple[Optional[str], str]:
     """Return (image_url, source) where source is variant|parent|none."""
     variant_image = (getattr(variant, "image_url", None) or "").strip()
@@ -309,7 +329,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         except (TypeError, ValueError):
             pass
 
-    return {
+    payload: Dict[str, Any] = {
         "retailer_id": retailer_id,
         "name": build_meta_variant_display_name(parent, variant),
         "description": description,
@@ -319,6 +339,10 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         "currency": currency,
         "availability": "in stock" if in_stock else "out of stock",
     }
+    item_group_id = resolve_meta_item_group_id(parent, variant)
+    if item_group_id:
+        payload["item_group_id"] = item_group_id
+    return payload
 
 
 def preview_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
@@ -443,6 +467,7 @@ __all__ = [
     "meta_price_amount",
     "meta_price_minor_units",
     "preview_meta_variant_payload",
+    "resolve_meta_item_group_id",
     "resolve_variant_image_url",
     "export_to_meta",
     "preflight_check",
