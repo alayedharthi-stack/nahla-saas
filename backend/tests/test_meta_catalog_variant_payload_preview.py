@@ -61,6 +61,7 @@ def test_variant_payload_uses_variant_retailer_id():
 def test_variant_payload_price_and_availability_from_variant():
     payload = build_meta_variant_payload(_parent(), _variant())
     assert payload["price"] == "59.00 SAR"
+    assert payload["currency"] == "SAR"
     assert payload["availability"] == "in stock"
 
 

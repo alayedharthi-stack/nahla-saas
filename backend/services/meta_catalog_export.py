@@ -267,7 +267,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         (getattr(variant, "currency", None) or "").strip()
         or str(parent_meta.get("currency") or "SAR").strip()
         or "SAR"
-    )
+    ).upper()
     image_url, _image_source = resolve_variant_image_url(parent, variant)
     product_url = (
         (parent_meta.get("product_url") or parent_meta.get("url") or "").strip()
@@ -293,6 +293,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         "image_url": image_url,
         "url": product_url,
         "price": format_meta_price(getattr(variant, "price", None), currency),
+        "currency": currency,
         "availability": "in stock" if in_stock else "out of stock",
     }
 

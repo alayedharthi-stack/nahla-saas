@@ -72,6 +72,7 @@ def _preview_ok():
             "image_url": "https://cdn.example/parent.jpg",
             "url": "https://store.example/p/88001",
             "price": "120.00 SAR",
+            "currency": "SAR",
             "availability": "in stock",
         },
         "warnings": [],
@@ -143,6 +144,10 @@ def test_confirm_get_empty_then_create():
     assert mock_client.post.call_count == 1
     post_url = mock_client.post.call_args.args[0]
     assert "/CAT-GENERIC-001/products" in post_url
+    post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    assert post_body["currency"] == "SAR"
+    assert "sale_price" not in post_body
+    assert "regular_price" not in post_body
 
 
 def test_confirm_get_existing_then_update():
@@ -171,6 +176,8 @@ def test_confirm_get_existing_then_update():
     assert mock_client.post.call_count == 1
     post_url = mock_client.post.call_args.args[0]
     assert post_url.endswith("/META-ITEM-EXISTING")
+    post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    assert post_body["currency"] == "SAR"
 
 
 def test_fatal_preview_does_not_call_graph():
