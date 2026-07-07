@@ -985,6 +985,38 @@ def _apply_studio_filters(
     return query
 
 
+def _catalog_list_sale_fields(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Read-only sale flags for catalog list rows (any Salla-synced product)."""
+    sale_raw = meta.get("sale_price")
+    regular_raw = meta.get("regular_price")
+
+    def _nonzero_amount(value: Any) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        try:
+            if float(value) == 0.0:
+                return None
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return text or None
+
+    sale_price = _nonzero_amount(sale_raw)
+    regular_price = _nonzero_amount(regular_raw)
+    is_on_sale = False
+    if sale_price and regular_price:
+        try:
+            is_on_sale = float(sale_price) != float(regular_price)
+        except (TypeError, ValueError):
+            is_on_sale = sale_price != regular_price
+
+    return {
+        "sale_price": sale_price,
+        "regular_price": regular_price,
+        "is_on_sale": is_on_sale,
+    }
+
+
 def _product_diag_rows(
     db: Session, tenant_id: int, *, limit: int, offset: int,
     q: Optional[str] = None,
@@ -1123,6 +1155,8 @@ def _product_diag_rows(
         except Exception:  # noqa: BLE001
             variants_payload = []
 
+        sale_fields = _catalog_list_sale_fields(meta)
+
         out_rows.append({
             "id":                    p.id,
             "title":                 p.title,
@@ -1135,6 +1169,9 @@ def _product_diag_rows(
             "stock_quantity":        getattr(p, "stock_quantity", None),
             "price":                 price_val,
             "currency":              currency or None,
+            "sale_price":            sale_fields["sale_price"],
+            "regular_price":         sale_fields["regular_price"],
+            "is_on_sale":            sale_fields["is_on_sale"],
             "image_url":             image_url,
             "product_url":           product_url,
             # Surface the product source so the dashboard table can
