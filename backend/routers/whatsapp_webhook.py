@@ -8449,9 +8449,10 @@ async def _handle_merchant_message(
                                 "availability_source",
                                 "checkout_pressure_allowed",
                             ):
-                                _kb_meta_val = brain_result.get(_kb_meta_key)
-                                if _kb_meta_val is not None:
-                                    _brain_persona_compose_event[_kb_meta_key] = _kb_meta_val
+                                if _kb_meta_key in brain_result:
+                                    _brain_persona_compose_event[_kb_meta_key] = brain_result[
+                                        _kb_meta_key
+                                    ]
                             if _brain_persona_compose.get("surface"):
                                 _brain_persona_compose_event["surface"] = _brain_persona_compose.get(
                                     "surface"

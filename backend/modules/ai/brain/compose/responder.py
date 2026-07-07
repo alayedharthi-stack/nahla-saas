@@ -668,6 +668,8 @@ class DefaultComposer:
             _catalog_fact_rows: list[dict[str, Any]] = []
             if _question_kind in _CATALOG_QA_QUESTION_KINDS:
                 _catalog_fact_rows = catalog_fact_product_rows(compose_products)
+                if _catalog_fact_rows:
+                    result.data["catalog_fact_products"] = _catalog_fact_rows
 
             _catalog_text: str | None = None
             _catalog_event: dict | None = None
