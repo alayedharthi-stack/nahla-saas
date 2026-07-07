@@ -147,6 +147,12 @@ def _rebuild_catalog_price_guard_fact_rows(
 
 
 def _catalog_price_guard_needs_fact_rebuild(result_data: Dict[str, Any]) -> bool:
+    return _is_catalog_product_price_guard_context(result_data) and not list(
+        result_data.get("catalog_fact_products") or []
+    )
+
+
+def _is_catalog_product_price_guard_context(result_data: Dict[str, Any]) -> bool:
     pc = result_data.get("persona_compose")
     surface = str(pc.get("surface") or "").strip() if isinstance(pc, dict) else ""
     if surface != "catalog_product_answer":
@@ -155,9 +161,113 @@ def _catalog_price_guard_needs_fact_rebuild(result_data: Dict[str, Any]) -> bool
         return False
     if str(result_data.get("price_source") or "").strip() != "catalog":
         return False
+    if result_data.get("checkout_pressure_allowed") is not False:
+        return False
     if not [x for x in (result_data.get("catalog_product_ids") or []) if x is not None]:
         return False
-    return not list(result_data.get("catalog_fact_products") or [])
+    return True
+
+
+def _catalog_guard_fact_rows_have_grounded_price(rows: Any) -> bool:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        if parse_price_amount(row.get("price")) is not None:
+            return True
+    return False
+
+
+def _rebuild_catalog_price_guard_fact_rows_from_db(
+    db: Any,
+    *,
+    tenant_id: Optional[int],
+    catalog_product_ids: Sequence[Any],
+) -> List[Dict[str, Any]]:
+    """Guard-only catalog price rows from synced DB products by catalog_product_ids."""
+    id_set = _catalog_product_ids_as_int_set(catalog_product_ids)
+    if not id_set or db is None or tenant_id is None:
+        return []
+    try:
+        from database.models import Product  # noqa: PLC0415
+        from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        products = (
+            db.query(Product)
+            .filter(
+                Product.tenant_id == int(tenant_id),
+                Product.id.in_(sorted(id_set)),
+            )
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG_PRICE_GUARD_DB] product lookup failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return []
+    if not products:
+        return []
+
+    builder = CatalogContextBuilder(db, int(tenant_id))
+    rows: List[Dict[str, Any]] = []
+    seen: Set[int] = set()
+    for product in products:
+        try:
+            pid_int = int(product.id)
+        except (TypeError, ValueError):
+            continue
+        if pid_int not in id_set or pid_int in seen:
+            continue
+        formatted = builder._format(product)
+        row = _catalog_guard_fact_row_from_product(formatted, pid_int=pid_int)
+        if row is None:
+            continue
+        rows.append(row)
+        seen.add(pid_int)
+    return rows
+
+
+def _resolve_catalog_price_guard_fact_rows(
+    result_data: Dict[str, Any],
+    *,
+    db: Any = None,
+    tenant_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Rebuild guard fact rows from in-memory pools, then DB when prices are missing."""
+    if not _is_catalog_product_price_guard_context(result_data):
+        return list(result_data.get("catalog_fact_products") or [])
+
+    catalog_product_ids = list(result_data.get("catalog_product_ids") or [])
+    rows = list(result_data.get("catalog_fact_products") or [])
+
+    if not _catalog_guard_fact_rows_have_grounded_price(rows):
+        pooled = _rebuild_catalog_price_guard_fact_rows(
+            result_data,
+            catalog_product_ids=catalog_product_ids,
+        )
+        if pooled:
+            rows = pooled
+            result_data["catalog_fact_products"] = pooled
+
+    if not _catalog_guard_fact_rows_have_grounded_price(rows):
+        db_rows = _rebuild_catalog_price_guard_fact_rows_from_db(
+            db,
+            tenant_id=tenant_id,
+            catalog_product_ids=catalog_product_ids,
+        )
+        if _catalog_guard_fact_rows_have_grounded_price(db_rows):
+            rows = db_rows
+            result_data["catalog_fact_products"] = db_rows
+            result_data["catalog_fact_rebuild_source"] = "db_by_catalog_product_ids"
+
+    return rows
 
 
 def _catalog_fact_guard_diagnostics(result_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -183,11 +293,15 @@ def _catalog_fact_guard_diagnostics(result_data: Dict[str, Any]) -> Dict[str, An
         if parsed is not None:
             prices.append(parsed)
     fallback_ids = _catalog_product_ids_as_int_set(result_data.get("catalog_product_ids"))
-    return {
+    diag: Dict[str, Any] = {
         "catalog_fact_products_len": len(fact_rows),
         "catalog_fact_product_ids": ids or sorted(fallback_ids),
         "catalog_fact_price_values": sorted(set(prices)),
     }
+    rebuild_source = str(result_data.get("catalog_fact_rebuild_source") or "").strip()
+    if rebuild_source:
+        diag["catalog_fact_rebuild_source"] = rebuild_source
+    return diag
 
 
 def _normalize_sku_token(s: Any) -> str:
@@ -3519,14 +3633,12 @@ class MerchantBrain:
                 _pcgg_chosen_path = str(
                     result.data.get("chosen_path") or _chosen_path or ""
                 ).strip()
-                if _catalog_price_guard_needs_fact_rebuild(result.data):
-                    _rebuilt_catalog_facts = _rebuild_catalog_price_guard_fact_rows(
-                        result.data,
-                        catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
-                    )
-                    if _rebuilt_catalog_facts:
-                        result.data["catalog_fact_products"] = _rebuilt_catalog_facts
-                        _pcgg_meta["catalog_fact_products"] = _rebuilt_catalog_facts
+                if _resolved_catalog_facts := _resolve_catalog_price_guard_fact_rows(
+                    result.data,
+                    db=db,
+                    tenant_id=tenant_id,
+                ):
+                    _pcgg_meta["catalog_fact_products"] = _resolved_catalog_facts
                 _pcgg_catalog_facts = list(result.data.get("catalog_fact_products") or [])
                 _pcgg = apply_product_claim_grounding_guard(
                     reply=reply or "",
