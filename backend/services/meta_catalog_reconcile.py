@@ -242,7 +242,7 @@ def build_meta_catalog_reconcile_plan(
         elif ref.published_at and not verified:
             to_clear.append(ref)
 
-        if ref.meta_retailer_id and ref.meta_retailer_id not in meta_live:
+        if ref.meta_retailer_id and not _is_meta_verified(ref, meta_live):
             local_not_in_meta.append(ref)
 
     stamped_verified = sum(
