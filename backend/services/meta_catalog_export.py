@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -228,7 +228,7 @@ def meta_price_minor_units(amount: Any) -> Optional[int]:
         return None
     try:
         major = Decimal(text.replace(",", ""))
-    except Exception:
+    except (TypeError, ValueError, InvalidOperation):
         return None
     minor = (major * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     return int(minor)
