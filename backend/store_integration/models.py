@@ -7,10 +7,15 @@ class NormalizedVariant(BaseModel):
     id: str
     title: str
     price: Optional[float] = None
+    sale_price: Optional[float] = None
+    regular_price: Optional[float] = None
     sku: Optional[str] = None
     in_stock: bool = True
     stock_quantity: Optional[int] = None
     image_url: Optional[str] = None
+    # Resolved option map (e.g. {"المقاس": "M"}) or raw ids fallback.
+    options: Optional[Dict[str, Any]] = None
+    option_summary: Optional[str] = None
 
 
 class NormalizedProduct(BaseModel):

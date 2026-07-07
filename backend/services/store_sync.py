@@ -118,6 +118,9 @@ def _normalise_product(raw: Any) -> Dict:
             v_dict["image_url"] = v_img
         elif "image_url" in v_dict and not v_dict.get("image_url"):
             v_dict.pop("image_url", None)
+        for price_key in ("price", "sale_price", "regular_price"):
+            if v_dict.get(price_key) is not None:
+                v_dict[price_key] = str(v_dict[price_key])
         variants_out.append(v_dict)
     return {
         "external_id":   str(raw.get("id", raw.get("external_id", ""))),
@@ -211,6 +214,11 @@ def _coerce_variant_dict(raw: Any) -> Dict[str, Any]:
     into a plain dict the upsert can read fields off."""
     if raw is None:
         return {}
+    if hasattr(raw, "model_dump"):
+        try:
+            return dict(raw.model_dump())
+        except Exception:  # noqa: BLE001
+            pass
     if hasattr(raw, "dict"):
         try:
             return dict(raw.dict())
@@ -221,9 +229,9 @@ def _coerce_variant_dict(raw: Any) -> Dict[str, Any]:
     # Bare object — best-effort attribute scrape.
     return {
         k: getattr(raw, k, None)
-        for k in ("id", "title", "price", "sku", "in_stock",
-                  "stock_quantity", "options", "option_summary",
-                  "image_url", "currency")
+        for k in ("id", "title", "price", "sale_price", "regular_price",
+                  "sku", "in_stock", "stock_quantity", "options",
+                  "option_summary", "image_url", "currency")
         if hasattr(raw, k)
     }
 
@@ -336,6 +344,11 @@ def _upsert_variants_for(db: Session, product: Any,
             if not isinstance(options, dict):
                 options = None
             image_url = coerce_image_url(v_dict.get("image_url")) or None
+            meta = dict(v_dict)
+            for price_key in ("sale_price", "regular_price"):
+                val = v_dict.get(price_key)
+                if val not in (None, ""):
+                    meta[price_key] = str(val)
             row = by_salla_id.get(sid)
             if row is None:
                 row = ProductVariant(
@@ -351,7 +364,7 @@ def _upsert_variants_for(db: Session, product: Any,
                     option_summary=_variant_option_summary(v_dict) or None,
                     image_url=image_url,
                     is_default=False,
-                    extra_metadata=v_dict,
+                    extra_metadata=meta,
                 )
                 db.add(row)
                 db.flush()  # populate row.id for retailer_id synthesis
@@ -369,7 +382,7 @@ def _upsert_variants_for(db: Session, product: Any,
                     row.option_summary = summary
                 if image_url:
                     row.image_url = image_url
-                row.extra_metadata = v_dict
+                row.extra_metadata = meta
             # Stamp retailer_id only when missing (never overwrite an
             # explicit publish that came in via the dashboard / admin).
             if not row.retailer_id:
@@ -949,6 +962,44 @@ class StoreSyncService:
 
     # ── Products sync ──────────────────────────────────────────────────────────
 
+    async def _enrich_normalised_variants_from_adapter(
+        self,
+        adapter: Any,
+        normalised: Dict[str, Any],
+    ) -> None:
+        """Fill ``normalised['variants']`` from Salla /variants when missing."""
+        if normalised.get("variants"):
+            return
+        ext_id = (normalised.get("external_id") or "").strip()
+        if not ext_id or not hasattr(adapter, "get_raw_variants"):
+            return
+        try:
+            raw_vars = await adapter.get_raw_variants(ext_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "[catalog/variants] tenant=%s product=%s dedicated variants "
+                "fetch failed: %s",
+                self.tenant_id, ext_id, exc,
+            )
+            return
+        if not raw_vars:
+            return
+        product_options = normalised.get("options") or []
+        variants_out: List[Dict[str, Any]] = []
+        for raw_v in raw_vars:
+            if not isinstance(raw_v, dict):
+                continue
+            if hasattr(adapter, "_normalize_variant"):
+                norm = adapter._normalize_variant(raw_v, product_options)
+                variants_out.append(_coerce_variant_dict(norm))
+            else:
+                variants_out.append(_coerce_variant_dict(raw_v))
+        for v_dict in variants_out:
+            for price_key in ("price", "sale_price", "regular_price"):
+                if v_dict.get(price_key) is not None:
+                    v_dict[price_key] = str(v_dict[price_key])
+        normalised["variants"] = variants_out
+
     async def sync_products(self, incremental: bool = False) -> int:
         """Fetch products from the store adapter and upsert into DB.
 
@@ -998,6 +1049,7 @@ class StoreSyncService:
 
         for raw in raw_list:
             normalised = _normalise_product(raw)
+            await self._enrich_normalised_variants_from_adapter(adapter, normalised)
             ext_id = normalised["external_id"]
             new_qty = _coerce_int(normalised.get("stock_qty"))
             new_in_stock = bool(normalised.get("in_stock", True))
@@ -1916,7 +1968,7 @@ class StoreSyncService:
             )
             try:
                 self.db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — best-effort rollback after pages persist failure
                 pass
 
         return len(pages)
@@ -2215,6 +2267,10 @@ class StoreSyncService:
         if not ext_id:
             return
 
+        adapter = self._get_adapter()
+        if adapter:
+            await self._enrich_normalised_variants_from_adapter(adapter, normalised)
+
         existing = (
             self.db.query(Product)
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
@@ -2223,17 +2279,34 @@ class StoreSyncService:
         if existing:
             existing.title         = normalised["title"]
             existing.price         = normalised["price"]
+            existing.description   = normalised.get("description", existing.description)
+            existing.sku           = normalised.get("sku", existing.sku)
+            existing.in_stock      = bool(normalised.get("in_stock", True))
+            existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
             existing.extra_metadata = normalised
+            product_row = existing
         else:
-            self.db.add(Product(
+            product_row = Product(
                 tenant_id      = self.tenant_id,
                 external_id    = ext_id,
                 title          = normalised["title"],
                 description    = normalised["description"],
                 price          = normalised["price"],
                 sku            = normalised["sku"],
+                in_stock       = bool(normalised.get("in_stock", True)),
+                stock_quantity = _coerce_int(normalised.get("stock_qty")),
                 extra_metadata = normalised,
-            ))
+            )
+            self.db.add(product_row)
+        self.db.flush()
+        try:
+            _upsert_variants_for(self.db, product_row, normalised)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[catalog/variants] tenant=%s product=%s webhook variant "
+                "upsert failed",
+                self.tenant_id, ext_id,
+            )
         self.db.commit()
 
         # Rebuild snapshot counts (lightweight)

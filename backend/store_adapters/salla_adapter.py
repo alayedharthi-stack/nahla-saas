@@ -237,6 +237,83 @@ def _coerce_salla_price_amount(value: Any) -> Optional[float]:
         return None
 
 
+def _extract_variant_options(
+    raw: Dict[str, Any],
+    product_options: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Map Salla variant option payloads to a stable JSON dict + summary."""
+    opts = raw.get("options")
+    if isinstance(opts, dict) and opts:
+        summary = " / ".join(str(v) for v in opts.values() if v)
+        return opts, summary or None
+
+    rov = raw.get("related_option_values") or raw.get("related_options")
+    if opts is not None and not isinstance(opts, dict):
+        rov = rov or opts
+
+    if not rov:
+        return None, None
+
+    if isinstance(rov, dict):
+        rov = [rov]
+    if not isinstance(rov, list) or not rov:
+        return None, None
+
+    value_index: Dict[str, tuple[str, str]] = {}
+    for group in product_options or []:
+        if not isinstance(group, dict):
+            continue
+        gname = (group.get("name") or "").strip()
+        for val in group.get("values") or []:
+            if not isinstance(val, dict):
+                continue
+            vid = str(val.get("id", "")).strip()
+            vname = (val.get("name") or val.get("value") or "").strip()
+            if vid and gname:
+                value_index[vid] = (gname, vname)
+
+    out: Dict[str, Any] = {}
+    raw_ids: List[Any] = []
+
+    for item in rov:
+        if isinstance(item, dict):
+            gname = (
+                item.get("option_name")
+                or item.get("option")
+                or item.get("name")
+                or ""
+            ).strip()
+            vname = (
+                item.get("value_name")
+                or item.get("value")
+                or ""
+            ).strip()
+            if gname and vname and gname not in out:
+                out[gname] = vname
+            elif item.get("id") is not None:
+                raw_ids.append(item.get("id"))
+        else:
+            raw_ids.append(item)
+
+    for rid in raw_ids:
+        key = str(rid).strip()
+        if key in value_index:
+            gname, vname = value_index[key]
+            if gname and vname:
+                out[gname] = vname
+
+    if out:
+        summary = " / ".join(str(v) for v in out.values() if v)
+        return out, summary or None
+
+    if raw_ids:
+        return {
+            "option_value_ids": [str(i) for i in raw_ids],
+        }, None
+
+    return None, None
+
+
 @register_adapter("salla")
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
@@ -1161,6 +1238,16 @@ class SallaAdapter(BaseStoreAdapter):
                 )
 
             normalized = self._normalize_product(raw)
+            if not normalized.variants:
+                raw_vars = await self.get_raw_variants(product_id)
+                if raw_vars:
+                    normalized = normalized.model_copy(update={
+                        "variants": [
+                            self._normalize_variant(v, normalized.options or [])
+                            for v in raw_vars
+                            if isinstance(v, dict)
+                        ],
+                    })
             logger.info(
                 "[SallaAdapter] get_product | id=%s title=%r option_groups=%d "
                 "has_required_options=%s",
@@ -1212,8 +1299,9 @@ class SallaAdapter(BaseStoreAdapter):
         regular_price_f = _coerce_salla_price_amount(raw.get("regular_price"))
 
         variants = [
-            self._normalize_variant(v)
+            self._normalize_variant(v, raw.get("options") or [])
             for v in (raw.get("variants") or [])
+            if isinstance(v, dict)
         ]
 
         options, has_required = self._normalize_options(raw.get("options") or [])
@@ -1296,26 +1384,41 @@ class SallaAdapter(BaseStoreAdapter):
                 has_required = True
         return out, has_required
 
-    def _normalize_variant(self, raw: Dict[str, Any]) -> NormalizedVariant:
-        price_block = raw.get("price") or {}
-        price_amount = price_block.get("amount") if isinstance(price_block, dict) else raw.get("price")
-        try:
-            price_f = float(price_amount) if price_amount is not None else None
-        except (TypeError, ValueError):
-            price_f = None
+    def _normalize_variant(
+        self,
+        raw: Dict[str, Any],
+        product_options: Optional[List[Dict[str, Any]]] = None,
+    ) -> NormalizedVariant:
+        price_f = _coerce_salla_price_amount(raw.get("price"))
+        sale_price_f = _coerce_salla_price_amount(raw.get("sale_price"))
+        regular_price_f = _coerce_salla_price_amount(raw.get("regular_price"))
+        options, option_summary = _extract_variant_options(raw, product_options)
+        qty = raw.get("quantity")
+        if qty is None:
+            qty = raw.get("stock_quantity")
+        available = raw.get("available")
+        if available is None and qty is not None:
+            try:
+                available = int(qty) > 0
+            except (TypeError, ValueError):
+                available = True
         return NormalizedVariant(
             id=str(raw.get("id", "")),
             title=raw.get("name") or str(raw.get("id", "")),
             price=price_f,
+            sale_price=sale_price_f,
+            regular_price=regular_price_f,
             sku=raw.get("sku"),
-            in_stock=raw.get("available", True),
-            stock_quantity=raw.get("quantity"),
+            in_stock=bool(available) if available is not None else True,
+            stock_quantity=qty,
             image_url=coerce_image_url(
                 raw.get("image_url")
                 or raw.get("image")
                 or raw.get("main_image")
                 or raw.get("thumbnail"),
             ) or None,
+            options=options,
+            option_summary=option_summary,
         )
 
     # ── Orders ─────────────────────────────────────────────────────────────────
