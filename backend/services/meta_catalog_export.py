@@ -188,9 +188,147 @@ def reconcile_meta_catalog(db: Session, tenant_id: int) -> Dict[str, int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-product payload builder — pure function, easy to unit-test
-# even while the network path is unimplemented.
+# Per-product / per-variant payload builders — pure functions, no I/O.
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _row_metadata(row: Any) -> Dict[str, Any]:
+    meta = getattr(row, "extra_metadata", None) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def format_meta_price(amount: Any, currency: str = "SAR") -> Optional[str]:
+    """Format a Nahla price for Meta review (e.g. ``59.00 SAR``)."""
+    if amount is None:
+        return None
+    text = str(amount).strip()
+    if not text:
+        return None
+    cur = (currency or "SAR").strip().upper() or "SAR"
+    try:
+        value = float(text.replace(",", ""))
+        return f"{value:.2f} {cur}"
+    except (TypeError, ValueError):
+        return f"{text} {cur}"
+
+
+def build_meta_variant_display_name(parent: Any, variant: Any) -> str:
+    """Human-facing catalog name — identity remains ``retailer_id``."""
+    title = (getattr(parent, "title", None) or "").strip()
+    summary = (getattr(variant, "option_summary", None) or "").strip()
+    if title and summary:
+        return f"{title} - {summary}"[:150]
+    options = getattr(variant, "options", None) or {}
+    if isinstance(options, dict):
+        ids = options.get("option_value_ids") or []
+        if title and ids:
+            return f"{title} - خيار {ids[0]}"[:150]
+    return (title or "Product")[:150]
+
+
+def resolve_variant_image_url(parent: Any, variant: Any) -> tuple[Optional[str], str]:
+    """Return (image_url, source) where source is variant|parent|none."""
+    variant_image = (getattr(variant, "image_url", None) or "").strip()
+    if variant_image:
+        return variant_image, "variant"
+    parent_image = (_row_metadata(parent).get("image_url") or "").strip()
+    if parent_image:
+        return parent_image, "parent"
+    return None, "none"
+
+
+def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
+    """Translate a Nahla variant (+ parent context) into a Meta item payload.
+
+    Uses ``variant.retailer_id`` — never the parent retailer id — so
+    multi-variant products map one Meta catalog item per sellable SKU.
+  """
+    retailer_id = (getattr(variant, "retailer_id", None) or "").strip() or None
+    parent_meta = _row_metadata(parent)
+    currency = (
+        (getattr(variant, "currency", None) or "").strip()
+        or str(parent_meta.get("currency") or "SAR").strip()
+        or "SAR"
+    )
+    image_url, _image_source = resolve_variant_image_url(parent, variant)
+    product_url = (
+        (parent_meta.get("product_url") or parent_meta.get("url") or "").strip()
+        or None
+    )
+    description = (getattr(parent, "description", None) or "").strip()
+    if not description:
+        description = (getattr(parent, "title", None) or "").strip() or None
+
+    in_stock = bool(getattr(variant, "in_stock", True))
+    stock_qty = getattr(variant, "stock_quantity", None)
+    if stock_qty is not None:
+        try:
+            if int(stock_qty) <= 0:
+                in_stock = False
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "retailer_id": retailer_id,
+        "name": build_meta_variant_display_name(parent, variant),
+        "description": description,
+        "image_url": image_url,
+        "url": product_url,
+        "price": format_meta_price(getattr(variant, "price", None), currency),
+        "availability": "in stock" if in_stock else "out of stock",
+    }
+
+
+def preview_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
+    """Build payload + debug fields + warnings for operator review."""
+    payload = build_meta_variant_payload(parent, variant)
+    variant_meta = _row_metadata(variant)
+    image_url, image_source = resolve_variant_image_url(parent, variant)
+
+    warnings: List[str] = []
+    if not payload.get("retailer_id"):
+        warnings.append("missing_retailer_id")
+    if not payload.get("price"):
+        warnings.append("missing_price")
+    if not payload.get("image_url"):
+        warnings.append("missing_image_url")
+    if not payload.get("url"):
+        warnings.append("missing_url")
+    if payload.get("availability") == "out of stock":
+        warnings.append("out_of_stock")
+
+    fatal_codes = {
+        "missing_retailer_id",
+        "missing_price",
+        "missing_image_url",
+        "missing_url",
+    }
+    has_fatal = any(code in fatal_codes for code in warnings)
+
+    return {
+        "product": {
+            "id": getattr(parent, "id", None),
+            "title": getattr(parent, "title", None),
+            "external_id": getattr(parent, "external_id", None),
+        },
+        "variant": {
+            "id": getattr(variant, "id", None),
+            "salla_variant_id": getattr(variant, "salla_variant_id", None),
+            "retailer_id": getattr(variant, "retailer_id", None),
+        },
+        "payload": payload,
+        "debug": {
+            "sale_price": variant_meta.get("sale_price"),
+            "regular_price": variant_meta.get("regular_price"),
+            "stock_quantity": getattr(variant, "stock_quantity", None),
+            "options": getattr(variant, "options", None),
+            "image_source": image_source,
+            "url_present": bool(payload.get("url")),
+            "image_present": bool(image_url),
+        },
+        "warnings": warnings,
+        "fatal": has_fatal,
+    }
+
 
 def build_meta_product_payload(product: Any) -> Dict[str, Any]:
     """Translate a Nahla ``Product`` row into a Meta-side payload.
@@ -256,6 +394,11 @@ __all__ = [
     "ExportReport",
     "MetaCatalogExportError",
     "build_meta_product_payload",
+    "build_meta_variant_payload",
+    "build_meta_variant_display_name",
+    "format_meta_price",
+    "preview_meta_variant_payload",
+    "resolve_variant_image_url",
     "export_to_meta",
     "preflight_check",
     "reconcile_meta_catalog",
