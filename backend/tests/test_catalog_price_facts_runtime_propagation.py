@@ -816,3 +816,126 @@ class TestCatalogPriceGuardFieldExtraction:
             data = dict(base)
             data["checkout_pressure_allowed"] = value
             assert pl._is_catalog_product_price_guard_context(data) is False
+
+
+class TestCatalogPriceGuardStaleRowHandoff:
+    def test_resolve_returns_empty_when_pool_and_db_lack_grounded_prices(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: [],
+        )
+
+        result_data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109, 121],
+            "checkout_pressure_allowed": False,
+            "catalog_fact_products": [
+                {"id": 109, "title": _TALH_1KG["title"], "can_checkout": False},
+            ],
+            "products": [{"id": 121, "title": _TALH_5KG["title"], "can_checkout": False}],
+        }
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        assert resolved == []
+        assert result_data["catalog_fact_products"] == []
+        assert result_data.get("catalog_fact_rebuild_source") is None
+        diag = pl._catalog_fact_guard_diagnostics(result_data)
+        assert diag["catalog_fact_products_len"] == 0
+        assert diag["catalog_fact_price_values"] == []
+        assert 109 in diag["catalog_fact_product_ids"]
+
+    def test_db_rebuild_regular_price_only_format_dict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from models import Product  # noqa: PLC0415
+
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        product = MagicMock()
+        product.id = 121
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [product]
+
+        monkeypatch.setattr(
+            "core.store_knowledge.CatalogContextBuilder._format",
+            lambda _self, _p: {
+                "id": 121,
+                "title": _TALH_5KG["title"],
+                "price": None,
+                "sale_price": None,
+                "regular_price": 1475,
+                "can_checkout": False,
+            },
+        )
+
+        rows = pl._rebuild_catalog_price_guard_fact_rows_from_db(
+            db,
+            tenant_id=33,
+            catalog_product_ids=[121],
+        )
+        assert len(rows) == 1
+        assert rows[0]["price"] == 1475
+        assert 1475 in pl._catalog_fact_guard_diagnostics(
+            {"catalog_fact_products": rows},
+        )["catalog_fact_price_values"]
+
+    def test_resolve_diagnostics_include_rebuild_source_after_db_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        monkeypatch.setattr(
+            pl,
+            "_rebuild_catalog_price_guard_fact_rows_from_db",
+            lambda *_args, **_kwargs: [
+                {
+                    "id": 109,
+                    "title": _TALH_1KG["title"],
+                    "price": 387,
+                    "can_checkout": False,
+                },
+            ],
+        )
+
+        result_data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "price",
+            "price_source": "catalog",
+            "catalog_product_ids": [109],
+            "checkout_pressure_allowed": False,
+            "catalog_fact_products": [],
+            "products": [],
+        }
+        resolved = pl._resolve_catalog_price_guard_fact_rows(
+            result_data,
+            db=object(),
+            tenant_id=33,
+        )
+        assert len(resolved) == 1
+        assert result_data["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
+        diag = pl._catalog_fact_guard_diagnostics(result_data)
+        assert diag["catalog_fact_products_len"] == 1
+        assert diag["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
+        assert 387 in diag["catalog_fact_price_values"]
+        assert 109 in diag["catalog_fact_product_ids"]
