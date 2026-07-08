@@ -256,6 +256,7 @@ def _apply_catalog_product_answer_guards(
             )
     else:
         from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            extract_reply_prices,
             parse_price_amount,
         )
 
@@ -268,8 +269,7 @@ def _apply_catalog_product_answer_guards(
             )
             if amt is not None
         }
-        for match in re.findall(r"(\d+(?:\.\d+)?)\s*ريال", working):
-            claimed = parse_price_amount(match) or parse_price_amount(f"{match} ريال")
+        for claimed in extract_reply_prices(working):
             if allowed_amounts and claimed not in allowed_amounts:
                 return PersonaGuardResult(
                     text=working,
