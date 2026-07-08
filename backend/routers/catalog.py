@@ -92,6 +92,7 @@ from modules.observability.delivery_mode import (
     new_delivery_audit,
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
+from services.meta_commerce_settings import get_whatsapp_commerce_settings_status
 
 logger = logging.getLogger("nahla.catalog")
 
@@ -644,6 +645,21 @@ async def merchant_catalog_waba_link_status(
     """
     tenant_id = resolve_tenant_id(request)
     return get_waba_catalog_link_status(db, tenant_id)
+
+
+@merchant_router.get("/commerce-settings-status")
+async def merchant_catalog_commerce_settings_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Read-only: WhatsApp commerce settings for the tenant phone number.
+
+    Tenant derived ONLY from JWT — no cross-tenant params. No Graph POST/PATCH,
+    no DB writes, no tokens in the response.
+    """
+    tenant_id = resolve_tenant_id(request)
+    return get_whatsapp_commerce_settings_status(db, tenant_id)
 
 
 @merchant_router.patch("/config")
