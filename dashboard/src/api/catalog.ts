@@ -102,6 +102,30 @@ export interface CatalogPatchResponse {
   status: CatalogStatus
 }
 
+export interface WabaLinkedCatalog {
+  id:   string
+  name: string | null
+}
+
+/** Mirrors GET /merchant/catalog/waba-link-status (PR #509). */
+export interface WabaCatalogLinkStatus {
+  ok:                      boolean
+  connected:               boolean
+  waba_id:                 string | null
+  expected_catalog_id:     string | null
+  linked_catalogs:         WabaLinkedCatalog[]
+  linked_catalog_ids:      string[]
+  expected_catalog_linked: boolean
+  token_source:            string
+  http_status:             number | null
+  missing:                 string[]
+  error:                   string | null
+  error_code?:             number | null
+  error_type?:             string | null
+  error_message?:          string | null
+  error_category?:         string | null
+}
+
 // ── Product diagnostic + resync ──────────────────────────────────────
 
 // Canonical product-source strings the backend stamps on every row.
@@ -570,6 +594,9 @@ export const catalogApi = {
   },
   diagnostics(): Promise<CatalogDiagnostics> {
     return apiCall<CatalogDiagnostics>('/merchant/catalog/diagnostics')
+  },
+  wabaLinkStatus(): Promise<WabaCatalogLinkStatus> {
+    return apiCall<WabaCatalogLinkStatus>('/merchant/catalog/waba-link-status')
   },
   // Manual product CRUD — Path 3 in the new architecture.
   createManualProduct(body: ManualProductInput): Promise<ManualProductRow> {

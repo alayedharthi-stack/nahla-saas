@@ -1754,6 +1754,32 @@ export interface Translations {
       disabled:       string
       save:           string
     }
+    wabaLinkStatus: {
+      loading:              string
+      refresh:              string
+      fetchFailed:          string
+      linkedTitle:          string
+      linkedDesc:           string
+      linkedBadge:          string
+      catalogNameLabel:     string
+      catalogIdLabel:       string
+      wabaConnectedLabel:   string
+      wabaConnectedValue:   string
+      noneTitle:            string
+      noneDesc:             string
+      linkComingSoon:       string
+      linkCtaDisabled:      string
+      mismatchTitle:        string
+      mismatchDesc:         string
+      expectedCatalogLabel: string
+      linkedCatalogsLabel:  string
+      missingTitle:         string
+      missingConnection:    string
+      missingWaba:          string
+      missingCatalogId:     string
+      missingToken:         string
+      metaErrorTitle:       string
+    }
     tools: {
       title:         string
       coverageLabel: string
