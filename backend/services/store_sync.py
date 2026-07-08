@@ -469,6 +469,144 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
+def _sale_meta_from_extra(meta: Any) -> Dict[str, Any]:
+    if not isinstance(meta, dict):
+        return {}
+    return {
+        "price": meta.get("price"),
+        "sale_price": meta.get("sale_price"),
+        "regular_price": meta.get("regular_price"),
+    }
+
+
+def _variant_rows_have_real_variants(variant_rows: List[Dict[str, Any]]) -> bool:
+    return any(not row.get("is_default") for row in variant_rows)
+
+
+def _product_db_summary(
+    db: Session,
+    tenant_id: int,
+    *,
+    external_id: Optional[str] = None,
+    product_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read-only snapshot of a Nahla product row (+ variants) for sync reports."""
+    try:
+        from models import ProductVariant  # noqa: PLC0415
+    except ImportError:  # pragma: no cover
+        from database.models import ProductVariant  # type: ignore  # noqa: PLC0415
+
+    query = db.query(Product).filter(Product.tenant_id == tenant_id)
+    if product_id is not None:
+        query = query.filter(Product.id == product_id)
+    elif external_id:
+        query = query.filter(Product.external_id == external_id)
+    else:
+        return None
+
+    product = query.first()
+    if not product:
+        return None
+
+    variants = (
+        db.query(ProductVariant)
+        .filter(ProductVariant.product_id == product.id)
+        .all()
+    )
+    variant_rows = [
+        {
+            "id": variant.id,
+            "salla_variant_id": variant.salla_variant_id,
+            "is_default": variant.is_default,
+            "price": str(variant.price) if variant.price is not None else None,
+            "in_stock": variant.in_stock,
+            "stock_quantity": variant.stock_quantity,
+        }
+        for variant in variants
+    ]
+    return {
+        "nahla_product_id": product.id,
+        "external_id": product.external_id,
+        "title": product.title,
+        "price": str(product.price) if product.price is not None else None,
+        "in_stock": product.in_stock,
+        "stock_quantity": product.stock_quantity,
+        "has_variants": product.has_variants,
+        "extra_metadata": _sale_meta_from_extra(product.extra_metadata),
+        "variants_count": len(variant_rows),
+        "variants": variant_rows,
+        "db_had_real_variants": _variant_rows_have_real_variants(variant_rows),
+    }
+
+
+def _salla_live_summary(normalised: Dict[str, Any]) -> Dict[str, Any]:
+    variants = normalised.get("variants") or []
+    variant_rows = [
+        {
+            "salla_variant_id": row.get("salla_variant_id") or row.get("id"),
+            "is_default": row.get("is_default"),
+            "price": row.get("price"),
+            "sale_price": row.get("sale_price"),
+            "regular_price": row.get("regular_price"),
+            "in_stock": row.get("in_stock"),
+            "stock_quantity": _coerce_int(row.get("stock_quantity") or row.get("stock_qty")),
+            "option_summary": row.get("option_summary"),
+        }
+        for row in variants
+        if isinstance(row, dict)
+    ]
+    return {
+        "external_id": normalised.get("external_id"),
+        "title": normalised.get("title"),
+        "price": normalised.get("price"),
+        "in_stock": normalised.get("in_stock"),
+        "stock_quantity": _coerce_int(normalised.get("stock_qty")),
+        "extra_metadata": _sale_meta_from_extra(normalised),
+        "variants_count": len(variant_rows),
+        "variants": variant_rows,
+        "salla_has_real_variants": _variant_rows_have_real_variants(variant_rows),
+    }
+
+
+def _compute_one_product_sync_diff(
+    db_before: Optional[Dict[str, Any]],
+    normalised: Dict[str, Any],
+) -> Dict[str, Any]:
+    live_in_stock = bool(normalised.get("in_stock", True))
+    live_qty = _coerce_int(normalised.get("stock_qty"))
+    live_meta = _sale_meta_from_extra(normalised)
+    variants = normalised.get("variants") or []
+    variant_rows = [row for row in variants if isinstance(row, dict)]
+    salla_has_real_variants = _variant_rows_have_real_variants(variant_rows)
+
+    if not db_before:
+        return {
+            "in_stock_changed": True,
+            "stock_quantity_changed": live_qty is not None,
+            "price_changed": bool(normalised.get("price")),
+            "sale_meta_changed": bool(
+                live_meta.get("sale_price") or live_meta.get("regular_price")
+            ),
+            "variants_count_changed": len(variant_rows) > 0,
+            "db_had_real_variants": False,
+            "salla_has_real_variants": salla_has_real_variants,
+        }
+
+    db_meta = db_before.get("extra_metadata") or {}
+    return {
+        "in_stock_changed": db_before.get("in_stock") != live_in_stock,
+        "stock_quantity_changed": db_before.get("stock_quantity") != live_qty,
+        "price_changed": str(db_before.get("price")) != str(normalised.get("price")),
+        "sale_meta_changed": (
+            str(db_meta.get("sale_price")) != str(live_meta.get("sale_price"))
+            or str(db_meta.get("regular_price")) != str(live_meta.get("regular_price"))
+        ),
+        "variants_count_changed": db_before.get("variants_count", 0) != len(variant_rows),
+        "db_had_real_variants": bool(db_before.get("db_had_real_variants")),
+        "salla_has_real_variants": salla_has_real_variants,
+    }
+
+
 def _extract_status_string(status: Any, fallback: str = "unknown") -> str:
     """
     Salla (and some other platforms) return order/product status as either:
@@ -1000,6 +1138,176 @@ class StoreSyncService:
                     v_dict[price_key] = str(v_dict[price_key])
         normalised["variants"] = variants_out
 
+    def _apply_normalised_product(
+        self,
+        normalised: Dict[str, Any],
+        adapter_source: str,
+    ) -> Dict[str, Any]:
+        """Upsert one normalised product row (+ variants). Shared by bulk and one-product sync."""
+        ext_id = normalised["external_id"]
+        new_qty = _coerce_int(normalised.get("stock_qty"))
+        new_in_stock = bool(normalised.get("in_stock", True))
+        new_available = new_in_stock and (new_qty is None or new_qty > 0)
+        row_source = normalised.get("source") or adapter_source
+
+        existing = (
+            self.db.query(Product)
+            .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+            .first()
+        )
+        restocked: Optional[Dict[str, Any]] = None
+
+        if existing:
+            was_unavailable = (
+                (getattr(existing, "in_stock", True) is False)
+                or (existing.stock_quantity is not None and existing.stock_quantity <= 0)
+            )
+            existing.title = normalised["title"]
+            existing.description = normalised["description"]
+            existing.price = normalised["price"]
+            existing.sku = normalised["sku"]
+            existing.in_stock = new_in_stock
+            existing.stock_quantity = new_qty
+            existing.extra_metadata = normalised
+            if (existing.source or "").lower() != "manual":
+                existing.source = row_source
+            try:
+                from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
+                assign_canonical_retailer_id(existing)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _upsert_variants_for(self.db, existing, normalised)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[catalog/variants] tenant=%s product=%s upsert "
+                    "failed — continuing parent sync",
+                    self.tenant_id, existing.id,
+                )
+            product_row = existing
+            action = "updated"
+            if was_unavailable and new_available:
+                restocked = {
+                    "product_id": existing.id,
+                    "external_id": ext_id,
+                    "title": normalised["title"],
+                }
+        else:
+            product_row = Product(
+                tenant_id=self.tenant_id,
+                external_id=ext_id,
+                title=normalised["title"],
+                description=normalised["description"],
+                price=normalised["price"],
+                sku=normalised["sku"],
+                in_stock=new_in_stock,
+                stock_quantity=new_qty,
+                extra_metadata=normalised,
+                source=row_source,
+            )
+            self.db.add(product_row)
+            self.db.flush()
+            try:
+                _upsert_variants_for(self.db, product_row, normalised)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[catalog/variants] tenant=%s product=%s "
+                    "(new) variant upsert failed — continuing",
+                    self.tenant_id, product_row.id,
+                )
+            action = "created"
+
+        return {
+            "action": action,
+            "product_id": product_row.id,
+            "restocked": restocked,
+        }
+
+    async def sync_one_product_by_external_id(
+        self,
+        external_id: str,
+        *,
+        dry_run: bool = True,
+        nahla_product_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fetch one Salla product and optionally upsert it into Nahla."""
+        adapter = self._get_adapter()
+        if adapter is None:
+            return {
+                "ok": False,
+                "error": "adapter_unavailable",
+                "message": (
+                    f"Store adapter unavailable for tenant={self.tenant_id} "
+                    "(integration may need reauth)"
+                ),
+            }
+
+        ext_id = str(external_id or "").strip()
+        if not ext_id:
+            return {
+                "ok": False,
+                "error": "missing_external_id",
+                "message": "external_id is required",
+            }
+
+        db_before = _product_db_summary(
+            self.db,
+            self.tenant_id,
+            external_id=ext_id,
+            product_id=nahla_product_id,
+        )
+        resolved_nahla_id = (db_before or {}).get("nahla_product_id") or nahla_product_id
+
+        try:
+            raw = await adapter.get_product(ext_id)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "error": "salla_fetch_failed",
+                "message": str(exc),
+                "tenant_id": self.tenant_id,
+                "external_id": ext_id,
+            }
+
+        if raw is None:
+            return {
+                "ok": False,
+                "error": "salla_product_not_found",
+                "message": f"Salla product not found for external_id={ext_id}",
+                "tenant_id": self.tenant_id,
+                "external_id": ext_id,
+            }
+
+        normalised = _normalise_product(raw)
+        await self._enrich_normalised_variants_from_adapter(adapter, normalised)
+        salla_live = _salla_live_summary(normalised)
+        diff = _compute_one_product_sync_diff(db_before, normalised)
+
+        report: Dict[str, Any] = {
+            "ok": True,
+            "dry_run": dry_run,
+            "tenant_id": self.tenant_id,
+            "external_id": ext_id,
+            "nahla_product_id": resolved_nahla_id,
+            "db_before": db_before,
+            "salla_live": salla_live,
+            "diff": diff,
+        }
+
+        if dry_run:
+            return report
+
+        adapter_source = getattr(adapter, "platform", None) or "salla"
+        apply_result = self._apply_normalised_product(normalised, adapter_source)
+        self.db.flush()
+        self.db.commit()
+
+        db_after = _product_db_summary(self.db, self.tenant_id, external_id=ext_id)
+        report["db_after"] = db_after
+        report["action"] = apply_result["action"]
+        report["nahla_product_id"] = apply_result["product_id"]
+        return report
+
     async def sync_products(self, incremental: bool = False) -> int:
         """Fetch products from the store adapter and upsert into DB.
 
@@ -1050,98 +1358,13 @@ class StoreSyncService:
         for raw in raw_list:
             normalised = _normalise_product(raw)
             await self._enrich_normalised_variants_from_adapter(adapter, normalised)
-            ext_id = normalised["external_id"]
-            new_qty = _coerce_int(normalised.get("stock_qty"))
-            new_in_stock = bool(normalised.get("in_stock", True))
-            new_available = new_in_stock and (new_qty is None or new_qty > 0)
-            # Per-row source override (some adapters surface ``source`` on
-            # the normalised dict — e.g. a Salla product re-exported from
-            # a Zid bridge would carry ``source="salla"`` despite being
-            # pulled by the Zid adapter). Per-row beats per-adapter.
-            row_source = normalised.get("source") or adapter_source
-
-            existing = (
-                self.db.query(Product)
-                .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
-                .first()
-            )
-            if existing:
-                # Detect 0 → >0 transition BEFORE we overwrite the columns.
-                # We treat (in_stock=false) OR (stock_quantity<=0) as "was zero".
-                was_unavailable = (
-                    (getattr(existing, "in_stock", True) is False)
-                    or (existing.stock_quantity is not None and existing.stock_quantity <= 0)
-                )
-                existing.title       = normalised["title"]
-                existing.description = normalised["description"]
-                existing.price       = normalised["price"]
-                existing.sku         = normalised["sku"]
-                existing.in_stock    = new_in_stock
-                existing.stock_quantity = new_qty
-                existing.extra_metadata = normalised
-                # Stamp the canonical source column (migration 0062) on
-                # every sync run so the diagnostics badge stays accurate
-                # even if the merchant later switches platforms. We never
-                # promote a row OUT of ``manual`` — a manual product must
-                # not be silently overwritten by a sync that happens to
-                # match an external_id (that would let a Salla sync wipe
-                # out a merchant's hand-written row). See ``manual_products``
-                # endpoint for the reverse direction.
-                if (existing.source or "").lower() != "manual":
-                    existing.source = row_source
-                # Auto-map: if the row was synced before we started
-                # writing retailer ids, give it one now. Idempotent +
-                # never overwrites an explicit value.
-                try:
-                    from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
-                    assign_canonical_retailer_id(existing)
-                except Exception:  # noqa: BLE001
-                    pass
-                # Parent / variant intelligence layer (migration 0064).
-                # Reconcile ``product_variants`` rows against the
-                # adapter payload. No-op when ``CATALOG_VARIANT_SYNC``
-                # is off so we can roll the writer back without
-                # touching the parent path.
-                try:
-                    _upsert_variants_for(self.db, existing, normalised)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "[catalog/variants] tenant=%s product=%s upsert "
-                        "failed — continuing parent sync",
-                        self.tenant_id, existing.id,
-                    )
-                updated += 1
-
-                if was_unavailable and new_available:
-                    restocked.append({
-                        "product_id":  existing.id,
-                        "external_id": ext_id,
-                        "title":       normalised["title"],
-                    })
-            else:
-                p = Product(
-                    tenant_id    = self.tenant_id,
-                    external_id  = ext_id,
-                    title        = normalised["title"],
-                    description  = normalised["description"],
-                    price        = normalised["price"],
-                    sku          = normalised["sku"],
-                    in_stock     = new_in_stock,
-                    stock_quantity = new_qty,
-                    extra_metadata = normalised,
-                    source       = row_source,
-                )
-                self.db.add(p)
-                self.db.flush()  # populate p.id for variant FK
-                try:
-                    _upsert_variants_for(self.db, p, normalised)
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "[catalog/variants] tenant=%s product=%s "
-                        "(new) variant upsert failed — continuing",
-                        self.tenant_id, p.id,
-                    )
+            apply_result = self._apply_normalised_product(normalised, adapter_source)
+            if apply_result["action"] == "created":
                 created += 1
+            elif apply_result["action"] == "updated":
+                updated += 1
+            if apply_result.get("restocked"):
+                restocked.append(apply_result["restocked"])
         self.db.flush()
         # Auto-map retailer ids on freshly-created rows. We do this
         # after ``flush()`` so the synthetic-id fallback can read
