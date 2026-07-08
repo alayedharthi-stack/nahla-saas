@@ -9,6 +9,8 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { Check, CheckCheck, Signal, Wifi, Battery } from 'lucide-react'
+import type { Lang } from '../../i18n/types'
+import { WHATSAPP_DEMO_COPY, type WhatsAppDemoMessage } from './whatsappDemoCopy'
 
 // ── Bee avatar (inline SVG) ───────────────────────────────────────────────────
 function BeeAvatar({ size = 28 }: { size?: number }) {
@@ -61,53 +63,8 @@ function ReadReceipt({ read }: { read: boolean }) {
 // ── Message definition ────────────────────────────────────────────────────────
 type MessageRole = 'customer' | 'nahla'
 
-interface Message {
-  id: number
-  role: MessageRole
-  lines: string[]
-  time: string
-  hasButton?: boolean
-  paymentMethods?: string
-}
+interface Message extends WhatsAppDemoMessage {}
 
-const MESSAGES: Message[] = [
-  {
-    id: 1,
-    role: 'customer',
-    lines: ['السلام عليكم، هل هذا المنتج متوفر؟'],
-    time: '10:32',
-  },
-  {
-    id: 2,
-    role: 'nahla',
-    lines: [
-      'وعليكم السلام 😊',
-      'نعم المنتج متوفر حالياً.',
-      'السعر: *129 ريال*',
-      'هل ترغب أن أرسل لك رابط الشراء الآن؟',
-    ],
-    time: '10:32',
-  },
-  {
-    id: 3,
-    role: 'customer',
-    lines: ['نعم أرسله لي'],
-    time: '10:33',
-  },
-  {
-    id: 4,
-    role: 'nahla',
-    lines: [
-      'رائع 👍',
-      'يمكنك إتمام الطلب مباشرة من هنا:',
-    ],
-    time: '10:33',
-    hasButton: true,
-    paymentMethods: 'بطاقة ائتمانية · Apple Pay · تحويل بنكي',
-  },
-]
-
-// ms to wait before showing typing → then message
 const DELAYS: Record<number, [number, number]> = {
   1: [0, 0],        // customer: show immediately
   2: [700, 1600],   // nahla: typing at 700ms, message at 1600ms
@@ -132,7 +89,7 @@ function FormattedLine({ text }: { text: string }) {
 }
 
 // ── Single chat bubble ────────────────────────────────────────────────────────
-function Bubble({ msg, visible }: { msg: Message; visible: boolean }) {
+function Bubble({ msg, visible, copy }: { msg: Message; visible: boolean; copy: typeof WHATSAPP_DEMO_COPY.ar }) {
   const isNahla   = msg.role === 'nahla'
   const isCustomer = msg.role === 'customer'
 
@@ -159,7 +116,7 @@ function Bubble({ msg, visible }: { msg: Message; visible: boolean }) {
       >
         {/* Sender label */}
         {isNahla && (
-          <p className="text-[11px] font-bold text-[#075E54] mb-1">نحلة 🐝</p>
+          <p className="text-[11px] font-bold text-[#075E54] mb-1">{copy.brandLabel}</p>
         )}
 
         {/* Lines */}
@@ -175,14 +132,16 @@ function Bubble({ msg, visible }: { msg: Message; visible: boolean }) {
         {msg.hasButton && (
           <div className="mt-3 mb-1.5">
             <div className="w-full text-center py-2 rounded-xl bg-[#25D366] text-white text-sm font-bold cursor-default select-none shadow-sm shadow-[#25D366]/30">
-              إتمام الطلب
+              {copy.completeOrder}
             </div>
             {msg.paymentMethods && (
               <p className="text-xs text-slate-500 mt-2 text-center">{msg.paymentMethods}</p>
             )}
+            {msg.helpLine && (
             <p className="text-[12px] text-slate-600 mt-2.5 leading-relaxed">
-              وإذا احتجت أي مساعدة أنا هنا لخدمتك. 🤝
+              {msg.helpLine}
             </p>
+            )}
           </div>
         )}
 
@@ -197,7 +156,11 @@ function Bubble({ msg, visible }: { msg: Message; visible: boolean }) {
 }
 
 // ── Main demo component ────────────────────────────────────────────────────────
-export default function WhatsAppDemo() {
+export default function WhatsAppDemo({ lang = 'ar' }: { lang?: Lang }) {
+  const copy = WHATSAPP_DEMO_COPY[lang]
+  const messages = copy.messages
+  const dir = lang === 'ar' ? 'rtl' : 'ltr'
+
   // Which messages are visible and whether typing indicator is showing
   const [visibleIds, setVisibleIds] = useState<Set<number>>(new Set())
   const [typingForId, setTypingForId] = useState<number | null>(null)
@@ -217,7 +180,7 @@ export default function WhatsAppDemo() {
     setVisibleIds(new Set())
     setTypingForId(null)
 
-    MESSAGES.forEach(msg => {
+    messages.forEach(msg => {
       const [typingAt, showAt] = DELAYS[msg.id]
 
       if (msg.role === 'nahla' && typingAt < showAt) {
@@ -242,11 +205,11 @@ export default function WhatsAppDemo() {
   useEffect(() => {
     runSequence()
     return clearTimers
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lang]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     // Phone device mockup
-    <div className="relative mx-auto w-[320px] sm:w-[360px]">
+    <div className="relative mx-auto w-[320px] sm:w-[360px]" dir={dir}>
       {/* Outer phone shell */}
       <div className="rounded-[2.5rem] bg-slate-800 border-[3px] border-slate-600/80 shadow-2xl shadow-black/40 overflow-hidden">
 
@@ -267,8 +230,8 @@ export default function WhatsAppDemo() {
             <span className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-[#25D366] rounded-full border-2 border-[#075E54]" />
           </div>
           <div>
-            <p className="text-white font-semibold text-sm leading-tight">نحلة 🐝</p>
-            <p className="text-[#c5e8c5] text-[11px]">متصل الآن</p>
+            <p className="text-white font-semibold text-sm leading-tight">{copy.brandLabel}</p>
+            <p className="text-[#c5e8c5] text-[11px]">{copy.online}</p>
           </div>
         </div>
 
@@ -285,11 +248,11 @@ export default function WhatsAppDemo() {
             {/* Date chip */}
             <div className="flex justify-center">
               <span className="text-[11px] bg-[#d1f0f0] text-[#3d8a8a] px-3 py-0.5 rounded-full shadow-sm">
-                اليوم
+                {copy.today}
               </span>
             </div>
 
-            {MESSAGES.map(msg => (
+            {messages.map(msg => (
               <div key={msg.id}>
                 {/* Typing indicator — shows before Nahla's message */}
                 {msg.role === 'nahla' && typingForId === msg.id && (
@@ -302,7 +265,7 @@ export default function WhatsAppDemo() {
                 )}
 
                 {/* Message bubble */}
-                <Bubble msg={msg} visible={visibleIds.has(msg.id)} />
+                <Bubble msg={msg} visible={visibleIds.has(msg.id)} copy={copy} />
               </div>
             ))}
 
@@ -314,7 +277,7 @@ export default function WhatsAppDemo() {
         {/* Input bar */}
         <div className="bg-[#f0f0f0] px-3 py-2.5 flex items-center gap-2 border-t border-[#d0d0d0]">
           <div className="flex-1 bg-white rounded-full px-4 py-2 text-sm text-slate-400 select-none">
-            اكتب رسالة…
+            {copy.typeMessage}
           </div>
           <div className="w-9 h-9 rounded-full bg-[#25D366] flex items-center justify-center shadow-sm shrink-0">
             <svg viewBox="0 0 24 24" className="w-4 h-4 fill-white">

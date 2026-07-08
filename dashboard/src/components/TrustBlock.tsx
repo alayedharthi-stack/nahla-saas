@@ -21,6 +21,54 @@ import {
   Lock,
   ExternalLink,
 } from 'lucide-react'
+import type { Lang } from '../i18n/types'
+
+const TRUST_COPY: Record<Lang, {
+  dir: 'rtl' | 'ltr'
+  crAria: (n: string) => string
+  mocAlt: string
+  crLabel: string
+  title: string
+  subtitle: string
+  crPrefix: string
+  mocVerified: string
+  authAria: string
+  authTitle: string
+  verifiedBy: string
+  sbcName: string
+  privacy: string
+}> = {
+  ar: {
+    dir: 'rtl',
+    crAria: (n) => `السجل التجاري ${n} — موثق لدى وزارة التجارة`,
+    mocAlt: 'شعار وزارة التجارة',
+    crLabel: 'السجل التجاري',
+    title: 'نحلة مسجلة في المملكة العربية السعودية',
+    subtitle: 'نحلة علامة تجارية سعودية مسجلة',
+    crPrefix: 'سجل تجاري رقم:',
+    mocVerified: 'موثق لدى وزارة التجارة',
+    authAria: 'الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة',
+    authTitle: 'اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال',
+    verifiedBy: 'موثّق لدى',
+    sbcName: 'المركز السعودي للأعمال',
+    privacy: 'بياناتك آمنة ومشفرة 100% ولا نشاركها مع أي جهة خارجية',
+  },
+  en: {
+    dir: 'ltr',
+    crAria: (n) => `Commercial registration ${n} — verified with the Ministry of Commerce`,
+    mocAlt: 'Ministry of Commerce logo',
+    crLabel: 'Commercial registration',
+    title: 'Nahla is registered in Saudi Arabia',
+    subtitle: 'Nahla is a registered Saudi trademark',
+    crPrefix: 'CR number:',
+    mocVerified: 'Verified with the Ministry of Commerce',
+    authAria: 'Open the Saudi Business Centre to verify Nahla',
+    authTitle: 'Click to verify Nahla on the Business Centre platform',
+    verifiedBy: 'Verified by',
+    sbcName: 'Saudi Business Centre',
+    privacy: 'Your data is encrypted and we do not share it with third parties',
+  },
+}
 
 // ─── Verifiable destinations ──────────────────────────────────────────────
 const COMMERCIAL_REGISTRY_NUMBER = '7050202485'
@@ -70,6 +118,8 @@ interface TrustBlockProps {
    */
   compact?: boolean
   className?: string
+  /** UI language — defaults to Arabic for Login/Register compatibility */
+  lang?: Lang
 }
 
 // ─── Component ────────────────────────────────────────────────────────────
@@ -77,7 +127,9 @@ export default function TrustBlock({
   variant = 'light',
   compact = false,
   className = '',
+  lang = 'ar',
 }: TrustBlockProps) {
+  const t = TRUST_COPY[lang]
   const wrapperBaseBg =
     variant === 'dark' ? 'rgba(2,6,23,0.55)' : 'rgba(2,6,23,0.85)'
 
@@ -98,11 +150,11 @@ export default function TrustBlock({
         borderRadius: 18,
         boxShadow: WRAPPER_SHADOW,
       }}
-      dir="rtl"
+      dir={t.dir}
     >
       <div className={`grid ${gridCols} items-stretch gap-4 p-5 sm:p-6`}>
 
-        {/* ── Right: Commercial registry card ─────────────────────────── */}
+        {/* Commercial registry card */}
         <a
           href={COMMERCIAL_REGISTRY_URL}
           target="_blank"
@@ -111,20 +163,19 @@ export default function TrustBlock({
           style={CARD_SURFACE_STYLE}
           onMouseEnter={e => { e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW }}
           onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
-          aria-label={`السجل التجاري ${COMMERCIAL_REGISTRY_NUMBER} — موثق لدى وزارة التجارة`}
+          aria-label={t.crAria(COMMERCIAL_REGISTRY_NUMBER)}
         >
-          {/* MoC emblem — green Saudi palm-and-swords crest, icon-only PNG */}
           <img
             src={MOC_LOGO_SRC}
-            alt="شعار وزارة التجارة"
+            alt={t.mocAlt}
             loading="lazy"
             decoding="async"
             className="shrink-0 w-16 h-16 rounded-xl object-cover shadow-sm"
             onError={e => { e.currentTarget.style.display = 'none' }}
           />
-          <div className="flex flex-col text-right leading-tight">
+          <div className="flex flex-col text-start leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
-              السجل التجاري
+              {t.crLabel}
             </span>
             <span
               className="font-bold tracking-wider text-base sm:text-[17px] font-mono mt-0.5"
@@ -142,13 +193,13 @@ export default function TrustBlock({
               className="text-white text-[15px] sm:text-base leading-snug"
               style={{ fontWeight: 600, letterSpacing: '0.3px' }}
             >
-              نحلة مسجلة في المملكة العربية السعودية
+              {t.title}
             </h3>
             <p className="text-slate-200 text-[13px] sm:text-sm leading-relaxed">
-              نحلة علامة تجارية سعودية مسجلة
+              {t.subtitle}
             </p>
             <p className="text-slate-300 text-[12px] sm:text-[13px] leading-relaxed">
-              سجل تجاري رقم:{' '}
+              {t.crPrefix}{' '}
               <a
                 href={COMMERCIAL_REGISTRY_URL}
                 target="_blank"
@@ -167,12 +218,12 @@ export default function TrustBlock({
               style={{ color: '#10B981' }}
             >
               <ShieldCheck className="w-4 h-4 shrink-0" />
-              موثق لدى وزارة التجارة
+              {t.mocVerified}
             </a>
           </div>
         </div>
 
-        {/* ── Left: Business-authentication card ─────────────────────── */}
+        {/* Business-authentication card */}
         <a
           href={BUSINESS_AUTH_URL}
           target="_blank"
@@ -181,8 +232,8 @@ export default function TrustBlock({
           style={CARD_SURFACE_STYLE}
           onMouseEnter={e => { e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW }}
           onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
-          aria-label="الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة"
-          title="اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال"
+          aria-label={t.authAria}
+          title={t.authTitle}
         >
           {/* SBC icon-only logo — purple starburst mark, no wordmark text */}
           <div
@@ -191,19 +242,19 @@ export default function TrustBlock({
           >
             <img
               src={BUSINESS_AUTH_LOGO_SRC}
-              alt="شعار المركز السعودي للأعمال"
+              alt={t.sbcName}
               loading="lazy"
               decoding="async"
               style={{ width: '100%', height: '100%', objectFit: 'contain', transform: 'scale(1.25)' }}
               onError={e => { e.currentTarget.style.display = 'none' }}
             />
           </div>
-          <div className="flex flex-col text-right leading-tight">
+          <div className="flex flex-col text-start leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
-              موثّق لدى
+              {t.verifiedBy}
             </span>
             <span className="text-white font-bold text-[14px] sm:text-[15px] mt-0.5">
-              المركز السعودي للأعمال
+              {t.sbcName}
             </span>
             <span className="text-slate-400 text-[10px] sm:text-[11px] tracking-wide flex items-center gap-1 mt-0.5">
               Saudi Business Centre
@@ -216,7 +267,7 @@ export default function TrustBlock({
       {/* ── Bottom strip — encryption / privacy reassurance ─────────── */}
       <div className="border-t border-white/10 bg-slate-950/40 px-4 sm:px-6 py-3 flex items-center justify-center gap-2 text-slate-100 text-[12px] sm:text-[13px] font-medium text-center">
         <Lock className="w-4 h-4 shrink-0" style={{ color: '#10B981' }} />
-        <span>بياناتك آمنة ومشفرة 100% ولا نشاركها مع أي جهة خارجية</span>
+        <span>{t.privacy}</span>
       </div>
     </div>
   )
