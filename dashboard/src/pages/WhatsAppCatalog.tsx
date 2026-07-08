@@ -49,6 +49,7 @@ import {
   type MetaImportReport,
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
+import WabaCatalogLinkStatusCard from '../components/catalog/WabaCatalogLinkStatusCard'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -679,6 +680,7 @@ export default function WhatsAppCatalog() {
         icon={<MessageCircle className="w-5 h-5 text-emerald-600" />}
       >
         <div className="space-y-4">
+          <WabaCatalogLinkStatusCard />
           <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3">
             {cm.channelBinding.intro}
           </div>
