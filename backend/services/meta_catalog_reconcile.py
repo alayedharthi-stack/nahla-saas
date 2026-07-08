@@ -94,13 +94,13 @@ class MetaCatalogReconcileReport:
         }
 
 
-def fetch_meta_catalog_retailer_ids(
+def fetch_meta_catalog_live_products(
     conn: Any,
     catalog_id: str,
     *,
     client: Optional[httpx.Client] = None,
-) -> Tuple[Set[str], Dict[str, Any]]:
-    """Paginate Meta Graph ``/{catalog_id}/products`` and collect retailer ids."""
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """Paginate Meta Graph ``/{catalog_id}/products`` (GET) into a retailer_id map."""
     catalog_id = str(catalog_id or "").strip()
     meta_info: Dict[str, Any] = {
         "catalog_id": catalog_id,
@@ -109,19 +109,19 @@ def fetch_meta_catalog_retailer_ids(
         "http_status": None,
         "error": None,
     }
-    ids: Set[str] = set()
+    live: Dict[str, Dict[str, Any]] = {}
     if not catalog_id:
         meta_info["error"] = "catalog_id_missing"
-        return ids, meta_info
+        return live, meta_info
 
     token = str((_select_graph_token(conn) or {}).get("token") or "").strip()
     if not token:
         meta_info["error"] = "no_graph_token"
-        return ids, meta_info
+        return live, meta_info
 
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/products"
     params: Optional[Dict[str, str]] = {
-        "fields": "retailer_id,name",
+        "fields": "id,retailer_id,name,price,availability",
         "limit": "250",
         "access_token": token,
     }
@@ -136,9 +136,15 @@ def fetch_meta_catalog_retailer_ids(
         meta_info["pages"] += 1
         for row in rows:
             rid = str(row.get("retailer_id") or "").strip()
-            if rid:
-                ids.add(rid)
-        meta_info["items"] = len(ids)
+            if not rid:
+                continue
+            live[rid] = {
+                "meta_product_id": str(row.get("id") or "").strip() or None,
+                "name": str(row.get("name") or "").strip() or None,
+                "price": row.get("price"),
+                "availability": str(row.get("availability") or "").strip() or None,
+            }
+        meta_info["items"] = len(live)
         return True
 
     if client is not None:
@@ -148,7 +154,7 @@ def fetch_meta_catalog_retailer_ids(
                 break
             url = (resp.json() or {}).get("paging", {}).get("next")
             params = None
-        return ids, meta_info
+        return live, meta_info
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
         while url:
@@ -157,7 +163,20 @@ def fetch_meta_catalog_retailer_ids(
                 break
             url = (resp.json() or {}).get("paging", {}).get("next")
             params = None
-    return ids, meta_info
+    return live, meta_info
+
+
+def fetch_meta_catalog_retailer_ids(
+    conn: Any,
+    catalog_id: str,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Tuple[Set[str], Dict[str, Any]]:
+    """Paginate Meta Graph ``/{catalog_id}/products`` and collect retailer ids."""
+    live, meta_info = fetch_meta_catalog_live_products(
+        conn, catalog_id, client=client,
+    )
+    return set(live.keys()), meta_info
 
 
 def _variant_ids_by_product(db: Any, tenant_id: int) -> Dict[int, Tuple[str, ...]]:
@@ -356,6 +375,7 @@ __all__ = [
     "MetaCatalogReconcileReport",
     "ReconcileRowRef",
     "build_meta_catalog_reconcile_plan",
+    "fetch_meta_catalog_live_products",
     "fetch_meta_catalog_retailer_ids",
     "reconcile_meta_catalog_publish_stamps",
 ]
