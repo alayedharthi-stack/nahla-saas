@@ -24,6 +24,7 @@ from services.meta_catalog_export import (
 from services.meta_catalog_reconcile import fetch_meta_catalog_live_products
 
 PUSHABLE_STATUSES = frozenset({"ready", "warn"})
+IN_STOCK_AVAILABILITY = "in stock"
 
 
 @dataclass
@@ -481,11 +482,71 @@ def build_meta_catalog_readiness_report(
     return report
 
 
+def is_ready_create_in_stock_candidate(
+    item: MetaCatalogReadinessItem,
+    *,
+    include_updates: bool = False,
+) -> bool:
+    """True when an item is eligible for guarded batch create push."""
+    if item.status != "ready":
+        return False
+    if (item.availability or "").strip().lower() != IN_STOCK_AVAILABILITY:
+        return False
+    action = (item.action_needed or "").strip().lower()
+    if action == "create":
+        return True
+    if include_updates and action == "update":
+        return True
+    return False
+
+
+def select_ready_create_push_candidates(
+    items: List[MetaCatalogReadinessItem],
+    *,
+    product_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    include_updates: bool = False,
+) -> List[MetaCatalogReadinessItem]:
+    """Filter readiness items to ready + in-stock + create (or update when flagged)."""
+    selected: List[MetaCatalogReadinessItem] = []
+    for item in items:
+        if product_id is not None and int(item.product_id) != int(product_id):
+            continue
+        if not is_ready_create_in_stock_candidate(item, include_updates=include_updates):
+            continue
+        selected.append(item)
+        if limit is not None and len(selected) >= int(limit):
+            break
+    return selected
+
+
+def candidate_push_row(item: MetaCatalogReadinessItem, *, would_push: bool) -> Dict[str, Any]:
+    """Serialize a batch candidate for CLI / operator review."""
+    return {
+        "product_id": item.product_id,
+        "title": item.title,
+        "variant_id": item.variant_id,
+        "retailer_id": item.retailer_id,
+        "item_group_id": item.item_group_id,
+        "generated_name": item.generated_name,
+        "price": item.price,
+        "currency": item.currency,
+        "availability": item.availability,
+        "action_needed": item.action_needed,
+        "status": item.status,
+        "would_push": would_push,
+    }
+
+
 __all__ = [
+    "IN_STOCK_AVAILABILITY",
     "MetaCatalogReadinessItem",
     "MetaCatalogReadinessReport",
     "build_meta_catalog_readiness_report",
+    "candidate_push_row",
     "classify_readiness_status",
     "eligibility_to_readiness_item",
+    "is_ready_create_in_stock_candidate",
     "resolve_action_needed",
+    "select_ready_create_push_candidates",
 ]
