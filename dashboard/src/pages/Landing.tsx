@@ -6,7 +6,9 @@ import WhatsAppDemo from '../components/landing/WhatsAppDemo'
 import InboxDemo from '../components/landing/InboxDemo'
 import '../components/landing/landing.css'
 import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
-import { landingPricingAr } from '../i18n/landingPricingLabels'
+import { useLanguage } from '../i18n/context'
+import { LANDING_COPY } from '../i18n/landingCopy'
+import { landingPricingAr, landingPricingEn } from '../i18n/landingPricingLabels'
 import {
   MessageCircle,
   ShoppingBag,
@@ -18,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
   ArrowLeft,
+  ArrowRight,
   Star,
   Check,
   Bot,
@@ -95,7 +98,7 @@ function FaqItem({ q, a }: { q: string; a: string }) {
     >
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between p-5 sm:p-6 text-right gap-4"
+        className="w-full flex items-center justify-between p-5 sm:p-6 text-start gap-4"
       >
         <span className="text-white font-bold text-base sm:text-lg leading-snug">{q}</span>
         <span className={`shrink-0 transition-colors ${open ? 'text-amber-400' : 'text-slate-500'}`}>
@@ -162,6 +165,8 @@ interface PlanProps {
   currency?: string
   securePayment?: string
   defaultCta?: string
+  savePercent?: (n: number) => string
+  locale?: string
 }
 
 function PlanCard({
@@ -171,6 +176,8 @@ function PlanCard({
   currency = 'ريال',
   securePayment = 'دفع آمن — لا تُطلب بطاقة للتجربة',
   defaultCta = 'ابدأ مجاناً 14 يوم',
+  savePercent = (n) => `وفّر ${n}٪`,
+  locale = 'ar-SA',
 }: PlanProps) {
   const theme    = PLAN_THEME[slug]
   const Icon     = theme.icon
@@ -207,7 +214,7 @@ function PlanCard({
           </div>
           {discount > 0 && (
             <span className={`ms-auto text-[11px] font-bold px-2 py-0.5 rounded-full ${theme.saveBg}`}>
-              وفّر {discount}٪
+              {savePercent(discount)}
             </span>
           )}
         </div>
@@ -216,11 +223,11 @@ function PlanCard({
         {/* Price */}
         <div className="flex items-end gap-2 mb-1">
           <span className="text-4xl font-black leading-none">
-            {launchPrice.toLocaleString('ar-SA')}
+            {launchPrice.toLocaleString(locale)}
           </span>
           <div className="pb-1">
             <div className="text-white/50 text-xs line-through">
-              {price.toLocaleString('ar-SA')} {currency}
+              {price.toLocaleString(locale)} {currency}
             </div>
             <div className="text-white/70 text-xs font-medium">{perMonth}</div>
           </div>
@@ -258,15 +265,15 @@ function PlanCard({
 
 // ── Feature card ──────────────────────────────────────────────────────────────
 function FeatureCard({
-  icon: Icon, title, desc, outcome, highlight = false,
-}: { icon: React.ElementType; title: string; desc: string; outcome?: string; highlight?: boolean }) {
+  icon: Icon, title, desc, outcome, highlight = false, featuredBadge = '⭐ مميزة',
+}: { icon: React.ElementType; title: string; desc: string; outcome?: string; highlight?: boolean; featuredBadge?: string }) {
   if (highlight) {
     return (
       <div className="group relative p-6 rounded-2xl bg-gradient-to-b from-amber-500/12 to-amber-500/4 border border-amber-400/30 hover:border-amber-400/60 hover:from-amber-500/18 transition-all duration-300 hover:-translate-y-1 backdrop-blur-sm shadow-lg shadow-amber-500/8">
-        {/* "مميز" badge */}
+        {/* Featured badge */}
         <div className="absolute -top-2.5 start-4">
           <span className="bg-amber-500 text-slate-900 text-[10px] font-black px-2.5 py-0.5 rounded-full shadow-md shadow-amber-500/30">
-            ⭐ مميزة
+            {featuredBadge}
           </span>
         </div>
         <div className="w-11 h-11 rounded-xl bg-amber-500/25 flex items-center justify-center mb-4 group-hover:bg-amber-500/35 transition-colors ring-1 ring-amber-400/30">
@@ -369,8 +376,20 @@ function signalSallaReady() {
   try { window.parent.postMessage({ event: 'app.ready', type: 'app.ready' }, '*') } catch { /* ignore */ }
 }
 
+const FEATURE_ICONS = [
+  Bot, Zap, ShoppingCart, RefreshCw, Star, CreditCard, Gift, ShoppingBag,
+  Send, LayoutTemplate, CalendarHeart, BarChart3,
+] as const
+
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function Landing() {
+  const { lang, setLang, dir } = useLanguage()
+  const c = LANDING_COPY[lang]
+  const pricing = lang === 'en' ? landingPricingEn : landingPricingAr
+  const priceLocale = lang === 'en' ? 'en-US' : 'ar-SA'
+  const ArrowCta = dir === 'rtl' ? ArrowLeft : ArrowRight
+  const fontFamily = lang === 'ar' ? "'Cairo', sans-serif" : "system-ui, -apple-system, sans-serif"
+
   const [scrolled, setScrolled]         = useState(false)
   const [mobileMenuOpen, setMobile]     = useState(false)
   const heroRef                          = useRef<HTMLDivElement>(null)
@@ -415,18 +434,13 @@ export default function Landing() {
     }, 50)
   }
 
-  const navLinks = [
-    { label: 'لماذا نحلة', id: 'why' },
-    { label: 'كيف تعمل', id: 'how' },
-    { label: 'شاهد نحلة', id: 'demo' },
-    { label: 'صندوق الوارد', id: 'inbox' },
-    { label: 'المميزات', id: 'features' },
-    { label: 'الأسعار', id: 'pricing' },
-    { label: 'الأسئلة الشائعة', id: 'faq' },
-  ]
+  const navLinks = c.nav
+
+  const langButtonClass =
+    'shrink-0 inline-flex items-center justify-center min-h-[36px] px-3 py-2 text-sm font-semibold text-amber-300 hover:text-white transition-colors whitespace-nowrap'
 
   return (
-    <div dir="rtl" className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily: "'Cairo', sans-serif" }}>
+    <div dir={dir} className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily }}>
 
       {/* ══════════════════════════════════════════════════════════
           NAVBAR
@@ -435,50 +449,60 @@ export default function Landing() {
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
+          <div className="flex items-center h-16 w-full">
             {/* Logo */}
-            <Link to="/landing" className="flex items-center gap-2 group">
-              <img src="/logo.png" alt="نحلة" className="w-10 h-10 object-contain drop-shadow-md" />
-              <span className="text-white font-black text-xl tracking-tight">نحلة</span>
+            <Link to="/landing" className="flex items-center gap-2 group shrink-0">
+              <img src="/logo.png" alt={c.brandName} className="w-10 h-10 object-contain drop-shadow-md" />
+              <span className="text-white font-black text-xl tracking-tight">{c.brandName}</span>
               <span className="text-amber-400 text-[10px] font-black bg-amber-500/15 px-1.5 py-0.5 rounded-full border border-amber-500/25 leading-none">
                 AI
               </span>
             </Link>
 
-            {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-0.5">
+            {/* Center nav — lg+ only so actions always keep space */}
+            <div className="hidden lg:flex flex-1 min-w-0 items-center justify-center gap-0.5 px-2">
               {navLinks.map((l) => (
                 <button
                   key={l.id}
                   onClick={() => scrollTo(l.id)}
-                  className="text-slate-400 hover:text-white transition-colors px-3.5 py-2 rounded-lg text-sm font-medium"
+                  className="text-slate-400 hover:text-white transition-colors px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
                 >
                   {l.label}
                 </button>
               ))}
             </div>
 
-            {/* Desktop CTAs */}
-            <div className="hidden md:flex items-center gap-3">
-              <Link to="/login" className="text-slate-400 hover:text-white text-sm font-medium transition-colors px-3 py-2">
-                دخول
+            {/* Actions — always pinned to the end; language never shares flex with nav */}
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0 ms-auto">
+              <Link
+                to="/login"
+                className="hidden md:inline text-slate-400 hover:text-white text-sm font-medium transition-colors px-2 py-2 whitespace-nowrap"
+              >
+                {c.navLogin}
               </Link>
+              <button
+                type="button"
+                onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+                className={langButtonClass}
+                aria-label={lang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية'}
+              >
+                {c.langSwitch}
+              </button>
               <Link
                 to="/register"
-                className="landing-trial-btn inline-flex items-center justify-center text-sm px-5 py-2.5 rounded-xl"
+                className="hidden md:inline-flex landing-trial-btn items-center justify-center text-sm px-5 py-2.5 rounded-xl whitespace-nowrap"
               >
-                جرّب مجاناً 14 يوم
+                {c.navTrial}
               </Link>
+              <button
+                type="button"
+                className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
+                onClick={() => setMobile(!mobileMenuOpen)}
+                aria-label={mobileMenuOpen ? c.menuClose : c.menuOpen}
+              >
+                {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
+              </button>
             </div>
-
-            {/* Mobile toggle — min 44×44px tap target for iPhone */}
-            <button
-              className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
-              onClick={() => setMobile(!mobileMenuOpen)}
-              aria-label={mobileMenuOpen ? 'إغلاق القائمة' : 'فتح القائمة'}
-            >
-              {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
-            </button>
           </div>
         </div>
 
@@ -489,18 +513,25 @@ export default function Landing() {
               <div className="flex flex-col pb-2">
                 {navLinks.map((l) => (
                   <button key={l.id} onClick={() => scrollTo(l.id)}
-                    className="text-slate-300 text-sm font-medium py-3 text-right hover:text-amber-400 transition-colors">
+                    className="text-slate-300 text-sm font-medium py-3 text-start hover:text-amber-400 transition-colors">
                     {l.label}
                   </button>
                 ))}
               </div>
               <div className="flex flex-col gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={() => { setLang(lang === 'ar' ? 'en' : 'ar'); setMobile(false) }}
+                  className={`${langButtonClass} w-full text-center`}
+                >
+                  {c.langSwitch}
+                </button>
                 <Link to="/login" className="text-center text-slate-400 py-2.5 text-sm" onClick={() => setMobile(false)}>
-                  تسجيل الدخول
+                  {c.navLoginMobile}
                 </Link>
                 <Link to="/register" onClick={() => setMobile(false)}
                   className="landing-trial-btn text-center text-sm py-3.5 rounded-2xl">
-                  جرّب مجاناً 14 يوم — بلا بطاقة
+                  {c.navTrialMobile}
                 </Link>
               </div>
             </div>
@@ -526,21 +557,21 @@ export default function Landing() {
           <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/25 rounded-full px-4 py-2 mb-6">
             <span className="w-2 h-2 bg-amber-400 rounded-full animate-pulse" />
             <span className="text-amber-300 text-sm font-bold">
-              عرض الإطلاق — خصم 50٪ لأول شهرين
+              {c.hero.badge}
             </span>
           </div>
 
           {/* Core promise — WhatsApp stays on your phone */}
           <h1 className="text-[2rem] sm:text-5xl lg:text-[4.25rem] font-black text-white leading-[1.12] mb-4 sm:mb-5 tracking-tight max-w-3xl mx-auto">
-            واتسابك يبقى معك…
+            {c.hero.titleLine1}
             <br />
             <span className="text-transparent bg-clip-text bg-gradient-to-l from-amber-300 via-amber-400 to-yellow-500">
-              ونحلة تبيع معك
+              {c.hero.titleLine2}
             </span>
           </h1>
 
           <p className="text-base sm:text-xl text-slate-300 max-w-2xl mx-auto leading-relaxed mb-6 sm:mb-8 font-medium">
-            اربط واتساب الأعمال بالذكاء والحملات، واستمر في استخدام جوالك كالمعتاد بينما نحلة ترد، تقترح، وتتابع الطلبات عنك.
+            {c.hero.subtitle}
           </p>
 
           {/* Primary CTA — above visual block so trial stays reachable on mobile */}
@@ -549,16 +580,16 @@ export default function Landing() {
               to="/register"
               className="landing-trial-btn group inline-flex items-center gap-2.5 text-base sm:text-lg px-8 sm:px-10 py-4 rounded-2xl w-full sm:w-auto justify-center order-1"
             >
-              <span className="sm:hidden pointer-events-none">جرّب مجانًا لمدة 14 يوم</span>
-              <span className="hidden sm:inline pointer-events-none">ابدأ تجربتك المجانية الآن</span>
-              <ArrowLeft size={18} className="pointer-events-none transition-transform motion-safe:group-hover:-translate-x-1" />
+              <span className="sm:hidden pointer-events-none">{c.hero.ctaTrialMobile}</span>
+              <span className="hidden sm:inline pointer-events-none">{c.hero.ctaTrialDesktop}</span>
+              <ArrowCta size={18} className="pointer-events-none transition-transform motion-safe:group-hover:translate-x-0.5 rtl:motion-safe:group-hover:-translate-x-1" />
             </Link>
             <button
               onClick={() => scrollTo('how')}
               className="flex items-center gap-2 text-slate-300 hover:text-white border border-white/15 hover:border-amber-400/35 hover:bg-amber-500/5 text-sm sm:text-base px-6 py-4 rounded-2xl transition-all duration-200 w-full sm:w-auto justify-center order-2"
             >
               <MessageCircle size={17} className="text-emerald-400/80 shrink-0" />
-              كيف يعمل مع واتساب الأعمال؟
+              {c.hero.ctaHow}
             </button>
           </div>
 
@@ -566,59 +597,59 @@ export default function Landing() {
           <div className="landing-hero-value">
             <div className="landing-hero-pill">
               <Smartphone size={13} className="shrink-0 text-amber-400" />
-              واتساب الأعمال + الذكاء + الحملات في مكان واحد
+              {c.hero.pill}
             </div>
-            <div className="landing-hero-stack" aria-label="واتساب الأعمال ثم الذكاء ثم الحملات">
+            <div className="landing-hero-stack" aria-label={c.hero.stackAria}>
               <div className="landing-hero-stack-item">
                 <div className="landing-hero-stack-icon landing-hero-stack-icon--wa">
                   <MessageCircle size={18} />
                 </div>
-                <span className="landing-hero-stack-label">واتساب الأعمال</span>
+                <span className="landing-hero-stack-label">{c.hero.stackWa}</span>
               </div>
-              <ArrowLeft size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
+              <ArrowCta size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
               <div className="landing-hero-stack-item">
                 <div className="landing-hero-stack-icon landing-hero-stack-icon--ai">
                   <Bot size={18} />
                 </div>
-                <span className="landing-hero-stack-label">ذكاء يرد ويقترح</span>
+                <span className="landing-hero-stack-label">{c.hero.stackAi}</span>
               </div>
-              <ArrowLeft size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
+              <ArrowCta size={14} className="landing-hero-stack-arrow shrink-0" aria-hidden="true" />
               <div className="landing-hero-stack-item">
                 <div className="landing-hero-stack-icon landing-hero-stack-icon--campaign">
                   <Send size={17} />
                 </div>
-                <span className="landing-hero-stack-label">حملات ومتابعة</span>
+                <span className="landing-hero-stack-label">{c.hero.stackCampaign}</span>
               </div>
             </div>
             <p className="landing-hero-stack-note hidden sm:block">
-              لا تغيّر طريقة عملك — نحلة تضيف الردود التلقائية والحملات فوق واتسابك الحالي على الجوال.
+              {c.hero.stackNote}
             </p>
           </div>
 
           {/* Risk-reversal micro-copy */}
           <p className="text-slate-600 text-xs mt-4">
-            بلا بطاقة ائتمانية · بلا عقود · تلغي في أي وقت
+            {c.hero.riskReversal}
           </p>
 
           {/* Social proof bar */}
           <div className="mt-8 sm:mt-12 inline-flex flex-wrap items-center justify-center gap-4 sm:gap-6 bg-white/3 border border-white/8 rounded-2xl px-5 sm:px-6 py-3.5 sm:py-4 backdrop-blur-sm">
             <div className="flex items-center gap-2.5">
-              <div className="flex -space-x-2 space-x-reverse">
+              <div className={`flex -space-x-2 ${dir === 'rtl' ? 'space-x-reverse' : ''}`}>
                 {['🧑‍💼', '👩‍💼', '👨‍💻', '👩‍🍳'].map((e, i) => (
                   <div key={i} className="w-7 h-7 rounded-full bg-slate-700 border-2 border-slate-800 flex items-center justify-center text-xs">
                     {e}
                   </div>
                 ))}
               </div>
-              <span className="text-slate-400 text-sm font-medium">+500 متجر نشط</span>
+              <span className="text-slate-400 text-sm font-medium">{c.hero.socialStores}</span>
             </div>
             <div className="w-px h-5 bg-white/10 hidden sm:block" />
             <div className="flex items-center gap-1.5">
               {[...Array(5)].map((_, i) => <Star key={i} size={13} className="text-amber-400 fill-amber-400" />)}
-              <span className="text-slate-400 text-sm font-medium">4.9/5 تقييم</span>
+              <span className="text-slate-400 text-sm font-medium">{c.hero.socialRating}</span>
             </div>
             <div className="w-px h-5 bg-white/10 hidden sm:block" />
-            <span className="text-slate-400 text-sm font-medium">14 يوم مجاناً</span>
+            <span className="text-slate-400 text-sm font-medium">{c.hero.socialTrial}</span>
           </div>
         </div>
 
@@ -636,13 +667,13 @@ export default function Landing() {
       <section className="bg-slate-800/40 border-y border-white/5 py-10">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
           <p className="text-center text-slate-500 text-xs font-bold uppercase tracking-widest mb-7">
-            هل تعاني من هذه المشاكل؟
+            {c.problem.heading}
           </p>
           <div className="grid sm:grid-cols-3 gap-4">
             {[
-              { icon: AlertCircle, text: 'رسائل واتساب بلا رد تعني عملاء يشترون من منافسك' },
-              { icon: Clock,       text: 'فريق الدعم غارق في نفس الأسئلة المتكررة يومياً' },
-              { icon: ShoppingCart, text: 'عملاء يتركون السلة لأن لا أحد يتابع معهم' },
+              { icon: AlertCircle, text: c.problem.items[0] },
+              { icon: Clock,       text: c.problem.items[1] },
+              { icon: ShoppingCart, text: c.problem.items[2] },
             ].map(({ icon: Icon, text }, i) => (
               <div key={i} className="flex items-start gap-3 p-4 rounded-xl bg-red-500/5 border border-red-500/10">
                 <Icon size={18} className="text-red-400/70 shrink-0 mt-0.5" />
@@ -651,17 +682,14 @@ export default function Landing() {
             ))}
           </div>
           <p className="text-center text-amber-400 font-bold text-sm mt-7">
-            نحلة تحل هذه المشاكل الثلاث تلقائياً، من اليوم الأول. 🐝
+            {c.problem.closing}
           </p>
         </div>
       </section>
 
-      {/* ══════════════════════════════════════════════════════════
-          WHY NAHLA — Sales Intelligence
-          (moved here from the registration / login pages so it sits
-           on the marketing flow before "how it works".)
-      ══════════════════════════════════════════════════════════ */}
-      <SalesIntelligenceSection lang="ar" />
+      <div id="why" className="scroll-mt-20">
+        <SalesIntelligenceSection lang={lang} />
+      </div>
 
       {/* ══════════════════════════════════════════════════════════
           HOW IT WORKS
@@ -670,38 +698,23 @@ export default function Landing() {
         <HoneycombBg />
         <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="text-center mb-14">
-            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">في 4 خطوات فقط</p>
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">{c.how.eyebrow}</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-3">
-              كيف تعمل نحلة؟
+              {c.how.title}
             </h2>
-            <p className="text-slate-400 text-base">إعداد كامل في أقل من ساعة واحدة</p>
+            <p className="text-slate-400 text-base">{c.how.subtitle}</p>
           </div>
           <div>
-            <StepCard
-              num="١"
-              title="اربط متجرك"
-              desc="أضف متجرك على سلة أو منصتك التجارية — التكامل فوري وبلا تعقيدات تقنية."
-              time="5 دقائق"
-            />
-            <StepCard
-              num="٢"
-              title="اربط واتساب"
-              desc="ربط رقم واتساب Business الخاص بمتجرك مع نحلة بخطوات موضّحة داخل اللوحة."
-              time="10 دقائق"
-            />
-            <StepCard
-              num="٣"
-              title="درّب نحلة على متجرك"
-              desc="أدخل منتجاتك وعروضك وسياسات الشحن والإرجاع — كل ما تعرفه عن متجرك، علّمه لنحلة."
-              time="20 دقيقة"
-            />
-            <StepCard
-              num="٤"
-              title="شغّل نحلة واسترح"
-              desc="نحلة تبدأ الرد على عملائك فور تفعيلها — ترد، تبيع، وتُتمّ الطلبات بدون أي تدخل منك."
-              time="الآن وإلى الأبد"
-              last
-            />
+            {c.how.steps.map((step, i) => (
+              <StepCard
+                key={step.num}
+                num={step.num}
+                title={step.title}
+                desc={step.desc}
+                time={step.time}
+                last={i === c.how.steps.length - 1}
+              />
+            ))}
           </div>
         </div>
       </section>
@@ -721,27 +734,21 @@ export default function Landing() {
             {/* Text side */}
             <div>
               <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-4">
-                تجربة حقيقية
+                {c.demo.eyebrow}
               </p>
               <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-5">
-                كيف تتحدث نحلة
+                {c.demo.titleLine1}
                 <br />
                 <span className="text-transparent bg-clip-text bg-gradient-to-l from-[#25D366] to-[#128C7E]">
-                  مع عملائك؟
+                  {c.demo.titleLine2}
                 </span>
               </h2>
               <p className="text-slate-400 leading-loose text-base mb-8 max-w-lg">
-                شاهد مثالاً حقيقياً لكيفية رد نحلة على العملاء ومساعدتهم على إتمام الطلب مباشرة عبر واتساب.
+                {c.demo.subtitle}
               </p>
 
-              {/* What the demo shows */}
               <ul className="space-y-4 mb-10">
-                {[
-                  { emoji: '💬', title: 'رد فوري',         desc: 'نحلة ترد في ثوانٍ — لا انتظار، لا تفويت.' },
-                  { emoji: '📦', title: 'تحقق من المخزون', desc: 'تؤكد التوفر والسعر من بيانات متجرك الفعلية.' },
-                  { emoji: '🛒', title: 'رابط الشراء',     desc: 'ترسل رابط الدفع مباشرة داخل المحادثة.' },
-                  { emoji: '💳', title: 'خيارات الدفع',    desc: 'بطاقة، Apple Pay، أو تحويل بنكي — كل شيء داخل الشات.' },
-                ].map(({ emoji, title, desc }) => (
+                {c.demo.bullets.map(({ emoji, title, desc }) => (
                   <li key={title} className="flex items-start gap-3.5">
                     <span className="text-xl shrink-0 mt-0.5">{emoji}</span>
                     <div>
@@ -756,14 +763,13 @@ export default function Landing() {
                 to="/register"
                 className="inline-flex items-center gap-2.5 bg-[#25D366] hover:bg-[#1ebe5d] text-white font-black text-sm px-7 py-3.5 rounded-2xl transition-all duration-200 shadow-lg shadow-[#25D366]/25"
               >
-                <span>ابدأ مجاناً — مثل ما شاهدت</span>
-                <ArrowLeft size={16} />
+                <span>{c.demo.cta}</span>
+                <ArrowCta size={16} />
               </Link>
             </div>
 
-            {/* Demo side */}
             <div className="flex justify-center lg:justify-end">
-              <WhatsAppDemo />
+              <WhatsAppDemo lang={lang} />
             </div>
 
           </div>
@@ -783,46 +789,43 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="text-center mb-12">
             <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">
-              صندوق الوارد الذكي
+              {c.inbox.eyebrow}
             </p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
-              واجهة واتساب التي تعرفها
+              {c.inbox.titleLine1}
               <br />
               <span className="text-transparent bg-clip-text bg-gradient-to-l from-amber-400 to-orange-500">
-                بقدرات مبيعات احترافية
+                {c.inbox.titleLine2}
               </span>
             </h2>
             <p className="text-slate-400 max-w-2xl mx-auto leading-loose text-base">
-              كل محادثات متجرك في مكان واحد. شارات ذكية تخبرك دائماً من يرد:
-              الذكاء الاصطناعي، موظفك، حملاتك، أو الطيار الآلي.
-              <span className="block mt-1 text-slate-500 text-sm">جرّب الفلاتر والمحادثات بنفسك 👇</span>
+              {c.inbox.subtitle}
+              <span className="block mt-1 text-slate-500 text-sm">{c.inbox.subtitleHint}</span>
             </p>
           </div>
 
-          {/* Interactive demo */}
           <div className="relative">
             <span className="absolute -top-3 right-1/2 translate-x-1/2 z-20 inline-flex items-center gap-1.5 bg-amber-500 text-slate-900 text-[11px] font-black px-3 py-1 rounded-full shadow-lg shadow-amber-500/30">
               <span className="w-1.5 h-1.5 rounded-full bg-slate-900 animate-pulse" />
-              تجربة تفاعلية · اضغط الفلاتر والمحادثات
+              {c.inbox.interactiveBadge}
             </span>
-            <InboxDemo />
+            <InboxDemo lang={lang} />
           </div>
 
-          {/* Capability strip */}
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-12">
             {[
-              { dot: 'bg-rose-400 shadow-[0_0_8px_#fb7185]',    title: 'ينبهك حين يطلب موظف', desc: 'بطاقة حمراء فورية لأي عميل يقول "أبغى موظف".' },
-              { dot: 'bg-emerald-400 shadow-[0_0_8px_#34d399]', title: 'يميّز ردّك البشري',     desc: 'حين تتدخل، تتحول البطاقة تلقائياً إلى "ردّ بشري".' },
-              { dot: 'bg-violet-400 shadow-[0_0_8px_#a78bfa]',  title: 'يعرض الحملات بأزرارها', desc: 'القوالب التسويقية تظهر بأزرارها كما يراها العميل.' },
-              { dot: 'bg-sky-400 shadow-[0_0_8px_#38bdf8]',     title: 'الطيار الآلي ينفّذ',    desc: 'تأكيد الطلب، الشحن والمتابعة — تظهر برسائل النظام.' },
-            ].map(c => (
+              { dot: 'bg-rose-400 shadow-[0_0_8px_#fb7185]',    ...c.inbox.capabilities[0] },
+              { dot: 'bg-emerald-400 shadow-[0_0_8px_#34d399]', ...c.inbox.capabilities[1] },
+              { dot: 'bg-violet-400 shadow-[0_0_8px_#a78bfa]',  ...c.inbox.capabilities[2] },
+              { dot: 'bg-sky-400 shadow-[0_0_8px_#38bdf8]',     ...c.inbox.capabilities[3] },
+            ].map(cap => (
               <div
-                key={c.title}
+                key={cap.title}
                 className="bg-slate-800/40 border border-white/5 rounded-xl p-4 hover:border-white/10 transition-colors"
               >
-                <div className={`w-2 h-2 rounded-full mb-2.5 ${c.dot}`} />
-                <h4 className="text-white font-bold text-sm mb-1">{c.title}</h4>
-                <p className="text-slate-400 text-xs leading-relaxed">{c.desc}</p>
+                <div className={`w-2 h-2 rounded-full mb-2.5 ${cap.dot}`} />
+                <h4 className="text-white font-bold text-sm mb-1">{cap.title}</h4>
+                <p className="text-slate-400 text-xs leading-relaxed">{cap.desc}</p>
               </div>
             ))}
           </div>
@@ -835,91 +838,27 @@ export default function Landing() {
       <section id="features" className="py-24 bg-slate-800/30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-14">
-            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">قدرات نحلة</p>
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">{c.features.eyebrow}</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
-              نحلة تعمل كفريق مبيعات متكامل
+              {c.features.title}
             </h2>
             <p className="text-slate-400 max-w-xl mx-auto leading-relaxed text-base">
-              لا توظيف، لا رواتب، لا إجازات — فقط مبيعات متواصلة على مدار الساعة.
+              {c.features.subtitle}
             </p>
           </div>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <FeatureCard
-              icon={Bot}
-              title="ردود ذكية طبيعية"
-              desc="تفهم أسئلة العملاء بالعامية والفصحى وترد بأسلوب متجرك تماماً."
-              outcome="يقلل متوسط وقت الرد من ساعات إلى ثوانٍ"
-            />
-            <FeatureCard
-              icon={Zap}
-              title="الطيار الآلي"
-              desc="شغّله مرة واحدة ثم ارتاح — نحلة تتولى الرد والمتابعة وإتمام الطلب من أوله لآخره بدون أي تدخل منك."
-              outcome="متجرك يبيع وأنت نائم، 24/7 بلا انقطاع"
-              highlight
-            />
-            <FeatureCard
-              icon={ShoppingCart}
-              title="استرجاع السلات المتروكة"
-              desc="تراقب من يترك الطلب وترسل تذكيرات ذكية في الوقت المناسب."
-              outcome="تسترجع ما يصل إلى 30٪ من الطلبات المفقودة"
-            />
-            <FeatureCard
-              icon={RefreshCw}
-              title="إعادة الطلب التنبؤي"
-              desc='نحلة تتذكر كل عميل وتُرسل له رسالة في اللحظة المناسبة — مثال: "سلمى، مرت 3 أسابيع على طلبك الأخير من كريم الترطيب، هل تريدين إعادة الطلب؟ 🍯"'
-              outcome="يزيد معدل تكرار الشراء حتى 40٪ — بدون إعلانات"
-              highlight
-            />
-            <FeatureCard
-              icon={Star}
-              title="توصيات المنتجات"
-              desc="تقترح منتجات مكملة بناءً على ما يريده العميل لزيادة قيمة الطلب."
-              outcome="ترفع متوسط قيمة الطلب بنسبة تصل لـ 35٪"
-            />
-            <FeatureCard
-              icon={CreditCard}
-              title="روابط الدفع الفورية"
-              desc="ترسل رابط الدفع للعميل مباشرة داخل المحادثة فيتم الشراء في ثوانٍ."
-              outcome="تحوّل الاستفسار إلى شراء في نفس المحادثة"
-            />
-            <FeatureCard
-              icon={Gift}
-              title="كوبونات ذكية"
-              desc="تُنشئ كوبونات شخصية للعملاء المترددين لدفعهم للإتمام."
-              outcome="تزيد معدل التحويل لدى العملاء المترددين"
-            />
-            <FeatureCard
-              icon={ShoppingBag}
-              title="طلبات داخل الواتساب"
-              desc="العميل يطلب ويدفع ويتأكد كل شيء داخل واتساب دون مغادرته."
-              outcome="تجربة شراء سلسة = عميل راضٍ يعود"
-            />
-            <FeatureCard
-              icon={Send}
-              title="حملات مجدولة"
-              desc="أرسل عروضك وإشعارات الطلبات والمناسبات لآلاف العملاء بضغطة واحدة."
-              outcome="وصول مضمون أعلى من البريد الإلكتروني"
-            />
-            <FeatureCard
-              icon={LayoutTemplate}
-              title="مكتبة قوالب نحلة الجاهزة"
-              desc="مكتبة قوالب احترافية مكتوبة بعناية ومتوافقة مع شروط ميتا — جاهزة للاعتماد بضغطة واحدة لاسترجاع السلات والحملات وتأكيد الطلبات والشحن."
-              outcome="انطلق فورًا بدون كتابة قوالب أو رفض من ميتا"
-            />
-            <FeatureCard
-              icon={CalendarHeart}
-              title="عروض المناسبات الذكية"
-              desc="نحلة تتعرف تلقائيًا على المناسبات (رمضان، العيد، اليوم الوطني، الجمعة البيضاء…) وتُجهّز لك عروضًا وكوبونات وحملات مخصصة لكل مناسبة في وقتها المثالي."
-              outcome="موسم ذروة بدون جهد — مبيعات تواكب كل مناسبة"
-              highlight
-            />
-            <FeatureCard
-              icon={BarChart3}
-              title="لوحة تحكم كاملة"
-              desc="تابع المحادثات والمبيعات والتحويلات والمشكلات من مكان واحد."
-              outcome="قرارات مبنية على بيانات حقيقية"
-            />
+            {c.features.items.map((feat, i) => (
+              <FeatureCard
+                key={feat.title}
+                icon={FEATURE_ICONS[i]}
+                title={feat.title}
+                desc={feat.desc}
+                outcome={feat.outcome}
+                highlight={feat.highlight}
+                featuredBadge={c.features.featuredBadge}
+              />
+            ))}
           </div>
         </div>
       </section>
@@ -931,42 +870,27 @@ export default function Landing() {
         <HoneycombBg />
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="text-center mb-14">
-            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">قصص نجاح حقيقية</p>
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">{c.testimonials.eyebrow}</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-3">
-              التجار يتكلمون
+              {c.testimonials.title}
             </h2>
-            <p className="text-slate-400 text-base">ليست أرقام، هذه نتائج متاجر حقيقية</p>
+            <p className="text-slate-400 text-base">{c.testimonials.subtitle}</p>
           </div>
 
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
-            <TestimonialCard
-              quote="كنت أرد يدوياً على 200 رسالة يومياً. الآن نحلة تتولى 90٪ منها وأنا أتابع فقط الحالات الاستثنائية."
-              name="محمد العتيبي"
-              store="متجر ملابس — الرياض"
-              result="+3 ساعات يومياً"
-            />
-            <TestimonialCard
-              quote="في أول أسبوع استرجعت 7 طلبات كانت ستضيع. نحلة ترسل للعميل في الوقت الصح وبالكلام الصح."
-              name="نورة الشمري"
-              store="متجر عطور — جدة"
-              result="+23٪ في المبيعات"
-            />
-            <TestimonialCard
-              quote="أفضل استثمار عملته لمتجري. الإعداد أخذ أقل من ساعة والنتائج ظهرت من اليوم الأول."
-              name="خالد المنصور"
-              store="متجر إلكترونيات — الدمام"
-              result="ROI في أسبوع"
-            />
+            {c.testimonials.items.map((t) => (
+              <TestimonialCard
+                key={t.name}
+                quote={t.quote}
+                name={t.name}
+                store={t.store}
+                result={t.result}
+              />
+            ))}
           </div>
 
-          {/* Aggregate trust bar */}
           <div className="mt-12 grid grid-cols-2 sm:grid-cols-4 gap-4">
-            {[
-              { value: '+500',  label: 'متجر نشط',           sub: 'في 3 دول خليجية' },
-              { value: '98٪',   label: 'رضا التجار',          sub: 'بعد أول شهر' },
-              { value: '+2.4M', label: 'محادثة معالجة',        sub: 'هذا الشهر' },
-              { value: '14 يوم', label: 'تجربة مجانية كاملة', sub: 'بلا قيود' },
-            ].map(({ value, label, sub }, i) => (
+            {c.testimonials.stats.map(({ value, label, sub }, i) => (
               <div key={i} className="text-center p-5 rounded-2xl bg-white/4 border border-white/8">
                 <div className="text-2xl sm:text-3xl font-black text-amber-400 mb-1">{value}</div>
                 <div className="text-white font-bold text-sm">{label}</div>
@@ -984,29 +908,27 @@ export default function Landing() {
         <HoneycombBg />
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           <div className="text-center mb-4">
-            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">الأسعار والباقات</p>
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">{c.pricing.eyebrow}</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-3">
-              استثمار يعود عليك من أول أسبوع
+              {c.pricing.title}
             </h2>
             <p className="text-slate-400 text-base max-w-lg mx-auto">
-              كل خطة تشمل تجربة مجانية 14 يوم. لا يلزم بطاقة ائتمانية.
+              {c.pricing.subtitle}
             </p>
           </div>
 
-          {/* Launch promo alert */}
           <div className="flex justify-center mb-10">
             <div className="inline-flex items-center gap-2.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl px-6 py-3">
               <Zap size={15} className="text-amber-400 shrink-0" />
               <span className="text-amber-200 font-bold text-sm">
-                عرض الإطلاق: الأسعار المعروضة بخصم 50٪ لأول شهرين — ينتهي قريباً
+                {c.pricing.promo}
               </span>
             </div>
           </div>
 
-          {/* Cards — no scale transform (breaks mobile) */}
           <div className="grid md:grid-cols-3 gap-5 lg:gap-6 items-stretch">
             {(['starter', 'growth', 'scale'] as const).map((slug) => {
-              const plan = landingPricingAr.plans[slug]
+              const plan = pricing.plans[slug]
               return (
                 <PlanCard
                   key={slug}
@@ -1020,22 +942,23 @@ export default function Landing() {
                   features={plan.features}
                   ctaLabel={plan.ctaLabel}
                   popular={slug === 'growth'}
-                  popularBadge={slug === 'growth' ? landingPricingAr.popularBadge : undefined}
-                  perMonth={landingPricingAr.perMonth}
-                  currency={landingPricingAr.currency}
-                  securePayment={landingPricingAr.securePayment}
-                  defaultCta={landingPricingAr.defaultCta}
+                  popularBadge={slug === 'growth' ? pricing.popularBadge : undefined}
+                  perMonth={pricing.perMonth}
+                  currency={pricing.currency}
+                  securePayment={pricing.securePayment}
+                  defaultCta={pricing.defaultCta}
+                  savePercent={c.pricing.savePercent}
+                  locale={priceLocale}
                 />
               )
             })}
           </div>
 
-          {/* Guarantees row */}
           <div className="mt-10 grid sm:grid-cols-3 gap-4">
             {[
-              { icon: Shield,     text: '14 يوم مجاناً بلا شروط' },
-              { icon: BadgeCheck, text: 'بلا عقود طويلة، ألغِ متى شئت' },
-              { icon: RefreshCw,  text: 'استرداد كامل خلال 7 أيام إن لم تقتنع' },
+              { icon: Shield,     text: c.pricing.guarantees[0] },
+              { icon: BadgeCheck, text: c.pricing.guarantees[1] },
+              { icon: RefreshCw,  text: c.pricing.guarantees[2] },
             ].map(({ icon: Icon, text }, i) => (
               <div key={i} className="flex items-center justify-center gap-2.5 p-4 rounded-2xl bg-green-500/5 border border-green-500/15">
                 <Icon size={16} className="text-green-400 shrink-0" />
@@ -1044,17 +967,16 @@ export default function Landing() {
             ))}
           </div>
 
-          {/* Main CTA under pricing */}
           <div className="text-center mt-10">
             <Link
               to="/register"
               className="inline-flex items-center gap-3 bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-base px-10 py-4 rounded-2xl transition-all duration-200 shadow-xl shadow-amber-500/25 hover:shadow-amber-400/40 hover:scale-[1.02]"
             >
-              ابدأ تجربتك المجانية الآن
-              <ArrowLeft size={18} />
+              {c.pricing.cta}
+              <ArrowCta size={18} />
             </Link>
             <p className="text-slate-600 text-xs mt-3">
-              بلا بطاقة ائتمانية · تلغي في أي وقت · الإعداد في أقل من ساعة
+              {c.pricing.ctaNote}
             </p>
           </div>
         </div>
@@ -1067,27 +989,25 @@ export default function Landing() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
             <div>
-              <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-4">نتائج حقيقية</p>
+              <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-4">{c.trust.eyebrow}</p>
               <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-6">
-                ليست أداة — بل شريك نمو لمتجرك
+                {c.trust.title}
               </h2>
               <p className="text-slate-400 leading-loose mb-8 text-base">
-                نحلة لم تُبنَ لتكون بوتاً للردود. بُنيت لتفهم متجرك كما تفهمه أنت، وتتحدث مع عملائك
-                بأسلوبك، وتحوّل كل محادثة إلى إيراد حقيقي.
+                {c.trust.body}
               </p>
               <ul className="space-y-4">
-                {[
-                  { icon: TrendingUp,  text: 'تزيد إيرادات واتساب بمتوسط 35٪ في أول 3 أشهر',     highlight: true },
-                  { icon: Clock,       text: 'توفّر على فريقك 3–5 ساعات يومياً من الردود المتكررة' },
-                  { icon: Users,       text: 'تحوّل 30٪ من السلات المتروكة إلى طلبات مكتملة' },
-                  { icon: Zap,         text: 'إعداد كامل في أقل من ساعة — دون خبرة تقنية' },
-                  { icon: BadgeCheck,  text: 'مبنية خصيصاً للمتاجر السعودية والخليجية' },
-                ].map(({ icon: Icon, text, highlight }, i) => (
+                {c.trust.bullets.map(({ text, highlight }, i) => (
                   <li key={i} className={`flex items-start gap-3.5 ${highlight ? 'opacity-100' : 'opacity-85'}`}>
                     <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
                       highlight ? 'bg-amber-500/20' : 'bg-white/5'
                     }`}>
-                      <Icon size={16} className={highlight ? 'text-amber-400' : 'text-slate-400'} />
+                      {highlight
+                        ? <TrendingUp size={16} className="text-amber-400" />
+                        : i === 1 ? <Clock size={16} className="text-slate-400" />
+                        : i === 2 ? <Users size={16} className="text-slate-400" />
+                        : i === 3 ? <Zap size={16} className="text-slate-400" />
+                        : <BadgeCheck size={16} className="text-slate-400" />}
                     </div>
                     <span className={`leading-relaxed text-sm sm:text-base ${
                       highlight ? 'text-white font-bold' : 'text-slate-400'
@@ -1097,25 +1017,26 @@ export default function Landing() {
               </ul>
             </div>
 
-            {/* Outcome stats — specific, credible */}
             <div className="grid grid-cols-2 gap-4">
-              {[
-                { value: '35٪',    label: 'زيادة متوسطة في إيرادات واتساب',    color: 'text-amber-400',  bg: 'bg-amber-500/8 border-amber-500/15' },
-                { value: '3 ساعات', label: 'توفّر يومياً من وقت فريق الدعم',    color: 'text-blue-400',   bg: 'bg-blue-500/8 border-blue-500/15' },
-                { value: '30٪',    label: 'من السلات المتروكة تُسترجع',          color: 'text-green-400',  bg: 'bg-green-500/8 border-green-500/15' },
-                { value: '1 ساعة',  label: 'الإعداد الكامل من الصفر',             color: 'text-purple-400', bg: 'bg-purple-500/8 border-purple-500/15' },
-              ].map(({ value, label, color, bg }, i) => (
-                <div key={i} className={`p-5 sm:p-6 rounded-2xl border text-center ${bg}`}>
-                  {i === 3 && (
-                    <div className="text-slate-500 text-[10px] font-medium mb-0.5">أقل من</div>
+              {c.trust.stats.map(({ value, label, prefix }, i) => (
+                <div key={i} className={`p-5 sm:p-6 rounded-2xl border text-center ${
+                  i === 0 ? 'bg-amber-500/8 border-amber-500/15' :
+                  i === 1 ? 'bg-blue-500/8 border-blue-500/15' :
+                  i === 2 ? 'bg-green-500/8 border-green-500/15' :
+                  'bg-purple-500/8 border-purple-500/15'
+                }`}>
+                  {prefix && (
+                    <div className="text-slate-500 text-[10px] font-medium mb-0.5">{prefix}</div>
                   )}
-                  <div className={`text-3xl sm:text-4xl font-black mb-2 ${color}`}>{value}</div>
+                  <div className={`text-3xl sm:text-4xl font-black mb-2 ${
+                    i === 0 ? 'text-amber-400' : i === 1 ? 'text-blue-400' : i === 2 ? 'text-green-400' : 'text-purple-400'
+                  }`}>{value}</div>
                   <div className="text-slate-400 text-xs sm:text-sm leading-snug">{label}</div>
                 </div>
               ))}
               <div className="col-span-2 p-4 rounded-2xl bg-amber-500/5 border border-amber-500/15 flex items-center justify-center gap-3">
                 <Shield size={18} className="text-amber-400" />
-                <span className="text-amber-300/80 font-bold text-sm">ضمان استرداد كامل خلال 7 أيام</span>
+                <span className="text-amber-300/80 font-bold text-sm">{c.trust.refund}</span>
               </div>
             </div>
           </div>
@@ -1132,15 +1053,15 @@ export default function Landing() {
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[300px] bg-amber-500/8 rounded-full blur-3xl pointer-events-none" />
 
         <div className="relative z-10 max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-          <img src="/logo.png" alt="نحلة" className="w-20 h-20 mx-auto mb-6 object-contain drop-shadow-lg" />
+          <img src="/logo.png" alt={c.brandName} className="w-20 h-20 mx-auto mb-6 object-contain drop-shadow-lg" />
           <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight mb-4">
-            متجرك يستحق مساعداً لا يتعب
+            {c.finalCta.title}
           </h2>
           <p className="text-slate-300 text-lg leading-loose mb-3">
-            ابدأ اليوم، وخلال أسبوع ستسأل نفسك: لماذا لم أفعل هذا قبل كذا؟
+            {c.finalCta.body}
           </p>
           <p className="text-slate-500 text-sm mb-10">
-            تجربة 14 يوم مجانية · الإعداد في ساعة واحدة · إلغاء بضغطة واحدة
+            {c.finalCta.note}
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
@@ -1148,17 +1069,17 @@ export default function Landing() {
               to="/register"
               className="group flex items-center gap-2.5 bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-base px-10 py-4 rounded-2xl transition-all duration-200 shadow-2xl shadow-amber-500/35 hover:shadow-amber-400/50 hover:scale-[1.03] w-full sm:w-auto justify-center"
             >
-              أنشئ حسابك الآن مجاناً
-              <ArrowLeft size={18} className="group-hover:-translate-x-1 transition-transform" />
+              {c.finalCta.primary}
+              <ArrowCta size={18} className="transition-transform group-hover:translate-x-0.5 rtl:group-hover:-translate-x-1" />
             </Link>
             <a
-              href="https://wa.me/966500000000?text=أريد معرفة المزيد عن نحلة"
+              href={c.finalCta.whatsappHref}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 border border-white/15 hover:border-amber-400/30 text-slate-300 hover:text-white font-bold text-base px-8 py-4 rounded-2xl transition-all duration-200 hover:bg-amber-500/5 w-full sm:w-auto justify-center"
             >
               <MessageCircle size={18} />
-              تحدث معنا على واتساب
+              {c.finalCta.whatsapp}
             </a>
           </div>
         </div>
@@ -1170,40 +1091,15 @@ export default function Landing() {
       <section id="faq" className="py-24 bg-slate-900">
         <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-12">
-            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">لديك تساؤلات؟</p>
+            <p className="text-amber-500 font-bold text-xs uppercase tracking-widest mb-3">{c.faq.eyebrow}</p>
             <h2 className="text-4xl sm:text-5xl font-black text-white leading-tight">
-              أسئلة شائعة
+              {c.faq.title}
             </h2>
           </div>
           <div className="space-y-2.5">
-            <FaqItem
-              q="كم تستغرق عملية الإعداد الكاملة؟"
-              a="في المتوسط أقل من ساعة. ربط سلة يأخذ 5 دقائق، ربط واتساب 10 دقائق، وإدخال المنتجات والعروض يعتمد على حجم كتالوجك. فريقنا يساعدك في كل خطوة."
-            />
-            <FaqItem
-              q="هل تحتاج نحلة إلى WhatsApp Business API؟"
-              a="نعم، نحلة تعمل مع WhatsApp Cloud API من Meta لتقديم تجربة موثوقة ومتوافقة. نساعدك في الحصول على الوصول وإعداد الحساب ضمن باقة الاشتراك."
-            />
-            <FaqItem
-              q="هل تدعم نحلة منصة سلة؟"
-              a="نعم، نحلة مبنية أصلاً للتكامل مع سلة. يمكنها جلب منتجاتك وأسعارك وحالة المخزون تلقائياً، وإنشاء الطلبات مباشرة داخل متجرك."
-            />
-            <FaqItem
-              q="هل يمكنني التحكم الكامل في ما تقوله نحلة؟"
-              a="بالكامل. أنت تحدد المنتجات، العروض، أسلوب التواصل، والقيود. نحلة لا تتجاوز ما أذنت له — أي معلومة خارج ما أدخلته، تحوّل المحادثة لك."
-            />
-            <FaqItem
-              q="ماذا يحدث بعد انتهاء التجربة المجانية؟"
-              a="ستتلقى إشعاراً قبل 3 أيام من انتهاء التجربة. لا يُخصم أي مبلغ تلقائياً — اختر الخطة التي تناسبك، أو ألغِ بلا أي رسوم."
-            />
-            <FaqItem
-              q="هل يمكن لنحلة إنشاء الطلبات ومعالجة الدفع؟"
-              a="نعم. نحلة تستطيع إنشاء الطلب داخل متجرك وإرسال رابط الدفع للعميل مباشرة عبر واتساب، سواء عبر مدى أو فيزا أو الدفع عند الاستلام."
-            />
-            <FaqItem
-              q="ما الفرق بين نحلة وبوتات واتساب الأخرى؟"
-              a="البوتات التقليدية تعمل بقوائم وكلمات مفتاحية ثابتة. نحلة تفهم السياق والنية وتُجري محادثة طبيعية، وترتبط بمتجرك لتعرف منتجاتك وطلباتك وعروضك في الوقت الفعلي."
-            />
+            {c.faq.items.map((item) => (
+              <FaqItem key={item.q} q={item.q} a={item.a} />
+            ))}
           </div>
         </div>
       </section>
@@ -1214,64 +1110,53 @@ export default function Landing() {
       <section className="bg-gradient-to-b from-slate-900 to-slate-950 py-20 px-4">
         <div className="max-w-3xl mx-auto text-center">
           <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-full px-4 py-1.5 mb-6">
-            <span className="text-amber-400 text-xs font-semibold">قريباً</span>
+            <span className="text-amber-400 text-xs font-semibold">{c.mobileApp.soon}</span>
             <span className="text-slate-400 text-xs">·</span>
-            <span className="text-slate-400 text-xs">تطبيق الجوال</span>
+            <span className="text-slate-400 text-xs">{c.mobileApp.label}</span>
           </div>
           <h2 className="text-3xl md:text-4xl font-black text-white mb-4">
-            نحلة في جيبك{' '}
-            <span className="text-amber-400">دائماً</span>
+            {c.mobileApp.title}{' '}
+            <span className="text-amber-400">{c.mobileApp.titleAccent}</span>
           </h2>
           <p className="text-slate-400 text-base leading-relaxed mb-10 max-w-xl mx-auto">
-            تابع محادثات متجرك، راجع الطلبات، وأدِر مساعدك الذكي من هاتفك في أي وقت ومن أي مكان.
-            التطبيق قادم قريباً على App Store وGoogle Play.
+            {c.mobileApp.body}
           </p>
 
-          {/* Mock phone + badges */}
           <div className="flex flex-col items-center gap-8">
-            {/* Feature chips */}
             <div className="flex flex-wrap justify-center gap-3">
-              {[
-                { icon: '💬', text: 'ردود واتساب فورية' },
-                { icon: '📦', text: 'إدارة الطلبات' },
-                { icon: '📊', text: 'إحصائيات حية' },
-                { icon: '🔔', text: 'إشعارات لحظية' },
-              ].map(chip => (
-                <div key={chip.text} className="flex items-center gap-2 bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-2">
-                  <span className="text-base">{chip.icon}</span>
-                  <span className="text-slate-300 text-sm font-medium">{chip.text}</span>
+              {c.mobileApp.chips.map((text, i) => (
+                <div key={text} className="flex items-center gap-2 bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-2">
+                  <span className="text-base">{['💬', '📦', '📊', '🔔'][i]}</span>
+                  <span className="text-slate-300 text-sm font-medium">{text}</span>
                 </div>
               ))}
             </div>
 
-            {/* Store badges */}
             <div className="flex flex-col items-center gap-3">
               <div className="flex flex-wrap justify-center gap-3" dir="ltr">
-                {/* App Store */}
                 <div className="flex items-center gap-2 bg-slate-800 text-white rounded-2xl px-5 py-3 border border-slate-600/50 opacity-70 cursor-not-allowed select-none">
                   <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white flex-shrink-0">
                     <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z" />
                   </svg>
-                  <div className="flex flex-col leading-none text-right">
-                    <span className="text-[10px] text-slate-400">قريباً على</span>
+                  <div className="flex flex-col leading-none text-start">
+                    <span className="text-[10px] text-slate-400">{c.mobileApp.storeSoon}</span>
                     <span className="text-base font-bold">App Store</span>
                   </div>
                 </div>
 
-                {/* Google Play */}
                 <div className="flex items-center gap-2 bg-slate-800 text-white rounded-2xl px-5 py-3 border border-slate-600/50 opacity-70 cursor-not-allowed select-none">
                   <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white flex-shrink-0">
                     <path d="M3.18 23.76c.31.17.66.22 1.02.14l12.2-7.03-2.66-2.66-10.56 9.55zM.54 1.3C.2 1.67 0 2.2 0 2.9v18.2c0 .7.2 1.23.54 1.6l.09.08 10.2-10.2v-.24L.63 1.22l-.09.08zM20.3 10.27l-2.9-1.67-2.98 2.98 2.98 2.98 2.92-1.68c.83-.48.83-1.26-.02-1.61zM4.2.1L16.4 7.13l-2.66 2.66L3.18.24C3.5.08 3.89.05 4.2.1z" />
                   </svg>
-                  <div className="flex flex-col leading-none text-right">
-                    <span className="text-[10px] text-slate-400">قريباً على</span>
+                  <div className="flex flex-col leading-none text-start">
+                    <span className="text-[10px] text-slate-400">{c.mobileApp.storeSoon}</span>
                     <span className="text-base font-bold">Google Play</span>
                   </div>
                 </div>
               </div>
 
               <p className="text-slate-600 text-xs">
-                في انتظار المراجعة · سيُعلن عند الإطلاق
+                {c.mobileApp.pending}
               </p>
             </div>
           </div>
@@ -1287,35 +1172,28 @@ export default function Landing() {
             {/* Brand */}
             <div className="lg:col-span-2">
               <div className="flex items-center gap-2.5 mb-5">
-                <img src="/logo.png" alt="نحلة" className="w-10 h-10 object-contain" />
-                <span className="text-white font-black text-xl">نحلة</span>
+                <img src="/logo.png" alt={c.brandName} className="w-10 h-10 object-contain" />
+                <span className="text-white font-black text-xl">{c.brandName}</span>
                 <span className="text-amber-400 text-[10px] font-black bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/20">
                   AI
                 </span>
               </div>
               <p className="text-slate-500 text-sm leading-loose max-w-xs mb-6">
-                منصة ذكية تحوّل واتساب إلى قناة مبيعات كاملة لمتجرك — ردود، طلبات، ودفع تلقائي.
+                {c.footer.tagline}
               </p>
               <Link
                 to="/register"
                 className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-slate-900 font-black text-sm px-5 py-2.5 rounded-xl transition-all duration-200"
               >
-                ابدأ مجاناً
-                <ArrowLeft size={14} />
+                {c.footer.cta}
+                <ArrowCta size={14} />
               </Link>
             </div>
 
-            {/* Platform links */}
             <div>
-              <h4 className="text-white font-bold text-sm mb-5">المنصة</h4>
+              <h4 className="text-white font-bold text-sm mb-5">{c.footer.platformHeading}</h4>
               <ul className="space-y-3">
-                {[
-                  { label: 'كيف تعمل', id: 'how' },
-                  { label: 'شاهد نحلة', id: 'demo' },
-                  { label: 'المميزات', id: 'features' },
-                  { label: 'الأسعار', id: 'pricing' },
-                  { label: 'الأسئلة الشائعة', id: 'faq' },
-                ].map(({ label, id }) => (
+                {c.footer.platformLinks.map(({ label, id }) => (
                   <li key={id}>
                     <button
                       onClick={() => scrollTo(id)}
@@ -1328,18 +1206,17 @@ export default function Landing() {
               </ul>
             </div>
 
-            {/* Account links */}
             <div>
-              <h4 className="text-white font-bold text-sm mb-5">الحساب</h4>
+              <h4 className="text-white font-bold text-sm mb-5">{c.footer.accountHeading}</h4>
               <ul className="space-y-3">
                 <li>
                   <Link to="/register" className="text-slate-500 hover:text-amber-400 transition-colors text-sm">
-                    إنشاء حساب جديد
+                    {c.footer.register}
                   </Link>
                 </li>
                 <li>
                   <Link to="/login" className="text-slate-500 hover:text-amber-400 transition-colors text-sm">
-                    تسجيل الدخول
+                    {c.footer.login}
                   </Link>
                 </li>
                 <li>
@@ -1349,7 +1226,7 @@ export default function Landing() {
                     rel="noopener noreferrer"
                     className="text-slate-500 hover:text-amber-400 transition-colors text-sm"
                   >
-                    تواصل معنا
+                    {c.footer.contact}
                   </a>
                 </li>
               </ul>
@@ -1358,10 +1235,10 @@ export default function Landing() {
 
           <div className="pt-6 border-t border-white/6 flex flex-col items-center gap-3 text-slate-600 text-xs">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 w-full">
-              <p>© 2026 نحلة AI — جميع الحقوق محفوظة</p>
+              <p>{c.footer.copyright}</p>
               <div className="flex items-center gap-2">
-                <img src="/logo.png" alt="نحلة" className="w-5 h-5 object-contain" />
-                <span>صُنع بعناية في المملكة العربية السعودية 🇸🇦</span>
+                <img src="/logo.png" alt={c.brandName} className="w-5 h-5 object-contain" />
+                <span>{c.footer.madeIn}</span>
               </div>
             </div>
             <p className="text-slate-500 text-center">
@@ -1376,7 +1253,7 @@ export default function Landing() {
 
           {/* Saudi commercial registration & business-authentication trust block */}
           <div className="mt-6">
-            <TrustBlock variant="dark" />
+            <TrustBlock variant="dark" lang={lang} />
           </div>
         </div>
       </footer>
