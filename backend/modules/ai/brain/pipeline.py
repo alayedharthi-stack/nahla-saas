@@ -318,6 +318,10 @@ def _resolve_catalog_price_guard_fact_rows(
             result_data["catalog_fact_products"] = db_rows
             result_data["catalog_fact_rebuild_source"] = "db_by_catalog_product_ids"
 
+    if not _catalog_guard_fact_rows_have_grounded_price(rows):
+        result_data["catalog_fact_products"] = []
+        return []
+
     return rows
 
 
