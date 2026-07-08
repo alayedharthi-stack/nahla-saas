@@ -267,9 +267,123 @@ def push_one_meta_catalog_item(
     return result
 
 
+def push_ready_meta_catalog_batch(
+    db: Any,
+    tenant_id: int,
+    *,
+    confirm: bool = False,
+    product_id: Optional[int] = None,
+    limit: Optional[int] = None,
+    include_updates: bool = False,
+    stop_on_first_error: bool = True,
+    client: Optional[httpx.Client] = None,
+) -> Dict[str, Any]:
+    """Push a filtered batch of ready create items (dry-run unless ``confirm=True``)."""
+    from services.meta_catalog_readiness import (  # noqa: PLC0415
+        build_meta_catalog_readiness_report,
+        candidate_push_row,
+        is_ready_create_in_stock_candidate,
+        select_ready_create_push_candidates,
+    )
+
+    report = build_meta_catalog_readiness_report(
+        db,
+        int(tenant_id),
+        product_id=product_id,
+        include_meta_live_read=True,
+        client=client,
+    )
+
+    batch: Dict[str, Any] = {
+        "dry_run": not confirm,
+        "tenant_id": int(tenant_id),
+        "error": report.error,
+        "meta_fetch": report.meta_fetch,
+        "summary": {
+            "candidate_count": 0,
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "skipped": 0,
+            "stopped_on_error": False,
+        },
+        "candidates": [],
+        "results": [],
+    }
+
+    if report.error:
+        return batch
+
+    candidates = select_ready_create_push_candidates(
+        report.items,
+        product_id=product_id,
+        limit=limit,
+        include_updates=include_updates,
+    )
+    batch["summary"]["candidate_count"] = len(candidates)
+    batch["candidates"] = [
+        candidate_push_row(item, would_push=True)
+        for item in candidates
+    ]
+
+    if not confirm:
+        return batch
+
+    for item in candidates:
+        if not is_ready_create_in_stock_candidate(item, include_updates=include_updates):
+            batch["summary"]["skipped"] += 1
+            batch["results"].append({
+                "retailer_id": item.retailer_id,
+                "ok": False,
+                "skipped": True,
+                "error": "not_ready_create_in_stock",
+            })
+            continue
+
+        rid = str(item.retailer_id or "").strip()
+        try:
+            push_result = push_one_meta_catalog_item(
+                db,
+                int(tenant_id),
+                rid,
+                confirm=True,
+                client=client,
+            )
+        except MetaCatalogPushError as exc:
+            push_result = {
+                "ok": False,
+                "retailer_id": rid,
+                "error": exc.code,
+                "message": str(exc),
+                "detail": exc.detail,
+            }
+
+        batch["summary"]["attempted"] += 1
+        row = {
+            "retailer_id": rid,
+            "action": push_result.get("action"),
+            "ok": bool(push_result.get("ok")),
+            "meta_product_id": push_result.get("meta_product_id"),
+            "http_status": (push_result.get("meta") or {}).get("http_status"),
+            "error": push_result.get("error"),
+        }
+        batch["results"].append(row)
+
+        if push_result.get("ok"):
+            batch["summary"]["succeeded"] += 1
+        else:
+            batch["summary"]["failed"] += 1
+            if stop_on_first_error:
+                batch["summary"]["stopped_on_error"] = True
+                break
+
+    return batch
+
+
 __all__ = [
     "MetaCatalogPushError",
     "find_meta_catalog_item_by_retailer_id",
     "load_variant_for_push",
     "push_one_meta_catalog_item",
+    "push_ready_meta_catalog_batch",
 ]
