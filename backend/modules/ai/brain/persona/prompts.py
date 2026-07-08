@@ -1,7 +1,23 @@
 """Surface prompts for FactBoundPersonaComposer."""
 from __future__ import annotations
 
+from typing import Any
+
 from .facts_bundle import PersonaFactsBundle
+
+
+def _resolve_catalog_visible_price(product: dict[str, Any]) -> Any:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for key in ("price", "sale_price", "regular_price"):
+        value = product.get(key)
+        if value is None:
+            continue
+        if parse_price_amount(value) is not None:
+            return value
+    return None
 
 
 def build_system_prompt(bundle: PersonaFactsBundle) -> str:
@@ -83,8 +99,10 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             parts = [f"product: {title}"]
             if product.get("category"):
                 parts.append(f"category={product.get('category')}")
-            if facts.get("allow_price_mention") and product.get("price") is not None:
-                parts.append(f"price={product.get('price')} ريال")
+            if facts.get("allow_price_mention"):
+                catalog_price = _resolve_catalog_visible_price(product)
+                if catalog_price is not None:
+                    parts.append(f"price={catalog_price} ريال")
             if facts.get("allow_availability_mention") and "available" in product:
                 parts.append(f"available={product.get('available')}")
             lines.append(" | ".join(parts))
