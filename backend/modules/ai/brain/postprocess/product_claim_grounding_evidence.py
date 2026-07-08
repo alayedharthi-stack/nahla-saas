@@ -139,12 +139,14 @@ def extract_reply_prices(reply: str) -> Set[int]:
         if _span_in_short_address_token(text, start, end):
             continue
 
+        line_start = text.rfind("\n", 0, start) + 1
         window_before = text[max(0, start - 48):start]
+        price_context_window = text[line_start:start]
         window_after = text[end: min(len(text), end + 24)]
         local = f"{window_before}{match.group(0)}{window_after}"
 
         has_currency = bool(_CURRENCY_TOKEN_RE.search(window_after))
-        has_price_context = bool(_PRICE_CONTEXT_RE.search(window_before))
+        has_price_context = bool(_PRICE_CONTEXT_RE.search(price_context_window))
         if not has_currency and not has_price_context:
             continue
 
