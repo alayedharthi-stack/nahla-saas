@@ -130,6 +130,8 @@ export default function WabaCatalogLinkStatusCard() {
                 </span>
               </div>
               <p className="text-xs text-slate-600 mt-1 leading-relaxed">{copy.linkedDesc}</p>
+              <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">{copy.linkedDisclaimer}</p>
+              <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">{copy.linkedManualCheck}</p>
             </div>
           </div>
           {refreshBtn}
@@ -162,8 +164,9 @@ export default function WabaCatalogLinkStatusCard() {
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
             <div>
               <h4 className="text-sm font-bold text-slate-800">{copy.noneTitle}</h4>
-              <p className="text-xs text-slate-600 mt-1">{copy.noneDesc}</p>
-              <p className="text-[11px] text-amber-800 mt-2">{copy.linkComingSoon}</p>
+              {copy.noneDesc ? (
+                <p className="text-xs text-slate-600 mt-1">{copy.noneDesc}</p>
+              ) : null}
             </div>
           </div>
           {refreshBtn}
@@ -176,6 +179,7 @@ export default function WabaCatalogLinkStatusCard() {
           <WhatsAppIcon className="w-4 h-4" />
           {copy.linkCtaDisabled}
         </button>
+        <p className="text-[11px] text-amber-800">{copy.linkComingSoon}</p>
       </div>
     )
   }

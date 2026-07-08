@@ -1760,6 +1760,8 @@ export interface Translations {
       fetchFailed:          string
       linkedTitle:          string
       linkedDesc:           string
+      linkedDisclaimer:     string
+      linkedManualCheck:    string
       linkedBadge:          string
       catalogNameLabel:     string
       catalogIdLabel:       string
