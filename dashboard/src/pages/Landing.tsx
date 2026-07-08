@@ -437,7 +437,7 @@ export default function Landing() {
   const navLinks = c.nav
 
   const langButtonClass =
-    'shrink-0 inline-flex items-center justify-center min-h-[36px] px-3.5 py-2 rounded-lg text-sm font-semibold text-amber-200 border border-amber-400/45 bg-amber-500/15 hover:bg-amber-500/25 hover:text-white transition-colors'
+    'shrink-0 inline-flex items-center justify-center min-h-[36px] px-3 py-2 text-sm font-semibold text-amber-300 hover:text-white transition-colors whitespace-nowrap'
 
   return (
     <div dir={dir} className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily }}>
@@ -449,7 +449,7 @@ export default function Landing() {
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center h-16 gap-2 sm:gap-3">
+          <div className="flex items-center h-16 w-full">
             {/* Logo */}
             <Link to="/landing" className="flex items-center gap-2 group shrink-0">
               <img src="/logo.png" alt={c.brandName} className="w-10 h-10 object-contain drop-shadow-md" />
@@ -459,22 +459,25 @@ export default function Landing() {
               </span>
             </Link>
 
-            {/* Desktop nav links — flex-1 keeps CTAs from being covered */}
-            <div className="hidden md:flex flex-1 min-w-0 items-center justify-center gap-0.5 px-1">
+            {/* Center nav — lg+ only so actions always keep space */}
+            <div className="hidden lg:flex flex-1 min-w-0 items-center justify-center gap-0.5 px-2">
               {navLinks.map((l) => (
                 <button
                   key={l.id}
                   onClick={() => scrollTo(l.id)}
-                  className="text-slate-400 hover:text-white transition-colors px-2 lg:px-3.5 py-2 rounded-lg text-xs lg:text-sm font-medium whitespace-nowrap"
+                  className="text-slate-400 hover:text-white transition-colors px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
                 >
                   {l.label}
                 </button>
               ))}
             </div>
 
-            {/* Desktop CTAs — shrink-0 + z-20 so language switch stays visible */}
-            <div className="hidden md:flex items-center gap-2 shrink-0 relative z-20">
-              <Link to="/login" className="text-slate-400 hover:text-white text-sm font-medium transition-colors px-3 py-2 whitespace-nowrap">
+            {/* Actions — always pinned to the end; language never shares flex with nav */}
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0 ms-auto">
+              <Link
+                to="/login"
+                className="hidden md:inline text-slate-400 hover:text-white text-sm font-medium transition-colors px-2 py-2 whitespace-nowrap"
+              >
                 {c.navLogin}
               </Link>
               <button
@@ -487,24 +490,13 @@ export default function Landing() {
               </button>
               <Link
                 to="/register"
-                className="landing-trial-btn inline-flex items-center justify-center text-sm px-5 py-2.5 rounded-xl whitespace-nowrap"
+                className="hidden md:inline-flex landing-trial-btn items-center justify-center text-sm px-5 py-2.5 rounded-xl whitespace-nowrap"
               >
                 {c.navTrial}
               </Link>
-            </div>
-
-            {/* Mobile: language + menu */}
-            <div className="flex md:hidden items-center gap-1 shrink-0 ms-auto">
               <button
                 type="button"
-                onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-                className={`${langButtonClass} min-w-[44px] min-h-[44px] px-3`}
-                aria-label={lang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية'}
-              >
-                {c.langSwitch}
-              </button>
-              <button
-                className="text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
+                className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
                 onClick={() => setMobile(!mobileMenuOpen)}
                 aria-label={mobileMenuOpen ? c.menuClose : c.menuOpen}
               >
