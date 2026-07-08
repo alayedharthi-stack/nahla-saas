@@ -527,6 +527,119 @@ class TestCatalogPriceNonOrderableFacts:
         assert "غير متاح للطلب" in text
         assert "متوفر" not in text
 
+    def test_compose_row_resolves_sale_price_when_price_null(self) -> None:
+        product = {
+            "id": 109,
+            "title": "عسل طلح نجد البري",
+            "category": "عسل",
+            "price": None,
+            "sale_price": 387,
+            "can_checkout": False,
+        }
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[product],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        rows = facts["catalog_products"]
+        assert len(rows) == 1
+        assert rows[0]["price"] == 387
+        assert facts["price_source"] == "catalog"
+        assert facts["allow_price_mention"] is True
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "387" in prompt
+        assert "price=387" in prompt
+
+    def test_compose_row_resolves_regular_price_when_sale_null(self) -> None:
+        product = {
+            "id": 121,
+            "title": "عسل طلح جبلي",
+            "category": "عسل",
+            "price": None,
+            "sale_price": None,
+            "regular_price": 1475,
+            "can_checkout": False,
+        }
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[product],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        rows = facts["catalog_products"]
+        assert len(rows) == 1
+        assert rows[0]["price"] == 1475
+        assert facts["price_source"] == "catalog"
+        assert facts["allow_price_mention"] is True
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "1475" in prompt
+        assert "price=1475" in prompt
+
+    def test_compose_no_price_when_unparseable(self) -> None:
+        product = {
+            "id": 109,
+            "title": "عسل طلح نجد البري",
+            "category": "عسل",
+            "price": None,
+            "sale_price": "اتصل للسعر",
+            "regular_price": "",
+            "can_checkout": False,
+        }
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[product],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        rows = facts["catalog_products"]
+        assert len(rows) == 1
+        assert "price" not in rows[0]
+        assert "price_source" not in facts
+        assert facts["allow_price_mention"] is False
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "price=" not in prompt
+
+    def test_sale_price_only_does_not_stamp_catalog_from_unrelated_price_column(self) -> None:
+        talh = {
+            "id": 109,
+            "title": "عسل طلح نجد البري",
+            "price": None,
+            "sale_price": 387,
+            "can_checkout": False,
+        }
+        other = {
+            "id": 200,
+            "title": "شمع عسل",
+            "price": 50,
+            "can_checkout": True,
+        }
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر الطلح؟",
+            products=[talh, other],
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        talh_row = next(
+            row for row in bundle.verified_facts["catalog_products"]
+            if row.get("id") == 109
+        )
+        assert talh_row["price"] == 387
+        assert bundle.verified_facts["price_source"] == "catalog"
+        assert bundle.verified_facts["allow_checkout_pressure"] is False
+
     def test_persona_compose_event_metadata_merge_includes_catalog_ids(self) -> None:
         from modules.ai.brain.persona.integration import (  # noqa: PLC0415
             merge_persona_compose_into_extra_metadata,

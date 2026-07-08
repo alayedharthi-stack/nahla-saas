@@ -53,6 +53,21 @@ def catalog_fact_product_rows(products: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def resolve_catalog_visible_price(raw: dict[str, Any]) -> Any:
+    """Resolve parseable catalog-visible price from formatted product fields only."""
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for key in ("price", "sale_price", "regular_price"):
+        value = raw.get(key)
+        if value is None:
+            continue
+        if parse_price_amount(value) is not None:
+            return value
+    return None
+
+
 def classify_catalog_question_kind(
     message: str,
     *,
@@ -107,7 +122,7 @@ def _catalog_rows_from_products(
         category = str(raw.get("category") or "").strip()
         if category:
             row["category"] = category
-        price = raw.get("price")
+        price = resolve_catalog_visible_price(raw)
         if price is not None:
             row["price"] = price
             any_price = True
