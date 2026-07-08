@@ -127,6 +127,12 @@ def test_display_name_ignores_raw_option_summary_list_repr():
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
 
 
+def test_display_name_uses_size_label_for_generic_blouse_variant():
+    parent = _parent(title="بلوزة")
+    variant = _variant(option_summary="40 - M", options=None)
+    assert build_meta_variant_display_name(parent, variant) == "بلوزة - 40 - M"
+
+
 def test_variant_payload_includes_item_group_id_for_real_variant():
     parent = _parent(external_id="88001", meta_retailer_id="88001")
     variant = _variant(retailer_id="88001-591539870", salla_variant_id="591539870")
