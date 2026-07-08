@@ -47,7 +47,7 @@ _CURRENCY_TOKEN_RE = re.compile(
 )
 _PRICE_CONTEXT_RE = re.compile(
     r"(?:السعر|سعر|اسعار|أسعار|الاجمالي|الإجمالي|اجمالي|إجمالي|المبلغ|مبلغ|"
-    r"تكلف|قيمة|ب(?:كم|ـكم))",
+    r"تكلف|قيمة|قيمته|بسعر|ب(?:كم|ـكم))",
     re.UNICODE | re.IGNORECASE,
 )
 _ADDRESS_CONTEXT_RE = re.compile(
@@ -61,6 +61,9 @@ _SHORT_ADDRESS_TOKEN_RE = re.compile(
 )
 _NUMERIC_CANDIDATE_RE = re.compile(
     r"(\d{2,5})(?:\.\d{1,2})?",
+)
+_REPLY_PRICE_AMOUNT_RE = re.compile(
+    r"(?:\d{1,3}(?:,\d{3})+|\d{2,6})(?:\.\d{1,2})?",
 )
 
 _ARABIC_DIGIT_TRANS = str.maketrans(
@@ -131,7 +134,7 @@ def extract_reply_prices(reply: str) -> Set[int]:
     if not text.strip():
         return prices
 
-    for match in _NUMERIC_CANDIDATE_RE.finditer(text):
+    for match in _REPLY_PRICE_AMOUNT_RE.finditer(text):
         start, end = match.span()
         if _span_in_short_address_token(text, start, end):
             continue
@@ -148,16 +151,9 @@ def extract_reply_prices(reply: str) -> Set[int]:
         if _ADDRESS_CONTEXT_RE.search(local) and not has_price_context:
             continue
 
-        raw_num = match.group(0).replace(",", "")
-        try:
-            val = float(raw_num)
-            prices.add(int(val))
-            if "." in raw_num:
-                whole, frac = raw_num.split(".", 1)
-                if frac:
-                    prices.add(int(whole))
-        except (TypeError, ValueError):
-            continue
+        amount = parse_price_amount(match.group(0))
+        if amount is not None:
+            prices.add(amount)
     return prices
 
 

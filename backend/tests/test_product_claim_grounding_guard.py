@@ -244,6 +244,26 @@ class TestPriceNormalization:
         assert parse_price_amount("١٬٤٧٥٫٠٠") == 1475
         assert parse_price_amount("1,475.00") == 1475
 
+    def test_extract_reply_prices_thousands_formats(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            extract_reply_prices,
+        )
+
+        assert extract_reply_prices("سعره ١٬٤٧٥") == {1475}
+        assert extract_reply_prices("387 و 1,475 ريال") == {387, 1475}
+        assert extract_reply_prices("سعره ١٬٤٧٥ ريال") == {1475}
+        assert extract_reply_prices("سعره ١,٤٧٥") == {1475}
+        assert extract_reply_prices("سعره 1٬475") == {1475}
+        assert 475 not in extract_reply_prices("سعره ١٬٤٧٥")
+
+    def test_extract_reply_prices_ignores_weight_without_price_context(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            extract_reply_prices,
+        )
+
+        assert extract_reply_prices("عبوة 500 جرام") == set()
+        assert extract_reply_prices("500 جرام طلح") == set()
+
 
 class TestCatalogFactPriceGrounding:
     def test_catalog_fact_products_prices_in_evidence(self) -> None:
@@ -408,3 +428,62 @@ class TestCatalogFactPriceGrounding:
         )
         assert evidence.catalog_products_this_turn is True
         assert 387 in evidence.grounded_prices
+
+    def test_arabic_thousands_talh_prices_not_rewritten(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        talh_facts = [
+            {
+                "id": 109,
+                "title": "عسل طلح نجد البري إنتاج منحلنا  1 كيلو",
+                "price": "ر.س. ٣٨٧٫٠٠",
+                "can_checkout": False,
+            },
+            {
+                "id": 121,
+                "title": "عسل طلح نجد البري إنتاج منحلنا  5 كيلو",
+                "price": "ر.س. ١٬٤٧٥٫٠٠",
+                "can_checkout": False,
+            },
+        ]
+        reply = "عسل الطلح ١ كيلو بسعر ٣٨٧ ريال، و٥ كيلو بسعر ١٬٤٧٥ ريال"
+        result = apply_product_claim_grounding_guard(
+            reply=reply,
+            tenant_id=33,
+            chosen_path="fact_bound_persona_compose",
+            catalog_fact_products=talh_facts,
+            inbound_metadata={
+                "question_kind": "price",
+                "price_source": "catalog",
+                "checkout_pressure_allowed": False,
+                "catalog_product_ids": [109, 121],
+                "persona_compose": {
+                    "surface": "catalog_product_answer",
+                    "source": "persona_llm",
+                },
+            },
+        )
+        assert result.replaced is False
+        assert "ما ظهر عندي سعر مؤكد" not in result.reply
+
+    def test_compose_guard_rejects_ungrounded_price_near_sعر(self) -> None:
+        from modules.ai.brain.persona.compose_guards import (  # noqa: PLC0415
+            _apply_catalog_product_answer_guards,
+        )
+
+        facts = {
+            "allow_price_mention": True,
+            "allow_slot_prompts": False,
+            "allow_availability_mention": True,
+            "has_positive_availability": False,
+            "allow_superiority_claims": False,
+            "catalog_products": [
+                {"title": "طلح 1ك", "price": 387},
+                {"title": "طلح 5ك", "price": 1475},
+            ],
+        }
+        guard = _apply_catalog_product_answer_guards("سعر الطلح 500", facts)
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_price_amount"
