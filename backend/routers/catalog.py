@@ -92,7 +92,10 @@ from modules.observability.delivery_mode import (
     new_delivery_audit,
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
-from services.meta_commerce_settings import get_whatsapp_commerce_settings_status
+from services.meta_commerce_settings import (
+    enable_whatsapp_catalog_visibility,
+    get_whatsapp_commerce_settings_status,
+)
 
 logger = logging.getLogger("nahla.catalog")
 
@@ -132,6 +135,19 @@ class CatalogConfigPatch(BaseModel):
             "meta_catalog_id must be set for the webhook to attempt "
             "catalog product sends."
         ),
+    )
+
+
+class CommerceSettingsEnableBody(BaseModel):
+    """Body for POST .../catalog/commerce-settings (enable visibility only)."""
+
+    catalog_visible: bool = Field(
+        default=True,
+        description="Must be true — this endpoint only enables catalog visibility.",
+    )
+    cart_enabled: bool = Field(
+        default=True,
+        description="Keep or enable WhatsApp cart alongside catalog visibility.",
     )
 
 
@@ -660,6 +676,35 @@ async def merchant_catalog_commerce_settings_status(
     """
     tenant_id = resolve_tenant_id(request)
     return get_whatsapp_commerce_settings_status(db, tenant_id)
+
+
+@merchant_router.post("/commerce-settings")
+async def merchant_catalog_commerce_settings_enable(
+    body: CommerceSettingsEnableBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Enable WhatsApp catalog visibility for the tenant phone number.
+
+    Tenant derived ONLY from JWT — no cross-tenant params. Graph POST only on
+    ``/{phone_number_id}/whatsapp_commerce_settings`` (query params). No DB
+    writes, no tokens in the response.
+    """
+    if not body.catalog_visible:
+        raise HTTPException(
+            status_code=400,
+            detail="catalog_visible must be true for this action.",
+        )
+    tenant_id = resolve_tenant_id(request)
+    result = enable_whatsapp_catalog_visibility(
+        db,
+        tenant_id,
+        cart_enabled=body.cart_enabled,
+    )
+    if result.get("error") == "catalog_not_linked":
+        raise HTTPException(status_code=409, detail=result)
+    return result
 
 
 @merchant_router.patch("/config")
