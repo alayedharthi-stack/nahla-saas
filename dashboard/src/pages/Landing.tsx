@@ -436,6 +436,9 @@ export default function Landing() {
 
   const navLinks = c.nav
 
+  const langButtonClass =
+    'shrink-0 inline-flex items-center justify-center min-h-[36px] px-3.5 py-2 rounded-lg text-sm font-semibold text-amber-200 border border-amber-400/45 bg-amber-500/15 hover:bg-amber-500/25 hover:text-white transition-colors'
+
   return (
     <div dir={dir} className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily }}>
 
@@ -446,9 +449,9 @@ export default function Landing() {
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
+          <div className="flex items-center h-16 gap-2 sm:gap-3">
             {/* Logo */}
-            <Link to="/landing" className="flex items-center gap-2 group">
+            <Link to="/landing" className="flex items-center gap-2 group shrink-0">
               <img src="/logo.png" alt={c.brandName} className="w-10 h-10 object-contain drop-shadow-md" />
               <span className="text-white font-black text-xl tracking-tight">{c.brandName}</span>
               <span className="text-amber-400 text-[10px] font-black bg-amber-500/15 px-1.5 py-0.5 rounded-full border border-amber-500/25 leading-none">
@@ -456,47 +459,58 @@ export default function Landing() {
               </span>
             </Link>
 
-            {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-0.5">
+            {/* Desktop nav links — flex-1 keeps CTAs from being covered */}
+            <div className="hidden md:flex flex-1 min-w-0 items-center justify-center gap-0.5 px-1">
               {navLinks.map((l) => (
                 <button
                   key={l.id}
                   onClick={() => scrollTo(l.id)}
-                  className="text-slate-400 hover:text-white transition-colors px-3.5 py-2 rounded-lg text-sm font-medium"
+                  className="text-slate-400 hover:text-white transition-colors px-2 lg:px-3.5 py-2 rounded-lg text-xs lg:text-sm font-medium whitespace-nowrap"
                 >
                   {l.label}
                 </button>
               ))}
             </div>
 
-            {/* Desktop CTAs */}
-            <div className="hidden md:flex items-center gap-3">
+            {/* Desktop CTAs — shrink-0 + z-20 so language switch stays visible */}
+            <div className="hidden md:flex items-center gap-2 shrink-0 relative z-20">
+              <Link to="/login" className="text-slate-400 hover:text-white text-sm font-medium transition-colors px-3 py-2 whitespace-nowrap">
+                {c.navLogin}
+              </Link>
               <button
                 type="button"
                 onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-                className="text-slate-400 hover:text-white text-sm font-medium transition-colors px-3 py-2 border border-white/10 hover:border-amber-400/30 rounded-lg"
+                className={langButtonClass}
+                aria-label={lang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية'}
               >
                 {c.langSwitch}
               </button>
-              <Link to="/login" className="text-slate-400 hover:text-white text-sm font-medium transition-colors px-3 py-2">
-                {c.navLogin}
-              </Link>
               <Link
                 to="/register"
-                className="landing-trial-btn inline-flex items-center justify-center text-sm px-5 py-2.5 rounded-xl"
+                className="landing-trial-btn inline-flex items-center justify-center text-sm px-5 py-2.5 rounded-xl whitespace-nowrap"
               >
                 {c.navTrial}
               </Link>
             </div>
 
-            {/* Mobile toggle — min 44×44px tap target for iPhone */}
-            <button
-              className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
-              onClick={() => setMobile(!mobileMenuOpen)}
-              aria-label={mobileMenuOpen ? c.menuClose : c.menuOpen}
-            >
-              {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
-            </button>
+            {/* Mobile: language + menu */}
+            <div className="flex md:hidden items-center gap-1 shrink-0 ms-auto">
+              <button
+                type="button"
+                onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
+                className={`${langButtonClass} min-w-[44px] min-h-[44px] px-3`}
+                aria-label={lang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية'}
+              >
+                {c.langSwitch}
+              </button>
+              <button
+                className="text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
+                onClick={() => setMobile(!mobileMenuOpen)}
+                aria-label={mobileMenuOpen ? c.menuClose : c.menuOpen}
+              >
+                {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -516,7 +530,7 @@ export default function Landing() {
                 <button
                   type="button"
                   onClick={() => { setLang(lang === 'ar' ? 'en' : 'ar'); setMobile(false) }}
-                  className="text-center text-slate-300 py-2.5 text-sm border border-white/10 rounded-xl"
+                  className={`${langButtonClass} w-full text-center`}
                 >
                   {c.langSwitch}
                 </button>
