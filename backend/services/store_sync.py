@@ -185,24 +185,58 @@ def _variant_sync_enabled() -> bool:
     return (raw or "").strip().lower() not in _CATALOG_VARIANT_SYNC_DISABLED_VALUES
 
 
+def _human_option_label(text: Any) -> Optional[str]:
+    """Reject raw option ids / list reprs; keep human labels only."""
+    if text is None:
+        return None
+    label = str(text).strip()
+    if not label:
+        return None
+    if label.isdigit():
+        return None
+    if label.startswith("[") and label.endswith("]"):
+        inner = label[1:-1].strip()
+        if not inner:
+            return None
+        parts = [
+            part.strip().strip("'\"")
+            for part in inner.split(",")
+            if part.strip()
+        ]
+        if parts and all(part.isdigit() for part in parts):
+            return None
+    return label
+
+
 def _variant_option_summary(variant_dict: Dict[str, Any]) -> str:
     """Build a short single-line summary from a variant's options/title.
 
     Falls through priorities so we always get *something* readable:
       1. Explicit ``option_summary`` set by the adapter.
-      2. Pretty-print of ``options`` dict (e.g. ``"M / Red"``).
-      3. ``title`` (Salla often labels variants by joining option names).
+      2. Pretty-print of human ``options`` dict values (e.g. ``"M / Red"``).
+      3. ``title`` / ``name`` (Salla often labels variants by joining option names).
       4. ``sku`` as a last resort.
     """
-    summary = variant_dict.get("option_summary")
+    summary = _human_option_label(variant_dict.get("option_summary"))
     if summary:
-        return str(summary).strip()[:255]
+        return summary[:255]
     options = variant_dict.get("options")
     if isinstance(options, dict) and options:
-        return " / ".join(str(v) for v in options.values() if v)[:255]
-    title = variant_dict.get("title")
-    if title:
-        return str(title).strip()[:255]
+        human_values: List[str] = []
+        for key, value in options.items():
+            if key == "option_value_ids":
+                continue
+            if isinstance(value, (list, tuple)):
+                continue
+            label = _human_option_label(value)
+            if label:
+                human_values.append(label)
+        if human_values:
+            return " / ".join(human_values)[:255]
+    for key in ("title", "name"):
+        label = _human_option_label(variant_dict.get(key))
+        if label:
+            return label[:255]
     sku = variant_dict.get("sku")
     if sku:
         return str(sku).strip()[:255]

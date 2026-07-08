@@ -237,6 +237,29 @@ def _coerce_salla_price_amount(value: Any) -> Optional[float]:
         return None
 
 
+def _human_option_label(text: Any) -> Optional[str]:
+    """Return a human option label, rejecting raw ids and list reprs."""
+    if text is None:
+        return None
+    label = str(text).strip()
+    if not label:
+        return None
+    if label.isdigit():
+        return None
+    if label.startswith("[") and label.endswith("]"):
+        inner = label[1:-1].strip()
+        if not inner:
+            return None
+        parts = [
+            part.strip().strip("'\"")
+            for part in inner.split(",")
+            if part.strip()
+        ]
+        if parts and all(part.isdigit() for part in parts):
+            return None
+    return label
+
+
 def _extract_variant_options(
     raw: Dict[str, Any],
     product_options: Optional[List[Dict[str, Any]]] = None,
@@ -244,8 +267,19 @@ def _extract_variant_options(
     """Map Salla variant option payloads to a stable JSON dict + summary."""
     opts = raw.get("options")
     if isinstance(opts, dict) and opts:
-        summary = " / ".join(str(v) for v in opts.values() if v)
-        return opts, summary or None
+        if opts.keys() != {"option_value_ids"}:
+            cleaned = {
+                k: v for k, v in opts.items()
+                if k != "option_value_ids"
+            }
+            human_values = [
+                label
+                for label in (_human_option_label(v) for v in cleaned.values())
+                if label
+            ]
+            if human_values:
+                summary = " / ".join(human_values)
+                return (cleaned or opts), summary or None
 
     rov = raw.get("related_option_values") or raw.get("related_options")
     if opts is not None and not isinstance(opts, dict):
@@ -307,6 +341,13 @@ def _extract_variant_options(
         return out, summary or None
 
     if raw_ids:
+        fallback = _human_option_label(raw.get("name") or raw.get("title"))
+        if fallback:
+            groups = product_options or []
+            if len(groups) == 1 and isinstance(groups[0], dict):
+                gname = (groups[0].get("name") or "").strip() or "option"
+                return {gname: fallback}, fallback
+            return None, fallback
         return {
             "option_value_ids": [str(i) for i in raw_ids],
         }, None
