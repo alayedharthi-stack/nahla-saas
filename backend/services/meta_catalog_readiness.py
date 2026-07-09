@@ -34,6 +34,11 @@ _NAME_QUALITY_REASONS = frozenset({
     "color_size_slash_name",
 })
 
+_LIVE_META_REVIEW_REASONS = frozenset({
+    "live_name_size_mismatch",
+    "stale_meta_display_name",
+})
+
 _HUMAN_OPTION_KEYS = frozenset({
     "المقاس", "مقاس", "size", "حجم",
     "اللون", "لون", "color", "colour",
@@ -218,6 +223,87 @@ def _looks_like_size_token(text: str) -> bool:
     return bool(_SIZE_LIKE_RE.search(text))
 
 
+def _canonical_size_label(text: str) -> Optional[str]:
+    """Normalize one apparel size token for conservative comparisons."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    match = _SIZE_LIKE_RE.search(text)
+    if not match:
+        return None
+    token = match.group(0).strip()
+    token = re.sub(r"\s*-\s*", " - ", token)
+    return token.upper()
+
+
+def _local_size_label(payload: Dict[str, Any], variant: Any) -> Optional[str]:
+    size = str(payload.get("size") or "").strip()
+    if size:
+        return _canonical_size_label(size) or size.upper()
+    summary = str(getattr(variant, "option_summary", "") or "").strip()
+    if not summary or _looks_like_raw_option_ids(summary):
+        return None
+    if "/" in summary:
+        return None
+    if not _looks_like_size_token(summary):
+        return None
+    return _canonical_size_label(summary)
+
+
+def _live_size_tokens(live_name: str, *, parent_title: Optional[str] = None) -> Set[str]:
+    """Extract distinct size tokens present in a Meta live display name."""
+    live_name = (live_name or "").strip()
+    if not live_name:
+        return set()
+
+    tokens: Set[str] = set()
+    segments = [part.strip() for part in live_name.split("/") if part.strip()]
+    if not segments:
+        segments = [live_name]
+
+    title_prefix = f"{parent_title} - " if parent_title else None
+    for segment in segments:
+        text = segment
+        if title_prefix and text.startswith(title_prefix):
+            text = text[len(title_prefix):].strip()
+        token = _canonical_size_label(text)
+        if token:
+            tokens.add(token)
+    return tokens
+
+
+def collect_live_meta_display_reasons(
+    payload: Dict[str, Any],
+    variant: Any,
+    live_row: Optional[Dict[str, Any]],
+    *,
+    parent: Any = None,
+) -> List[str]:
+    """Read-only Meta live display drift flags (no payload mutation)."""
+    if not live_row:
+        return []
+
+    live_name = str(live_row.get("name") or "").strip()
+    generated_name = str(payload.get("name") or "").strip()
+    if not live_name:
+        return []
+
+    reasons: List[str] = []
+    parent_title = str(getattr(parent, "title", "") or "").strip() if parent else None
+    local_size = _local_size_label(payload, variant)
+    live_sizes = _live_size_tokens(live_name, parent_title=parent_title or None)
+
+    if local_size and live_sizes and local_size not in live_sizes:
+        reasons.append("live_name_size_mismatch")
+    elif (
+        generated_name
+        and live_name != generated_name
+        and "live_name_size_mismatch" not in reasons
+    ):
+        reasons.append("stale_meta_display_name")
+    return reasons
+
+
 def _is_color_size_slash_name(summary: str) -> bool:
     text = (summary or "").strip()
     if "/" not in text:
@@ -299,6 +385,10 @@ def collect_variant_name_quality_reasons(
     ):
         reasons.append("meta_name_no_size")
     return reasons
+
+
+# TODO(platform): duplicate_option_summary_siblings — flag repeated option_summary
+# across siblings on the same parent when building the full tenant report.
 
 
 def classify_readiness_status(
@@ -453,7 +543,15 @@ def eligibility_to_readiness_item(
         if live:
             item.meta_product_id = live.get("meta_product_id")
             item.live_name = live.get("name")
-        item.action_needed = resolve_action_needed(status, payload or None, live)
+        live_reasons = collect_live_meta_display_reasons(
+            payload, variant, live, parent=parent,
+        )
+        for code in live_reasons:
+            if code not in item.reasons:
+                item.reasons.append(code)
+        if item.status == "ready" and "live_name_size_mismatch" in live_reasons:
+            item.status = "warn"
+        item.action_needed = resolve_action_needed(item.status, payload or None, live)
 
     return item
 
@@ -487,6 +585,8 @@ def _compute_counts(
         "orphan_option_value_ids_items": 0,
         "meta_name_no_size_items": 0,
         "color_size_slash_name_items": 0,
+        "live_name_size_mismatch_items": 0,
+        "stale_meta_display_name_items": 0,
     }
     for item in all_items:
         if item.status == "ready":
@@ -515,6 +615,10 @@ def _compute_counts(
             counts["meta_name_no_size_items"] += 1
         if "color_size_slash_name" in item.reasons:
             counts["color_size_slash_name_items"] += 1
+        if "live_name_size_mismatch" in item.reasons:
+            counts["live_name_size_mismatch_items"] += 1
+        if "stale_meta_display_name" in item.reasons:
+            counts["stale_meta_display_name_items"] += 1
 
         if item.in_meta_live is True:
             counts["already_live_in_meta"] += 1
@@ -708,6 +812,7 @@ __all__ = [
     "build_meta_catalog_readiness_report",
     "candidate_push_row",
     "classify_readiness_status",
+    "collect_live_meta_display_reasons",
     "collect_variant_name_quality_reasons",
     "eligibility_to_readiness_item",
     "is_ready_create_in_stock_candidate",
