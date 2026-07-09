@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -260,6 +261,85 @@ def _human_option_label(text: Any) -> Optional[str]:
     return label
 
 
+_SIZE_COMPOUND_RE = re.compile(
+    r"^\d{1,2}\s*[-–]\s*(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL)$",
+    re.IGNORECASE,
+)
+_SIZE_LETTER_RE = re.compile(
+    r"^(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL)$",
+    re.IGNORECASE,
+)
+_APPAREL_SIZE_NUMBERS = frozenset({
+    "34", "36", "38", "40", "42", "44", "46", "48", "50", "52",
+})
+_KNOWN_COLOR_TOKENS = frozenset({
+    "اسود", "ابيض", "بيج", "وردي", "فوشي", "بنفسجي", "احمر",
+    "ازرق", "اخضر", "رمادي", "بني", "كحلي", "ذهبي", "فضي",
+    "black", "white", "beige", "pink", "purple", "red", "blue",
+    "green", "gray", "grey", "brown", "navy", "gold", "silver",
+})
+
+
+def _normalize_color_lookup(text: str) -> str:
+    text = unicodedata.normalize("NFKC", (text or "").strip()).lower()
+    for src, dst in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+        text = text.replace(src, dst)
+    return text
+
+
+def _looks_like_apparel_size(value_name: str) -> bool:
+    text = (value_name or "").strip()
+    if not text:
+        return False
+    if _SIZE_COMPOUND_RE.match(text):
+        return True
+    if _SIZE_LETTER_RE.match(text):
+        return True
+    if text.isdigit() and text in _APPAREL_SIZE_NUMBERS:
+        return True
+    return False
+
+
+def _looks_like_known_color(value_name: str) -> bool:
+    text = _normalize_color_lookup(value_name)
+    if not text:
+        return False
+    if text in _KNOWN_COLOR_TOKENS:
+        return True
+    # Allow a single known color token with minor suffix, e.g. "ازرق غامق".
+    first = text.split()[0] if text.split() else ""
+    return bool(first and first in _KNOWN_COLOR_TOKENS)
+
+
+def _canonicalize_option_entry(group_name: str, value_name: str) -> tuple[str, str]:
+    """Map a Salla option group/value pair to stable catalog keys when confident."""
+    gname = (group_name or "").strip() or "option"
+    vname = (value_name or "").strip()
+    if not vname:
+        return gname, vname
+    if _looks_like_apparel_size(vname):
+        return "المقاس", vname
+    if _looks_like_known_color(vname):
+        return "اللون", vname
+    return gname, vname
+
+
+def _canonicalize_options_dict(options: Dict[str, Any]) -> Dict[str, str]:
+    """Apply conservative key canonicalization to a human options dict."""
+    out: Dict[str, str] = {}
+    for group_name, value in options.items():
+        if group_name == "option_value_ids":
+            continue
+        label = _human_option_label(value)
+        if not label:
+            continue
+        ckey, cval = _canonicalize_option_entry(str(group_name).strip(), label)
+        if ckey in out and out[ckey] != cval:
+            continue
+        out[ckey] = cval
+    return out
+
+
 def _extract_variant_options(
     raw: Dict[str, Any],
     product_options: Optional[List[Dict[str, Any]]] = None,
@@ -278,8 +358,9 @@ def _extract_variant_options(
                 if label
             ]
             if human_values:
-                summary = " / ".join(human_values)
-                return (cleaned or opts), summary or None
+                canonical = _canonicalize_options_dict(cleaned)
+                summary = " / ".join(canonical.values()) if canonical else " / ".join(human_values)
+                return (canonical or cleaned or opts), summary or None
 
     rov = raw.get("related_option_values") or raw.get("related_options")
     if opts is not None and not isinstance(opts, dict):
@@ -323,7 +404,9 @@ def _extract_variant_options(
                 or ""
             ).strip()
             if gname and vname and gname not in out:
-                out[gname] = vname
+                ckey, cval = _canonicalize_option_entry(gname, vname)
+                if ckey not in out:
+                    out[ckey] = cval
             elif item.get("id") is not None:
                 raw_ids.append(item.get("id"))
         else:
@@ -334,7 +417,9 @@ def _extract_variant_options(
         if key in value_index:
             gname, vname = value_index[key]
             if gname and vname:
-                out[gname] = vname
+                ckey, cval = _canonicalize_option_entry(gname, vname)
+                if ckey not in out:
+                    out[ckey] = cval
 
     if out:
         summary = " / ".join(str(v) for v in out.values() if v)
@@ -346,7 +431,8 @@ def _extract_variant_options(
             groups = product_options or []
             if len(groups) == 1 and isinstance(groups[0], dict):
                 gname = (groups[0].get("name") or "").strip() or "option"
-                return {gname: fallback}, fallback
+                canonical = _canonicalize_options_dict({gname: fallback})
+                return canonical, " / ".join(canonical.values()) if canonical else fallback
             return None, fallback
         return {
             "option_value_ids": [str(i) for i in raw_ids],

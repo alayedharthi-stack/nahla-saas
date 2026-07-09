@@ -258,9 +258,35 @@ def _human_option_summary(variant: Any) -> Optional[str]:
     return summary
 
 
+def _extract_variant_attribute(options: Any, *keys: str) -> Optional[str]:
+    """Return the first non-empty option value for any of *keys* (case-insensitive)."""
+    if not isinstance(options, dict) or not options:
+        return None
+    lookup = {
+        str(k).lower(): v
+        for k, v in options.items()
+        if k and str(k).lower() != "option_value_ids"
+    }
+    for key in keys:
+        val = lookup.get(key.lower())
+        if val is None or isinstance(val, (list, tuple)):
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return None
+
+
+def _is_grouped_meta_variant(parent: Any, variant: Any) -> bool:
+    """True when this variant participates in a Meta item_group_id set."""
+    return resolve_meta_item_group_id(parent, variant) is not None
+
+
 def build_meta_variant_display_name(parent: Any, variant: Any) -> str:
     """Human-facing catalog name — identity remains ``retailer_id``."""
     title = (getattr(parent, "title", None) or "").strip() or "Product"
+    if _is_grouped_meta_variant(parent, variant):
+        return title[:150]
     label = _human_option_summary(variant)
     if label:
         return f"{title} - {label}"[:150]
@@ -342,6 +368,17 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
     item_group_id = resolve_meta_item_group_id(parent, variant)
     if item_group_id:
         payload["item_group_id"] = item_group_id
+
+    opts = getattr(variant, "options", None) or {}
+    size = _extract_variant_attribute(opts, "size", "حجم", "مقاس", "المقاس")
+    color = _extract_variant_attribute(opts, "color", "colour", "لون", "اللون")
+    material = _extract_variant_attribute(opts, "material", "خامة", "مادة", "الخامة")
+    if size:
+        payload["size"] = size
+    if color:
+        payload["color"] = color
+    if material:
+        payload["material"] = material
     return payload
 
 

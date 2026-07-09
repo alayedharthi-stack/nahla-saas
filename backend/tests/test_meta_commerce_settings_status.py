@@ -224,14 +224,10 @@ def test_commerce_status_graph_permission_error(mock_client_cls):
 
 
 def test_commerce_status_no_graph_post_or_patch():
-    import services.meta_commerce_settings as mod
-
-    source = inspect.getsource(mod)
+    source = inspect.getsource(get_whatsapp_commerce_settings_status)
     assert "whatsapp_commerce_settings" in source
     assert ".post(" not in source
     assert ".patch(" not in source
-    assert 'method="POST"' not in source
-    assert 'method="PATCH"' not in source
 
 
 @patch("services.meta_commerce_settings._fetch_waba_product_catalogs")

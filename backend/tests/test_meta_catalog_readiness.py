@@ -111,7 +111,7 @@ def test_multi_variant_ready_human_name():
         elig, parent=parent, variant=variant, has_real_variants=True,
     )
     assert item.status == "ready"
-    assert item.generated_name == "حذاء رياضي أبيض - 42 - L"
+    assert item.generated_name == "حذاء رياضي أبيض"
     assert item.item_group_id == "88001"
 
 
@@ -271,7 +271,7 @@ def test_missing_option_summary_warn_multi_variant():
 def test_meta_live_create_update_noop_skip():
     local_payload = {
         "retailer_id": "88001-591001",
-        "name": "حذاء رياضي أبيض - 42 - L",
+        "name": "حذاء رياضي أبيض",
         "availability": "in stock",
     }
     assert resolve_action_needed("blocked", local_payload, {"name": "x"}) == "skip"
@@ -280,12 +280,12 @@ def test_meta_live_create_update_noop_skip():
     assert resolve_action_needed(
         "ready",
         local_payload,
-        {"name": "حذاء رياضي أبيض - 42 - L", "availability": "in stock"},
+        {"name": "حذاء رياضي أبيض", "availability": "in stock"},
     ) == "noop"
     assert resolve_action_needed(
         "warn",
         local_payload,
-        {"name": "حذاء رياضي أبيض", "availability": "in stock"},
+        {"name": "حذاء رياضي أبيض", "availability": "out of stock"},
     ) == "update"
 
     parent = _Parent(id=32, tenant_id=9, title="حذاء رياضي أبيض")
@@ -293,7 +293,7 @@ def test_meta_live_create_update_noop_skip():
     elig = _eligibility_from(parent, variant, has_real_variants=True)
     live = {
         "meta_product_id": "123",
-        "name": "حذاء رياضي أبيض - 42 - L",
+        "name": "حذاء رياضي أبيض",
         "availability": "in stock",
     }
     item = eligibility_to_readiness_item(
@@ -366,7 +366,7 @@ def test_generic_commerce_neutral_product():
         elig, parent=parent, variant=variant, has_real_variants=True,
     )
     assert item.status == "ready"
-    assert item.generated_name == "متجر تجريبي عام - 500g"
+    assert item.generated_name == "متجر تجريبي عام"
     assert item.currency == "SAR"
 
 
