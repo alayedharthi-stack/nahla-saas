@@ -305,6 +305,7 @@ def has_billing_access(db: Session, tenant_id: int) -> bool:
       2. Salla App Store active or trial subscription
       3. Nahla internal free-trial window
       4. Explicit partner-testing override (tenant 1 only, metadata-driven)
+      5. Manual gift grant (metadata-driven, tenant-scoped)
 
     Inbound ingestion, store sync, analytics, and webhook processing
     are ALWAYS allowed regardless of this flag — see automation_engine._execute_action.
@@ -325,6 +326,15 @@ def has_billing_access(db: Session, tenant_id: int) -> bool:
 
     if is_partner_testing_override_active(db, tenant_id):
         log_billing_override_grant(tenant_id, reason=PARTNER_TESTING_REASON)
+        return True
+
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        is_manual_gift_grant_active,
+        log_manual_gift_grant,
+    )
+
+    if is_manual_gift_grant_active(db, tenant_id):
+        log_manual_gift_grant(tenant_id)
         return True
 
     return False

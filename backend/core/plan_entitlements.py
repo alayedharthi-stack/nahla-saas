@@ -457,7 +457,8 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
     0. Partner-testing override (tenant 1, metadata-driven, temporary)
     1. Salla Integration.config (Salla-billed tenants)
     2. Nahla BillingSubscription / BillingPlan (Moyasar/Stripe tenants)
-    3. Fallback: plan="none"
+    3. Manual gift grant (metadata-driven; paid/trial always wins)
+    4. Fallback: plan="none"
 
     Safety rule: unknown/missing plan slug always resolves to "none"
     — never accidentally grant Growth or Scale features.
@@ -557,6 +558,42 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
     plan_def   = PLAN_DEFINITIONS[effective_slug]
     is_active  = billing_status in _ACTIVE_STATUSES
     is_blocked = not is_active and billing_status not in ("none",)
+
+    # Paid / trial subscription always wins over manual gift grants.
+    if is_active and effective_slug not in ("none", "failed"):
+        return PlanEntitlements(
+            plan_slug      = effective_slug,
+            plan_name_ar   = plan_def.name_ar,
+            billing_status = billing_status,
+            is_active      = is_active,
+            is_blocked     = is_blocked,
+            features       = plan_def.features,
+            limits         = plan_def.limits,
+            raw_plan       = plan_def,
+        )
+
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        DEFAULT_GIFT_PLAN_SLUG,
+        get_manual_gift_grant_plan_slug,
+        is_manual_gift_grant_active,
+        log_manual_gift_grant,
+    )
+
+    if is_manual_gift_grant_active(db, tenant_id):
+        gift_slug = get_manual_gift_grant_plan_slug(db, tenant_id)
+        gift_slug = gift_slug if gift_slug in PLAN_DEFINITIONS else DEFAULT_GIFT_PLAN_SLUG
+        log_manual_gift_grant(tenant_id)
+        gift_def = PLAN_DEFINITIONS[gift_slug]
+        return PlanEntitlements(
+            plan_slug      = gift_slug,
+            plan_name_ar   = gift_def.name_ar,
+            billing_status = "gift",
+            is_active      = True,
+            is_blocked     = False,
+            features       = gift_def.features,
+            limits         = gift_def.limits,
+            raw_plan       = gift_def,
+        )
 
     return PlanEntitlements(
         plan_slug      = effective_slug,
