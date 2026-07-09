@@ -1070,12 +1070,17 @@ async def update_customer(
         else:
             from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
 
-            apply_customer_name(
+            applied = apply_customer_name(
                 cust,
                 new_value,
                 source="manual_admin",
                 force_merchant=True,
             )
+            if not applied or (cust.name or "").strip() != (new_value or "").strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail="تعذر حفظ الاسم. تحقق من صيغة الاسم وحاول مرة أخرى.",
+                )
             name_changed = (cust.name or None) != previous_name
     if body.email is not None:
         cust.email = body.email

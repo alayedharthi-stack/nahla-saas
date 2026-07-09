@@ -281,6 +281,33 @@ def test_manual_admin_edit_updates_name() -> None:
     assert customer.name == "أبو نايف"
 
 
+def test_manual_admin_accepts_arabic_name_with_role_token() -> None:
+    """Regression: inline edit on /customers — ``ضيف`` in a compound name."""
+    from core.customer_identity_resolver import display_name_for_customer  # noqa: PLC0415
+
+    customer = _CustomerStub(name=None, phone="966500000001")
+    assert apply_customer_name(
+        customer,
+        "حارث ضيف الله",
+        source="manual_admin",
+        force_merchant=True,
+    )
+    assert customer.name == "حارث ضيف الله"
+    assert display_name_for_customer(customer, phone_fallback="966500000001") == "حارث ضيف الله"
+
+
+def test_manual_admin_generic_merchant_arabic_spaces() -> None:
+    """Platform-wide: Arabic names with spaces must persist for any merchant."""
+    customer = _CustomerStub(name=None, phone="966511122233")
+    apply_customer_name(
+        customer,
+        "نورة عبد الله",
+        source="manual_admin",
+        force_merchant=True,
+    )
+    assert customer.name == "نورة عبد الله"
+
+
 def test_manual_clear_leaves_name_empty() -> None:
     customer = _CustomerStub(
         name="قديم",

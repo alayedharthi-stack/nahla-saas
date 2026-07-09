@@ -199,3 +199,28 @@ def validate_customer_name(raw: Optional[str]) -> NameValidationResult:
 
 def is_valid_customer_name(raw: Optional[str]) -> bool:
     return validate_customer_name(raw).valid
+
+
+def normalize_merchant_manual_name(
+    raw: Optional[str],
+    *,
+    max_len: int = 80,
+) -> NameValidationResult:
+    """
+    Hygiene-only gate for merchant-curated names (dashboard inline edit,
+    order correction). Skips AI adoption heuristics such as role-label
+    tokens — e.g. ``ضيف`` inside ``حارث ضيف الله`` is a valid name part.
+    """
+    if raw is None or not isinstance(raw, str):
+        return NameValidationResult(valid=False, reason="empty")
+    text = _normalize_full(_EMOJI_RE.sub(" ", raw))
+    if not text:
+        return NameValidationResult(valid=False, reason="empty")
+    if len(text) > max_len:
+        return NameValidationResult(valid=False, reason="too_long")
+    return NameValidationResult(
+        valid=True,
+        cleaned=text,
+        reason="ok",
+        confidence=0.98,
+    )

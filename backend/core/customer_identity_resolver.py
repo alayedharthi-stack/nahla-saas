@@ -334,7 +334,6 @@ def apply_customer_name(
         return False
 
     meta = _meta(customer)
-    validation = validate_customer_name(raw_name)
     canon_source, canon_status, base_conf = normalize_identity_source(
         source,
         platform=platform,
@@ -360,6 +359,43 @@ def apply_customer_name(
     override_flag = bool(meta.get("manual_name_override"))
     cleared_flag = bool(meta.get("manual_name_cleared"))
     current_name = str(getattr(customer, "name", None) or "").strip()
+
+    # Merchant-curated names bypass AI adoption heuristics (role labels,
+    # commerce tokens, conversational fillers). The dashboard inline edit
+    # and order-correction flows stamp ``force_merchant=True``.
+    if force_merchant and raw_name and str(raw_name).strip():
+        from core.customer_name_validator import normalize_merchant_manual_name  # noqa: PLC0415
+
+        mval = normalize_merchant_manual_name(raw_name)
+        if not mval.valid:
+            logger.info(
+                "[CUSTOMER_IDENTITY] rejected merchant name=%r source=%s reason=%s",
+                str(raw_name)[:60],
+                source,
+                mval.reason,
+            )
+            return False
+        cleaned = mval.cleaned
+        customer.name = cleaned
+        meta["customer_name_source"] = canon_source
+        meta["customer_name_status"] = canon_status
+        meta["customer_name_confidence"] = base_conf
+        meta["customer_name_updated_at"] = _utcnow_iso()
+        meta["name_source"] = source or canon_source
+        meta.pop("customer_name_rejected_reason", None)
+        meta["manual_name_override"] = True
+        meta["manual_name_cleared"] = False
+        meta["manual_name_source"] = source or canon_source
+        customer.extra_metadata = meta
+        logger.info(
+            "[CUSTOMER_IDENTITY] applied merchant name=%r status=%s source=%s",
+            cleaned,
+            canon_status,
+            canon_source,
+        )
+        return True
+
+    validation = validate_customer_name(raw_name)
 
     if not validation.valid:
         if _protected_stored_name(
