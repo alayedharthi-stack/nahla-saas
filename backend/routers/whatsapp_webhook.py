@@ -6863,6 +6863,7 @@ async def _handle_merchant_message(
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
+        brain_result: Optional[Dict[str, Any]] = None
         _brain_persona_compose_event: Optional[Dict[str, Any]] = None
         _payment_persona_compose_event: Optional[Dict[str, Any]] = None
         _brain_handoff: bool = False  # set True only by the brain handoff branch
@@ -12254,6 +12255,38 @@ async def _handle_merchant_message(
                 logger.debug(
                     "[OUTBOUND_BODY_SYNC] evaluate failed (open): %s",
                     _sync_exc,
+                )
+
+        if reply and isinstance(brain_result, dict):
+            try:
+                from core.ai_quality_events import observe_turn_quality  # noqa: PLC0415
+
+                _recent_outbound = [
+                    str(h.get("body") or "")
+                    for h in (history or [])
+                    if str(h.get("direction") or "").lower() in {"out", "outbound"}
+                ][-3:]
+                observe_turn_quality(
+                    db,
+                    tenant_id=int(tenant_id),
+                    conversation_id=getattr(convo, "id", None),
+                    customer_phone=to,
+                    inbound_text=text or "",
+                    reply_text=reply or "",
+                    brain_result=brain_result,
+                    outbound_text_policy=(
+                        _outbound_text_tracker.to_metadata()
+                        if _outbound_text_tracker is not None
+                        else None
+                    ),
+                    recent_outbound_bodies=_recent_outbound,
+                    turn=int(getattr(state, "turn", 0) or 0),
+                )
+            except Exception as _quality_obs_exc:  # noqa: BLE001 — observe only
+                logger.debug(
+                    "[AI_QUALITY] observe_turn_quality skipped tenant=%s err=%s",
+                    tenant_id,
+                    _quality_obs_exc,
                 )
 
         _visual_enforced_pre_send = False
