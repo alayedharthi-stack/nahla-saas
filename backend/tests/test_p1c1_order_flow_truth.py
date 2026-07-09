@@ -217,7 +217,7 @@ class TestTrackOrderContradictionGuard:
         state = MerchantConversationState()
         reply = resolve_track_order_fallback(state=state, history=[])
         assert reply is None
-        assert T.no_orders() == "لم أجد أي طلبات مسجّلة لرقمك. هل تريد إنشاء طلب جديد؟"
+        assert T.no_orders() == "لم أجد أي طلبات مسجّلة لرقمك."
 
     def test_failed_status_honest_reply(self):
         state = MerchantConversationState(
