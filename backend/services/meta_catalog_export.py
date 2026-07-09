@@ -277,16 +277,9 @@ def _extract_variant_attribute(options: Any, *keys: str) -> Optional[str]:
     return None
 
 
-def _is_grouped_meta_variant(parent: Any, variant: Any) -> bool:
-    """True when this variant participates in a Meta item_group_id set."""
-    return resolve_meta_item_group_id(parent, variant) is not None
-
-
 def build_meta_variant_display_name(parent: Any, variant: Any) -> str:
     """Human-facing catalog name — identity remains ``retailer_id``."""
     title = (getattr(parent, "title", None) or "").strip() or "Product"
-    if _is_grouped_meta_variant(parent, variant):
-        return title[:150]
     label = _human_option_summary(variant)
     if label:
         return f"{title} - {label}"[:150]
