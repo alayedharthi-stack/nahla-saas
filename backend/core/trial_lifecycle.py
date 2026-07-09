@@ -739,6 +739,10 @@ def build_billing_status_payload(
 
     payload.update(partner_testing_override_status(db, tenant_id))
 
+    from core.manual_billing_grant import manual_gift_grant_status  # noqa: PLC0415
+
+    payload.update(manual_gift_grant_status(db, tenant_id))
+
     return payload
 
 
