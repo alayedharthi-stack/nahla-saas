@@ -317,6 +317,85 @@ def catalog_product_answer_deterministic_fallback(
     return text
 
 
+def try_catalog_qa_deterministic_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    catalog_search_query: str = "",
+    search_result_count: int = 0,
+    category_scope: str = "",
+    allowed_category: str = "",
+    question_kind: str = "",
+    category_filter_dropped: int = 0,
+    display_count: int = 0,
+    decision_args: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """Operational catalog price/availability answer without persona enforce gate."""
+    qkind = str(question_kind or "").strip() or classify_catalog_question_kind(
+        inbound_text,
+        query=catalog_search_query,
+        decision_args=dict(decision_args or {}),
+    )
+    if qkind not in _CATALOG_QA_KINDS or not products:
+        return None, None
+
+    compose_fact_rows = catalog_fact_product_rows(products)
+    bundle = build_catalog_product_answer_facts_bundle(
+        inbound_text=inbound_text,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        products=products,
+        catalog_search_query=catalog_search_query,
+        search_result_count=search_result_count,
+        category_scope=category_scope,
+        allowed_category=allowed_category,
+        question_kind=qkind,
+        category_filter_dropped=category_filter_dropped,
+        display_count=display_count,
+        decision_args=dict(decision_args or {}),
+    )
+    if not bundle.verified_facts.get("has_catalog_products"):
+        return None, None
+
+    fallback_text = catalog_product_answer_deterministic_fallback(bundle)
+    if not (fallback_text or "").strip():
+        return None, None
+
+    fallback_result = _catalog_deterministic_compose_result(
+        bundle=bundle,
+        text=fallback_text,
+        prior=PersonaComposeResult(
+            text="",
+            source="",
+            surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+            facts_hash="",
+            guard_passed=False,
+            guard_failed_reason="persona_gate_bypassed",
+        ),
+    )
+    event_meta = build_catalog_product_answer_event_metadata(
+        fallback_result,
+        tenant_id=int(tenant_id),
+        allowlist_result="persona_gate_bypassed",
+        catalog_facts=bundle.verified_facts,
+        catalog_fact_products=compose_fact_rows,
+    )
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    prices: list[int] = []
+    for row in compose_fact_rows:
+        parsed = parse_price_amount(row.get("price"))
+        if parsed is not None:
+            prices.append(parsed)
+    if prices:
+        event_meta["catalog_fact_price_values"] = sorted(set(prices))
+    return fallback_text.strip(), event_meta
+
+
 def _catalog_deterministic_compose_result(
     *,
     bundle: PersonaFactsBundle,

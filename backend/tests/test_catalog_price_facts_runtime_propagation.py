@@ -195,6 +195,161 @@ class TestResponderCatalogPriceFactPersist:
         asyncio.run(_run())
 
 
+_JACKET_PRODUCT = {
+    "id": 28,
+    "title": "جاكيت",
+    "category": "ملابس",
+    "price": 169,
+    "can_checkout": True,
+    "in_stock": True,
+}
+
+
+def _gate_off_search_ctx(*, message: str, tenant_id: int = 1) -> BrainContext:
+    return BrainContext(
+        tenant_id=tenant_id,
+        customer_phone="966500009429",
+        customer_id=1,
+        conversation_id=9739,
+        message=message,
+        intent=Intent(name="ask_price", confidence=0.9, raw_message=message),
+        state=MerchantConversationState(greeted=True, stage="discovery"),
+        facts=CommerceFacts(has_products=True, orderable=True, product_count=1),
+        merchant_context={"ai_settings": {"persona_composer_enabled": False}},
+    )
+
+
+class TestResponderCatalogQaDeterministicBypass:
+    def test_gate_off_price_uses_direct_catalog_not_narrow_choices(self) -> None:
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _gate_off_search_ctx(message="كم سعر جاكيت؟")
+            result = ActionResult(
+                success=True,
+                data={
+                    "products": [_JACKET_PRODUCT],
+                    "query": "جاكيت",
+                    "count": 1,
+                },
+            )
+            decision = Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "جاكيت", "source": "search"},
+                reason="test jacket price gate off",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                AsyncMock(return_value=(None, None, None)),
+            ):
+                with patch(
+                    "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                    side_effect=lambda products, **_kw: list(products),
+                ):
+                    text = await composer.compose(decision, result, ctx)
+
+            assert "169" in text
+            assert "جاكيت" in text
+            assert "اختر رقم" not in text
+            assert "أكمل معك" not in text
+            assert result.data.get("question_kind") == "price"
+            assert result.data.get("price_source") == "catalog"
+            assert 28 in (result.data.get("catalog_product_ids") or [])
+            assert 169 in (result.data.get("catalog_fact_price_values") or [])
+            pc = result.data.get("persona_compose") or {}
+            assert pc.get("surface") == "catalog_product_answer"
+            assert pc.get("source") == "catalog_deterministic_fallback"
+            assert result.data.get("pending_buttons") is None
+            assert result.data.get("pending_candidates") is None
+
+        asyncio.run(_run())
+
+    def test_browse_search_still_allows_narrow_choices(self) -> None:
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        async def _run() -> None:
+            ctx = _gate_off_search_ctx(message="أبغى جاكيت", tenant_id=1)
+            result = ActionResult(
+                success=True,
+                data={
+                    "products": [_JACKET_PRODUCT],
+                    "query": "جاكيت",
+                    "count": 1,
+                },
+            )
+            decision = Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "جاكيت", "source": "search"},
+                reason="test jacket browse",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                AsyncMock(return_value=(None, None, None)),
+            ):
+                with patch(
+                    "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                    side_effect=lambda products, **_kw: list(products),
+                ):
+                    text = await composer.compose(decision, result, ctx)
+
+            assert "اختر رقم" in text
+            assert result.data.get("pending_candidates")
+            assert result.data.get("pending_buttons")
+
+        asyncio.run(_run())
+
+    def test_talh_price_gate_off_still_direct_catalog_answer(self) -> None:
+        from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+        talh_rows = [_TALH_1KG, _TALH_5KG]
+
+        async def _run() -> None:
+            ctx = _gate_off_search_ctx(message="كم سعر الطلح؟", tenant_id=33)
+            result = ActionResult(
+                success=True,
+                data={
+                    "products": [],
+                    "catalog_fact_products": list(talh_rows),
+                    "query": "طلح",
+                    "count": 2,
+                },
+            )
+            decision = Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={"query": "طلح", "source": "search"},
+                reason="test talh price gate off",
+                confidence=0.9,
+            )
+            composer = DefaultComposer()
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                AsyncMock(return_value=(None, None, None)),
+            ):
+                with patch(
+                    "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                    side_effect=lambda products, **_kw: list(products),
+                ):
+                    text = await composer.compose(decision, result, ctx)
+
+            assert "٣٨٧" in text or "387" in text
+            assert "٤٧٥" in text or "1475" in text
+            assert "اختر رقم" not in text
+            assert result.data.get("question_kind") == "price"
+            assert result.data.get("price_source") == "catalog"
+            ids = set(result.data.get("catalog_product_ids") or [])
+            assert 109 in ids
+            assert 121 in ids
+            prices = set(result.data.get("catalog_fact_price_values") or [])
+            assert 387 in prices
+            assert 1475 in prices
+
+        asyncio.run(_run())
+
+
 class TestPipelineGuardCatalogPriceFacts:
     def test_pipeline_rebuild_finds_side_channel_facts(
         self,
