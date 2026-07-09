@@ -218,6 +218,68 @@ def test_bkam_riyadh_without_thread_uses_commerce_ambiguous() -> None:
     assert out.args.get("topic") == "commerce_ambiguous"
 
 
+# ── 4b. Generic ask_price product queries (platform-wide) ───────────────────
+
+_FULFILLMENT_HISTORY = [
+    {"role": "user", "body": "ابي عسل علاجي وابي فوق يكون رجفت العسل"},
+    {"role": "assistant", "body": "تقصد عسل للاستخدام الصحي؟"},
+]
+
+
+def _ask_price_search_decision(query: str) -> Decision:
+    return Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args={"query": query},
+        reason="customer ask_price — search catalog",
+        confidence=0.90,
+    )
+
+
+def test_generic_jacket_price_allowed_for_catalog_search() -> None:
+    ctx = _ctx("كم سعر جاكيت؟", intent_name="ask_price", history=_FULFILLMENT_HISTORY)
+    decision = _ask_price_search_decision("جاكيت")
+    assert has_catalog_search_evidence(ctx, "جاكيت", decision) is True
+    out = apply_catalog_search_evidence_gate(ctx, decision)
+    assert out.action == ACTION_SEARCH_PRODUCTS
+    assert out.args.get("topic") is None
+
+
+def test_talh_price_regression_still_searches_catalog() -> None:
+    ctx = _ctx("كم سعر الطلح؟", intent_name="ask_price")
+    decision = _ask_price_search_decision("طلح")
+    assert has_catalog_search_evidence(ctx, "طلح", decision) is True
+    out = apply_catalog_search_evidence_gate(ctx, decision)
+    assert out.action == ACTION_SEARCH_PRODUCTS
+    assert out.args.get("topic") is None
+
+
+def test_riyadh_in_fulfillment_thread_stays_shipping_price_ambiguous() -> None:
+    ctx = _ctx("بكم الرياض", intent_name="ask_price", history=_FULFILLMENT_HISTORY)
+    decision = _ask_price_search_decision("رياض")
+    assert has_catalog_search_evidence(ctx, "رياض", decision) is False
+    out = apply_catalog_search_evidence_gate(ctx, decision)
+    assert out.action == ACTION_LLM_REPLY
+    assert out.args.get("topic") == "shipping_price_ambiguous"
+
+
+def test_shipping_price_question_stays_delivery_ambiguity() -> None:
+    ctx = _ctx("كم سعر الشحن؟", intent_name="ask_price")
+    decision = _ask_price_search_decision("الشحن")
+    assert has_catalog_search_evidence(ctx, "الشحن", decision) is False
+    out = apply_catalog_search_evidence_gate(ctx, decision)
+    assert out.action == ACTION_LLM_REPLY
+    assert out.args.get("topic") == "shipping_price_ambiguous"
+
+
+def test_generic_blouse_price_allowed_for_catalog_search() -> None:
+    ctx = _ctx("كم سعر البلوزة؟", intent_name="ask_price", history=_FULFILLMENT_HISTORY)
+    decision = _ask_price_search_decision("بلوزة")
+    assert has_catalog_search_evidence(ctx, "بلوزة", decision) is True
+    out = apply_catalog_search_evidence_gate(ctx, decision)
+    assert out.action == ACTION_SEARCH_PRODUCTS
+    assert out.args.get("topic") is None
+
+
 # ── 5. Genuine catalog-like miss may still use template ─────────────────────
 
 def test_genuine_product_miss_may_use_search_miss_template() -> None:
