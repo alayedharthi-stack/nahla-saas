@@ -66,6 +66,72 @@ def _norm_token(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+_SHIPPING_GEO_AMBIGUITY_TOKENS = frozenset(
+    _norm_token(token)
+    for token in (
+        "شحن", "الشحن", "توصيل", "التوصيل", "delivery", "shipping",
+        "رياض", "الرياض", "جدة", "جده", "مكة", "مكه", "المدينة", "المدينه",
+        "الدمام", "دمام", "القصيم", "قصيم", "الطائف", "طائف",
+    )
+)
+
+_SHIPPING_GEO_AMBIGUITY_RE = re.compile(
+    r"(?:شحن|توصيل|delivery|shipping|توصلون|يوصلون)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_INBOUND_SHIPPING_PRICE_RE = re.compile(
+    r"(?:"
+    r"(?:سعر|بكم|كم\s+سعر|ب\s*كم).*(?:شحن|توصيل)|"
+    r"(?:شحن|توصيل).*(?:سعر|بكم|كم)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _query_tokens_normalized(query: str) -> list[str]:
+    return [_norm_token(part) for part in (query or "").split() if part.strip()]
+
+
+def _is_shipping_or_geo_ambiguous_query(query: str) -> bool:
+    """True when a blocked catalog token is shipping/delivery/geo, not a product name."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    norm = _norm_token(q)
+    if _SHIPPING_GEO_AMBIGUITY_RE.search(norm):
+        return True
+    tokens = _query_tokens_normalized(q)
+    if not tokens:
+        return False
+    if len(tokens) == 1:
+        return tokens[0] in _SHIPPING_GEO_AMBIGUITY_TOKENS
+    return all(token in _SHIPPING_GEO_AMBIGUITY_TOKENS for token in tokens)
+
+
+def _inbound_is_shipping_price_question(text: str) -> bool:
+    """True for delivery-cost asks (e.g. كم سعر الشحن؟), not product price asks."""
+    norm = _norm_token(text or "")
+    if not norm:
+        return False
+    return bool(_INBOUND_SHIPPING_PRICE_RE.search(norm))
+
+
+def _is_ask_price_catalog_credible(ctx: BrainContext, query: str) -> bool:
+    """ask_price with a product-like query — platform-wide, not honey-domain only."""
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if intent_name != "ask_price":
+        return False
+    q = (query or "").strip()
+    if not q or is_discourse_only_query(q) or _is_vision_template_query(q):
+        return False
+    if _is_shipping_or_geo_ambiguous_query(q):
+        return False
+    if _inbound_is_shipping_price_question(ctx.message or ""):
+        return False
+    return True
+
+
 def _inbound_metadata(ctx: BrainContext) -> dict:
     profile = getattr(ctx, "profile", None) or {}
     if not isinstance(profile, dict):
@@ -266,6 +332,9 @@ def has_catalog_search_evidence(
     if _is_vision_template_query(q):
         return False
 
+    if _is_shipping_or_geo_ambiguous_query(q):
+        return False
+
     if _query_has_product_domain_signal(q):
         return True
 
@@ -289,6 +358,9 @@ def has_catalog_search_evidence(
     if intent_name in {"ask_product", "start_order", "pick_list_item"}:
         if len(q.split()) >= 2 or _query_has_product_domain_signal(q):
             return True
+
+    if _is_ask_price_catalog_credible(ctx, q):
+        return True
 
     return False
 
@@ -367,11 +439,18 @@ def _weak_query_llm_decision(ctx: BrainContext, decision: Decision, query: str) 
     # runs first, so ``shipping_price_ambiguous`` applies only when the blocked
     # token lacked catalog credibility (e.g. ``بكم الرياض`` in an order thread).
     args = {"topic": "commerce_ambiguous"}
-    if has_conversation_fulfillment_context(ctx):
-        args["topic"] = "shipping_price_ambiguous"
     blocked = (query or "").strip()
     if blocked:
         args["blocked_catalog_query"] = blocked
+    shipping_ambiguous = (
+        _is_shipping_or_geo_ambiguous_query(blocked)
+        or _inbound_is_shipping_price_question(ctx.message or "")
+    )
+    if shipping_ambiguous and (
+        has_conversation_fulfillment_context(ctx)
+        or _inbound_is_shipping_price_question(ctx.message or "")
+    ):
+        args["topic"] = "shipping_price_ambiguous"
     return Decision(
         action=ACTION_LLM_REPLY,
         args=args,
