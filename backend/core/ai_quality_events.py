@@ -372,7 +372,7 @@ def persist_quality_flags(
         except Exception as exc:  # noqa: BLE001
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — rollback cleanup after failed flag persist
                 pass
             logger.warning(
                 "[AI_QUALITY] quality flag persistence failed tenant=%s flag=%s: %s",
