@@ -106,7 +106,7 @@ def test_preview_ok_when_parent_image_and_url_present():
     assert report["fatal"] is False
     assert report["debug"]["sale_price"] == "59.0"
     assert report["debug"]["regular_price"] == "119.0"
-    assert report["payload"]["name"] == "قميص قطني أزرق - M"
+    assert report["payload"]["name"] == "قميص قطني أزرق"
 
 
 def test_preview_fatal_when_retailer_id_missing():
@@ -115,9 +115,14 @@ def test_preview_fatal_when_retailer_id_missing():
     assert report["fatal"] is True
 
 
-def test_display_name_uses_human_option_summary():
+def test_display_name_uses_human_option_summary_for_simple_product():
     parent = _parent(title="قميص قطني أزرق")
-    variant = _variant(option_summary="مقاس 36", options=None)
+    variant = _variant(
+        option_summary="مقاس 36",
+        options=None,
+        salla_variant_id=None,
+        retailer_id="99001",
+    )
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق - مقاس 36"
 
 
@@ -127,10 +132,10 @@ def test_display_name_ignores_raw_option_summary_list_repr():
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
 
 
-def test_display_name_uses_size_label_for_generic_blouse_variant():
+def test_display_name_grouped_variant_uses_parent_title_only():
     parent = _parent(title="بلوزة")
     variant = _variant(option_summary="40 - M", options=None)
-    assert build_meta_variant_display_name(parent, variant) == "بلوزة - 40 - M"
+    assert build_meta_variant_display_name(parent, variant) == "بلوزة"
 
 
 def test_variant_payload_includes_item_group_id_for_real_variant():
@@ -166,3 +171,101 @@ def test_display_name_ignores_raw_option_value_ids_only():
     parent = _parent(title="قميص قطني أزرق")
     variant = _variant(option_summary=None, options={"option_value_ids": ["2019873167"]})
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
+
+
+def test_meta_variant_payload_includes_item_group_id_size_color():
+    parent = _parent(title="فستان", external_id="299542287", meta_retailer_id="299542287")
+    variant = _variant(
+        retailer_id="299542287-834891199",
+        salla_variant_id="834891199",
+        option_summary="44 - XL",
+        options={"المقاس": "44 - XL", "اللون": "أسود"},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["retailer_id"] == "299542287-834891199"
+    assert payload["item_group_id"] == "299542287"
+    assert payload["size"] == "44 - XL"
+    assert payload["color"] == "أسود"
+    assert payload["name"] == "فستان"
+    assert " - 44" not in payload["name"]
+
+
+def test_meta_variant_payload_material_optional():
+    parent = _parent(title="حذاء رياضي أبيض", external_id="77001")
+    variant = _variant(
+        retailer_id="77001-1001",
+        salla_variant_id="1001",
+        options={"المقاس": "42", "الخامة": "جلد"},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["material"] == "جلد"
+
+
+def test_meta_variant_payload_simple_product_name_unchanged():
+    parent = _parent(title="عطر ورد 100ml", external_id="99001", meta_retailer_id="99001")
+    variant = _variant(
+        retailer_id="99001",
+        salla_variant_id=None,
+        option_summary=None,
+        options={},
+        is_default=True,
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["name"] == "عطر ورد 100ml"
+    assert "item_group_id" not in payload
+    assert "size" not in payload
+
+
+def test_meta_variant_payload_does_not_change_retailer_id():
+    parent = _parent(external_id="299542287")
+    variant = _variant(
+        retailer_id="299542287-834891199",
+        salla_variant_id="834891199",
+        options={"size": "M", "color": "Blue"},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["retailer_id"] == "299542287-834891199"
+
+
+def test_meta_variant_payload_no_raw_option_summary_in_name_for_grouped_variant():
+    parent = _parent(title="فستان", external_id="299542287")
+    variant = _variant(
+        retailer_id="299542287-834891199",
+        salla_variant_id="834891199",
+        option_summary="44 - XL / أسود",
+        options={"المقاس": "44 - XL", "اللون": "أسود"},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["name"] == "فستان"
+    assert payload["size"] == "44 - XL"
+    assert payload["color"] == "أسود"
+
+
+def test_meta_variant_payload_keeps_price_availability_image_url_url():
+    parent = _parent()
+    variant = _variant(
+        options={"المقاس": "M", "اللون": "أبيض"},
+    )
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["price"] == 5900
+    assert payload["currency"] == "SAR"
+    assert payload["availability"] == "in stock"
+    assert payload["image_url"] == "https://cdn.example/parent.jpg"
+    assert payload["url"] == "https://store.example/p/88001"
+
+
+def test_meta_variant_payload_arabic_and_english_option_keys():
+    parent = _parent(title="قميص قطني أزرق", external_id="88001")
+    variant = _variant(
+        options={"size": "L", "color": "Navy"},
+    )
+    payload_en = build_meta_variant_payload(parent, variant)
+    assert payload_en["size"] == "L"
+    assert payload_en["color"] == "Navy"
+
+    variant_ar = _variant(
+        options={"مقاس": "42", "لون": "أزرق"},
+    )
+    payload_ar = build_meta_variant_payload(parent, variant_ar)
+    assert payload_ar["size"] == "42"
+    assert payload_ar["color"] == "أزرق"
