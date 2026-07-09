@@ -50,6 +50,20 @@ export default function EditCustomerNameModal({
       ? labels.nameRequired
       : ''
 
+  const submitSave = () => {
+    if (canSave) onSave(trimmed)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      submitSave()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      if (!saving) onClose()
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4"
@@ -75,6 +89,7 @@ export default function EditCustomerNameModal({
             type="text"
             value={value}
             onChange={(e) => setValue(e.target.value)}
+            onKeyDown={handleKeyDown}
             maxLength={CUSTOMER_NAME_MAX_LEN + 10}
             disabled={saving}
             autoFocus
@@ -96,7 +111,7 @@ export default function EditCustomerNameModal({
           </button>
           <button
             type="button"
-            onClick={() => onSave(trimmed)}
+            onClick={submitSave}
             disabled={!canSave}
             className="flex-1 inline-flex items-center justify-center gap-2 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg py-2 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
