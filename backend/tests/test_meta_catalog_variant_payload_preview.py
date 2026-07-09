@@ -106,7 +106,7 @@ def test_preview_ok_when_parent_image_and_url_present():
     assert report["fatal"] is False
     assert report["debug"]["sale_price"] == "59.0"
     assert report["debug"]["regular_price"] == "119.0"
-    assert report["payload"]["name"] == "قميص قطني أزرق"
+    assert report["payload"]["name"] == "قميص قطني أزرق - M"
 
 
 def test_preview_fatal_when_retailer_id_missing():
@@ -132,10 +132,10 @@ def test_display_name_ignores_raw_option_summary_list_repr():
     assert build_meta_variant_display_name(parent, variant) == "قميص قطني أزرق"
 
 
-def test_display_name_grouped_variant_uses_parent_title_only():
+def test_display_name_grouped_variant_includes_option_summary():
     parent = _parent(title="بلوزة")
     variant = _variant(option_summary="40 - M", options=None)
-    assert build_meta_variant_display_name(parent, variant) == "بلوزة"
+    assert build_meta_variant_display_name(parent, variant) == "بلوزة - 40 - M"
 
 
 def test_variant_payload_includes_item_group_id_for_real_variant():
@@ -186,8 +186,7 @@ def test_meta_variant_payload_includes_item_group_id_size_color():
     assert payload["item_group_id"] == "299542287"
     assert payload["size"] == "44 - XL"
     assert payload["color"] == "أسود"
-    assert payload["name"] == "فستان"
-    assert " - 44" not in payload["name"]
+    assert payload["name"] == "فستان - 44 - XL"
 
 
 def test_meta_variant_payload_material_optional():
@@ -227,7 +226,7 @@ def test_meta_variant_payload_does_not_change_retailer_id():
     assert payload["retailer_id"] == "299542287-834891199"
 
 
-def test_meta_variant_payload_no_raw_option_summary_in_name_for_grouped_variant():
+def test_meta_variant_payload_grouped_variant_name_includes_option_summary():
     parent = _parent(title="فستان", external_id="299542287")
     variant = _variant(
         retailer_id="299542287-834891199",
@@ -236,7 +235,7 @@ def test_meta_variant_payload_no_raw_option_summary_in_name_for_grouped_variant(
         options={"المقاس": "44 - XL", "اللون": "أسود"},
     )
     payload = build_meta_variant_payload(parent, variant)
-    assert payload["name"] == "فستان"
+    assert payload["name"] == "فستان - 44 - XL / أسود"
     assert payload["size"] == "44 - XL"
     assert payload["color"] == "أسود"
 

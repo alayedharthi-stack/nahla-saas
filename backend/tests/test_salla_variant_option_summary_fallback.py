@@ -179,4 +179,4 @@ def test_meta_payload_gets_size_after_canonicalized_options():
     payload = build_meta_variant_payload(parent, variant)
     assert payload["size"] == "40 - M"
     assert "color" not in payload
-    assert payload["name"] == "فستان"
+    assert payload["name"] == "فستان - 40 - M"

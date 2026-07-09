@@ -264,6 +264,19 @@ class TestPriceNormalization:
         assert extract_reply_prices("عبوة 500 جرام") == set()
         assert extract_reply_prices("500 جرام طلح") == set()
 
+    def test_extract_reply_prices_ignores_weight_on_later_catalog_line(self) -> None:
+        from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+            extract_reply_prices,
+        )
+
+        body = (
+            "من الكتالوج:\n"
+            "• طلح سمره سعره ر.س. ٣٨٧٫٠٠\n"
+            "• طلح سمره 500 جرام سعره ر.س. ١٬٤٧٥٫٠٠"
+        )
+        assert extract_reply_prices(body) == {387, 1475}
+        assert 500 not in extract_reply_prices(body)
+
 
 class TestCatalogFactPriceGrounding:
     def test_catalog_fact_products_prices_in_evidence(self) -> None:
