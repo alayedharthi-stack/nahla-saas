@@ -1061,7 +1061,16 @@ class DefaultComposer:
                     return await self._llm_compose(ctx, result)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up gate best-effort; fall through to template
                 pass
-            if not result.success or data.get("message") == "no_orders_found":
+            msg_key = str(data.get("message") or "").strip()
+            if msg_key == "need_order_number":
+                result.data["chosen_path"] = "track_order_need_order_number"
+                result.data.pop("pending_candidates", None)
+                return T.track_order_need_identifiers()
+            if msg_key == "order_not_found":
+                result.data["chosen_path"] = "track_order_not_found"
+                result.data.pop("pending_candidates", None)
+                return T.order_status_not_found()
+            if not result.success or msg_key == "no_orders_found":
                 try:
                     from core.order_creation_evidence import (  # noqa: PLC0415
                         resolve_track_order_fallback,
@@ -1078,7 +1087,11 @@ class DefaultComposer:
                         return _honest
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — track evidence fallback best-effort
                     pass
-                return T.no_orders()
+                result.data["chosen_path"] = "track_order_need_order_number"
+                result.data.pop("pending_candidates", None)
+                return T.track_order_need_identifiers()
+            result.data["chosen_path"] = "track_order_status"
+            result.data.pop("pending_candidates", None)
             return self._with_follow_up(
                 T.order_status(
                     reference=str(data.get("reference", "")),

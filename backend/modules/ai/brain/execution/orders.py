@@ -1580,6 +1580,14 @@ class DraftOrderHandler:
 
 from core.order_status_label import ORDER_STATUS_LABELS_AR as _ORDER_STATUS_AR  # noqa: E402
 
+_TRACK_ORDER_SAFE_REASONS_WITHOUT_NUMBER = frozenset({
+    "explicit_order_number",
+    "active_whatsapp_draft",
+    "latest_open_order",
+    "latest_shipped_order",
+    "latest_paid_order",
+})
+
 
 class TrackOrderHandler:
     """Handles ACTION_TRACK_ORDER.
@@ -1598,6 +1606,7 @@ class TrackOrderHandler:
         # Pull order_number from intent slots or decision args
         order_number = (
             str(decision.args.get("order_number") or "").strip()
+            or str(decision.args.get("order_id") or "").strip()
             or str(ctx.intent.slots.get("order_id") or "").strip()
             or str(ctx.intent.slots.get("order_number") or "").strip()
         )
@@ -1616,14 +1625,52 @@ class TrackOrderHandler:
                 "conversation_id": ctx.conversation_id,
             },
         )
-        latest: dict = runtime_result.payload.get("order") if runtime_result.ok else {}
+        payload = dict(runtime_result.payload or {})
+        latest: dict = payload.get("order") if runtime_result.ok else {}
+        local_resolver = bool(payload.get("local_resolver"))
+        selected_reason = str(payload.get("selected_reason") or "").strip()
+        matched_by_ref = bool(payload.get("matched_by_ref"))
 
-        if not latest:
-            return ActionResult(
-                success=False,
-                error="no_orders",
-                data={"message": "no_orders_found"},
-            )
+        if order_number:
+            if not latest:
+                return ActionResult(
+                    success=False,
+                    error="order_not_found",
+                    data={"message": "order_not_found"},
+                )
+            if local_resolver:
+                if selected_reason != "explicit_order_number":
+                    return ActionResult(
+                        success=False,
+                        error="order_not_found",
+                        data={"message": "order_not_found"},
+                    )
+            elif not matched_by_ref:
+                return ActionResult(
+                    success=False,
+                    error="order_not_found",
+                    data={"message": "order_not_found"},
+                )
+        else:
+            if not latest:
+                return ActionResult(
+                    success=False,
+                    error="need_order_number",
+                    data={"message": "need_order_number"},
+                )
+            if local_resolver:
+                if selected_reason not in _TRACK_ORDER_SAFE_REASONS_WITHOUT_NUMBER:
+                    return ActionResult(
+                        success=False,
+                        error="need_order_number",
+                        data={"message": "need_order_number"},
+                    )
+            elif not matched_by_ref:
+                return ActionResult(
+                    success=False,
+                    error="need_order_number",
+                    data={"message": "need_order_number"},
+                )
 
         from core.order_status_label import order_status_label_ar  # noqa: PLC0415
 
@@ -1653,7 +1700,9 @@ class TrackOrderHandler:
                 "total":           latest.get("total"),
                 "currency":        latest.get("currency", "SAR"),
                 "item_titles":     item_titles,
-                "matched_by_ref":  runtime_result.payload.get("matched_by_ref", False),
+                "matched_by_ref":  matched_by_ref,
+                "selected_reason": selected_reason,
+                "local_resolver":  local_resolver,
             },
         )
 
