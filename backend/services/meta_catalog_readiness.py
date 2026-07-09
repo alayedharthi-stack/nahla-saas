@@ -8,6 +8,7 @@ taxonomy and optional Meta Graph GET comparison. No POST, no DB writes.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
@@ -25,6 +26,24 @@ from services.meta_catalog_reconcile import fetch_meta_catalog_live_products
 
 PUSHABLE_STATUSES = frozenset({"ready", "warn"})
 IN_STOCK_AVAILABILITY = "in stock"
+
+_NAME_QUALITY_REASONS = frozenset({
+    "composite_option_summary",
+    "orphan_option_value_ids",
+    "meta_name_no_size",
+    "color_size_slash_name",
+})
+
+_HUMAN_OPTION_KEYS = frozenset({
+    "المقاس", "مقاس", "size", "حجم",
+    "اللون", "لون", "color", "colour",
+    "material", "خامة", "مادة", "الخامة",
+})
+
+_SIZE_LIKE_RE = re.compile(
+    r"(\d+\s*-\s*[A-Za-zXSML]+|\b[XSML]{1,3}\b)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -167,6 +186,121 @@ def _normalize_reasons(warnings: List[str]) -> List[str]:
     return reasons
 
 
+def _variant_options_dict(variant: Any) -> Dict[str, Any]:
+    opts = getattr(variant, "options", None) or {}
+    return dict(opts) if isinstance(opts, dict) else {}
+
+
+def _has_orphan_option_value_ids(variant: Any) -> bool:
+    opts = _variant_options_dict(variant)
+    value_ids = opts.get("option_value_ids")
+    if not (isinstance(value_ids, list) and value_ids):
+        return False
+    human_keys = {
+        str(k).lower() for k in opts
+        if str(k).lower() != "option_value_ids"
+    }
+    known = {key.lower() for key in _HUMAN_OPTION_KEYS}
+    return not bool(human_keys & known)
+
+
+def _is_composite_option_summary(summary: str) -> bool:
+    text = (summary or "").strip()
+    if not text:
+        return False
+    return "/" in text
+
+
+def _looks_like_size_token(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    return bool(_SIZE_LIKE_RE.search(text))
+
+
+def _is_color_size_slash_name(summary: str) -> bool:
+    text = (summary or "").strip()
+    if "/" not in text:
+        return False
+    parts = [part.strip() for part in text.split("/") if part.strip()]
+    if len(parts) < 2:
+        return False
+    has_size_part = any(_looks_like_size_token(part) for part in parts)
+    has_non_size_part = any(not _looks_like_size_token(part) for part in parts)
+    return has_size_part and has_non_size_part
+
+
+def _looks_like_apparel_variant(variant: Any, summary: str) -> bool:
+    opts = _variant_options_dict(variant)
+    human_keys = {
+        str(k).lower() for k in opts
+        if str(k).lower() != "option_value_ids"
+    }
+    apparel_keys = {
+        "المقاس", "مقاس", "size", "حجم",
+        "اللون", "لون", "color", "colour",
+    }
+    if human_keys & apparel_keys:
+        return True
+    if opts.get("option_value_ids"):
+        return True
+    if _is_composite_option_summary(summary):
+        return True
+    if _looks_like_size_token(summary):
+        return True
+    return False
+
+
+def _needs_meta_name_no_size_review(
+    variant: Any,
+    payload: Dict[str, Any],
+    *,
+    has_real_variants: bool,
+) -> bool:
+    """Conservative: grouped apparel SKU missing Meta ``size`` needs operator review."""
+    if not has_real_variants:
+        return False
+    if not str(getattr(variant, "salla_variant_id", "") or "").strip():
+        return False
+    if str(payload.get("size") or "").strip():
+        return False
+    summary = str(getattr(variant, "option_summary", "") or "").strip()
+    if summary and _looks_like_raw_option_ids(summary):
+        return False
+    if not _looks_like_apparel_variant(variant, summary):
+        return False
+    return True
+
+
+def collect_variant_name_quality_reasons(
+    variant: Any,
+    payload: Dict[str, Any],
+    *,
+    has_real_variants: bool,
+) -> List[str]:
+    """Read-only name/option quality flags for operator review (no payload mutation)."""
+    if not has_real_variants:
+        return []
+    if not str(getattr(variant, "salla_variant_id", "") or "").strip():
+        return []
+
+    reasons: List[str] = []
+    summary = str(getattr(variant, "option_summary", "") or "").strip()
+
+    if _has_orphan_option_value_ids(variant):
+        reasons.append("orphan_option_value_ids")
+    if summary and not _looks_like_raw_option_ids(summary):
+        if _is_composite_option_summary(summary):
+            reasons.append("composite_option_summary")
+        if _is_color_size_slash_name(summary):
+            reasons.append("color_size_slash_name")
+    if _needs_meta_name_no_size_review(
+        variant, payload, has_real_variants=has_real_variants,
+    ):
+        reasons.append("meta_name_no_size")
+    return reasons
+
+
 def classify_readiness_status(
     eligibility: MetaCatalogEligibilityItem,
     *,
@@ -182,6 +316,16 @@ def classify_readiness_status(
     payload = dict(eligibility.payload or {})
     generated_name = str(payload.get("name") or "").strip() or None
     reasons = _normalize_reasons(list(eligibility.warnings or []))
+    name_quality = collect_variant_name_quality_reasons(
+        variant, payload, has_real_variants=has_real_variants,
+    )
+
+    def _merge_name_quality(current: List[str]) -> List[str]:
+        merged = list(current)
+        for code in name_quality:
+            if code not in merged:
+                merged.append(code)
+        return merged
 
     if eligibility.fatal or eligibility.status == "fatal":
         return "blocked", reasons
@@ -191,15 +335,19 @@ def classify_readiness_status(
             parent, variant, has_real_variants=has_real_variants, generated_name=generated_name,
         ) and "missing_option_summary" not in reasons:
             reasons.append("missing_option_summary")
-        return "warn", reasons
+        return "warn", _merge_name_quality(reasons)
 
     if _has_missing_option_summary(
         parent, variant, has_real_variants=has_real_variants, generated_name=generated_name,
     ):
         if "missing_option_summary" not in reasons:
             reasons.append("missing_option_summary")
-        return "warn", reasons
+        return "warn", _merge_name_quality(reasons)
 
+    if reasons:
+        return "warn", _merge_name_quality(reasons)
+
+    reasons = _merge_name_quality(reasons)
     if reasons:
         return "warn", reasons
 
@@ -334,6 +482,11 @@ def _compute_counts(
         "missing_in_meta": 0,
         "needs_update": 0,
         "needs_create": 0,
+        "review_name_quality_items": 0,
+        "composite_option_summary_items": 0,
+        "orphan_option_value_ids_items": 0,
+        "meta_name_no_size_items": 0,
+        "color_size_slash_name_items": 0,
     }
     for item in all_items:
         if item.status == "ready":
@@ -352,6 +505,16 @@ def _compute_counts(
             counts["skipped_legacy_default"] += 1
         if "raw_option_summary" in item.reasons:
             counts["raw_option_label_items"] += 1
+        if any(code in item.reasons for code in _NAME_QUALITY_REASONS):
+            counts["review_name_quality_items"] += 1
+        if "composite_option_summary" in item.reasons:
+            counts["composite_option_summary_items"] += 1
+        if "orphan_option_value_ids" in item.reasons:
+            counts["orphan_option_value_ids_items"] += 1
+        if "meta_name_no_size" in item.reasons:
+            counts["meta_name_no_size_items"] += 1
+        if "color_size_slash_name" in item.reasons:
+            counts["color_size_slash_name_items"] += 1
 
         if item.in_meta_live is True:
             counts["already_live_in_meta"] += 1
@@ -545,6 +708,7 @@ __all__ = [
     "build_meta_catalog_readiness_report",
     "candidate_push_row",
     "classify_readiness_status",
+    "collect_variant_name_quality_reasons",
     "eligibility_to_readiness_item",
     "is_ready_create_in_stock_candidate",
     "resolve_action_needed",
