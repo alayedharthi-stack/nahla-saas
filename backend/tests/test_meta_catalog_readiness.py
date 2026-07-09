@@ -504,6 +504,157 @@ def test_live_composite_orphan_still_noop_when_matched():
     assert "orphan_option_value_ids" in item.reasons
 
 
+def test_live_name_size_mismatch_warns_keeps_update():
+    parent = _Parent(id=23, tenant_id=9, title="فستان", external_id="398551325", meta_retailer_id="398551325")
+    variant = _Variant(
+        id=230,
+        tenant_id=9,
+        product_id=23,
+        retailer_id="398551325-2103864026",
+        salla_variant_id="2103864026",
+        option_summary="36 - XS",
+        options={"المقاس": "36 - XS"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "28400117032923756",
+        "name": "فستان - 42 - L",
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert item.status == "warn"
+    assert "live_name_size_mismatch" in item.reasons
+    assert "stale_meta_display_name" not in item.reasons
+    assert item.action_needed == "update"
+
+
+def test_live_name_size_mismatch_product_23_variant_226():
+    parent = _Parent(id=23, tenant_id=9, title="فستان", external_id="398551325", meta_retailer_id="398551325")
+    variant = _Variant(
+        id=226,
+        tenant_id=9,
+        product_id=23,
+        retailer_id="398551325-705359582",
+        salla_variant_id="705359582",
+        option_summary="38 - S",
+        options={"المقاس": "38 - S"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "27260304090336292",
+        "name": "فستان - 40 - M",
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert item.status == "warn"
+    assert "live_name_size_mismatch" in item.reasons
+    assert item.action_needed == "update"
+
+
+def test_stale_meta_display_name_same_size_no_mismatch():
+    parent = _Parent(id=30, tenant_id=9, title="بنطلون", external_id="1455849494", meta_retailer_id="1455849494")
+    variant = _Variant(
+        id=282,
+        tenant_id=9,
+        product_id=30,
+        retailer_id="1455849494-1930952685",
+        salla_variant_id="1930952685",
+        option_summary="36 - XS",
+        options={"المقاس": "36 - XS"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "27545766575107811",
+        "name": "بنطلون - 36 - XS / 36 - XS",
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert "live_name_size_mismatch" not in item.reasons
+    assert "stale_meta_display_name" in item.reasons
+    assert item.status == "ready"
+    assert item.action_needed == "update"
+
+
+def test_live_name_diff_without_size_token_no_mismatch():
+    parent = _Parent(id=50, tenant_id=9, title="عطر ورد 100ml", meta_retailer_id="99001", external_id="99001")
+    variant = _Variant(
+        id=201,
+        tenant_id=9,
+        product_id=50,
+        retailer_id="99001-1001",
+        salla_variant_id="1001",
+        option_summary="100ml",
+        options={"الحجم": "100ml"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "999",
+        "name": "عطر ورد 100ml عرض خاص",
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert "live_name_size_mismatch" not in item.reasons
+
+
+def test_live_name_clean_noop_unchanged():
+    parent = _Parent(id=32, tenant_id=9, title="حذاء رياضي أبيض")
+    variant = _Variant(
+        id=101,
+        tenant_id=9,
+        product_id=32,
+        retailer_id="88001-591001",
+        salla_variant_id="591001",
+        option_summary="42 - L",
+        options={"المقاس": "42 - L"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "123",
+        "name": "حذاء رياضي أبيض - 42 - L",
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert item.status == "ready"
+    assert item.action_needed == "noop"
+    assert "live_name_size_mismatch" not in item.reasons
+    assert "stale_meta_display_name" not in item.reasons
+
+
 def test_readiness_module_has_no_push_dependency():
     import inspect
 
