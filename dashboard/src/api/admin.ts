@@ -275,6 +275,47 @@ export interface AdminTenantSummary {
   }
 }
 
+export interface AdminManualGiftGrantSnapshot {
+  tenant_id: number
+  store_name: string
+  domain: string | null
+  owner_email: string | null
+  owner_phone: string | null
+  entitlements: {
+    plan_slug: string
+    billing_status: string
+    is_active: boolean
+  }
+  trial: {
+    is_trial: boolean
+    trial_expired: boolean
+    trial_ends_at: string | null
+    trial_days_remaining: number
+  }
+  salla: {
+    billing_status: string | null
+    plan_slug: string | null
+  }
+  nahla_subscription: {
+    active: boolean
+    status: string | null
+    plan_slug: string | null
+    ends_at: string | null
+  }
+  gift: {
+    active: boolean
+    blob: Record<string, unknown> | null
+    manual_gift_grant_active?: boolean
+    manual_gift_grant_reason?: string | null
+    manual_gift_grant_plan_slug?: string | null
+    manual_gift_grant_ends_at?: string | null
+    manual_gift_grant_billing_status?: string | null
+  }
+  can_grant: boolean
+  grant_blocked_reason: string | null
+  grant_blocked_message_ar: string | null
+}
+
 export interface AdminTenantsResponse {
   total: number
   total_active: number
@@ -425,6 +466,33 @@ export const adminApi = {
 
   tenantSummary: (tenantId: number) =>
     apiCall<AdminTenantSummary>(`/admin/tenants/${tenantId}/summary`),
+
+  manualGiftGrantSnapshot: (tenantId: number) =>
+    apiCall<AdminManualGiftGrantSnapshot>(`/admin/tenants/${tenantId}/manual-gift-grant`),
+
+  previewManualGiftGrant: (tenantId: number, body: { days?: number; reason: string }) =>
+    apiCall<{ preview: Record<string, unknown> }>(
+      `/admin/tenants/${tenantId}/manual-gift-grant/preview`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ days: body.days ?? 30, reason: body.reason }),
+      },
+    ),
+
+  applyManualGiftGrant: (tenantId: number, body: { days?: number; reason: string }) =>
+    apiCall<{ grant: Record<string, unknown>; snapshot: AdminManualGiftGrantSnapshot }>(
+      `/admin/tenants/${tenantId}/manual-gift-grant`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ days: body.days ?? 30, reason: body.reason }),
+      },
+    ),
+
+  revokeManualGiftGrant: (tenantId: number) =>
+    apiCall<{ revoke: Record<string, unknown>; snapshot: AdminManualGiftGrantSnapshot }>(
+      `/admin/tenants/${tenantId}/manual-gift-grant/revoke`,
+      { method: 'POST' },
+    ),
 
   tenantUsers: (tenantId: number) =>
     apiCall<{ tenant_id: number; users: Array<{ id: number; email: string; role: string; is_active: boolean; created_at: string | null }> }>(
