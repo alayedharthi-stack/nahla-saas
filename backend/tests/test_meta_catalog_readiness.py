@@ -385,6 +385,125 @@ def test_generic_commerce_neutral_product():
     assert item.currency == "SAR"
 
 
+def test_clean_simple_size_variant_stays_ready():
+    parent = _Parent(id=37, tenant_id=9, title="فستان", external_id="299542287", meta_retailer_id="299542287")
+    variant = _Variant(
+        id=318,
+        tenant_id=9,
+        product_id=37,
+        retailer_id="299542287-1568058297",
+        salla_variant_id="1568058297",
+        option_summary="40 - M",
+        options={"المقاس": "40 - M"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+    )
+    assert item.status == "ready"
+    assert not any(
+        code in item.reasons
+        for code in (
+            "composite_option_summary",
+            "orphan_option_value_ids",
+            "meta_name_no_size",
+            "color_size_slash_name",
+        )
+    )
+
+
+def test_composite_orphan_variant_warns_not_ready():
+    parent = _Parent(id=37, tenant_id=9, title="فستان", external_id="299542287", meta_retailer_id="299542287")
+    variant = _Variant(
+        id=316,
+        tenant_id=9,
+        product_id=37,
+        retailer_id="299542287-834891199",
+        salla_variant_id="834891199",
+        option_summary="44 - XL / 42 - L",
+        options={"option_value_ids": ["834891199", "618796933"]},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+    )
+    assert item.status == "warn"
+    assert item.status != "ready"
+    assert "composite_option_summary" in item.reasons
+    assert "orphan_option_value_ids" in item.reasons
+
+
+def test_color_size_slash_variant_warns_with_resolved_size():
+    parent = _Parent(id=23, tenant_id=9, title="فستان", external_id="23001", meta_retailer_id="23001")
+    variant = _Variant(
+        id=230,
+        tenant_id=9,
+        product_id=23,
+        retailer_id="23001-5001",
+        salla_variant_id="5001",
+        option_summary="فوشي / 38 - S",
+        options={"اللون": "فوشي", "المقاس": "38 - S"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+    )
+    assert item.status == "warn"
+    assert "color_size_slash_name" in item.reasons
+    assert "composite_option_summary" in item.reasons
+    assert (elig.payload or {}).get("size") == "38 - S"
+
+
+def test_color_only_apparel_warns_meta_name_no_size():
+    parent = _Parent(id=38, tenant_id=9, title="فستان", external_id="38001", meta_retailer_id="38001")
+    variant = _Variant(
+        id=380,
+        tenant_id=9,
+        product_id=38,
+        retailer_id="38001-2001",
+        salla_variant_id="2001",
+        option_summary="اسود",
+        options={"اللون": "اسود"},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+    )
+    assert item.status == "warn"
+    assert "meta_name_no_size" in item.reasons
+    assert "composite_option_summary" not in item.reasons
+
+
+def test_live_composite_orphan_still_noop_when_matched():
+    parent = _Parent(id=37, tenant_id=9, title="فستان", external_id="299542287", meta_retailer_id="299542287")
+    variant = _Variant(
+        id=316,
+        tenant_id=9,
+        product_id=37,
+        retailer_id="299542287-834891199",
+        salla_variant_id="834891199",
+        option_summary="44 - XL / 42 - L",
+        options={"option_value_ids": ["834891199", "618796933"]},
+    )
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    live = {
+        "meta_product_id": "27748168301485180",
+        "name": str((elig.payload or {}).get("name") or ""),
+        "availability": "in stock",
+    }
+    item = eligibility_to_readiness_item(
+        elig,
+        parent=parent,
+        variant=variant,
+        has_real_variants=True,
+        live_row=live,
+        include_meta=True,
+    )
+    assert item.status == "warn"
+    assert item.action_needed == "noop"
+    assert "orphan_option_value_ids" in item.reasons
+
+
 def test_readiness_module_has_no_push_dependency():
     import inspect
 
