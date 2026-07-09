@@ -772,3 +772,87 @@ class TestCatalogFactProductRows:
         assert rows[0]["id"] == 109
         assert rows[0]["price"] == "ر.س. ٣٨٧٫٠٠"
         assert rows[0]["can_checkout"] is False
+
+
+_JACKET_PRODUCT = {
+    "id": 28,
+    "title": "جاكيت",
+    "category": "ملابس",
+    "price": 169,
+    "can_checkout": True,
+    "in_stock": True,
+}
+
+_TALH_PRICE_PRODUCTS = [
+    {
+        "id": 109,
+        "title": "عسل طلح نجد البري إنتاج منحلنا  1 كيلو",
+        "category": "عسل",
+        "price": 387,
+        "can_checkout": False,
+        "in_stock": False,
+    },
+    {
+        "id": 121,
+        "title": "عسل طلح نجد البري إنتاج منحلنا  5 كيلو",
+        "category": "عسل",
+        "price": 1475,
+        "can_checkout": False,
+        "in_stock": False,
+    },
+]
+
+
+class TestCatalogQaDeterministicBypass:
+    def test_gate_off_jacket_price_direct(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            try_catalog_qa_deterministic_answer,
+        )
+
+        text, event = try_catalog_qa_deterministic_answer(
+            tenant_id=1,
+            customer_phone="966500009429",
+            inbound_text="كم سعر جاكيت؟",
+            products=[_JACKET_PRODUCT],
+            catalog_search_query="جاكيت",
+            question_kind="price",
+        )
+        assert text
+        assert "169" in text
+        assert "جاكيت" in text
+        assert "اختر رقم" not in text
+        assert "أكمل معك" not in text
+        assert event is not None
+        assert event["question_kind"] == "price"
+        assert event["price_source"] == "catalog"
+        assert event["catalog_product_ids"] == [28]
+        assert 169 in event["catalog_fact_price_values"]
+        assert event["persona_compose"]["surface"] == "catalog_product_answer"
+        assert event["persona_compose"]["source"] == "catalog_deterministic_fallback"
+        assert event["checkout_pressure_allowed"] is False
+
+    def test_talh_price_direct_without_persona_gate(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            try_catalog_qa_deterministic_answer,
+        )
+
+        text, event = try_catalog_qa_deterministic_answer(
+            tenant_id=33,
+            customer_phone="966500009429",
+            inbound_text="كم سعر الطلح؟",
+            products=_TALH_PRICE_PRODUCTS,
+            catalog_search_query="طلح",
+            question_kind="price",
+        )
+        assert text
+        assert "387" in text
+        assert "1475" in text
+        assert "اختر رقم" not in text
+        assert event is not None
+        assert event["question_kind"] == "price"
+        assert event["price_source"] == "catalog"
+        assert 109 in event["catalog_product_ids"]
+        assert 121 in event["catalog_product_ids"]
+        assert 387 in event["catalog_fact_price_values"]
+        assert 1475 in event["catalog_fact_price_values"]
+

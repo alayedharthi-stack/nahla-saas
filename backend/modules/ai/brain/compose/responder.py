@@ -705,6 +705,37 @@ class DefaultComposer:
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
 
+            if (
+                _question_kind in _CATALOG_QA_QUESTION_KINDS
+                and not (_catalog_text or "").strip()
+            ):
+                from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    try_catalog_qa_deterministic_answer,
+                )
+
+                _qa_text, _qa_event = try_catalog_qa_deterministic_answer(
+                    tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                    customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                    inbound_text=str(getattr(ctx, "message", "") or ""),
+                    products=list(compose_products),
+                    catalog_search_query=_search_query,
+                    search_result_count=len(facts_products),
+                    category_scope=_category_scope,
+                    allowed_category=_category_scope,
+                    question_kind=_question_kind,
+                    category_filter_dropped=_facts_category_dropped,
+                    display_count=len(candidates),
+                    decision_args=dict(decision.args or {}),
+                )
+                if (_qa_text or "").strip() and isinstance(_qa_event, dict):
+                    result.data.update(_qa_event)
+                    _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
+                        compose_products,
+                    )
+                    if _persist_fact_rows:
+                        result.data["catalog_fact_products"] = _persist_fact_rows
+                    return (_qa_text or "").strip()
+
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
                 if _question_kind in _CATALOG_QA_QUESTION_KINDS:
                     _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
@@ -730,6 +761,9 @@ class DefaultComposer:
                 return (_catalog_text or "").strip()
 
             if not candidates:
+                return T.no_products(variant=self._variant_idx(ctx))
+
+            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
                 return T.no_products(variant=self._variant_idx(ctx))
 
             # INVARIANT: pending_candidates = EXACTLY the products shown in
