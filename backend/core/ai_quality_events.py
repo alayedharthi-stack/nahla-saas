@@ -49,6 +49,8 @@ logger = logging.getLogger("nahla.ai_quality_events")
 
 PREVIEW_MAX_CHARS = 200
 
+CATEGORY_QUALITY_FLAG = "quality_flag"
+
 VALID_RESOLVED_STATUSES = frozenset({"open", "reviewed", "ignored", "fixed"})
 
 # Default thresholds for the 6-hour periodic alert. Tuned to be
@@ -179,6 +181,276 @@ def persist_alignment_mismatch(
         return None
 
 
+# ── Class 9 quality observability (PR1 — observe only) ─────────────────────
+
+
+_QUALITY_STAMP_KEYS = (
+    "chosen_path",
+    "decision_action",
+    "intent",
+    "surface",
+    "source",
+    "topic",
+    "question_kind",
+    "price_source",
+    "knowledge_source",
+    "catalog_product_ids",
+    "catalog_fact_price_values",
+    "pre_guard_body_preview",
+    "post_guard_body_preview",
+    "guards_triggered",
+    "final_turn_violations",
+    "outbound_text_policy",
+    "shipment_evidence_ok",
+    "shipment_guard_blocked_claims",
+    "orders_delta",
+    "quality_flags",
+)
+
+
+def build_outbound_quality_metadata(
+    brain_result: Optional[Dict[str, Any]],
+    *,
+    outbound_text_policy: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+    orders_delta: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Flatten brain quality_observability + policy into outbound metadata."""
+    base = dict((brain_result or {}).get("quality_observability") or {})
+    if not base and isinstance(brain_result, dict):
+        persona = dict(brain_result.get("persona_compose") or {})
+        base = {
+            "chosen_path": brain_result.get("chosen_path"),
+            "decision_action": brain_result.get("decision_action"),
+            "intent": brain_result.get("intent"),
+            "surface": persona.get("surface"),
+            "source": persona.get("source"),
+            "topic": (brain_result.get("decision_args") or {}).get("topic"),
+            "question_kind": brain_result.get("question_kind"),
+            "price_source": brain_result.get("price_source"),
+            "knowledge_source": brain_result.get("knowledge_source"),
+            "catalog_product_ids": list(brain_result.get("catalog_product_ids") or []),
+            "catalog_fact_price_values": list(
+                brain_result.get("catalog_fact_price_values") or []
+            ),
+            "shipment_guard_blocked_claims": list(
+                brain_result.get("shipment_guard_blocked_claims") or []
+            ),
+        }
+    if outbound_text_policy:
+        base["outbound_text_policy"] = dict(outbound_text_policy)
+        if not base.get("pre_guard_body_preview"):
+            base["pre_guard_body_preview"] = str(
+                outbound_text_policy.get("pre_postprocess_body_preview") or ""
+            )[:200]
+        if not base.get("post_guard_body_preview"):
+            base["post_guard_body_preview"] = str(
+                outbound_text_policy.get("postprocess_body_preview") or ""
+            )[:200]
+    if orders_delta is not None:
+        base["orders_delta"] = int(orders_delta)
+    if inbound_text:
+        base["inbound_text_preview"] = _truncate(inbound_text, 120)
+    return {k: v for k, v in base.items() if v is not None and v != "" and v != []}
+
+
+def merge_quality_metadata_into_extra_metadata(
+    extra: Optional[Dict[str, Any]],
+    quality_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged = dict(extra or {})
+    stamp = {
+        k: quality_metadata[k]
+        for k in _QUALITY_STAMP_KEYS
+        if k in quality_metadata
+    }
+    if stamp:
+        merged["quality_observability"] = stamp
+        for key in (
+            "chosen_path",
+            "decision_action",
+            "intent",
+            "surface",
+            "source",
+            "question_kind",
+            "price_source",
+        ):
+            if quality_metadata.get(key) is not None and key not in merged:
+                merged[key] = quality_metadata[key]
+    return merged
+
+
+def stamp_outbound_quality_metadata(
+    db: Any,
+    *,
+    tenant_id: Optional[int],
+    recipient: str,
+    quality_metadata: Dict[str, Any],
+) -> Optional[int]:
+    """Merge quality stamp onto the latest queued outbound row."""
+    if db is None or tenant_id is None or not recipient or not quality_metadata:
+        return None
+    try:
+        from core.outbound_send_status import _find_queued_outbound_row  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        row = _find_queued_outbound_row(
+            db, tenant_id=int(tenant_id), recipient=str(recipient),
+        )
+        if row is None:
+            return None
+        meta = merge_quality_metadata_into_extra_metadata(
+            dict(getattr(row, "extra_metadata", None) or {}),
+            quality_metadata,
+        )
+        row.extra_metadata = meta
+        flag_modified(row, "extra_metadata")
+        db.add(row)
+        db.flush()
+        return int(getattr(row, "id", 0)) or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AI_QUALITY] outbound metadata stamp failed tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+        return None
+
+
+def persist_quality_flags(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int],
+    customer_phone: str,
+    inbound_text: str,
+    reply_text: str,
+    flags: List[Any],
+    quality_metadata: Optional[Dict[str, Any]] = None,
+    turn: int = 0,
+) -> List[int]:
+    """Append one ai_quality_events row per quality flag."""
+    if not flags:
+        return []
+    try:
+        from core.ai_quality_detectors import quality_context_json  # noqa: PLC0415
+        from database.models import AiQualityEvent  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AI_QUALITY] quality flag import failed: %s", exc)
+        return []
+
+    meta = dict(quality_metadata or {})
+    ids: List[int] = []
+    ctx_json = quality_context_json(meta, flags)
+    for flag in flags:
+        flag_id = str(getattr(flag, "flag_id", flag))
+        reason = str(getattr(flag, "reason", "") or "")
+        try:
+            row = AiQualityEvent(
+                tenant_id=int(tenant_id),
+                conversation_id=conversation_id if conversation_id else None,
+                customer_phone_masked=mask_phone(customer_phone),
+                category=CATEGORY_QUALITY_FLAG,
+                mismatch_type=flag_id[:64],
+                mismatch_reason=reason or ctx_json,
+                detected_intent=str(meta.get("intent") or "")[:64] or None,
+                action_taken=str(meta.get("decision_action") or "")[:64] or None,
+                chosen_path=str(meta.get("chosen_path") or "")[:64] or None,
+                turn=int(turn) if turn else None,
+                inbound_preview=_truncate(inbound_text),
+                reply_preview=_truncate(reply_text),
+                alignment_passed=True,
+                regen_fired=False,
+                resolved_status="open",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(row)
+            db.flush()
+            row_id = int(getattr(row, "id", 0) or 0)
+            if row_id:
+                ids.append(row_id)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                db.rollback()
+            except Exception:  # noqa: silent-ok — rollback cleanup after failed flag persist
+                pass
+            logger.warning(
+                "[AI_QUALITY] quality flag persistence failed tenant=%s flag=%s: %s",
+                tenant_id,
+                flag_id,
+                exc,
+            )
+    return ids
+
+
+def observe_turn_quality(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int],
+    customer_phone: str,
+    inbound_text: str,
+    reply_text: str,
+    brain_result: Optional[Dict[str, Any]] = None,
+    outbound_text_policy: Optional[Dict[str, Any]] = None,
+    recent_outbound_bodies: Optional[List[str]] = None,
+    orders_delta: Optional[int] = None,
+    turn: int = 0,
+) -> Dict[str, Any]:
+    """Stamp outbound metadata and persist deterministic quality flags."""
+    try:
+        from core.ai_quality_detectors import detect_quality_flags  # noqa: PLC0415
+
+        metadata = build_outbound_quality_metadata(
+            brain_result,
+            outbound_text_policy=outbound_text_policy,
+            inbound_text=inbound_text,
+            orders_delta=orders_delta,
+        )
+        stamp_outbound_quality_metadata(
+            db,
+            tenant_id=tenant_id,
+            recipient=customer_phone,
+            quality_metadata=metadata,
+        )
+        detection = detect_quality_flags(
+            inbound_text=inbound_text,
+            reply_text=reply_text,
+            metadata=metadata,
+            recent_outbound_bodies=recent_outbound_bodies,
+        )
+        if detection.flags:
+            metadata["quality_flags"] = detection.flag_ids
+            stamp_outbound_quality_metadata(
+                db,
+                tenant_id=tenant_id,
+                recipient=customer_phone,
+                quality_metadata=metadata,
+            )
+            persist_quality_flags(
+                db,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                customer_phone=customer_phone,
+                inbound_text=inbound_text,
+                reply_text=reply_text,
+                flags=detection.flags,
+                quality_metadata=metadata,
+                turn=turn,
+            )
+        return {
+            "metadata": metadata,
+            "flags": detection.flag_ids,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AI_QUALITY] observe_turn_quality failed tenant=%s: %s",
+            tenant_id,
+            exc,
+        )
+        return {"metadata": {}, "flags": []}
+
+
 # ── Aggregation helpers (used by the periodic alert job + summary API) ─────
 
 
@@ -298,11 +570,17 @@ def check_threshold_and_alert(
 
 __all__ = [
     "PREVIEW_MAX_CHARS",
+    "CATEGORY_QUALITY_FLAG",
     "VALID_RESOLVED_STATUSES",
     "DEFAULT_ALERT_THRESHOLDS",
     "DEFAULT_LOOKBACK_HOURS",
     "mask_phone",
     "persist_alignment_mismatch",
+    "build_outbound_quality_metadata",
+    "merge_quality_metadata_into_extra_metadata",
+    "stamp_outbound_quality_metadata",
+    "persist_quality_flags",
+    "observe_turn_quality",
     "aggregate_recent_mismatches",
     "check_threshold_and_alert",
 ]

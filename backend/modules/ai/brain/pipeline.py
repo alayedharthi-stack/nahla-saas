@@ -4274,10 +4274,70 @@ class MerchantBrain:
             "shipment_guard_blocked_claims": list(
                 result.data.get("shipment_guard_blocked_claims") or []
             ),
+            "quality_observability": _build_quality_observability(
+                chosen_path=_chosen_path,
+                decision=decision,
+                intent=intent,
+                result_data=dict(getattr(result, "data", None) or {}),
+                reply=reply or "",
+                pre_guard_body=_owned_reply_snapshot or "",
+                guards_triggered=[
+                    name for name, fired in (_guard_replaced or {}).items() if fired
+                ],
+            ),
         }
 
 
 # ── Brain state helpers ────────────────────────────────────────────────────────
+
+def _build_quality_observability(
+    *,
+    chosen_path: str,
+    decision: Any,
+    intent: Any,
+    result_data: Dict[str, Any],
+    reply: str,
+    pre_guard_body: str,
+    guards_triggered: List[str],
+) -> Dict[str, Any]:
+    """Observation-only snapshot for Class 9 quality monitor."""
+    persona = dict(result_data.get("persona_compose") or {})
+    violations: List[str] = []
+    for key in (
+        "final_turn_violations_post_compose",
+        "final_turn_violations_post_postprocess",
+    ):
+        violations.extend([str(v) for v in (result_data.get(key) or []) if v])
+    policy = dict(result_data.get("outbound_text_policy") or {})
+    return {
+        "chosen_path": str(chosen_path or ""),
+        "decision_action": str(getattr(decision, "action", "") or ""),
+        "intent": str(getattr(intent, "name", "") or ""),
+        "surface": str(
+            persona.get("surface") or result_data.get("surface") or ""
+        ),
+        "source": str(
+            persona.get("source") or result_data.get("source") or ""
+        ),
+        "topic": str((getattr(decision, "args", None) or {}).get("topic") or ""),
+        "question_kind": result_data.get("question_kind"),
+        "price_source": result_data.get("price_source"),
+        "knowledge_source": result_data.get("knowledge_source"),
+        "catalog_product_ids": list(result_data.get("catalog_product_ids") or []),
+        "catalog_fact_price_values": list(
+            result_data.get("catalog_fact_price_values") or []
+        ),
+        "pre_guard_body_preview": str(pre_guard_body or "")[:200],
+        "post_guard_body_preview": str(reply or "")[:200],
+        "guards_triggered": list(guards_triggered or []),
+        "final_turn_violations": list(dict.fromkeys(violations)),
+        "outbound_text_policy": policy,
+        "shipment_evidence_ok": result_data.get("shipment_evidence_ok"),
+        "shipment_guard_blocked_claims": list(
+            result_data.get("shipment_guard_blocked_claims") or []
+        ),
+    }
+
 
 def _infer_customer_goal(intent: Intent, decision: Decision, previous_goal: str = "") -> str:
     mapping = {
