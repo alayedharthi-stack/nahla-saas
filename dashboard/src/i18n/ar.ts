@@ -1921,6 +1921,12 @@ const ar: Translations = {
       missingCatalogId:     'Catalog ID غير مضبوط',
       missingToken:         'رمز Meta Graph غير متوفر',
       metaErrorTitle:       'تعذر قراءة حالة الربط من Meta',
+      wabaInaccessibleTitle: 'تعذر التحقق من ارتباط الكتالوج بحساب واتساب',
+      wabaInaccessibleDesc:  'الكتالوج موجود ويعمل، لكن حساب WABA المحفوظ غير قابل للقراءة أو يحتاج تحديث صلاحيات. راجع إعدادات Meta Business أو تواصل مع الدعم.',
+      wabaNotFoundTitle:     'حساب واتساب التجاري (WABA) غير موجود',
+      wabaNotFoundDesc:      'المعرّف المحفوظ لحساب واتساب التجاري غير موجود في Meta. تأكد من WABA ID الصحيح في إعدادات الربط.',
+      showTechnicalDetails:  'عرض التفاصيل التقنية',
+      hideTechnicalDetails:  'إخفاء التفاصيل التقنية',
     },
     tools: {
       title:         'أدوات الكتالوج',

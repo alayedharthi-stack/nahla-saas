@@ -124,6 +124,8 @@ export interface WabaCatalogLinkStatus {
   error_type?:             string | null
   error_message?:          string | null
   error_category?:         string | null
+  link_status?:            'linked' | 'mismatch' | 'not_linked' | 'unknown' | null
+  catalog_exists?:         boolean | null
 }
 
 // ── Product diagnostic + resync ──────────────────────────────────────

@@ -1917,6 +1917,12 @@ const en: Translations = {
       missingCatalogId:     'Catalog ID is not set',
       missingToken:         'Meta Graph token is not available',
       metaErrorTitle:       'Could not read link status from Meta',
+      wabaInaccessibleTitle: 'Could not verify catalog link to WhatsApp account',
+      wabaInaccessibleDesc:  'Your catalog exists and works, but the saved WABA account cannot be read or needs permission updates. Check Meta Business settings or contact support.',
+      wabaNotFoundTitle:     'WhatsApp Business Account (WABA) not found',
+      wabaNotFoundDesc:      'The saved WhatsApp Business Account ID does not exist in Meta. Verify the correct WABA ID in link settings.',
+      showTechnicalDetails:  'Show technical details',
+      hideTechnicalDetails:  'Hide technical details',
     },
     tools: {
       title:         'Catalog tools',

@@ -17,6 +17,8 @@ os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
 from routers.catalog import merchant_router  # noqa: E402
 from services.meta_catalog_linking import (  # noqa: E402
+    WABA_ERROR_INACCESSIBLE,
+    WABA_ERROR_NOT_FOUND,
     get_waba_catalog_link_status,
 )
 
@@ -104,7 +106,7 @@ def test_link_status_missing_token(_mock_token):
 @patch("services.meta_catalog_linking.httpx.Client")
 def test_link_status_expected_linked_true(mock_client_cls):
     mock_client = MagicMock()
-    mock_client_cls.return_value = mock_client
+    mock_client_cls.return_value.__enter__.return_value = mock_client
     mock_client.get.return_value = _graph_response([
         {"id": "CAT-GENERIC-001", "name": "متجر تجريبي عام"},
         {"id": "CAT-OTHER", "name": "كتالوج آخر"},
@@ -114,6 +116,7 @@ def test_link_status_expected_linked_true(mock_client_cls):
     assert out["ok"] is True
     assert out["connected"] is True
     assert out["expected_catalog_linked"] is True
+    assert out["link_status"] == "linked"
     assert out["http_status"] == 200
     assert out["linked_catalog_ids"] == ["CAT-GENERIC-001", "CAT-OTHER"]
     mock_client.get.assert_called_once()
@@ -125,7 +128,7 @@ def test_link_status_expected_linked_true(mock_client_cls):
 @patch("services.meta_catalog_linking.httpx.Client")
 def test_link_status_expected_linked_false(mock_client_cls):
     mock_client = MagicMock()
-    mock_client_cls.return_value = mock_client
+    mock_client_cls.return_value.__enter__.return_value = mock_client
     mock_client.get.return_value = _graph_response([
         {"id": "CAT-OTHER-ONLY", "name": "عطر ورد 100ml"},
     ])
@@ -134,20 +137,79 @@ def test_link_status_expected_linked_false(mock_client_cls):
     assert out["ok"] is True
     assert out["connected"] is True
     assert out["expected_catalog_linked"] is False
+    assert out["link_status"] == "mismatch"
     assert out["expected_catalog_id"] == "CAT-GENERIC-001"
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_waba_object_not_found_not_catalog_not_found(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=400,
+        code=100,
+        message="Unsupported get request. Object with ID 'WABA-BAD' does not exist",
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn(waba_id="WABA-BAD")), 9)
+    assert out["ok"] is False
+    assert out["error"] == WABA_ERROR_NOT_FOUND
+    assert out["error"] != "catalog_not_found"
+    assert out["error_category"] != "catalog_not_found"
+    assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is False
+
+
+@patch("services.meta_catalog_linking._probe_catalog_exists", return_value=True)
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_waba_missing_permissions_is_inaccessible(mock_client_cls, _mock_probe):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=400,
+        code=100,
+        message=(
+            "Unsupported get request. Object with ID 'WABA-BAD' does not exist, "
+            "cannot be loaded due to missing permissions"
+        ),
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn(waba_id="WABA-BAD")), 9)
+    assert out["ok"] is False
+    assert out["error"] == WABA_ERROR_INACCESSIBLE
+    assert out["error_category"] == WABA_ERROR_INACCESSIBLE
+    assert out["link_status"] == "unknown"
+    assert out["catalog_exists"] is True
+
+
+@patch("services.meta_catalog_linking._probe_catalog_exists", return_value=False)
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_catalog_probe_false_only_when_catalog_missing(mock_client_cls, _mock_probe):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=404,
+        code=100,
+        message="Unsupported get request. Object with ID 'WABA-BAD' does not exist",
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn(waba_id="WABA-BAD")), 9)
+    assert out["error"] == WABA_ERROR_NOT_FOUND
+    assert out["catalog_exists"] is False
 
 
 @patch("services.meta_catalog_linking.httpx.Client")
 def test_link_status_graph_permission_error(mock_client_cls):
     mock_client = MagicMock()
-    mock_client_cls.return_value = mock_client
+    mock_client_cls.return_value.__enter__.return_value = mock_client
     mock_client.get.return_value = _graph_error(status=403, code=200)
 
     out = get_waba_catalog_link_status(_db_with(_conn()), 9)
     assert out["ok"] is False
     assert out["http_status"] == 403
-    assert out["error_code"] == 200
-    assert out["error_category"] is not None
+    assert out["error"] == WABA_ERROR_INACCESSIBLE
+    assert out["error"] != "catalog_not_found"
+    assert out["link_status"] == "unknown"
 
 
 def test_link_status_no_graph_post_in_service():
@@ -163,7 +225,7 @@ def test_link_status_no_graph_post_in_service():
 def test_link_status_does_not_leak_token(mock_client_cls):
     secret = "EAAB-super-secret-token-value"
     mock_client = MagicMock()
-    mock_client_cls.return_value = mock_client
+    mock_client_cls.return_value.__enter__.return_value = mock_client
     mock_client.get.return_value = _graph_response([{"id": "CAT-GENERIC-001", "name": "حذاء"}])
 
     out = get_waba_catalog_link_status(_db_with(_conn(token=secret)), 9)
@@ -176,7 +238,7 @@ def test_link_status_does_not_leak_token(mock_client_cls):
 def test_link_status_generic_neutral_tenant(mock_client_cls):
     """Platform-wide neutral merchant — not honey-store specific."""
     mock_client = MagicMock()
-    mock_client_cls.return_value = mock_client
+    mock_client_cls.return_value.__enter__.return_value = mock_client
     mock_client.get.return_value = _graph_response([
         {"id": "CAT-SHOES-100", "name": "حذاء رياضي أبيض"},
     ])
