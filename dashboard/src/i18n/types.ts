@@ -1781,6 +1781,13 @@ export interface Translations {
       missingCatalogId:     string
       missingToken:         string
       metaErrorTitle:       string
+      wabaInaccessibleTitle: string
+      wabaInaccessibleDesc:  string
+      wabaCatalogExistsNote: string
+      wabaNotFoundTitle:     string
+      wabaNotFoundDesc:      string
+      showTechnicalDetails:  string
+      hideTechnicalDetails:  string
     }
     tools: {
       title:         string

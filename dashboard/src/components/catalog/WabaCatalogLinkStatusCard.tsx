@@ -18,7 +18,16 @@ function WhatsAppIcon({ className = 'w-5 h-5' }: { className?: string }) {
 
 type WabaLinkCopy = Translations['catalogMgmt']['wabaLinkStatus']
 
-type ViewCase = 'loading' | 'fetch_error' | 'linked' | 'none' | 'mismatch' | 'missing' | 'meta_error'
+type ViewCase =
+  | 'loading'
+  | 'fetch_error'
+  | 'linked'
+  | 'none'
+  | 'mismatch'
+  | 'missing'
+  | 'waba_inaccessible'
+  | 'waba_not_found'
+  | 'meta_error'
 
 function resolveCase(
   status: WabaCatalogLinkStatus | null,
@@ -29,8 +38,12 @@ function resolveCase(
   if (fetchError) return 'fetch_error'
   if (!status) return 'fetch_error'
   if (status.missing.length > 0) return 'missing'
-  if (!status.ok) return 'meta_error'
-  if (status.expected_catalog_linked) return 'linked'
+  if (!status.ok) {
+    if (status.error === 'waba_inaccessible') return 'waba_inaccessible'
+    if (status.error === 'waba_not_found') return 'waba_not_found'
+    return 'meta_error'
+  }
+  if (status.expected_catalog_linked === true) return 'linked'
   if (status.connected) return 'mismatch'
   return 'none'
 }
@@ -53,6 +66,7 @@ export default function WabaCatalogLinkStatusCard() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [showTechDetails, setShowTechDetails] = useState(false)
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true)
@@ -247,6 +261,52 @@ export default function WabaCatalogLinkStatusCard() {
     )
   }
 
+  if ((view === 'waba_inaccessible' || view === 'waba_not_found') && status) {
+    const title = view === 'waba_not_found' ? copy.wabaNotFoundTitle : copy.wabaInaccessibleTitle
+    const desc = view === 'waba_not_found' ? copy.wabaNotFoundDesc : copy.wabaInaccessibleDesc
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+            <div>
+              <h4 className="text-sm font-bold text-slate-800">{title}</h4>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">{desc}</p>
+              {status.catalog_exists === true && (
+                <p className="text-xs text-emerald-800 mt-2 leading-relaxed">
+                  {copy.wabaCatalogExistsNote}
+                </p>
+              )}
+              {status.catalog_exists === true && status.expected_catalog_id && (
+                <p className="text-[11px] text-emerald-800 mt-2">
+                  {copy.catalogIdLabel}{' '}
+                  <span className="font-mono" dir="ltr">{status.expected_catalog_id}</span>
+                </p>
+              )}
+            </div>
+          </div>
+          {refreshBtn}
+        </div>
+        {status.error_message && (
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowTechDetails(v => !v)}
+              className="text-[11px] font-semibold text-slate-600 hover:text-slate-800 underline"
+            >
+              {showTechDetails ? copy.hideTechnicalDetails : copy.showTechnicalDetails}
+            </button>
+            {showTechDetails && (
+              <p className="text-[11px] text-slate-500 mt-1 line-clamp-4" dir="ltr">
+                {status.error_message}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   if (view === 'meta_error' && status) {
     return (
       <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 space-y-2">
@@ -255,11 +315,21 @@ export default function WabaCatalogLinkStatusCard() {
             <XCircle className="w-5 h-5 text-rose-600 shrink-0" />
             <div>
               <h4 className="text-sm font-bold text-rose-900">{copy.metaErrorTitle}</h4>
-              {status.error_category && (
-                <p className="text-xs text-rose-800 mt-1">{status.error_category}</p>
-              )}
               {status.error_message && (
-                <p className="text-[11px] text-rose-700 mt-1 line-clamp-3">{status.error_message}</p>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowTechDetails(v => !v)}
+                    className="text-[11px] font-semibold text-rose-800 hover:text-rose-900 underline mt-1"
+                  >
+                    {showTechDetails ? copy.hideTechnicalDetails : copy.showTechnicalDetails}
+                  </button>
+                  {showTechDetails && (
+                    <p className="text-[11px] text-rose-700 mt-1 line-clamp-3" dir="ltr">
+                      {status.error_message}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>

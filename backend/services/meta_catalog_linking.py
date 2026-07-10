@@ -15,8 +15,9 @@ import httpx
 
 from core.config import META_GRAPH_API_VERSION
 from services.meta_catalog_import import (
+    GRAPH_RESULT_META_HTTP_ERROR,
+    GRAPH_RESULT_TOKEN_INVALID,
     _TOKEN_SOURCE_NONE,
-    classify_meta_graph_error,
     _select_graph_token,
 )
 
@@ -24,6 +25,14 @@ logger = logging.getLogger("nahla.meta_catalog_linking")
 
 REQUEST_TIMEOUT: float = 45.0
 _GRAPH_FIELDS = "id,name"
+
+WABA_ERROR_NOT_FOUND = "waba_not_found"
+WABA_ERROR_INACCESSIBLE = "waba_inaccessible"
+
+LINK_STATUS_LINKED = "linked"
+LINK_STATUS_MISMATCH = "mismatch"
+LINK_STATUS_NOT_LINKED = "not_linked"
+LINK_STATUS_UNKNOWN = "unknown"
 
 
 def _missing_payload(
@@ -41,12 +50,113 @@ def _missing_payload(
         "expected_catalog_id": expected_catalog_id,
         "linked_catalogs": [],
         "linked_catalog_ids": [],
-        "expected_catalog_linked": False,
+        "expected_catalog_linked": None,
         "token_source": token_source,
         "http_status": None,
         "missing": missing,
         "error": error,
+        "link_status": LINK_STATUS_UNKNOWN,
+        "catalog_exists": None,
     }
+
+
+def _classify_waba_product_catalogs_error(
+    graph_err: Dict[str, Any],
+    *,
+    http_status: int,
+) -> Dict[str, Any]:
+    """Classify Graph errors from GET /{waba_id}/product_catalogs.
+
+  Never maps to ``catalog_not_found`` — that code is reserved for a
+  missing Commerce catalog object, not an unreadable WABA ID.
+    """
+    msg_lower = str(graph_err.get("meta_message") or "").lower()
+    meta_code = graph_err.get("meta_code")
+    meta_type = str(graph_err.get("meta_type") or "")
+    base = {
+        "meta_code": meta_code,
+        "meta_type": graph_err.get("meta_type"),
+    }
+
+    if meta_code in (190, 102) or (
+        meta_type == "OAuthException" and "invalid" in msg_lower and "token" in msg_lower
+    ):
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_TOKEN_INVALID,
+            "permission_category": "invalid_token",
+        }
+
+    if meta_code in (4, 17, 32) or http_status >= 500:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
+
+    if "unexpected graph response shape" in msg_lower:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
+
+    permission_hint = (
+        "missing permissions" in msg_lower
+        or http_status in (401, 403)
+        or meta_code in (10, 200, 294)
+    )
+    not_exist_hint = (
+        "does not exist" in msg_lower
+        or "cannot be loaded" in msg_lower
+        or http_status == 404
+    )
+    if not_exist_hint and not permission_hint:
+        code = WABA_ERROR_NOT_FOUND
+    elif permission_hint:
+        code = WABA_ERROR_INACCESSIBLE
+    else:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
+    return {
+        **base,
+        "result_code": code,
+        "permission_category": code,
+    }
+
+
+def _probe_catalog_exists(
+    catalog_id: str,
+    token: str,
+    *,
+    client: httpx.Client,
+) -> Optional[bool]:
+    """Lightweight read-only check that the configured catalog object exists."""
+    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    try:
+        resp = client.get(url, params={"fields": "id", "access_token": token})
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        logger.warning(
+            "catalog_exists_probe_transport_error catalog_id=%s error=%s",
+            catalog_id,
+            type(exc).__name__,
+        )
+        return None
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "catalog_exists_probe_http_error catalog_id=%s error=%s",
+            catalog_id,
+            type(exc).__name__,
+        )
+        return None
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
+        return False
+    return None
 
 
 def _fetch_waba_product_catalogs(
@@ -139,35 +249,49 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
             token_source=token_source,
         )
 
-    linked_catalogs, http_status, graph_err = _fetch_waba_product_catalogs(waba_id, token)
-    if graph_err is not None:
-        classified = classify_meta_graph_error(
-            graph_err,
-            http_status=http_status,
-            token_source=token_source,
-            stage="waba_product_catalogs",
+    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+        linked_catalogs, http_status, graph_err = _fetch_waba_product_catalogs(
+            waba_id, token, client=client,
         )
-        return {
-            "ok": False,
-            "connected": False,
-            "waba_id": waba_id,
-            "expected_catalog_id": expected_catalog_id,
-            "linked_catalogs": [],
-            "linked_catalog_ids": [],
-            "expected_catalog_linked": False,
-            "token_source": token_source,
-            "http_status": http_status,
-            "missing": [],
-            "error": classified.get("result_code"),
-            "error_code": classified.get("meta_code"),
-            "error_type": classified.get("meta_type"),
-            "error_message": (graph_err.get("meta_message") or "")[:240] or None,
-            "error_category": classified.get("permission_category"),
-        }
+        if graph_err is not None:
+            classified = _classify_waba_product_catalogs_error(
+                graph_err,
+                http_status=http_status,
+            )
+            catalog_exists = (
+                _probe_catalog_exists(expected_catalog_id, token, client=client)
+                if expected_catalog_id
+                else None
+            )
+            return {
+                "ok": False,
+                "connected": False,
+                "waba_id": waba_id,
+                "expected_catalog_id": expected_catalog_id,
+                "linked_catalogs": [],
+                "linked_catalog_ids": [],
+                "expected_catalog_linked": None,
+                "token_source": token_source,
+                "http_status": http_status,
+                "missing": [],
+                "error": classified.get("result_code"),
+                "error_code": classified.get("meta_code"),
+                "error_type": classified.get("meta_type"),
+                "error_message": (graph_err.get("meta_message") or "")[:240] or None,
+                "error_category": classified.get("permission_category"),
+                "link_status": LINK_STATUS_UNKNOWN,
+                "catalog_exists": catalog_exists,
+            }
 
     linked_catalog_ids = [c["id"] for c in linked_catalogs]
     expected_linked = expected_catalog_id in linked_catalog_ids
     any_linked = bool(linked_catalog_ids)
+    if expected_linked:
+        link_status = LINK_STATUS_LINKED
+    elif any_linked:
+        link_status = LINK_STATUS_MISMATCH
+    else:
+        link_status = LINK_STATUS_NOT_LINKED
 
     return {
         "ok": True,
@@ -181,7 +305,13 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
         "http_status": http_status,
         "missing": [],
         "error": None,
+        "link_status": link_status,
+        "catalog_exists": True if expected_linked else None,
     }
 
 
-__all__ = ["get_waba_catalog_link_status"]
+__all__ = [
+    "get_waba_catalog_link_status",
+    "WABA_ERROR_INACCESSIBLE",
+    "WABA_ERROR_NOT_FOUND",
+]
