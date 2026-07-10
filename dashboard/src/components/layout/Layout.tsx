@@ -8,7 +8,7 @@ import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { MobileChatFullscreenProvider, useMobileChatFullscreen } from '../../context/MobileChatFullscreenContext'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
-import { getApiBase } from '../../auth'
+import { getApiBase, getRole, isImpersonating, isPlatformStaffRole } from '../../auth'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
 import { X } from 'lucide-react'
 
@@ -219,6 +219,12 @@ function LayoutShell() {
       : (_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
   const meta = t(metaSelector)
 
+  const showMerchantBanners = !(
+    pathname.startsWith('/admin') &&
+    isPlatformStaffRole(getRole()) &&
+    !isImpersonating()
+  )
+
   return (
     <div className="min-h-dvh flex bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-x-hidden transition-colors">
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
@@ -237,8 +243,8 @@ function LayoutShell() {
             />
             <ImpersonationBanner />
             <SupportAccessWarningBanner />
-            <StoreAIPausedBanner />
-            <TrialBanner />
+            {showMerchantBanners && <StoreAIPausedBanner />}
+            {showMerchantBanners && <TrialBanner />}
           </div>
         )}
         <main
