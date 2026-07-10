@@ -5,7 +5,7 @@
  */
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Clock, AlertTriangle, Zap, X, RefreshCw, Phone, Info } from 'lucide-react'
+import { Clock, AlertTriangle, Zap, X, RefreshCw, Phone, Info, Gift } from 'lucide-react'
 import { billingApi, type BillingStatus } from '../../api/billing'
 import { throttleFocusRefetch } from '../../lib/focusThrottleRefetch'
 
@@ -123,6 +123,40 @@ export default function TrialBanner() {
 
   const lifecycle = resolveLifecycle(status)
   if (lifecycle === 'paid_active') return null
+
+  const isGiftActive = lifecycle === 'gift_active' || status.manual_gift_grant_active === true
+  if (isGiftActive) {
+    const giftPlan =
+      status.plan_name
+      || (status.manual_gift_grant_plan_slug === 'starter' ? 'الباقة الأساسية' : status.manual_gift_grant_plan_slug)
+      || 'الباقة الأساسية'
+    const giftEnd = status.manual_gift_grant_ends_at?.slice(0, 10)
+    return (
+      <div className="bg-amber-500 text-white px-4 py-3 flex items-center justify-between gap-3 text-sm" dir="rtl">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <Gift className="w-5 h-5 shrink-0" />
+          <div>
+            <span className="font-bold block">
+              {status.manual_gift_grant_headline_ar || `لديك شهر هدية على ${giftPlan}`}
+            </span>
+            <span className="text-amber-100 text-xs block mt-0.5">
+              {status.headline_ar
+                || (giftEnd
+                  ? `تم تفعيل الباقة الأساسية كهدية حتى ${giftEnd}`
+                  : 'يمكنك استخدام مزايا الباقة خلال فترة الهدية.')}
+            </span>
+          </div>
+        </div>
+        <button
+          onClick={() => setDismissed(true)}
+          className="opacity-70 hover:opacity-100 transition-opacity shrink-0"
+          aria-label="إخفاء"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    )
+  }
 
   const { trial_days_remaining, warning_level, headline_ar, plan_name } = status
   const planLabel = plan_name || status.plan?.name_ar || 'الباقة'

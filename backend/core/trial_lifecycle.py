@@ -421,9 +421,11 @@ def _lifecycle_headline_ar(
     plan_name: str,
     trial_end: Optional[str],
     subscription_end: Optional[str],
+    gift_end: Optional[str] = None,
 ) -> str:
     trial_date = (trial_end or "")[:10] or "—"
     sub_date = (subscription_end or "")[:10] or "—"
+    gift_date = (gift_end or "")[:10] or "—"
     plan = plan_name or "الباقة"
 
     if lifecycle_status == "trial_pending_whatsapp":
@@ -432,6 +434,11 @@ def _lifecycle_headline_ar(
         return f"أنت الآن في التجربة المجانية — تنتهي بتاريخ: {trial_date}"
     if lifecycle_status == "trial_expired":
         return f"انتهت تجربتك المجانية بتاريخ: {trial_date} — اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي"
+    if lifecycle_status == "gift_active":
+        return (
+            f"تم تفعيل باقة {plan} كهدية حتى {gift_date}"
+            " — يمكنك استخدام مزايا الباقة خلال فترة الهدية."
+        )
     if lifecycle_status == "paid_active":
         return f"اشتراكك في باقة {plan} نشط — ينتهي بتاريخ: {sub_date}"
     if lifecycle_status == "paid_expired":
@@ -444,6 +451,7 @@ def _lifecycle_status_label_ar(lifecycle_status: str) -> str:
         "trial_pending_whatsapp": "بانتظار ربط واتساب",
         "trial_active":           "تجربة مجانية",
         "trial_expired":          "انتهت التجربة المجانية",
+        "gift_active":            "هدية",
         "paid_active":            "نشط",
         "paid_expired":           "منتهي",
     }.get(lifecycle_status, "—")
@@ -471,6 +479,7 @@ def resolve_billing_lifecycle(
     sub_started = _coerce_utc(record_sub.started_at) if record_sub else None
     sub_ends = _effective_sub_ends_at(record_sub) if record_sub else None
     sub_expired = bool(sub_ends and sub_ends <= now) if record_sub else False
+    gift_end_iso: Optional[str] = None
 
     if active_sub:
         lifecycle_status = "paid_active"
@@ -480,46 +489,69 @@ def resolve_billing_lifecycle(
         trial_expired = False
         subscription_expired = False
         has_subscription = True
-    elif has_paid_history and record_sub:
-        lifecycle_status = "paid_expired"
-        days_remaining = 0
-        warning_level = "expired"
-        is_trial = False
-        trial_expired = False
-        subscription_expired = True
-        has_subscription = False
-    elif trial_info.get("trial_pending_whatsapp"):
-        lifecycle_status = "trial_pending_whatsapp"
-        days_remaining = 0
-        warning_level = "none"
-        is_trial = False
-        trial_expired = False
-        subscription_expired = False
-        has_subscription = False
-    elif trial_info.get("is_trial"):
-        lifecycle_status = "trial_active"
-        days_remaining = trial_info["trial_days_remaining"]
-        warning_level = trial_info.get("warning_level", "none")
-        is_trial = True
-        trial_expired = False
-        subscription_expired = False
-        has_subscription = False
-    elif trial_info.get("trial_expired"):
-        lifecycle_status = "trial_expired"
-        days_remaining = 0
-        warning_level = "expired"
-        is_trial = False
-        trial_expired = True
-        subscription_expired = False
-        has_subscription = False
     else:
-        lifecycle_status = "trial_expired"
-        days_remaining = 0
-        warning_level = "expired"
-        is_trial = False
-        trial_expired = True
-        subscription_expired = False
-        has_subscription = False
+        from core.manual_billing_grant import (  # noqa: PLC0415
+            _read_grant_blob,
+            get_manual_gift_grant_plan_slug,
+            is_manual_gift_grant_active,
+        )
+        from core.plan_entitlements import PLAN_DEFINITIONS  # noqa: PLC0415
+
+        if is_manual_gift_grant_active(db, tenant_id):
+            gift_plan_slug = get_manual_gift_grant_plan_slug(db, tenant_id)
+            gift_def = PLAN_DEFINITIONS.get(gift_plan_slug) or PLAN_DEFINITIONS["starter"]
+            plan_name_ar = gift_def.name_ar
+            plan_slug = gift_plan_slug
+            blob = _read_grant_blob(db, tenant_id) or {}
+            gift_end_iso = blob.get("ends_at")
+            gift_ends_dt = _coerce_utc(gift_end_iso) if gift_end_iso else None
+            lifecycle_status = "gift_active"
+            days_remaining = _days_until(gift_ends_dt) if gift_ends_dt else 0
+            warning_level = "none"
+            is_trial = False
+            trial_expired = False
+            subscription_expired = False
+            has_subscription = False
+        elif has_paid_history and record_sub:
+            lifecycle_status = "paid_expired"
+            days_remaining = 0
+            warning_level = "expired"
+            is_trial = False
+            trial_expired = False
+            subscription_expired = True
+            has_subscription = False
+        elif trial_info.get("trial_pending_whatsapp"):
+            lifecycle_status = "trial_pending_whatsapp"
+            days_remaining = 0
+            warning_level = "none"
+            is_trial = False
+            trial_expired = False
+            subscription_expired = False
+            has_subscription = False
+        elif trial_info.get("is_trial"):
+            lifecycle_status = "trial_active"
+            days_remaining = trial_info["trial_days_remaining"]
+            warning_level = trial_info.get("warning_level", "none")
+            is_trial = True
+            trial_expired = False
+            subscription_expired = False
+            has_subscription = False
+        elif trial_info.get("trial_expired"):
+            lifecycle_status = "trial_expired"
+            days_remaining = 0
+            warning_level = "expired"
+            is_trial = False
+            trial_expired = True
+            subscription_expired = False
+            has_subscription = False
+        else:
+            lifecycle_status = "trial_expired"
+            days_remaining = 0
+            warning_level = "expired"
+            is_trial = False
+            trial_expired = True
+            subscription_expired = False
+            has_subscription = False
 
     last_payment = payments[0] if payments else None
     payment_provider = "unknown"
@@ -533,6 +565,7 @@ def resolve_billing_lifecycle(
         plan_name=plan_name_ar,
         trial_end=trial_info.get("trial_end"),
         subscription_end=_iso(sub_ends),
+        gift_end=gift_end_iso,
     )
 
     expired_since_days = 0

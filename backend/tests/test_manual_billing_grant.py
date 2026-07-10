@@ -387,6 +387,64 @@ class TestManualGiftGrant:
         assert payload["manual_gift_grant_active"] is True
         assert payload["manual_gift_grant_plan_slug"] == "starter"
         assert payload["manual_gift_grant_billing_status"] == "gift"
+        assert payload["lifecycle_status"] == "gift_active"
+        assert payload["trial_expired"] is False
+        assert payload["ai_auto_replies_allowed"] is True
+
+    def test_gift_lifecycle_wins_over_expired_trial(self, db):
+        from core.trial_lifecycle import resolve_billing_lifecycle
+
+        tenant = _seed_tenant(db, TENANT_GIFT)
+        _enable_gift(db, TENANT_GIFT)
+
+        lifecycle = resolve_billing_lifecycle(db, TENANT_GIFT, tenant, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "gift_active"
+        assert lifecycle["trial_expired"] is False
+        assert lifecycle["plan_slug"] == "starter"
+        assert lifecycle["ai_auto_replies_allowed"] is True
+
+    def test_expired_gift_falls_back_to_trial_expired(self, db):
+        from core.trial_lifecycle import resolve_billing_lifecycle
+
+        tenant = _seed_tenant(db, TENANT_GIFT)
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0).isoformat()
+        settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == TENANT_GIFT).one()
+        settings.extra_metadata = {
+            "billing": {
+                "manual_gift_grant": {
+                    "enabled": True,
+                    "grant_type": "gift",
+                    "plan_slug": "starter",
+                    "starts_at": (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),
+                    "ends_at": past,
+                    "reason": "test",
+                    "granted_by": "ops",
+                    "granted_at": (datetime.now(timezone.utc) - timedelta(days=31)).isoformat(),
+                    "revoked_at": None,
+                    "revoked_by": None,
+                }
+            }
+        }
+        db.commit()
+
+        lifecycle = resolve_billing_lifecycle(db, TENANT_GIFT, tenant, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "trial_expired"
+        assert lifecycle["trial_expired"] is True
+
+    def test_paid_active_wins_over_gift_lifecycle(self, db):
+        from core.trial_lifecycle import resolve_billing_lifecycle
+
+        tenant = _seed_tenant(db, TENANT_GIFT)
+        _enable_gift(db, TENANT_GIFT)
+        _seed_active_growth_subscription(db, TENANT_GIFT)
+        active_sub = (
+            db.query(BillingSubscription)
+            .filter(BillingSubscription.tenant_id == TENANT_GIFT, BillingSubscription.status == "active")
+            .first()
+        )
+
+        lifecycle = resolve_billing_lifecycle(db, TENANT_GIFT, tenant, active_sub=active_sub)
+        assert lifecycle["lifecycle_status"] == "paid_active"
 
     def test_revoke_via_module(self, db):
         from core.billing import has_billing_access
