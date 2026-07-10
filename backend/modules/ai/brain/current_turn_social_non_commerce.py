@@ -409,6 +409,14 @@ def resolve_current_turn_social_non_commerce(
             confidence=max(_intent_confidence(intent), 0.90),
         )
 
+    if name == INTENT_WHO_ARE_YOU and _intent_confidence(intent) >= 0.80:
+        return CurrentTurnSocialNonCommerce(
+            True,
+            category="persona_identity",
+            reason="intent_who_are_you",
+            confidence=max(_intent_confidence(intent), 0.90),
+        )
+
     if is_colloquial_social_inventory_message(raw):
         return CurrentTurnSocialNonCommerce(
             True,
