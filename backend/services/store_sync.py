@@ -1207,7 +1207,14 @@ class StoreSyncService:
                         "restocked": None,
                     }
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning(
+                    "[StoreSync] native-product guard check failed tenant=%s "
+                    "product=%s external_id=%s — continuing normal upsert",
+                    self.tenant_id,
+                    getattr(existing, "id", None),
+                    ext_id,
+                    exc_info=True,
+                )
             was_unavailable = (
                 (getattr(existing, "in_stock", True) is False)
                 or (existing.stock_quantity is not None and existing.stock_quantity <= 0)

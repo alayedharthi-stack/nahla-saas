@@ -1918,12 +1918,13 @@ export interface Translations {
       }
     }
     sources: {
-      salla:   string
-      zid:     string
-      meta:    string
-      manual:  string
-      unknown: string
-      mixed:   string
+      salla:        string
+      zid:          string
+      meta:         string
+      manual:       string
+      nahla_native: string
+      unknown:      string
+      mixed:        string
     }
     messages: {
       resyncSuccess:         string
@@ -2073,6 +2074,13 @@ export interface Translations {
         restoreFailed:     string
         statusRemovedMeta: string
         statusHidden:      string
+        ownershipNahlaManaged:    string
+        ownershipExternalManaged: string
+        ownershipMetaReadonly:    string
+        readOnlyNote:             string
+        deleteBtn:                string
+        deleteConfirm:            string
+        deleteFailed:             string
       }
     }
   }
