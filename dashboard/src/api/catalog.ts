@@ -115,7 +115,7 @@ export interface WabaCatalogLinkStatus {
   expected_catalog_id:     string | null
   linked_catalogs:         WabaLinkedCatalog[]
   linked_catalog_ids:      string[]
-  expected_catalog_linked: boolean
+  expected_catalog_linked: boolean | null
   token_source:            string
   http_status:             number | null
   missing:                 string[]

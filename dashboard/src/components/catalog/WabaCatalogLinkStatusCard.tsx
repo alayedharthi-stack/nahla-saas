@@ -43,7 +43,7 @@ function resolveCase(
     if (status.error === 'waba_not_found') return 'waba_not_found'
     return 'meta_error'
   }
-  if (status.expected_catalog_linked) return 'linked'
+  if (status.expected_catalog_linked === true) return 'linked'
   if (status.connected) return 'mismatch'
   return 'none'
 }
@@ -272,7 +272,12 @@ export default function WabaCatalogLinkStatusCard() {
             <div>
               <h4 className="text-sm font-bold text-slate-800">{title}</h4>
               <p className="text-xs text-slate-600 mt-1 leading-relaxed">{desc}</p>
-              {status.catalog_exists && status.expected_catalog_id && (
+              {status.catalog_exists === true && (
+                <p className="text-xs text-emerald-800 mt-2 leading-relaxed">
+                  {copy.wabaCatalogExistsNote}
+                </p>
+              )}
+              {status.catalog_exists === true && status.expected_catalog_id && (
                 <p className="text-[11px] text-emerald-800 mt-2">
                   {copy.catalogIdLabel}{' '}
                   <span className="font-mono" dir="ltr">{status.expected_catalog_id}</span>

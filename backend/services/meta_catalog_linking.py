@@ -15,6 +15,8 @@ import httpx
 
 from core.config import META_GRAPH_API_VERSION
 from services.meta_catalog_import import (
+    GRAPH_RESULT_META_HTTP_ERROR,
+    GRAPH_RESULT_TOKEN_INVALID,
     _TOKEN_SOURCE_NONE,
     _select_graph_token,
 )
@@ -48,7 +50,7 @@ def _missing_payload(
         "expected_catalog_id": expected_catalog_id,
         "linked_catalogs": [],
         "linked_catalog_ids": [],
-        "expected_catalog_linked": False,
+        "expected_catalog_linked": None,
         "token_source": token_source,
         "http_status": None,
         "missing": missing,
@@ -70,6 +72,35 @@ def _classify_waba_product_catalogs_error(
     """
     msg_lower = str(graph_err.get("meta_message") or "").lower()
     meta_code = graph_err.get("meta_code")
+    meta_type = str(graph_err.get("meta_type") or "")
+    base = {
+        "meta_code": meta_code,
+        "meta_type": graph_err.get("meta_type"),
+    }
+
+    if meta_code in (190, 102) or (
+        meta_type == "OAuthException" and "invalid" in msg_lower and "token" in msg_lower
+    ):
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_TOKEN_INVALID,
+            "permission_category": "invalid_token",
+        }
+
+    if meta_code in (4, 17, 32) or http_status >= 500:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
+
+    if "unexpected graph response shape" in msg_lower:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
+
     permission_hint = (
         "missing permissions" in msg_lower
         or http_status in (401, 403)
@@ -82,13 +113,18 @@ def _classify_waba_product_catalogs_error(
     )
     if not_exist_hint and not permission_hint:
         code = WABA_ERROR_NOT_FOUND
-    else:
+    elif permission_hint:
         code = WABA_ERROR_INACCESSIBLE
+    else:
+        return {
+            **base,
+            "result_code": GRAPH_RESULT_META_HTTP_ERROR,
+            "permission_category": "meta_http_error",
+        }
     return {
+        **base,
         "result_code": code,
         "permission_category": code,
-        "meta_code": meta_code,
-        "meta_type": graph_err.get("meta_type"),
     }
 
 
@@ -102,7 +138,19 @@ def _probe_catalog_exists(
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
     try:
         resp = client.get(url, params={"fields": "id", "access_token": token})
-    except Exception:  # noqa: BLE001
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        logger.warning(
+            "catalog_exists_probe_transport_error catalog_id=%s error=%s",
+            catalog_id,
+            type(exc).__name__,
+        )
+        return None
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "catalog_exists_probe_http_error catalog_id=%s error=%s",
+            catalog_id,
+            type(exc).__name__,
+        )
         return None
     if resp.status_code == 200:
         return True
@@ -222,7 +270,7 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
                 "expected_catalog_id": expected_catalog_id,
                 "linked_catalogs": [],
                 "linked_catalog_ids": [],
-                "expected_catalog_linked": False,
+                "expected_catalog_linked": None,
                 "token_source": token_source,
                 "http_status": http_status,
                 "missing": [],

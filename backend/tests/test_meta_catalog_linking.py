@@ -21,6 +21,10 @@ from services.meta_catalog_linking import (  # noqa: E402
     WABA_ERROR_NOT_FOUND,
     get_waba_catalog_link_status,
 )
+from services.meta_catalog_import import (  # noqa: E402
+    GRAPH_RESULT_META_HTTP_ERROR,
+    GRAPH_RESULT_TOKEN_INVALID,
+)
 
 
 def _conn(
@@ -157,7 +161,7 @@ def test_link_status_waba_object_not_found_not_catalog_not_found(mock_client_cls
     assert out["error"] != "catalog_not_found"
     assert out["error_category"] != "catalog_not_found"
     assert out["link_status"] == "unknown"
-    assert out["expected_catalog_linked"] is False
+    assert out["expected_catalog_linked"] is None
 
 
 @patch("services.meta_catalog_linking._probe_catalog_exists", return_value=True)
@@ -179,6 +183,7 @@ def test_link_status_waba_missing_permissions_is_inaccessible(mock_client_cls, _
     assert out["error"] == WABA_ERROR_INACCESSIBLE
     assert out["error_category"] == WABA_ERROR_INACCESSIBLE
     assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
     assert out["catalog_exists"] is True
 
 
@@ -195,7 +200,94 @@ def test_link_status_catalog_probe_false_only_when_catalog_missing(mock_client_c
 
     out = get_waba_catalog_link_status(_db_with(_conn(waba_id="WABA-BAD")), 9)
     assert out["error"] == WABA_ERROR_NOT_FOUND
+    assert out["expected_catalog_linked"] is None
     assert out["catalog_exists"] is False
+
+
+@patch("services.meta_catalog_linking._probe_catalog_exists", return_value=None)
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_waba_failure_catalog_probe_unknown(mock_client_cls, _mock_probe):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=400,
+        code=100,
+        message=(
+            "Unsupported get request. Object with ID 'WABA-BAD' does not exist, "
+            "cannot be loaded due to missing permissions"
+        ),
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn(waba_id="WABA-BAD")), 9)
+    assert out["error"] == WABA_ERROR_INACCESSIBLE
+    assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
+    assert out["catalog_exists"] is None
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_token_invalid_not_waba_inaccessible(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=400,
+        code=190,
+        message="Error validating access token: Session has expired",
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn()), 9)
+    assert out["ok"] is False
+    assert out["error"] == GRAPH_RESULT_TOKEN_INVALID
+    assert out["error"] != WABA_ERROR_INACCESSIBLE
+    assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_rate_limit_not_permanent_waba_error(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=400,
+        code=4,
+        message="Application request limit reached",
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn()), 9)
+    assert out["error"] == GRAPH_RESULT_META_HTTP_ERROR
+    assert out["error"] not in (WABA_ERROR_INACCESSIBLE, WABA_ERROR_NOT_FOUND)
+    assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_graph_5xx_not_permanent_waba_error(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_error(
+        status=503,
+        code=2,
+        message="Service temporarily unavailable",
+    )
+
+    out = get_waba_catalog_link_status(_db_with(_conn()), 9)
+    assert out["error"] == GRAPH_RESULT_META_HTTP_ERROR
+    assert out["error"] not in (WABA_ERROR_INACCESSIBLE, WABA_ERROR_NOT_FOUND)
+    assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_not_linked_empty_catalogs(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_response([])
+
+    out = get_waba_catalog_link_status(_db_with(_conn()), 9)
+    assert out["ok"] is True
+    assert out["connected"] is False
+    assert out["expected_catalog_linked"] is False
+    assert out["link_status"] == "not_linked"
 
 
 @patch("services.meta_catalog_linking.httpx.Client")
@@ -210,6 +302,7 @@ def test_link_status_graph_permission_error(mock_client_cls):
     assert out["error"] == WABA_ERROR_INACCESSIBLE
     assert out["error"] != "catalog_not_found"
     assert out["link_status"] == "unknown"
+    assert out["expected_catalog_linked"] is None
 
 
 def test_link_status_no_graph_post_in_service():

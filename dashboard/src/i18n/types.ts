@@ -1783,6 +1783,7 @@ export interface Translations {
       metaErrorTitle:       string
       wabaInaccessibleTitle: string
       wabaInaccessibleDesc:  string
+      wabaCatalogExistsNote: string
       wabaNotFoundTitle:     string
       wabaNotFoundDesc:      string
       showTechnicalDetails:  string
