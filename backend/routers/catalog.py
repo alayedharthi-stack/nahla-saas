@@ -79,8 +79,11 @@ from core.catalog import (
     is_meta_export_eligible,
     merchant_edit_rejection_detail,
     meta_export_rejection_detail,
+    native_product_price_http_detail,
+    normalize_catalog_price_amount,
     product_source,
     source_breakdown,
+    validate_native_product_price,
     whatsapp_commerce_diagnostics_readiness,
 )
 from core.database import get_db
@@ -1069,51 +1072,16 @@ def _apply_studio_filters(
 
 
 def _normalize_catalog_price_amount(value: Any) -> Optional[str]:
-    """Normalize catalog price metadata to a plain numeric string, or None.
+    """Router-local alias — logic lives in ``core.catalog``."""
+    return normalize_catalog_price_amount(value)
 
-    Accepts numbers, numeric strings, and ``{amount, currency}`` dicts.
-    Never returns ``str(dict)`` or other raw technical reprs.
-    """
-    if value is None or value == "":
-        return None
 
-    if isinstance(value, dict):
-        return _normalize_catalog_price_amount(value.get("amount"))
-
-    if isinstance(value, (int, float)):
-        try:
-            if float(value) == 0.0:
-                return None
-        except (TypeError, ValueError):
-            return None
-        if float(value).is_integer():
-            return str(int(value))
-        return str(float(value))
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    if text.startswith("{") and text.endswith("}"):
-        try:
-            import ast  # noqa: PLC0415
-
-            parsed = ast.literal_eval(text)
-        except (ValueError, SyntaxError):
-            return None
-        if isinstance(parsed, dict):
-            return _normalize_catalog_price_amount(parsed)
-        return None
-
+def _coerce_native_price_or_422(value: Any) -> Optional[str]:
+    """Validate Nahla-native price writes; 422 on currency text or garbage."""
     try:
-        num = float(text.replace(",", ""))
-        if num == 0.0:
-            return None
-        if num.is_integer():
-            return str(int(num))
-        return str(num)
-    except (TypeError, ValueError):
-        return None
+        return validate_native_product_price(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=native_product_price_http_detail())
 
 
 def _catalog_list_sale_fields(meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -2102,11 +2070,14 @@ async def merchant_catalog_create_manual_product(
         "image_url":     (payload.image_url or "").strip() or None,
         "product_url":   (payload.product_url or "").strip() or None,
     }
+    native_price = None
+    if payload.price is not None and str(payload.price).strip():
+        native_price = _coerce_native_price_or_422(payload.price)
     p = Product(
         tenant_id        = tenant_id,
         title            = payload.title.strip(),
         description      = (payload.description or None),
-        price            = (payload.price or None),
+        price            = native_price,
         sku              = (payload.sku or None),
         external_id      = (payload.external_id or None) or None,
         meta_retailer_id = (payload.meta_retailer_id or None) or None,
@@ -2156,6 +2127,8 @@ async def merchant_catalog_update_manual_product(
     _assert_merchant_editable_or_409(p)
 
     data = payload.model_dump(exclude_unset=True)
+    if "price" in data:
+        data["price"] = _coerce_native_price_or_422(data["price"])
     # Top-level columns
     for col in (
         "title", "description", "price", "sku",
@@ -2489,6 +2462,9 @@ def _apply_studio_product_patch(
     provenance.
     """
     data = payload.model_dump(exclude_unset=True)
+
+    if "price" in data:
+        data["price"] = _coerce_native_price_or_422(data["price"])
 
     if "title" in data:
         title = _clean_optional_text(data["title"])

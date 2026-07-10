@@ -651,6 +651,12 @@ function Pagination(props: {
 // backend automatically influences the counter without a frontend
 // release. Pure consumer of the registry.
 
+function isNativePriceDraftValid(price: string | undefined): boolean {
+  const v = (price ?? '').trim()
+  if (!v) return true
+  return /^\d+(?:[.,]\d+)?$/.test(v.replace(/,/g, ''))
+}
+
 function FieldShell(props: {
   fieldName: string
   label: string
@@ -662,6 +668,10 @@ function FieldShell(props: {
   placeholder?: string
   dir?: 'rtl' | 'ltr'
   disabled?: boolean
+  inputMode?: 'text' | 'decimal' | 'numeric'
+  type?: string
+  helperText?: string
+  errorText?: string
 }) {
   const statuses: Array<{ channel: string; label_ar: string; fs: ReadinessFieldStatus }> =
     props.perChannel
@@ -727,10 +737,18 @@ function FieldShell(props: {
             placeholder={props.placeholder}
             dir={props.dir}
             disabled={props.disabled}
+            inputMode={props.inputMode}
+            type={props.type}
             className="w-full bg-transparent px-3 py-2 text-sm outline-none disabled:opacity-60 disabled:cursor-not-allowed"
           />
         )}
       </div>
+      {props.helperText && !props.errorText && (
+        <p className="text-[11px] text-slate-500 leading-relaxed">{props.helperText}</p>
+      )}
+      {props.errorText && (
+        <p className="text-[11px] text-rose-700 leading-relaxed">{props.errorText}</p>
+      )}
       {/* Inline warnings — show only the strictest message */}
       {statuses
         .filter(s => s.fs.state === 'warn' || s.fs.state === 'error' || (s.fs.state === 'missing' && s.fs.required))
@@ -885,6 +903,7 @@ function ProductDrawer(props: {
   const [metaPreview, setMetaPreview] = useState<MetaSyncPreviewResponse | null>(null)
   const [metaPreviewBusy, setMetaPreviewBusy] = useState(false)
   const [metaPreviewError, setMetaPreviewError] = useState<string | null>(null)
+  const [priceSaveError, setPriceSaveError] = useState<string | null>(null)
   const previewTimer = useRef<number | null>(null)
   const saveTimer = useRef<number | null>(null)
   const saveVersion = useRef(0)
@@ -913,6 +932,7 @@ function ProductDrawer(props: {
     setSaveStatus('idle')
     setMetaPreview(null)
     setMetaPreviewError(null)
+    setPriceSaveError(null)
     pendingSaveDraft.current = null
     saveVersion.current += 1
     catalogApi.productDetail(props.productId)
@@ -961,9 +981,15 @@ function ProductDrawer(props: {
 
   const persistDraft = useCallback(async (d: ReadinessPreviewBody, version: number) => {
     if (!data || !isMerchantEditableSource(data.product.source)) return
+    if (!isNativePriceDraftValid(d.price)) {
+      setSaveStatus('error')
+      setPriceSaveError(dr.priceInvalid)
+      return
+    }
     const productId = props.productId
     pendingSaveDraft.current = null
     setSaveStatus('saving')
+    setPriceSaveError(null)
     try {
       const saved = await catalogApi.updateProduct(productId, d)
       if (version !== saveVersion.current || activeProductId.current !== productId) return
@@ -971,14 +997,24 @@ function ProductDrawer(props: {
       setPerChannel(saved.per_channel)
       setSaveStatus('saved')
       props.onMutated()
-    } catch {
+    } catch (err: unknown) {
       if (version !== saveVersion.current || activeProductId.current !== productId) return
       setSaveStatus('error')
+      const detail = (err as { detail?: { message_ar?: string; error_code?: string } })?.detail
+      if (detail?.error_code === 'price_must_be_numeric') {
+        setPriceSaveError(detail.message_ar || dr.priceInvalid)
+      }
     }
-  }, [props, data])
+  }, [props, data, dr.priceInvalid])
 
   const scheduleSave = useCallback((d: ReadinessPreviewBody) => {
     if (!data || !isMerchantEditableSource(data.product.source)) return
+    if (!isNativePriceDraftValid(d.price)) {
+      setSaveStatus('error')
+      setPriceSaveError(dr.priceInvalid)
+      return
+    }
+    setPriceSaveError(null)
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
     const version = saveVersion.current + 1
     saveVersion.current = version
@@ -1337,6 +1373,10 @@ function ProductDrawer(props: {
                   fieldName="price" label={fld.price} required
                   value={draft.price ?? ''} onChange={v => update('price', v)}
                   perChannel={perChannel} disabled={!isEditable}
+                  inputMode="decimal"
+                  type="text"
+                  helperText={isEditable ? dr.priceHelper : undefined}
+                  errorText={isEditable ? priceSaveError ?? undefined : undefined}
                 />
                 <FieldShell
                   fieldName="sale_price" label={fld.salePrice}
