@@ -52,6 +52,10 @@ class _VisProduct:
     price: Optional[str] = None
     in_stock: bool = True
     source: str = SOURCE_META
+    ownership_mode: Optional[str] = None
+    source_conflict_status: Optional[str] = None
+    source_conflict_detail: Optional[Dict[str, Any]] = None
+    meta_item_id: Optional[str] = None
     catalog_status: str = CATALOG_STATUS_ACTIVE
     merchant_hidden_at: Optional[datetime] = None
     meta_removed_at: Optional[datetime] = None
@@ -145,6 +149,10 @@ class _ReconcileDb(_InMemoryCatalogDb):
                 price=getattr(obj, "price", None),
                 in_stock=bool(getattr(obj, "in_stock", True)),
                 source=getattr(obj, "source", None) or SOURCE_META,
+                ownership_mode=getattr(obj, "ownership_mode", None),
+                source_conflict_status=getattr(obj, "source_conflict_status", None),
+                source_conflict_detail=dict(getattr(obj, "source_conflict_detail", None) or {}),
+                meta_item_id=getattr(obj, "meta_item_id", None),
                 catalog_status=getattr(obj, "catalog_status", None) or CATALOG_STATUS_ACTIVE,
                 merchant_hidden_at=getattr(obj, "merchant_hidden_at", None),
                 meta_removed_at=getattr(obj, "meta_removed_at", None),

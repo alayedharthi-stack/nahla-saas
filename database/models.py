@@ -221,6 +221,19 @@ class Product(Base):
     # the Zid sync; ``"unknown"`` for legacy rows whose origin we
     # can't determine.
     source = Column(String(32), nullable=True, index=True)
+    # ── Multi-source ownership (migration 0085) ───────────────────────────
+    ownership_mode = Column(String(32), nullable=True)
+    source_external_id = Column(String(128), nullable=True)
+    meta_item_id = Column(String(128), nullable=True)
+    canonical_retailer_id = Column(String(255), nullable=True)
+    sync_status = Column(String(32), nullable=True)
+    sync_error = Column(Text, nullable=True)
+    last_synced_at = Column(DateTime(timezone=True), nullable=True)
+    imported_at = Column(DateTime(timezone=True), nullable=True)
+    managed_confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    managed_confirmed_by = Column(String(64), nullable=True)
+    source_conflict_status = Column(String(32), nullable=True)
+    source_conflict_detail = Column(JSONB, nullable=True)
     # ── Catalog visibility (migration 0072 — P1-G1) ───────────────────────
     # Soft lifecycle for Meta reconciliation + merchant hide. Never hard-
     # delete rows that orders / affinities / KB links may reference.

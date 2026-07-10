@@ -289,15 +289,106 @@ def assign_canonical_retailer_id(product: Any) -> bool:
 # and the input-side tag is permanent.
 SOURCE_SALLA   = "salla"
 SOURCE_ZID     = "zid"
-SOURCE_META    = "meta"     # Imported FROM Meta Catalog into Nahla
-SOURCE_MANUAL  = "manual"
+SOURCE_SHOPIFY = "shopify"
+SOURCE_META    = "meta"     # Legacy alias — prefer SOURCE_META_EXISTING for new writes
+SOURCE_META_EXISTING = "meta_existing"
+SOURCE_MANUAL  = "manual"   # Legacy alias — prefer SOURCE_NAHLA_NATIVE for new writes
+SOURCE_NAHLA_NATIVE = "nahla_native"
+SOURCE_NAHLA_MANAGED_META = "nahla_managed_meta"
 SOURCE_UNKNOWN = "unknown"
 
-# Sources we accept on intake. ``unknown`` is allowed as a backfill value
-# only — new writes MUST pick a concrete source.
+# Legacy → canonical aliases (read normalization only).
+SOURCE_ALIASES = {
+    SOURCE_MANUAL: SOURCE_NAHLA_NATIVE,
+    SOURCE_META: SOURCE_META_EXISTING,
+}
+
+# Sources we accept on intake. Legacy values remain readable.
 KNOWN_SOURCES = frozenset({
-    SOURCE_SALLA, SOURCE_ZID, SOURCE_META, SOURCE_MANUAL, SOURCE_UNKNOWN,
+    SOURCE_SALLA, SOURCE_ZID, SOURCE_SHOPIFY,
+    SOURCE_META, SOURCE_META_EXISTING,
+    SOURCE_MANUAL, SOURCE_NAHLA_NATIVE,
+    SOURCE_NAHLA_MANAGED_META,
+    SOURCE_UNKNOWN,
 })
+
+EXTERNAL_PLATFORM_SOURCES = frozenset({
+    SOURCE_SALLA, SOURCE_ZID, SOURCE_SHOPIFY,
+})
+
+NAHLA_NATIVE_SOURCES = frozenset({
+    SOURCE_MANUAL, SOURCE_NAHLA_NATIVE,
+})
+
+META_EXISTING_SOURCES = frozenset({
+    SOURCE_META, SOURCE_META_EXISTING,
+})
+
+# ── Ownership modes (migration 0085) ─────────────────────────────────────
+
+OWNERSHIP_EXTERNAL_MANAGED = "external_managed"
+OWNERSHIP_NAHLA_MANAGED = "nahla_managed"
+OWNERSHIP_META_READONLY = "meta_readonly"
+OWNERSHIP_NAHLA_MANAGED_META = "nahla_managed_meta"
+OWNERSHIP_ARCHIVED_OR_DISCONNECTED = "archived_or_disconnected"
+
+KNOWN_OWNERSHIP_MODES = frozenset({
+    OWNERSHIP_EXTERNAL_MANAGED,
+    OWNERSHIP_NAHLA_MANAGED,
+    OWNERSHIP_META_READONLY,
+    OWNERSHIP_NAHLA_MANAGED_META,
+    OWNERSHIP_ARCHIVED_OR_DISCONNECTED,
+})
+
+CONFLICT_POSSIBLE_DUPLICATE = "possible_duplicate"
+
+
+def normalize_source(raw: Any) -> str:
+    """Map legacy source strings to canonical vocabulary."""
+    if raw is None:
+        return SOURCE_UNKNOWN
+    s = str(raw).strip().lower()
+    if not s:
+        return SOURCE_UNKNOWN
+    if s in SOURCE_ALIASES:
+        return SOURCE_ALIASES[s]
+    if s in KNOWN_SOURCES:
+        return s
+    return SOURCE_UNKNOWN
+
+
+def infer_ownership_mode(product: Any) -> Optional[str]:
+    """Infer ownership from column or source. Returns None when unknown."""
+    if product is None:
+        return None
+    raw = getattr(product, "ownership_mode", None)
+    if raw and str(raw).strip():
+        mode = str(raw).strip().lower()
+        if mode in KNOWN_OWNERSHIP_MODES:
+            return mode
+    src = normalize_source(getattr(product, "source", None))
+    if src in EXTERNAL_PLATFORM_SOURCES:
+        return OWNERSHIP_EXTERNAL_MANAGED
+    if src in NAHLA_NATIVE_SOURCES:
+        return OWNERSHIP_NAHLA_MANAGED
+    if src == SOURCE_NAHLA_MANAGED_META:
+        return OWNERSHIP_NAHLA_MANAGED_META
+    if src in META_EXISTING_SOURCES:
+        return OWNERSHIP_META_READONLY
+    if src == SOURCE_UNKNOWN:
+        ext = getattr(product, "external_id", None)
+        if ext and str(ext).strip():
+            return OWNERSHIP_EXTERNAL_MANAGED
+    return None
+
+
+def is_import_protected(product: Any) -> bool:
+    """True when Meta import must not mutate *product*."""
+    mode = infer_ownership_mode(product)
+    if mode == OWNERSHIP_EXTERNAL_MANAGED:
+        return True
+    src = normalize_source(getattr(product, "source", None))
+    return src in EXTERNAL_PLATFORM_SOURCES
 
 # ── Catalog visibility (P1-G1) ─────────────────────────────────────────────
 # Single vocabulary for AI + dashboard + Meta reconciliation. Legacy rows
@@ -401,7 +492,7 @@ def product_source(product: Any) -> str:
     if raw:
         s = str(raw).strip().lower()
         if s in KNOWN_SOURCES:
-            return s
+            return normalize_source(s)
         # Unknown literal string — surface as "unknown" rather than the
         # opaque foreign value so the UI badge mapping stays a closed set.
         return SOURCE_UNKNOWN
@@ -414,7 +505,7 @@ def product_source(product: Any) -> str:
         if meta_src:
             s = str(meta_src).strip().lower()
             if s in KNOWN_SOURCES:
-                return s
+                return normalize_source(s)
 
     # No explicit source — fall back to the same heuristic the migration
     # uses. A product with an external_id almost certainly came from a
