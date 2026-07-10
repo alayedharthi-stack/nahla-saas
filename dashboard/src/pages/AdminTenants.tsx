@@ -65,6 +65,32 @@ function ActiveBadge({ active }: { active: boolean }) {
   )
 }
 
+const BILLING_BADGE_CLS: Record<string, string> = {
+  paid: 'bg-emerald-100 text-emerald-800 border border-emerald-200',
+  gift: 'bg-amber-100 text-amber-800 border border-amber-200',
+  trial: 'bg-blue-100 text-blue-800 border border-blue-200',
+  pending_payment: 'bg-orange-100 text-orange-800 border border-orange-200',
+  none: 'bg-slate-100 text-slate-600 border border-slate-200',
+  store_disabled: 'bg-red-50 text-red-600 border border-red-100',
+}
+
+function BillingBadge({ display }: { display: AdminTenantSummary['billing_display'] | undefined }) {
+  if (!display?.billing_access_label_ar) {
+    return <span className="text-xs text-slate-300">—</span>
+  }
+  const kind = display.billing_access_kind || 'none'
+  const cls = BILLING_BADGE_CLS[kind] ?? BILLING_BADGE_CLS.none
+  const title = display.billing_ends_at || display.gift_ends_at || undefined
+  return (
+    <span
+      className={`inline-block text-xs px-2 py-0.5 rounded-full font-medium max-w-[200px] truncate ${cls}`}
+      title={title}
+    >
+      {display.billing_access_label_ar}
+    </span>
+  )
+}
+
 const VISIBILITY_TAG_META: Record<VisibilityTag, {
   label: string
   cls: string
@@ -432,7 +458,7 @@ function TenantDrawer({
             <DetailRow label="اسم المتجر" value={tenant.name} />
             <DetailRow label="الدومين" value={tenant.domain} mono />
             <DetailRow label="تاريخ التسجيل" value={fmtDate(tenant.created_at)} />
-            <DetailRow label="الحالة" value={<ActiveBadge active={tenant.is_active} />} />
+            <DetailRow label="حالة المتجر" value={<ActiveBadge active={tenant.is_active} />} />
             <DetailRow label="الخطة" value={tenant.subscription.plan || '—'} />
             <DetailRow label="حالة الاشتراك" value={SUB_STATUS_AR[tenant.subscription.status] ?? tenant.subscription.status} />
           </Section>
@@ -779,7 +805,8 @@ export default function AdminTenants() {
                     'Phone Number ID',
                     'WABA ID',
                     'الخطة',
-                    'الحالة',
+                    'حالة المتجر',
+                    'حالة الفوترة',
                     ...(showAll ? ['التصنيف'] : []),
                     'إجراء',
                   ].map(h => (
@@ -856,9 +883,14 @@ export default function AdminTenants() {
                       <p className="text-xs text-slate-400">{SUB_STATUS_AR[tenant.subscription.status] ?? tenant.subscription.status}</p>
                     </td>
 
-                    {/* Active */}
+                    {/* Store active */}
                     <td className="px-3 py-3">
                       <ActiveBadge active={tenant.is_active} />
+                    </td>
+
+                    {/* Billing access */}
+                    <td className="px-3 py-3">
+                      <BillingBadge display={tenant.billing_display} />
                     </td>
 
                     {/* Visibility badge — only visible when showAll is on */}

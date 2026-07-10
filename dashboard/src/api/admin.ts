@@ -234,6 +234,23 @@ export interface AdminMerchantSummary {
 
 export type VisibilityTag = 'archived' | 'disconnected' | 'test' | 'pending_payment'
 
+export type BillingAccessKind =
+  | 'paid'
+  | 'gift'
+  | 'trial'
+  | 'pending_payment'
+  | 'none'
+  | 'store_disabled'
+
+export interface AdminBillingDisplay {
+  billing_access_kind: BillingAccessKind
+  billing_access_label_ar: string
+  billing_plan_slug: string | null
+  billing_ends_at: string | null
+  gift_active: boolean
+  gift_ends_at: string | null
+}
+
 export interface AdminTenantSummary {
   id: number
   name: string
@@ -242,6 +259,7 @@ export interface AdminTenantSummary {
   created_at: string | null
   /** null = visible by default; non-null = would be hidden in filtered view */
   visibility_tag: VisibilityTag | null
+  billing_display: AdminBillingDisplay
   subscription: {
     status: string
     plan: string

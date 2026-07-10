@@ -298,12 +298,21 @@ def _tenant_summary_payload(db: Session, tenant: Tenant) -> Dict[str, Any]:
         BillingPayment.tenant_id == tenant.id,
         BillingPayment.status == "paid",
     ).scalar() or 0
+    from core.manual_billing_grant import compact_billing_display_for_admin  # noqa: PLC0415
+
+    billing_display = compact_billing_display_for_admin(
+        db,
+        tenant.id,
+        tenant=tenant,
+        subscription_row=subscription,
+    )
     return {
         "id": tenant.id,
         "name": tenant.name,
         "domain": tenant.domain,
         "is_active": tenant.is_active,
         "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "billing_display": billing_display,
         "subscription": {
             "status": subscription.status if subscription else "none",
             "plan": _plan_name(db, subscription.plan_id if subscription else None),
@@ -856,6 +865,14 @@ async def list_tenants(
                 "id": t.id, "name": t.name or f"tenant-{t.id}", "domain": t.domain,
                 "is_active": bool(t.is_active),
                 "created_at": t.created_at.isoformat() if t.created_at else None,
+                "billing_display": {
+                    "billing_access_kind": "none",
+                    "billing_access_label_ar": "لا باقة",
+                    "billing_plan_slug": None,
+                    "billing_ends_at": None,
+                    "gift_active": False,
+                    "gift_ends_at": None,
+                },
                 "subscription": {"status": "none", "plan": "—", "trial_ends_at": None, "ends_at": None},
                 "whatsapp": {
                     "status": "not_connected", "phone_number": None,
