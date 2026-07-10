@@ -999,6 +999,18 @@ def match(message: str) -> Optional[Intent]:
                         continue
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — must not break intent match
                     pass
+            if ruleset.intent == INTENT_ASK_PRODUCT:
+                try:
+                    from ..current_turn_social_non_commerce import (  # noqa: PLC0415
+                        is_colloquial_social_inventory_message,
+                    )
+
+                    if is_colloquial_social_inventory_message(_regex_surface):
+                        continue
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — must not break intent match
+                    pass
+            if ruleset.intent == INTENT_WHO_ARE_YOU and _persona is not None:
+                continue
             candidates.append((
                 ruleset.confidence,
                 Intent(

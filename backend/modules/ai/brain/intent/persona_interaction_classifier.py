@@ -97,6 +97,34 @@ _TEASE_BARE_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_TEASE_PLAYFUL_RE = re.compile(
+    r"^(?:"
+    r"ت(?:ض|ض)حك\s+علينا|"
+    r"ت(?:ض|ض)حك\s+علي|"
+    r"تمزح(?:ين|ون)?|"
+    r"ت(?:مز|مز)ح(?:ين|ون)?|"
+    r"(?:كنت\s+)?(?:امزح|أمزح)\s+معك|"
+    r"(?:امزح|أمزح)\s+معك"
+    r")\s*[\?؟!]?\.?\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_PLAYFUL_NICKNAME_RE = re.compile(
+    r"^يا\s+(?:نحله|نحلة|عسل)"
+    r"(?:\s+يا\s+(?:نحله|نحلة|عسل))*"
+    r"[\s\?؟!.,😄😁🤣😂🌹💛✨🙏]*$"
+    ,
+    re.IGNORECASE | re.UNICODE,
+)
+
+_LAUGHTER_ONLY_RE = re.compile(
+    r"^(?:"
+    r"(?:ه|ھ){2,}|(?:ها){2,}|ههه+"
+    r")[\s\?؟!😄😁🤣😂]*$"
+    ,
+    re.IGNORECASE | re.UNICODE,
+)
+
 
 @dataclass(frozen=True)
 class PersonaInteractionMatch:
@@ -136,6 +164,16 @@ def _blocks_tease_persona(norm_msg: str) -> bool:
 
 
 def _match_kind(norm_msg: str) -> Optional[Tuple[str, str]]:
+    if _PLAYFUL_NICKNAME_RE.search(norm_msg):
+        if _has_operational_context(norm_msg):
+            return None
+        return PERSONA_KIND_TEASE, "playful_nickname"
+    if _LAUGHTER_ONLY_RE.search(norm_msg):
+        return PERSONA_KIND_TEASE, "laughter_only"
+    if _TEASE_PLAYFUL_RE.search(norm_msg):
+        if _blocks_tease_persona(norm_msg):
+            return None
+        return PERSONA_KIND_TEASE, "tease_playful"
     if _AFFECTION_RE.search(norm_msg):
         return PERSONA_KIND_AFFECTION, "affection_probe"
     if _APPEARANCE_RE.search(norm_msg):
@@ -161,7 +199,7 @@ def classify_persona_interaction(message: str) -> Optional[PersonaInteractionMat
     norm = _norm(raw)
     if not norm:
         return None
-    if len(norm) > 72:
+    if len(norm) > 80:
         return None
 
     hit = _match_kind(norm)

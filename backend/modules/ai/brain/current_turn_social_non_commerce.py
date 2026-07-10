@@ -117,10 +117,13 @@ _CONGRATULATIONS_RE = re.compile(
 )
 
 _LAUGHTER_OR_JOKE_RE = re.compile(
-    r"^(?:"
-    r"(?:ه|ھ){2,}|(?:ها){2,}|(?:ههه+)|lol|lmao|😂|🤣|😁|😄|😅|"
-    r"(?:امزح|أمزح|مزح|دعابه|دعابة|نكت(?:ه|ة)).{0,80}"
-    r")\s*$",
+    r"(?:"
+    r"(?:^|\s)(?:ه|ھ){2,}(?:\s|$)|"
+    r"(?:^|\s)(?:ها){2,}(?:\s|$)|"
+    r"ههه+|"
+    r"lol|lmao|😂|🤣|😁|😄|😅|"
+    r"(?:امزح|أمزح|مزح|دعابه|دعابة|نكت(?:ه|ة))"
+    r")",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -146,6 +149,45 @@ _QUANTITY_LIKE_RE = re.compile(
 
 _PRODUCT_EVIDENCE_RE = re.compile(
     r"(?:عسل|سدر|سمر|طلح|ضهيان|شمع|منتج|صنف|كتالوج|catalog|product|honey)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_REAL_PRODUCT_COMMERCE_RE = re.compile(
+    r"(?:"
+    r"عسل\s+(?:ال)?(?:طلح|سدر|سمر|ضهيان|شمع)"
+    r"|(?:وش|ايش)\s+انواع\s+العسل"
+    r"|كم\s+سعر"
+    r"|ابغ[ىي]\s+عسل"
+    r"|انواع\s+العسل"
+    r"|(?:وش|ايش)\s+عند(?:ك|كم)\s+من\s+عسل"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_PLAYFUL_NICKNAME_ADDRESS_RE = re.compile(
+    r"^يا\s+(?:نحله|نحلة|عسل)"
+    r"(?:\s+يا\s+(?:نحله|نحلة|عسل))*"
+    r"[\s\?؟!.,😄😁🤣😂🌹💛✨🙏]*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_COLLOQUIAL_SOCIAL_INVENTORY_RE = re.compile(
+    r"(?:"
+    r"(?:وش|ايش|شو|ايه)\s+عندك\s+من\s+(?:سوالف|اخبار|أخبار|حديث|كلام)"
+    r"|عندك\s+سوالف"
+    r"|(?:وش|ايش)\s+عندك\s+من\s+(?:سوالف|اخبار|أخبار)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_TEASE_PHRASE_RE = re.compile(
+    r"(?:"
+    r"ت(?:ض|ض)حك\s+علينا|"
+    r"ت(?:ض|ض)حك\s+علي|"
+    r"تمزح(?:ين|ون)?|"
+    r"ت(?:مز|مز)ح(?:ين|ون)?|"
+    r"(?:امزح|أمزح)\s+معك"
+    r")",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -304,7 +346,22 @@ def _quantity_slot_expected(
 
 
 def _has_product_evidence(message: str) -> bool:
-    return bool(_PRODUCT_EVIDENCE_RE.search(_norm(message or "")))
+    norm = _norm(message or "")
+    if not norm:
+        return False
+    if _REAL_PRODUCT_COMMERCE_RE.search(norm):
+        return True
+    if _PLAYFUL_NICKNAME_ADDRESS_RE.search(norm):
+        return False
+    return bool(_PRODUCT_EVIDENCE_RE.search(norm))
+
+
+def is_colloquial_social_inventory_message(message: str) -> bool:
+    """Colloquial smalltalk inventory asks — not product commerce."""
+    norm = _norm(message or "")
+    if not norm:
+        return False
+    return bool(_COLLOQUIAL_SOCIAL_INVENTORY_RE.search(norm))
 
 
 def _is_staff_contact_non_product(message: str, *, intent: Optional[Intent] = None) -> bool:
@@ -341,6 +398,41 @@ def resolve_current_turn_social_non_commerce(
     if not raw:
         return CurrentTurnSocialNonCommerce(False)
 
+    name = _intent_name(intent)
+    slots = dict(getattr(intent, "slots", None) or {})
+
+    if name == INTENT_PERSONA_INTERACTION and _intent_confidence(intent) >= 0.80:
+        return CurrentTurnSocialNonCommerce(
+            True,
+            category=f"persona_{slots.get('persona_kind') or 'social'}",
+            reason="intent_persona_interaction",
+            confidence=max(_intent_confidence(intent), 0.90),
+        )
+
+    if is_colloquial_social_inventory_message(raw):
+        return CurrentTurnSocialNonCommerce(
+            True,
+            category="smalltalk",
+            reason="colloquial_social_inventory",
+            confidence=0.91,
+        )
+
+    norm = _norm(raw)
+    if _PLAYFUL_NICKNAME_ADDRESS_RE.search(norm) and not _REAL_PRODUCT_COMMERCE_RE.search(norm):
+        return CurrentTurnSocialNonCommerce(
+            True,
+            category="playful",
+            reason="playful_nickname_address",
+            confidence=0.90,
+        )
+    if _TEASE_PHRASE_RE.search(norm):
+        return CurrentTurnSocialNonCommerce(
+            True,
+            category="humor",
+            reason="tease_phrase",
+            confidence=0.90,
+        )
+
     if _has_explicit_catalog_or_product_intent(
         raw,
         intent=intent,
@@ -348,8 +440,6 @@ def resolve_current_turn_social_non_commerce(
     ):
         return CurrentTurnSocialNonCommerce(False, reason="explicit_commerce_or_operational_intent")
 
-    name = _intent_name(intent)
-    slots = dict(getattr(intent, "slots", None) or {})
     try:
         from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
             has_embedded_commerce_inquiry_beyond_greeting,
@@ -471,6 +561,7 @@ def is_current_turn_social_non_commerce(
 
 __all__ = [
     "CurrentTurnSocialNonCommerce",
+    "is_colloquial_social_inventory_message",
     "is_current_turn_social_non_commerce",
     "resolve_current_turn_social_non_commerce",
 ]
