@@ -147,6 +147,23 @@ def _normalise_product(raw: Any) -> Dict:
     }
 
 
+def _preserve_existing_product_images(
+    normalised: Dict[str, Any],
+    existing_meta: Any,
+) -> None:
+    """In-place: keep stored images when a sync payload omits them."""
+    if not isinstance(existing_meta, dict):
+        return
+    if not coerce_image_url(normalised.get("image_url")):
+        previous_url = coerce_image_url(existing_meta.get("image_url"))
+        if previous_url:
+            normalised["image_url"] = previous_url
+    if not normalised.get("additional_images"):
+        previous_extra = existing_meta.get("additional_images")
+        if isinstance(previous_extra, (list, tuple)) and previous_extra:
+            normalised["additional_images"] = list(previous_extra)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parent / variant catalog layer (migration 0064 — Phase 2)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1225,6 +1242,7 @@ class StoreSyncService:
             existing.sku = normalised["sku"]
             existing.in_stock = new_in_stock
             existing.stock_quantity = new_qty
+            _preserve_existing_product_images(normalised, existing.extra_metadata)
             existing.extra_metadata = normalised
             if (existing.source or "").lower() != "manual":
                 existing.source = row_source
@@ -2563,6 +2581,7 @@ class StoreSyncService:
             existing.sku           = normalised.get("sku", existing.sku)
             existing.in_stock      = bool(normalised.get("in_stock", True))
             existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
+            _preserve_existing_product_images(normalised, existing.extra_metadata)
             existing.extra_metadata = normalised
             product_row = existing
         else:

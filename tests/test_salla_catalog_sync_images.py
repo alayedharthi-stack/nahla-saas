@@ -1,6 +1,7 @@
 """Salla catalog sync — product + variant image persistence."""
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -21,7 +22,12 @@ from core.catalog_image import (  # noqa: E402
     extract_sync_product_image,
 )
 from models import Base, Product, ProductVariant, Tenant  # noqa: E402
-from services.store_sync import _normalise_product, _upsert_variants_for  # noqa: E402
+from services.store_sync import (  # noqa: E402
+    StoreSyncService,
+    _normalise_product,
+    _preserve_existing_product_images,
+    _upsert_variants_for,
+)
 from store_adapters.salla_adapter import SallaAdapter  # noqa: E402
 from store_integration.models import NormalizedProduct, NormalizedVariant  # noqa: E402
 
@@ -240,3 +246,155 @@ class TestVariantImageUpsert:
         assert row.price == "175"
         assert row.in_stock is False
         assert row.stock_quantity == 0
+
+
+class TestPreserveExistingProductImages:
+    def test_preserves_image_url_when_sync_omits_image(self):
+        normalised = {"image_url": "", "additional_images": []}
+        _preserve_existing_product_images(
+            normalised,
+            {
+                "image_url": "https://cdn.salla.sa/old.jpg",
+                "additional_images": ["https://cdn.salla.sa/extra.jpg"],
+            },
+        )
+        assert normalised["image_url"] == "https://cdn.salla.sa/old.jpg"
+        assert normalised["additional_images"] == ["https://cdn.salla.sa/extra.jpg"]
+
+    def test_replaces_image_url_when_sync_has_valid_image(self):
+        normalised = {"image_url": "https://cdn.salla.sa/new.jpg", "additional_images": []}
+        _preserve_existing_product_images(
+            normalised,
+            {"image_url": "https://cdn.salla.sa/old.jpg"},
+        )
+        assert normalised["image_url"] == "https://cdn.salla.sa/new.jpg"
+
+    def test_preserves_additional_images_when_sync_returns_empty_list(self):
+        normalised = {
+            "image_url": "https://cdn.salla.sa/p.jpg",
+            "additional_images": [],
+        }
+        _preserve_existing_product_images(
+            normalised,
+            {"additional_images": ["https://cdn.salla.sa/a.jpg", "https://cdn.salla.sa/b.jpg"]},
+        )
+        assert normalised["additional_images"] == [
+            "https://cdn.salla.sa/a.jpg",
+            "https://cdn.salla.sa/b.jpg",
+        ]
+
+
+class TestApplyNormalisedProductImagePreservation:
+    def _svc(self, db, tenant_id: int) -> StoreSyncService:
+        svc = StoreSyncService(db, tenant_id)
+        svc._adapter = None
+        return svc
+
+    def test_update_without_image_preserves_existing(self):
+        db, _ = _make_db()
+        t = Tenant(name="T-preserve", is_active=True)
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        old_url = "https://cdn.salla.sa/shoe-old.jpg"
+        p = Product(
+            tenant_id=t.id,
+            title="حذاء رياضي أبيض",
+            external_id="407525900",
+            price="199",
+            in_stock=True,
+            source="salla",
+            extra_metadata={
+                "image_url": old_url,
+                "additional_images": ["https://cdn.salla.sa/shoe-alt.jpg"],
+            },
+        )
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+
+        normalised = _normalise_product({"id": "407525900", "name": "حذاء رياضي أبيض"})
+        assert normalised["image_url"] == ""
+
+        result = self._svc(db, t.id)._apply_normalised_product(normalised, "salla")
+        db.commit()
+        db.refresh(p)
+
+        assert result["action"] == "updated"
+        assert p.extra_metadata["image_url"] == old_url
+        assert p.extra_metadata["additional_images"] == ["https://cdn.salla.sa/shoe-alt.jpg"]
+
+    def test_update_with_new_image_replaces_old(self):
+        db, _ = _make_db()
+        t = Tenant(name="T-replace", is_active=True)
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        p = Product(
+            tenant_id=t.id,
+            title="قميص قطني أزرق",
+            external_id="shirt-1",
+            price="89",
+            in_stock=True,
+            source="salla",
+            extra_metadata={"image_url": "https://cdn.salla.sa/old-shirt.jpg"},
+        )
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+
+        new_url = "https://cdn.salla.sa/new-shirt.jpg"
+        normalised = _normalise_product({
+            "id": "shirt-1",
+            "name": "قميص قطني أزرق",
+            "main_image": new_url,
+        })
+        self._svc(db, t.id)._apply_normalised_product(normalised, "salla")
+        db.commit()
+        db.refresh(p)
+
+        assert p.extra_metadata["image_url"] == new_url
+
+    def test_create_without_image_stays_empty(self):
+        db, _ = _make_db()
+        t = Tenant(name="T-create", is_active=True)
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+
+        normalised = _normalise_product({"id": "new-no-img", "name": "عطر ورد 100ml"})
+        result = self._svc(db, t.id)._apply_normalised_product(normalised, "salla")
+        db.commit()
+
+        row = db.query(Product).filter_by(id=result["product_id"]).one()
+        assert result["action"] == "created"
+        assert row.extra_metadata["image_url"] == ""
+
+
+class TestWebhookProductImagePreservation:
+    def test_webhook_update_without_image_preserves_existing(self):
+        db, _ = _make_db()
+        t = Tenant(name="T-webhook", is_active=True)
+        db.add(t)
+        db.commit()
+        db.refresh(t)
+        old_url = "https://cdn.salla.sa/webhook-old.jpg"
+        p = Product(
+            tenant_id=t.id,
+            title="منتج تجريبي عام",
+            external_id="wh-40",
+            price="120",
+            in_stock=True,
+            source="salla",
+            extra_metadata={"image_url": old_url},
+        )
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+
+        svc = StoreSyncService(db, t.id)
+        svc._get_adapter = lambda: None
+        asyncio.run(svc.handle_product_webhook({"id": "wh-40", "name": "منتج تجريبي عام"}))
+
+        db.refresh(p)
+        assert p.extra_metadata["image_url"] == old_url
