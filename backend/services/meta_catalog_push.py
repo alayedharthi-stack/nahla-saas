@@ -106,6 +106,10 @@ def _resolve_catalog_and_token(conn: Any) -> Tuple[str, str]:
     return catalog_id, token
 
 
+def _graph_auth_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {(token or '').strip()}"}
+
+
 def find_meta_catalog_item_by_retailer_id(
     conn: Any,
     catalog_id: str,
@@ -131,11 +135,11 @@ def find_meta_catalog_item_by_retailer_id(
     params = {
         "fields": GRAPH_FIELDS,
         "filter": json.dumps({"retailer_id": {"eq": rid}}, separators=(",", ":")),
-        "access_token": token,
     }
+    headers = _graph_auth_headers(token)
 
     def _run(http: httpx.Client) -> Tuple[Optional[str], Dict[str, Any]]:
-        resp = http.get(url, params=params)
+        resp = http.get(url, params=params, headers=headers)
         lookup["http_status"] = resp.status_code
         if resp.status_code >= 400:
             lookup["error"] = resp.text[:500]
@@ -163,10 +167,10 @@ def _post_catalog_item(
     client: Optional[httpx.Client] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     body = {k: v for k, v in payload.items() if v is not None}
-    body["access_token"] = token
+    headers = _graph_auth_headers(token)
 
     def _run(http: httpx.Client) -> Tuple[int, Dict[str, Any]]:
-        resp = http.post(url, data=body)
+        resp = http.post(url, data=body, headers=headers)
         try:
             parsed = resp.json() or {}
         except Exception:

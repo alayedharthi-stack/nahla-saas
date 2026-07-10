@@ -142,11 +142,18 @@ def test_confirm_get_empty_then_create():
     assert result["meta_product_id"] == "META-ITEM-NEW"
     assert mock_client.get.call_count == 1
     assert mock_client.post.call_count == 1
+    get_params = mock_client.get.call_args.kwargs.get("params") or {}
+    get_headers = mock_client.get.call_args.kwargs.get("headers") or {}
+    assert "access_token" not in get_params
+    assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
     assert "/CAT-GENERIC-001/products" in post_url
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    post_headers = mock_client.post.call_args.kwargs.get("headers") or {}
     assert post_body["currency"] == "SAR"
     assert post_body["price"] == 12000
+    assert "access_token" not in post_body
+    assert post_headers.get("Authorization") == "Bearer tok"
     assert "sale_price" not in post_body
     assert "regular_price" not in post_body
 
@@ -175,11 +182,18 @@ def test_confirm_get_existing_then_update():
     assert result["meta_product_id"] == "META-ITEM-EXISTING"
     assert mock_client.get.call_count == 1
     assert mock_client.post.call_count == 1
+    get_params = mock_client.get.call_args.kwargs.get("params") or {}
+    get_headers = mock_client.get.call_args.kwargs.get("headers") or {}
+    assert "access_token" not in get_params
+    assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
     assert post_url.endswith("/META-ITEM-EXISTING")
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    post_headers = mock_client.post.call_args.kwargs.get("headers") or {}
     assert post_body["currency"] == "SAR"
     assert post_body["price"] == 12000
+    assert "access_token" not in post_body
+    assert post_headers.get("Authorization") == "Bearer tok"
 
 
 def test_fatal_preview_does_not_call_graph():

@@ -42,6 +42,12 @@ for _p in (_REPO_ROOT, _BACKEND_DIR, _DATABASE_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from core.log_redaction import SecretRedactingFilter  # noqa: E402
+
+_secret_redact_filter = SecretRedactingFilter()
+for _logger_name in ("httpx", "httpcore"):
+    logging.getLogger(_logger_name).addFilter(_secret_redact_filter)
+
 # ── Config & middleware ────────────────────────────────────────────────────────
 from core.config import ENVIRONMENT, IS_PRODUCTION  # noqa: E402
 from core.middleware import (  # noqa: E402
