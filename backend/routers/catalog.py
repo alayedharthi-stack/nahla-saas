@@ -76,7 +76,9 @@ from core.catalog import (
     effective_retailer_id,
     is_catalog_eligible,
     is_merchant_editable_product,
+    is_meta_export_eligible,
     merchant_edit_rejection_detail,
+    meta_export_rejection_detail,
     product_source,
     source_breakdown,
     whatsapp_commerce_diagnostics_readiness,
@@ -95,6 +97,7 @@ from modules.observability.delivery_mode import (
     new_delivery_audit,
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
+from services.meta_catalog_sync_preview import preview_native_meta_sync
 from services.meta_commerce_settings import (
     enable_whatsapp_catalog_visibility,
     get_whatsapp_commerce_settings_status,
@@ -2537,6 +2540,29 @@ def _compute_per_channel(product_or_draft: Any) -> List[Dict[str, Any]]:
     """
     from services.product_readiness import compute_all  # noqa: PLC0415
     return [r.to_dict() for r in compute_all(product_or_draft)]
+
+
+@merchant_router.post("/products/{product_id}/meta-sync/preview")
+async def merchant_catalog_meta_sync_preview(
+    product_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Dry-run Meta sync preview for one Nahla-native product.
+
+    Never calls Graph write APIs and never mutates catalog rows.
+    """
+    tenant_id = resolve_tenant_id(request)
+    result = preview_native_meta_sync(db, tenant_id, product_id)
+    if not result.get("eligible"):
+        code = str(result.get("error_code") or "")
+        if code == "product_not_found":
+            raise HTTPException(status_code=404, detail=code)
+        if code == "product_not_meta_export_eligible":
+            raise HTTPException(status_code=409, detail=result)
+        raise HTTPException(status_code=400, detail=result)
+    return result
 
 
 @merchant_router.get("/products/{product_id}")

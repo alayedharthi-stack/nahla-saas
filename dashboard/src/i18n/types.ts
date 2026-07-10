@@ -2081,6 +2081,16 @@ export interface Translations {
         deleteBtn:                string
         deleteConfirm:            string
         deleteFailed:             string
+        metaSyncBtn:              string
+        metaSyncDryRunNote:       string
+        metaSyncBlockedExternal:  string
+        metaSyncRunning:          string
+        metaSyncFailed:           string
+        metaSyncTitle:            string
+        metaSyncFatalTitle:       string
+        metaSyncWarningsTitle:    string
+        metaSyncCatalogId:        string
+        metaSyncRetailerId:       string
       }
     }
   }

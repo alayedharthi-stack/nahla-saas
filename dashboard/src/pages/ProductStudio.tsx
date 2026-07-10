@@ -48,6 +48,7 @@ import {
   type ProductDetailResponse,
   type ProductSource,
   type ReadinessFieldStatus,
+  type MetaSyncPreviewResponse,
   type ReadinessPreviewBody,
   type StudioFilters,
   type StudioProduct,
@@ -881,6 +882,9 @@ function ProductDrawer(props: {
   const [perChannel, setPerChannel] = useState<ChannelReadiness[]>([])
   const [actionBusy, setActionBusy] = useState(false)
   const [saveStatus, setSaveStatus] = useState<AutoSaveStatus>('idle')
+  const [metaPreview, setMetaPreview] = useState<MetaSyncPreviewResponse | null>(null)
+  const [metaPreviewBusy, setMetaPreviewBusy] = useState(false)
+  const [metaPreviewError, setMetaPreviewError] = useState<string | null>(null)
   const previewTimer = useRef<number | null>(null)
   const saveTimer = useRef<number | null>(null)
   const saveVersion = useRef(0)
@@ -907,6 +911,8 @@ function ProductDrawer(props: {
     let cancelled = false
     setLoading(true)
     setSaveStatus('idle')
+    setMetaPreview(null)
+    setMetaPreviewError(null)
     pendingSaveDraft.current = null
     saveVersion.current += 1
     catalogApi.productDetail(props.productId)
@@ -1069,6 +1075,25 @@ function ProductDrawer(props: {
     }
   }
 
+  const onMetaSyncPreview = async () => {
+    setMetaPreviewBusy(true)
+    setMetaPreviewError(null)
+    setMetaPreview(null)
+    try {
+      const result = await catalogApi.metaSyncPreview(props.productId)
+      setMetaPreview(result)
+    } catch (err: unknown) {
+      const detail = (err as { detail?: MetaSyncPreviewResponse | string })?.detail
+      if (detail && typeof detail === 'object' && 'message_ar' in detail) {
+        setMetaPreview(detail)
+      } else {
+        setMetaPreviewError(dr.metaSyncFailed)
+      }
+    } finally {
+      setMetaPreviewBusy(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex" dir={dir}>
       <div className="flex-1 bg-slate-900/40" onClick={props.onClose} />
@@ -1093,6 +1118,19 @@ function ProductDrawer(props: {
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {data && isEditable && (
+              <button
+                type="button"
+                disabled={actionBusy || metaPreviewBusy}
+                onClick={() => void onMetaSyncPreview()}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                {metaPreviewBusy
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <ShoppingBag className="w-3.5 h-3.5" />}
+                {metaPreviewBusy ? dr.metaSyncRunning : dr.metaSyncBtn}
+              </button>
+            )}
             {data && isEditable && (
               <button
                 type="button"
@@ -1147,6 +1185,80 @@ function ProductDrawer(props: {
               }`}>
                 {ownershipBanner}
               </div>
+            )}
+            {isExternalManaged && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                {dr.metaSyncBlockedExternal}
+              </p>
+            )}
+            {isEditable && metaPreview && (
+              <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">{dr.metaSyncTitle}</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">{dr.metaSyncDryRunNote}</p>
+                  </div>
+                  {metaPreview.eligible && metaPreview.dry_run && (
+                    <span className="text-[11px] font-semibold text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2 py-0.5 shrink-0">
+                      dry-run
+                    </span>
+                  )}
+                </div>
+                {!metaPreview.eligible && metaPreview.message_ar && (
+                  <p className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+                    {metaPreview.message_ar}
+                  </p>
+                )}
+                {metaPreview.eligible && (
+                  <>
+                    <div className="flex flex-wrap gap-2 text-[11px] text-slate-600">
+                      {metaPreview.meta_catalog_id && (
+                        <span className="bg-slate-50 border border-slate-200 rounded-full px-2 py-0.5">
+                          {dr.metaSyncCatalogId}: <code dir="ltr" className="font-mono">{metaPreview.meta_catalog_id}</code>
+                        </span>
+                      )}
+                      {metaPreview.retailer_id && (
+                        <span className="bg-slate-50 border border-slate-200 rounded-full px-2 py-0.5">
+                          {dr.metaSyncRetailerId}: <code dir="ltr" className="font-mono">{metaPreview.retailer_id}</code>
+                        </span>
+                      )}
+                    </div>
+                    {(metaPreview.fatal_errors?.length ?? 0) > 0 && (
+                      <div className="rounded-lg border border-rose-200 bg-rose-50/60 p-3">
+                        <h4 className="text-xs font-bold text-rose-800 mb-1.5">{dr.metaSyncFatalTitle}</h4>
+                        <ul className="text-xs text-rose-900 space-y-1">
+                          {metaPreview.fatal_errors!.map(item => (
+                            <li key={item.code}>{item.message_ar}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {(metaPreview.warnings?.length ?? 0) > 0 && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+                        <h4 className="text-xs font-bold text-amber-800 mb-1.5">{dr.metaSyncWarningsTitle}</h4>
+                        <ul className="text-xs text-amber-900 space-y-1">
+                          {metaPreview.warnings!.map(item => (
+                            <li key={item.code}>{item.message_ar}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {metaPreview.payload && (
+                      <pre
+                        dir="ltr"
+                        className="text-[10px] leading-relaxed bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto max-h-48"
+                      >
+                        {JSON.stringify(metaPreview.payload, null, 2)}
+                      </pre>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+            {isEditable && metaPreviewError && (
+              <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+                {metaPreviewError}
+              </p>
             )}
             {/* Hero — image + meta */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 flex gap-4">
