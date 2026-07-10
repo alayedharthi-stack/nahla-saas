@@ -49,6 +49,7 @@ import {
   type ProductSource,
   type ReadinessFieldStatus,
   type MetaSyncPreviewResponse,
+  type MetaSyncConfirmResponse,
   type ReadinessPreviewBody,
   type StudioFilters,
   type StudioProduct,
@@ -903,6 +904,9 @@ function ProductDrawer(props: {
   const [metaPreview, setMetaPreview] = useState<MetaSyncPreviewResponse | null>(null)
   const [metaPreviewBusy, setMetaPreviewBusy] = useState(false)
   const [metaPreviewError, setMetaPreviewError] = useState<string | null>(null)
+  const [metaConfirmBusy, setMetaConfirmBusy] = useState(false)
+  const [metaConfirmResult, setMetaConfirmResult] = useState<MetaSyncConfirmResponse | null>(null)
+  const [metaConfirmError, setMetaConfirmError] = useState<string | null>(null)
   const [priceSaveError, setPriceSaveError] = useState<string | null>(null)
   const previewTimer = useRef<number | null>(null)
   const saveTimer = useRef<number | null>(null)
@@ -932,6 +936,8 @@ function ProductDrawer(props: {
     setSaveStatus('idle')
     setMetaPreview(null)
     setMetaPreviewError(null)
+    setMetaConfirmResult(null)
+    setMetaConfirmError(null)
     setPriceSaveError(null)
     pendingSaveDraft.current = null
     saveVersion.current += 1
@@ -1115,6 +1121,8 @@ function ProductDrawer(props: {
     setMetaPreviewBusy(true)
     setMetaPreviewError(null)
     setMetaPreview(null)
+    setMetaConfirmResult(null)
+    setMetaConfirmError(null)
     try {
       const result = await catalogApi.metaSyncPreview(props.productId)
       setMetaPreview(result)
@@ -1127,6 +1135,33 @@ function ProductDrawer(props: {
       }
     } finally {
       setMetaPreviewBusy(false)
+    }
+  }
+
+  const canMetaConfirm =
+    Boolean(
+      metaPreview?.eligible
+      && (metaPreview.fatal_errors?.length ?? 0) === 0
+    )
+
+  const onMetaSyncConfirm = async () => {
+    if (!window.confirm(dr.metaSyncConfirmModal)) return
+    setMetaConfirmBusy(true)
+    setMetaConfirmError(null)
+    setMetaConfirmResult(null)
+    try {
+      const result = await catalogApi.metaSyncConfirm(props.productId)
+      setMetaConfirmResult(result)
+      props.onMutated()
+    } catch (err: unknown) {
+      const detail = (err as { detail?: MetaSyncConfirmResponse | string })?.detail
+      if (detail && typeof detail === 'object' && 'message_ar' in detail) {
+        setMetaConfirmError(detail.message_ar || dr.metaSyncConfirmFailed)
+      } else {
+        setMetaConfirmError(dr.metaSyncConfirmFailed)
+      }
+    } finally {
+      setMetaConfirmBusy(false)
     }
   }
 
@@ -1154,10 +1189,23 @@ function ProductDrawer(props: {
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {data && isEditable && canMetaConfirm && (
+              <button
+                type="button"
+                disabled={actionBusy || metaConfirmBusy || metaPreviewBusy}
+                onClick={() => void onMetaSyncConfirm()}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                {metaConfirmBusy
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <ShoppingBag className="w-3.5 h-3.5" />}
+                {metaConfirmBusy ? dr.metaSyncConfirmRunning : dr.metaSyncConfirmBtn}
+              </button>
+            )}
             {data && isEditable && (
               <button
                 type="button"
-                disabled={actionBusy || metaPreviewBusy}
+                disabled={actionBusy || metaPreviewBusy || metaConfirmBusy}
                 onClick={() => void onMetaSyncPreview()}
                 className="inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
               >
@@ -1287,9 +1335,32 @@ function ProductDrawer(props: {
                         {JSON.stringify(metaPreview.payload, null, 2)}
                       </pre>
                     )}
+                    {canMetaConfirm && (
+                      <button
+                        type="button"
+                        disabled={metaConfirmBusy || metaPreviewBusy}
+                        onClick={() => void onMetaSyncConfirm()}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 disabled:opacity-50"
+                      >
+                        {metaConfirmBusy
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <ShoppingBag className="w-3.5 h-3.5" />}
+                        {metaConfirmBusy ? dr.metaSyncConfirmRunning : dr.metaSyncConfirmBtn}
+                      </button>
+                    )}
                   </>
                 )}
               </div>
+            )}
+            {isEditable && metaConfirmResult?.ok && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                {dr.metaSyncConfirmSuccess}
+              </p>
+            )}
+            {isEditable && metaConfirmError && (
+              <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
+                {metaConfirmError}
+              </p>
             )}
             {isEditable && metaPreviewError && (
               <p className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
