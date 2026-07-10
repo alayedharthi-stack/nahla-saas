@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import {
   CheckCircle, Zap, TrendingUp, Rocket, Loader2, AlertCircle,
   RefreshCw, Tag, MessageSquare, Star, ArrowUp, ExternalLink, ShieldCheck,
-  Clock, Sparkles, Bot, Phone, Info, ArrowUpRight,
+  Clock, Sparkles, Bot, Phone, Info, ArrowUpRight, Gift,
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
 import { displayPlanFeature } from '../lib/planFeatures'
@@ -539,7 +539,8 @@ export default function Billing() {
   )
 
   const lifecycle = status.lifecycle_status ?? (
-    status.trial_pending_whatsapp ? 'trial_pending_whatsapp'
+    status.manual_gift_grant_active ? 'gift_active'
+    : status.trial_pending_whatsapp ? 'trial_pending_whatsapp'
     : status.is_trial ? 'trial_active'
     : status.subscription_expired ? 'paid_expired'
     : status.trial_expired ? 'trial_expired'
@@ -547,8 +548,17 @@ export default function Billing() {
     : 'trial_expired'
   )
 
+  const isGiftActive = lifecycle === 'gift_active' || status.manual_gift_grant_active === true
+  const giftPlanLabel =
+    status.plan_name
+    || (status.manual_gift_grant_plan_slug === 'starter' ? 'الباقة الأساسية' : status.manual_gift_grant_plan_slug)
+    || 'الباقة الأساسية'
+
   const daysRemainingLabel = (() => {
     if (lifecycle === 'trial_pending_whatsapp') return '—'
+    if (lifecycle === 'gift_active' && status.days_remaining != null && status.days_remaining > 0) {
+      return String(status.days_remaining)
+    }
     if (status.days_remaining != null && status.days_remaining > 0) {
       return String(status.days_remaining)
     }
@@ -558,7 +568,7 @@ export default function Billing() {
   })()
 
   const warningLevel = status.warning_level ?? 'none'
-  const showExpiryWarning = ['7d', '3d', '1d', 'expired'].includes(warningLevel)
+  const showExpiryWarning = !isGiftActive && ['7d', '3d', '1d', 'expired'].includes(warningLevel)
   const expiryWarningStyle =
     warningLevel === 'expired' ? 'bg-red-50 border-red-200 text-red-800'
     : warningLevel === '1d'    ? 'bg-red-50 border-red-200 text-red-800'
@@ -1002,8 +1012,31 @@ export default function Billing() {
         </div>
       )}
 
+      {/* Active manual gift grant */}
+      {isGiftActive && (
+        <div className="flex items-start gap-3 bg-amber-50 border-2 border-amber-200 rounded-xl p-4">
+          <Gift className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm font-bold text-amber-900">
+              هدية — {giftPlanLabel}
+            </p>
+            <p className="text-xs text-amber-800 mt-1">
+              {lifecycleHeadline}
+            </p>
+            {status.manual_gift_grant_ends_at && (
+              <p className="text-xs text-amber-700 mt-1">
+                تنتهي الهدية بتاريخ: {fmtDate(status.manual_gift_grant_ends_at)}
+                {daysRemainingLabel !== '—' && daysRemainingLabel !== '٠'
+                  ? ` · متبقي ${daysRemainingLabel} ${daysRemainingLabel === '1' ? 'يوم' : 'أيام'}`
+                  : ''}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Trial expired — no paid subscription */}
-      {lifecycle === 'trial_expired' && (
+      {lifecycle === 'trial_expired' && !isGiftActive && (
         <div className="flex items-start gap-3 bg-red-50 border-2 border-red-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
           <div>
@@ -1071,6 +1104,15 @@ export default function Billing() {
                 <Clock className="w-3 h-3" /> مجاني لمدة 14 يوم
               </span>
             </>
+          ) : lifecycle === 'gift_active' || isGiftActive ? (
+            <>
+              <p className="text-base font-semibold text-amber-700">هدية — {giftPlanLabel}</p>
+              <p className="text-xs text-amber-700 mt-1">
+                {status.manual_gift_grant_ends_at
+                  ? `فعّالة حتى ${fmtDate(status.manual_gift_grant_ends_at)}`
+                  : 'فعّالة خلال فترة الهدية'}
+              </p>
+            </>
           ) : lifecycle === 'paid_expired' ? (
             <>
               <p className="text-base font-semibold text-orange-700">{planDisplayName}</p>
@@ -1117,7 +1159,7 @@ export default function Billing() {
       </div>
 
       {/* No subscription alert — trial expired without payment */}
-      {lifecycle === 'trial_expired' && (
+      {lifecycle === 'trial_expired' && !isGiftActive && (
         <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
           <AlertCircle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
           <div>

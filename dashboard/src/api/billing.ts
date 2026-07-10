@@ -30,6 +30,7 @@ export type BillingLifecycleStatus =
   | 'trial_pending_whatsapp'
   | 'trial_active'
   | 'trial_expired'
+  | 'gift_active'
   | 'paid_active'
   | 'paid_expired'
 
@@ -68,6 +69,11 @@ export interface BillingStatus {
   partner_testing_override_reason?: string | null
   partner_testing_override_expires_at?: string | null
   partner_testing_override_plan_slug?: string | null
+  manual_gift_grant_active?: boolean
+  manual_gift_grant_headline_ar?: string | null
+  manual_gift_grant_plan_slug?: string | null
+  manual_gift_grant_ends_at?: string | null
+  manual_gift_grant_billing_status?: string | null
   manual_replies_allowed?: boolean
   campaigns_automations_allowed?: boolean
   billing_channel?:        BillingChannel
