@@ -152,6 +152,105 @@ def manual_gift_grant_status(db: Session, tenant_id: int) -> Dict[str, Any]:
     }
 
 
+GRANT_BLOCKED_MESSAGES_AR: Dict[str, str] = {
+    "active_paid_subscription": (
+        "لا يمكن منح هدية لأن التاجر لديه اشتراك مدفوع نشط."
+    ),
+    "active_gift_exists": "يوجد هدية نشطة بالفعل؛ ألغِها أولاً.",
+}
+
+
+def build_admin_manual_gift_context(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Read-only billing + gift snapshot for the owner admin dashboard."""
+    from models import BillingPlan, Integration, Tenant, User  # noqa: PLC0415
+
+    from core.billing import compute_trial_info, get_tenant_subscription  # noqa: PLC0415
+    from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise ManualGiftGrantError(f"Tenant {tenant_id} not found", code="tenant_not_found")
+
+    owner = (
+        db.query(User)
+        .filter(User.tenant_id == tenant_id, User.role == "merchant")
+        .order_by(User.created_at.asc(), User.id.asc())
+        .first()
+    )
+
+    salla_cfg: Dict[str, Any] = {}
+    salla_int = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .order_by(Integration.id.desc())
+        .first()
+    )
+    if salla_int and salla_int.config:
+        salla_cfg = salla_int.config
+
+    nahla_sub = get_tenant_subscription(db, tenant_id)
+    nahla_plan_slug: Optional[str] = None
+    if nahla_sub and nahla_sub.plan_id:
+        plan_row = db.query(BillingPlan).filter(BillingPlan.id == nahla_sub.plan_id).first()
+        nahla_plan_slug = plan_row.slug if plan_row else None
+
+    entitlements = get_entitlements(db, tenant_id)
+    trial_info = compute_trial_info(tenant)
+    gift_blob = get_manual_gift_grant(db, tenant_id)
+    gift_active = is_manual_gift_grant_active(db, tenant_id)
+    gift_status = manual_gift_grant_status(db, tenant_id)
+
+    grant_blocked_reason: Optional[str] = None
+    can_grant = True
+    if has_active_paid_subscription(db, tenant_id):
+        can_grant = False
+        grant_blocked_reason = "active_paid_subscription"
+    elif gift_active:
+        can_grant = False
+        grant_blocked_reason = "active_gift_exists"
+
+    return {
+        "tenant_id": tenant_id,
+        "store_name": tenant.name,
+        "domain": tenant.domain,
+        "owner_email": owner.email if owner else None,
+        "owner_phone": getattr(owner, "phone", None) if owner else None,
+        "entitlements": {
+            "plan_slug": entitlements.plan_slug,
+            "billing_status": entitlements.billing_status,
+            "is_active": entitlements.is_active,
+        },
+        "trial": {
+            "is_trial": trial_info.get("is_trial", False),
+            "trial_expired": trial_info.get("trial_expired", False),
+            "trial_ends_at": trial_info.get("trial_end"),
+            "trial_days_remaining": trial_info.get("trial_days_remaining", 0),
+        },
+        "salla": {
+            "billing_status": salla_cfg.get("billing_status"),
+            "plan_slug": salla_cfg.get("salla_plan_slug"),
+        },
+        "nahla_subscription": {
+            "active": nahla_sub is not None,
+            "status": nahla_sub.status if nahla_sub else None,
+            "plan_slug": nahla_plan_slug,
+            "ends_at": nahla_sub.ends_at.isoformat() if nahla_sub and nahla_sub.ends_at else None,
+        },
+        "gift": {
+            "active": gift_active,
+            "blob": gift_blob,
+            **gift_status,
+        },
+        "can_grant": can_grant,
+        "grant_blocked_reason": grant_blocked_reason,
+        "grant_blocked_message_ar": (
+            GRANT_BLOCKED_MESSAGES_AR.get(grant_blocked_reason or "", "")
+            if grant_blocked_reason
+            else None
+        ),
+    }
+
+
 def log_manual_gift_grant(tenant_id: int, *, reason: str = "") -> None:
     logger.info(
         "[ManualGiftGrant] tenant_id=%s reason=%s",

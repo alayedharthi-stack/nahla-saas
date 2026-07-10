@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Search, Store, ToggleLeft, ToggleRight,
   X, Hash, Calendar, Wifi, WifiOff, Phone, Copy,
   CheckCircle2, AlertCircle, Clock, Unplug, AlertTriangle, Loader2,
-  Eye, EyeOff, Archive, Plug, FlaskConical, CreditCard,
+  Eye, EyeOff, Archive, Plug, FlaskConical, CreditCard, Gift,
 } from 'lucide-react'
 import { apiCall } from '../api/client'
-import { adminApi, type AdminTenantSummary, type VisibilityTag } from '../api/admin'
+import { adminApi, type AdminManualGiftGrantSnapshot, type AdminTenantSummary, type VisibilityTag } from '../api/admin'
+
+const DEFAULT_GIFT_REASON = '30-day starter gift for merchant community member'
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -207,6 +209,120 @@ function DisconnectWaModal({
   )
 }
 
+// ── Manual gift grant modals ───────────────────────────────────────────────────
+
+function GrantGiftModal({
+  tenantName,
+  tenantId,
+  onConfirm,
+  onCancel,
+  busy,
+  error,
+}: {
+  tenantName: string
+  tenantId: number
+  onConfirm: (reason: string) => void
+  onCancel: () => void
+  busy: boolean
+  error: string | null
+}) {
+  const [reason, setReason] = useState(DEFAULT_GIFT_REASON)
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" dir="rtl">
+      <div className="absolute inset-0 bg-black/50" onClick={busy ? undefined : onCancel} />
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-4">
+        <h3 className="text-base font-black text-slate-800">منح شهر هدية للباقة الأساسية</h3>
+        <p className="text-sm text-slate-600">
+          المتجر: <span className="font-semibold">{tenantName}</span>
+          {' '}(#{tenantId})
+        </p>
+        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg p-3">
+          سيتم فتح الباقة الأساسية لمدة 30 يوم بدون إنشاء عملية دفع أو فاتورة.
+        </p>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">السبب (مطلوب)</label>
+          <textarea
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            rows={3}
+            className="w-full text-sm border border-slate-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-300"
+            disabled={busy}
+          />
+        </div>
+        {error && (
+          <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">{error}</p>
+        )}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            إلغاء
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm(reason.trim())}
+            disabled={busy || !reason.trim()}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {busy ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ المنح...</> : 'تأكيد المنح'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RevokeGiftModal({
+  tenantName,
+  onConfirm,
+  onCancel,
+  busy,
+  error,
+}: {
+  tenantName: string
+  onConfirm: () => void
+  onCancel: () => void
+  busy: boolean
+  error: string | null
+}) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" dir="rtl">
+      <div className="absolute inset-0 bg-black/50" onClick={busy ? undefined : onCancel} />
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-4">
+        <h3 className="text-base font-black text-slate-800">إلغاء الهدية</h3>
+        <p className="text-sm text-slate-600">
+          هل تريد إلغاء باقة الهدية للمتجر <span className="font-semibold">{tenantName}</span>؟
+        </p>
+        {error && (
+          <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">{error}</p>
+        )}
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            إلغاء
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center justify-center gap-2"
+          >
+            {busy ? <><Loader2 className="w-4 h-4 animate-spin" /> جارٍ الإلغاء...</> : 'تأكيد الإلغاء'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Detail Drawer ─────────────────────────────────────────────────────────────
 
 function TenantDrawer({
@@ -224,6 +340,70 @@ function TenantDrawer({
 }) {
   const wa = tenant.whatsapp ?? { status: 'not_connected', phone_number: null, phone_number_id: null, whatsapp_business_account_id: null, business_display_name: null, sending_enabled: false, webhook_verified: false, connection_type: null, provider: null, connected_at: null, disconnect_reason: null, disconnected_at: null }
   const integ = tenant.integration ?? { integration_id: null, external_store_id: null, enabled: null, provider: null }
+
+  const [giftSnapshot, setGiftSnapshot] = useState<AdminManualGiftGrantSnapshot | null>(null)
+  const [giftLoading, setGiftLoading] = useState(true)
+  const [giftError, setGiftError] = useState<string | null>(null)
+  const [giftSuccess, setGiftSuccess] = useState<string | null>(null)
+  const [showGrantModal, setShowGrantModal] = useState(false)
+  const [showRevokeModal, setShowRevokeModal] = useState(false)
+  const [giftBusy, setGiftBusy] = useState(false)
+  const [grantModalError, setGrantModalError] = useState<string | null>(null)
+  const [revokeModalError, setRevokeModalError] = useState<string | null>(null)
+
+  const loadGiftSnapshot = useCallback(async () => {
+    setGiftLoading(true)
+    setGiftError(null)
+    try {
+      const data = await adminApi.manualGiftGrantSnapshot(tenant.id)
+      setGiftSnapshot(data)
+    } catch (e) {
+      setGiftSnapshot(null)
+      setGiftError(e instanceof Error ? e.message : 'تعذر تحميل حالة الفوترة')
+    } finally {
+      setGiftLoading(false)
+    }
+  }, [tenant.id])
+
+  useEffect(() => {
+    loadGiftSnapshot()
+  }, [loadGiftSnapshot])
+
+  const handleGrantConfirm = async (reason: string) => {
+    setGiftBusy(true)
+    setGrantModalError(null)
+    try {
+      const res = await adminApi.applyManualGiftGrant(tenant.id, { days: 30, reason })
+      setGiftSnapshot(res.snapshot)
+      setGiftSuccess('تم منح شهر الهدية بنجاح')
+      setShowGrantModal(false)
+      setTimeout(() => setGiftSuccess(null), 5000)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'تعذر منح الهدية'
+      setGrantModalError(msg)
+    } finally {
+      setGiftBusy(false)
+    }
+  }
+
+  const handleRevokeConfirm = async () => {
+    setGiftBusy(true)
+    setRevokeModalError(null)
+    try {
+      const res = await adminApi.revokeManualGiftGrant(tenant.id)
+      setGiftSnapshot(res.snapshot)
+      setGiftSuccess('تم إلغاء الهدية بنجاح')
+      setShowRevokeModal(false)
+      setTimeout(() => setGiftSuccess(null), 5000)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'تعذر إلغاء الهدية'
+      setRevokeModalError(msg)
+    } finally {
+      setGiftBusy(false)
+    }
+  }
+
+  const giftActive = giftSnapshot?.gift?.active === true
 
   return (
     <div className="fixed inset-0 z-50 flex justify-start" dir="rtl">
@@ -284,10 +464,102 @@ function TenantDrawer({
               </>
             )}
           </Section>
+
+          {/* Billing & Gift */}
+          <Section title="الفوترة والهدية" icon={Gift}>
+            {giftLoading ? (
+              <p className="text-xs text-slate-400 flex items-center gap-2">
+                <Loader2 className="w-3 h-3 animate-spin" /> جارٍ التحميل...
+              </p>
+            ) : giftError ? (
+              <p className="text-xs text-red-600">{giftError}</p>
+            ) : giftSnapshot ? (
+              <>
+                {giftSuccess && (
+                  <p className="text-xs text-green-700 bg-green-50 border border-green-100 rounded-lg p-2 mb-2">
+                    {giftSuccess}
+                  </p>
+                )}
+                <DetailRow label="Tenant ID" value={String(giftSnapshot.tenant_id)} mono />
+                <DetailRow label="الخطة الحالية" value={giftSnapshot.entitlements.plan_slug} />
+                <DetailRow label="حالة الفوترة" value={giftSnapshot.entitlements.billing_status} />
+                <DetailRow
+                  label="التجربة المجانية"
+                  value={
+                    giftSnapshot.trial.is_trial
+                      ? `نشطة (${giftSnapshot.trial.trial_days_remaining} يوم)`
+                      : giftSnapshot.trial.trial_expired
+                        ? 'منتهية'
+                        : '—'
+                  }
+                />
+                <DetailRow
+                  label="سلة (فوترة)"
+                  value={giftSnapshot.salla.billing_status || '—'}
+                />
+                <DetailRow
+                  label="اشتراك نحلة"
+                  value={
+                    giftSnapshot.nahla_subscription.active
+                      ? `${giftSnapshot.nahla_subscription.plan_slug || '—'} (${giftSnapshot.nahla_subscription.status})`
+                      : '—'
+                  }
+                />
+                {giftSnapshot.owner_email && (
+                  <DetailRow label="إيميل المالك" value={giftSnapshot.owner_email} mono />
+                )}
+                {giftSnapshot.owner_phone && (
+                  <DetailRow label="جوال المالك" value={giftSnapshot.owner_phone} mono />
+                )}
+                {giftActive ? (
+                  <>
+                    <DetailRow label="هدية نشطة" value="نعم" />
+                    <DetailRow label="خطة الهدية" value={giftSnapshot.gift.manual_gift_grant_plan_slug || 'starter'} />
+                    <DetailRow label="تنتهي في" value={fmtDate(giftSnapshot.gift.manual_gift_grant_ends_at)} />
+                    <DetailRow label="السبب" value={giftSnapshot.gift.manual_gift_grant_reason || '—'} />
+                    <DetailRow
+                      label="منحها"
+                      value={(giftSnapshot.gift.blob?.granted_by as string) || '—'}
+                    />
+                  </>
+                ) : (
+                  <DetailRow label="هدية نشطة" value="لا" />
+                )}
+                {!giftSnapshot.can_grant && giftSnapshot.grant_blocked_message_ar && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg p-2 mt-2">
+                    {giftSnapshot.grant_blocked_message_ar}
+                  </p>
+                )}
+              </>
+            ) : null}
+          </Section>
         </div>
 
         {/* Footer actions */}
         <div className="sticky bottom-0 bg-white border-t border-slate-100 px-5 py-3 space-y-2">
+          {giftActive ? (
+            <button
+              type="button"
+              onClick={() => { setRevokeModalError(null); setShowRevokeModal(true) }}
+              disabled={giftBusy}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200"
+            >
+              <Gift className="w-4 h-4" />
+              إلغاء الهدية
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setGrantModalError(null); setShowGrantModal(true) }}
+              disabled={giftBusy || giftLoading || !giftSnapshot?.can_grant}
+              title={giftSnapshot?.grant_blocked_message_ar || undefined}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Gift className="w-4 h-4" />
+              منح شهر هدية
+            </button>
+          )}
+
           {/* Disconnect WhatsApp — only show when connected */}
           {wa.status === 'connected' && (
             <button
@@ -317,6 +589,26 @@ function TenantDrawer({
           </button>
         </div>
       </aside>
+
+      {showGrantModal && (
+        <GrantGiftModal
+          tenantName={tenant.name}
+          tenantId={tenant.id}
+          onConfirm={handleGrantConfirm}
+          onCancel={() => !giftBusy && setShowGrantModal(false)}
+          busy={giftBusy}
+          error={grantModalError}
+        />
+      )}
+      {showRevokeModal && (
+        <RevokeGiftModal
+          tenantName={tenant.name}
+          onConfirm={handleRevokeConfirm}
+          onCancel={() => !giftBusy && setShowRevokeModal(false)}
+          busy={giftBusy}
+          error={revokeModalError}
+        />
+      )}
     </div>
   )
 }

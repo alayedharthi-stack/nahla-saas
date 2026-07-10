@@ -54,6 +54,7 @@ from core.auth import (
     create_token,
     hash_password,
     require_admin,
+    require_not_support_impersonation,
 )
 from core.config import INVITE_EXPIRE_H
 from core.database import get_db
@@ -1032,6 +1033,168 @@ async def extend_tenant_trial(
         "reason":                  reason,
         "trial_extended_by_admin": True,
     }
+
+
+# ── Manual gift grant (admin only) ───────────────────────────────────────────
+
+DEFAULT_MANUAL_GIFT_DAYS = 30
+
+
+def _admin_actor_label(admin: Dict[str, Any]) -> str:
+    return str(
+        admin.get("sub")
+        or admin.get("email")
+        or admin.get("actor_sub")
+        or "admin"
+    )
+
+
+def _raise_manual_gift_http(exc: Exception) -> None:
+    from core.manual_billing_grant import ManualGiftGrantError  # noqa: PLC0415
+
+    if not isinstance(exc, ManualGiftGrantError):
+        raise exc
+    status = 400
+    if exc.code == "tenant_not_found":
+        status = 404
+    elif exc.code in ("active_paid_subscription", "active_gift_exists", "no_grant_to_revoke"):
+        status = 409
+    raise HTTPException(
+        status_code=status,
+        detail={"code": exc.code, "message": str(exc)},
+    ) from exc
+
+
+class ManualGiftGrantMutationIn(BaseModel):
+    days:   int  = Field(default=DEFAULT_MANUAL_GIFT_DAYS, ge=1, le=365)
+    reason: str  = Field(..., min_length=1)
+
+
+@router.get("/admin/tenants/{tenant_id}/manual-gift-grant")
+async def get_manual_gift_grant_admin_context(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Read-only billing + gift snapshot for the admin dashboard."""
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        ManualGiftGrantError,
+        build_admin_manual_gift_context,
+    )
+
+    try:
+        return build_admin_manual_gift_context(db, tenant_id)
+    except ManualGiftGrantError as exc:
+        _raise_manual_gift_http(exc)
+    return None  # unreachable
+
+
+@router.post("/admin/tenants/{tenant_id}/manual-gift-grant/preview")
+async def preview_manual_gift_grant_admin(
+    tenant_id: int,
+    body: ManualGiftGrantMutationIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+):
+    """Validate a gift grant without writing metadata."""
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        DEFAULT_GIFT_PLAN_SLUG,
+        ManualGiftGrantError,
+        apply_manual_gift_grant,
+    )
+
+    try:
+        result = apply_manual_gift_grant(
+            db,
+            tenant_id,
+            days=int(body.days),
+            plan_slug=DEFAULT_GIFT_PLAN_SLUG,
+            reason=body.reason.strip(),
+            granted_by=_admin_actor_label(admin),
+            dry_run=True,
+        )
+        return {"preview": result}
+    except ManualGiftGrantError as exc:
+        _raise_manual_gift_http(exc)
+    return None  # unreachable
+
+
+@router.post("/admin/tenants/{tenant_id}/manual-gift-grant")
+async def apply_manual_gift_grant_admin(
+    tenant_id: int,
+    body: ManualGiftGrantMutationIn,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+):
+    """Apply a 30-day starter gift grant (metadata only)."""
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        DEFAULT_GIFT_PLAN_SLUG,
+        ManualGiftGrantError,
+        apply_manual_gift_grant,
+        build_admin_manual_gift_context,
+    )
+
+    granted_by = _admin_actor_label(admin)
+    try:
+        result = apply_manual_gift_grant(
+            db,
+            tenant_id,
+            days=int(body.days),
+            plan_slug=DEFAULT_GIFT_PLAN_SLUG,
+            reason=body.reason.strip(),
+            granted_by=granted_by,
+            dry_run=False,
+        )
+    except ManualGiftGrantError as exc:
+        _raise_manual_gift_http(exc)
+
+    audit(
+        "manual_gift_grant_applied",
+        admin=granted_by,
+        tenant_id=tenant_id,
+        days=int(body.days),
+        reason=body.reason.strip(),
+        ends_at=result.get("ends_at"),
+    )
+    snapshot = build_admin_manual_gift_context(db, tenant_id)
+    return {"grant": result, "snapshot": snapshot}
+
+
+@router.post("/admin/tenants/{tenant_id}/manual-gift-grant/revoke")
+async def revoke_manual_gift_grant_admin(
+    tenant_id: int,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+):
+    """Revoke the current manual gift grant metadata blob."""
+    from core.manual_billing_grant import (  # noqa: PLC0415
+        ManualGiftGrantError,
+        build_admin_manual_gift_context,
+        revoke_manual_gift_grant,
+    )
+
+    revoked_by = _admin_actor_label(admin)
+    try:
+        result = revoke_manual_gift_grant(
+            db,
+            tenant_id,
+            granted_by=revoked_by,
+            dry_run=False,
+        )
+    except ManualGiftGrantError as exc:
+        _raise_manual_gift_http(exc)
+
+    audit(
+        "manual_gift_grant_revoked",
+        admin=revoked_by,
+        tenant_id=tenant_id,
+        revoked_at=result.get("revoked_at"),
+    )
+    snapshot = build_admin_manual_gift_context(db, tenant_id)
+    return {"revoke": result, "snapshot": snapshot}
 
 
 @router.get("/admin/tenants/{tenant_id}/users")
