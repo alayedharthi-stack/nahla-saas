@@ -159,6 +159,151 @@ GRANT_BLOCKED_MESSAGES_AR: Dict[str, str] = {
     "active_gift_exists": "يوجد هدية نشطة بالفعل؛ ألغِها أولاً.",
 }
 
+_PLAN_DISPLAY_AR: Dict[str, str] = {
+    "starter": "Starter",
+    "growth": "Growth",
+    "scale": "Scale",
+}
+
+
+def _format_ar_short_date(dt: datetime) -> str:
+    """Compact Arabic date for admin list badges."""
+    try:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
+def compact_billing_display_for_admin(
+    db: Session,
+    tenant_id: int,
+    *,
+    tenant,
+    subscription_row=None,
+) -> Dict[str, Any]:
+    """Lightweight read-only billing badge for admin tenant list rows."""
+    from models import BillingPlan, Integration  # noqa: PLC0415
+
+    from core.billing import compute_trial_info, get_tenant_subscription  # noqa: PLC0415
+
+    gift_active = is_manual_gift_grant_active(db, tenant_id)
+    gift_blob = _read_grant_blob(db, tenant_id) if gift_active else None
+    gift_ends_raw = (gift_blob or {}).get("ends_at")
+    gift_ends_dt = _parse_dt(gift_ends_raw) if gift_active else None
+    gift_plan_slug = (
+        get_manual_gift_grant_plan_slug(db, tenant_id) if gift_active else None
+    )
+
+    if not bool(getattr(tenant, "is_active", True)):
+        return {
+            "billing_access_kind": "store_disabled",
+            "billing_access_label_ar": "المتجر معطل",
+            "billing_plan_slug": gift_plan_slug,
+            "billing_ends_at": gift_ends_raw if gift_active else None,
+            "gift_active": gift_active,
+            "gift_ends_at": gift_ends_raw if gift_active else None,
+        }
+
+    nahla_sub = get_tenant_subscription(db, tenant_id)
+    nahla_plan_slug: Optional[str] = None
+    nahla_ends_at: Optional[str] = None
+    if nahla_sub:
+        if nahla_sub.plan_id:
+            plan_row = (
+                db.query(BillingPlan)
+                .filter(BillingPlan.id == nahla_sub.plan_id)
+                .first()
+            )
+            nahla_plan_slug = plan_row.slug if plan_row else None
+        if nahla_sub.ends_at:
+            nahla_ends_at = nahla_sub.ends_at.isoformat()
+
+    salla_plan_slug: Optional[str] = None
+    salla_billing_status: Optional[str] = None
+    salla_int = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .order_by(Integration.id.desc())
+        .first()
+    )
+    if salla_int and salla_int.config:
+        salla_billing_status = salla_int.config.get("billing_status")
+        raw_slug = salla_int.config.get("salla_plan_slug")
+        if raw_slug:
+            salla_plan_slug = str(raw_slug).strip().lower()
+
+    trial_info = compute_trial_info(tenant)
+    trial_active = bool(trial_info.get("is_trial"))
+    trial_end = trial_info.get("trial_end")
+
+    sub_status = getattr(subscription_row, "status", None) if subscription_row else None
+    pending_payment = sub_status == "pending_payment"
+
+    if has_active_paid_subscription(db, tenant_id):
+        plan_slug = nahla_plan_slug or salla_plan_slug or DEFAULT_GIFT_PLAN_SLUG
+        plan_label = _PLAN_DISPLAY_AR.get(plan_slug or "", (plan_slug or "").title())
+        return {
+            "billing_access_kind": "paid",
+            "billing_access_label_ar": f"مدفوع نشط — {plan_label}" if plan_label else "مدفوع نشط",
+            "billing_plan_slug": plan_slug,
+            "billing_ends_at": nahla_ends_at,
+            "gift_active": gift_active,
+            "gift_ends_at": gift_ends_raw if gift_active else None,
+        }
+
+    if gift_active:
+        plan_label = _PLAN_DISPLAY_AR.get(gift_plan_slug or "", (gift_plan_slug or "Starter").title())
+        label = f"هدية — {plan_label}"
+        if gift_ends_dt:
+            label = f"{label} — حتى {_format_ar_short_date(gift_ends_dt)}"
+        return {
+            "billing_access_kind": "gift",
+            "billing_access_label_ar": label,
+            "billing_plan_slug": gift_plan_slug,
+            "billing_ends_at": gift_ends_raw,
+            "gift_active": True,
+            "gift_ends_at": gift_ends_raw,
+        }
+
+    if trial_active:
+        return {
+            "billing_access_kind": "trial",
+            "billing_access_label_ar": "تجربة",
+            "billing_plan_slug": None,
+            "billing_ends_at": trial_end,
+            "gift_active": False,
+            "gift_ends_at": None,
+        }
+
+    if pending_payment:
+        return {
+            "billing_access_kind": "pending_payment",
+            "billing_access_label_ar": "بانتظار الدفع",
+            "billing_plan_slug": nahla_plan_slug or salla_plan_slug,
+            "billing_ends_at": nahla_ends_at,
+            "gift_active": False,
+            "gift_ends_at": None,
+        }
+
+    if salla_billing_status == "trial":
+        return {
+            "billing_access_kind": "trial",
+            "billing_access_label_ar": "تجربة",
+            "billing_plan_slug": salla_plan_slug,
+            "billing_ends_at": None,
+            "gift_active": False,
+            "gift_ends_at": None,
+        }
+
+    return {
+        "billing_access_kind": "none",
+        "billing_access_label_ar": "لا باقة",
+        "billing_plan_slug": None,
+        "billing_ends_at": None,
+        "gift_active": False,
+        "gift_ends_at": None,
+    }
+
 
 def build_admin_manual_gift_context(db: Session, tenant_id: int) -> Dict[str, Any]:
     """Read-only billing + gift snapshot for the owner admin dashboard."""
