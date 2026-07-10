@@ -10,7 +10,13 @@ for _p in (REPO_ROOT, BACKEND_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from core.catalog import SOURCE_META, SOURCE_SALLA, product_source  # noqa: E402
+from core.catalog import (  # noqa: E402
+    SOURCE_META,
+    SOURCE_META_EXISTING,
+    SOURCE_SALLA,
+    normalize_source,
+    product_source,
+)
 from core.catalog_image import coerce_image_url, resolve_product_image_url  # noqa: E402
 
 
@@ -75,11 +81,12 @@ class TestMetaExportCandidateSkip:
             source = SOURCE_META
             extra_metadata = {"source": SOURCE_META}
 
-        assert product_source(P()) == SOURCE_META
+        assert normalize_source(SOURCE_META) == SOURCE_META_EXISTING
+        assert product_source(P()) == SOURCE_META_EXISTING
 
     def test_salla_source_not_meta(self):
         class P:
             source = SOURCE_SALLA
             extra_metadata = {}
 
-        assert product_source(P()) != SOURCE_META
+        assert product_source(P()) != SOURCE_META_EXISTING
