@@ -1694,6 +1694,41 @@ export interface Translations {
       addManual:      string
       resync:         string
     }
+    summary: {
+      title:            string
+      productCount:     string
+      sourceLabel:      string
+      lastUpdateLabel:  string
+      statusLabel:      string
+      statusReady:      string
+      statusNotReady:   string
+      statusEmpty:      string
+      lastImportNever:  string
+      moreActions:      string
+    }
+    channels: {
+      title:              string
+      whatsapp:           string
+      ai:                 string
+      campaigns:          string
+      google:             string
+      statusReady:        string
+      statusNeedsAction:  string
+      statusNotConnected: string
+      statusComingSoon:   string
+    }
+    advanced: {
+      title:                    string
+      structureTitle:           string
+      catalogStatusTitle:       string
+      linkStatusTitle:          string
+      bindingSettingsTitle:     string
+      commerceDiagnosticsTitle: string
+      catalogToolsTitle:        string
+      manualProductsTitle:      string
+      metaImportTitle:          string
+      testSendTitle:            string
+    }
     diagnostics: {
       title:                string
       readyTitle:           string
@@ -1880,9 +1915,12 @@ export interface Translations {
     }
     hub: {
       title:          string
+      advancedTitle:  string
       intro:          string
       inputsLabel:    string
       outputsLabel:   string
+      sourcesLabel:   string
+      channelsLabel:  string
       nahlaCatalog:   string
       unifiedSource:  string
       productCount:   string
@@ -1981,6 +2019,7 @@ export interface Translations {
         whatsappReady:  string
         metaReady:      string
         googleReady:    string
+        needsReview:    string
       }
       variantsDrawer: {
         noVariants:  string
@@ -2018,6 +2057,8 @@ export interface Translations {
         missingInChannels: string
         readyWithWarn:     string
         ready:             string
+        readySimple:       string
+        needsCompletion:   string
       }
       pagination: {
         pageOf: string
