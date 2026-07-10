@@ -65,7 +65,8 @@ from core.catalog import (
     CATALOG_STATUS_MERCHANT_HIDDEN,
     CATALOG_STATUS_REMOVED_FROM_META,
     KNOWN_SOURCES,
-    SOURCE_MANUAL,
+    OWNERSHIP_NAHLA_MANAGED,
+    SOURCE_NAHLA_NATIVE,
     SOURCE_UNKNOWN,
     assign_canonical_retailer_id,
     canonical_retailer_id,
@@ -74,6 +75,8 @@ from core.catalog import (
     dominant_source,
     effective_retailer_id,
     is_catalog_eligible,
+    is_merchant_editable_product,
+    merchant_edit_rejection_detail,
     product_source,
     source_breakdown,
     whatsapp_commerce_diagnostics_readiness,
@@ -1986,8 +1989,11 @@ async def admin_graph_import_diagnostics(
 # already plugs in (WhatsApp catalog send, AI [PRODUCT:...] resolver,
 # campaigns).
 #
-# Contract for manual products:
-#   • ``source = "manual"`` is the marker that a sync run MUST NOT
+# Contract for Nahla-native products (Phase 3A):
+#   • ``source = "nahla_native"`` + ``ownership_mode = "nahla_managed"``
+#     on create. Legacy rows may still carry ``source = "manual"`` and
+#     remain editable via ``is_merchant_editable_product``.
+#   • ``source = "manual"`` (legacy) is the marker that a sync run MUST NOT
 #     overwrite this row even if its ``external_id`` (NULL by default
 #     for manual rows) happens to clash with an upstream product. The
 #     store_sync upsert at ``services/store_sync.py:_upsert_products``
@@ -2040,6 +2046,12 @@ class _ManualProductPatch(BaseModel):
     stock_quantity:   Optional[int] = Field(None, ge=0)
 
 
+def _assert_merchant_editable_or_409(p: Product) -> None:
+    detail = merchant_edit_rejection_detail(p)
+    if detail:
+        raise HTTPException(status_code=409, detail=detail)
+
+
 def _serialise_manual_product(p: Product) -> Dict[str, Any]:
     """Render a product row in the shape the dashboard expects.
 
@@ -2083,7 +2095,7 @@ async def merchant_catalog_create_manual_product(
     # Build the same ``extra_metadata`` shape the Salla sync produces
     # so the resolver / sender don't need a manual-specific branch.
     meta_blob = {
-        "source":        SOURCE_MANUAL,
+        "source":        SOURCE_NAHLA_NATIVE,
         "image_url":     (payload.image_url or "").strip() or None,
         "product_url":   (payload.product_url or "").strip() or None,
     }
@@ -2098,7 +2110,8 @@ async def merchant_catalog_create_manual_product(
         in_stock         = bool(payload.in_stock),
         stock_quantity   = payload.stock_quantity,
         extra_metadata   = meta_blob,
-        source           = SOURCE_MANUAL,
+        source           = SOURCE_NAHLA_NATIVE,
+        ownership_mode   = OWNERSHIP_NAHLA_MANAGED,
     )
     db.add(p)
     db.flush()
@@ -2137,11 +2150,7 @@ async def merchant_catalog_update_manual_product(
     )
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
-    if product_source(p) != SOURCE_MANUAL:
-        raise HTTPException(
-            status_code=409,
-            detail="product_not_manual_cannot_edit_via_manual_endpoint",
-        )
+    _assert_merchant_editable_or_409(p)
 
     data = payload.model_dump(exclude_unset=True)
     # Top-level columns
@@ -2161,8 +2170,12 @@ async def merchant_catalog_update_manual_product(
         if "product_url" in data:
             meta["product_url"] = (data["product_url"] or "").strip() or None
         # Keep the source marker pinned regardless of patch shape.
-        meta["source"] = SOURCE_MANUAL
+        meta["source"] = SOURCE_NAHLA_NATIVE
         p.extra_metadata = meta
+    if not p.ownership_mode:
+        p.ownership_mode = OWNERSHIP_NAHLA_MANAGED
+    if (p.source or "").strip().lower() == "manual":
+        p.source = SOURCE_NAHLA_NATIVE
     db.commit()
     db.refresh(p)
     audit(
@@ -2342,11 +2355,7 @@ async def merchant_catalog_delete_manual_product(
     )
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
-    if product_source(p) != SOURCE_MANUAL:
-        raise HTTPException(
-            status_code=409,
-            detail="product_not_manual_cannot_delete_via_manual_endpoint",
-        )
+    _assert_merchant_editable_or_409(p)
     db.delete(p)
     db.commit()
     audit(
@@ -2574,6 +2583,7 @@ async def merchant_catalog_update_product(
     )
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
+    _assert_merchant_editable_or_409(p)
 
     fields = _apply_studio_product_patch(p, payload)
     db.commit()

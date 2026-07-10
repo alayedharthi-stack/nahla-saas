@@ -390,6 +390,39 @@ def is_import_protected(product: Any) -> bool:
     src = normalize_source(getattr(product, "source", None))
     return src in EXTERNAL_PLATFORM_SOURCES
 
+
+def is_merchant_editable_product(product: Any) -> bool:
+    """True when the merchant may edit/delete via Nahla native product CRUD."""
+    if product is None:
+        return False
+    mode = infer_ownership_mode(product)
+    if mode == OWNERSHIP_NAHLA_MANAGED:
+        return True
+    if mode in (
+        OWNERSHIP_EXTERNAL_MANAGED,
+        OWNERSHIP_META_READONLY,
+        OWNERSHIP_NAHLA_MANAGED_META,
+        OWNERSHIP_ARCHIVED_OR_DISCONNECTED,
+    ):
+        return False
+    src = normalize_source(getattr(product, "source", None))
+    if src in NAHLA_NATIVE_SOURCES:
+        return True
+    if src in EXTERNAL_PLATFORM_SOURCES or src in META_EXISTING_SOURCES:
+        return False
+    return False
+
+
+def merchant_edit_rejection_detail(product: Any) -> Optional[str]:
+    """HTTP 409 detail code when native CRUD must refuse a product row."""
+    if is_merchant_editable_product(product):
+        return None
+    mode = infer_ownership_mode(product)
+    src = normalize_source(getattr(product, "source", None))
+    if mode == OWNERSHIP_META_READONLY or src in META_EXISTING_SOURCES:
+        return "product_not_editable_meta_readonly"
+    return "product_not_editable_external_managed"
+
 # ── Catalog visibility (P1-G1) ─────────────────────────────────────────────
 # Single vocabulary for AI + dashboard + Meta reconciliation. Legacy rows
 # without ``catalog_status`` are treated as ``active``.

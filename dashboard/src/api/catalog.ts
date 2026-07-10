@@ -136,7 +136,7 @@ export interface WabaCatalogLinkStatus {
 // merchant's Meta Commerce Manager catalog — even if they will later
 // be pushed BACK to Meta as an output channel, the input-side tag is
 // permanent.
-export type ProductSource = 'salla' | 'zid' | 'meta' | 'manual' | 'unknown'
+export type ProductSource = 'salla' | 'zid' | 'meta' | 'manual' | 'nahla_native' | 'unknown'
 export type DominantSource = ProductSource | 'mixed'
 
 // Output channels the catalog can publish to. ``google_merchant`` and
