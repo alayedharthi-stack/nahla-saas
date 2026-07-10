@@ -569,6 +569,46 @@ def apply_product_claim_grounding_guard(
         return ProductClaimGroundingGuardResult(reply=original, action="allowed")
 
     try:
+        from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: PLC0415
+            resolve_current_turn_social_non_commerce,
+        )
+
+        meta = dict(inbound_metadata or {})
+        inbound_text = str(meta.get("inbound_text") or meta.get("message") or "")
+        intent_obj = meta.get("intent")
+        if intent_obj is None and inbound_text:
+            try:
+                from modules.ai.brain.intent import rules as intent_rules  # noqa: PLC0415
+
+                intent_obj = intent_rules.match(inbound_text)
+            except Exception:  # noqa: BLE001
+                intent_obj = None
+        last_question = str(getattr(order_state, "last_question_asked", "") or "")
+        current_turn = resolve_current_turn_social_non_commerce(
+            inbound_text,
+            intent=intent_obj,
+            state=order_state,
+            inbound_metadata=inbound_metadata,
+            last_question=last_question,
+        )
+        if current_turn.matched:
+            logger.info(
+                "[PRODUCT_CLAIM_GROUNDING_GUARD] allow_social_noncommerce "
+                "tenant=%s conv=%s category=%s reason=%s",
+                tenant_id,
+                conversation_id,
+                current_turn.category or "-",
+                current_turn.reason or "-",
+            )
+            return ProductClaimGroundingGuardResult(
+                reply=original,
+                action="allowed_social_noncommerce",
+                reason=current_turn.reason or "current_turn_social_non_commerce",
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[PRODUCT_CLAIM_GROUNDING_GUARD] social_non_commerce_probe_failed")
+
+    try:
         from modules.ai.order_flow_v2.flags import is_v2_checkout_scope_active  # noqa: PLC0415
         from modules.ai.order_flow_v2.state import prep_dict, trusted_catalog_price  # noqa: PLC0415
 
