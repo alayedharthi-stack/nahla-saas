@@ -115,10 +115,20 @@ from core.catalog import (
     CATALOG_STATUS_ACTIVE,
     CATALOG_STATUS_MERCHANT_HIDDEN,
     CATALOG_STATUS_REMOVED_FROM_META,
-    SOURCE_MANUAL,
+    CONFLICT_POSSIBLE_DUPLICATE,
+    OWNERSHIP_META_READONLY,
     SOURCE_META,
+    SOURCE_META_EXISTING,
     assign_canonical_retailer_id,
     catalog_status_of,
+)
+from core.catalog_write_router import (
+    ACTION_CREATE,
+    ACTION_FLAG_CONFLICT,
+    ACTION_REFRESH_META,
+    ACTION_SKIP_PROTECTED,
+    conflict_detail_payload,
+    resolve_meta_import_action,
 )
 from core.config import META_GRAPH_API_VERSION, WA_TOKEN
 from models import Product, WhatsAppConnection
@@ -411,6 +421,9 @@ class ImportReport:
     created:         int = 0
     updated:         int = 0
     skipped_manual:  int = 0
+    skipped_protected: int = 0
+    flagged_conflict: int = 0
+    refreshed_meta:   int = 0
     errors:          int = 0
     pages_fetched:   int = 0
     truncated:       bool = False    # True when MAX_PAGES hit + Meta had more
@@ -443,6 +456,9 @@ class ImportReport:
             "created":           self.created,
             "updated":           self.updated,
             "skipped_manual":    self.skipped_manual,
+            "skipped_protected": self.skipped_protected,
+            "flagged_conflict":  self.flagged_conflict,
+            "refreshed_meta":    self.refreshed_meta,
             "errors":            self.errors,
             "pages_fetched":     self.pages_fetched,
             "truncated":         self.truncated,
@@ -2192,13 +2208,28 @@ def _process_one_meta_product(
               .first()
         )
 
-        # Refuse to overwrite a manual row. Manual rows are the
-        # merchant's intentional, hand-curated entries — if a Meta
-        # import happens to match the same retailer_id (because the
-        # merchant typed the same ID in both places) we surface a
-        # ``skipped_manual`` counter rather than silently winning.
-        if existing is not None and (existing.source or "").lower() == SOURCE_MANUAL:
-            report.skipped_manual += 1
+        decision = resolve_meta_import_action(
+            existing,
+            {"meta_id": meta_id, "retailer_id": retailer_id},
+        )
+
+        if decision.action == ACTION_SKIP_PROTECTED:
+            report.skipped_protected += 1
+            return
+
+        if decision.action == ACTION_FLAG_CONFLICT:
+            report.flagged_conflict += 1
+            from core.catalog import NAHLA_NATIVE_SOURCES, normalize_source  # noqa: PLC0415
+            if existing is not None:
+                if normalize_source(existing.source) in NAHLA_NATIVE_SOURCES:
+                    report.skipped_manual += 1
+                existing.source_conflict_status = CONFLICT_POSSIBLE_DUPLICATE
+                existing.source_conflict_detail = conflict_detail_payload(
+                    existing=existing,
+                    meta_id=meta_id,
+                    retailer_id=retailer_id,
+                    reason=decision.reason,
+                )
             return
 
         price_blob      = _parse_meta_price(row.get("price"))
@@ -2211,7 +2242,7 @@ def _process_one_meta_product(
         availability    = (row.get("availability") or "").lower()
         in_stock        = availability in {"", "in stock", "in_stock", "available"}
         meta_blob = {
-            "source":       SOURCE_META,
+            "source":       SOURCE_META_EXISTING,
             "meta_id":      meta_id or None,
             "image_url":    row.get("image_url") or None,
             "product_url":  row.get("url") or None,
@@ -2226,19 +2257,23 @@ def _process_one_meta_product(
         # Drop empty values so the JSONB stays compact.
         meta_blob = {k: v for k, v in meta_blob.items() if v is not None}
 
-        if existing is None:
+        if decision.action == ACTION_CREATE:
             p = Product(
-                tenant_id        = tenant_id,
-                external_id      = meta_id,
-                meta_retailer_id = retailer_id,
-                title            = title,
-                description      = row.get("description") or None,
-                price            = price_blob["raw"] or None,
-                in_stock         = in_stock,
-                extra_metadata   = meta_blob,
-                source           = SOURCE_META,
-                catalog_status   = CATALOG_STATUS_ACTIVE,
+                tenant_id         = tenant_id,
+                external_id       = meta_id,
+                meta_retailer_id  = retailer_id,
+                title             = title,
+                description       = row.get("description") or None,
+                price             = price_blob["raw"] or None,
+                in_stock          = in_stock,
+                extra_metadata    = meta_blob,
+                source            = SOURCE_META_EXISTING,
+                ownership_mode    = OWNERSHIP_META_READONLY,
+                source_external_id = retailer_id or meta_id,
+                meta_item_id      = meta_id,
+                catalog_status    = CATALOG_STATUS_ACTIVE,
                 meta_last_seen_at = now,
+                imported_at       = now,
             )
             db.add(p)
             db.flush()
@@ -2247,12 +2282,14 @@ def _process_one_meta_product(
             except Exception:  # noqa: BLE001
                 pass
             report.created += 1
-        else:
+        elif decision.action == ACTION_REFRESH_META and existing is not None:
             existing.title       = title
             existing.description = row.get("description") or existing.description
             existing.price       = price_blob["raw"] or existing.price
             existing.in_stock    = in_stock
             existing.meta_last_seen_at = now
+            if not (getattr(existing, "meta_item_id", None) or "").strip():
+                existing.meta_item_id = meta_id
             if getattr(existing, "merchant_hidden_at", None) is None:
                 prev_status = catalog_status_of(existing)
                 if prev_status == CATALOG_STATUS_REMOVED_FROM_META:
@@ -2261,28 +2298,18 @@ def _process_one_meta_product(
                     report.restored_from_meta += 1
                 elif prev_status != CATALOG_STATUS_MERCHANT_HIDDEN:
                     existing.catalog_status = CATALOG_STATUS_ACTIVE
-            # Merge metadata instead of replacing so anything other
-            # writers stamped (e.g. recommendation tags) survives.
             merged = dict(existing.extra_metadata or {})
             merged.update(meta_blob)
             existing.extra_metadata = merged
-            # Stamp ``source`` so a row that was previously "unknown"
-            # (legacy backfill heuristic) gets correctly tagged.
-            existing.source = SOURCE_META
-            # Make sure the retailer-id columns reflect the new
-            # semantics — external_id always holds Meta's id, and
-            # meta_retailer_id holds the merchant SKU. Backfill on
-            # any legacy row that has either column NULL.
             if not (existing.meta_retailer_id or "").strip():
                 existing.meta_retailer_id = retailer_id
-            # Migrate legacy rows whose external_id is the
-            # retailer_id (old behaviour) over to the Meta id. We
-            # only overwrite when the new id is non-empty AND the
-            # existing value differs from it — preserves rows where
-            # external_id was already set by a non-Meta writer.
-            if meta_id and (existing.external_id or "").strip() != meta_id:
-                existing.external_id = meta_id
+            # Legacy meta rows may still carry source=meta — do not re-stamp.
+            if not (existing.source or "").strip():
+                existing.source = SOURCE_META_EXISTING
+            if not (getattr(existing, "ownership_mode", None) or "").strip():
+                existing.ownership_mode = OWNERSHIP_META_READONLY
             report.updated += 1
+            report.refreshed_meta += 1
     except Exception as exc:  # noqa: BLE001
         report.errors += 1
         if len(report.error_samples) < 10:

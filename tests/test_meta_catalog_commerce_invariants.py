@@ -65,6 +65,16 @@ class _StoredProduct:
     in_stock: bool = True
     source: str = "meta"
     extra_metadata: Dict[str, Any] = field(default_factory=dict)
+    ownership_mode: Optional[str] = None
+    source_external_id: Optional[str] = None
+    meta_item_id: Optional[str] = None
+    imported_at: Any = None
+    source_conflict_status: Optional[str] = None
+    source_conflict_detail: Optional[Dict[str, Any]] = None
+    catalog_status: str = "active"
+    merchant_hidden_at: Any = None
+    meta_removed_at: Any = None
+    meta_last_seen_at: Any = None
     id: int = 0
 
 
@@ -174,6 +184,10 @@ class _InMemoryCatalogDb:
                 in_stock=bool(getattr(obj, "in_stock", True)),
                 source=getattr(obj, "source", None) or "meta",
                 extra_metadata=dict(getattr(obj, "extra_metadata", None) or {}),
+                ownership_mode=getattr(obj, "ownership_mode", None),
+                source_external_id=getattr(obj, "source_external_id", None),
+                meta_item_id=getattr(obj, "meta_item_id", None),
+                imported_at=getattr(obj, "imported_at", None),
             )
             stored.id = self._next_id
             self._next_id += 1

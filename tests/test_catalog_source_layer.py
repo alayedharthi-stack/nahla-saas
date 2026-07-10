@@ -41,9 +41,13 @@ os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 from core.catalog import (  # noqa: E402
     KNOWN_SOURCES,
     SOURCE_MANUAL,
+    SOURCE_META,
+    SOURCE_META_EXISTING,
+    SOURCE_NAHLA_NATIVE,
     SOURCE_SALLA,
     SOURCE_UNKNOWN,
     dominant_source,
+    normalize_source,
     product_source,
     source_breakdown,
 )
@@ -64,7 +68,7 @@ def _p(**kw):
 
 
 def test_product_source_reads_column_first():
-    assert product_source(_p(source="manual")) == SOURCE_MANUAL
+    assert product_source(_p(source="manual")) == SOURCE_NAHLA_NATIVE
     assert product_source(_p(source="salla")) == SOURCE_SALLA
 
 
@@ -90,7 +94,7 @@ def test_product_source_metadata_dict_on_plain_dict_product():
     """Plain dict products (used by the [PRODUCT:...] resolver path)
     also surface a source via metadata."""
     p = {"source": None, "extra_metadata": {"source": "manual"}}
-    assert product_source(p) == SOURCE_MANUAL
+    assert product_source(p) == SOURCE_NAHLA_NATIVE
 
 
 def test_product_source_heuristic_external_id_means_salla():
@@ -108,7 +112,7 @@ def test_product_source_column_takes_priority_over_metadata():
     """If both are set, the top-level column wins — metadata is
     only consulted when the column is empty."""
     p = _p(source="manual", extra_metadata={"source": "salla"})
-    assert product_source(p) == SOURCE_MANUAL
+    assert product_source(p) == SOURCE_NAHLA_NATIVE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,7 +128,7 @@ def test_source_breakdown_counts_each_source():
         _p(external_id="ext_1"),  # heuristic → salla
     ]
     b = source_breakdown(products)
-    assert b == {SOURCE_SALLA: 3, SOURCE_MANUAL: 1}
+    assert b == {SOURCE_SALLA: 3, SOURCE_NAHLA_NATIVE: 1}
 
 
 def test_source_breakdown_empty_iterable():
@@ -134,21 +138,21 @@ def test_source_breakdown_empty_iterable():
 
 def test_dominant_source_single_source_short_circuits():
     assert dominant_source({SOURCE_SALLA: 5}) == SOURCE_SALLA
-    assert dominant_source({SOURCE_MANUAL: 1}) == SOURCE_MANUAL
+    assert dominant_source({SOURCE_NAHLA_NATIVE: 1}) == SOURCE_NAHLA_NATIVE
 
 
 def test_dominant_source_strict_majority_wins():
     """If >50% of products come from one source, that's the badge.
     8 Salla vs 2 manual → "salla" (the merchant clearly has a store)."""
-    assert dominant_source({SOURCE_SALLA: 8, SOURCE_MANUAL: 2}) == SOURCE_SALLA
+    assert dominant_source({SOURCE_SALLA: 8, SOURCE_NAHLA_NATIVE: 2}) == SOURCE_SALLA
 
 
 def test_dominant_source_no_strict_majority_returns_mixed():
     """5/5 or 4/4/2 — no majority → ``"mixed"`` so the UI shows
     the merchant they have multiple data sources to reconcile."""
-    assert dominant_source({SOURCE_SALLA: 5, SOURCE_MANUAL: 5}) == "mixed"
+    assert dominant_source({SOURCE_SALLA: 5, SOURCE_NAHLA_NATIVE: 5}) == "mixed"
     assert dominant_source(
-        {SOURCE_SALLA: 4, SOURCE_MANUAL: 4, SOURCE_UNKNOWN: 2},
+        {SOURCE_SALLA: 4, SOURCE_NAHLA_NATIVE: 4, SOURCE_UNKNOWN: 2},
     ) == "mixed"
 
 
@@ -162,21 +166,22 @@ def test_known_sources_includes_all_documented_strings():
     CRUD / Meta import MUST stamp a value that's inside KNOWN_SOURCES,
     otherwise ``product_source`` will silently coerce it to
     ``"unknown"`` and the dashboard badge will lie."""
-    expected = {SOURCE_SALLA, SOURCE_MANUAL, SOURCE_UNKNOWN, "zid", "meta"}
+    expected = {
+        SOURCE_SALLA, SOURCE_MANUAL, SOURCE_NAHLA_NATIVE,
+        SOURCE_UNKNOWN, "zid", "meta", SOURCE_META_EXISTING,
+    }
     assert expected.issubset(KNOWN_SOURCES)
 
 
 def test_source_meta_is_known_and_roundtrips_through_product_source():
-    """Hub architecture #14: products imported FROM Meta carry
-    ``source = "meta"`` and the resolver must round-trip them back
-    verbatim — losing the tag would let a re-sync silently
-    misattribute them."""
-    from core.catalog import SOURCE_META  # noqa: PLC0415
-
+    """Hub architecture #14: legacy ``source = "meta"`` normalises to
+    ``meta_existing`` for the closed dashboard badge set."""
     assert SOURCE_META == "meta"
     assert SOURCE_META in KNOWN_SOURCES
-    assert product_source(_p(source="meta")) == SOURCE_META
-    assert product_source(_p(source="META  ")) == SOURCE_META  # case + ws
+    assert SOURCE_META_EXISTING in KNOWN_SOURCES
+    assert normalize_source(SOURCE_META) == SOURCE_META_EXISTING
+    assert product_source(_p(source="meta")) == SOURCE_META_EXISTING
+    assert product_source(_p(source="META  ")) == SOURCE_META_EXISTING  # case + ws
 
 
 def test_known_channels_are_exposed_for_hub_diagram():
@@ -284,7 +289,7 @@ def test_serialise_manual_product_surfaces_jsonb_urls_at_top_level():
     out = _serialise_manual_product(p)
     assert out["id"] == 42
     assert out["title"] == "منتج اختبار"
-    assert out["source"] == "manual"
+    assert out["source"] == SOURCE_NAHLA_NATIVE
     assert out["image_url"] == "https://cdn.example.com/p.jpg"
     assert out["product_url"] == "https://store.example.com/p/42"
     # No retailer id at all → effective_retailer_id is empty.
