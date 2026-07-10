@@ -2093,6 +2093,11 @@ export interface Translations {
         metaSyncWarningsTitle:    string
         metaSyncCatalogId:        string
         metaSyncRetailerId:       string
+        metaSyncConfirmBtn:       string
+        metaSyncConfirmModal:     string
+        metaSyncConfirmRunning:   string
+        metaSyncConfirmFailed:    string
+        metaSyncConfirmSuccess:   string
       }
     }
   }

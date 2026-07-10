@@ -554,6 +554,24 @@ export interface MetaSyncPreviewResponse {
   message_ar?:       string
 }
 
+export interface MetaSyncConfirmResponse {
+  eligible?:         boolean
+  ok?:               boolean
+  confirm?:          boolean
+  product_id?:       number
+  source?:           ProductSource | string
+  ownership_mode?:   string | null
+  retailer_id?:      string | null
+  sync_status?:      string | null
+  sync_error?:       string | null
+  last_synced_at?:   string | null
+  variant_created?:  boolean
+  error_code?:       string
+  message_ar?:       string
+  fatal_errors?:     MetaSyncPreviewIssue[]
+  push?:             Record<string, unknown>
+}
+
 // ── Merchant surface ─────────────────────────────────────────────────
 
 export const catalogApi = {
@@ -642,6 +660,12 @@ export const catalogApi = {
     return apiCall<MetaSyncPreviewResponse>(
       `/merchant/catalog/products/${id}/meta-sync/preview`,
       { method: 'POST' },
+    )
+  },
+  metaSyncConfirm(id: number): Promise<MetaSyncConfirmResponse> {
+    return apiCall<MetaSyncConfirmResponse>(
+      `/merchant/catalog/products/${id}/meta-sync/confirm`,
+      { method: 'POST', body: JSON.stringify({ confirm: true }) },
     )
   },
   // Import from Meta — Path 4. Pulls products from Meta Commerce

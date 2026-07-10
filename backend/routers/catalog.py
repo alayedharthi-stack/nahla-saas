@@ -101,6 +101,7 @@ from modules.observability.delivery_mode import (
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_sync_preview import preview_native_meta_sync
+from services.meta_catalog_sync_confirm import confirm_native_meta_sync
 from services.meta_commerce_settings import (
     enable_whatsapp_catalog_visibility,
     get_whatsapp_commerce_settings_status,
@@ -2538,6 +2539,39 @@ async def merchant_catalog_meta_sync_preview(
         if code == "product_not_meta_export_eligible":
             raise HTTPException(status_code=409, detail=result)
         raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+class _MetaSyncConfirmBody(BaseModel):
+    confirm: bool = False
+
+
+@merchant_router.post("/products/{product_id}/meta-sync/confirm")
+async def merchant_catalog_meta_sync_confirm(
+    product_id: int,
+    body: _MetaSyncConfirmBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Confirm-push one Nahla-native product to Meta after preview gates pass."""
+    tenant_id = resolve_tenant_id(request)
+    result = confirm_native_meta_sync(
+        db, tenant_id, product_id, confirm=bool(body.confirm),
+    )
+    if not result.get("eligible") and result.get("error_code") == "confirm_required":
+        raise HTTPException(status_code=422, detail=result)
+    if not result.get("eligible"):
+        code = str(result.get("error_code") or "")
+        if code == "product_not_found":
+            raise HTTPException(status_code=404, detail=code)
+        if code == "product_not_meta_export_eligible":
+            raise HTTPException(status_code=409, detail=result)
+        if code == "preview_fatal":
+            raise HTTPException(status_code=400, detail=result)
+        raise HTTPException(status_code=400, detail=result)
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result)
     return result
 
 
