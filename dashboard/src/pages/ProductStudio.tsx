@@ -36,7 +36,7 @@ import {
   Search, X, Image as ImageIcon, ExternalLink, Loader2,
   AlertTriangle, CheckCircle2, XCircle, Package,
   Filter as FilterIcon, ChevronLeft, ChevronRight, ChevronDown,
-  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers, EyeOff, RotateCcw,
+  Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers, EyeOff, RotateCcw, Trash2,
 } from 'lucide-react'
 import {
   catalogApi,
@@ -69,11 +69,20 @@ function fmtCount(n: number, lang: Lang): string {
 type CatalogSourceKey = keyof Translations['catalogMgmt']['sources']
 
 const SOURCE_STYLES: Record<string, { bg: string; text: string }> = {
-  salla:   { bg: 'bg-orange-50 border-orange-200', text: 'text-orange-700' },
-  zid:     { bg: 'bg-violet-50 border-violet-200', text: 'text-violet-700' },
-  meta:    { bg: 'bg-blue-50   border-blue-200',   text: 'text-blue-700'   },
-  manual:  { bg: 'bg-sky-50    border-sky-200',    text: 'text-sky-700'    },
-  unknown: { bg: 'bg-slate-50  border-slate-200', text: 'text-slate-600'  },
+  salla:        { bg: 'bg-orange-50 border-orange-200', text: 'text-orange-700' },
+  zid:          { bg: 'bg-violet-50 border-violet-200', text: 'text-violet-700' },
+  meta:         { bg: 'bg-blue-50   border-blue-200',   text: 'text-blue-700'   },
+  manual:       { bg: 'bg-sky-50    border-sky-200',    text: 'text-sky-700'    },
+  nahla_native: { bg: 'bg-sky-50    border-sky-200',    text: 'text-sky-700'    },
+  unknown:      { bg: 'bg-slate-50  border-slate-200', text: 'text-slate-600'  },
+}
+
+function isMerchantEditableSource(source: string): boolean {
+  return source === 'nahla_native' || source === 'manual'
+}
+
+function isExternalManagedSource(source: string): boolean {
+  return source === 'salla' || source === 'zid' || source === 'shopify'
 }
 
 // Channel icon → lucide-react element. Keeps Studio rendering channel
@@ -181,6 +190,7 @@ function FiltersBar(props: {
           <option value="salla">{sources.salla}</option>
           <option value="meta">{sources.meta}</option>
           <option value="manual">{sources.manual}</option>
+          <option value="nahla_native">{sources.nahla_native}</option>
           <option value="zid">{sources.zid}</option>
           <option value="unknown">{sources.unknown}</option>
         </select>
@@ -650,6 +660,7 @@ function FieldShell(props: {
   perChannel: ChannelReadiness[]
   placeholder?: string
   dir?: 'rtl' | 'ltr'
+  disabled?: boolean
 }) {
   const statuses: Array<{ channel: string; label_ar: string; fs: ReadinessFieldStatus }> =
     props.perChannel
@@ -705,7 +716,8 @@ function FieldShell(props: {
             placeholder={props.placeholder}
             dir={props.dir}
             rows={4}
-            className="w-full bg-transparent px-3 py-2 text-sm outline-none resize-none"
+            disabled={props.disabled}
+            className="w-full bg-transparent px-3 py-2 text-sm outline-none resize-none disabled:opacity-60 disabled:cursor-not-allowed"
           />
         ) : (
           <input
@@ -713,7 +725,8 @@ function FieldShell(props: {
             onChange={e => props.onChange(e.target.value)}
             placeholder={props.placeholder}
             dir={props.dir}
-            className="w-full bg-transparent px-3 py-2 text-sm outline-none"
+            disabled={props.disabled}
+            className="w-full bg-transparent px-3 py-2 text-sm outline-none disabled:opacity-60 disabled:cursor-not-allowed"
           />
         )}
       </div>
@@ -941,6 +954,7 @@ function ProductDrawer(props: {
   }, [])
 
   const persistDraft = useCallback(async (d: ReadinessPreviewBody, version: number) => {
+    if (!data || !isMerchantEditableSource(data.product.source)) return
     const productId = props.productId
     pendingSaveDraft.current = null
     setSaveStatus('saving')
@@ -955,9 +969,10 @@ function ProductDrawer(props: {
       if (version !== saveVersion.current || activeProductId.current !== productId) return
       setSaveStatus('error')
     }
-  }, [props])
+  }, [props, data])
 
   const scheduleSave = useCallback((d: ReadinessPreviewBody) => {
+    if (!data || !isMerchantEditableSource(data.product.source)) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
     const version = saveVersion.current + 1
     saveVersion.current = version
@@ -967,16 +982,17 @@ function ProductDrawer(props: {
       saveTimer.current = null
       void persistDraft(d, version)
     }, 700)
-  }, [persistDraft])
+  }, [persistDraft, data])
 
   const update = useCallback(<K extends keyof ReadinessPreviewBody>(k: K, v: ReadinessPreviewBody[K]) => {
+    if (!data || !isMerchantEditableSource(data.product.source)) return
     setDraft(prev => {
       const next = { ...prev, [k]: v }
       recompute(next)
       scheduleSave(next)
       return next
     })
-  }, [recompute, scheduleSave])
+  }, [recompute, scheduleSave, data])
 
   // Escape closes the drawer.
   useEffect(() => {
@@ -986,6 +1002,16 @@ function ProductDrawer(props: {
   }, [props])
 
   const catalogStatus = data?.product.catalog_status ?? 'active'
+  const productSource = data?.product.source ?? 'unknown'
+  const isEditable = isMerchantEditableSource(productSource)
+  const isExternalManaged = isExternalManagedSource(productSource)
+  const ownershipBanner = isEditable
+    ? dr.ownershipNahlaManaged
+    : isExternalManaged
+      ? dr.ownershipExternalManaged
+      : productSource === 'meta'
+        ? dr.ownershipMetaReadonly
+        : null
   const isMerchantHidden =
     catalogStatus === 'merchant_hidden' || Boolean(data?.product.merchant_hidden_at)
   const isRemovedMeta = catalogStatus === 'removed_from_meta'
@@ -1001,6 +1027,20 @@ function ProductDrawer(props: {
       : saveStatus === 'saved'
         ? 'text-emerald-700 bg-emerald-50 border-emerald-100'
         : 'text-slate-500 bg-slate-50 border-slate-100'
+
+  const onDelete = async () => {
+    if (!window.confirm(dr.deleteConfirm)) return
+    setActionBusy(true)
+    try {
+      await catalogApi.deleteManualProduct(props.productId)
+      props.onMutated()
+      props.onClose()
+    } catch {
+      window.alert(dr.deleteFailed)
+    } finally {
+      setActionBusy(false)
+    }
+  }
 
   const onHide = async () => {
     if (!window.confirm(dr.hideConfirm)) return
@@ -1053,6 +1093,16 @@ function ProductDrawer(props: {
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {data && isEditable && (
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void onDelete()}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> {dr.deleteBtn}
+              </button>
+            )}
             {data && !isMerchantHidden && !isRemovedMeta && (
               <button
                 type="button"
@@ -1089,6 +1139,15 @@ function ProductDrawer(props: {
           </div>
         ) : (
           <div className="p-5 space-y-5">
+            {ownershipBanner && (
+              <div className={`rounded-xl border px-3 py-2 text-sm leading-relaxed ${
+                isEditable
+                  ? 'bg-sky-50 border-sky-200 text-sky-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-900'
+              }`}>
+                {ownershipBanner}
+              </div>
+            )}
             {/* Hero — image + meta */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 flex gap-4">
               <div className="shrink-0 w-32 h-32 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
@@ -1148,88 +1207,90 @@ function ProductDrawer(props: {
                 </h3>
                 <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${autoSaveTone}`}>
                   {saveStatus === 'saving' && <Loader2 className="w-3 h-3 animate-spin" />}
-                  {autoSaveLabel}
+                  {isEditable ? autoSaveLabel : dr.readOnlyNote}
                 </span>
               </div>
               <FieldShell
                 fieldName="title" label={fld.title} required
                 value={draft.title ?? ''} onChange={v => update('title', v)}
-                perChannel={perChannel}
+                perChannel={perChannel} disabled={!isEditable}
               />
               <FieldShell
                 fieldName="description" label={fld.description} multiline
                 value={draft.description ?? ''} onChange={v => update('description', v)}
-                perChannel={perChannel}
+                perChannel={perChannel} disabled={!isEditable}
               />
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
                   fieldName="price" label={fld.price} required
                   value={draft.price ?? ''} onChange={v => update('price', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="sale_price" label={fld.salePrice}
                   value={draft.sale_price ?? ''} onChange={v => update('sale_price', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
                   fieldName="currency" label={fld.currency} dir="ltr"
                   value={draft.currency ?? ''} onChange={v => update('currency', v.toUpperCase())}
-                  perChannel={perChannel} placeholder={ph.currency}
+                  perChannel={perChannel} placeholder={ph.currency} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="availability" label={fld.availability}
                   value={draft.availability ?? ''} onChange={v => update('availability', v)}
-                  perChannel={perChannel} placeholder={ph.availability}
+                  perChannel={perChannel} placeholder={ph.availability} disabled={!isEditable}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
                   fieldName="image_url" label={fld.imageUrl} dir="ltr"
                   value={draft.image_url ?? ''} onChange={v => update('image_url', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="product_url" label={fld.productUrl} dir="ltr"
                   value={draft.product_url ?? ''} onChange={v => update('product_url', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <FieldShell
                   fieldName="brand" label={fld.brand}
                   value={draft.brand ?? ''} onChange={v => update('brand', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="category" label={fld.category}
                   value={draft.category ?? ''} onChange={v => update('category', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <FieldShell
                   fieldName="condition" label={fld.condition}
                   value={draft.condition ?? ''} onChange={v => update('condition', v)}
-                  perChannel={perChannel} placeholder={ph.condition}
+                  perChannel={perChannel} placeholder={ph.condition} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="gtin" label={fld.gtin} dir="ltr"
                   value={draft.gtin ?? ''} onChange={v => update('gtin', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
                 <FieldShell
                   fieldName="mpn" label={fld.mpn} dir="ltr"
                   value={draft.mpn ?? ''} onChange={v => update('mpn', v)}
-                  perChannel={perChannel}
+                  perChannel={perChannel} disabled={!isEditable}
                 />
               </div>
 
+              {isEditable && (
               <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-100 rounded-lg p-2 leading-relaxed">
                 {dr.autoSaveNote}
               </div>
+              )}
             </div>
 
             {/* Variants — read-only preview when present */}

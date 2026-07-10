@@ -1192,6 +1192,29 @@ class StoreSyncService:
         restocked: Optional[Dict[str, Any]] = None
 
         if existing:
+            try:
+                from core.catalog import is_merchant_editable_product  # noqa: PLC0415
+
+                if is_merchant_editable_product(existing):
+                    logger.info(
+                        "[StoreSync] skip protected nahla-native/manual product "
+                        "tenant=%s product=%s external_id=%s",
+                        self.tenant_id, existing.id, ext_id,
+                    )
+                    return {
+                        "action": "skipped_protected",
+                        "product_id": existing.id,
+                        "restocked": None,
+                    }
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "[StoreSync] native-product guard check failed tenant=%s "
+                    "product=%s external_id=%s — continuing normal upsert",
+                    self.tenant_id,
+                    getattr(existing, "id", None),
+                    ext_id,
+                    exc_info=True,
+                )
             was_unavailable = (
                 (getattr(existing, "in_stock", True) is False)
                 or (existing.stock_quantity is not None and existing.stock_quantity <= 0)
