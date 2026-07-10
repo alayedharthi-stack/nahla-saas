@@ -2081,6 +2081,8 @@ export interface Translations {
         deleteBtn:                string
         deleteConfirm:            string
         deleteFailed:             string
+        priceHelper:              string
+        priceInvalid:             string
         metaSyncBtn:              string
         metaSyncDryRunNote:       string
         metaSyncBlockedExternal:  string

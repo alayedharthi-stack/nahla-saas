@@ -2221,6 +2221,8 @@ const ar: Translations = {
         deleteBtn:                'حذف المنتج',
         deleteConfirm:            'حذف هذا المنتج من كتالوج نحلة؟ لا يمكن التراجع.',
         deleteFailed:             'تعذّر حذف المنتج.',
+        priceHelper:              'السعر رقم فقط، والعملة تُحدد منفصلة.',
+        priceInvalid:             'السعر يجب أن يكون رقماً فقط، بدون كتابة العملة. مثال: 199',
         metaSyncBtn:              'فحص مزامنة Meta',
         metaSyncDryRunNote:       'هذا فحص فقط ولن يتم إرسال المنتج إلى Meta الآن.',
         metaSyncBlockedExternal:  'منتج مُدار من سلة — لا يمكن مزامنته من هذا المسار.',

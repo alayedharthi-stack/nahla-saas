@@ -61,6 +61,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from core.catalog import normalize_catalog_price_amount
+
 logger = logging.getLogger("nahla.meta_catalog_export")
 
 
@@ -208,26 +210,22 @@ def format_meta_price(amount: Any, currency: str = "SAR") -> Optional[str]:
 
 def meta_price_amount(amount: Any) -> Optional[float]:
     """Normalize a Nahla price to a major-unit float for human display."""
-    if amount is None:
-        return None
-    text = str(amount).strip()
-    if not text:
+    normalized = normalize_catalog_price_amount(amount)
+    if normalized is None:
         return None
     try:
-        return float(text.replace(",", ""))
+        return float(normalized)
     except (TypeError, ValueError):
         return None
 
 
 def meta_price_minor_units(amount: Any) -> Optional[int]:
     """Normalize a Nahla price to Meta Graph minor units (e.g. 59.00 SAR -> 5900)."""
-    if amount is None:
-        return None
-    text = str(amount).strip()
-    if not text:
+    normalized = normalize_catalog_price_amount(amount)
+    if normalized is None:
         return None
     try:
-        major = Decimal(text.replace(",", ""))
+        major = Decimal(normalized)
     except (TypeError, ValueError, InvalidOperation):
         return None
     minor = (major * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)

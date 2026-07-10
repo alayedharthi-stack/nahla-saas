@@ -458,6 +458,102 @@ def meta_export_rejection_detail(product: Any) -> Optional[Dict[str, str]]:
         ),
     }
 
+
+PRICE_MUST_BE_NUMERIC_AR = (
+    "السعر يجب أن يكون رقماً فقط، بدون كتابة العملة. مثال: 199"
+)
+PRICE_MUST_BE_NUMERIC_EN = (
+    "Price must be a number only, without currency text. Example: 199"
+)
+
+
+def normalize_catalog_price_amount(value: Any) -> Optional[str]:
+    """Normalize catalog price metadata to a plain numeric string, or None.
+
+    Accepts numbers, numeric strings, and ``{amount, currency}`` dicts.
+    Never returns ``str(dict)`` or currency-suffixed text like ``199 SAR``.
+    """
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, dict):
+        return normalize_catalog_price_amount(value.get("amount"))
+
+    if isinstance(value, (int, float)):
+        try:
+            if float(value) < 0:
+                return None
+            if float(value) == 0.0:
+                return None
+        except (TypeError, ValueError):
+            return None
+        if float(value).is_integer():
+            return str(int(value))
+        return str(float(value))
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            import ast  # noqa: PLC0415
+
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            return None
+        if isinstance(parsed, dict):
+            return normalize_catalog_price_amount(parsed)
+        return None
+
+    try:
+        num = float(text.replace(",", ""))
+        if num < 0:
+            return None
+        if num == 0.0:
+            return None
+        if num.is_integer():
+            return str(int(num))
+        return str(num)
+    except (TypeError, ValueError):
+        return None
+
+
+def native_product_price_http_detail() -> Dict[str, str]:
+    """Structured 422 payload for invalid Nahla-native product prices."""
+    return {
+        "error_code": "price_must_be_numeric",
+        "message_ar": PRICE_MUST_BE_NUMERIC_AR,
+        "message_en": PRICE_MUST_BE_NUMERIC_EN,
+    }
+
+
+def validate_native_product_price(value: Any) -> Optional[str]:
+    """Normalize a Nahla-native product price or return None when empty.
+
+    Raises ``ValueError`` with code ``price_must_be_numeric`` when invalid.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        normalized = normalize_catalog_price_amount(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        compact = text.replace(",", "")
+        if not compact or compact.count(".") > 1:
+            raise ValueError("price_must_be_numeric")
+        if not all(ch in "0123456789." for ch in compact):
+            raise ValueError("price_must_be_numeric")
+        parts = compact.split(".")
+        if not all(part.isdigit() for part in parts if part != ""):
+            raise ValueError("price_must_be_numeric")
+        normalized = normalize_catalog_price_amount(text)
+    if normalized is None:
+        raise ValueError("price_must_be_numeric")
+    return normalized
+
 # ── Catalog visibility (P1-G1) ─────────────────────────────────────────────
 # Single vocabulary for AI + dashboard + Meta reconciliation. Legacy rows
 # without ``catalog_status`` are treated as ``active``.

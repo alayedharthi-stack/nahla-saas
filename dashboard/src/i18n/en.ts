@@ -2217,6 +2217,8 @@ const en: Translations = {
         deleteBtn:                'Delete product',
         deleteConfirm:            'Delete this product from the Nahla catalog? This cannot be undone.',
         deleteFailed:             'Could not delete product.',
+        priceHelper:              'Enter the amount only; currency is set separately.',
+        priceInvalid:             'Price must be a number only, without currency text. Example: 199',
         metaSyncBtn:              'Check Meta sync',
         metaSyncDryRunNote:       'This is a preview only — the product will not be sent to Meta yet.',
         metaSyncBlockedExternal:  'Salla-managed product — cannot sync from this path.',
