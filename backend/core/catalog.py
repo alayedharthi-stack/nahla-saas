@@ -423,6 +423,41 @@ def merchant_edit_rejection_detail(product: Any) -> Optional[str]:
         return "product_not_editable_meta_readonly"
     return "product_not_editable_external_managed"
 
+
+def is_meta_export_eligible(product: Any) -> bool:
+    """True when a Nahla-native product may be previewed/pushed to Meta."""
+    if product is None:
+        return False
+    mode = infer_ownership_mode(product)
+    if mode == OWNERSHIP_NAHLA_MANAGED:
+        return True
+    if mode in (
+        OWNERSHIP_EXTERNAL_MANAGED,
+        OWNERSHIP_META_READONLY,
+        OWNERSHIP_NAHLA_MANAGED_META,
+        OWNERSHIP_ARCHIVED_OR_DISCONNECTED,
+    ):
+        return False
+    src = normalize_source(getattr(product, "source", None))
+    if src in NAHLA_NATIVE_SOURCES:
+        return True
+    if src in EXTERNAL_PLATFORM_SOURCES or src in META_EXISTING_SOURCES:
+        return False
+    return False
+
+
+def meta_export_rejection_detail(product: Any) -> Optional[Dict[str, str]]:
+    """Structured rejection when Meta export preview must refuse a product row."""
+    if is_meta_export_eligible(product):
+        return None
+    return {
+        "eligible": False,
+        "error_code": "product_not_meta_export_eligible",
+        "message_ar": (
+            "هذا المنتج غير قابل للمزامنة مع Meta لأنه مُدار من مصدر خارجي."
+        ),
+    }
+
 # ── Catalog visibility (P1-G1) ─────────────────────────────────────────────
 # Single vocabulary for AI + dashboard + Meta reconciliation. Legacy rows
 # without ``catalog_status`` are treated as ``active``.

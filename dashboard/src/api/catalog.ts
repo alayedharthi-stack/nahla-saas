@@ -533,6 +533,27 @@ export interface ManualProductRow {
   product_url:            string
 }
 
+export interface MetaSyncPreviewIssue {
+  code:       string
+  message_ar: string
+}
+
+export interface MetaSyncPreviewResponse {
+  eligible:          boolean
+  dry_run?:          boolean
+  would_sync?:       boolean
+  product_id?:       number
+  source?:           ProductSource | string
+  ownership_mode?:   string | null
+  meta_catalog_id?:  string | null
+  retailer_id?:      string | null
+  payload?:          Record<string, unknown>
+  fatal_errors?:     MetaSyncPreviewIssue[]
+  warnings?:         MetaSyncPreviewIssue[]
+  error_code?:       string
+  message_ar?:       string
+}
+
 // ── Merchant surface ─────────────────────────────────────────────────
 
 export const catalogApi = {
@@ -615,6 +636,12 @@ export const catalogApi = {
     return apiCall<{ deleted: boolean; id: number }>(
       `/merchant/catalog/products/manual/${id}`,
       { method: 'DELETE' },
+    )
+  },
+  metaSyncPreview(id: number): Promise<MetaSyncPreviewResponse> {
+    return apiCall<MetaSyncPreviewResponse>(
+      `/merchant/catalog/products/${id}/meta-sync/preview`,
+      { method: 'POST' },
     )
   },
   // Import from Meta — Path 4. Pulls products from Meta Commerce
