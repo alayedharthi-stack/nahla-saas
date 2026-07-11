@@ -172,7 +172,7 @@ def _has_existing_order_support_context(ctx: BrainContext) -> bool:
             commerce_bundle=commerce_bundle,
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order evidence probe is best-effort
         pass
     return bool(_recent_customer_order_reference(getattr(ctx, "history", None)))
 

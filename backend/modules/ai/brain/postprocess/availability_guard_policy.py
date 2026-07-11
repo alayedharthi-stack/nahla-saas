@@ -89,10 +89,8 @@ def _existing_order_support_thread(
 
         if is_placed_order_statement(message):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — placed-order probe is best-effort
         pass
-    if _recent_customer_order_reference(history):
-        return True
     try:
         from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
             has_existing_order_evidence,
@@ -104,8 +102,10 @@ def _existing_order_support_thread(
             commerce_bundle=ctx.get("commerce_bundle"),
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order evidence probe is best-effort
         pass
+    if _recent_customer_order_reference(history):
+        return True
     return False
 
 
