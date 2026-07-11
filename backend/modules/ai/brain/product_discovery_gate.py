@@ -1149,7 +1149,7 @@ def should_suppress_recommendation_escalation(
             intent_name=intent_name,
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional escalation suppression probe
         pass
 
     try:
@@ -1176,7 +1176,7 @@ def should_suppress_recommendation_escalation(
         )
         if should_block_generic_product_discovery(ctx, message=message):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional generic discovery block probe
         pass
 
     norm = _normalize_ar(message or "")
@@ -1326,7 +1326,7 @@ def try_price_query_decision(
             PriceTurnKind.PRICE_COMMENT,
             PriceTurnKind.UNIT_PRICE_REFERENCE,
         }
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn classifier import
         pass
 
     if focus and (
