@@ -205,7 +205,7 @@ def load_merchant_display_name(db: Any, tenant_id: int) -> str:
         )
         if snap and snap.store_profile:
             return clean_store_name(str(snap.store_profile.get("name") or ""))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — store name is optional compose context
         pass
     return ""
 
