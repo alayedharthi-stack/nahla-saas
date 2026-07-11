@@ -7621,6 +7621,7 @@ async def _handle_merchant_message(
                         _tenant_id=tenant_id, _db=db,
                         customer_message=text or "",
                         delivery_path="branch_trigger_router",
+                        escalation_reason=_btr_decision.reason or "",
                         policy_deliver_contact=True,
                     )
                     if _btr_vcard_ok and _btr_decision.persist_contact:
