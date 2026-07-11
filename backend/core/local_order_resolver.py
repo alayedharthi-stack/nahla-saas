@@ -334,6 +334,10 @@ def _build_priority_list(
     return ordered
 
 
+def _order_number_explicitly_supplied(order_number: Optional[str]) -> bool:
+    return bool(str(order_number or "").strip().lstrip("#"))
+
+
 def _select_order(
     *,
     intent: Optional[str],
@@ -343,7 +347,12 @@ def _select_order(
     latest_shipped: Optional[LocalOrderSnapshot],
     latest_paid: Optional[LocalOrderSnapshot],
     priority_list: Sequence[LocalOrderSnapshot],
+    order_number_was_explicitly_supplied: bool = False,
 ) -> tuple[Optional[LocalOrderSnapshot], str]:
+    if order_number_was_explicitly_supplied:
+        if explicit is not None:
+            return explicit, "explicit_order_number"
+        return None, "explicit_order_number_not_found"
     if explicit is not None:
         return explicit, "explicit_order_number"
     if active_draft is not None:
@@ -431,6 +440,7 @@ def resolve_customer_order_context(
     latest_shipped = _pick_latest(snapshots, predicate=lambda s: s.is_shipped)
     priority_list = _build_priority_list(snapshots, active_draft=active_draft)
 
+    explicit_supplied = _order_number_explicitly_supplied(order_number)
     selected, selected_reason = _select_order(
         intent=intent,
         active_draft=active_draft,
@@ -439,6 +449,7 @@ def resolve_customer_order_context(
         latest_shipped=latest_shipped,
         latest_paid=latest_paid,
         priority_list=priority_list,
+        order_number_was_explicitly_supplied=explicit_supplied,
     )
 
     return CustomerOrderContext(
