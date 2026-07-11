@@ -4118,6 +4118,16 @@ async def _dispatch_message(
             return
 
         text = normalized_inbound.text.strip()
+        try:
+            from modules.ai.media.routing_guard import resolve_semantic_customer_message  # noqa: PLC0415
+
+            text = resolve_semantic_customer_message(
+                brain_text=text,
+                inbound_metadata=normalized_inbound.metadata,
+                inbound_normalized_type=normalized_inbound.normalized_type,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block inbound routing
+            text = normalized_inbound.text.strip()
         persist_body = inbound_persist_body(normalized_inbound)
         # ── Media-without-text fallback ─────────────────────────────
         # The normalizer detected an audio/image/video/document but
