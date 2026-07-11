@@ -72,6 +72,24 @@ def has_explicit_operational_intent(message: str) -> bool:
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional arrival intent probe
         pass
+    try:
+        from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
+            is_showroom_or_escalation_context,
+        )
+
+        if is_showroom_or_escalation_context(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional showroom probe
+        pass
+    try:
+        from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+            is_bare_who_to_call_followup,
+        )
+
+        if is_bare_who_to_call_followup(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional who-to-call probe
+        pass
     return False
 
 
