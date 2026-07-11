@@ -3,6 +3,16 @@
 Dedicated to merchant catalog uploads — not AI media, not inbound media.
 Public URLs are built from ``NAHLA_CATALOG_MEDIA_PUBLIC_BASE_URL`` so ops
 can later switch to ``https://media.nahlah.ai`` without code changes.
+
+Ops notes
+---------
+* ``NAHLA_CATALOG_MEDIA_PUBLIC_BASE_URL`` must be the bucket's **Public
+  Development URL** (``*.r2.dev``) or a future custom domain — **not**
+  the S3 API endpoint (``*.r2.cloudflarestorage.com``).
+* Lifecycle: uploads start as ``metadata.status=pending``. Product
+  create/patch promotes them to ``attached`` with ``product-id``. Any
+  future cleanup job must delete **only** ``pending`` objects older than
+  a safe TTL — never ``attached``.
 """
 from __future__ import annotations
 
@@ -153,6 +163,100 @@ def image_url_owned_by_tenant(tenant_id: int, image_url: Optional[str]) -> bool:
         return True
     prefix = tenant_image_url_prefix(tenant_id)
     return url.startswith(prefix)
+
+
+def object_key_from_public_url(image_url: str) -> Optional[str]:
+    """Map a configured public URL back to its R2 object key, if ours."""
+    url = (image_url or "").strip()
+    base = catalog_media_public_base_url()
+    if not base or not url.startswith(f"{base}/"):
+        return None
+    key = url[len(base) + 1 :]
+    if not key or ".." in key or key.startswith("/"):
+        return None
+    return key
+
+
+def is_managed_catalog_image_url(image_url: Optional[str]) -> bool:
+    key = object_key_from_public_url((image_url or "").strip())
+    return bool(key and key.startswith(f"{OBJECT_PREFIX}/"))
+
+
+def _head_object_metadata(object_key: str) -> dict:
+    client = _s3_client()
+    try:
+        resp = client.head_object(
+            Bucket=catalog_media_bucket(),
+            Key=object_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise CatalogMediaStorageError("image_object_not_found") from exc
+    return dict(resp.get("Metadata") or {})
+
+
+def attach_catalog_product_image(
+    *,
+    tenant_id: int,
+    image_url: str,
+    product_id: int,
+) -> None:
+    """Mark an uploaded catalog image as attached to *product_id*.
+
+    Must run after the product row exists (we need the id) and before
+    treating the upload lifecycle as complete. A future cleanup job may
+    delete only objects whose metadata ``status`` is ``pending`` — never
+    ``attached``.
+    """
+    key = object_key_from_public_url(image_url)
+    if not key:
+        return
+    expected_prefix = f"{OBJECT_PREFIX}/{int(tenant_id)}/"
+    if not key.startswith(expected_prefix):
+        raise CatalogMediaValidationError("image_url_not_owned_by_tenant")
+
+    meta = _head_object_metadata(key)
+    status = (meta.get("status") or "").strip().lower()
+    bound_product = (meta.get("product-id") or "").strip()
+    pid = str(int(product_id))
+    if status == "attached" and bound_product and bound_product != pid:
+        raise CatalogMediaValidationError("image_already_attached")
+
+    client = _s3_client()
+    try:
+        client.copy_object(
+            Bucket=catalog_media_bucket(),
+            Key=key,
+            CopySource={
+                "Bucket": catalog_media_bucket(),
+                "Key": key,
+            },
+            MetadataDirective="REPLACE",
+            Metadata={
+                "tenant-id": str(int(tenant_id)),
+                "status": "attached",
+                "purpose": "catalog-manual-product",
+                "product-id": pid,
+            },
+            ContentType="image/webp",
+            CacheControl="public, max-age=31536000, immutable",
+        )
+    except CatalogMediaValidationError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception(
+            "[catalog_media.attach] tenant=%s product=%s key=%s failed",
+            tenant_id,
+            product_id,
+            key,
+        )
+        raise CatalogMediaStorageError("image_attach_failed") from exc
+
+    _logger.info(
+        "[catalog_media.attach] tenant=%s product=%s key=%s",
+        tenant_id,
+        product_id,
+        key,
+    )
 
 
 def _s3_client():

@@ -102,6 +102,7 @@ from modules.observability.delivery_mode import (
 from services.catalog_media_storage import (
     CatalogMediaStorageError,
     CatalogMediaValidationError,
+    attach_catalog_product_image,
     image_url_owned_by_tenant,
     is_catalog_media_storage_configured,
     upload_catalog_product_image,
@@ -2143,6 +2144,19 @@ async def merchant_catalog_create_manual_product(
         assign_canonical_retailer_id(p)
     except Exception:  # noqa: BLE001
         pass
+    if image_url:
+        try:
+            attach_catalog_product_image(
+                tenant_id=tenant_id,
+                image_url=image_url,
+                product_id=int(p.id),
+            )
+        except CatalogMediaValidationError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CatalogMediaStorageError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()
     db.refresh(p)
     audit(
@@ -2190,6 +2204,7 @@ async def merchant_catalog_update_manual_product(
             setattr(p, col, data[col])
     # JSONB-only fields (image_url / product_url) — merge instead of
     # replacing the whole blob so we don't drop other metadata.
+    prior_image_url = ((p.extra_metadata or {}).get("image_url") or "").strip() or None
     if "image_url" in data or "product_url" in data:
         meta = dict(p.extra_metadata or {})
         if "image_url" in data:
@@ -2199,6 +2214,20 @@ async def merchant_catalog_update_manual_product(
         # Keep the source marker pinned regardless of patch shape.
         meta["source"] = SOURCE_NAHLA_NATIVE
         p.extra_metadata = meta
+    next_image_url = ((p.extra_metadata or {}).get("image_url") or "").strip() or None
+    if "image_url" in data and next_image_url and next_image_url != prior_image_url:
+        try:
+            attach_catalog_product_image(
+                tenant_id=tenant_id,
+                image_url=next_image_url,
+                product_id=int(p.id),
+            )
+        except CatalogMediaValidationError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CatalogMediaStorageError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not p.ownership_mode:
         p.ownership_mode = OWNERSHIP_NAHLA_MANAGED
     if (p.source or "").strip().lower() == "manual":

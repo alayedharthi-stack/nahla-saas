@@ -119,3 +119,54 @@ def test_public_url_for_object_key_uses_config_base_only(monkeypatch):
     )
     url = cms.public_url_for_object_key("catalog-products/1/abc.webp")
     assert url == "https://media.nahlah.ai/catalog-products/1/abc.webp"
+
+
+def test_object_key_from_public_url_roundtrip():
+    url = "https://pub-example.r2.dev/catalog-products/3/deadbeef.webp"
+    assert cms.object_key_from_public_url(url) == "catalog-products/3/deadbeef.webp"
+    assert cms.object_key_from_public_url("https://other.example/x.webp") is None
+
+
+@patch("services.catalog_media_storage._s3_client")
+def test_attach_catalog_product_image_marks_attached(mock_client_factory):
+    mock_client = MagicMock()
+    mock_client_factory.return_value = mock_client
+    mock_client.head_object.return_value = {
+        "Metadata": {"status": "pending", "tenant-id": "7"},
+    }
+    url = "https://pub-example.r2.dev/catalog-products/7/abc123.webp"
+
+    cms.attach_catalog_product_image(tenant_id=7, image_url=url, product_id=99)
+
+    mock_client.copy_object.assert_called_once()
+    meta = mock_client.copy_object.call_args.kwargs["Metadata"]
+    assert meta["status"] == "attached"
+    assert meta["product-id"] == "99"
+    assert meta["tenant-id"] == "7"
+
+
+@patch("services.catalog_media_storage._s3_client")
+def test_attach_rejects_image_bound_to_other_product(mock_client_factory):
+    mock_client = MagicMock()
+    mock_client_factory.return_value = mock_client
+    mock_client.head_object.return_value = {
+        "Metadata": {"status": "attached", "product-id": "1"},
+    }
+    url = "https://pub-example.r2.dev/catalog-products/7/abc123.webp"
+
+    with pytest.raises(cms.CatalogMediaValidationError, match="image_already_attached"):
+        cms.attach_catalog_product_image(tenant_id=7, image_url=url, product_id=2)
+
+
+@patch("services.catalog_media_storage._s3_client")
+def test_attach_idempotent_for_same_product(mock_client_factory):
+    mock_client = MagicMock()
+    mock_client_factory.return_value = mock_client
+    mock_client.head_object.return_value = {
+        "Metadata": {"status": "attached", "product-id": "99"},
+    }
+    url = "https://pub-example.r2.dev/catalog-products/7/abc123.webp"
+
+    cms.attach_catalog_product_image(tenant_id=7, image_url=url, product_id=99)
+
+    mock_client.copy_object.assert_called_once()
