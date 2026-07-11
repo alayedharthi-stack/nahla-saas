@@ -1806,8 +1806,16 @@ export interface Translations {
       wabaConnectedValue:   string
       noneTitle:            string
       noneDesc:             string
+      noneGuidance:         string
       linkComingSoon:       string
       linkCtaDisabled:      string
+      useThisCatalog:       string
+      useLinkedCatalog:     string
+      currentlyInUse:       string
+      switchConfirm:        string
+      catalogAppliedSuccess: string
+      catalogApplyFailed:   string
+      singleCatalogRecommendation: string
       mismatchTitle:        string
       mismatchDesc:         string
       expectedCatalogLabel: string

@@ -1,10 +1,14 @@
 /**
- * Read-only WABA ↔ Meta catalog link status (GET /merchant/catalog/waba-link-status).
- * No POST, no link action — display + refresh only.
+ * WABA ↔ Meta catalog link status with linked-catalog picker (GET + PATCH config).
+ * Selecting a catalog updates meta_catalog_id only — no import, no Graph writes.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
-import { catalogApi, type WabaCatalogLinkStatus } from '../../api/catalog'
+import {
+  catalogApi,
+  type WabaCatalogLinkStatus,
+  type WabaLinkedCatalog,
+} from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 
@@ -29,6 +33,11 @@ type ViewCase =
   | 'waba_not_found'
   | 'meta_error'
 
+export interface WabaCatalogLinkStatusCardProps {
+  /** Called after PATCH succeeds — parent should refresh status/diagnostics. */
+  onCatalogApplied?: (catalogId: string) => void | Promise<void>
+}
+
 function resolveCase(
   status: WabaCatalogLinkStatus | null,
   fetchError: string | null,
@@ -50,15 +59,83 @@ function resolveCase(
 
 function missingLabel(key: string, copy: WabaLinkCopy): string {
   const map: Record<string, string> = {
-    connection:     copy.missingConnection,
-    waba_id:        copy.missingWaba,
+    connection:      copy.missingConnection,
+    waba_id:         copy.missingWaba,
     meta_catalog_id: copy.missingCatalogId,
-    graph_token:    copy.missingToken,
+    graph_token:     copy.missingToken,
   }
   return map[key] ?? key
 }
 
-export default function WabaCatalogLinkStatusCard() {
+function isCurrentCatalog(catalogId: string, expectedId: string | null | undefined): boolean {
+  const current = (expectedId ?? '').trim()
+  return Boolean(current) && current === catalogId
+}
+
+type LinkedCatalogListProps = {
+  catalogs: WabaLinkedCatalog[]
+  expectedCatalogId: string | null | undefined
+  applyingId: string | null
+  onUse: (catalogId: string) => void
+  copy: WabaLinkCopy
+  showSingleRecommendation?: boolean
+}
+
+function LinkedCatalogList({
+  catalogs,
+  expectedCatalogId,
+  applyingId,
+  onUse,
+  copy,
+  showSingleRecommendation = false,
+}: LinkedCatalogListProps) {
+  const singleLinked = catalogs.length === 1
+
+  return (
+    <div className="space-y-2">
+      {showSingleRecommendation && singleLinked && !isCurrentCatalog(catalogs[0].id, expectedCatalogId) && (
+        <p className="text-xs text-slate-600 leading-relaxed">{copy.singleCatalogRecommendation}</p>
+      )}
+      {catalogs.map(catalog => {
+        const current = isCurrentCatalog(catalog.id, expectedCatalogId)
+        const useLabel = singleLinked ? copy.useLinkedCatalog : copy.useThisCatalog
+        return (
+          <div
+            key={catalog.id}
+            className="flex flex-wrap items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg p-3"
+          >
+            <div className="min-w-0 space-y-0.5">
+              {catalog.name && (
+                <p className="text-sm font-semibold text-slate-800">{catalog.name}</p>
+              )}
+              <p className="font-mono text-xs text-slate-600" dir="ltr">{catalog.id}</p>
+            </div>
+            {current ? (
+              <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full shrink-0">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {copy.currentlyInUse}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onUse(catalog.id)}
+                disabled={applyingId !== null}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-white bg-[#25D366] hover:bg-[#128C7E] disabled:opacity-50 px-3 py-1.5 rounded-lg transition shrink-0"
+              >
+                {applyingId === catalog.id
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <WhatsAppIcon className="w-3.5 h-3.5" />}
+                {useLabel}
+              </button>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export default function WabaCatalogLinkStatusCard({ onCatalogApplied }: WabaCatalogLinkStatusCardProps) {
   const { tStatic } = useLanguage()
   const copy = tStatic(tr => tr.catalogMgmt.wabaLinkStatus)
 
@@ -67,6 +144,9 @@ export default function WabaCatalogLinkStatusCard() {
   const [refreshing, setRefreshing] = useState(false)
   const [fetchError, setFetchError] = useState<string | null>(null)
   const [showTechDetails, setShowTechDetails] = useState(false)
+  const [applyingId, setApplyingId] = useState<string | null>(null)
+  const [applyError, setApplyError] = useState<string | null>(null)
+  const [applySuccess, setApplySuccess] = useState<string | null>(null)
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true)
@@ -86,13 +166,37 @@ export default function WabaCatalogLinkStatusCard() {
 
   useEffect(() => { void load() }, [load])
 
+  const applyCatalog = useCallback(async (catalogId: string) => {
+    if (!status || applyingId) return
+    if (isCurrentCatalog(catalogId, status.expected_catalog_id)) return
+
+    const currentId = (status.expected_catalog_id ?? '').trim()
+    if (currentId && currentId !== catalogId) {
+      if (!window.confirm(copy.switchConfirm)) return
+    }
+
+    setApplyingId(catalogId)
+    setApplyError(null)
+    setApplySuccess(null)
+    try {
+      await catalogApi.patch({ meta_catalog_id: catalogId })
+      await load(true)
+      await onCatalogApplied?.(catalogId)
+      setApplySuccess(copy.catalogAppliedSuccess)
+    } catch {
+      setApplyError(copy.catalogApplyFailed)
+    } finally {
+      setApplyingId(null)
+    }
+  }, [status, applyingId, copy.switchConfirm, copy.catalogAppliedSuccess, copy.catalogApplyFailed, load, onCatalogApplied])
+
   const view = resolveCase(status, fetchError, loading && !status)
 
   const refreshBtn = (
     <button
       type="button"
       onClick={() => void load(true)}
-      disabled={loading || refreshing}
+      disabled={loading || refreshing || applyingId !== null}
       className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-800 border border-slate-200 rounded-lg px-2.5 py-1.5 transition disabled:opacity-50"
     >
       {(loading || refreshing)
@@ -102,9 +206,13 @@ export default function WabaCatalogLinkStatusCard() {
     </button>
   )
 
-  const linkedCatalogName = status?.linked_catalogs.find(
-    c => c.id === status.expected_catalog_id,
-  )?.name
+  const feedbackBanner = (applySuccess || applyError) && (
+    <div className={`text-xs font-semibold rounded-lg px-3 py-2 ${
+      applySuccess ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'
+    }`}>
+      {applySuccess ?? applyError}
+    </div>
+  )
 
   if (view === 'loading') {
     return (
@@ -138,7 +246,7 @@ export default function WabaCatalogLinkStatusCard() {
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h4 className="text-sm font-bold text-slate-800">{copy.linkedTitle}</h4>
-                <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-[#25D366] hover:bg-[#128C7E] px-2.5 py-1 rounded-full transition">
+                <span className="inline-flex items-center gap-1 text-xs font-bold text-white bg-[#25D366] px-2.5 py-1 rounded-full">
                   <WhatsAppIcon className="w-3.5 h-3.5" />
                   {copy.linkedBadge}
                 </span>
@@ -150,22 +258,17 @@ export default function WabaCatalogLinkStatusCard() {
           </div>
           {refreshBtn}
         </div>
-        <dl className="grid gap-1.5 text-xs text-slate-700 bg-white/80 border border-[#25D366]/20 rounded-lg p-3">
-          {linkedCatalogName && (
-            <div className="flex flex-wrap gap-1">
-              <dt className="font-semibold text-slate-500">{copy.catalogNameLabel}</dt>
-              <dd>{linkedCatalogName}</dd>
-            </div>
-          )}
-          <div className="flex flex-wrap gap-1" dir="ltr">
-            <dt className="font-semibold text-slate-500">{copy.catalogIdLabel}</dt>
-            <dd className="font-mono">{status.expected_catalog_id}</dd>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            <dt className="font-semibold text-slate-500">{copy.wabaConnectedLabel}</dt>
-            <dd>{copy.wabaConnectedValue}</dd>
-          </div>
-        </dl>
+        {feedbackBanner}
+        <div>
+          <p className="text-xs font-semibold text-slate-500 mb-2">{copy.linkedCatalogsLabel}</p>
+          <LinkedCatalogList
+            catalogs={status.linked_catalogs}
+            expectedCatalogId={status.expected_catalog_id}
+            applyingId={applyingId}
+            onUse={catalogId => void applyCatalog(catalogId)}
+            copy={copy}
+          />
+        </div>
       </div>
     )
   }
@@ -178,22 +281,12 @@ export default function WabaCatalogLinkStatusCard() {
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
             <div>
               <h4 className="text-sm font-bold text-slate-800">{copy.noneTitle}</h4>
-              {copy.noneDesc ? (
-                <p className="text-xs text-slate-600 mt-1">{copy.noneDesc}</p>
-              ) : null}
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">{copy.noneDesc}</p>
+              <p className="text-xs text-slate-600 mt-2 leading-relaxed">{copy.noneGuidance}</p>
             </div>
           </div>
           {refreshBtn}
         </div>
-        <button
-          type="button"
-          disabled
-          className="inline-flex items-center gap-2 text-sm font-bold text-white bg-[#25D366] opacity-50 cursor-not-allowed px-4 py-2 rounded-xl"
-        >
-          <WhatsAppIcon className="w-4 h-4" />
-          {copy.linkCtaDisabled}
-        </button>
-        <p className="text-[11px] text-amber-800">{copy.linkComingSoon}</p>
       </div>
     )
   }
@@ -211,31 +304,24 @@ export default function WabaCatalogLinkStatusCard() {
           </div>
           {refreshBtn}
         </div>
-        <dl className="space-y-2 text-xs">
-          <div className="bg-white border border-amber-200 rounded-lg p-3">
-            <dt className="font-semibold text-slate-500 mb-1">{copy.expectedCatalogLabel}</dt>
-            <dd className="font-mono" dir="ltr">{status.expected_catalog_id}</dd>
+        {feedbackBanner}
+        {status.expected_catalog_id && (
+          <div className="bg-white border border-amber-200 rounded-lg p-3 text-xs">
+            <p className="font-semibold text-slate-500 mb-1">{copy.expectedCatalogLabel}</p>
+            <p className="font-mono" dir="ltr">{status.expected_catalog_id}</p>
           </div>
-          <div className="bg-white border border-amber-200 rounded-lg p-3">
-            <dt className="font-semibold text-slate-500 mb-1">{copy.linkedCatalogsLabel}</dt>
-            <dd className="space-y-1">
-              {status.linked_catalogs.map(c => (
-                <div key={c.id} className="flex flex-wrap gap-2" dir="ltr">
-                  <span className="font-mono">{c.id}</span>
-                  {c.name && <span className="text-slate-600">— {c.name}</span>}
-                </div>
-              ))}
-            </dd>
-          </div>
-        </dl>
-        <button
-          type="button"
-          disabled
-          className="inline-flex items-center gap-2 text-sm font-bold text-white bg-[#25D366] opacity-50 cursor-not-allowed px-4 py-2 rounded-xl"
-        >
-          <WhatsAppIcon className="w-4 h-4" />
-          {copy.linkCtaDisabled}
-        </button>
+        )}
+        <div>
+          <p className="text-xs font-semibold text-slate-500 mb-2">{copy.linkedCatalogsLabel}</p>
+          <LinkedCatalogList
+            catalogs={status.linked_catalogs}
+            expectedCatalogId={status.expected_catalog_id}
+            applyingId={applyingId}
+            onUse={catalogId => void applyCatalog(catalogId)}
+            copy={copy}
+            showSingleRecommendation
+          />
+        </div>
       </div>
     )
   }
