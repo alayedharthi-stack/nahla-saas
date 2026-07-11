@@ -93,6 +93,7 @@ from core.plan_entitlements import (
     get_entitlements,
     require_feature,
 )
+from core.native_product_public_url import resolve_product_public_url
 from core.tenant import resolve_tenant_id
 from models import Product, Tenant, WhatsAppConnection
 from modules.observability.delivery_mode import (
@@ -109,7 +110,8 @@ from services.catalog_media_storage import (
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_sync_preview import preview_native_meta_sync
-from services.meta_catalog_sync_confirm import confirm_native_meta_sync
+from services.meta_catalog_sync_confirm import confirm_native_meta_sync, ensure_native_default_variant
+from services.product_publication_status import build_product_publication_status
 from services.meta_commerce_settings import (
     enable_whatsapp_catalog_visibility,
     get_whatsapp_commerce_settings_status,
@@ -2114,8 +2116,9 @@ async def merchant_catalog_create_manual_product(
     meta_blob = {
         "source":        SOURCE_NAHLA_NATIVE,
         "image_url":     image_url,
-        "product_url":   (payload.product_url or "").strip() or None,
+        "product_url":   None,
     }
+    merchant_url = (payload.product_url or "").strip() or None
     if payload.price is not None and str(payload.price).strip():
         meta_blob["currency"] = "SAR"
     native_price = None
@@ -2144,6 +2147,13 @@ async def merchant_catalog_create_manual_product(
         assign_canonical_retailer_id(p)
     except Exception:  # noqa: BLE001
         pass
+    resolved_url = resolve_product_public_url(
+        p, merchant_product_url=merchant_url,
+    )
+    if resolved_url:
+        meta_blob["product_url"] = resolved_url
+        p.extra_metadata = meta_blob
+    ensure_native_default_variant(db, p)
     if image_url:
         try:
             attach_catalog_product_image(
@@ -2210,7 +2220,11 @@ async def merchant_catalog_update_manual_product(
         if "image_url" in data:
             meta["image_url"] = (data["image_url"] or "").strip() or None
         if "product_url" in data:
-            meta["product_url"] = (data["product_url"] or "").strip() or None
+            merchant_url = (data["product_url"] or "").strip() or None
+            resolved = resolve_product_public_url(
+                p, merchant_product_url=merchant_url,
+            )
+            meta["product_url"] = resolved
         # Keep the source marker pinned regardless of patch shape.
         meta["source"] = SOURCE_NAHLA_NATIVE
         p.extra_metadata = meta
@@ -2232,6 +2246,7 @@ async def merchant_catalog_update_manual_product(
         p.ownership_mode = OWNERSHIP_NAHLA_MANAGED
     if (p.source or "").strip().lower() == "manual":
         p.source = SOURCE_NAHLA_NATIVE
+    ensure_native_default_variant(db, p)
     db.commit()
     db.refresh(p)
     audit(
@@ -2678,6 +2693,7 @@ async def merchant_catalog_product_detail(
     return {
         "product":     _serialise_studio_product(p),
         "per_channel": _compute_per_channel(p),
+        "publication": build_product_publication_status(p),
     }
 
 
@@ -2713,6 +2729,7 @@ async def merchant_catalog_update_product(
     return {
         "product":     _serialise_studio_product(p),
         "per_channel": _compute_per_channel(p),
+        "publication": build_product_publication_status(p),
     }
 
 
@@ -2733,6 +2750,7 @@ async def admin_catalog_product_detail(
     return {
         "product":     _serialise_studio_product(p),
         "per_channel": _compute_per_channel(p),
+        "publication": build_product_publication_status(p),
     }
 
 

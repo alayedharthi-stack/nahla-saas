@@ -194,6 +194,7 @@ JWT_PUBLIC_PREFIXES = (
     # stored file_url. Must stay public; access is gated by unguessable id
     # + row existence inside stream_ai_media (see intelligence_libraries).
     "/intelligence/ai-media/file/",
+    "/public/catalog/",                 # native product pages for Meta url + crawlers
 )
 
 # Exact paths only — do not use startswith (e.g. "/salla/app" would swallow

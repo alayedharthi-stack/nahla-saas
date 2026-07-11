@@ -457,8 +457,10 @@ from routers.operations_center  import router as _operations_center_router   # n
 # TEMPORARY: token-gated public debug router. Safe to delete once the
 # abandoned-cart investigation is closed. See routers/debug_public.py.
 from routers.debug_public      import router as _debug_public_router       # noqa: E402
+from routers.public_catalog    import router as _public_catalog_router     # noqa: E402
 
 app.include_router(_health_router)
+app.include_router(_public_catalog_router)
 app.include_router(_debug_public_router)
 app.include_router(_admin_router)
 app.include_router(_admin_debug_router)

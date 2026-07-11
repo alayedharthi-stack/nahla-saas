@@ -121,6 +121,10 @@ def test_preview_with_numeric_price_has_minor_units() -> None:
     assert "missing_price" not in report["warnings"]
 
 
+def test_meta_price_minor_units_one_sar() -> None:
+    assert meta_price_minor_units("1") == 100
+
+
 def test_meta_price_minor_units_numeric_string() -> None:
     assert meta_price_minor_units("199") == 19900
 

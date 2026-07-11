@@ -2189,7 +2189,7 @@ const ar: Translations = {
       variantsSummary: {
         products:      'منتجات',
         variants:      'الاختلافات',
-        whatsappReady: 'جاهز لواتساب',
+        whatsappReady: 'بيانات جاهزة لواتساب',
         metaReady:     'جاهز لـ Meta',
         googleReady:   'جاهز لـ Google',
         needsReview:   'يحتاج مراجعة',
@@ -2243,6 +2243,8 @@ const ar: Translations = {
         missing:       '{count} مفقود',
         readyWarn:     'جاهز ⚠',
         ready:         'جاهز',
+        readyWhatsappData: 'بيانات المنتج جاهزة لواتساب',
+        readyDataOnly:     'بيانات جاهزة محلياً',
         futureChannel: 'قناة مستقبلية',
       },
       readinessPanel: {

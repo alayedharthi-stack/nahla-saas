@@ -62,6 +62,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from core.catalog import normalize_catalog_price_amount
+from core.native_product_public_url import resolve_meta_export_product_url
 
 logger = logging.getLogger("nahla.meta_catalog_export")
 
@@ -329,10 +330,7 @@ def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
         or "SAR"
     ).upper()
     image_url, _image_source = resolve_variant_image_url(parent, variant)
-    product_url = (
-        (parent_meta.get("product_url") or parent_meta.get("url") or "").strip()
-        or None
-    )
+    product_url = resolve_meta_export_product_url(parent, variant)
     description = (getattr(parent, "description", None) or "").strip()
     if not description:
         description = (getattr(parent, "title", None) or "").strip() or None
