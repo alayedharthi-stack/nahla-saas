@@ -150,6 +150,24 @@ def should_block_order_draft_injection(
         return True
     if args.get("block_order_flow"):
         return True
+    try:
+        from .commerce_turn_contract import is_placed_order_statement  # noqa: PLC0415
+        from .order_tracking_intent_guard import (  # noqa: PLC0415
+            has_pending_order_reference_evidence,
+            is_order_support_operational_follow_up,
+        )
+
+        if has_pending_order_reference_evidence(state=brain_state, history=history) and (
+            is_order_support_operational_follow_up(
+                customer_message or "",
+                state=brain_state,
+                history=history,
+            )
+            or is_placed_order_statement(customer_message or "")
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support draft block is best-effort
+        pass
     return False
 
 
