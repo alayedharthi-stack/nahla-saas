@@ -4118,16 +4118,34 @@ async def _dispatch_message(
             return
 
         text = normalized_inbound.text.strip()
+        route_unclear_audio_order_support = False
         try:
-            from modules.ai.media.routing_guard import resolve_semantic_customer_message  # noqa: PLC0415
+            from core.conversation_engine import StateManager  # noqa: PLC0415
+            from modules.ai.media.routing_guard import (  # noqa: PLC0415
+                resolve_inbound_semantic_routing,
+            )
 
-            text = resolve_semantic_customer_message(
+            _semantic_routing = resolve_inbound_semantic_routing(
                 brain_text=text,
                 inbound_metadata=normalized_inbound.metadata,
                 inbound_normalized_type=normalized_inbound.normalized_type,
+                history=StateManager.load_history(
+                    db,
+                    phone=sender,
+                    tenant_id=resolved_tenant_id,
+                ),
+            )
+            text = _semantic_routing.semantic_text
+            route_unclear_audio_order_support = (
+                _semantic_routing.route_unclear_audio_order_support
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block inbound routing
             text = normalized_inbound.text.strip()
+            route_unclear_audio_order_support = False
+        if route_unclear_audio_order_support:
+            _ni_meta = dict(normalized_inbound.metadata or {})
+            _ni_meta["route_unclear_audio_order_support"] = True
+            normalized_inbound.metadata = _ni_meta
         persist_body = inbound_persist_body(normalized_inbound)
         # ── Media-without-text fallback ─────────────────────────────
         # The normalizer detected an audio/image/video/document but
@@ -4148,6 +4166,7 @@ async def _dispatch_message(
         # than the empty-text drop further down.
         if (
             not text
+            and not route_unclear_audio_order_support
             and normalized_inbound.fallback_reply_ar
             and normalized_inbound.normalized_type in {"audio", "image", "document", "video", "sticker"}
             and not _is_platform_tenant(db, resolved_tenant_id)
@@ -4178,7 +4197,7 @@ async def _dispatch_message(
             )
             return
 
-        if not text:
+        if not text and not route_unclear_audio_order_support:
             logger.info(
                 "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
@@ -5628,24 +5647,29 @@ async def _handle_merchant_message(
     never enter this conversational pipeline.
     """
     if not (text or "").strip():
-        # Hard guard: refuse to spend tokens / send replies on empty
-        # inbound. Empty body usually means the upstream parser failed
-        # to extract text from a non-text message type.
-        logger.info(
-            "[Merchant] DROPPED empty inbound — no reply generated | tenant=%s to=%s",
-            tenant_id, to,
+        _unclear_audio_order_support = bool(
+            isinstance(inbound_metadata, dict)
+            and inbound_metadata.get("route_unclear_audio_order_support")
         )
-        try:
-            from core.inbound_lifecycle import (  # noqa: PLC0415
-                EVENT_END_DROPPED, record_lifecycle,
+        if not _unclear_audio_order_support:
+            # Hard guard: refuse to spend tokens / send replies on empty
+            # inbound. Empty body usually means the upstream parser failed
+            # to extract text from a non-text message type.
+            logger.info(
+                "[Merchant] DROPPED empty inbound — no reply generated | tenant=%s to=%s",
+                tenant_id, to,
             )
-            record_lifecycle(
-                EVENT_END_DROPPED,
-                detail="merchant_empty_text_guard",
-            )
-        except Exception:
-            pass
-        return
+            try:
+                from core.inbound_lifecycle import (  # noqa: PLC0415
+                    EVENT_END_DROPPED, record_lifecycle,
+                )
+                record_lifecycle(
+                    EVENT_END_DROPPED,
+                    detail="merchant_empty_text_guard",
+                )
+            except Exception:
+                pass
+            return
     logger.info(
         "[Merchant/INBOUND_TRIGGER] tenant=%s from=%s direction=inbound text_len=%d snippet=%r",
         tenant_id, to, len(text or ""), (text or "")[:60],

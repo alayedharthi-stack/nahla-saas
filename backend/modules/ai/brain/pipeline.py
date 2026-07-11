@@ -2912,6 +2912,11 @@ class MerchantBrain:
                 customer_message=ctx.message or "",
                 decision=decision,
                 history=list(getattr(ctx, "history", None) or []),
+                inbound_metadata=(
+                    dict((getattr(ctx, "profile", None) or {}).get("inbound_metadata") or {})
+                    if isinstance(getattr(ctx, "profile", None), dict)
+                    else None
+                ),
             ):
                 reply = maybe_inject_draft_flow_reply(
                     reply=reply or "",

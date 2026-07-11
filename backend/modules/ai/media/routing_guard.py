@@ -7,7 +7,8 @@ PDF OCR, vision, or transcripts.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Sequence
 
 from modules.ai.brain.commerce.staff_contact_media_source_guard import (
     is_media_framed_inbound_message,
@@ -81,6 +82,69 @@ def is_audio_without_trusted_transcript(
     if str(semantic_message or "").strip():
         return False
     return not _trusted_transcript_from_metadata(meta)
+
+
+def should_route_unclear_audio_to_existing_order_support(
+    *,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    semantic_message: str = "",
+    inbound_normalized_type: Optional[str] = None,
+    history: Optional[Sequence[Any]] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when unclear audio should own the turn as existing-order support."""
+    if not is_audio_without_trusted_transcript(
+        inbound_metadata,
+        semantic_message=semantic_message,
+        inbound_normalized_type=inbound_normalized_type,
+    ):
+        return False
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            has_pending_order_reference_evidence,
+        )
+
+        return has_pending_order_reference_evidence(
+            state=brain_state,
+            history=list(history or []),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support probe must not block routing
+        return False
+
+
+@dataclass(frozen=True)
+class InboundSemanticRouting:
+    semantic_text: str
+    route_unclear_audio_order_support: bool
+
+
+def resolve_inbound_semantic_routing(
+    *,
+    brain_text: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    inbound_normalized_type: Optional[str] = None,
+    history: Optional[Sequence[Any]] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
+) -> InboundSemanticRouting:
+    """Resolve semantic text and whether unclear audio should own order support."""
+    semantic = resolve_semantic_customer_message(
+        brain_text=brain_text,
+        inbound_metadata=inbound_metadata,
+        inbound_normalized_type=inbound_normalized_type,
+    )
+    route_support = False
+    if not semantic.strip():
+        route_support = should_route_unclear_audio_to_existing_order_support(
+            inbound_metadata=inbound_metadata,
+            semantic_message=semantic,
+            inbound_normalized_type=inbound_normalized_type,
+            history=history,
+            brain_state=brain_state,
+        )
+    return InboundSemanticRouting(
+        semantic_text=semantic,
+        route_unclear_audio_order_support=route_support,
+    )
 
 
 def resolve_pre_brain_customer_message(

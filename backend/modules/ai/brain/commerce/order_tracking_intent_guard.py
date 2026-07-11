@@ -333,6 +333,7 @@ def build_order_support_follow_up_args(
     history: Optional[List[Any]] = None,
     commerce_bundle: Optional[dict] = None,
     order_verified: bool = False,
+    unclear_audio: bool = False,
 ) -> Dict[str, Any]:
     """LLM args for existing-order support when lookup may still be unresolved."""
     bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
@@ -363,18 +364,26 @@ def build_order_support_follow_up_args(
             order_verified = True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — order status resolve is best-effort
         pass
+    response_goal = (
+        "existing_order_support — reply in natural Saudi Arabic about the "
+        "customer's existing order using only known facts. If order_verified "
+        "is false, say the reference is not verified yet and ask only for "
+        "the minimum identifier needed. Do NOT promise carrier changes, "
+        "discounts, or mutations. Do NOT open catalog or restart checkout."
+    )
+    if unclear_audio:
+        response_goal += (
+            " The voice note transcript is unavailable; acknowledge that "
+            "gently and ask the customer to repeat their question in text "
+            "or provide the minimum order identifier needed."
+        )
     return {
         "topic": "existing_order_support",
         "order_reference": order_ref,
         "order_verified": bool(order_verified),
         "order_status": status,
-        "response_goal": (
-            "existing_order_support — reply in natural Saudi Arabic about the "
-            "customer's existing order using only known facts. If order_verified "
-            "is false, say the reference is not verified yet and ask only for "
-            "the minimum identifier needed. Do NOT promise carrier changes, "
-            "discounts, or mutations. Do NOT open catalog or restart checkout."
-        ),
+        "unclear_audio": bool(unclear_audio),
+        "response_goal": response_goal,
     }
 
 
@@ -409,6 +418,35 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
     )
     if not has_pending:
         return None
+
+    try:
+        from modules.ai.media.routing_guard import (  # noqa: PLC0415
+            is_audio_without_trusted_transcript,
+        )
+
+        if not message.strip() and is_audio_without_trusted_transcript(
+            inbound_metadata,
+            semantic_message=message,
+            inbound_normalized_type=str(
+                inbound_metadata.get("normalized_type")
+                or inbound_metadata.get("type")
+                or ""
+            ),
+        ):
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args=build_order_support_follow_up_args(
+                    message=message,
+                    state=state,
+                    history=history,
+                    commerce_bundle=commerce_bundle,
+                    unclear_audio=True,
+                ),
+                reason="pending order reference — unclear audio support clarification",
+                confidence=0.91,
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unclear-audio probe must not block continuity
+        pass
 
     try:
         from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415

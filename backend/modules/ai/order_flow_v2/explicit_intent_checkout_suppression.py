@@ -247,7 +247,6 @@ def _detect_pending_order_support_intent(
     inbound_metadata: Optional[Dict[str, Any]] = None,
     history: Optional[Sequence[Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
-    order_prep: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Bypass stale checkout when recent order-reference context owns the turn."""
     hist = list(history or [])
@@ -315,7 +314,6 @@ def detect_explicit_non_checkout_intent(
         inbound_metadata=inbound_metadata,
         history=history,
         brain_state=brain_state,
-        order_prep=order_prep,
     )
     if pending_support:
         return pending_support
