@@ -504,7 +504,15 @@ export default function WhatsAppCatalog() {
         </AdvancedSubSection>
 
         <AdvancedSubSection title={cm.advanced.linkStatusTitle} lazyMount>
-          <WabaCatalogLinkStatusCard />
+          <WabaCatalogLinkStatusCard
+            onCatalogApplied={async (catalogId) => {
+              setCatalogId(catalogId)
+              setError(null)
+              setSuccess(cm.messages.settingsSaved)
+              await refresh()
+              await loadDiagnostics()
+            }}
+          />
         </AdvancedSubSection>
 
         <AdvancedSubSection title={cm.advanced.bindingSettingsTitle}>
