@@ -4146,6 +4146,10 @@ async def _dispatch_message(
             _ni_meta = dict(normalized_inbound.metadata or {})
             _ni_meta["route_unclear_audio_order_support"] = True
             normalized_inbound.metadata = _ni_meta
+        elif isinstance(normalized_inbound.metadata, dict):
+            _ni_meta = dict(normalized_inbound.metadata)
+            _ni_meta.pop("route_unclear_audio_order_support", None)
+            normalized_inbound.metadata = _ni_meta
         persist_body = inbound_persist_body(normalized_inbound)
         # ── Media-without-text fallback ─────────────────────────────
         # The normalizer detected an audio/image/video/document but
@@ -5647,10 +5651,35 @@ async def _handle_merchant_message(
     never enter this conversational pipeline.
     """
     if not (text or "").strip():
-        _unclear_audio_order_support = bool(
-            isinstance(inbound_metadata, dict)
-            and inbound_metadata.get("route_unclear_audio_order_support")
-        )
+        _unclear_audio_order_support = False
+        try:
+            from core.conversation_engine import StateManager  # noqa: PLC0415
+            from modules.ai.media.routing_guard import (  # noqa: PLC0415
+                should_route_unclear_audio_to_existing_order_support,
+            )
+
+            _inbound_meta = (
+                dict(inbound_metadata or {})
+                if isinstance(inbound_metadata, dict)
+                else {}
+            )
+            _unclear_audio_order_support = should_route_unclear_audio_to_existing_order_support(
+                inbound_metadata=_inbound_meta,
+                semantic_message="",
+                inbound_normalized_type=str(
+                    _inbound_meta.get("inbound_normalized_type")
+                    or _inbound_meta.get("normalized_type")
+                    or _inbound_meta.get("type")
+                    or "audio"
+                ),
+                history=StateManager.load_history(
+                    db,
+                    phone=to,
+                    tenant_id=tenant_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — unclear-audio gate must not block merchant entry
+            _unclear_audio_order_support = False
         if not _unclear_audio_order_support:
             # Hard guard: refuse to spend tokens / send replies on empty
             # inbound. Empty body usually means the upstream parser failed

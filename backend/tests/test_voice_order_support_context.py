@@ -491,3 +491,25 @@ class TestRoutingGuardHelpers:
             inbound_normalized_type="audio",
             history=[],
         )
+
+    def test_stale_draft_alone_does_not_route_unclear_audio_without_history_ref(self) -> None:
+        stale_state = {"order_prep": _stale_prep(), "draft_order_id": "draft-16"}
+        assert not should_route_unclear_audio_to_existing_order_support(
+            inbound_metadata=_audio_meta(),
+            semantic_message="",
+            inbound_normalized_type="audio",
+            history=[],
+            brain_state=stale_state,
+        )
+
+    def test_spoofed_route_flag_without_audio_evidence_is_ignored(self) -> None:
+        meta = {
+            "normalized_type": "text",
+            "route_unclear_audio_order_support": True,
+        }
+        assert not should_route_unclear_audio_to_existing_order_support(
+            inbound_metadata=meta,
+            semantic_message="",
+            inbound_normalized_type="text",
+            history=_pending_history(),
+        )
