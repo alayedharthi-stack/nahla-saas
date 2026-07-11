@@ -30,12 +30,12 @@
  * Each of those needs its own diagnostic surface — collapsing them
  * into the generic Integrations row would hide the actionable bits.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Loader2,
-  Package, RefreshCw, Send, ShieldCheck, ToggleLeft, ToggleRight, XCircle,
+  Package, RefreshCw, ToggleLeft, ToggleRight, XCircle,
   Store, MessageCircle, Database, ArrowDown, Bot, Megaphone, ShoppingBag,
-  Download, Clock, Image as ImageIcon,
+  Download, Clock,
 } from 'lucide-react'
 import {
   catalogApi,
@@ -50,6 +50,9 @@ import {
 } from '../api/catalog'
 import ProductStudio from './ProductStudio'
 import WabaCatalogLinkStatusCard from '../components/catalog/WabaCatalogLinkStatusCard'
+import CatalogSummaryCard from '../components/catalog/CatalogSummaryCard'
+import CatalogChannelsCard from '../components/catalog/CatalogChannelsCard'
+import CatalogAdvancedSection, { AdvancedSubSection } from '../components/catalog/CatalogAdvancedSection'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -168,6 +171,28 @@ export default function WhatsAppCatalog() {
   const [productsRefresh, setProductsRefresh] = useState(0)
   const bumpProductList = () => setProductsRefresh(v => v + 1)
 
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [manualFormOpen, setManualFormOpen] = useState(false)
+  const [metaImportBusy, setMetaImportBusy] = useState(false)
+  const [metaImportError, setMetaImportError] = useState<string | null>(null)
+  const [metaImportErrorDetail, setMetaImportErrorDetail] = useState<Record<string, unknown> | null>(null)
+  const [metaImportReport, setMetaImportReport] = useState<MetaImportReport | null>(null)
+
+  const openAdvanced = () => {
+    setAdvancedOpen(true)
+    requestAnimationFrame(() => {
+      document.getElementById('catalog-advanced-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  const openManualForm = () => {
+    setManualFormOpen(true)
+    openAdvanced()
+    requestAnimationFrame(() => {
+      document.getElementById('catalog-manual-product-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
   const loadDiagnostics = async () => {
     try {
       const d = await catalogApi.diagnostics()
@@ -188,6 +213,50 @@ export default function WhatsAppCatalog() {
       setProductsLoading(false)
     }
   }
+
+  const runMetaImport = useCallback(async () => {
+    if (metaImportBusy) return
+    setMetaImportBusy(true)
+    setError(null)
+    setSuccess(null)
+    setMetaImportError(null)
+    setMetaImportErrorDetail(null)
+    setMetaImportReport(null)
+    try {
+      const r = await catalogApi.importFromMeta()
+      setMetaImportReport(r.report)
+      const created = fmtCount(r.report.created ?? 0, lang)
+      const updated = fmtCount(r.report.updated ?? 0, lang)
+      setSuccess(`${cm.metaImport.reportTitle}: ${cm.metaImport.created} ${created}, ${cm.metaImport.updated} ${updated}`)
+      await loadProducts()
+      await loadDiagnostics()
+      bumpProductList()
+    } catch (e: unknown) {
+      const err = e as { code?: string; detail?: string; message?: string; status?: number; provider?: string; token_source?: string; catalog_id?: string; hint?: string; meta_code?: number; meta_message?: string; fbtrace_id?: string; stage?: string; discovery?: { error?: { meta_code?: number; meta_message?: string; fbtrace_id?: string } } }
+      const code = err?.code ?? err?.detail ?? err?.message
+      const msg = metaImportErrorCopy(code, cm.metaImport, cm.messages)
+      setMetaImportError(msg)
+      setError(msg)
+      const detail = {
+        code,
+        status:         err?.status,
+        provider:       err?.provider,
+        token_source:   err?.token_source,
+        catalog_id:     err?.catalog_id,
+        hint:           err?.hint,
+        meta_code:      err?.meta_code ?? err?.discovery?.error?.meta_code,
+        meta_message:   err?.meta_message ?? err?.discovery?.error?.meta_message,
+        fbtrace_id:     err?.fbtrace_id ?? err?.discovery?.error?.fbtrace_id,
+        stage:          err?.stage,
+      }
+      const compact = Object.fromEntries(
+        Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''),
+      )
+      setMetaImportErrorDetail(Object.keys(compact).length > 0 ? compact : null)
+    } finally {
+      setMetaImportBusy(false)
+    }
+  }, [metaImportBusy, cm, lang])
 
   const onResync = async () => {
     setResyncing(true)
@@ -312,256 +381,93 @@ export default function WhatsAppCatalog() {
     )
   }
 
-  // ── Top-header import button (May 2026 UI revamp) ──────────────────
-  // The full-fledged Meta-import section still lives lower in the
-  // page (with its diagnostics, error copy, and report card), but
-  // merchants expect a "استيراد من Meta" CTA next to the page title
-  // — the way Meta Commerce Manager places its Add/Import buttons in
-  // the page header. We anchor-scroll to the same section instead of
-  // duplicating logic, so the source of truth stays single.
-  const scrollToMetaImport = () => {
-    const el = document.getElementById('meta-import-section')
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-  }
-
-  // Layout note: this page DELIBERATELY does NOT clamp itself to
-  // ``max-w-4xl mx-auto`` — the catalog is now a daily-driver page
-  // whose product grid needs the full app width (12+ columns of
-  // product metadata). The outer ``<main>`` already applies the
-  // right horizontal padding; we just let the content fill what's
-  // left after the sidebar.
   return (
     <div className="space-y-6 w-full" dir={dir}>
-      {/* ── Header: title + primary CTAs (Meta-style command bar) ──
-            Pinned at the top so merchants always see the import +
-            add-product actions, regardless of how far down the
-            page they scroll. The lower-down sections (sub-cards)
-            still hold the full configuration UX. */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-5 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">
-            <Package className="w-7 h-7 text-emerald-600" />
-            {cm.page.title}
-            {diagnostics && (
-              <span className="text-base font-bold text-slate-500 bg-slate-100 rounded-full px-3 py-0.5">
-                {cm.page.productCount.replace('{count}', fmtCount(diagnostics.products.total, lang))}
-              </span>
-            )}
-          </h1>
-          <p className="text-sm text-slate-500 mt-1.5 leading-relaxed max-w-3xl">
-            {cm.page.intro}
-          </p>
-        </div>
-        {/* Primary CTAs — visible above the fold. The Meta import
-            button is conditional on the channel being wired,
-            matching the behaviour of the section below. */}
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {diagnostics?.catalog.catalog_id_present && (
-            <button
-              type="button"
-              onClick={scrollToMetaImport}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2.5 rounded-xl text-sm transition shadow-sm"
-            >
-              <Download className="w-4 h-4" />
-              {cm.page.importFromMeta}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              const el = document.getElementById('manual-product-section')
-              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-            }}
-            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-sm transition"
-          >
-            <Package className="w-4 h-4" />
-            {cm.page.addManual}
-          </button>
-          <button
-            type="button"
-            onClick={onResync}
-            disabled={resyncing}
-            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2.5 rounded-xl text-sm transition disabled:opacity-50"
-          >
-            {resyncing
-              ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <RefreshCw className="w-4 h-4" />}
-            {cm.page.resync}
-          </button>
-        </div>
-      </div>
-
-      {/* ── Hub diagram: Sources → Catalog → Channels ─────────────
-            Visual mental model: Nahla Catalog is the central hub.
-            Sources feed it (Manual / Salla / Meta-import / future);
-            Channels consume it (WhatsApp / AI / Campaigns / future).
-            The diagram reads the same diagnostics payload that the
-            "حالة الكتالوج" card uses — single source of truth. */}
       {diagnostics && (
-        <HubDiagramCard diagnostics={diagnostics} />
+        <CatalogSummaryCard
+          diagnostics={diagnostics}
+          showMetaImport={diagnostics.catalog.catalog_id_present}
+          metaImportBusy={metaImportBusy}
+          onImportMeta={() => void runMetaImport()}
+          onAddManual={openManualForm}
+          onOpenAdvanced={openAdvanced}
+        />
       )}
 
-      {/* ── Diagnostics snapshot (source-agnostic) ──────────────── */}
-      {diagnostics && (
-        <Card title={cm.diagnostics.title} icon={<Database className="w-5 h-5 text-emerald-600" />}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {/* Readiness pill */}
-            <div className={`rounded-xl border p-3 ${
-              diagnostics.readiness.catalog_ready
-                ? 'bg-emerald-50 border-emerald-200'
-                : 'bg-amber-50 border-amber-200'
-            }`}>
-              <div className="flex items-center gap-2">
-                {diagnostics.readiness.catalog_ready
-                  ? <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  : <AlertTriangle className="w-5 h-5 text-amber-600" />}
-                <span className="text-sm font-bold text-slate-800">
-                  {diagnostics.readiness.catalog_ready
-                    ? cm.diagnostics.readyTitle
-                    : cm.diagnostics.notReadyTitle}
+      {diagnostics && <CatalogChannelsCard diagnostics={diagnostics} />}
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-4 py-3 flex items-start gap-2">
+          <XCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <p className="text-sm">{error}</p>
+        </div>
+      )}
+      {success && (
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 flex items-start gap-2">
+          <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
+          <p className="text-sm">{success}</p>
+        </div>
+      )}
+
+      <section
+        id="product-studio"
+        className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
+      >
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Package className="w-5 h-5 text-emerald-600" />
+          <div className="flex-1 min-w-0">
+            <h3 className="text-base font-bold text-slate-800">{cm.studioSection.title}</h3>
+            <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+              {cm.studioSection.intro}
+            </p>
+          </div>
+        </div>
+        <div className="p-5">
+          <ProductStudio
+            refreshTrigger={productsRefresh}
+            showEmptyActions={false}
+          />
+        </div>
+      </section>
+
+      <CatalogAdvancedSection open={advancedOpen} onOpenChange={setAdvancedOpen}>
+        {diagnostics && (
+          <AdvancedSubSection title={cm.advanced.structureTitle}>
+            <HubDiagramCard diagnostics={diagnostics} merchantLabels />
+          </AdvancedSubSection>
+        )}
+
+        {diagnostics && (
+          <AdvancedSubSection title={cm.advanced.catalogStatusTitle}>
+            <DiagnosticsDetailPanel diagnostics={diagnostics} />
+          </AdvancedSubSection>
+        )}
+
+        <AdvancedSubSection title={cm.advanced.commerceDiagnosticsTitle}>
+          {status && (
+            <div className="space-y-3 mb-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusPill ok={status.eligibility.ok} reason={status.eligibility.reason} />
+                <span className="text-xs text-slate-500">
+                  {cm.connectionStatus.whatsappLabel}{' '}
+                  {status.connection.found ? (status.connection.status ?? '—') : cm.connectionStatus.notLinked}
+                </span>
+                <span className="text-xs text-slate-500">
+                  {cm.connectionStatus.catalogIdLabel}{' '}
+                  {status.connection.meta_catalog_id ? status.connection.meta_catalog_id : '—'}
+                </span>
+                <span className="text-xs text-slate-500">
+                  {cm.connectionStatus.retailerCoverageLabel}{' '}
+                  {status.coverage.with_retailer_id} / {status.coverage.sample_size}
                 </span>
               </div>
-              <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
-                {diagnostics.catalog.catalog_id_present
-                  ? (() => {
-                      const parts = cm.diagnostics.metaLinked.split('{catalogId}')
-                      return (
-                        <>
-                          {parts[0]}
-                          <code dir="ltr" className="bg-slate-100 px-1 rounded">{diagnostics.catalog.catalog_id}</code>
-                          {parts[1] ?? ''}
-                        </>
-                      )
-                    })()
-                  : cm.diagnostics.metaNotLinked}
+              <p className="text-sm text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3">
+                {status.advice}
               </p>
             </div>
-
-            {/* Product source */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center gap-2">
-                <Store className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.productSource}</span>
-                <SourceBadge source={diagnostics.products.dominant_source} size="md" />
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {(Object.entries(diagnostics.products.source_breakdown) as Array<[ProductSource, number]>)
-                  .filter(([, n]) => n > 0)
-                  .map(([src, n]) => {
-                    const srcKey = (src in SOURCE_STYLES ? src : 'unknown') as CatalogSourceKey
-                    const srcLabel = cm.sources[srcKey]
-                    return (
-                    <span
-                      key={src}
-                      className="inline-flex items-center gap-1 rounded-full bg-white border border-slate-200 text-[11px] px-2 py-0.5 text-slate-600"
-                      title={cm.diagnostics.sourceBreakdownTitle
-                        .replace('{count}', fmtCount(n, lang))
-                        .replace('{source}', srcLabel)}
-                    >
-                      <SourceBadge source={src} /> × {fmtCount(n, lang)}
-                    </span>
-                    )
-                  })}
-                {diagnostics.products.total === 0 && (
-                  <span className="text-[11px] text-slate-500">{cm.diagnostics.noProductsYet}</span>
-                )}
-              </div>
-            </div>
-
-            {/* Coverage */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center gap-2">
-                <Package className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.coverageTitle}</span>
-              </div>
-              <p className="text-xs text-slate-600 mt-1.5">
-                {cm.diagnostics.coverageDesc
-                  .replace('{with}', fmtCount(diagnostics.products.with_effective_retailer_id, lang))
-                  .replace('{total}', fmtCount(diagnostics.products.total, lang))
-                  .replace('{pct}', String(diagnostics.products.coverage_pct))}
-              </p>
-              {diagnostics.products.without_effective_retailer_id > 0 && (
-                <p className="text-[11px] text-amber-700 mt-1">
-                  {cm.diagnostics.coverageHint}
-                </p>
-              )}
-            </div>
-
-            {/* WhatsApp channel readiness */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center gap-2">
-                <MessageCircle className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.channelTitle}</span>
-              </div>
-              <p className="text-xs text-slate-600 mt-1.5">
-                {diagnostics.catalog.whatsapp_connected
-                  ? cm.diagnostics.channelConnected
-                  : cm.diagnostics.channelNotConnected}
-              </p>
-            </div>
-
-            {/* Last Meta import */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center gap-2">
-                <Clock className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-bold text-slate-800">{cm.diagnostics.importTitle}</span>
-              </div>
-              {!diagnostics.import.status ? (
-                <p className="text-xs text-slate-600 mt-1.5">{cm.diagnostics.importNever}</p>
-              ) : (
-                <>
-                  <p className="text-xs text-slate-600 mt-1.5">
-                    {diagnostics.import.status === 'running' && cm.diagnostics.importStatusRunning}
-                    {diagnostics.import.status === 'success' && cm.diagnostics.importStatusSuccess}
-                    {diagnostics.import.status === 'discovery_only' && cm.diagnostics.importStatusDiscoveryOnly}
-                    {diagnostics.import.status === 'failed' && cm.diagnostics.importStatusFailed}
-                    {diagnostics.import.last_at && (
-                      <>
-                        {' · '}
-                        {cm.diagnostics.importLastAt.replace(
-                          '{at}',
-                          fmtImportAt(diagnostics.import.last_at, lang),
-                        )}
-                      </>
-                    )}
-                  </p>
-                  {diagnostics.import.last_report && (
-                    <p className="text-[11px] text-slate-500 mt-1">
-                      {cm.diagnostics.importCounts
-                        .replace('{scanned}', fmtCount(diagnostics.import.last_report.scanned ?? 0, lang))
-                        .replace('{created}', fmtCount(diagnostics.import.last_report.created ?? 0, lang))
-                        .replace('{updated}', fmtCount(diagnostics.import.last_report.updated ?? 0, lang))}
-                    </p>
-                  )}
-                  {diagnostics.import.discovery_only && (
-                    <p className="text-[11px] text-amber-800 mt-1">
-                      {cm.diagnostics.importDiscoveryOnlyHint}
-                    </p>
-                  )}
-                  {diagnostics.import.status === 'failed' && diagnostics.import.last_error && (
-                    <p className="text-[11px] text-rose-700 mt-1">{diagnostics.import.last_error}</p>
-                  )}
-                  {diagnostics.graph_import?.token_selection?.token_source && (
-                    <p className="text-[11px] text-slate-600 mt-1">
-                      {cm.diagnostics.graphTokenSource.replace(
-                        '{source}',
-                        diagnostics.graph_import.token_selection.token_source,
-                      )}
-                    </p>
-                  )}
-                  {diagnostics.graph_import?.action_required && (
-                    <p className="text-[11px] text-amber-800 mt-1">
-                      {diagnostics.graph_import.action_required}
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* WhatsApp Commerce readiness checklist */}
-            <div className={`rounded-xl border p-3 md:col-span-2 ${
+          )}
+          {diagnostics && (
+            <div className={`rounded-xl border p-3 ${
               diagnostics.whatsapp_readiness.ready
                 ? 'bg-emerald-50 border-emerald-200'
                 : 'bg-amber-50 border-amber-200'
@@ -593,312 +499,289 @@ export default function WhatsAppCatalog() {
                   )
                 })}
               </ul>
-              {diagnostics.whatsapp_readiness.missing_requirements.length > 0 && (
-                <p className="text-[11px] text-amber-800 mt-2">
-                  {cm.diagnostics.missingRequirements}:{' '}
-                  {diagnostics.whatsapp_readiness.missing_requirements
-                    .map((key) => cm.diagnostics.checkLabels[key as keyof typeof cm.diagnostics.checkLabels] ?? key)
-                    .join(lang === 'ar' ? '، ' : ', ')}
+            </div>
+          )}
+        </AdvancedSubSection>
+
+        <AdvancedSubSection title={cm.advanced.linkStatusTitle} lazyMount>
+          <WabaCatalogLinkStatusCard />
+        </AdvancedSubSection>
+
+        <AdvancedSubSection title={cm.advanced.bindingSettingsTitle}>
+          <div className="space-y-4">
+            <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3">
+              {cm.channelBinding.intro}
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-1">
+                {cm.channelBinding.catalogIdLabel}
+              </label>
+              <input
+                type="text"
+                dir="ltr"
+                value={catalogId}
+                onChange={e => setCatalogId(e.target.value)}
+                placeholder={cm.channelBinding.catalogIdPh}
+                className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
+              />
+              <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+                {cm.channelBinding.catalogIdHint}
+              </p>
+              {catalogIdMissingForEnable && (
+                <p className="text-xs text-amber-700 mt-1.5 leading-relaxed">
+                  {cm.messages.catalogIdRequired}
                 </p>
               )}
             </div>
-          </div>
-        </Card>
-      )}
-
-      {/* ── Error / Success banners ─────────────────────────────── */}
-      {error && (
-        <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-4 py-3 flex items-start gap-2">
-          <XCircle className="w-5 h-5 shrink-0 mt-0.5" />
-          <p className="text-sm">{error}</p>
-        </div>
-      )}
-      {success && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 flex items-start gap-2">
-          <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
-          <p className="text-sm">{success}</p>
-        </div>
-      )}
-
-      {/* ── Status snapshot ─────────────────────────────────────── */}
-      {status && (
-        <Card title={cm.connectionStatus.title} icon={<ShieldCheck className="w-5 h-5 text-emerald-600" />}>
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusPill ok={status.eligibility.ok} reason={status.eligibility.reason} />
-              <span className="text-xs text-slate-500">
-                {cm.connectionStatus.whatsappLabel}{' '}
-                {status.connection.found ? (status.connection.status ?? '—') : cm.connectionStatus.notLinked}
-              </span>
-              <span className="text-xs text-slate-500">
-                {cm.connectionStatus.catalogIdLabel}{' '}
-                {status.connection.meta_catalog_id ? status.connection.meta_catalog_id : '—'}
-              </span>
-              <span className="text-xs text-slate-500">
-                {cm.connectionStatus.retailerCoverageLabel}{' '}
-                {status.coverage.with_retailer_id} / {status.coverage.sample_size}
-              </span>
+            <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
+              <div>
+                <p className="font-semibold text-sm text-slate-800">{cm.channelBinding.enableTitle}</p>
+                <p className="text-xs text-slate-500 mt-0.5">{cm.channelBinding.enableDesc}</p>
+              </div>
+              <button
+                type="button"
+                onClick={onToggleEnabled}
+                className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-semibold transition ${enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}
+                aria-pressed={enabled}
+              >
+                {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                {enabled ? cm.channelBinding.enabled : cm.channelBinding.disabled}
+              </button>
             </div>
-            <p className="text-sm text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3">
-              {status.advice}
-            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={onSave}
+                disabled={saving || catalogIdMissingForEnable}
+                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
+              >
+                {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                {cm.channelBinding.save}
+              </button>
+            </div>
           </div>
-        </Card>
-      )}
+        </AdvancedSubSection>
 
-      {/* ── Product Studio (PROMOTED to above the fold) ──────────────
-            Daily-driver content. Moved above the channel-binding card
-            so the table is the FIRST thing merchants see after the
-            status banner — matches Meta Commerce Manager's IA where
-            the products table is the page, and the settings are tabs
-            beside it. The settings cards below still hold the full
-            configuration UX (channel binding / manual add / Meta
-            import / test send). */}
-      <section
-        id="product-studio"
-        className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
-      >
-        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-          <Package className="w-5 h-5 text-emerald-600" />
-          <div className="flex-1 min-w-0">
-            <h3 className="text-base font-bold text-slate-800">{cm.studioSection.title}</h3>
-            <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-              {cm.studioSection.intro}
-            </p>
-          </div>
-        </div>
-        <div className="p-5">
-          <ProductStudio refreshTrigger={productsRefresh} />
-        </div>
-      </section>
-
-      {/* ── Channel binding (WhatsApp + Meta) ────────────────────────
-            Catalog itself is channel-agnostic; this sub-section is
-            specifically the WhatsApp/Meta channel wire-up. */}
-      <Card
-        title={cm.channelBinding.title}
-        icon={<MessageCircle className="w-5 h-5 text-emerald-600" />}
-      >
-        <div className="space-y-4">
-          <WabaCatalogLinkStatusCard />
-          <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3">
-            {cm.channelBinding.intro}
-          </div>
-          <div>
-            <label className="block text-sm font-semibold text-slate-700 mb-1">
-              {cm.channelBinding.catalogIdLabel}
-            </label>
-            <input
-              type="text"
-              dir="ltr"
-              value={catalogId}
-              onChange={e => setCatalogId(e.target.value)}
-              placeholder={cm.channelBinding.catalogIdPh}
-              className="w-full rounded-xl border border-slate-200 px-4 py-2.5 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-            />
-            <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
-              {cm.channelBinding.catalogIdHint}
-            </p>
-            {catalogIdMissingForEnable && (
-              <p className="text-xs text-amber-700 mt-1.5 leading-relaxed">
-                {cm.messages.catalogIdRequired}
-              </p>
+        <AdvancedSubSection title={cm.advanced.catalogToolsTitle}>
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-slate-800">
+                  {cm.tools.coverageLabel}{' '}
+                  <span className="text-emerald-700">{products ? products.coverage.with_rid : '—'}</span>
+                  <span className="text-slate-400"> / </span>
+                  <span className="text-slate-700">{products ? products.coverage.total : '—'}</span>
+                </p>
+                <p className="text-xs text-slate-500 leading-relaxed">{cm.tools.coverageDesc}</p>
+              </div>
+              <button
+                onClick={onResync}
+                disabled={resyncing}
+                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-xl text-sm transition shrink-0"
+              >
+                {resyncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {cm.tools.resyncBtn}
+              </button>
+            </div>
+            {resyncReport && (
+              <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-900 space-y-1">
+                <p className="font-bold">{cm.tools.reportTitle}</p>
+                <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
+                  <li>{cm.tools.scanned} {resyncReport.scanned}</li>
+                  <li>{cm.tools.assigned} {resyncReport.retailer_id_set}</li>
+                  <li>{cm.tools.alreadySet} {resyncReport.already_set}</li>
+                  <li>{cm.tools.synthetic} {resyncReport.synthetic_assigned}</li>
+                  <li>{cm.tools.published} {resyncReport.published_stamped}</li>
+                  <li>{cm.tools.errors} {resyncReport.errors}</li>
+                </ul>
+              </div>
             )}
           </div>
+        </AdvancedSubSection>
 
-          <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
-            <div>
-              <p className="font-semibold text-sm text-slate-800">{cm.channelBinding.enableTitle}</p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {cm.channelBinding.enableDesc}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onToggleEnabled}
-              className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-semibold transition ${enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}
-              aria-pressed={enabled}
-            >
-              {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-              {enabled ? cm.channelBinding.enabled : cm.channelBinding.disabled}
-            </button>
-          </div>
-
-          <div className="flex justify-end">
-            <button
-              onClick={onSave}
-              disabled={saving || catalogIdMissingForEnable}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
-            >
-              {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-              {cm.channelBinding.save}
-            </button>
-          </div>
-        </div>
-      </Card>
-
-      {/* ── Catalog tools (resync + retailer_id coverage) ───────────
-            Catalog-level operations live above the Studio. Per-product
-            actions live INSIDE the Studio (the grid + drawer). */}
-      <Card title={cm.tools.title} icon={<RefreshCw className="w-5 h-5 text-emerald-600" />}>
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
-            <div className="space-y-1">
-              <p className="text-sm font-semibold text-slate-800">
-                {cm.tools.coverageLabel}{' '}
-                <span className="text-emerald-700">
-                  {products ? products.coverage.with_rid : '—'}
-                </span>
-                <span className="text-slate-400"> / </span>
-                <span className="text-slate-700">
-                  {products ? products.coverage.total : '—'}
-                </span>
-                {products && products.coverage.total > 0 && (
-                  <span className="text-xs text-slate-500 ms-2">
-                    ({Math.round(products.coverage.with_rid / products.coverage.total * 100)}%)
-                  </span>
-                )}
-              </p>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                {cm.tools.coverageDesc}
-              </p>
-            </div>
-            <button
-              onClick={onResync}
-              disabled={resyncing}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2 rounded-xl text-sm transition shrink-0"
-            >
-              {resyncing
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <RefreshCw className="w-4 h-4" />}
-              {cm.tools.resyncBtn}
-            </button>
-          </div>
-
-          {resyncReport && (
-            <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-4 text-xs text-emerald-900 space-y-1">
-              <p className="font-bold">{cm.tools.reportTitle}</p>
-              <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
-                <li>{cm.tools.scanned} {resyncReport.scanned}</li>
-                <li>{cm.tools.assigned} {resyncReport.retailer_id_set}</li>
-                <li>{cm.tools.alreadySet} {resyncReport.already_set}</li>
-                <li>{cm.tools.synthetic} {resyncReport.synthetic_assigned}</li>
-                <li>{cm.tools.published} {resyncReport.published_stamped}</li>
-                <li>{cm.tools.errors} {resyncReport.errors}</li>
-              </ul>
-            </div>
-          )}
-        </div>
-      </Card>
-
-      {/* ── Manual products (Path 3) ─────────────────────────────────
-            Inline editor for merchants without a synced store. Wires
-            to /merchant/catalog/products/manual. We render it for ALL
-            tenants — even Salla merchants may want to add a one-off
-            promotional product that doesn't exist in their store. */}
-      <ManualProductsSection
-        currentSource={diagnostics?.products.dominant_source ?? 'unknown'}
-        onChanged={async () => {
-          await loadProducts()
-          await loadDiagnostics()
-          bumpProductList()
-        }}
-      />
-
-      {/* ── Import from Meta (Hub: Meta → Nahla) ────────────────────
-            Optional source for merchants who already have products
-            inside Meta Commerce Manager. Only renders when the Meta
-            channel is wired (we need a catalog_id + token to pull). */}
-      {diagnostics?.catalog.catalog_id_present && (
-        <MetaImportSection
-          onChanged={async () => {
-            await loadProducts()
-            await loadDiagnostics()
-            bumpProductList()
-          }}
-        />
-      )}
-
-      {/* ── Test send ────────────────────────────────────────────── */}
-      <Card title={cm.testSend.title} icon={<Send className="w-5 h-5 text-emerald-600" />}>
-        <div className="space-y-3">
-          <p className="text-xs text-slate-500 leading-relaxed">
-            {cm.testSend.intro}
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <input
-              dir="ltr"
-              placeholder={cm.testSend.phonePlaceholder}
-              value={testTo}
-              onChange={e => setTestTo(e.target.value)}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
-            />
-            <input
-              placeholder={cm.testSend.titlePlaceholder}
-              value={testTitle}
-              onChange={e => setTestTitle(e.target.value)}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
-            />
-            <input
-              dir="ltr"
-              placeholder={cm.testSend.productIdPlaceholder}
-              value={testProductId}
-              onChange={e => {
-                const v = e.target.value.trim()
-                setTestProductId(v === '' ? '' : Number.isFinite(Number(v)) ? Number(v) : '')
+        <AdvancedSubSection title={cm.advanced.manualProductsTitle}>
+          <div id="catalog-manual-product-section">
+            <ManualProductsSection
+              currentSource={diagnostics?.products.dominant_source ?? 'unknown'}
+              formOpen={manualFormOpen}
+              onFormOpenChange={setManualFormOpen}
+              hideAddButton
+              onChanged={async () => {
+                await loadProducts()
+                await loadDiagnostics()
+                bumpProductList()
               }}
-              className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
             />
           </div>
-          <div className="flex justify-end">
-            <button
-              onClick={onTestSend}
-              disabled={testing || !testTo.trim() || (!testTitle.trim() && testProductId === '')}
-              className="inline-flex items-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
-            >
-              {testing && <Loader2 className="w-4 h-4 animate-spin" />}
-              {cm.testSend.sendBtn}
-            </button>
-          </div>
+        </AdvancedSubSection>
 
-          {testResult && (
-            <div className="mt-3 bg-slate-50 border border-slate-100 rounded-xl p-4 text-sm space-y-2">
-              <p className="font-bold text-slate-800 flex items-center gap-2">
-                {testResult.ok
-                  ? <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  : <XCircle className="w-4 h-4 text-rose-600" />}
-                {cm.testSend.resultTitle}{' '}
-                <code className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded text-xs">
-                  {testResult.final_mode}
-                </code>
-              </p>
-              <p className="text-xs text-slate-600">
-                {cm.testSend.productLabel} <strong>{testResult.product.title}</strong>
-                {' '}(retailer_id: <code>{testResult.product.retailer_id ?? '—'}</code>)
-              </p>
-              <ul className="text-xs text-slate-600 space-y-1">
-                <li>{cm.testSend.catalogLine}{' '}
-                  {testResult.catalog.attempted
-                    ? (testResult.catalog.succeeded
-                        ? cm.testResult.catalogSucceeded
-                        : cm.testResult.catalogFailed.replace('{reason}', testResult.catalog.reason ?? ''))
-                    : cm.testSend.notAttempted}
-                </li>
-                <li>{cm.testSend.imageLine}{' '}
-                  {testResult.image_cta.attempted
-                    ? (testResult.image_cta.image_ok ? cm.testResult.imageOk : cm.testResult.imageFailed)
-                    : cm.testSend.notAttempted}
-                </li>
-                <li>{cm.testSend.ctaLine}{' '}
-                  {testResult.cta_only.attempted
-                    ? (testResult.cta_only.ok ? cm.testResult.ctaOk : cm.testResult.ctaFailed)
-                    : cm.testSend.notAttempted}
-                </li>
-              </ul>
+        {diagnostics?.catalog.catalog_id_present && (
+          <AdvancedSubSection title={cm.advanced.metaImportTitle}>
+            <MetaImportSection
+              busy={metaImportBusy}
+              error={metaImportError}
+              errorDetail={metaImportErrorDetail}
+              report={metaImportReport}
+              hideImportButton
+              onImport={() => void runMetaImport()}
+            />
+          </AdvancedSubSection>
+        )}
+
+        <AdvancedSubSection title={cm.advanced.testSendTitle}>
+          <div className="space-y-3">
+            <p className="text-xs text-slate-500 leading-relaxed">{cm.testSend.intro}</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <input
+                dir="ltr"
+                placeholder={cm.testSend.phonePlaceholder}
+                value={testTo}
+                onChange={e => setTestTo(e.target.value)}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
+              />
+              <input
+                placeholder={cm.testSend.titlePlaceholder}
+                value={testTitle}
+                onChange={e => setTestTitle(e.target.value)}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
+              />
+              <input
+                dir="ltr"
+                placeholder={cm.testSend.productIdPlaceholder}
+                value={testProductId}
+                onChange={e => {
+                  const v = e.target.value.trim()
+                  setTestProductId(v === '' ? '' : Number.isFinite(Number(v)) ? Number(v) : '')
+                }}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-emerald-400"
+              />
             </div>
-          )}
+            <div className="flex justify-end">
+              <button
+                onClick={onTestSend}
+                disabled={testing || !testTo.trim() || (!testTitle.trim() && testProductId === '')}
+                className="inline-flex items-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
+              >
+                {testing && <Loader2 className="w-4 h-4 animate-spin" />}
+                {cm.testSend.sendBtn}
+              </button>
+            </div>
+            {testResult && (
+              <div className="mt-3 bg-slate-50 border border-slate-100 rounded-xl p-4 text-sm space-y-2">
+                <p className="font-bold text-slate-800 flex items-center gap-2">
+                  {testResult.ok
+                    ? <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    : <XCircle className="w-4 h-4 text-rose-600" />}
+                  {cm.testSend.resultTitle}{' '}
+                  <code className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded text-xs">
+                    {testResult.final_mode}
+                  </code>
+                </p>
+                <p className="text-xs text-slate-600">
+                  {cm.testSend.productLabel} <strong>{testResult.product.title}</strong>
+                  {' '}(retailer_id: <code>{testResult.product.retailer_id ?? '—'}</code>)
+                </p>
+              </div>
+            )}
+          </div>
+        </AdvancedSubSection>
+      </CatalogAdvancedSection>
+    </div>
+  )
+}
+
+
+function DiagnosticsDetailPanel(props: { diagnostics: CatalogDiagnostics }) {
+  const { tStatic, lang } = useLanguage()
+  const cm = tStatic(tr => tr.catalogMgmt)
+  const diagnostics = props.diagnostics
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className={`rounded-xl border p-3 ${
+        diagnostics.readiness.catalog_ready
+          ? 'bg-emerald-50 border-emerald-200'
+          : 'bg-amber-50 border-amber-200'
+      }`}>
+        <div className="flex items-center gap-2">
+          {diagnostics.readiness.catalog_ready
+            ? <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+            : <AlertTriangle className="w-5 h-5 text-amber-600" />}
+          <span className="text-sm font-bold text-slate-800">
+            {diagnostics.readiness.catalog_ready
+              ? cm.diagnostics.readyTitle
+              : cm.diagnostics.notReadyTitle}
+          </span>
         </div>
-      </Card>
+        <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
+          {diagnostics.catalog.catalog_id_present
+            ? (() => {
+                const parts = cm.diagnostics.metaLinked.split('{catalogId}')
+                return (
+                  <>
+                    {parts[0]}
+                    <code dir="ltr" className="bg-slate-100 px-1 rounded">{diagnostics.catalog.catalog_id}</code>
+                    {parts[1] ?? ''}
+                  </>
+                )
+              })()
+            : cm.diagnostics.metaNotLinked}
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <div className="flex items-center gap-2">
+          <Store className="w-5 h-5 text-slate-500" />
+          <span className="text-sm font-bold text-slate-800">{cm.diagnostics.productSource}</span>
+          <SourceBadge source={diagnostics.products.dominant_source} size="md" />
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {(Object.entries(diagnostics.products.source_breakdown) as Array<[ProductSource, number]>)
+            .filter(([, n]) => n > 0)
+            .map(([src, n]) => {
+              const srcKey = (src in SOURCE_STYLES ? src : 'unknown') as CatalogSourceKey
+              const srcLabel = cm.sources[srcKey]
+              return (
+                <span
+                  key={src}
+                  className="inline-flex items-center gap-1 rounded-full bg-white border border-slate-200 text-[11px] px-2 py-0.5 text-slate-600"
+                >
+                  <SourceBadge source={src} /> × {fmtCount(n, lang)}
+                  <span className="sr-only">{srcLabel}</span>
+                </span>
+              )
+            })}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <div className="flex items-center gap-2">
+          <Package className="w-5 h-5 text-slate-500" />
+          <span className="text-sm font-bold text-slate-800">{cm.diagnostics.coverageTitle}</span>
+        </div>
+        <p className="text-xs text-slate-600 mt-1.5">
+          {cm.diagnostics.coverageDesc
+            .replace('{with}', fmtCount(diagnostics.products.with_effective_retailer_id, lang))
+            .replace('{total}', fmtCount(diagnostics.products.total, lang))
+            .replace('{pct}', String(diagnostics.products.coverage_pct))}
+        </p>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <div className="flex items-center gap-2">
+          <Clock className="w-5 h-5 text-slate-500" />
+          <span className="text-sm font-bold text-slate-800">{cm.diagnostics.importTitle}</span>
+        </div>
+        {!diagnostics.import.status ? (
+          <p className="text-xs text-slate-600 mt-1.5">{cm.diagnostics.importNever}</p>
+        ) : (
+          <p className="text-xs text-slate-600 mt-1.5">
+            {diagnostics.import.last_at && cm.diagnostics.importLastAt.replace(
+              '{at}',
+              fmtImportAt(diagnostics.import.last_at, lang),
+            )}
+          </p>
+        )}
+      </div>
     </div>
   )
 }
@@ -964,11 +847,14 @@ function HubNode(props: {
   )
 }
 
-function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
+function HubDiagramCard(props: { diagnostics: CatalogDiagnostics; merchantLabels?: boolean }) {
   const { tStatic, lang, dir } = useLanguage()
   const hub = tStatic(tr => tr.catalogMgmt.hub)
   const d = props.diagnostics
   const breakdown = d.products.source_breakdown
+  const cardTitle = props.merchantLabels ? hub.advancedTitle : hub.title
+  const inputsLabel = props.merchantLabels ? hub.sourcesLabel : hub.inputsLabel
+  const outputsLabel = props.merchantLabels ? hub.channelsLabel : hub.outputsLabel
 
   // Source availability — derived purely from the diagnostics payload.
   const sallaCount  = breakdown.salla  ?? 0
@@ -991,7 +877,7 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
   const campaignsStatus: NodeStatus = d.products.total > 0 ? 'available' : 'unused'
 
   return (
-    <Card title={hub.title} icon={<Database className="w-5 h-5 text-emerald-600" />}>
+    <Card title={cardTitle} icon={<Database className="w-5 h-5 text-emerald-600" />}>
       <div dir={dir}>
       <p className="text-xs text-slate-600 leading-relaxed mb-4">
         {hub.intro}
@@ -1001,7 +887,7 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
         {/* ── Sources column ── */}
         <div className="space-y-2">
           <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
-            {hub.inputsLabel}
+            {inputsLabel}
           </div>
           <HubNode
             icon={<Store className="w-4 h-4 text-orange-600" />}
@@ -1066,7 +952,7 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
         {/* ── Channels column ── */}
         <div className="space-y-2">
           <div className="text-xs font-bold text-slate-500 uppercase tracking-wide text-center mb-2">
-            {hub.outputsLabel}
+            {outputsLabel}
           </div>
           <HubNode
             icon={<MessageCircle className="w-4 h-4 text-emerald-600" />}
@@ -1105,90 +991,55 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics }) {
 // ─────────────────────────────────────────────────────────────────────
 // Meta import section (Path 4)
 // ─────────────────────────────────────────────────────────────────────
-//
-// Trigger ``/merchant/catalog/import/meta``. Only mounted when the
-// Meta channel is wired (catalog_id present) — otherwise the import
-// would fail preflight anyway, so showing a button would be confusing.
 
-function MetaImportSection(props: { onChanged: () => Promise<void> }) {
+function metaImportErrorCopy(
+  code: string | undefined,
+  mi: Translations['catalogMgmt']['metaImport'],
+  msgs: Translations['catalogMgmt']['messages'],
+): string {
+  const errs = mi.errors
+  switch (code) {
+    case 'connection_not_found':       return errs.connection_not_found
+    case 'catalog_id_missing':         return errs.catalog_id_missing
+    case 'access_token_missing':       return errs.access_token_missing
+    case 'meta_access_token_missing':  return errs.meta_access_token_missing
+    case 'catalog_not_found':          return errs.catalog_not_found
+    case 'catalog_type_unsupported':   return errs.catalog_type_unsupported
+    case 'meta_http_error':            return errs.meta_http_error
+    default:
+      return code
+        ? errs.defaultUnexpected.replace('{code}', code)
+        : msgs.unexpectedImport
+  }
+}
+
+function MetaImportSection(props: {
+  busy: boolean
+  error: string | null
+  errorDetail: Record<string, unknown> | null
+  report: MetaImportReport | null
+  hideImportButton?: boolean
+  onImport?: () => void
+}) {
   const { tStatic, dir } = useLanguage()
   const mi = tStatic(tr => tr.catalogMgmt.metaImport)
-  const msgs = tStatic(tr => tr.catalogMgmt.messages)
 
-  const [busy, setBusy]               = useState(false)
-  const [error, setError]             = useState<string | null>(null)
-  const [errorDetail, setErrorDetail] = useState<Record<string, any> | null>(null)
-  const [showDetail, setShowDetail]   = useState(false)
-  const [report, setReport]           = useState<MetaImportReport | null>(null)
-
-  const errorCopy = (code: string | undefined): string => {
-    const errs = mi.errors
-    switch (code) {
-      case 'connection_not_found':       return errs.connection_not_found
-      case 'catalog_id_missing':         return errs.catalog_id_missing
-      case 'access_token_missing':       return errs.access_token_missing
-      case 'meta_access_token_missing':  return errs.meta_access_token_missing
-      case 'catalog_not_found':          return errs.catalog_not_found
-      case 'catalog_type_unsupported':   return errs.catalog_type_unsupported
-      case 'meta_http_error':            return errs.meta_http_error
-      default:
-        return code
-          ? errs.defaultUnexpected.replace('{code}', code)
-          : msgs.unexpectedImport
-    }
-  }
-
-  const onImport = async () => {
-    setBusy(true); setError(null); setErrorDetail(null); setShowDetail(false); setReport(null)
-    try {
-      const r = await catalogApi.importFromMeta()
-      setReport(r.report)
-      await props.onChanged()
-    } catch (e: any) {
-      // The API wrapper surfaces the FastAPI ``detail`` as ``e.code``
-      // and stashes the full structured detail on ``e.validation``
-      // (when present) or on ``e.detail``. We capture both so the
-      // collapsible diagnostic block can show what Meta actually
-      // said (token_source / provider / meta_message / fbtrace_id).
-      const code  = e?.code ?? e?.detail ?? e?.message
-      setError(errorCopy(code))
-      const detail = (e && typeof e === 'object') ? {
-        code:           code,
-        status:         e?.status,
-        provider:       e?.provider,
-        token_source:   e?.token_source,
-        catalog_id:     e?.catalog_id,
-        hint:           e?.hint,
-        meta_code:      e?.meta_code ?? e?.discovery?.error?.meta_code,
-        meta_message:   e?.meta_message ?? e?.discovery?.error?.meta_message,
-        fbtrace_id:     e?.fbtrace_id ?? e?.discovery?.error?.fbtrace_id,
-        stage:          e?.stage,
-      } : null
-      // Drop empty entries so the panel only shows what actually has a value.
-      const compact = detail
-        ? Object.fromEntries(Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''))
-        : null
-      setErrorDetail(compact && Object.keys(compact).length > 0 ? compact : null)
-    } finally {
-      setBusy(false)
-    }
-  }
+  const [showDetail, setShowDetail] = useState(false)
 
   return (
     <div id="meta-import-section">
-    <Card title={mi.title} icon={<Download className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-3" dir={dir}>
         <p className="text-xs text-slate-600 leading-relaxed">
           {mi.intro}
         </p>
 
-        {error && (
+        {props.error && (
           <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm space-y-2">
             <div className="flex items-start gap-2">
               <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{error}</span>
+              <span className="leading-relaxed">{props.error}</span>
             </div>
-            {errorDetail && (
+            {props.errorDetail && (
               <div className="ms-6">
                 <button
                   type="button"
@@ -1199,7 +1050,7 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
                 </button>
                 {showDetail && (
                   <pre dir="ltr" className="mt-2 bg-white border border-rose-100 rounded-lg p-2 text-[11px] text-slate-700 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-{JSON.stringify(errorDetail, null, 2)}
+{JSON.stringify(props.errorDetail, null, 2)}
                   </pre>
                 )}
               </div>
@@ -1207,18 +1058,18 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
           </div>
         )}
 
-        {report && (
+        {props.report && (
           <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-900 space-y-1">
             <p className="font-bold">{mi.reportTitle}</p>
             <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
-              <li>{mi.scanned} {report.scanned}</li>
-              <li>{mi.created} {report.created}</li>
-              <li>{mi.updated} {report.updated}</li>
-              <li>{mi.skippedManual} {report.skipped_manual}</li>
-              <li>{mi.reportErrors} {report.errors}</li>
-              <li>{mi.pages} {report.pages_fetched}</li>
+              <li>{mi.scanned} {props.report.scanned}</li>
+              <li>{mi.created} {props.report.created}</li>
+              <li>{mi.updated} {props.report.updated}</li>
+              <li>{mi.skippedManual} {props.report.skipped_manual}</li>
+              <li>{mi.reportErrors} {props.report.errors}</li>
+              <li>{mi.pages} {props.report.pages_fetched}</li>
             </ul>
-            {report.truncated && (
+            {props.report.truncated && (
               <p className="text-amber-700 mt-1">
                 {mi.truncated}
               </p>
@@ -1226,17 +1077,18 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
           </div>
         )}
 
+        {!props.hideImportButton && props.onImport && (
         <button
           type="button"
-          onClick={onImport}
-          disabled={busy}
+          onClick={props.onImport}
+          disabled={props.busy}
           className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
         >
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          {props.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
           {mi.importBtn}
         </button>
+        )}
       </div>
-    </Card>
     </div>
   )
 }
@@ -1263,12 +1115,20 @@ function MetaImportSection(props: { onChanged: () => Promise<void> }) {
 function ManualProductsSection(props: {
   currentSource: DominantSource
   onChanged: () => Promise<void>
+  formOpen?: boolean
+  onFormOpenChange?: (open: boolean) => void
+  hideAddButton?: boolean
 }) {
   const { tStatic, dir } = useLanguage()
   const manual = tStatic(tr => tr.catalogMgmt.manual)
   const msgs = tStatic(tr => tr.catalogMgmt.messages)
 
-  const [open, setOpen]       = useState(false)
+  const [internalOpen, setInternalOpen] = useState(false)
+  const open = props.formOpen ?? internalOpen
+  const setOpen = (next: boolean) => {
+    props.onFormOpenChange?.(next)
+    if (props.formOpen === undefined) setInternalOpen(next)
+  }
   const [busy, setBusy]       = useState(false)
   const [error, setError]     = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -1323,7 +1183,6 @@ function ManualProductsSection(props: {
 
   return (
     <div id="manual-product-section">
-    <Card title={manual.title} icon={<Store className="w-5 h-5 text-emerald-600" />}>
       <div className="space-y-4" dir={dir}>
         <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3 leading-relaxed">
           {explainer}
@@ -1340,7 +1199,7 @@ function ManualProductsSection(props: {
           </div>
         )}
 
-        {!open && (
+        {!open && !props.hideAddButton && (
           <button
             type="button"
             onClick={() => { setOpen(true); setSuccess(null) }}
@@ -1437,7 +1296,6 @@ function ManualProductsSection(props: {
           </div>
         )}
       </div>
-    </Card>
     </div>
   )
 }

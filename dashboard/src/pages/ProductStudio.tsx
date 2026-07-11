@@ -38,6 +38,7 @@ import {
   Filter as FilterIcon, ChevronLeft, ChevronRight, ChevronDown,
   Bot, MessageCircle, Megaphone, ShoppingBag, Sparkles, Layers, EyeOff, RotateCcw, Trash2,
 } from 'lucide-react'
+import { resolveRowDisplaySource } from '../components/catalog/catalogDisplay'
 import {
   catalogApi,
   type CatalogProductDiagRow,
@@ -107,10 +108,11 @@ const CHANNEL_ICON_COLOR: Record<string, string> = {
 }
 
 
-function SourcePill({ source }: { source: ProductSource | string }) {
+function SourcePill({ source, metaRetailerId }: { source: ProductSource | string; metaRetailerId?: string | null }) {
   const { t } = useLanguage()
-  const style = SOURCE_STYLES[source] ?? SOURCE_STYLES.unknown
-  const key = (source in SOURCE_STYLES ? source : 'unknown') as CatalogSourceKey
+  const resolved = resolveRowDisplaySource(source as ProductSource, metaRetailerId ?? null)
+  const style = SOURCE_STYLES[resolved] ?? SOURCE_STYLES.unknown
+  const key = (resolved in SOURCE_STYLES ? resolved : 'unknown') as CatalogSourceKey
   const label = t(tr => tr.catalogMgmt.sources[key]) // i18n-static: allow — key is CatalogSourceKey
   return (
     <span className={`inline-flex items-center gap-1 rounded-full border font-semibold text-[11px] px-2 py-0.5 ${style.bg} ${style.text}`}>
@@ -121,32 +123,21 @@ function SourcePill({ source }: { source: ProductSource | string }) {
 
 
 function ReadinessPill({ row }: { row: CatalogProductDiagRow }) {
-  const { t, lang } = useLanguage()
+  const { t } = useLanguage()
   const rd = t(tr => tr.catalogMgmt.studio.readiness)
   const b = row.readiness_badge
   if (!b) return <span className="text-[11px] text-slate-400">—</span>
-  const palette: Record<string, { bg: string; text: string; dot: string }> = {
-    green: { bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-    amber: { bg: 'bg-amber-50   border-amber-200',   text: 'text-amber-700',   dot: 'bg-amber-500'   },
-    red:   { bg: 'bg-rose-50    border-rose-200',    text: 'text-rose-700',    dot: 'bg-rose-500'    },
-    slate: { bg: 'bg-slate-50   border-slate-200',   text: 'text-slate-600',   dot: 'bg-slate-300'   },
-  }
-  const c = palette[b.level] ?? palette.slate
-  const label =
-    b.blocking_count > 0
-      ? rd.missingInChannels.replace('{count}', fmtCount(b.blocking_count, lang))
-      : b.warn_count > 0
-        ? rd.readyWithWarn
-            .replace('{ready}', fmtCount(b.ready_count, lang))
-            .replace('{total}', fmtCount(b.enabled_total, lang))
-        : rd.ready
-            .replace('{ready}', fmtCount(b.ready_count, lang))
-            .replace('{total}', fmtCount(b.enabled_total, lang))
+  const isReady = b.blocking_count === 0
+    && b.warn_count === 0
+    && b.ready_count >= b.enabled_total
+  const palette = isReady
+    ? { bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', dot: 'bg-emerald-500' }
+    : { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-700', dot: 'bg-amber-500' }
+  const label = isReady ? rd.readySimple : rd.needsCompletion
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full border text-[11px] px-2 py-0.5 ${c.bg} ${c.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
+    <span className={`inline-flex items-center gap-1 rounded-full border text-[11px] px-2 py-0.5 ${palette.bg} ${palette.text}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${palette.dot}`} />
       {label}
-      <span className="text-slate-400 font-mono">{b.score_pct}%</span>
     </span>
   )
 }
@@ -319,14 +310,10 @@ function VariantsSummaryBar(props: { summary?: CatalogVariantsSummary | null }) 
   }> = [
     { label: vs.products, value: s.products,
       Icon: Package, tone: 'text-slate-700 bg-slate-50 border-slate-200' },
-    { label: vs.variants, value: s.variants,
-      Icon: Layers, tone: 'text-indigo-700 bg-indigo-50 border-indigo-200' },
     { label: vs.whatsappReady, value: s.whatsapp_ready,
       Icon: MessageCircle, tone: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
-    { label: vs.metaReady, value: s.meta_ready,
-      Icon: ShoppingBag, tone: 'text-sky-700 bg-sky-50 border-sky-200' },
-    { label: vs.googleReady, value: s.google_ready,
-      Icon: Sparkles, tone: 'text-amber-700 bg-amber-50 border-amber-200' },
+    { label: vs.needsReview, value: Math.max(0, s.products - s.whatsapp_ready),
+      Icon: Layers, tone: 'text-amber-700 bg-amber-50 border-amber-200' },
   ]
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-3">
@@ -418,6 +405,9 @@ function ProductGrid(props: {
   rows: CatalogProductDiagRow[]
   loading: boolean
   onSelect: (id: number) => void
+  onImportMeta?: () => void
+  onAddManual?: () => void
+  showEmptyActions?: boolean
 }) {
   const { t } = useLanguage()
   const g = t(tr => tr.catalogMgmt.studio.grid)
@@ -446,20 +436,42 @@ function ProductGrid(props: {
         <p className="text-sm text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
           {g.emptyDesc}
         </p>
+        {props.showEmptyActions !== false && (
         <div className="flex flex-wrap items-center justify-center gap-2">
-          <a
-            href="#meta-import-section"
-            className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
-          >
-            {g.importFromMeta}
-          </a>
-          <a
-            href="#manual-product-section"
-            className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-sm transition"
-          >
-            {g.addManual}
-          </a>
+          {props.onImportMeta ? (
+            <button
+              type="button"
+              onClick={props.onImportMeta}
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
+            >
+              {g.importFromMeta}
+            </button>
+          ) : (
+            <a
+              href="#meta-import-section"
+              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
+            >
+              {g.importFromMeta}
+            </a>
+          )}
+          {props.onAddManual ? (
+            <button
+              type="button"
+              onClick={props.onAddManual}
+              className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-sm transition"
+            >
+              {g.addManual}
+            </button>
+          ) : (
+            <a
+              href="#manual-product-section"
+              className="inline-flex items-center gap-2 bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold px-4 py-2 rounded-xl text-sm transition"
+            >
+              {g.addManual}
+            </a>
+          )}
         </div>
+        )}
       </div>
     )
   }
@@ -562,7 +574,7 @@ function ProductGridRow(props: {
             </div>
           </div>
         </td>
-        <td className="py-3 px-3"><SourcePill source={row.source} /></td>
+        <td className="py-3 px-3"><SourcePill source={row.source} metaRetailerId={row.meta_retailer_id} /></td>
         <td className="py-3 px-3 text-slate-700 font-medium">
           <CatalogProductPriceCell row={row} />
         </td>
@@ -1544,7 +1556,12 @@ function ProductDrawer(props: {
 // Public component — the Studio as one unit
 // ─────────────────────────────────────────────────────────────────────
 
-export default function ProductStudio(props: { refreshTrigger?: number }) {
+export default function ProductStudio(props: {
+  refreshTrigger?: number
+  onImportMeta?: () => void
+  onAddManual?: () => void
+  showEmptyActions?: boolean
+}) {
   const [filters, setFilters] = useState<StudioFilters>({})
   const [offset, setOffset]   = useState(0)
   const [limit]               = useState(50)
@@ -1589,7 +1606,14 @@ export default function ProductStudio(props: { refreshTrigger?: number }) {
         totalShown={rows.length}
         total={total}
       />
-      <ProductGrid rows={rows} loading={loading} onSelect={setSelectedId} />
+      <ProductGrid
+        rows={rows}
+        loading={loading}
+        onSelect={setSelectedId}
+        onImportMeta={props.onImportMeta}
+        onAddManual={props.onAddManual}
+        showEmptyActions={props.showEmptyActions}
+      />
       <Pagination offset={offset} limit={limit} total={total} onChange={setOffset} />
 
       {selectedId !== null && (
