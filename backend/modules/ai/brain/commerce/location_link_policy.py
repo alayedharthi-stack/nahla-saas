@@ -100,7 +100,7 @@ def evaluate_location_link_policy(
                             has_branch_details=True,
                         )
             except Exception as exc:  # noqa: BLE001
-                logger.debug(
+                logger.exception(
                     "[LOCATION_LINK_POLICY] branch_context_failed tenant=%s err=%s",
                     tenant_id,
                     exc,
