@@ -292,6 +292,8 @@ async def try_compose_branch_action(
                         "model_override": route.model,
                     },
                 )
+                if isinstance(result, dict):
+                    return str(result.get("reply_text") or "").strip()
                 return str(result or "").strip()
             return ""
 

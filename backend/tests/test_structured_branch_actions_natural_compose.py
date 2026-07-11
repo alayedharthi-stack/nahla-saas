@@ -367,3 +367,29 @@ class TestComposeSurface:
             BranchComposeFacts(action_kind=ACTION_KIND_ARRIVAL_SOFT),
         )
         assert len(fb) <= 4
+
+    def test_provider_dict_reply_text_extraction(self) -> None:
+        async def _dict_llm(_bundle: PersonaFactsBundle) -> str:
+            return "{'ignored': True}"  # should not be used when provider returns dict
+
+        async def _provider_style(bundle: PersonaFactsBundle) -> str:
+            # Simulate _default_llm extraction path via stub callable
+            result = {"reply_text": "loc:location:معرض", "provider": "openai_compatible"}
+            return str(result.get("reply_text") or "").strip()
+
+        facts = BranchComposeFacts(
+            action_kind=ACTION_KIND_LOCATION,
+            customer_message=MSG_LOCATION,
+            branch_name=BRANCH_A,
+            maps_cta_available=True,
+        )
+        out = _run(
+            try_compose_branch_action(
+                facts,
+                tenant_id=TENANT_A,
+                llm_callable=_provider_style,
+            )
+        )
+        assert out.compose_source == "persona_llm"
+        assert "provider" not in out.text
+        assert out.text.startswith("loc:")
