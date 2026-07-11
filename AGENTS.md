@@ -83,6 +83,51 @@ The goal is **natural conversation**, not scripted conversation.
 
 ---
 
+## Mandatory Natural Language Rule
+
+Hardcoded **customer-facing conversational templates** are prohibited in normal AI runtime flows.
+
+The platform must pass **trusted facts** and **structured actions** to the LLM. The LLM must compose customer-facing wording naturally (tone, greetings, apologies, transitions, concise context-aware phrasing).
+
+**Do not add or use in normal runtime paths:**
+
+- Fixed greetings, apologies, or thanks
+- Fixed showroom/location paragraphs or arrival replies
+- Fixed employee-contact sentences
+- Deterministic prose builders that only substitute merchant facts (name, branch, URL, phone)
+- Reusable canned conversational paragraphs or template pools hidden inside runtime code
+
+**Before adding any customer-facing text constant, ask:**
+
+> Is this exact wording required by law, security, protocol, safety, or an explicitly approved merchant/system template?
+
+If **no** — do not add fixed wording; pass structured facts to a grounded compose surface and let the LLM phrase the response.
+
+### Allowed exceptions only
+
+1. Nahla Templates Library
+2. Templates explicitly created or approved by the merchant
+3. Official WhatsApp/Meta templates
+4. OTP / authentication messages
+5. Legally required notices
+6. Security, payment, consent, or safety notices requiring exact deterministic wording
+7. A **minimal emergency fallback** used only when LLM composition fails
+
+### Emergency fallback requirements
+
+- One short factual line
+- No invented facts
+- Not the normal primary path
+- Metadata must record: `compose_source=fallback_deterministic`, `fallback_reason`, and structured action type
+
+This rule cannot be bypassed for convenience, fewer files, lower latency, or easier testing.
+
+### Testing guidance
+
+Assert **behavior and structured delivery** (CTA URL, vCard payload, routing, metadata, tenant isolation). Do **not** assert exact Arabic sentences unless the exact phrase is the bug under test.
+
+---
+
 ## Platform-Wide Thinking
 
 Every fix must solve the **root cause at the platform level**.
