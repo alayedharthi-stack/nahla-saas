@@ -87,6 +87,17 @@ def inbound_exempt_from_availability_rewrite(
     if browse_alternatives_requested(raw):
         return True
     try:
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            extract_inquiry_product_query,
+            is_open_category_inquiry_turn,
+        )
+
+        inquiry_q = extract_inquiry_product_query(raw)
+        if is_open_category_inquiry_turn(raw, inquiry_q):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional open-inquiry gate import
+        pass
+    try:
         from modules.ai.brain.commerce.product_label_hygiene import (  # noqa: PLC0415
             is_conversational_non_product_inbound,
             is_negative_logistics_or_contact_context,

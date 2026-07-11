@@ -190,6 +190,7 @@ def product_browse_negative_context_reason(message: str) -> str:
 _INQUIRY_PRODUCT_QUERY_RE = re.compile(
     r"(?:"
     r"استفسار\s*عن|استفسر\s*عن|"
+    r"عندي\s+سؤال\s*عن|عندي\s+استفسار\s*عن|"
     r"اريد\s+معرف(?:ة|ه)|أريد\s+معرف(?:ة|ه)|"
     r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,24}(?:اعرف|أعرف|استفسر|استفسار)(?:\s*عن)?"
     r")\s+(.{2,40})",
@@ -199,6 +200,7 @@ _INQUIRY_PRODUCT_QUERY_RE = re.compile(
 _INQUIRY_PHRASING_RE = re.compile(
     r"(?:"
     r"استفسار\s*عن|استفسر\s*عن|"
+    r"عندي\s+سؤال\s*عن|عندي\s+استفسار\s*عن|"
     r"اريد\s+معرف(?:ة|ه)|أريد\s+معرف(?:ة|ه)|"
     r"(?:ابغ|ابي|أبغ|أبي|اريد|أريد).{0,24}(?:اعرف|أعرف|استفسر|استفسار)"
     r")",
@@ -234,6 +236,7 @@ _SKU_SPECIFICITY_RE = re.compile(
 )
 
 INQUIRY_CLASS_BROAD = "broad_category_inquiry"
+INQUIRY_CLASS_OPEN = "open_category_inquiry"
 INQUIRY_CLASS_BROWSE = "category_browse"
 INQUIRY_CLASS_SPECIFIC = "specific_product_search"
 
@@ -264,6 +267,8 @@ def has_inquiry_phrasing(message: str) -> bool:
         for p in (
             "استفسار عن",
             "استفسر عن",
+            "عندي سؤال عن",
+            "عندي استفسار عن",
             "ابغى اعرف عن",
             "أبغى أعرف عن",
             "ابي اعرف عن",
@@ -355,6 +360,96 @@ def log_inquiry_class(
         pass
 
 
+def is_open_category_inquiry_turn(message: str, query: str = "") -> bool:
+    """True for open category inquiry — not explicit browse or availability."""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    q = (query or "").strip() or extract_inquiry_product_query(msg)
+    if not q or not is_generic_category_noun(q):
+        return False
+    if not has_inquiry_phrasing(msg) and not extract_inquiry_product_query(msg):
+        return False
+    if _SKU_SPECIFICITY_RE.search(msg):
+        return False
+    if has_types_overview_ask(msg, q):
+        return False
+    if has_explicit_broad_browse_request(msg):
+        return False
+    try:
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            explicit_hard_browse_requested,
+            global_availability_browse_requested,
+        )
+
+        if explicit_hard_browse_requested(msg) or global_availability_browse_requested(msg):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+            CommerceTurnKind,
+            classify_commerce_turn_kind,
+            has_price_inquiry_signal,
+        )
+
+        if has_price_inquiry_signal(msg):
+            return False
+        kind = classify_commerce_turn_kind(msg)
+        if kind in (
+            CommerceTurnKind.AVAILABILITY,
+            CommerceTurnKind.VISUAL_BROWSE,
+            CommerceTurnKind.PRICE_INQUIRY,
+        ):
+            return False
+        # ORDER/BROWSE false positives on «أريد معرفة» / «أبغى استفسار» — inquiry
+        # phrasing and explicit browse guards above are the source of truth.
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _stamp_open_inquiry_category(ctx: BrainContext, category: str) -> None:
+    """Persist category anchor for follow-up turns without forcing catalog browse."""
+    state = getattr(ctx, "state", None)
+    cat = _strip_category_noun(category or "")
+    if state is None or not cat:
+        return
+    try:
+        state.last_browse_query = cat
+        from .commerce.commerce_conversation_guard import (  # noqa: PLC0415
+            apply_commerce_session,
+            load_commerce_session,
+        )
+
+        session = load_commerce_session(state)
+        session.active_category = cat
+        apply_commerce_session(state, session)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _build_open_category_inquiry_decision(
+    ctx: BrainContext,
+    *,
+    query: str,
+) -> Decision:
+    category_hint = _strip_category_noun(query)
+    _stamp_open_inquiry_category(ctx, category_hint or query)
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "open_category_inquiry",
+            "category_scope": category_hint or query,
+            "inquiry_category": category_hint or query,
+            "block_availability_rewrite": True,
+            "response_goal": "open_category_inquiry",
+        },
+        reason="open category inquiry — conversational LLM with category anchor",
+        confidence=0.88,
+    )
+
+
 def classify_product_inquiry_route(
     ctx: BrainContext,
     *,
@@ -403,6 +498,8 @@ def classify_product_inquiry_route(
     generic = is_generic_category_noun(q)
 
     if inquiry_turn and generic and not _SKU_SPECIFICITY_RE.search(msg):
+        if is_open_category_inquiry_turn(msg, q):
+            return INQUIRY_CLASS_OPEN, "llm"
         return INQUIRY_CLASS_BROAD, "search"
 
     if soft_browse and generic:
@@ -421,9 +518,11 @@ def try_broad_category_inquiry_decision(
     inquiry_class: str = "",
     route: str = "",
 ) -> Optional[Decision]:
-    """Route broad category inquiry to catalog-grounded browse search."""
+    """Route broad category inquiry to catalog search or open conversational LLM."""
     if not inquiry_class:
         inquiry_class, route = classify_product_inquiry_route(ctx, query=query)
+    if inquiry_class == INQUIRY_CLASS_OPEN and route == "llm":
+        return _build_open_category_inquiry_decision(ctx, query=query)
     if inquiry_class != INQUIRY_CLASS_BROAD or route != "search":
         return None
 
@@ -533,6 +632,9 @@ def has_explicit_product_browse_intent(
     if has_explicit_broad_browse_request(msg):
         return True
     if has_explicit_product_inquiry(msg):
+        inquiry_q = extract_inquiry_product_query(msg)
+        if inquiry_q and is_open_category_inquiry_turn(msg, inquiry_q):
+            return False
         return True
     if has_types_overview_ask(msg):
         return True
@@ -1047,7 +1149,7 @@ def should_suppress_recommendation_escalation(
             intent_name=intent_name,
         ):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional escalation suppression probe
         pass
 
     try:
@@ -1074,7 +1176,7 @@ def should_suppress_recommendation_escalation(
         )
         if should_block_generic_product_discovery(ctx, message=message):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional generic discovery block probe
         pass
 
     norm = _normalize_ar(message or "")
@@ -1224,7 +1326,7 @@ def try_price_query_decision(
             PriceTurnKind.PRICE_COMMENT,
             PriceTurnKind.UNIT_PRICE_REFERENCE,
         }
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn classifier import
         pass
 
     if focus and (
@@ -1693,7 +1795,9 @@ __all__ = [
     "has_explicit_product_inquiry",
     "has_inquiry_phrasing",
     "has_types_overview_ask",
+    "is_open_category_inquiry_turn",
     "INQUIRY_CLASS_BROAD",
+    "INQUIRY_CLASS_OPEN",
     "INQUIRY_CLASS_BROWSE",
     "INQUIRY_CLASS_SPECIFIC",
     "is_generic_category_noun",

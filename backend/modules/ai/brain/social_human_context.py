@@ -519,12 +519,11 @@ def compute_social_human_context(
     actionable = _has_actionable_substance(raw)
     suppress_greeting = bool(
         actionable
-        or embedded
         or category == SHC_JOB_HELP_REQUEST
         or commercial_primary
     )
     suppress_prepend = bool(
-        suppress_greeting
+        (suppress_greeting and not embedded)
         or (is_pure_social and category in {
             SHC_RELIGIOUS_REMINDER,
             SHC_DUA,
