@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from ..types import INTENT_TRACK_ORDER, Intent
+from ..decision.actions import ACTION_LLM_REPLY, ACTION_TRACK_ORDER
+from ..types import Decision, INTENT_TRACK_ORDER, Intent
 
 _DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 _ZW_RE = re.compile(r"[\u200B-\u200F\u2028-\u202F\u2060-\u206F]")
@@ -168,6 +169,32 @@ _CATALOG_PRODUCT_HINT_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_BARE_ORDER_REF_RE = re.compile(r"^\d{6,12}$")
+_LABELED_ORDER_REF_RE = re.compile(
+    r"(?:طلب(?:ك|كم)?\s*رقم|رقم\s*(?:ال)?طلب(?:ك|كم)?|order\s*(?:#|number)?)\s*[:#]?\s*(\d{6,12})",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_ORDER_SUPPORT_TOPIC_RE = re.compile(
+    r"(?:"
+    r"شحن|توصيل|شحنه|الشحنه|الشحنة|"
+    r"وصل|يوصل|توصل|تأخر|متأخر|"
+    r"طلبي|طلبيتي|محتوى|محتويات|"
+    r"مشكله|مشكلة|خطأ|غلط|"
+    r"carrier|shipping|delivery|shipment|order\s+problem|track"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_EXPLICIT_NEW_SHOP_RE = re.compile(
+    r"(?:"
+    r"أ?بي\s*أ?طلب|اب(?:ي|غ(?:ى|a)?)\s*أ?طلب|"
+    r"أ?ض(?:ف|يف)|اض(?:ف|يف)|"
+    r"اشتري|أشتري|order\s+now|buy\s+now|add\s+to\s+cart"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 # Post-order shipping policy / carrier questions — defer to brain (ACTION_LLM_REPLY).
 _POST_ORDER_SHIPPING_BRAIN_DEFER_RE = re.compile(
@@ -182,6 +209,257 @@ _POST_ORDER_SHIPPING_BRAIN_DEFER_RE = re.compile(
     r")",
     re.UNICODE | re.IGNORECASE,
 )
+
+
+def extract_bare_order_reference(message: str) -> str:
+    """Return a standalone 6–12 digit order reference when the inbound is only digits."""
+    raw = re.sub(r"\s+", "", (message or "").strip())
+    if _BARE_ORDER_REF_RE.match(raw):
+        return raw
+    return ""
+
+
+def extract_order_reference_from_history(
+    history: Optional[List[Any]],
+) -> str:
+    """Pull the most recent customer-supplied order reference from conversation history."""
+    if not history:
+        return ""
+    try:
+        for turn in reversed(history):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("in", "inbound", ""):
+                continue
+            body = str((turn or {}).get("body") or "").strip()
+            if not body:
+                continue
+            labeled = _LABELED_ORDER_REF_RE.search(body)
+            if labeled:
+                return labeled.group(1)
+            bare = extract_bare_order_reference(body)
+            if bare:
+                return bare
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def has_pending_order_reference_evidence(
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """Verified order evidence or an unresolved customer-supplied order reference."""
+    if has_existing_order_evidence(
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        return True
+    return bool(extract_order_reference_from_history(history))
+
+
+def is_order_support_operational_follow_up(
+    message: str,
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """Operational order-support follow-up when a recent order reference exists."""
+    if not has_pending_order_reference_evidence(
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        return False
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if extract_bare_order_reference(raw):
+        return True
+    norm = _norm_ar(raw)
+    if is_order_tracking_follow_up(
+        raw,
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        return True
+    if is_post_order_shipping_brain_defer(raw):
+        return True
+    if _ORDER_SUPPORT_TOPIC_RE.search(norm):
+        return True
+    if _EXISTING_ORDER_MESSAGE_RE.search(norm):
+        return True
+    return False
+
+
+def build_order_support_follow_up_args(
+    *,
+    message: str = "",
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+    order_verified: bool = False,
+) -> Dict[str, Any]:
+    """LLM args for existing-order support when lookup may still be unresolved."""
+    bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
+    order_ref = extract_order_reference_from_history(history) or extract_bare_order_reference(message)
+    if not order_ref:
+        try:
+            from core.active_order_context import resolve_order_reference  # noqa: PLC0415
+
+            order_ref, _mode = resolve_order_reference(
+                commerce_bundle=bundle,
+                state=state,
+                history=history,
+            )
+            if order_ref and _mode == "structured":
+                order_verified = True
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order ref resolve is best-effort
+            pass
+    status = ""
+    try:
+        from core.active_order_context import resolve_order_status  # noqa: PLC0415
+
+        status, _mode = resolve_order_status(
+            commerce_bundle=bundle,
+            state=state,
+            history=history,
+        )
+        if status and _mode == "structured":
+            order_verified = True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order status resolve is best-effort
+        pass
+    return {
+        "topic": "existing_order_support",
+        "order_reference": order_ref,
+        "order_verified": bool(order_verified),
+        "order_status": status,
+        "response_goal": (
+            "existing_order_support — reply in natural Saudi Arabic about the "
+            "customer's existing order using only known facts. If order_verified "
+            "is false, say the reference is not verified yet and ask only for "
+            "the minimum identifier needed. Do NOT promise carrier changes, "
+            "discounts, or mutations. Do NOT open catalog or restart checkout."
+        ),
+    }
+
+
+def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
+    """Route bare/repeated order references and pending-ref follow-ups before social/catalog."""
+    message = str(getattr(ctx, "message", "") or "")
+    history = getattr(ctx, "history", None)
+    state = getattr(ctx, "state", None)
+    commerce_bundle = getattr(ctx, "commerce_bundle", None) or {}
+    inbound_metadata: dict = {}
+    try:
+        profile = getattr(ctx, "profile", None) or {}
+        if isinstance(profile, dict):
+            inbound_metadata = dict(profile.get("inbound_metadata") or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — inbound metadata probe is best-effort
+        inbound_metadata = {}
+
+    bare_ref = extract_bare_order_reference(message)
+    if bare_ref:
+        return Decision(
+            action=ACTION_TRACK_ORDER,
+            args={"order_number": bare_ref, "order_id": bare_ref},
+            reason="bare order reference — existing-order lookup",
+            confidence=0.98,
+        )
+
+    pending_ref = extract_order_reference_from_history(history)
+    has_pending = has_pending_order_reference_evidence(
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    )
+    if not has_pending:
+        return None
+
+    try:
+        from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+            should_use_generative_tracking_follow_up,
+        )
+
+        if should_use_generative_tracking_follow_up(
+            message,
+            history=history,
+            state=state,
+            commerce_bundle=commerce_bundle,
+        ):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up defer is best-effort
+        pass
+
+    if is_order_support_operational_follow_up(
+        message,
+        state=state,
+        history=history,
+        commerce_bundle=commerce_bundle,
+    ):
+        if is_post_order_shipping_brain_defer(message) and has_existing_order_evidence(
+            state=state,
+            history=history,
+            commerce_bundle=commerce_bundle,
+        ):
+            return None
+        if is_post_order_shipping_brain_defer(message):
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args=build_order_support_follow_up_args(
+                    message=message,
+                    state=state,
+                    history=history,
+                    commerce_bundle=commerce_bundle,
+                ),
+                reason="pending order reference — shipping/carrier support follow-up",
+                confidence=0.94,
+            )
+        if is_explicit_order_tracking_request(
+            message,
+            state=state,
+            history=history,
+            commerce_bundle=commerce_bundle,
+            inbound_metadata=inbound_metadata,
+        ):
+            ref = pending_ref or extract_bare_order_reference(message)
+            return Decision(
+                action=ACTION_TRACK_ORDER,
+                args={"order_number": ref, "order_id": ref},
+                reason="pending order reference — tracking follow-up",
+                confidence=0.96,
+            )
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args=build_order_support_follow_up_args(
+                message=message,
+                state=state,
+                history=history,
+                commerce_bundle=commerce_bundle,
+            ),
+            reason="pending order reference — operational follow-up",
+            confidence=0.92,
+        )
+
+    if pending_ref and not _EXPLICIT_NEW_SHOP_RE.search(_norm_ar(message)):
+        norm = _norm_ar(message)
+        if _EXISTING_ORDER_MESSAGE_RE.search(norm) or _ORDER_SUPPORT_TOPIC_RE.search(norm):
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args=build_order_support_follow_up_args(
+                    message=message,
+                    state=state,
+                    history=history,
+                    commerce_bundle=commerce_bundle,
+                ),
+                reason="pending order reference — order clarification",
+                confidence=0.9,
+            )
+    return None
 
 
 def is_general_shipping_duration_inquiry(message: str) -> bool:
@@ -290,13 +568,15 @@ def is_order_tracking_follow_up(
     raw = (message or "").strip()
     if not raw:
         return False
+    if extract_bare_order_reference(raw):
+        return True
     if is_pre_order_shipping_inquiry(raw):
         return False
     norm = _norm_ar(raw)
     if _PURE_BROWSE_RE.search(norm):
         return False
 
-    order_evidence = has_existing_order_evidence(
+    order_evidence = has_pending_order_reference_evidence(
         state=state,
         history=history,
         commerce_bundle=commerce_bundle,
@@ -424,6 +704,10 @@ def boost_track_order_intent(
     if rule_intent and rule_intent.name == INTENT_TRACK_ORDER:
         return rule_intent
     slots = dict(getattr(rule_intent, "slots", None) or {})
+    bare_ref = extract_bare_order_reference(message)
+    if bare_ref:
+        slots.setdefault("order_id", bare_ref)
+        slots.setdefault("order_number", bare_ref)
     return Intent(
         name=INTENT_TRACK_ORDER,
         confidence=0.97,
@@ -452,13 +736,19 @@ def resolve_order_tracking_guard_reply(
 
 __all__ = [
     "boost_track_order_intent",
+    "build_order_support_follow_up_args",
+    "extract_bare_order_reference",
+    "extract_order_reference_from_history",
     "has_existing_order_evidence",
+    "has_pending_order_reference_evidence",
     "is_explicit_order_tracking_request",
     "is_general_shipping_duration_inquiry",
+    "is_order_support_operational_follow_up",
     "is_order_tracking_follow_up",
     "is_post_order_shipping_brain_defer",
     "is_pre_order_shipping_inquiry",
     "is_shipping_tracking_non_product_label",
     "resolve_order_tracking_guard_reply",
     "should_exempt_from_availability_rewrite",
+    "try_order_reference_continuity_decision",
 ]

@@ -234,6 +234,16 @@ def evaluate_duplicate_fragment_turn(
     Short repeated inbound fragments from the same customer should not each
     spawn a full brain turn with catalog fallback.
     """
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            extract_bare_order_reference,
+        )
+
+        if extract_bare_order_reference(text):
+            return DuplicateFragmentDecision(process_turn=True)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — bare order ref probe is best-effort
+        pass
+
     norm = _normalize(text)
     if not norm or len(norm) > max_len:
         return DuplicateFragmentDecision(process_turn=True)

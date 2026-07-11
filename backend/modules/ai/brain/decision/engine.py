@@ -744,6 +744,28 @@ class DefaultDecisionEngine:
                 confidence=0.85,
             )
 
+        # ── -0.44 Order reference continuity (before social/catalog drift) ──
+        try:
+            from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                try_order_reference_continuity_decision,
+            )
+
+            _ord_ref_dec = try_order_reference_continuity_decision(ctx)
+            if _ord_ref_dec is not None:
+                logger.info(
+                    "[ORDER_REF_CONTINUITY] route=%s tenant=%s preview=%r",
+                    _ord_ref_dec.action,
+                    getattr(ctx, "tenant_id", None),
+                    (ctx.message or "")[:60],
+                )
+                return _ord_ref_dec
+        except Exception as _ord_ref_exc:  # noqa: BLE001  # noqa: silent-ok — order ref continuity must not block decide
+            logger.debug(
+                "[ORDER_REF_CONTINUITY] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _ord_ref_exc,
+            )
+
         # ── 0. Semantic turn interpretation (Phase 1) ───────────────────
         # Context-aware repair for short/ambiguous replies. Runs BEFORE
         # social/courtesy routing so "كل الحجام" after a size question
@@ -1342,9 +1364,22 @@ class DefaultDecisionEngine:
                     intent.name,
                     (ctx.message or "")[:60],
                 )
+                from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                    extract_bare_order_reference,
+                    extract_order_reference_from_history,
+                )
+
+                _track_ref = (
+                    extract_bare_order_reference(ctx.message or "")
+                    or extract_order_reference_from_history(getattr(ctx, "history", None))
+                    or str((intent.slots or {}).get("order_id") or "").strip()
+                )
+                _track_args = {"order_id": _track_ref}
+                if _track_ref:
+                    _track_args["order_number"] = _track_ref
                 return Decision(
                     action=ACTION_TRACK_ORDER,
-                    args={"order_id": (intent.slots or {}).get("order_id", "")},
+                    args=_track_args,
                     reason="order_tracking_guard — existing-order follow-up",
                     confidence=0.97,
                 )
@@ -2010,6 +2045,19 @@ class DefaultDecisionEngine:
             INTENT_ONLINE_STORE_INQUIRY,
             INTENT_ASK_LOCATION, INTENT_ASK_OWNER_CONTACT, INTENT_ASK_PAYMENT_INFO,
         ):
+            try:
+                from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                    has_pending_order_reference_evidence,
+                )
+
+                if has_pending_order_reference_evidence(
+                    state=state,
+                    history=getattr(ctx, "history", None),
+                    commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                ):
+                    _candidates = []
+            except Exception:  # noqa: BLE001
+                pass
             if _block_stale_resume("pending_candidates"):
                 _candidates = []
             _matched_product = _match_product_from_message(ctx.message, _candidates) if _candidates else None
