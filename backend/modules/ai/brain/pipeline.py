@@ -3101,32 +3101,48 @@ class MerchantBrain:
         # acknowledgment so the salaam is honoured. After that we mark the
         # conversation as greeted so the welcome card cannot fire later.
         try:
+            from modules.ai.brain.compose.greeting_etiquette import (  # noqa: PLC0415
+                customer_message_for_etiquette,
+                detect_salam_level,
+                reply_already_has_salam_return,
+            )
+
             _embedded = bool(getattr(ctx.intent, "slots", {}).get("embedded_greeting"))
             _shc = getattr(ctx, "social_human_context", None)
             _suppress_prepend = bool(
                 _shc is not None
                 and getattr(_shc, "suppress_embedded_greeting_prepend", False)
             )
-            if (
+            _cust_msg = customer_message_for_etiquette(ctx)
+            _salam = detect_salam_level(_cust_msg)
+            _intent_name = str(getattr(ctx.intent, "name", "") or "")
+            _mixed_greeting_turn = bool(
                 _embedded
+                or (
+                    _salam
+                    and _intent_name not in {"greeting", "social", "social_interaction"}
+                )
+            )
+            if (
+                _mixed_greeting_turn
                 and not _suppress_prepend
-                and not new_state.greeted
                 and decision.action not in {ACTION_GREET, ACTION_SOCIAL_REPLY, ACTION_OUT_OF_SCOPE}
                 and isinstance(reply, str)
                 and reply.strip()
+                and not reply_already_has_salam_return(reply)
             ):
                 reply = _prepend_first_contact_salaam(reply, ctx)
-                new_state.greeted = True
-                # Composer must not try to "re-introduce identity" later in
-                # the same conversation either.
-                new_state.assistant_identity_introduced = True
+                if not new_state.greeted:
+                    new_state.greeted = True
+                    new_state.assistant_identity_introduced = True
                 result.data["welcome_gate"] = "embedded_greeting_acknowledged"
                 logger.info(
                     "[WELCOME_GATE] embedded_greeting acknowledged | tenant=%s "
-                    "intent=%s action=%s",
+                    "intent=%s action=%s salam=%s",
                     tenant_id,
-                    getattr(ctx.intent, "name", "?"),
+                    _intent_name or "?",
                     decision.action,
+                    bool(_salam),
                 )
         except Exception as _wg_exc:  # noqa: BLE001 — never break a turn
             logger.warning("[WELCOME_GATE] prepend skipped: %s", _wg_exc)

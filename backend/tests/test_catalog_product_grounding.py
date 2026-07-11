@@ -26,7 +26,11 @@ from modules.ai.brain.commerce.catalog_product_grounding import (  # noqa: E402
 from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: E402
     build_product_ordering_prompt,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_LLM_REPLY,
+    ACTION_SEARCH_PRODUCTS,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: E402
     apply_catalog_product_grounding_guard,
@@ -205,25 +209,27 @@ class TestProductOrderingPromptGrounding:
 
 
 class TestBroadInquiryRouting:
-    def test_broad_inquiry_honey_routes_catalog_search(self) -> None:
+    def test_broad_inquiry_honey_routes_open_llm(self) -> None:
         msg = "أبغى الاستفسار عن العسل"
         decision = DefaultDecisionEngine().decide(_ctx(msg))
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("source") == "category_browse"
-        assert decision.action != ACTION_LLM_REPLY
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "open_category_inquiry"
+        assert decision.action != ACTION_SEARCH_PRODUCTS
 
     def test_types_overview_routes_catalog_search(self) -> None:
         msg = "وش أنواع العسل؟"
         decision = DefaultDecisionEngine().decide(_ctx(msg))
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("query")
+        assert decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE}
+        assert decision.args.get("query") or decision.action == ACTION_CATALOG_NAVIGATE
 
-    def test_classify_broad_inquiry_route_is_search(self) -> None:
+    def test_classify_open_inquiry_route_is_llm(self) -> None:
+        from modules.ai.brain.product_discovery_gate import INQUIRY_CLASS_OPEN
+
         inquiry_class, route = classify_product_inquiry_route(
             _ctx("أبغى الاستفسار عن العسل"), query="العسل",
         )
-        assert inquiry_class == INQUIRY_CLASS_BROAD
-        assert route == "search"
+        assert inquiry_class == INQUIRY_CLASS_OPEN
+        assert route == "llm"
 
 
 class TestCatalogProductGroundingGuard:

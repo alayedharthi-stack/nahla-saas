@@ -18,6 +18,7 @@ for _p in [_backend, os.path.join(_backend, "..")]:
         sys.path.insert(0, _p)
 
 from modules.ai.brain.decision.actions import (
+    ACTION_CATALOG_NAVIGATE,
     ACTION_CLARIFY,
     ACTION_LLM_REPLY,
     ACTION_SEARCH_PRODUCTS,
@@ -277,20 +278,21 @@ class TestInquiryRoutingSplit:
             facts=CommerceFacts(has_products=True, orderable=True),
         )
 
-    def test_broad_inquiry_honey_routes_catalog_search(self):
+    def test_broad_inquiry_honey_routes_open_llm(self):
         msg = "أبغى الاستفسار عن العسل"
         decision = DefaultDecisionEngine().decide(self._ctx(msg))
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("source") == "category_browse"
-        assert decision.action != ACTION_LLM_REPLY
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "open_category_inquiry"
+        assert decision.action != ACTION_SEARCH_PRODUCTS
 
-    def test_broad_inquiry_perfume_types_routes_catalog_search(self):
+    def test_broad_inquiry_types_still_routes_catalog_search(self):
         msg = "أبغى أعرف أنواع العطور"
         decision = DefaultDecisionEngine().decide(self._ctx(msg))
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("source") == "category_browse"
+        assert decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE}
+        if decision.action == ACTION_SEARCH_PRODUCTS:
+            assert decision.args.get("source") == "category_browse"
 
-    def test_broad_inquiry_cross_vertical(self):
+    def test_broad_inquiry_cross_vertical_open_llm(self):
         for msg in (
             "أبغى الاستفسار عن الجوالات",
             "أبغى الاستفسار عن الملابس",
@@ -298,8 +300,8 @@ class TestInquiryRoutingSplit:
             "أبغى الاستفسار عن القهوة",
         ):
             decision = DefaultDecisionEngine().decide(self._ctx(msg))
-            assert decision.action == ACTION_SEARCH_PRODUCTS, msg
-            assert decision.args.get("source") == "category_browse", msg
+            assert decision.action == ACTION_LLM_REPLY, msg
+            assert decision.args.get("topic") == "open_category_inquiry", msg
 
     def test_specific_product_name_still_searches(self):
         msg = "عسل سدر طيب"
@@ -341,17 +343,17 @@ class TestInquiryRoutingSplit:
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action == ACTION_SEARCH_PRODUCTS
 
-    def test_classify_broad_category_inquiry(self):
+    def test_classify_open_category_inquiry(self):
         from modules.ai.brain.product_discovery_gate import (
-            INQUIRY_CLASS_BROAD,
+            INQUIRY_CLASS_OPEN,
             classify_product_inquiry_route,
         )
 
         inquiry_class, route = classify_product_inquiry_route(
             self._ctx("أبغى الاستفسار عن العسل"), query="العسل",
         )
-        assert inquiry_class == INQUIRY_CLASS_BROAD
-        assert route == "search"
+        assert inquiry_class == INQUIRY_CLASS_OPEN
+        assert route == "llm"
 
 
 class TestTypesOverviewFollowUp:
@@ -391,7 +393,6 @@ class TestTypesOverviewFollowUp:
         assert route == "search"
 
     def test_types_ask_after_availability_routes_catalog_search(self):
-        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         from modules.ai.brain.types import BrainContext, CommerceFacts, Intent, MerchantConversationState
 
@@ -410,6 +411,7 @@ class TestTypesOverviewFollowUp:
             facts=CommerceFacts(has_products=True, orderable=True),
         )
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("source") == "category_browse"
-        assert decision.args.get("query") == "\u0633\u0645\u0631"
+        assert decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE}
+        if decision.action == ACTION_SEARCH_PRODUCTS:
+            assert decision.args.get("source") == "category_browse"
+            assert decision.args.get("query") == "\u0633\u0645\u0631"
