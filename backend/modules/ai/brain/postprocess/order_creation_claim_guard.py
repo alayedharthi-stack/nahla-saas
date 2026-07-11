@@ -28,6 +28,41 @@ _ORDER_CONFIRMED_RE = re.compile(
     r"تم\s*تأكيد\s*الطلب",
     re.UNICODE | re.IGNORECASE,
 )
+_COMPENSATION_COMMITMENT_RE = re.compile(
+    r"(?:تعويض|compensation)",
+    re.UNICODE | re.IGNORECASE,
+)
+_APPLIED_DISCOUNT_CLAIM_RE = re.compile(
+    r"(?:"
+    r"تم\s*(?:تطبيق|إعطاء|منح|خصم)|"
+    r"أعطيناك|منحناك|طبقنا|خصمنا|"
+    r"applied\s+(?:the\s+)?discount|discount\s+applied"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+_UNGROUNDED_DISCOUNT_PROMISE_RE = re.compile(
+    r"(?:"
+    r"\d+\s*%|"
+    r"خصم\s*\d+|"
+    r"discount\s*(?:of|for)?\s*\d+"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CompensationEvidence:
+    coupon_id: str = ""
+    coupon_offered: bool = False
+    discount_applied: bool = False
+    compensation_approved: bool = False
+    compensation_executed: bool = False
+
+    def allows_applied_discount_claim(self) -> bool:
+        return self.discount_applied or self.compensation_executed
+
+    def allows_compensation_commitment(self) -> bool:
+        return self.compensation_approved and self.compensation_executed
 
 
 @dataclass(frozen=True)
@@ -125,6 +160,86 @@ def _strip_unsupported_order_claims(text: str) -> str:
     return cleaned
 
 
+def _trusted_compensation_evidence(
+    *,
+    brain_state: Optional[Dict[str, Any]] = None,
+    order_prep: Optional[Dict[str, Any]] = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
+) -> CompensationEvidence:
+    coupon_id = ""
+    coupon_offered = False
+    discount_applied = False
+    compensation_approved = False
+    compensation_executed = False
+
+    for source in (brain_state, order_prep, commerce_bundle):
+        if not isinstance(source, dict):
+            continue
+        if not coupon_id:
+            coupon_id = str(
+                source.get("coupon_id")
+                or source.get("trusted_coupon_code")
+                or source.get("approved_coupon_id")
+                or ""
+            ).strip()
+        if source.get("coupon_offered") is True:
+            coupon_offered = True
+        if source.get("discount_applied") is True:
+            discount_applied = True
+        if source.get("approved_compensation_policy") is True:
+            compensation_approved = True
+        exec_log = source.get("last_execution") or source.get("action_execution")
+        if isinstance(exec_log, dict):
+            action = str(exec_log.get("action") or "").strip().lower()
+            if exec_log.get("success") is True:
+                if action in {"apply_coupon", "apply_discount"}:
+                    discount_applied = True
+                if action == "grant_compensation":
+                    compensation_executed = True
+
+    if coupon_id and not discount_applied:
+        coupon_offered = True
+    return CompensationEvidence(
+        coupon_id=coupon_id,
+        coupon_offered=coupon_offered,
+        discount_applied=discount_applied,
+        compensation_approved=compensation_approved,
+        compensation_executed=compensation_executed,
+    )
+
+
+def _unsupported_compensation_claim_kinds(
+    reply: str,
+    evidence: CompensationEvidence,
+) -> tuple[str, ...]:
+    kinds: list[str] = []
+    if _APPLIED_DISCOUNT_CLAIM_RE.search(reply) and not evidence.allows_applied_discount_claim():
+        kinds.append("applied_discount_claim")
+    if _UNGROUNDED_DISCOUNT_PROMISE_RE.search(reply) and not evidence.allows_applied_discount_claim():
+        kinds.append("discount_promise")
+    if _COMPENSATION_COMMITMENT_RE.search(reply) and not evidence.allows_compensation_commitment():
+        kinds.append("compensation_commitment")
+    return tuple(kinds)
+
+
+def _strip_unsupported_compensation_claims(text: str, kinds: tuple[str, ...]) -> str:
+    kept: list[str] = []
+    for chunk in re.split(r"(?<=[.!?؟،])\s+|\n+", text or ""):
+        part = chunk.strip()
+        if not part:
+            continue
+        blocked = False
+        if "applied_discount_claim" in kinds and _APPLIED_DISCOUNT_CLAIM_RE.search(part):
+            blocked = True
+        if "discount_promise" in kinds and _UNGROUNDED_DISCOUNT_PROMISE_RE.search(part):
+            blocked = True
+        if "compensation_commitment" in kinds and _COMPENSATION_COMMITMENT_RE.search(part):
+            blocked = True
+        if not blocked:
+            kept.append(part)
+    return " ".join(kept).strip()
+
+
 def apply_order_creation_claim_guard(
     reply: str,
     *,
@@ -134,10 +249,32 @@ def apply_order_creation_claim_guard(
     order_prep: Optional[Dict[str, Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
     state: Any = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> OrderCreationClaimGuardResult:
     original = str(reply or "")
     if not original.strip():
         return OrderCreationClaimGuardResult(reply=original, replaced=False)
+
+    compensation_evidence = _trusted_compensation_evidence(
+        brain_state=brain_state,
+        order_prep=order_prep,
+        commerce_bundle=commerce_bundle,
+    )
+    blocked_kinds = _unsupported_compensation_claim_kinds(original, compensation_evidence)
+    if blocked_kinds:
+        stripped = _strip_unsupported_compensation_claims(original, blocked_kinds)
+        if stripped != original:
+            logger.info(
+                "[ORDER_CREATION_CLAIM_GUARD] compensation_scrub tenant=%s conversation=%s kinds=%s",
+                tenant_id,
+                conversation_id,
+                blocked_kinds,
+            )
+            return OrderCreationClaimGuardResult(
+                reply=stripped,
+                replaced=True,
+                reason="untrusted_compensation_claim",
+            )
 
     evidence = _resolve_evidence_with_persisted_draft(
         db=db,
