@@ -34,6 +34,7 @@ SOCIAL_THANKS = "social_thanks"
 SOCIAL_DUA = "social_dua"
 SOCIAL_PHATIC = "social_phatic"
 PRODUCT_KNOWLEDGE_FACTS = "product_knowledge_facts"
+EXISTING_ORDER_SUPPORT = "existing_order_support"
 
 _BYPASS_INTENTS = frozenset(
     {
@@ -240,14 +241,83 @@ def is_explicit_payment_info_request(
         return False
 
 
+def _detect_pending_order_support_intent(
+    message: str,
+    *,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    history: Optional[Sequence[Any]] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Bypass stale checkout when recent order-reference context owns the turn."""
+    hist = list(history or [])
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            has_pending_order_reference_evidence,
+            is_order_support_operational_follow_up,
+        )
+
+        has_pending = has_pending_order_reference_evidence(
+            state=brain_state,
+            history=hist,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support probe must not block checkout
+        return ""
+
+    if not has_pending:
+        return ""
+
+    semantic = str(message or "").strip()
+    try:
+        from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+            is_placed_order_statement,
+        )
+
+        if semantic and is_placed_order_statement(semantic):
+            return EXISTING_ORDER_SUPPORT
+        if semantic and is_order_support_operational_follow_up(
+            semantic,
+            state=brain_state,
+            history=hist,
+        ):
+            return EXISTING_ORDER_SUPPORT
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support probe must not block checkout
+        return ""
+
+    try:
+        from modules.ai.media.routing_guard import (  # noqa: PLC0415
+            is_audio_without_trusted_transcript,
+        )
+
+        if is_audio_without_trusted_transcript(
+            inbound_metadata,
+            semantic_message=semantic,
+        ):
+            return EXISTING_ORDER_SUPPORT
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — audio transcript probe must not block checkout
+        return ""
+
+    return ""
+
+
 def detect_explicit_non_checkout_intent(
     message: str,
     inbound_metadata: Optional[Dict[str, Any]] = None,
     *,
     order_prep: Optional[Dict[str, Any]] = None,
     missing_fields: Optional[Sequence[str]] = None,
+    history: Optional[Sequence[Any]] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return a bypass intent key when the current turn is not checkout continuation."""
+    pending_support = _detect_pending_order_support_intent(
+        message,
+        inbound_metadata=inbound_metadata,
+        history=history,
+        brain_state=brain_state,
+    )
+    if pending_support:
+        return pending_support
+
     text = str(message or "").strip()
     if not text:
         return ""
@@ -323,6 +393,7 @@ def is_checkout_continuation_turn(
     brain_state: Optional[Dict[str, Any]] = None,
     missing_fields: Optional[Sequence[str]] = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    history: Optional[Sequence[Any]] = None,
 ) -> bool:
     """True when the customer is answering the active checkout prompt."""
     text = str(message or "").strip()
@@ -340,6 +411,8 @@ def is_checkout_continuation_turn(
         inbound_metadata,
         order_prep=prep,
         missing_fields=missing,
+        history=history,
+        brain_state=brain_state,
     ):
         return False
 
@@ -412,6 +485,7 @@ def evaluate_stale_checkout_suppression(
     order_prep: Optional[Dict[str, Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
     missing_fields: Optional[Sequence[str]] = None,
+    history: Optional[Sequence[Any]] = None,
     checkout_active: bool,
     draft_active: bool,
 ) -> CheckoutSuppressionDecision:
@@ -426,6 +500,7 @@ def evaluate_stale_checkout_suppression(
         brain_state=brain_state,
         missing_fields=missing_fields,
         inbound_metadata=inbound_metadata,
+        history=history,
     ):
         return CheckoutSuppressionDecision(
             suppress=False,
@@ -437,6 +512,8 @@ def evaluate_stale_checkout_suppression(
         inbound_metadata,
         order_prep=prep,
         missing_fields=missing_fields,
+        history=history,
+        brain_state=brain_state,
     )
     if not detected:
         return CheckoutSuppressionDecision(suppress=False, reason="no_explicit_intent")
@@ -454,6 +531,7 @@ def should_suppress_stale_checkout_for_message(
     inbound_metadata: Optional[Dict[str, Any]] = None,
     order_prep: Optional[Dict[str, Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
+    history: Optional[Sequence[Any]] = None,
     checkout_active: bool,
     draft_active: bool = False,
 ) -> bool:
@@ -462,6 +540,7 @@ def should_suppress_stale_checkout_for_message(
         inbound_metadata=inbound_metadata,
         order_prep=order_prep,
         brain_state=brain_state,
+        history=history,
         checkout_active=checkout_active,
         draft_active=draft_active,
     )
@@ -489,6 +568,7 @@ def log_checkout_suppressed_by_explicit_intent(
 
 __all__ = [
     "CheckoutSuppressionDecision",
+    "EXISTING_ORDER_SUPPORT",
     "PAYMENT_BARCODE_IMAGE_REQUEST",
     "PRODUCT_KNOWLEDGE_FACTS",
     "SOCIAL_GREETING",

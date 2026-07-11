@@ -263,6 +263,16 @@ def try_handle_order_flow_v2(
 
     meta = dict(inbound_metadata or {})
     text = str(message or "").strip()
+    try:
+        from modules.ai.media.routing_guard import resolve_semantic_customer_message  # noqa: PLC0415
+
+        text = resolve_semantic_customer_message(
+            brain_text=text,
+            inbound_metadata=meta,
+            inbound_normalized_type=inbound_normalized_type,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block checkout owner
+        text = str(message or "").strip()
     conversation, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
     live, shadow_log, _op_reason = operational_tuple(
         db,
@@ -329,12 +339,25 @@ def try_handle_order_flow_v2(
             log_checkout_suppressed_by_explicit_intent,
         )
 
+        recent_history: List[Any] = []
+        try:
+            from core.conversation_engine import StateManager  # noqa: PLC0415
+
+            recent_history = StateManager.load_history(
+                db,
+                phone=customer_phone,
+                tenant_id=tenant_id,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — history load must not block checkout owner
+            recent_history = []
+
         suppression = evaluate_stale_checkout_suppression(
             message=text,
             inbound_metadata=meta,
             order_prep={**order_prep, **patch},
             brain_state=bs,
             missing_fields=_missing({**order_prep, **patch}),
+            history=recent_history,
             checkout_active=True,
             draft_active=True,
         )
