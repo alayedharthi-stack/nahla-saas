@@ -135,38 +135,6 @@ def evaluate_staff_contact_policy(
     if not staff_contact_policy_enabled():
         return None
 
-    from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
-        should_defer_contact_routing_for_checkout_slot,
-    )
-
-    if should_defer_contact_routing_for_checkout_slot(
-        db,
-        tenant_id=int(tenant_id or 0),
-        customer_phone=customer_phone or "",
-        message=message or "",
-    ):
-        logger.info(
-            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_slot",
-            tenant_id,
-        )
-        return None
-
-    from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
-        should_defer_staff_location_for_checkout_route,
-    )
-
-    if should_defer_staff_location_for_checkout_route(
-        db,
-        tenant_id=int(tenant_id or 0),
-        customer_phone=customer_phone or "",
-        message=message or "",
-    ):
-        logger.info(
-            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_route_owner",
-            tenant_id,
-        )
-        return None
-
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
         MSG_AMBIGUOUS_STAFF_CLARIFY,
         _CONTACT_ASK_RE,
@@ -181,13 +149,6 @@ def evaluate_staff_contact_policy(
         should_defer_contact_policies_for_commerce,
         staff_policy_applies_to_named_request,
     )
-
-    if should_defer_contact_policies_for_commerce(message or ""):
-        logger.info(
-            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=commerce_flow",
-            tenant_id,
-        )
-        return None
 
     try:
         from modules.ai.brain.commerce.staff_contact_media_source_guard import (  # noqa: PLC0415
@@ -205,12 +166,15 @@ def evaluate_staff_contact_policy(
 
     _continuity_synthetic = ""
     _brain_turn = 0
+    _continuity = None
+    _skip_checkout_defer = False
     if customer_phone:
         try:
             from core.order_flow import _load_brain_state  # noqa: PLC0415
             from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
                 capture_pending_target_from_inbound,
                 clear_pending_contact_target,
+                is_bare_who_to_call_followup,
                 persist_pending_contact_target,
                 resolve_pending_contact_followup,
                 should_clear_pending_on_topic_switch,
@@ -243,6 +207,76 @@ def evaluate_staff_contact_policy(
                         target=_inbound_target,
                     )
 
+            if is_bare_who_to_call_followup(message or ""):
+                _continuity = resolve_pending_contact_followup(
+                    db,
+                    tenant_id=int(tenant_id or 0),
+                    customer_phone=str(customer_phone or ""),
+                    message=message or "",
+                    store_contact_phone=store_contact_phone,
+                )
+                if _continuity is not None:
+                    _skip_checkout_defer = True
+                    logger.info(
+                        "[STAFF_CONTACT_POLICY] tenant=%s checkout_override=true "
+                        "reason=operational_who_to_call_continuity",
+                        tenant_id,
+                    )
+        except Exception as _cont_exc:  # noqa: BLE001
+            logger.exception(
+                "[STAFF_CONTACT_POLICY] continuity_failed tenant=%s err=%s",
+                tenant_id,
+                _cont_exc,
+            )
+            _continuity = None
+            _skip_checkout_defer = False
+
+    if not _skip_checkout_defer:
+        from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+            should_defer_contact_routing_for_checkout_slot,
+        )
+
+        if should_defer_contact_routing_for_checkout_slot(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            message=message or "",
+        ):
+            logger.info(
+                "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_slot",
+                tenant_id,
+            )
+            return None
+
+        from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
+            should_defer_staff_location_for_checkout_route,
+        )
+
+        if should_defer_staff_location_for_checkout_route(
+            db,
+            tenant_id=int(tenant_id or 0),
+            customer_phone=customer_phone or "",
+            message=message or "",
+        ):
+            logger.info(
+                "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=checkout_route_owner",
+                tenant_id,
+            )
+            return None
+
+    if should_defer_contact_policies_for_commerce(message or ""):
+        logger.info(
+            "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=commerce_flow",
+            tenant_id,
+        )
+        return None
+
+    if customer_phone and _continuity is None:
+        try:
+            from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+                resolve_pending_contact_followup,
+            )
+
             _continuity = resolve_pending_contact_followup(
                 db,
                 tenant_id=int(tenant_id or 0),
@@ -257,8 +291,6 @@ def evaluate_staff_contact_policy(
                 _cont_exc,
             )
             _continuity = None
-    else:
-        _continuity = None
 
     request = classify_staff_contact_request(
         _intent_msg,
