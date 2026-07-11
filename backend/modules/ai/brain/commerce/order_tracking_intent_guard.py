@@ -380,6 +380,21 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
     if not has_pending:
         return None
 
+    try:
+        from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
+            should_use_generative_tracking_follow_up,
+        )
+
+        if should_use_generative_tracking_follow_up(
+            message,
+            history=history,
+            state=state,
+            commerce_bundle=commerce_bundle,
+        ):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up defer is best-effort
+        pass
+
     if is_order_support_operational_follow_up(
         message,
         state=state,
