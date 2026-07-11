@@ -241,7 +241,7 @@ def evaluate_duplicate_fragment_turn(
 
         if extract_bare_order_reference(text):
             return DuplicateFragmentDecision(process_turn=True)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — bare order ref probe is best-effort
         pass
 
     norm = _normalize(text)

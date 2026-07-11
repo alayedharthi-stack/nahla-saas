@@ -318,7 +318,7 @@ def build_order_support_follow_up_args(
             )
             if order_ref and _mode == "structured":
                 order_verified = True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order ref resolve is best-effort
             pass
     status = ""
     try:
@@ -331,7 +331,7 @@ def build_order_support_follow_up_args(
         )
         if status and _mode == "structured":
             order_verified = True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order status resolve is best-effort
         pass
     return {
         "topic": "existing_order_support",
@@ -359,7 +359,7 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
         profile = getattr(ctx, "profile", None) or {}
         if isinstance(profile, dict):
             inbound_metadata = dict(profile.get("inbound_metadata") or {})
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — inbound metadata probe is best-effort
         inbound_metadata = {}
 
     bare_ref = extract_bare_order_reference(message)

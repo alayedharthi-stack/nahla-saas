@@ -759,7 +759,7 @@ class DefaultDecisionEngine:
                     (ctx.message or "")[:60],
                 )
                 return _ord_ref_dec
-        except Exception as _ord_ref_exc:  # noqa: BLE001
+        except Exception as _ord_ref_exc:  # noqa: BLE001  # noqa: silent-ok — order ref continuity must not block decide
             logger.debug(
                 "[ORDER_REF_CONTINUITY] skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
