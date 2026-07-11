@@ -81,6 +81,10 @@ def build_dedup_local_order_short_reply(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — resolver must not break dedup path
         return ""
 
+    selected_reason = str(getattr(ctx, "selected_reason", "") or "").strip()
+    if order_number and selected_reason == "explicit_order_number_not_found":
+        return ""
+
     selected = getattr(ctx, "selected_order", None)
     if selected is None:
         return ""
