@@ -3436,6 +3436,31 @@ class MerchantBrain:
         _bs = getattr(new_state, "brain_state", None) or getattr(ctx, "state", None)
         if isinstance(_bs, dict):
             _brain_state_dict = dict(_bs)
+        _commerce_bundle_dict = dict(getattr(ctx, "commerce_bundle", None) or {})
+        _guard_evidence_keys = (
+            "last_execution",
+            "action_execution",
+            "shipping_carrier_change_succeeded",
+            "coupon_id",
+            "trusted_coupon_code",
+            "approved_coupon_id",
+            "coupon_offered",
+            "discount_applied",
+            "approved_compensation_policy",
+        )
+        for _gk in _guard_evidence_keys:
+            _gv = result.data.get(_gk)
+            if _gv is not None:
+                _brain_state_dict[_gk] = _gv
+        _guard_extra_metadata = {
+            k: _brain_state_dict[k]
+            for k in (
+                "last_execution",
+                "action_execution",
+                "shipping_carrier_change_succeeded",
+            )
+            if k in _brain_state_dict
+        }
 
         try:
             from modules.ai.brain.postprocess.shipping_cost_truth_guard import (  # noqa: PLC0415
@@ -3472,6 +3497,7 @@ class MerchantBrain:
                 order_prep=_order_prep_dict,
                 brain_state=_brain_state_dict,
                 state=new_state,
+                commerce_bundle=_commerce_bundle_dict,
             )
             if _occg.replaced:
                 reply = _occg.reply
@@ -3488,7 +3514,8 @@ class MerchantBrain:
             )
             _stg = apply_shipment_truth_guard(
                 reply=reply or "",
-                commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                commerce_bundle=_commerce_bundle_dict,
+                extra_metadata=_guard_extra_metadata or None,
                 inbound_metadata=(profile or {}).get("inbound_metadata") or {},
                 payment_receipt_received=bool(
                     getattr(new_state.order_prep, "payment_receipt_received", False)

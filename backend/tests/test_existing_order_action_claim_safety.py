@@ -68,13 +68,30 @@ def _ctx(message: str, *, history: list | None = None) -> BrainContext:
 
 
 class TestCompensationClaims:
-    def test_b1_no_trusted_coupon_scrubs_discount_promise(self) -> None:
+    def test_b1_no_trusted_evidence_removes_invented_discount(self) -> None:
         reply = "نعتذر عن التأخير وسنعطيك خصم 10% على طلبك القادم"
         result = apply_order_creation_claim_guard(reply)
         assert result.replaced is True
         assert "10%" not in result.reply
 
-    def test_b2_trusted_coupon_allows_grounded_discount(self) -> None:
+    def test_b2_coupon_available_not_applied_allows_availability_not_application(self) -> None:
+        reply = "عندنا كود خصم متاح لك على الطلب القادم"
+        result = apply_order_creation_claim_guard(
+            reply,
+            commerce_bundle={"coupon_id": "SAVE10", "coupon_offered": True},
+        )
+        assert result.replaced is False
+
+    def test_b2_coupon_available_blocks_applied_discount_claim(self) -> None:
+        reply = "تم تطبيق خصم 10% على طلبك"
+        result = apply_order_creation_claim_guard(
+            reply,
+            commerce_bundle={"coupon_id": "SAVE10", "coupon_offered": True},
+        )
+        assert result.replaced is True
+        assert "10%" not in result.reply
+
+    def test_b3_trusted_applied_coupon_allows_grounded_discount(self) -> None:
         reply = "تم تطبيق كود الخصم بنسبة 10%"
         result = apply_order_creation_claim_guard(
             reply,
@@ -82,6 +99,36 @@ class TestCompensationClaims:
         )
         assert result.replaced is False
         assert "10%" in result.reply
+
+    def test_b4_approved_compensation_requires_execution(self) -> None:
+        reply = "اعتمدنا لك تعويض على التأخير"
+        blocked = apply_order_creation_claim_guard(
+            reply,
+            brain_state={"approved_compensation_policy": True},
+        )
+        assert blocked.replaced is True
+
+        allowed = apply_order_creation_claim_guard(
+            reply,
+            brain_state={
+                "approved_compensation_policy": True,
+                "last_execution": {"action": "grant_compensation", "success": True},
+            },
+        )
+        assert allowed.replaced is False
+
+    def test_b5_bundle_only_coupon_id_reaches_guard(self) -> None:
+        reply = "تم تطبيق كود الخصم بنسبة 10%"
+        without_bundle = apply_order_creation_claim_guard(
+            reply,
+            brain_state={"coupon_id": "SAVE10"},
+        )
+        assert without_bundle.replaced is True
+        with_bundle = apply_order_creation_claim_guard(
+            reply,
+            commerce_bundle={"coupon_id": "SAVE10", "discount_applied": True},
+        )
+        assert with_bundle.replaced is False
 
 
 class TestShippingModificationClaims:
