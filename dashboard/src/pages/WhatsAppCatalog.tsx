@@ -53,6 +53,7 @@ import WabaCatalogLinkStatusCard from '../components/catalog/WabaCatalogLinkStat
 import CatalogSummaryCard from '../components/catalog/CatalogSummaryCard'
 import CatalogChannelsCard from '../components/catalog/CatalogChannelsCard'
 import CatalogAdvancedSection, { AdvancedSubSection } from '../components/catalog/CatalogAdvancedSection'
+import ManualProductModal from '../components/catalog/ManualProductModal'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -172,7 +173,7 @@ export default function WhatsAppCatalog() {
   const bumpProductList = () => setProductsRefresh(v => v + 1)
 
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [manualFormOpen, setManualFormOpen] = useState(false)
+  const [manualModalOpen, setManualModalOpen] = useState(false)
   const [metaImportBusy, setMetaImportBusy] = useState(false)
   const [metaImportError, setMetaImportError] = useState<string | null>(null)
   const [metaImportErrorDetail, setMetaImportErrorDetail] = useState<Record<string, unknown> | null>(null)
@@ -186,11 +187,14 @@ export default function WhatsAppCatalog() {
   }
 
   const openManualForm = () => {
-    setManualFormOpen(true)
-    openAdvanced()
-    requestAnimationFrame(() => {
-      document.getElementById('catalog-manual-product-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    })
+    setManualModalOpen(true)
+  }
+
+  const onManualProductCreated = async (title: string) => {
+    setSuccess(cm.messages.addProductSuccess.replace('{title}', title))
+    await loadProducts()
+    await loadDiagnostics()
+    bumpProductList()
   }
 
   const loadDiagnostics = async () => {
@@ -391,6 +395,14 @@ export default function WhatsAppCatalog() {
           onImportMeta={() => void runMetaImport()}
           onAddManual={openManualForm}
           onOpenAdvanced={openAdvanced}
+        />
+      )}
+
+      {diagnostics && (
+        <ManualProductModal
+          open={manualModalOpen}
+          onClose={() => setManualModalOpen(false)}
+          onCreated={onManualProductCreated}
         />
       )}
 
@@ -603,22 +615,6 @@ export default function WhatsAppCatalog() {
                 </ul>
               </div>
             )}
-          </div>
-        </AdvancedSubSection>
-
-        <AdvancedSubSection title={cm.advanced.manualProductsTitle}>
-          <div id="catalog-manual-product-section">
-            <ManualProductsSection
-              currentSource={diagnostics?.products.dominant_source ?? 'unknown'}
-              formOpen={manualFormOpen}
-              onFormOpenChange={setManualFormOpen}
-              hideAddButton
-              onChanged={async () => {
-                await loadProducts()
-                await loadDiagnostics()
-                bumpProductList()
-              }}
-            />
           </div>
         </AdvancedSubSection>
 
@@ -1095,213 +1091,6 @@ function MetaImportSection(props: {
           {props.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
           {mi.importBtn}
         </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-
-// ─────────────────────────────────────────────────────────────────────
-// Manual products section (Path 3)
-// ─────────────────────────────────────────────────────────────────────
-//
-// Standalone block — pulled out of the main component so the page
-// stays readable. Renders:
-//   • a brief explainer about when to use manual entry,
-//   • a single inline form (collapsed by default) for adding a new
-//     manual product,
-//   • a flash success/error region.
-//
-// We do NOT render a full list of manual products here — the main
-// catalog table above already lists EVERY product with a source badge,
-// so manual rows are visible there. Edit/delete UX for an individual
-// manual product is a follow-up PR (right now this section is "create
-// only", which covers the immediate need: a no-Salla merchant being
-// able to seed their catalog).
-
-function ManualProductsSection(props: {
-  currentSource: DominantSource
-  onChanged: () => Promise<void>
-  formOpen?: boolean
-  onFormOpenChange?: (open: boolean) => void
-  hideAddButton?: boolean
-}) {
-  const { tStatic, dir } = useLanguage()
-  const manual = tStatic(tr => tr.catalogMgmt.manual)
-  const msgs = tStatic(tr => tr.catalogMgmt.messages)
-
-  const [internalOpen, setInternalOpen] = useState(false)
-  const open = props.formOpen ?? internalOpen
-  const setOpen = (next: boolean) => {
-    props.onFormOpenChange?.(next)
-    if (props.formOpen === undefined) setInternalOpen(next)
-  }
-  const [busy, setBusy]       = useState(false)
-  const [error, setError]     = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
-
-  const [title, setTitle]               = useState('')
-  const [price, setPrice]               = useState('')
-  const [description, setDescription]   = useState('')
-  const [imageUrl, setImageUrl]         = useState('')
-  const [productUrl, setProductUrl]     = useState('')
-  const [metaRid, setMetaRid]           = useState('')
-
-  const reset = () => {
-    setTitle(''); setPrice(''); setDescription('')
-    setImageUrl(''); setProductUrl(''); setMetaRid('')
-  }
-
-  const onSubmit = async () => {
-    setBusy(true); setError(null); setSuccess(null)
-    try {
-      const productTitle = title.trim()
-      if (!productTitle) {
-        setError(manual.nameRequired)
-        setBusy(false)
-        return
-      }
-      const created = await catalogApi.createManualProduct({
-        title:            productTitle,
-        price:            price.trim() || undefined,
-        description:      description.trim() || undefined,
-        image_url:        imageUrl.trim() || undefined,
-        product_url:      productUrl.trim() || undefined,
-        meta_retailer_id: metaRid.trim() || undefined,
-      })
-      setSuccess(msgs.addProductSuccess.replace('{title}', created.title))
-      reset()
-      setOpen(false)
-      await props.onChanged()
-    } catch (e: any) {
-      setError(e?.message ?? msgs.addProductFailed)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Explainer copy adapts to the current dominant source: a Salla
-  // merchant gets a different tone ("هذا اختياري") than a no-store
-  // merchant ("ابدأ من هنا").
-  const explainer =
-    props.currentSource === 'salla' || props.currentSource === 'zid'
-      ? manual.explainerStore
-      : manual.explainerNoStore
-
-  return (
-    <div id="manual-product-section">
-      <div className="space-y-4" dir={dir}>
-        <div className="text-xs text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3 leading-relaxed">
-          {explainer}
-        </div>
-
-        {error && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
-            <XCircle className="w-4 h-4 shrink-0 mt-0.5" /> {error}
-          </div>
-        )}
-        {success && (
-          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-3 py-2 text-sm flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" /> {success}
-          </div>
-        )}
-
-        {!open && !props.hideAddButton && (
-          <button
-            type="button"
-            onClick={() => { setOpen(true); setSuccess(null) }}
-            className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-xl text-sm transition"
-          >
-            <Package className="w-4 h-4" />
-            {manual.addNew}
-          </button>
-        )}
-
-        {open && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.productName} <span className="text-rose-500">*</span></label>
-              <input
-                value={title}
-                onChange={e => setTitle(e.target.value)}
-                placeholder={manual.productNamePh}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.price}</label>
-              <input
-                value={price}
-                onChange={e => setPrice(e.target.value)}
-                placeholder={manual.pricePh}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.imageUrl}</label>
-              <input
-                value={imageUrl}
-                onChange={e => setImageUrl(e.target.value)}
-                placeholder="https://..."
-                dir="ltr"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.productUrl}</label>
-              <input
-                value={productUrl}
-                onChange={e => setProductUrl(e.target.value)}
-                placeholder="https://..."
-                dir="ltr"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                {manual.metaRidLabel}
-              </label>
-              <input
-                value={metaRid}
-                onChange={e => setMetaRid(e.target.value)}
-                placeholder={manual.metaRidPh}
-                dir="ltr"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none"
-              />
-              <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                {manual.metaRidHint}
-              </p>
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">{manual.description}</label>
-              <textarea
-                value={description}
-                onChange={e => setDescription(e.target.value)}
-                rows={3}
-                placeholder={manual.descriptionPh}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200 outline-none resize-none"
-              />
-            </div>
-            <div className="md:col-span-2 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => { setOpen(false); reset(); setError(null) }}
-                className="px-4 py-2 rounded-xl text-sm font-semibold text-slate-600 hover:bg-slate-100 transition"
-              >
-                {manual.cancel}
-              </button>
-              <button
-                type="button"
-                onClick={onSubmit}
-                disabled={busy}
-                className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
-              >
-                {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-                {manual.save}
-              </button>
-            </div>
-          </div>
         )}
       </div>
     </div>

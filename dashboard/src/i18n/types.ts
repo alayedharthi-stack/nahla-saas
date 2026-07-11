@@ -1849,6 +1849,7 @@ export interface Translations {
     }
     manual: {
       title:            string
+      modalTitle:       string
       explainerStore:   string
       explainerNoStore: string
       addNew:           string
@@ -1856,15 +1857,37 @@ export interface Translations {
       productNamePh:    string
       price:            string
       pricePh:          string
+      currencyLabel:    string
       imageUrl:         string
+      imageLabel:       string
+      imageDropHint:    string
+      imageChoose:      string
+      imageRemove:      string
+      imageRequired:    string
+      imageUploading:   string
+      imageUploadFailed:string
+      imageTypeInvalid: string
+      imageTooLarge:    string
       productUrl:       string
       metaRidLabel:     string
       metaRidHint:      string
       metaRidPh:        string
       description:      string
       descriptionPh:    string
+      availability:     string
+      inStock:          string
+      outOfStock:       string
+      sku:              string
+      skuPh:            string
+      additionalOptions:string
+      priceRequired:    string
+      priceInvalid:     string
+      unsavedCloseTitle:string
+      unsavedCloseMessage: string
+      unsavedCloseConfirm: string
       cancel:           string
       save:             string
+      saving:           string
       nameRequired:     string
     }
     metaImport: {
