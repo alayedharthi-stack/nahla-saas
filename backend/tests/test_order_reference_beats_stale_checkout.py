@@ -132,3 +132,36 @@ class TestOrderReferenceBeatsStaleCheckout:
             history=history,
         )
         assert reply == ""
+
+    def test_verified_paid_order_shipping_defers_to_shipping_post_order(self) -> None:
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: PLC0415
+        from modules.ai.brain.types import (  # noqa: PLC0415
+            BrainContext,
+            CommerceFacts,
+            Intent,
+            INTENT_ASK_SHIPPING,
+            MerchantConversationState,
+            OrderPreparationState,
+        )
+
+        op = OrderPreparationState()
+        op.payment_receipt_received = True
+        op.order_status = "processing"
+        st = MerchantConversationState()
+        st.order_prep = op
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966500000099",
+            message="اي فرع ارسلتو طلبي في سمسا",
+            intent=Intent(
+                name=INTENT_ASK_SHIPPING,
+                confidence=0.9,
+                slots={},
+                raw_message="اي فرع ارسلتو طلبي في سمسا",
+                extraction_method="rules",
+            ),
+            state=st,
+            facts=CommerceFacts(),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.args.get("topic") == "shipping_post_order"

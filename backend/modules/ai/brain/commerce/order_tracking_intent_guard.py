@@ -260,6 +260,36 @@ def has_pending_order_reference_evidence(
     return bool(extract_order_reference_from_history(history))
 
 
+def _is_stale_unverified_draft_evidence(
+    *,
+    state: Any = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """True when persisted evidence is an active draft/checkout, not a verified placed order."""
+    if state is not None:
+        op = getattr(state, "order_prep", None)
+        if op is not None:
+            if bool(getattr(op, "payment_receipt_received", False)):
+                return False
+            if str(getattr(op, "order_creation_status", "") or "").strip().lower() == "created":
+                return True
+            if str(getattr(op, "order_status", "") or "").strip().lower() in {
+                "pending_customer_info",
+                "draft",
+            }:
+                return True
+        if str(getattr(state, "draft_order_id", "") or "").strip():
+            return True
+
+    bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
+    ctx_obj = bundle.get("active_order_context") or {}
+    if isinstance(ctx_obj, dict):
+        status = str(ctx_obj.get("order_status") or ctx_obj.get("status") or "").strip().lower()
+        if status in {"pending_customer_info", "draft"}:
+            return True
+    return False
+
+
 def is_order_support_operational_follow_up(
     message: str,
     *,
@@ -401,6 +431,20 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
         history=history,
         commerce_bundle=commerce_bundle,
     ):
+        if is_post_order_shipping_brain_defer(message) and has_existing_order_evidence(
+            state=state,
+            history=history,
+            commerce_bundle=commerce_bundle,
+        ):
+            customer_ref = extract_order_reference_from_history(history)
+            if not (
+                customer_ref
+                and _is_stale_unverified_draft_evidence(
+                    state=state,
+                    commerce_bundle=commerce_bundle,
+                )
+            ):
+                return None
         if is_post_order_shipping_brain_defer(message):
             return Decision(
                 action=ACTION_LLM_REPLY,
