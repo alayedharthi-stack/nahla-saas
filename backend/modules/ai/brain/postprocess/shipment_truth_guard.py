@@ -110,6 +110,18 @@ _TRACKING_PROMISE_RES = (
 CLAIM_KIND_SHIPMENT = "ungrounded_shipment_claim"
 CLAIM_KIND_DELIVERY_ETA = "ungrounded_delivery_eta"
 CLAIM_KIND_TRACKING_PROMISE = "ungrounded_tracking_promise"
+CLAIM_KIND_CARRIER_CHANGE = "ungrounded_carrier_change"
+
+_CARRIER_CHANGE_RES = (
+    re.compile(
+        r"(?:غير(?:ت|نا)|تم\s*تغيير|س(?:غ|ـ)?ير|راح\s*أغير|ب(?:غ|ـ)?ير).{0,40}(?:شحن|شركة\s*الشحن|carrier)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:changed|updated|switched)\s+(?:the\s+)?(?:shipping|carrier|courier)",
+        re.UNICODE | re.IGNORECASE,
+    ),
+)
 
 
 def _norm(text: Optional[str]) -> str:
@@ -152,6 +164,30 @@ def reply_contains_tracking_promise_claim(reply: Optional[str]) -> bool:
     return _matches_any_pattern(norm, _TRACKING_PROMISE_RES)
 
 
+def reply_contains_carrier_change_claim(reply: Optional[str]) -> bool:
+    norm = _norm(reply)
+    if not norm:
+        return False
+    return _matches_any_pattern(norm, _CARRIER_CHANGE_RES)
+
+
+def _carrier_change_execution_succeeded(
+    extra_metadata: Optional[Dict[str, Any]] = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    for md in (extra_metadata, inbound_metadata):
+        if not isinstance(md, dict):
+            continue
+        if md.get("shipping_carrier_change_succeeded") is True:
+            return True
+        exec_log = md.get("last_execution") or md.get("action_execution")
+        if isinstance(exec_log, dict):
+            action = str(exec_log.get("action") or "").strip().lower()
+            if action in {"change_shipping_carrier", "update_shipping_carrier"}:
+                return bool(exec_log.get("success") is True)
+    return False
+
+
 def detect_ungrounded_shipment_claim_kinds(reply: Optional[str]) -> Tuple[str, ...]:
     """Return blocked claim kinds present in *reply* (pre-evidence check)."""
     kinds: list[str] = []
@@ -161,6 +197,8 @@ def detect_ungrounded_shipment_claim_kinds(reply: Optional[str]) -> Tuple[str, .
         kinds.append(CLAIM_KIND_DELIVERY_ETA)
     if reply_contains_tracking_promise_claim(reply):
         kinds.append(CLAIM_KIND_TRACKING_PROMISE)
+    if reply_contains_carrier_change_claim(reply):
+        kinds.append(CLAIM_KIND_CARRIER_CHANGE)
     return tuple(kinds)
 
 
@@ -176,6 +214,8 @@ def chunk_contains_blocked_shipment_claim(
     if CLAIM_KIND_DELIVERY_ETA in active and reply_contains_delivery_eta_claim(chunk):
         return True
     if CLAIM_KIND_TRACKING_PROMISE in active and reply_contains_tracking_promise_claim(chunk):
+        return True
+    if CLAIM_KIND_CARRIER_CHANGE in active and reply_contains_carrier_change_claim(chunk):
         return True
     return False
 
@@ -313,7 +353,22 @@ def apply_shipment_truth_guard(
                 evidence=evidence,
             )
 
-        if evidence.evidence_ok:
+        needs_shipment = any(
+            kind in blocked_kinds
+            for kind in (
+                CLAIM_KIND_SHIPMENT,
+                CLAIM_KIND_DELIVERY_ETA,
+                CLAIM_KIND_TRACKING_PROMISE,
+            )
+        )
+        needs_carrier = CLAIM_KIND_CARRIER_CHANGE in blocked_kinds
+        shipment_ok = (not needs_shipment) or evidence.evidence_ok
+        carrier_change_ok = (not needs_carrier) or _carrier_change_execution_succeeded(
+            extra_metadata,
+            inbound_metadata,
+        )
+
+        if shipment_ok and carrier_change_ok:
             log_shipment_truth_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,

@@ -28,6 +28,15 @@ _ORDER_CONFIRMED_RE = re.compile(
     r"تم\s*تأكيد\s*الطلب",
     re.UNICODE | re.IGNORECASE,
 )
+_COMPENSATION_PROMISE_RE = re.compile(
+    r"(?:"
+    r"\d+\s*%|"
+    r"خصم\s*\d+|"
+    r"كوبون|كود\s*خصم|"
+    r"تعويض|compensation|discount\s*(?:of|for)?\s*\d+"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,38 @@ def _strip_unsupported_order_claims(text: str) -> str:
     return cleaned
 
 
+def _trusted_compensation_evidence(
+    *,
+    brain_state: Optional[Dict[str, Any]] = None,
+    order_prep: Optional[Dict[str, Any]] = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
+) -> bool:
+    for source in (brain_state, order_prep, commerce_bundle):
+        if not isinstance(source, dict):
+            continue
+        if str(source.get("coupon_id") or source.get("trusted_coupon_code") or "").strip():
+            return True
+        if source.get("discount_applied") is True:
+            return True
+        if source.get("approved_compensation_policy") is True:
+            return True
+        exec_log = source.get("last_execution") or source.get("action_execution")
+        if isinstance(exec_log, dict):
+            action = str(exec_log.get("action") or "").strip().lower()
+            if action in {"apply_coupon", "apply_discount", "grant_compensation"}:
+                return bool(exec_log.get("success") is True)
+    return False
+
+
+def _strip_unsupported_compensation_claims(text: str) -> str:
+    kept: list[str] = []
+    for chunk in re.split(r"(?<=[.!?؟،])\s+|\n+", text or ""):
+        part = chunk.strip()
+        if part and not _COMPENSATION_PROMISE_RE.search(part):
+            kept.append(part)
+    return " ".join(kept).strip()
+
+
 def apply_order_creation_claim_guard(
     reply: str,
     *,
@@ -134,10 +175,32 @@ def apply_order_creation_claim_guard(
     order_prep: Optional[Dict[str, Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
     state: Any = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> OrderCreationClaimGuardResult:
     original = str(reply or "")
     if not original.strip():
         return OrderCreationClaimGuardResult(reply=original, replaced=False)
+
+    if (
+        _COMPENSATION_PROMISE_RE.search(original)
+        and not _trusted_compensation_evidence(
+            brain_state=brain_state,
+            order_prep=order_prep,
+            commerce_bundle=commerce_bundle,
+        )
+    ):
+        stripped = _strip_unsupported_compensation_claims(original)
+        if stripped != original:
+            logger.info(
+                "[ORDER_CREATION_CLAIM_GUARD] compensation_scrub tenant=%s conversation=%s",
+                tenant_id,
+                conversation_id,
+            )
+            return OrderCreationClaimGuardResult(
+                reply=stripped,
+                replaced=True,
+                reason="untrusted_compensation_claim",
+            )
 
     evidence = _resolve_evidence_with_persisted_draft(
         db=db,

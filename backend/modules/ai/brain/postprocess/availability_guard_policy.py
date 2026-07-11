@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger("nahla.brain.availability_guard_policy")
+
+_BARE_ORDER_REF_RE = re.compile(r"^\d{6,12}$")
 
 _BROWSE_ALTERNATIVES_PHRASES = (
     "وش غيرها",
@@ -54,6 +56,59 @@ def browse_alternatives_requested(message: str) -> bool:
     return any(phrase in norm for phrase in _BROWSE_ALTERNATIVES_PHRASES)
 
 
+def _recent_customer_order_reference(history: Optional[List[Any]]) -> str:
+    if not history:
+        return ""
+    try:
+        for turn in reversed(history):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("in", "inbound", ""):
+                continue
+            body = str((turn or {}).get("body") or "").strip()
+            if not body:
+                continue
+            compact = re.sub(r"\s+", "", body)
+            if _BARE_ORDER_REF_RE.match(compact):
+                return compact
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _existing_order_support_thread(
+    message: str,
+    *,
+    availability_context: Optional[Any] = None,
+) -> bool:
+    ctx = availability_context if isinstance(availability_context, dict) else {}
+    history = ctx.get("history")
+    try:
+        from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+            is_placed_order_statement,
+        )
+
+        if is_placed_order_statement(message):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    if _recent_customer_order_reference(history):
+        return True
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            has_existing_order_evidence,
+        )
+
+        if has_existing_order_evidence(
+            state=ctx.get("state"),
+            history=history,
+            commerce_bundle=ctx.get("commerce_bundle"),
+        ):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def inbound_exempt_from_availability_rewrite(
     message: str,
     *,
@@ -66,6 +121,8 @@ def inbound_exempt_from_availability_rewrite(
     raw = (message or "").strip()
     if not raw:
         return False
+    if _existing_order_support_thread(raw, availability_context=availability_context):
+        return True
     try:
         from modules.ai.brain.commerce.staff_contact_product_label_guard import (  # noqa: PLC0415
             should_block_product_availability_rewrite,

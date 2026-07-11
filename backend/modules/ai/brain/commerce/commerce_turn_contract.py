@@ -75,6 +75,29 @@ _SAME_ORDER_CONFIRM_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_PLACED_ORDER_STATEMENT_RE = re.compile(
+    r"(?:"
+    r"خلاص\s*طلبت|انا\s*طلبت|أنا\s*طلبت|تم\s*الطلب|"
+    r"الطلب\s*موجود|هذا\s*رقم\s*طلبي|سبق\s*(?:و)?طلبت|"
+    r"طلبت\s*بالفعل|already\s*ordered|order\s*already\s*placed"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_BARE_ORDER_REF_RE = re.compile(r"^\d{6,12}$")
+_LABELED_ORDER_REF_RE = re.compile(
+    r"(?:طلب(?:ك|كم)?\s*رقم|رقم\s*(?:ال)?طلب(?:ك|كم)?|order\s*(?:#|number)?)\s*[:#]?\s*(\d{6,12})",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_BLOCK_NEW_ORDER_ACTIONS = frozenset({
+    ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEARCH_PRODUCTS,
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_NARROW,
+    ACTION_CLARIFY,
+})
+
 _ADDRESS_ON_FILE_CLAIM_RE = re.compile(
     r"(?:"
     r"(?:ال)?(?:مدين(?:ة|ه)|العنوان|الموقع|بيانات(?:ك)?).{0,40}(?:عندكم|مسجل|محفوظ|موجود|عندك)"
@@ -102,6 +125,79 @@ def _contract_checkout_enforced(contract: CommerceTurnContract) -> bool:
     return bool(
         facts.get("catalog_order_current_turn")
         or facts.get("active_catalog_checkout")
+    )
+
+
+def _contract_existing_order_support_enforced(contract: CommerceTurnContract) -> bool:
+    facts = contract.known_facts
+    return bool(
+        facts.get("placed_order_support_only")
+        or facts.get("existing_order_support_only")
+    )
+
+
+def _recent_customer_order_reference(history: Optional[List[Any]]) -> str:
+    if not history:
+        return ""
+    try:
+        for turn in reversed(history):
+            direction = str((turn or {}).get("direction") or "").lower()
+            if direction not in ("in", "inbound", ""):
+                continue
+            body = str((turn or {}).get("body") or "").strip()
+            if not body:
+                continue
+            compact = re.sub(r"\s+", "", body)
+            if _BARE_ORDER_REF_RE.match(compact):
+                return compact
+            labeled = _LABELED_ORDER_REF_RE.search(body)
+            if labeled:
+                return labeled.group(1)
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _has_existing_order_support_context(ctx: BrainContext) -> bool:
+    state = getattr(ctx, "state", None)
+    commerce_bundle = getattr(ctx, "commerce_bundle", None) or {}
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            has_existing_order_evidence,
+        )
+
+        if has_existing_order_evidence(
+            state=state,
+            history=getattr(ctx, "history", None),
+            commerce_bundle=commerce_bundle,
+        ):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return bool(_recent_customer_order_reference(getattr(ctx, "history", None)))
+
+
+def _build_existing_order_support_decision(
+    ctx: BrainContext,
+    *,
+    reason: str,
+) -> Decision:
+    ref = _recent_customer_order_reference(getattr(ctx, "history", None))
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "existing_order_support",
+            "order_reference": ref or None,
+            "order_verified": False,
+            "response_goal": (
+                "existing_order_support — customer is discussing an order they "
+                "already placed or a prior order reference. Stay in order-support "
+                "context. Do NOT collect new products, quantities, or checkout "
+                "fields. Do NOT create a duplicate order or open catalog browsing."
+            ),
+        },
+        reason=reason,
+        confidence=0.94,
     )
 
 
@@ -418,6 +514,26 @@ def build_commerce_turn_contract(
         known_facts["phone_known"] = True
         known_facts["phone_source"] = "whatsapp"
 
+    msg = str(getattr(ctx, "message", "") or "")
+    if is_placed_order_statement(msg):
+        known_facts["placed_order_support_only"] = True
+        commerce_state = "existing_order_support"
+        next_goal = "existing_order_support"
+        forbidden_actions = _merge_forbidden(
+            forbidden_actions,
+            _CATALOG_ORDER_FORBIDDEN,
+        )
+        reasons.append("placed_order_statement")
+    elif _has_existing_order_support_context(ctx):
+        known_facts["existing_order_support_only"] = True
+        commerce_state = "existing_order_support"
+        next_goal = "existing_order_support"
+        forbidden_actions = _merge_forbidden(
+            forbidden_actions,
+            _CATALOG_ORDER_FORBIDDEN,
+        )
+        reasons.append("existing_order_support_context")
+
     from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
         is_current_catalog_order_submitted,
         try_catalog_order_continue_decision,
@@ -654,6 +770,23 @@ def maybe_enforce_commerce_turn_contract_decision(
     Phase 2 — when contract marks catalog order or active catalog checkout, override
     browse / discovery / LLM-fallback decisions into checkout continuation.
     """
+    if _contract_existing_order_support_enforced(contract):
+        raw_action = str(getattr(decision, "action", "") or "")
+        if raw_action in _BLOCK_NEW_ORDER_ACTIONS:
+            enforced = _build_existing_order_support_decision(
+                ctx,
+                reason="commerce_turn_contract — block new-order continuation",
+            )
+            logger.info(
+                "[COMMERCE_TURN_CONTRACT/enforce] "
+                "event=contract_enforced_existing_order_support "
+                "tenant=%s raw_action=%s enforced_action=%s",
+                getattr(ctx, "tenant_id", None),
+                raw_action,
+                enforced.action,
+            )
+            return enforced
+
     if not _contract_checkout_enforced(contract):
         return decision
 
@@ -720,11 +853,17 @@ def is_same_order_confirmation(message: str) -> bool:
     return bool(_SAME_ORDER_CONFIRM_RE.search(_norm_msg(message)))
 
 
+def is_placed_order_statement(message: str) -> bool:
+    """Customer states an order was already placed — block duplicate checkout."""
+    return bool(_PLACED_ORDER_STATEMENT_RE.search(_norm_msg(message)))
+
+
 __all__ = [
     "CommerceTurnContract",
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
     "is_address_on_file_claim",
+    "is_placed_order_statement",
     "is_same_order_confirmation",
     "log_commerce_turn_contract_divergence",
     "maybe_enforce_commerce_turn_contract_decision",
