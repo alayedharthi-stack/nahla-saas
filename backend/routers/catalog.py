@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -98,6 +98,14 @@ from models import Product, Tenant, WhatsAppConnection
 from modules.observability.delivery_mode import (
     compute_final_delivery_mode,
     new_delivery_audit,
+)
+from services.catalog_media_storage import (
+    CatalogMediaStorageError,
+    CatalogMediaValidationError,
+    attach_catalog_product_image,
+    image_url_owned_by_tenant,
+    is_catalog_media_storage_configured,
+    upload_catalog_product_image,
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_sync_preview import preview_native_meta_sync
@@ -2050,6 +2058,40 @@ def _serialise_manual_product(p: Product) -> Dict[str, Any]:
     }
 
 
+@merchant_router.post("/products/manual/upload-image", status_code=201)
+async def merchant_catalog_upload_manual_product_image(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Upload a catalog product image to Cloudflare R2 (tenant-scoped).
+
+    Returns a stable public HTTPS URL for use with manual product create.
+    Tenant isolation: ``tenant_id`` comes from the JWT only.
+    """
+    if not is_catalog_media_storage_configured():
+        raise HTTPException(status_code=503, detail="catalog_media_storage_not_configured")
+    tenant_id = resolve_tenant_id(request)
+    try:
+        content = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="upload_read_failed") from exc
+    try:
+        result = upload_catalog_product_image(tenant_id=tenant_id, content=content)
+    except CatalogMediaValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogMediaStorageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    audit(
+        "merchant_catalog_upload_manual_product_image",
+        tenant_id=tenant_id,
+        media_id=result.get("media_id"),
+        size_bytes=result.get("size_bytes"),
+    )
+    return result
+
+
 @merchant_router.post("/products/manual", status_code=201)
 async def merchant_catalog_create_manual_product(
     payload: _ManualProductIn,
@@ -2064,13 +2106,18 @@ async def merchant_catalog_create_manual_product(
     build their catalog before they upgrade to start sending.
     """
     tenant_id = resolve_tenant_id(request)
+    image_url = (payload.image_url or "").strip() or None
+    if image_url and not image_url_owned_by_tenant(tenant_id, image_url):
+        raise HTTPException(status_code=400, detail="image_url_not_owned_by_tenant")
     # Build the same ``extra_metadata`` shape the Salla sync produces
     # so the resolver / sender don't need a manual-specific branch.
     meta_blob = {
         "source":        SOURCE_NAHLA_NATIVE,
-        "image_url":     (payload.image_url or "").strip() or None,
+        "image_url":     image_url,
         "product_url":   (payload.product_url or "").strip() or None,
     }
+    if payload.price is not None and str(payload.price).strip():
+        meta_blob["currency"] = "SAR"
     native_price = None
     if payload.price is not None and str(payload.price).strip():
         native_price = _coerce_native_price_or_422(payload.price)
@@ -2097,6 +2144,19 @@ async def merchant_catalog_create_manual_product(
         assign_canonical_retailer_id(p)
     except Exception:  # noqa: BLE001
         pass
+    if image_url:
+        try:
+            attach_catalog_product_image(
+                tenant_id=tenant_id,
+                image_url=image_url,
+                product_id=int(p.id),
+            )
+        except CatalogMediaValidationError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CatalogMediaStorageError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()
     db.refresh(p)
     audit(
@@ -2128,6 +2188,10 @@ async def merchant_catalog_update_manual_product(
     _assert_merchant_editable_or_409(p)
 
     data = payload.model_dump(exclude_unset=True)
+    if "image_url" in data:
+        next_url = (data["image_url"] or "").strip() or None
+        if next_url and not image_url_owned_by_tenant(tenant_id, next_url):
+            raise HTTPException(status_code=400, detail="image_url_not_owned_by_tenant")
     if "price" in data:
         data["price"] = _coerce_native_price_or_422(data["price"])
     # Top-level columns
@@ -2140,6 +2204,7 @@ async def merchant_catalog_update_manual_product(
             setattr(p, col, data[col])
     # JSONB-only fields (image_url / product_url) — merge instead of
     # replacing the whole blob so we don't drop other metadata.
+    prior_image_url = ((p.extra_metadata or {}).get("image_url") or "").strip() or None
     if "image_url" in data or "product_url" in data:
         meta = dict(p.extra_metadata or {})
         if "image_url" in data:
@@ -2149,6 +2214,20 @@ async def merchant_catalog_update_manual_product(
         # Keep the source marker pinned regardless of patch shape.
         meta["source"] = SOURCE_NAHLA_NATIVE
         p.extra_metadata = meta
+    next_image_url = ((p.extra_metadata or {}).get("image_url") or "").strip() or None
+    if "image_url" in data and next_image_url and next_image_url != prior_image_url:
+        try:
+            attach_catalog_product_image(
+                tenant_id=tenant_id,
+                image_url=next_image_url,
+                product_id=int(p.id),
+            )
+        except CatalogMediaValidationError as exc:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CatalogMediaStorageError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not p.ownership_mode:
         p.ownership_mode = OWNERSHIP_NAHLA_MANAGED
     if (p.source or "").strip().lower() == "manual":

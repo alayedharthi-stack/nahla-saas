@@ -10,7 +10,8 @@
  * relies on this shape staying stable; a server-side rename should
  * land here in the same commit.
  */
-import { apiCall } from './client'
+import { getToken, getTenantId, logout } from '../auth'
+import { apiCall, API_BASE } from './client'
 
 // ── Shared shapes ────────────────────────────────────────────────────
 
@@ -518,6 +519,13 @@ export interface ManualProductInput {
   stock_quantity?:   number | null
 }
 
+export interface ManualProductImageUploadResult {
+  image_url:    string
+  media_id:     string
+  content_type: string
+  size_bytes:   number
+}
+
 export interface ManualProductRow {
   id:                     number
   tenant_id:              number
@@ -640,6 +648,40 @@ export const catalogApi = {
     return apiCall<WabaCatalogLinkStatus>('/merchant/catalog/waba-link-status')
   },
   // Manual product CRUD — Path 3 in the new architecture.
+  async uploadManualProductImage(file: File): Promise<ManualProductImageUploadResult> {
+    const token = getToken()
+    const tenantId = getTenantId()
+    const form = new FormData()
+    form.append('file', file)
+
+    let res: Response
+    try {
+      res = await fetch(`${API_BASE}/merchant/catalog/products/manual/upload-image`, {
+        method: 'POST',
+        cache: 'no-store',
+        mode: 'cors',
+        headers: {
+          ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: form,
+      })
+    } catch {
+      throw new Error('تعذر رفع الصورة — تحقق من الاتصال بالخادم.')
+    }
+
+    if (res.status === 401) {
+      logout()
+      throw new Error('انتهت الجلسة — سجّل الدخول مجدداً.')
+    }
+
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = typeof data?.detail === 'string' ? data.detail : 'upload_failed'
+      throw new Error(detail)
+    }
+    return data as ManualProductImageUploadResult
+  },
   createManualProduct(body: ManualProductInput): Promise<ManualProductRow> {
     return apiCall<ManualProductRow>('/merchant/catalog/products/manual', {
       method: 'POST',
