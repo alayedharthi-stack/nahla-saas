@@ -273,6 +273,31 @@ def _patch_empty_brain_state(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+_CHECKOUT_SAVED_CHOICES = "\u0627\u062e\u062a\u064a\u0627\u0631\u0627\u062a\u0643 \u0645\u062d\u0641\u0648\u0638\u0629"
+
+
+def _active_checkout_order_prep() -> dict:
+    return {
+        "line_items": [{"product_id": "generic-p1", "name": "\u062d\u0630\u0627\u0621 \u0631\u064a\u0627\u0636\u064a"}],
+        "checkout_channel": "whatsapp_fast",
+        "missing_fields": ["address", "short_address_code"],
+        "customer_phone": GENERIC_CUSTOMER_PHONE,
+    }
+
+
+def _patch_brain_state(monkeypatch: pytest.MonkeyPatch, brain_state: dict) -> None:
+    conv = _StubConv(brain_state)
+    monkeypatch.setattr(
+        "core.order_flow._load_brain_state",
+        lambda _db, *, tenant_id, phone: (conv, dict(brain_state)),
+    )
+
+
+def _assert_no_checkout_continuation(text: str) -> None:
+    assert _CHECKOUT_SAVED_CHOICES not in (text or "")
+    _assert_no_commerce_hijack(text)
+
+
 class TestNoOneHereEscalation:
     def test_malagit_ahad_delivers_trusted_contact(
         self,
@@ -328,6 +353,172 @@ class TestWhoToCallFollowUp:
         assert decision.call_target is not None
         assert GENERIC_RECEPTION_NAME in (decision.call_target.name or "")
         _assert_no_vague_contact_fallback(decision.reply_text)
+
+
+class TestCheckoutContinuityOverride:
+    def test_stale_checkout_who_to_call_after_no_one_here(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _generic_branch_db()
+        _patch_empty_brain_state(monkeypatch)
+        turn_one = evaluate_branch_trigger_routing(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message=MSG_NO_ONE_HERE,
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        assert turn_one is not None
+        assert turn_one.deliver_contact is True
+        assert turn_one.call_target is not None
+        assert GENERIC_RECEPTION_NAME in (turn_one.call_target.name or "")
+
+        from modules.ai.brain.commerce.staff_contact_target_continuity import (  # noqa: PLC0415
+            PENDING_CONTACT_TARGET_KEY,
+            PendingContactTarget,
+        )
+
+        order_prep = _active_checkout_order_prep()
+        order_prep[PENDING_CONTACT_TARGET_KEY] = PendingContactTarget(
+            lookup_name=GENERIC_RECEPTION_NAME,
+            display_name=GENERIC_RECEPTION_NAME,
+            source="structured_branch_reception",
+            confidence=0.96,
+            created_turn=7,
+        ).to_dict()
+        brain_state = {
+            "turn": 9,
+            "stage": "ordering",
+            "order_prep": order_prep,
+            "recent_messages": [
+                {"direction": "inbound", "body": MSG_NO_ONE_HERE, "turn": 7},
+                {"direction": "outbound", "body": turn_one.reply_text, "turn": 8},
+            ],
+        }
+        _patch_brain_state(monkeypatch, brain_state)
+
+        turn_two = evaluate_staff_contact_policy(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message=MSG_WHO_TO_CALL,
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        assert turn_two is not None
+        assert turn_two.skip_brain is True
+        assert turn_two.deliver_contact is True
+        assert turn_two.call_target is not None
+        assert GENERIC_RECEPTION_NAME in (turn_two.call_target.name or "")
+        _assert_no_checkout_continuation(turn_two.reply_text)
+        _assert_no_vague_contact_fallback(turn_two.reply_text)
+
+    def test_soft_arrival_who_to_call_beats_stale_checkout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _generic_branch_db()
+        brain_state = {
+            "turn": 7,
+            "stage": "ordering",
+            "order_prep": _active_checkout_order_prep(),
+            "recent_messages": [
+                {"direction": "inbound", "body": MSG_ON_THE_WAY, "turn": 6},
+            ],
+        }
+        _patch_brain_state(monkeypatch, brain_state)
+
+        decision = evaluate_staff_contact_policy(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message=MSG_WHO_TO_CALL,
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        assert decision is not None
+        assert decision.skip_brain is True
+        assert decision.deliver_contact is True
+        assert decision.call_target is not None
+        assert GENERIC_RECEPTION_NAME in (decision.call_target.name or "")
+        _assert_no_checkout_continuation(decision.reply_text)
+
+    def test_checkout_preservation_tamam_without_arrival_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from core.wa_draft_confirmation import compose_wa_order_flow_reply  # noqa: PLC0415
+
+        db = _generic_branch_db()
+        order_prep = _active_checkout_order_prep()
+        brain_state = {
+            "turn": 4,
+            "stage": "ordering",
+            "order_prep": order_prep,
+            "recent_messages": [],
+        }
+        _patch_brain_state(monkeypatch, brain_state)
+
+        decision = evaluate_staff_contact_policy(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message="\u062a\u0645\u0627\u0645",
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        assert decision is None
+
+        checkout_reply = compose_wa_order_flow_reply(
+            order_prep=order_prep,
+            brain_state=brain_state,
+            customer_message="\u062a\u0645\u0627\u0645",
+        )
+        assert checkout_reply is not None
+        assert _CHECKOUT_SAVED_CHOICES in checkout_reply
+
+    def test_bare_who_to_call_without_context_does_not_override_checkout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _generic_branch_db()
+        brain_state = {
+            "turn": 3,
+            "stage": "ordering",
+            "order_prep": _active_checkout_order_prep(),
+            "recent_messages": [],
+        }
+        _patch_brain_state(monkeypatch, brain_state)
+
+        decision = evaluate_staff_contact_policy(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message=MSG_WHO_TO_CALL,
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        assert decision is None
+
+    def test_missing_trusted_contact_no_invented_phone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _generic_branch_db(with_contacts=False, with_escalation=False)
+        brain_state = {
+            "turn": 6,
+            "stage": "ordering",
+            "order_prep": _active_checkout_order_prep(),
+            "recent_messages": [
+                {"direction": "inbound", "body": MSG_ON_THE_WAY, "turn": 5},
+            ],
+        }
+        _patch_brain_state(monkeypatch, brain_state)
+
+        decision = evaluate_staff_contact_policy(
+            db,
+            tenant_id=GENERIC_TENANT_ID,
+            message=MSG_WHO_TO_CALL,
+            customer_phone=GENERIC_CUSTOMER_PHONE,
+        )
+        if decision is not None:
+            assert decision.deliver_contact is False
+            assert "966" not in (decision.reply_text or "")
+            _assert_no_checkout_continuation(decision.reply_text)
+        else:
+            assert decision is None
 
 
 class TestNoResponseVariants:
