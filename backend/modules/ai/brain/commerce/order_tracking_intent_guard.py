@@ -179,7 +179,7 @@ _ORDER_SUPPORT_TOPIC_RE = re.compile(
     r"(?:"
     r"شحن|توصيل|شحنه|الشحنه|الشحنة|"
     r"وصل|يوصل|توصل|تأخر|متأخر|"
-    r"طلبي|طلبيتي|محتوى|محتويات|"
+    r"طلبي|طلبيتي|محتوى|محتويات|الطلب\s*فيه|"
     r"مشكله|مشكلة|خطأ|غلط|"
     r"carrier|shipping|delivery|shipment|order\s+problem|track"
     r")",
@@ -401,12 +401,6 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
         history=history,
         commerce_bundle=commerce_bundle,
     ):
-        if is_post_order_shipping_brain_defer(message) and has_existing_order_evidence(
-            state=state,
-            history=history,
-            commerce_bundle=commerce_bundle,
-        ):
-            return None
         if is_post_order_shipping_brain_defer(message):
             return Decision(
                 action=ACTION_LLM_REPLY,
