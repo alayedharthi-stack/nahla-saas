@@ -3180,21 +3180,24 @@ def _build_location_reply(
     district: str = "",
     address: str = "",
     has_branch_details: bool = False,
+    include_url_in_body: bool = True,
 ) -> str:
-    """Canonical Arabic reply when a maps URL is available.
+    """Build location reply body for WhatsApp delivery.
 
-    When structured branch data exists, include branch context before
-    the URL so WhatsApp can still lift the URL into a CTA button.
+    When ``include_url_in_body`` is False the caller sends a CTA button
+    carrying ``maps_url`` — keep the body short and omit the raw URL.
+    Plain-text / fallback delivery keeps the full block plus URL.
     """
     header_name = (branch_name or store_name or "").strip()
     lines: List[str] = []
 
-    if has_branch_details and header_name:
-        lines.append(f"📍 هذا موقع {header_name}")
-    elif header_name:
-        lines.append(f"📍 هذا موقع {header_name}")
+    if header_name:
+        lines.append(f"📍 {header_name}")
     else:
-        lines.append("📍 هذا موقعنا على خرائط Google")
+        lines.append("📍 موقعنا على الخريطة")
+
+    if not include_url_in_body:
+        return "\n".join(lines)
 
     if has_branch_details:
         branch_loc_parts = [p for p in (city, district) if p]

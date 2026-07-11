@@ -66,6 +66,7 @@ PLATFORM_DEFAULT_KEYWORDS: Tuple[Tuple[str, str], ...] = (
     ("مالقيت أحد", TRIGGER_NO_RESPONSE),
     ("ما لقيت احد", TRIGGER_NO_RESPONSE),
     ("مافي احد", TRIGGER_NO_RESPONSE),
+    ("مافيه احد", TRIGGER_NO_RESPONSE),
     ("ما فيه احد", TRIGGER_NO_RESPONSE),
     ("ما أحد يرد", TRIGGER_NO_RESPONSE),
     ("وينكم", TRIGGER_NO_RESPONSE),

@@ -680,7 +680,7 @@ def test_build_location_reply_includes_branch_details() -> None:
         address="شارع العدل الواعظ، حي الحلقة الغربية",
         has_branch_details=True,
     )
-    assert "📍 هذا موقع معرض آل عايد للعسل البلدي" in text
+    assert "📍 معرض آل عايد للعسل البلدي" in text
     assert "الفرع:" in text
     assert "الطائف" in text
     assert "العنوان:" in text
@@ -695,6 +695,6 @@ def test_build_location_reply_maps_only_fallback() -> None:
         "https://maps.app.goo.gl/only",
         has_branch_details=False,
     )
-    assert "📍 هذا موقعنا على خرائط Google" in text
+    assert "📍 موقعنا على الخريطة" in text
     assert "اضغط الزر لفتح الموقع." in text
     assert "https://maps.app.goo.gl/only" in text

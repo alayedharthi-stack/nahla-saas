@@ -214,7 +214,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestLocationRequest:
-    def test_structured_branch_location_includes_maps_url_in_body(self) -> None:
+    def test_structured_branch_location_cta_body_omits_raw_url(self) -> None:
         db = _generic_branch_db()
         decision = evaluate_branch_trigger_routing(
             db,
@@ -225,10 +225,12 @@ class TestLocationRequest:
         assert decision.trigger_type == "location_request"
         assert decision.maps_url == GENERIC_MAPS_URL
         assert decision.reply_text.strip() != "موقعنا 📍"
-        assert GENERIC_MAPS_URL in decision.reply_text
+        assert GENERIC_MAPS_URL not in decision.reply_text
+        assert decision.use_cta is True
+        assert len(decision.reply_text.strip()) < 120
         _assert_no_commerce_hijack(decision.reply_text)
 
-    def test_location_link_policy_transcript_safe_body(
+    def test_location_link_policy_cta_body_omits_raw_url(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -244,12 +246,12 @@ class TestLocationRequest:
         assert decision is not None
         assert decision.maps_url == GENERIC_MAPS_URL
         assert decision.reply_text.strip() != "موقعنا 📍"
-        assert GENERIC_MAPS_URL in decision.reply_text
+        assert GENERIC_MAPS_URL not in decision.reply_text
         assert decision.use_cta is True
 
 
 class TestSoftArrival:
-    def test_on_the_way_warm_with_location_reminder(self) -> None:
+    def test_on_the_way_warm_without_duplicate_location_body(self) -> None:
         db = _generic_branch_db()
         decision = evaluate_branch_trigger_routing(
             db,
@@ -259,9 +261,11 @@ class TestSoftArrival:
         assert decision is not None
         assert decision.trigger_type == "arrival_soft"
         assert "في انتظارك" in decision.reply_text
-        assert GENERIC_MAPS_URL in decision.reply_text
+        assert GENERIC_MAPS_URL not in decision.reply_text
         assert decision.deliver_contact is False
         assert decision.resend_maps is True
+        assert decision.use_cta is True
+        assert len(decision.reply_text.strip()) < 80
         _assert_no_commerce_hijack(decision.reply_text)
 
 

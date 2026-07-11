@@ -78,7 +78,10 @@ def evaluate_location_link_policy(
                 "[LOCATION_LINK_POLICY] cta_classify_failed tenant=%s err=%s",
                 tenant_id, exc,
             )
-        reply_text = _build_location_reply(maps_url)
+        reply_text = _build_location_reply(
+            maps_url,
+            include_url_in_body=False,
+        )
         if source == "structured_branch":
             try:
                 from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
@@ -98,6 +101,7 @@ def evaluate_location_link_policy(
                             district=branch.district or "",
                             address=branch.address or "",
                             has_branch_details=True,
+                            include_url_in_body=False,
                         )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(

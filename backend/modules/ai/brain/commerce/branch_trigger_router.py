@@ -106,7 +106,12 @@ def _build_reception_targets(
     return call_target, _build_arrival_reply_text(evidence.lookup_name)
 
 
-def _build_location_reply_text(config: Any, maps_url: str) -> str:
+def _build_location_reply_text(
+    config: Any,
+    maps_url: str,
+    *,
+    use_cta: bool = False,
+) -> str:
     if not maps_url:
         return ""
     try:
@@ -116,9 +121,10 @@ def _build_location_reply_text(config: Any, maps_url: str) -> str:
             maps_url,
             branch_name=str(getattr(config, "name", "") or "").strip(),
             has_branch_details=bool(str(getattr(config, "name", "") or "").strip()),
+            include_url_in_body=not use_cta,
         )
     except Exception:  # noqa: silent-ok - location body fallback is acceptable
-        return maps_url
+        return maps_url if not use_cta else "📍 موقعنا على الخريطة"
 
 
 def _build_location_decision(
@@ -130,7 +136,11 @@ def _build_location_decision(
 ) -> BranchTriggerDecision:
     maps_url = config.maps_url
     use_cta = bool(maps_url)
-    reply = _build_location_reply_text(config, maps_url) if maps_url else "موقعنا 📍"
+    reply = (
+        _build_location_reply_text(config, maps_url, use_cta=use_cta)
+        if maps_url
+        else "موقعنا 📍"
+    )
     if config.location_response_mode == LOCATION_MODE_PLUS_INSTRUCTIONS:
         if config.location_instructions_text:
             reply = f"{reply}\n{config.location_instructions_text}"
