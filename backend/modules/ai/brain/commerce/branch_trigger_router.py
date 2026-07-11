@@ -31,6 +31,9 @@ logger = logging.getLogger("nahla.brain.branch_trigger_router")
 MSG_ESCALATION_EXHAUSTED = (
     "حاضر، وصلنا لأعلى مستوى في سلسلة التصعيد. سنتابع معك."
 )
+MSG_NO_TRUSTED_BRANCH_CONTACT = (
+    "ما ظهر عندي رقم فرع مؤكد الآن، برسّل طلبك للفريق يتواصلون معك."
+)
 MSG_BRANCH_CLARIFY = "أي فرع تقصد؟"
 MSG_PICKUP_PREFERENCE_ASK = (
     "هل تفضّل أرسل لك موقع المعرض أو بيانات التواصل؟"
@@ -103,6 +106,21 @@ def _build_reception_targets(
     return call_target, _build_arrival_reply_text(evidence.lookup_name)
 
 
+def _build_location_reply_text(config: Any, maps_url: str) -> str:
+    if not maps_url:
+        return ""
+    try:
+        from modules.ai.postprocess.safety_nets import _build_location_reply  # noqa: PLC0415
+
+        return _build_location_reply(
+            maps_url,
+            branch_name=str(getattr(config, "name", "") or "").strip(),
+            has_branch_details=bool(str(getattr(config, "name", "") or "").strip()),
+        )
+    except Exception:  # noqa: silent-ok - location body fallback is acceptable
+        return maps_url
+
+
 def _build_location_decision(
     db: Any,
     tenant_id: int,
@@ -112,7 +130,7 @@ def _build_location_decision(
 ) -> BranchTriggerDecision:
     maps_url = config.maps_url
     use_cta = bool(maps_url)
-    reply = "موقعنا 📍"
+    reply = _build_location_reply_text(config, maps_url) if maps_url else "موقعنا 📍"
     if config.location_response_mode == LOCATION_MODE_PLUS_INSTRUCTIONS:
         if config.location_instructions_text:
             reply = f"{reply}\n{config.location_instructions_text}"
@@ -290,7 +308,7 @@ def _build_no_response_decision(
             matched_phrase=match.matched_phrase,
             branch_id=match.branch_id,
             reason="no_escalation_chain",
-            reply_text=MSG_ESCALATION_EXHAUSTED,
+            reply_text=MSG_NO_TRUSTED_BRANCH_CONTACT,
         )
 
     nxt = resolve_next_structured_escalation(chain, contacts_sent)

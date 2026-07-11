@@ -44,6 +44,25 @@ _PRONOUN_CONTACT_FOLLOWUP_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_BARE_WHO_TO_CALL_RE = re.compile(
+    r"(?:"
+    r"(?:^|\s)(?:اتصل|أتصل|اكلم|أكلم|اتواصل|أتواصل)\s+(?:على|علي|ب|مع)?\s*(?:من|مين)"
+    r"|(?:^|\s)(?:من|مين)\s*(?:اتصل|أتصل|اكلم|أكلم|اتواصل|أتواصل)"
+    r"|(?:^|\s)مين\s*(?:أ|ا)?تواصل\s*(?:مع(?:ه|ها|هم))?"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_BARE_WHO_TARGET_TOKENS = frozenset({"من", "مين"})
+
+_ARRIVAL_OUTBOUND_HINTS = (
+    "في انتظارك",
+    "maps.google",
+    "خرائط google",
+    "موقعنا",
+    "هذا موقع",
+)
+
 
 def _norm(text: str) -> str:
     if not text:
@@ -130,6 +149,170 @@ def is_pronoun_staff_contact_followup(message: str) -> bool:
 
 
 is_contact_target_followup = is_pronoun_staff_contact_followup
+
+
+def is_bare_who_to_call_followup(message: str) -> bool:
+    """True for «اتصل على من؟» / «اكلم مين؟» without a named staff span."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    try:
+        from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
+            extract_staff_name_candidate,
+        )
+
+        if extract_staff_name_candidate(raw):
+            span = extract_staff_name_candidate(raw)
+            if _norm(span) not in _BARE_WHO_TARGET_TOKENS:
+                return False
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] staff_name_candidate_check_failed",
+        )
+    norm = _norm(raw)
+    if not _BARE_WHO_TO_CALL_RE.search(norm):
+        return False
+    if re.search(
+        r"(?:^|\s)(?:ال)?(?:ارقام|أرقام|ارقم)(?:كم|ك|ه|ها|هم)?(?:\s|$)",
+        norm,
+        flags=re.UNICODE,
+    ):
+        return False
+    return True
+
+
+def _recent_has_arrival_location_context(
+    brain_state: Optional[Dict[str, Any]],
+) -> bool:
+    """True when recent turns show showroom arrival or location intent."""
+    try:
+        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
+            is_arrival_or_visit_signal,
+        )
+        from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+            LinkIntentType,
+            resolve_inbound_link_intent,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] arrival_location_import_failed",
+        )
+        return False
+
+    for direction, body, _turn in reversed(_recent_message_texts(brain_state, limit=8)):
+        body_norm = (body or "").strip()
+        if not body_norm:
+            continue
+        if direction == "inbound":
+            if is_arrival_or_visit_signal(body_norm):
+                return True
+            if resolve_inbound_link_intent(body_norm) == LinkIntentType.PHYSICAL_LOCATION:
+                return True
+            continue
+        body_low = body_norm.lower()
+        if any(hint in body_low for hint in _ARRIVAL_OUTBOUND_HINTS):
+            return True
+    return False
+
+
+def _pending_from_branch_contact(
+    contact: Any,
+    *,
+    created_turn: int = 0,
+) -> Optional[PendingContactTarget]:
+    lookup = str(getattr(contact, "display_name", "") or "").strip()
+    if not lookup or not _is_valid_target_name(lookup):
+        return None
+    role = str(getattr(contact, "role", "") or "reception").strip()
+    try:
+        from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+            resolve_contact_display_name,
+        )
+
+        display = resolve_contact_display_name(lookup, role=role, fallback=lookup)
+    except Exception:  # noqa: BLE001
+        display = lookup
+    return PendingContactTarget(
+        lookup_name=lookup,
+        display_name=display or lookup,
+        role=role,
+        source="structured_branch_reception",
+        confidence=0.96,
+        created_turn=int(created_turn or 0),
+    )
+
+
+def _resolve_arrival_location_contact_target(
+    db: Any,
+    *,
+    tenant_id: int,
+    registry: Any,
+    message: str = "",
+    created_turn: int = 0,
+) -> Optional[PendingContactTarget]:
+    """Resolve trusted showroom/branch/reception contact from tenant evidence."""
+    try:
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            resolve_branch_for_message,
+            resolve_reception_for_branch_id,
+            structured_branch_contacts_enabled,
+            tenant_has_structured_branch_data,
+        )
+
+        if structured_branch_contacts_enabled() and tenant_has_structured_branch_data(
+            db, int(tenant_id or 0),
+        ):
+            branch = resolve_branch_for_message(
+                db, int(tenant_id or 0), message or "",
+            )
+            if branch is not None:
+                reception = resolve_reception_for_branch_id(db, int(branch.id))
+                target = _pending_from_branch_contact(
+                    reception,
+                    created_turn=created_turn,
+                )
+                if target is not None:
+                    return target
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] structured_branch_contact_failed tenant=%s",
+            tenant_id,
+        )
+
+    try:
+        from modules.ai.brain.commerce.arrival_contact_delivery_policy import (  # noqa: PLC0415
+            resolve_arrival_contact_evidence,
+        )
+
+        evidence = resolve_arrival_contact_evidence(
+            db, int(tenant_id or 0), message=message or "",
+        )
+        if evidence is not None and evidence.phone:
+            lookup = str(evidence.lookup_name or "").strip()
+            if lookup and _is_valid_target_name(lookup):
+                return PendingContactTarget(
+                    lookup_name=lookup,
+                    display_name=lookup,
+                    role=str(evidence.role or "showroom").strip(),
+                    source="arrival_contact_evidence",
+                    confidence=0.95,
+                    created_turn=int(created_turn or 0),
+                )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[STAFF_CONTACT_CONTINUITY] arrival_contact_evidence_failed tenant=%s",
+            tenant_id,
+        )
+
+    rec = registry.first_general_contact() if registry is not None else None
+    if rec is not None:
+        return pending_target_from_record(
+            rec,
+            source="registry_general",
+            confidence=0.90,
+            created_turn=created_turn,
+        )
+    return None
 
 
 def should_clear_pending_on_topic_switch(message: str) -> bool:
@@ -603,7 +786,9 @@ def resolve_pending_contact_followup(
     Return (StaffContactRequest, PendingContactTarget, synthetic_message) when
     a pronoun follow-up can be resolved; else None.
     """
-    if not is_contact_target_followup(message or ""):
+    who_to_call = is_bare_who_to_call_followup(message or "")
+    pronoun_followup = is_contact_target_followup(message or "")
+    if not who_to_call and not pronoun_followup:
         return None
     if should_clear_pending_on_topic_switch(message or ""):
         return None
@@ -630,15 +815,25 @@ def resolve_pending_contact_followup(
             brain_state=bs,
             registry=registry,
         )
+        if pending is None and who_to_call and _recent_has_arrival_location_context(bs):
+            pending = _resolve_arrival_location_contact_target(
+                db,
+                tenant_id=int(tenant_id or 0),
+                registry=registry,
+                message=message or "",
+                created_turn=turn,
+            )
         if pending is None or is_stale_pending_target(pending, current_turn=turn):
             return None
         request = staff_request_from_pending_target(pending)
         synthetic = synthetic_message_for_pending_target(pending)
         logger.info(
-            "[STAFF_CONTACT_CONTINUITY] resolved_followup tenant=%s lookup=%r source=%s",
+            "[STAFF_CONTACT_CONTINUITY] resolved_followup tenant=%s lookup=%r source=%s "
+            "who_to_call=%s",
             tenant_id,
             pending.lookup_name,
             pending.source,
+            who_to_call,
         )
         return request, pending, synthetic
     except Exception as exc:  # noqa: BLE001
@@ -657,6 +852,7 @@ __all__ = [
     "capture_pending_target_from_inbound",
     "clear_pending_contact_target",
     "infer_pending_target_from_text",
+    "is_bare_who_to_call_followup",
     "is_contact_target_followup",
     "is_pronoun_staff_contact_followup",
     "is_stale_pending_target",

@@ -78,12 +78,39 @@ def evaluate_location_link_policy(
                 "[LOCATION_LINK_POLICY] cta_classify_failed tenant=%s err=%s",
                 tenant_id, exc,
             )
+        reply_text = _build_location_reply(maps_url)
+        if source == "structured_branch":
+            try:
+                from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                    resolve_branch_for_message,
+                    structured_branch_contacts_enabled,
+                )
+
+                if structured_branch_contacts_enabled():
+                    branch = resolve_branch_for_message(
+                        db, int(tenant_id or 0), message or "",
+                    )
+                    if branch is not None and branch.maps_url:
+                        reply_text = _build_location_reply(
+                            maps_url,
+                            branch_name=branch.name or "",
+                            city=branch.city or "",
+                            district=branch.district or "",
+                            address=branch.address or "",
+                            has_branch_details=True,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "[LOCATION_LINK_POLICY] branch_context_failed tenant=%s err=%s",
+                    tenant_id,
+                    exc,
+                )
         logger.info(
             "[LOCATION_LINK_POLICY] tenant=%s deliver=true source=%s use_cta=true",
             tenant_id, source or "-",
         )
         return LocationLinkPolicyDecision(
-            reply_text="موقعنا 📍",
+            reply_text=reply_text,
             maps_url=maps_url,
             source=source or "",
             reason="maps_url_configured",

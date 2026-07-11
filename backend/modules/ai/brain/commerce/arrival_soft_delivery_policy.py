@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from modules.operations.branch_arrival_keyword_evidence import (
-    ARRIVAL_MODE_LOCATION_AND_RECEPTION,
     BranchActionConfig,
 )
 
@@ -27,27 +26,47 @@ class ArrivalSoftDeliveryDecision:
     skip_brain: bool = True
 
 
+def _location_reminder_text(config: BranchActionConfig) -> str:
+    maps_url = (config.maps_url or "").strip()
+    if not maps_url:
+        return ""
+    try:
+        from modules.ai.postprocess.safety_nets import _build_location_reply  # noqa: PLC0415
+
+        return _build_location_reply(
+            maps_url,
+            branch_name=(config.name or "").strip(),
+            has_branch_details=bool((config.name or "").strip()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ARRIVAL_SOFT] location_reply_build_failed err=%s", exc)
+        return maps_url
+
+
 def evaluate_arrival_soft_delivery(
     config: BranchActionConfig,
 ) -> ArrivalSoftDeliveryDecision:
-    resend = (
-        config.arrival_response_mode == ARRIVAL_MODE_LOCATION_AND_RECEPTION
-        and bool(config.maps_url)
-    )
+    maps_url = (config.maps_url or "").strip()
+    resend = bool(maps_url)
     cta_label = "موقع المتجر"
     if resend:
         try:
             from core.wa_link_buttons import classify_url  # noqa: PLC0415
 
-            cls = classify_url(config.maps_url)
+            cls = classify_url(maps_url)
             if cls.button_title:
                 cta_label = cls.button_title
         except Exception as exc:  # noqa: BLE001
             logger.exception("[ARRIVAL_SOFT] cta_classify_failed err=%s", exc)
 
+    reply_parts = [MSG_ARRIVAL_SOFT_WELCOME]
+    location_text = _location_reminder_text(config)
+    if location_text:
+        reply_parts.append(location_text)
+
     return ArrivalSoftDeliveryDecision(
-        reply_text=MSG_ARRIVAL_SOFT_WELCOME,
-        maps_url=config.maps_url if resend else "",
+        reply_text="\n\n".join(reply_parts),
+        maps_url=maps_url if resend else "",
         cta_button_label=cta_label,
         resend_maps=resend,
         reason="arrival_soft_welcome",
