@@ -33,7 +33,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Loader2,
-  Package, RefreshCw, ToggleLeft, ToggleRight, XCircle,
+  Package, RefreshCw, XCircle,
   Store, MessageCircle, Database, ArrowDown, Bot, Megaphone, ShoppingBag,
   Download, Clock,
 } from 'lucide-react'
@@ -306,18 +306,9 @@ export default function WhatsAppCatalog() {
 
   const catalogIdMissingForEnable = enabled && !catalogId.trim()
 
-  const onToggleEnabled = () => {
-    if (!enabled && !catalogId.trim()) {
-      setError(cm.messages.catalogIdRequired)
-      setSuccess(null)
-      return
-    }
-    setError(null)
-    setEnabled(prev => !prev)
-  }
-
-  const onSave = async () => {
-    if (enabled && !catalogId.trim()) {
+  const onSave = async (opts?: { forceEnabled?: boolean }) => {
+    const nextEnabled = opts?.forceEnabled ?? enabled
+    if (nextEnabled && !catalogId.trim()) {
       setError(cm.messages.catalogIdRequired)
       setSuccess(null)
       return
@@ -328,7 +319,7 @@ export default function WhatsAppCatalog() {
     try {
       const res = await catalogApi.patch({
         meta_catalog_id: catalogId.trim(),
-        catalog_enabled: enabled,
+        catalog_enabled: nextEnabled,
       })
       setStatus(res.status)
       setEnabled(res.status.connection.catalog_enabled)
@@ -338,6 +329,7 @@ export default function WhatsAppCatalog() {
       } else {
         setSuccess(cm.messages.settingsSaved)
       }
+      await loadDiagnostics()
     } catch (e: any) {
       if (
         e?.code === 'catalog_id_required'
@@ -352,6 +344,31 @@ export default function WhatsAppCatalog() {
     } finally {
       setSaving(false)
     }
+  }
+
+  const onActivateWhatsAppCatalog = async () => {
+    if (!catalogId.trim()) {
+      setError(cm.messages.catalogIdRequired)
+      openAdvanced()
+      requestAnimationFrame(() => {
+        document.getElementById('catalog-binding-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+      return
+    }
+    setEnabled(true)
+    await onSave({ forceEnabled: true })
+  }
+
+  const onRecheckWhatsAppCatalog = async () => {
+    await refresh()
+    await loadDiagnostics()
+  }
+
+  const scrollToBindingSettings = () => {
+    openAdvanced()
+    requestAnimationFrame(() => {
+      document.getElementById('catalog-binding-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
   }
 
   const onTestSend = async () => {
@@ -394,7 +411,18 @@ export default function WhatsAppCatalog() {
         />
       )}
 
-      {diagnostics && <CatalogChannelsCard diagnostics={diagnostics} />}
+      {diagnostics && (
+        <CatalogChannelsCard
+          diagnostics={diagnostics}
+          whatsappActivation={{
+            busy: saving,
+            verifying: loading,
+            onActivate: () => void onActivateWhatsAppCatalog(),
+            onManage: scrollToBindingSettings,
+            onRecheck: () => void onRecheckWhatsAppCatalog(),
+          }}
+        />
+      )}
 
       {error && (
         <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-4 py-3 flex items-start gap-2">
@@ -516,7 +544,7 @@ export default function WhatsAppCatalog() {
         </AdvancedSubSection>
 
         <AdvancedSubSection title={cm.advanced.bindingSettingsTitle}>
-          <div className="space-y-4">
+          <div id="catalog-binding-settings" className="space-y-4">
             <div className="text-xs leading-relaxed text-slate-600 bg-slate-50 border border-slate-100 rounded-lg p-3">
               {cm.channelBinding.intro}
             </div>
@@ -541,24 +569,12 @@ export default function WhatsAppCatalog() {
                 </p>
               )}
             </div>
-            <div className="flex items-center justify-between gap-3 bg-slate-50 border border-slate-100 rounded-xl p-4">
-              <div>
-                <p className="font-semibold text-sm text-slate-800">{cm.channelBinding.enableTitle}</p>
-                <p className="text-xs text-slate-500 mt-0.5">{cm.channelBinding.enableDesc}</p>
-              </div>
-              <button
-                type="button"
-                onClick={onToggleEnabled}
-                className={`shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-full text-sm font-semibold transition ${enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}
-                aria-pressed={enabled}
-              >
-                {enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-                {enabled ? cm.channelBinding.enabled : cm.channelBinding.disabled}
-              </button>
-            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              {enabled ? cm.channelBinding.enabledNote : cm.channelBinding.disabledNote}
+            </p>
             <div className="flex justify-end">
               <button
-                onClick={onSave}
+                onClick={() => void onSave()}
                 disabled={saving || catalogIdMissingForEnable}
                 className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition"
               >

@@ -1,6 +1,9 @@
 import { Bot, Megaphone, MessageCircle, ShoppingBag } from 'lucide-react'
 import type { CatalogDiagnostics } from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
+import WhatsAppCatalogActivationCTA, {
+  type WhatsAppCatalogActivationCTAProps,
+} from './WhatsAppCatalogActivationCTA'
 
 type ChannelStatus = 'ready' | 'available' | 'needs_action' | 'not_connected' | 'coming_soon'
 
@@ -31,7 +34,10 @@ function ChannelRow(props: {
   )
 }
 
-export default function CatalogChannelsCard(props: { diagnostics: CatalogDiagnostics }) {
+export default function CatalogChannelsCard(props: {
+  diagnostics: CatalogDiagnostics
+  whatsappActivation?: Omit<WhatsAppCatalogActivationCTAProps, 'diagnostics'>
+}) {
   const { tStatic } = useLanguage()
   const ch = tStatic(tr => tr.catalogMgmt.channels)
   const d = props.diagnostics
@@ -84,6 +90,12 @@ export default function CatalogChannelsCard(props: { diagnostics: CatalogDiagnos
           statusLabel={statusLabel('coming_soon')}
         />
       </div>
+      {props.whatsappActivation && (
+        <WhatsAppCatalogActivationCTA
+          diagnostics={d}
+          {...props.whatsappActivation}
+        />
+      )}
     </div>
   )
 }

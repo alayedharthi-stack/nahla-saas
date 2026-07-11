@@ -1719,6 +1719,21 @@ export interface Translations {
       statusNotConnected: string
       statusComingSoon:   string
     }
+    whatsappActivation: {
+      verifying:              string
+      notConnectedTitle:        string
+      notConnectedDesc:         string
+      activateTitle:            string
+      activateDesc:             string
+      activateBtn:              string
+      activeTitle:              string
+      activeBadge:              string
+      activeDesc:               string
+      enabledNeedsSetupTitle:   string
+      enabledNeedsSetupDesc:    string
+      manageBtn:                string
+      recheckBtn:               string
+    }
     advanced: {
       title:                    string
       structureTitle:           string
@@ -1789,6 +1804,8 @@ export interface Translations {
       enableDesc:     string
       enabled:        string
       disabled:       string
+      enabledNote:    string
+      disabledNote:   string
       save:           string
     }
     wabaLinkStatus: {
