@@ -2,10 +2,11 @@ import { Bot, Megaphone, MessageCircle, ShoppingBag } from 'lucide-react'
 import type { CatalogDiagnostics } from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
 
-type ChannelStatus = 'ready' | 'needs_action' | 'not_connected' | 'coming_soon'
+type ChannelStatus = 'ready' | 'available' | 'needs_action' | 'not_connected' | 'coming_soon'
 
 const STATUS_STYLE: Record<ChannelStatus, string> = {
   ready:          'bg-emerald-50 border-emerald-200 text-emerald-700',
+  available:      'bg-slate-50 border-slate-200 text-slate-600',
   needs_action:   'bg-amber-50 border-amber-200 text-amber-700',
   not_connected:  'bg-slate-50 border-slate-200 text-slate-600',
   coming_soon:    'bg-slate-50 border-slate-200 text-slate-500',
@@ -35,9 +36,11 @@ export default function CatalogChannelsCard(props: { diagnostics: CatalogDiagnos
   const ch = tStatic(tr => tr.catalogMgmt.channels)
   const d = props.diagnostics
 
-  const statusLabel = (s: ChannelStatus) => {
+  const statusLabel = (s: ChannelStatus, channel?: 'ai' | 'campaigns') => {
     switch (s) {
       case 'ready': return ch.statusReady
+      case 'available':
+        return channel === 'campaigns' ? ch.statusAvailableCampaigns : ch.statusAvailableAi
       case 'needs_action': return ch.statusNeedsAction
       case 'not_connected': return ch.statusNotConnected
       case 'coming_soon': return ch.statusComingSoon
@@ -49,8 +52,8 @@ export default function CatalogChannelsCard(props: { diagnostics: CatalogDiagnos
     : d.catalog.whatsapp_connected ? 'needs_action'
     : 'not_connected'
 
-  const aiStatus: ChannelStatus = d.products.total > 0 ? 'ready' : 'needs_action'
-  const campaignsStatus: ChannelStatus = d.products.total > 0 ? 'ready' : 'needs_action'
+  const aiStatus: ChannelStatus = d.products.total > 0 ? 'available' : 'needs_action'
+  const campaignsStatus: ChannelStatus = d.products.total > 0 ? 'available' : 'needs_action'
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
@@ -66,13 +69,13 @@ export default function CatalogChannelsCard(props: { diagnostics: CatalogDiagnos
           icon={<Bot className="w-4 h-4 text-violet-600" />}
           label={ch.ai}
           status={aiStatus}
-          statusLabel={statusLabel(aiStatus)}
+          statusLabel={statusLabel(aiStatus, 'ai')}
         />
         <ChannelRow
           icon={<Megaphone className="w-4 h-4 text-rose-600" />}
           label={ch.campaigns}
           status={campaignsStatus}
-          statusLabel={statusLabel(campaignsStatus)}
+          statusLabel={statusLabel(campaignsStatus, 'campaigns')}
         />
         <ChannelRow
           icon={<ShoppingBag className="w-4 h-4 text-amber-500" />}

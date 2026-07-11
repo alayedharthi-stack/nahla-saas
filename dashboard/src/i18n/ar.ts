@@ -1853,6 +1853,8 @@ const ar: Translations = {
       campaigns:          'الحملات',
       google:             'Google',
       statusReady:        'جاهز',
+      statusAvailableAi:  'متاح للاستخدام',
+      statusAvailableCampaigns: 'متاحة للاستخدام',
       statusNeedsAction:  'يحتاج إجراء',
       statusNotConnected: 'غير متصل',
       statusComingSoon:   'قريبًا',

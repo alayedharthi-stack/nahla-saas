@@ -30,7 +30,7 @@
  * Each of those needs its own diagnostic surface — collapsing them
  * into the generic Integrations row would hide the actionable bits.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   AlertTriangle, CheckCircle2, Loader2,
   Package, RefreshCw, ToggleLeft, ToggleRight, XCircle,
@@ -174,7 +174,9 @@ export default function WhatsAppCatalog() {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [manualFormOpen, setManualFormOpen] = useState(false)
   const [metaImportBusy, setMetaImportBusy] = useState(false)
-  const metaImportRef = useRef<MetaImportHandle>(null)
+  const [metaImportError, setMetaImportError] = useState<string | null>(null)
+  const [metaImportErrorDetail, setMetaImportErrorDetail] = useState<Record<string, unknown> | null>(null)
+  const [metaImportReport, setMetaImportReport] = useState<MetaImportReport | null>(null)
 
   const openAdvanced = () => {
     setAdvancedOpen(true)
@@ -211,6 +213,50 @@ export default function WhatsAppCatalog() {
       setProductsLoading(false)
     }
   }
+
+  const runMetaImport = useCallback(async () => {
+    if (metaImportBusy) return
+    setMetaImportBusy(true)
+    setError(null)
+    setSuccess(null)
+    setMetaImportError(null)
+    setMetaImportErrorDetail(null)
+    setMetaImportReport(null)
+    try {
+      const r = await catalogApi.importFromMeta()
+      setMetaImportReport(r.report)
+      const created = fmtCount(r.report.created ?? 0, lang)
+      const updated = fmtCount(r.report.updated ?? 0, lang)
+      setSuccess(`${cm.metaImport.reportTitle}: ${cm.metaImport.created} ${created}, ${cm.metaImport.updated} ${updated}`)
+      await loadProducts()
+      await loadDiagnostics()
+      bumpProductList()
+    } catch (e: unknown) {
+      const err = e as { code?: string; detail?: string; message?: string; status?: number; provider?: string; token_source?: string; catalog_id?: string; hint?: string; meta_code?: number; meta_message?: string; fbtrace_id?: string; stage?: string; discovery?: { error?: { meta_code?: number; meta_message?: string; fbtrace_id?: string } } }
+      const code = err?.code ?? err?.detail ?? err?.message
+      const msg = metaImportErrorCopy(code, cm.metaImport, cm.messages)
+      setMetaImportError(msg)
+      setError(msg)
+      const detail = {
+        code,
+        status:         err?.status,
+        provider:       err?.provider,
+        token_source:   err?.token_source,
+        catalog_id:     err?.catalog_id,
+        hint:           err?.hint,
+        meta_code:      err?.meta_code ?? err?.discovery?.error?.meta_code,
+        meta_message:   err?.meta_message ?? err?.discovery?.error?.meta_message,
+        fbtrace_id:     err?.fbtrace_id ?? err?.discovery?.error?.fbtrace_id,
+        stage:          err?.stage,
+      }
+      const compact = Object.fromEntries(
+        Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''),
+      )
+      setMetaImportErrorDetail(Object.keys(compact).length > 0 ? compact : null)
+    } finally {
+      setMetaImportBusy(false)
+    }
+  }, [metaImportBusy, cm, lang])
 
   const onResync = async () => {
     setResyncing(true)
@@ -342,7 +388,7 @@ export default function WhatsAppCatalog() {
           diagnostics={diagnostics}
           showMetaImport={diagnostics.catalog.catalog_id_present}
           metaImportBusy={metaImportBusy}
-          onImportMeta={() => void metaImportRef.current?.runImport()}
+          onImportMeta={() => void runMetaImport()}
           onAddManual={openManualForm}
           onOpenAdvanced={openAdvanced}
         />
@@ -379,12 +425,7 @@ export default function WhatsAppCatalog() {
         <div className="p-5">
           <ProductStudio
             refreshTrigger={productsRefresh}
-            onImportMeta={
-              diagnostics?.catalog.catalog_id_present
-                ? () => void metaImportRef.current?.runImport()
-                : undefined
-            }
-            onAddManual={openManualForm}
+            showEmptyActions={false}
           />
         </div>
       </section>
@@ -576,14 +617,12 @@ export default function WhatsAppCatalog() {
         {diagnostics?.catalog.catalog_id_present && (
           <AdvancedSubSection title={cm.advanced.metaImportTitle}>
             <MetaImportSection
-              ref={metaImportRef}
+              busy={metaImportBusy}
+              error={metaImportError}
+              errorDetail={metaImportErrorDetail}
+              report={metaImportReport}
               hideImportButton
-              onBusyChange={setMetaImportBusy}
-              onChanged={async () => {
-                await loadProducts()
-                await loadDiagnostics()
-                bumpProductList()
-              }}
+              onImport={() => void runMetaImport()}
             />
           </AdvancedSubSection>
         )}
@@ -952,83 +991,40 @@ function HubDiagramCard(props: { diagnostics: CatalogDiagnostics; merchantLabels
 // ─────────────────────────────────────────────────────────────────────
 // Meta import section (Path 4)
 // ─────────────────────────────────────────────────────────────────────
-//
-// Trigger ``/merchant/catalog/import/meta``. Only mounted when the
-// Meta channel is wired (catalog_id present) — otherwise the import
-// would fail preflight anyway, so showing a button would be confusing.
 
-export type MetaImportHandle = { runImport: () => Promise<void> }
+function metaImportErrorCopy(
+  code: string | undefined,
+  mi: Translations['catalogMgmt']['metaImport'],
+  msgs: Translations['catalogMgmt']['messages'],
+): string {
+  const errs = mi.errors
+  switch (code) {
+    case 'connection_not_found':       return errs.connection_not_found
+    case 'catalog_id_missing':         return errs.catalog_id_missing
+    case 'access_token_missing':       return errs.access_token_missing
+    case 'meta_access_token_missing':  return errs.meta_access_token_missing
+    case 'catalog_not_found':          return errs.catalog_not_found
+    case 'catalog_type_unsupported':   return errs.catalog_type_unsupported
+    case 'meta_http_error':            return errs.meta_http_error
+    default:
+      return code
+        ? errs.defaultUnexpected.replace('{code}', code)
+        : msgs.unexpectedImport
+  }
+}
 
-const MetaImportSection = forwardRef<MetaImportHandle, {
-  onChanged: () => Promise<void>
+function MetaImportSection(props: {
+  busy: boolean
+  error: string | null
+  errorDetail: Record<string, unknown> | null
+  report: MetaImportReport | null
   hideImportButton?: boolean
-  onBusyChange?: (busy: boolean) => void
-}>(function MetaImportSection(props, ref) {
+  onImport?: () => void
+}) {
   const { tStatic, dir } = useLanguage()
   const mi = tStatic(tr => tr.catalogMgmt.metaImport)
-  const msgs = tStatic(tr => tr.catalogMgmt.messages)
 
-  const [busy, setBusy]               = useState(false)
-  const [error, setError]             = useState<string | null>(null)
-  const [errorDetail, setErrorDetail] = useState<Record<string, any> | null>(null)
-  const [showDetail, setShowDetail]   = useState(false)
-  const [report, setReport]           = useState<MetaImportReport | null>(null)
-
-  const errorCopy = (code: string | undefined): string => {
-    const errs = mi.errors
-    switch (code) {
-      case 'connection_not_found':       return errs.connection_not_found
-      case 'catalog_id_missing':         return errs.catalog_id_missing
-      case 'access_token_missing':       return errs.access_token_missing
-      case 'meta_access_token_missing':  return errs.meta_access_token_missing
-      case 'catalog_not_found':          return errs.catalog_not_found
-      case 'catalog_type_unsupported':   return errs.catalog_type_unsupported
-      case 'meta_http_error':            return errs.meta_http_error
-      default:
-        return code
-          ? errs.defaultUnexpected.replace('{code}', code)
-          : msgs.unexpectedImport
-    }
-  }
-
-  const onImport = useCallback(async () => {
-    setBusy(true); props.onBusyChange?.(true); setError(null); setErrorDetail(null); setShowDetail(false); setReport(null)
-    try {
-      const r = await catalogApi.importFromMeta()
-      setReport(r.report)
-      await props.onChanged()
-    } catch (e: any) {
-      // The API wrapper surfaces the FastAPI ``detail`` as ``e.code``
-      // and stashes the full structured detail on ``e.validation``
-      // (when present) or on ``e.detail``. We capture both so the
-      // collapsible diagnostic block can show what Meta actually
-      // said (token_source / provider / meta_message / fbtrace_id).
-      const code  = e?.code ?? e?.detail ?? e?.message
-      setError(errorCopy(code))
-      const detail = (e && typeof e === 'object') ? {
-        code:           code,
-        status:         e?.status,
-        provider:       e?.provider,
-        token_source:   e?.token_source,
-        catalog_id:     e?.catalog_id,
-        hint:           e?.hint,
-        meta_code:      e?.meta_code ?? e?.discovery?.error?.meta_code,
-        meta_message:   e?.meta_message ?? e?.discovery?.error?.meta_message,
-        fbtrace_id:     e?.fbtrace_id ?? e?.discovery?.error?.fbtrace_id,
-        stage:          e?.stage,
-      } : null
-      // Drop empty entries so the panel only shows what actually has a value.
-      const compact = detail
-        ? Object.fromEntries(Object.entries(detail).filter(([, v]) => v !== undefined && v !== null && v !== ''))
-        : null
-      setErrorDetail(compact && Object.keys(compact).length > 0 ? compact : null)
-    } finally {
-      setBusy(false)
-      props.onBusyChange?.(false)
-    }
-  }, [props.onChanged, props.onBusyChange])
-
-  useImperativeHandle(ref, () => ({ runImport: onImport }), [onImport])
+  const [showDetail, setShowDetail] = useState(false)
 
   return (
     <div id="meta-import-section">
@@ -1037,13 +1033,13 @@ const MetaImportSection = forwardRef<MetaImportHandle, {
           {mi.intro}
         </p>
 
-        {error && (
+        {props.error && (
           <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-3 py-2 text-sm space-y-2">
             <div className="flex items-start gap-2">
               <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{error}</span>
+              <span className="leading-relaxed">{props.error}</span>
             </div>
-            {errorDetail && (
+            {props.errorDetail && (
               <div className="ms-6">
                 <button
                   type="button"
@@ -1054,7 +1050,7 @@ const MetaImportSection = forwardRef<MetaImportHandle, {
                 </button>
                 {showDetail && (
                   <pre dir="ltr" className="mt-2 bg-white border border-rose-100 rounded-lg p-2 text-[11px] text-slate-700 overflow-x-auto whitespace-pre-wrap leading-relaxed">
-{JSON.stringify(errorDetail, null, 2)}
+{JSON.stringify(props.errorDetail, null, 2)}
                   </pre>
                 )}
               </div>
@@ -1062,18 +1058,18 @@ const MetaImportSection = forwardRef<MetaImportHandle, {
           </div>
         )}
 
-        {report && (
+        {props.report && (
           <div className="bg-emerald-50/60 border border-emerald-100 rounded-xl p-3 text-xs text-emerald-900 space-y-1">
             <p className="font-bold">{mi.reportTitle}</p>
             <ul className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-1">
-              <li>{mi.scanned} {report.scanned}</li>
-              <li>{mi.created} {report.created}</li>
-              <li>{mi.updated} {report.updated}</li>
-              <li>{mi.skippedManual} {report.skipped_manual}</li>
-              <li>{mi.reportErrors} {report.errors}</li>
-              <li>{mi.pages} {report.pages_fetched}</li>
+              <li>{mi.scanned} {props.report.scanned}</li>
+              <li>{mi.created} {props.report.created}</li>
+              <li>{mi.updated} {props.report.updated}</li>
+              <li>{mi.skippedManual} {props.report.skipped_manual}</li>
+              <li>{mi.reportErrors} {props.report.errors}</li>
+              <li>{mi.pages} {props.report.pages_fetched}</li>
             </ul>
-            {report.truncated && (
+            {props.report.truncated && (
               <p className="text-amber-700 mt-1">
                 {mi.truncated}
               </p>
@@ -1081,21 +1077,21 @@ const MetaImportSection = forwardRef<MetaImportHandle, {
           </div>
         )}
 
-        {!props.hideImportButton && (
+        {!props.hideImportButton && props.onImport && (
         <button
           type="button"
-          onClick={onImport}
-          disabled={busy}
+          onClick={props.onImport}
+          disabled={props.busy}
           className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-5 py-2 rounded-xl text-sm transition"
         >
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          {props.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
           {mi.importBtn}
         </button>
         )}
       </div>
     </div>
   )
-})
+}
 
 
 // ─────────────────────────────────────────────────────────────────────

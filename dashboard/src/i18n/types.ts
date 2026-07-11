@@ -1713,6 +1713,8 @@ export interface Translations {
       campaigns:          string
       google:             string
       statusReady:        string
+      statusAvailableAi:  string
+      statusAvailableCampaigns: string
       statusNeedsAction:  string
       statusNotConnected: string
       statusComingSoon:   string

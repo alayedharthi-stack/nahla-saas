@@ -30,9 +30,9 @@ export function AdvancedSubSection(props: {
         <span>{props.title}</span>
         <ChevronDown className={`w-4 h-4 text-slate-500 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
-      {open && (
-        <div className="px-4 pb-4 border-t border-slate-100">
-          {props.lazyMount ? (mounted ? props.children : null) : props.children}
+      {(props.lazyMount ? mounted : open) && (
+        <div className={`px-4 pb-4 border-t border-slate-100 ${open ? '' : 'hidden'}`}>
+          {props.children}
         </div>
       )}
     </div>

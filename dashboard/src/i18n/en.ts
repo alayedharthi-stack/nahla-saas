@@ -1849,6 +1849,8 @@ const en: Translations = {
       campaigns:          'Campaigns',
       google:             'Google',
       statusReady:        'Ready',
+      statusAvailableAi:  'Available for use',
+      statusAvailableCampaigns: 'Available for use',
       statusNeedsAction:  'Needs action',
       statusNotConnected: 'Not connected',
       statusComingSoon:   'Coming soon',

@@ -407,6 +407,7 @@ function ProductGrid(props: {
   onSelect: (id: number) => void
   onImportMeta?: () => void
   onAddManual?: () => void
+  showEmptyActions?: boolean
 }) {
   const { t } = useLanguage()
   const g = t(tr => tr.catalogMgmt.studio.grid)
@@ -435,6 +436,7 @@ function ProductGrid(props: {
         <p className="text-sm text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
           {g.emptyDesc}
         </p>
+        {props.showEmptyActions !== false && (
         <div className="flex flex-wrap items-center justify-center gap-2">
           {props.onImportMeta ? (
             <button
@@ -469,6 +471,7 @@ function ProductGrid(props: {
             </a>
           )}
         </div>
+        )}
       </div>
     )
   }
@@ -1557,6 +1560,7 @@ export default function ProductStudio(props: {
   refreshTrigger?: number
   onImportMeta?: () => void
   onAddManual?: () => void
+  showEmptyActions?: boolean
 }) {
   const [filters, setFilters] = useState<StudioFilters>({})
   const [offset, setOffset]   = useState(0)
@@ -1608,6 +1612,7 @@ export default function ProductStudio(props: {
         onSelect={setSelectedId}
         onImportMeta={props.onImportMeta}
         onAddManual={props.onAddManual}
+        showEmptyActions={props.showEmptyActions}
       />
       <Pagination offset={offset} limit={limit} total={total} onChange={setOffset} />
 
