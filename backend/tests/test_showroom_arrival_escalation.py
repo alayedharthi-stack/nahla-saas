@@ -214,7 +214,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestLocationRequest:
-    def test_structured_branch_location_includes_maps_url_in_body(self) -> None:
+    def test_structured_branch_location_compose_facts_and_cta(self) -> None:
         db = _generic_branch_db()
         decision = evaluate_branch_trigger_routing(
             db,
@@ -224,8 +224,10 @@ class TestLocationRequest:
         assert decision is not None
         assert decision.trigger_type == "location_request"
         assert decision.maps_url == GENERIC_MAPS_URL
-        assert decision.reply_text.strip() != "موقعنا 📍"
-        assert GENERIC_MAPS_URL in decision.reply_text
+        assert decision.use_cta is True
+        assert decision.compose_facts is not None
+        assert decision.compose_facts.maps_cta_available is True
+        assert not (decision.reply_text or "").strip()
         _assert_no_commerce_hijack(decision.reply_text)
 
     def test_location_link_policy_transcript_safe_body(
@@ -249,7 +251,7 @@ class TestLocationRequest:
 
 
 class TestSoftArrival:
-    def test_on_the_way_warm_with_location_reminder(self) -> None:
+    def test_on_the_way_structured_compose_facts(self) -> None:
         db = _generic_branch_db()
         decision = evaluate_branch_trigger_routing(
             db,
@@ -258,10 +260,12 @@ class TestSoftArrival:
         )
         assert decision is not None
         assert decision.trigger_type == "arrival_soft"
-        assert "في انتظارك" in decision.reply_text
-        assert GENERIC_MAPS_URL in decision.reply_text
-        assert decision.deliver_contact is False
+        assert decision.compose_facts is not None
+        assert decision.compose_facts.action_kind == "arrival_soft"
+        assert decision.compose_facts.location_already_sent is True
+        assert decision.maps_url == GENERIC_MAPS_URL
         assert decision.resend_maps is True
+        assert not (decision.reply_text or "").strip()
         _assert_no_commerce_hijack(decision.reply_text)
 
 

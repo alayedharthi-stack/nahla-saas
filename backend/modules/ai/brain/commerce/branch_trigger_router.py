@@ -61,7 +61,36 @@ class BranchTriggerDecision:
     persist_pending_choice: str = ""
     pending_branch_id: int = 0
     metadata_path: str = "branch_trigger_router"
+    compose_facts: Any = None
 
+
+def _compose_facts_for_location(
+    message: str,
+    config: Any,
+    *,
+    maps_url: str,
+    use_cta: bool,
+    needs_pickup_preference_choice: bool = False,
+    maps_configured: bool = True,
+) -> Any:
+    from modules.ai.brain.persona.branch_action_compose import (  # noqa: PLC0415
+        ACTION_KIND_LOCATION,
+        BranchComposeFacts,
+    )
+
+    instructions = ""
+    if config.location_response_mode == LOCATION_MODE_PLUS_INSTRUCTIONS:
+        instructions = str(getattr(config, "location_instructions_text", "") or "").strip()
+    return BranchComposeFacts(
+        action_kind=ACTION_KIND_LOCATION,
+        customer_message=message or "",
+        branch_name=str(getattr(config, "name", "") or "").strip(),
+        maps_cta_available=bool(use_cta),
+        location_already_sent=False,
+        maps_configured=maps_configured,
+        needs_pickup_preference_choice=needs_pickup_preference_choice,
+        location_instructions=instructions,
+    )
 
 def _cta_label_for_url(maps_url: str) -> str:
     label = "موقع المتجر"
@@ -106,21 +135,6 @@ def _build_reception_targets(
     return call_target, _build_arrival_reply_text(evidence.lookup_name)
 
 
-def _build_location_reply_text(config: Any, maps_url: str) -> str:
-    if not maps_url:
-        return ""
-    try:
-        from modules.ai.postprocess.safety_nets import _build_location_reply  # noqa: PLC0415
-
-        return _build_location_reply(
-            maps_url,
-            branch_name=str(getattr(config, "name", "") or "").strip(),
-            has_branch_details=bool(str(getattr(config, "name", "") or "").strip()),
-        )
-    except Exception:  # noqa: silent-ok - location body fallback is acceptable
-        return maps_url
-
-
 def _build_location_decision(
     db: Any,
     tenant_id: int,
@@ -130,10 +144,7 @@ def _build_location_decision(
 ) -> BranchTriggerDecision:
     maps_url = config.maps_url
     use_cta = bool(maps_url)
-    reply = _build_location_reply_text(config, maps_url) if maps_url else "موقعنا 📍"
-    if config.location_response_mode == LOCATION_MODE_PLUS_INSTRUCTIONS:
-        if config.location_instructions_text:
-            reply = f"{reply}\n{config.location_instructions_text}"
+    needs_pickup_choice = False
 
     from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
         is_explicit_arrival_intent,
@@ -149,10 +160,8 @@ def _build_location_decision(
     _direct_location = is_explicit_direct_location_request(message or "")
     if deliver_reception and not _arrival_confirmed:
         deliver_reception = False
-        if config.location_instructions_text:
-            reply = f"{reply}\n{config.location_instructions_text}"
         if not _direct_location:
-            reply = f"{reply}\n{MSG_PICKUP_PREFERENCE_ASK}"
+            needs_pickup_choice = True
     elif deliver_reception:
         reception_target, reception_reply = _build_reception_targets(
             db, tenant_id, message,
@@ -161,15 +170,14 @@ def _build_location_decision(
             deliver_reception = False
 
     if not maps_url and not deliver_reception:
-        from modules.ai.brain.commerce.contact_route_policy import (  # noqa: PLC0415
-            MSG_LOCATION_NOT_CONFIGURED,
-        )
         return BranchTriggerDecision(
             trigger_type=TRIGGER_LOCATION_REQUEST,
             matched_phrase=match.matched_phrase,
             branch_id=match.branch_id,
             reason="no_maps_url",
-            reply_text=MSG_LOCATION_NOT_CONFIGURED,
+            compose_facts=_compose_facts_for_location(
+                message, config, maps_url="", use_cta=False, maps_configured=False,
+            ),
         )
 
     return BranchTriggerDecision(
@@ -177,7 +185,13 @@ def _build_location_decision(
         matched_phrase=match.matched_phrase,
         branch_id=match.branch_id,
         reason=f"location_{config.location_response_mode}",
-        reply_text=reply,
+        compose_facts=_compose_facts_for_location(
+            message,
+            config,
+            maps_url=maps_url,
+            use_cta=use_cta,
+            needs_pickup_preference_choice=needs_pickup_choice,
+        ),
         maps_url=maps_url,
         cta_button_label=_cta_label_for_url(maps_url) if maps_url else "",
         use_cta=use_cta,
@@ -186,33 +200,40 @@ def _build_location_decision(
         reception_reply_text=reception_reply,
         persist_contact=deliver_reception,
         persist_pending_choice=(
-            PENDING_PICKUP_MAPS_OR_CONTACT
-            if MSG_PICKUP_PREFERENCE_ASK in reply and not _direct_location
-            else ""
+            PENDING_PICKUP_MAPS_OR_CONTACT if needs_pickup_choice else ""
         ),
-        pending_branch_id=(
-            int(match.branch_id)
-            if MSG_PICKUP_PREFERENCE_ASK in reply and not _direct_location
-            else 0
-        ),
+        pending_branch_id=int(match.branch_id) if needs_pickup_choice else 0,
     )
 
 
 def _build_soft_decision(
     match: Any,
     config: Any,
+    message: str = "",
 ) -> BranchTriggerDecision:
     from modules.ai.brain.commerce.arrival_soft_delivery_policy import (  # noqa: PLC0415
         evaluate_arrival_soft_delivery,
     )
+    from modules.ai.brain.persona.branch_action_compose import (  # noqa: PLC0415
+        ACTION_KIND_ARRIVAL_SOFT,
+        BranchComposeFacts,
+    )
 
     soft = evaluate_arrival_soft_delivery(config)
+    compose_facts = BranchComposeFacts(
+        action_kind=ACTION_KIND_ARRIVAL_SOFT,
+        customer_message=message or "",
+        branch_name=soft.branch_name,
+        maps_cta_available=soft.resend_maps,
+        location_already_sent=soft.location_already_sent,
+        maps_configured=bool(soft.maps_url),
+    )
     return BranchTriggerDecision(
         trigger_type=TRIGGER_ARRIVAL_SOFT,
         matched_phrase=match.matched_phrase,
         branch_id=match.branch_id,
         reason=soft.reason,
-        reply_text=soft.reply_text,
+        compose_facts=compose_facts,
         maps_url=soft.maps_url,
         cta_button_label=soft.cta_button_label,
         use_cta=soft.resend_maps,
@@ -288,8 +309,9 @@ def _build_no_response_decision(
         build_staff_call_target,
         resolve_contact_display_name,
     )
-    from modules.ai.brain.commerce.staff_contact_recovery import (  # noqa: PLC0415
-        _build_recovery_reply_text,
+    from modules.ai.brain.persona.branch_action_compose import (  # noqa: PLC0415
+        ACTION_KIND_BRANCH_CONTACT,
+        BranchComposeFacts,
     )
     from modules.operations.branch_escalation_evidence import (  # noqa: PLC0415
         load_structured_escalation_chain,
@@ -339,13 +361,23 @@ def _build_no_response_decision(
         )
 
     label = resolve_contact_display_name(nxt.lookup_name, role=nxt.role or "")
-    reply = _build_recovery_reply_text(label or nxt.lookup_name, role=nxt.role or "")
+    config = load_branch_action_config(db, match.branch_id)
+    branch_name = str(getattr(config, "name", "") or "").strip() if config else ""
+    compose_facts = BranchComposeFacts(
+        action_kind=ACTION_KIND_BRANCH_CONTACT,
+        customer_message=message or "",
+        branch_name=branch_name,
+        contact_card_available=True,
+        contact_name=label or nxt.lookup_name,
+        contact_role=str(nxt.role or "").strip(),
+        maps_configured=True,
+    )
     return BranchTriggerDecision(
         trigger_type=TRIGGER_NO_RESPONSE,
         matched_phrase=match.matched_phrase,
         branch_id=match.branch_id,
         reason="no_response_escalation_advance",
-        reply_text=reply,
+        compose_facts=compose_facts,
         deliver_contact=True,
         call_target=call_target,
         persist_contact=True,
@@ -508,7 +540,7 @@ def evaluate_branch_trigger_routing(
     if match.trigger_type == TRIGGER_LOCATION_REQUEST:
         return _build_location_decision(db, tenant_id, route_msg or message or "", match, config)
     if match.trigger_type == TRIGGER_ARRIVAL_SOFT:
-        return _build_soft_decision(match, config)
+        return _build_soft_decision(match, config, route_msg or message or "")
     if match.trigger_type == TRIGGER_ARRIVAL_CONFIRMED:
         return _build_confirmed_decision(db, tenant_id, route_msg or message or "", match, config)
     if match.trigger_type == TRIGGER_NO_RESPONSE:

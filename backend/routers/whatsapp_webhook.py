@@ -7534,19 +7534,67 @@ async def _handle_merchant_message(
                 owner="branch_trigger_router",
             )
             _btr_reply = _btr_decision.reply_text
+            _btr_compose_meta: dict = {}
+            _btr_compose_facts = getattr(_btr_decision, "compose_facts", None)
+            if _btr_compose_facts is not None:
+                try:
+                    from modules.ai.brain.persona.branch_action_compose import (  # noqa: PLC0415
+                        compose_branch_trigger_body,
+                        plain_text_location_fallback_body,
+                    )
+
+                    _btr_compose_out = await compose_branch_trigger_body(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_phone=to,
+                        compose_facts=_btr_compose_facts,
+                    )
+                    _btr_reply = plain_text_location_fallback_body(
+                        _btr_compose_out.text,
+                        _btr_decision.maps_url,
+                        use_cta=bool(
+                            _btr_decision.use_cta and _btr_decision.maps_url
+                        ),
+                    )
+                    _btr_compose_meta = _btr_compose_out.to_metadata()
+                except Exception as _btr_comp_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[BRANCH_TRIGGER_ROUTER] compose failed tenant=%s err=%s",
+                        tenant_id,
+                        _btr_comp_exc,
+                    )
             _btr_ok = False
             _btr_vcard_ok = False
+            _btr_cta_fallback = False
             try:
                 if _btr_decision.use_cta and _btr_decision.maps_url:
                     _btr_ok = await _send_cta_url(
                         phone_id=phone_id,
                         to=to,
-                        body_text=_btr_reply or "موقعنا 📍",
+                        body_text=_btr_reply or "…",
                         btn_label=_btr_decision.cta_button_label or "موقع المتجر",
                         btn_url=_btr_decision.maps_url,
                         _tenant_id=tenant_id,
                         _db=db,
                     )
+                    if not _btr_ok:
+                        from modules.ai.brain.persona.branch_action_compose import (  # noqa: PLC0415
+                            plain_text_location_fallback_body,
+                        )
+
+                        _btr_cta_fallback = True
+                        _btr_reply = plain_text_location_fallback_body(
+                            _btr_reply,
+                            _btr_decision.maps_url,
+                            use_cta=False,
+                        )
+                        _btr_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_btr_reply,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                        )
                 elif _btr_reply:
                     _btr_ok = await _send_whatsapp_message(
                         phone_id=phone_id, to=to, text=_btr_reply,
@@ -7602,20 +7650,42 @@ async def _handle_merchant_message(
                                 "[BRANCH_TRIGGER_ROUTER] persist failed tenant=%s",
                                 tenant_id,
                             )
-                    _follow_up = ""
+                    elif not _btr_vcard_ok:
+                        _trusted_phone = (
+                            getattr(_btr_contact_target, "phone_display", "")
+                            or getattr(_btr_contact_target, "raw_phone", "")
+                            or getattr(_btr_contact_target, "wa_id", "")
+                            or ""
+                        )
+                        if _trusted_phone:
+                            if _btr_ok and (_btr_reply or "").strip():
+                                _phone_fallback = _trusted_phone
+                            else:
+                                _phone_fallback = (
+                                    f"{(_btr_reply or '').strip()}\n{_trusted_phone}".strip()
+                                )
+                            if _phone_fallback:
+                                _btr_ok = await _send_whatsapp_message(
+                                    phone_id=phone_id,
+                                    to=to,
+                                    text=_phone_fallback,
+                                    _tenant_id=tenant_id,
+                                    _db=db,
+                                )
+                                if not (_btr_reply or "").strip():
+                                    _btr_reply = _phone_fallback
+                                _btr_compose_meta["contact_card_fallback"] = "trusted_phone"
                     if (
                         _btr_decision.deliver_reception_after_maps
                         and _btr_decision.reception_reply_text
+                        and _btr_vcard_ok
                     ):
-                        _follow_up = _btr_decision.reception_reply_text
-                    elif _btr_decision.deliver_contact and _btr_reply:
-                        _follow_up = _btr_reply
-                    if _follow_up and _btr_vcard_ok:
                         await _send_whatsapp_message(
-                            phone_id=phone_id, to=to, text=_follow_up,
+                            phone_id=phone_id, to=to,
+                            text=_btr_decision.reception_reply_text,
                             _tenant_id=tenant_id, _db=db,
                         )
-                        _btr_reply = _follow_up
+                        _btr_reply = _btr_decision.reception_reply_text
 
                 StateManager.save_message(
                     db, to, _btr_reply or "", "outbound",
@@ -7628,6 +7698,8 @@ async def _handle_merchant_message(
                         "branch_trigger_phrase": _btr_decision.matched_phrase,
                         "branch_id": _btr_decision.branch_id,
                         "branch_vcard_sent": _btr_vcard_ok,
+                        **_btr_compose_meta,
+                        **({"cta_send_fallback": "plain_text_url"} if _btr_cta_fallback else {}),
                     },
                 )
                 _pending_choice = str(
