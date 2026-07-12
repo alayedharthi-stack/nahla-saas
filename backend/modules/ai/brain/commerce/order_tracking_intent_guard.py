@@ -504,13 +504,7 @@ def build_order_support_follow_up_args(
 
     if not order_verified:
         status = ""
-    response_goal = (
-        "existing_order_support — reply in natural Saudi Arabic about the "
-        "customer's existing order using only known facts. If order_verified "
-        "is false, say the reference is not verified yet and ask only for "
-        "the minimum identifier needed. Do NOT promise carrier changes, "
-        "discounts, or mutations. Do NOT open catalog or restart checkout."
-    )
+    response_goal = _base_existing_order_support_response_goal()
     if unclear_audio:
         response_goal += (
             " The voice note transcript is unavailable; acknowledge that "
@@ -525,6 +519,66 @@ def build_order_support_follow_up_args(
         "unclear_audio": bool(unclear_audio),
         "response_goal": response_goal,
     }
+
+
+_IN_CHANNEL_WHATSAPP_ORDER_SUPPORT = (
+    "in_channel_only — the customer is already on WhatsApp with this merchant; "
+    "continue helping in this chat. Do NOT redirect them generically to phone, "
+    "email, or an external sales/support desk. Do NOT invent a contact team or "
+    "off-channel contact method. If human help is truly needed, acknowledge "
+    "in-channel only — official staff handoff may be triggered by the platform; "
+    "do not supply phone numbers or email addresses unless they appear in Facts."
+)
+
+
+def _base_existing_order_support_response_goal() -> str:
+    return (
+        "existing_order_support — reply in natural Saudi Arabic about the "
+        "customer's existing order using only known facts. If order_verified "
+        "is false, say the reference is not verified yet and ask only for "
+        "the minimum identifier needed. Do NOT promise carrier changes, "
+        "discounts, or mutations. Do NOT fabricate tracking, carrier, or "
+        "order-status facts without evidence. Do NOT open catalog or restart checkout."
+    )
+
+
+def _base_shipping_post_order_response_goal() -> str:
+    return (
+        "shipping_post_order — reply in natural Saudi Arabic about the "
+        "customer's order, shipping, or delivery concern using only known "
+        "facts from context. Do NOT fabricate tracking URLs, carrier names, "
+        "or delivery ETAs without evidence. Do NOT open catalog or restart checkout."
+    )
+
+
+def compose_order_support_response_goal_for_decision(
+    args: Optional[Dict[str, Any]],
+) -> str:
+    """Merge structured order-support goals for compose (constraints only)."""
+    payload = dict(args or {})
+    topic = str(payload.get("topic") or "").strip()
+    base = str(payload.get("response_goal") or "").strip()
+    if not base:
+        if topic == "shipping_post_order":
+            base = _base_shipping_post_order_response_goal()
+        else:
+            base = _base_existing_order_support_response_goal()
+
+    lines = [base, _IN_CHANNEL_WHATSAPP_ORDER_SUPPORT]
+    order_ref = str(payload.get("order_reference") or "").strip()
+    if order_ref:
+        lines.append(f"order_reference={order_ref}")
+    if "order_verified" in payload:
+        lines.append(f"order_verified={bool(payload.get('order_verified'))}")
+    status = str(payload.get("order_status") or "").strip()
+    if status:
+        lines.append(f"order_status={status}")
+    if payload.get("unclear_audio"):
+        lines.append(
+            "unclear_audio=true — voice transcript may be missing; ask gently "
+            "to repeat in text or provide the minimum order identifier if needed."
+        )
+    return " | ".join(lines)
 
 
 def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
@@ -965,6 +1019,7 @@ def resolve_order_tracking_guard_reply(
 __all__ = [
     "boost_track_order_intent",
     "build_order_support_follow_up_args",
+    "compose_order_support_response_goal_for_decision",
     "extract_bare_order_reference",
     "extract_order_reference_from_history",
     "has_existing_order_evidence",
