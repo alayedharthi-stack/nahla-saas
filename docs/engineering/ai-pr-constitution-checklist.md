@@ -5,6 +5,10 @@ Mandatory for every AI behavior PR. A PR cannot receive PASS or merge approval u
 Authoritative doctrine: `AGENTS.md` (Mandatory Natural Language Rule).  
 Enforcement: `constitution-compliance` CI check.
 
+**Merge-blocking status:** The check runs in CI but is **not** merge-blocking until GitHub branch protection marks `constitution-compliance` as Required. Owner actions: `docs/engineering/merge-and-ci-policy.md`.
+
+**Waiver policy:** Tracked violations are `FAILING POLICY WITH TEMPORARY WAIVER` — never approved exceptions. New waivers require governance PR + `governance_baseline_version` bump.
+
 - [ ] Source of final customer text identified.
 - [ ] Decision → facts → compose → guards → sanitizer → dedup → wire traced.
 - [ ] `compose_source`, `response_mode`, and `chosen_path` asserted.

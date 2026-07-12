@@ -5,8 +5,11 @@ Authoritative doctrine: ``AGENTS.md``. Policy registry:
 """
 from __future__ import annotations
 
+import copy
+import json
 import os
 import sys
+from datetime import date
 from typing import Any, Dict, Mapping
 
 import pytest
@@ -18,21 +21,30 @@ if _BACKEND not in sys.path:
 
 from modules.ai.brain.persona.branch_action_compose import (  # noqa: E402
     BranchActionComposeOutcome,
+    BranchComposeFacts,
     minimal_emergency_fallback,
 )
-from modules.ai.brain.persona.branch_action_compose import (  # noqa: E402
-    BranchComposeFacts,
-)
+from modules.ai.compose import constitutional_policy as policy  # noqa: E402
 from modules.ai.compose.constitutional_policy import (  # noqa: E402
     APPROVED_COMPOSE_SOURCES,
     DETERMINISTIC_EXCEPTIONS,
+    GOVERNANCE_BASELINE,
     TRACKED_VIOLATION_IDS,
     TRACKED_VIOLATION_PATHS,
+    TRACKED_VIOLATION_STATUS,
     TRACKED_VIOLATIONS,
+    TrackedViolation,
     classify_untracked_violations,
+    format_approved_exception_report,
     format_tracked_violation_report,
+    load_governance_baseline,
+    scan_compose_boundary_violations,
     scan_exact_prose_test_assertions,
     scan_responder_direct_template_returns,
+    validate_governance_baseline,
+    validate_live_violations_against_waivers,
+    validate_new_violation_cannot_self_waive,
+    validate_tracked_violation_entry,
     validate_compose_source,
     validate_fallback_metadata,
     validate_reply_metadata,
@@ -72,6 +84,24 @@ def _fallback_metadata(*, compose_attempted: bool = True) -> Dict[str, Any]:
         "fallback_reason": "compose_timeout",
         "fallback_action_type": "branch_location",
     }
+
+
+def _sample_waiver(**overrides: object) -> TrackedViolation:
+    base = TRACKED_VIOLATIONS[0]
+    data = {
+        "violation_id": base.violation_id,
+        "path": base.path,
+        "file": base.file,
+        "action": base.action,
+        "owner": base.owner,
+        "reason": base.reason,
+        "removal_ref": base.removal_ref,
+        "added_at": base.added_at,
+        "expiry_date": base.expiry_date,
+        "approved_by": base.approved_by,
+    }
+    data.update(overrides)
+    return TrackedViolation(**data)  # type: ignore[arg-type]
 
 
 class TestComposeSourceContract:
@@ -114,10 +144,96 @@ class TestComposeSourceContract:
         assert any("fallback_reason" in e for e in errors)
 
 
+class TestGovernanceWaiverSchema:
+    def test_expired_tracked_violation_fails(self) -> None:
+        expired = _sample_waiver(expiry_date="2020-01-01")
+        errors = validate_tracked_violation_entry(expired, as_of=date(2026, 7, 12))
+        assert any("expired" in e for e in errors)
+
+    def test_missing_owner_fails(self) -> None:
+        bad = _sample_waiver(owner="")
+        errors = validate_tracked_violation_entry(bad)
+        assert any("owner is required" in e for e in errors)
+
+    def test_missing_removal_reference_fails(self) -> None:
+        bad = _sample_waiver(removal_ref="")
+        errors = validate_tracked_violation_entry(bad)
+        assert any("removal_ref is required" in e for e in errors)
+
+    def test_malformed_expiry_fails(self) -> None:
+        bad = _sample_waiver(expiry_date="31-08-2026")
+        errors = validate_tracked_violation_entry(bad)
+        assert any("malformed expiry_date" in e for e in errors)
+
+    def test_missing_approved_by_fails(self) -> None:
+        bad = _sample_waiver(approved_by="")
+        errors = validate_tracked_violation_entry(bad)
+        assert any("approved_by is required" in e for e in errors)
+
+    def test_live_baseline_passes_governance_validation(self) -> None:
+        assert validate_governance_baseline(as_of=date(2026, 7, 12)) == []
+
+    def test_tracked_violation_is_not_classified_as_approved_exception(self) -> None:
+        assert TRACKED_VIOLATION_STATUS == "FAILING_POLICY_WITH_TEMPORARY_WAIVER"
+        approved_paths = {exc.action_path for exc in DETERMINISTIC_EXCEPTIONS}
+        for violation in TRACKED_VIOLATIONS:
+            assert violation.path not in approved_paths
+            assert violation.status == TRACKED_VIOLATION_STATUS
+        report = format_tracked_violation_report()
+        assert "FAILING POLICY WITH TEMPORARY WAIVER" in report
+        assert "APPROVED" not in report.split("FAILING")[0]
+
+    def test_approved_exception_report_is_separate_from_waivers(self) -> None:
+        approved_report = format_approved_exception_report()
+        waiver_report = format_tracked_violation_report()
+        assert "APPROVED DETERMINISTIC EXCEPTIONS" in approved_report
+        assert "track_order_not_found" not in approved_report
+        assert "NL-V001" in waiver_report
+
+
+class TestAntiGrandfathering:
+    def test_new_violation_id_not_in_baseline_allowed_list_fails(self) -> None:
+        errors = validate_new_violation_cannot_self_waive(
+            GOVERNANCE_BASELINE,
+            proposed_new_ids={"NL-V999"},
+        )
+        assert errors
+        assert "governance_baseline_version" in errors[0]
+
+    def test_adding_violation_and_waiver_together_cannot_pass_baseline_guard(self) -> None:
+        raw = json.loads(
+            (policy.BASELINE_JSON).read_text(encoding="utf-8")
+        )
+        mutated = copy.deepcopy(raw)
+        mutated["violations"].append(
+            {
+                "violation_id": "NL-V999",
+                "path": "new_fake_path",
+                "file": "backend/modules/ai/brain/compose/responder.py",
+                "action": "fake:T.fake_template",
+                "owner": "ai-platform",
+                "reason": "attempted casual waiver",
+                "removal_ref": "fix/some-feature",
+                "added_at": "2026-07-12",
+                "expiry_date": "2026-12-31",
+                "approved_by": "self",
+            }
+        )
+        # allowed_violation_ids unchanged — governance mismatch must fail.
+        tmp = policy.REPO_ROOT / ".tmp_baseline_guard_test.json"
+        tmp.write_text(json.dumps(mutated), encoding="utf-8")
+        try:
+            baseline = load_governance_baseline(tmp)
+            errors = validate_governance_baseline(baseline, as_of=date(2026, 7, 12))
+            assert any("must match allowed_violation_ids" in e for e in errors)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+
 class TestPostprocessConstitution:
     def test_sanitizer_replacing_llm_text_with_deterministic_prose_fails(self) -> None:
         from core.outbound_sanitizer import maybe_scrub_unkept_asset_promise
-
         from modules.ai.brain.compose import templates as T
 
         llm_candidate = T.order_status_not_found()
@@ -130,22 +246,8 @@ class TestPostprocessConstitution:
         assert changed is True
         assert asset_class == "phone"
         assert scrubbed != llm_candidate
-        # Constitutional violation: deterministic replacement without metadata contract.
-        meta = {
-            "compose_source": "llm",
-            "response_mode": "llm",
-            "chosen_path": "track_order_not_found",
-            "llm_candidate_present": True,
-            "final_text_transformed": True,
-            "final_transform_reasons": ["sanitizer_asset_promise_scrub"],
-        }
-        # If transform happened, compose_source must not remain plain llm without audit.
-        assert meta["final_text_transformed"] is True
-        assert meta["llm_candidate_present"] is True
-        assert scrubbed  # documents production false-positive path
 
     def test_dedup_substitute_introducing_fixed_conversational_prose_is_detected(self) -> None:
-        # Dedup must not substitute fixed conversational wording on normal paths.
         fixed_substitute = "حالياً لا يوجد رقم تواصل مهيأ لإرساله."
         meta: Mapping[str, object] = {
             "compose_source": "llm",
@@ -155,10 +257,8 @@ class TestPostprocessConstitution:
             "final_text_transformed": True,
             "final_transform_reasons": ["dedup_operational_delta"],
         }
-        errors = validate_reply_metadata(meta)
-        assert errors == []
-        assert meta["final_text_transformed"] is True
-        assert fixed_substitute  # sentinel — dedup + sanitizer stack must stay auditable
+        assert validate_reply_metadata(meta) == []
+        assert fixed_substitute
 
 
 class TestExceptionRegistry:
@@ -181,38 +281,73 @@ class TestExceptionRegistry:
 
 
 class TestRuntimeViolationDetection:
-    def test_track_order_not_found_deterministic_normal_path_detected(self) -> None:
+    def test_track_order_not_found_still_detected_until_runtime_fix(self) -> None:
         findings = scan_responder_direct_template_returns()
-        paths = {f.chosen_path for f in findings}
+        paths = {f.path for f in findings}
         assert "track_order_not_found" in paths
-        match = next(f for f in findings if f.chosen_path == "track_order_not_found")
+        match = next(f for f in findings if f.path == "track_order_not_found")
         assert match.template_call == "order_status_not_found"
 
+    def test_compose_scan_detects_assigned_template_return_pattern(self) -> None:
+        findings = scan_compose_boundary_violations(
+            ["backend/modules/ai/brain/compose/responder.py"]
+        )
+        kinds = {f.kind.value for f in findings}
+        assert "direct_template_return" in kinds
+
     def test_detected_violations_are_explicitly_tracked_not_silently_grandfathered(self) -> None:
-        findings = scan_responder_direct_template_returns()
-        untracked = classify_untracked_violations(findings)
-        assert untracked == [], (
-            "New untracked constitutional violations detected:\n"
-            + "\n".join(
-                f"  {f.chosen_path} -> T.{f.template_call}() @ {f.file}:{f.line}"
-                for f in untracked
-            )
+        errors = validate_live_violations_against_waivers()
+        assert errors == [], (
+            "Constitutional drift detected:\n"
+            + "\n".join(f"  - {e}" for e in errors)
             + "\n\n"
             + format_tracked_violation_report()
         )
 
-    def test_tracked_waivers_include_track_order_not_found(self) -> None:
-        assert "NL-V001" in TRACKED_VIOLATION_IDS
-        assert "track_order_not_found" in TRACKED_VIOLATION_PATHS
-        waiver = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V001")
-        assert waiver.removal_pr == "fix/track-order-not-found-compose-compliance"
-        assert waiver.expiry == "2026-08-31"
+    def test_untracked_new_deterministic_prose_fails(self) -> None:
+        untracked = classify_untracked_violations(scan_compose_boundary_violations())
+        assert untracked == []
 
-    def test_exact_prose_test_assertion_detected_and_tracked(self) -> None:
+    def test_nl_v001_removal_ownership(self) -> None:
+        waiver = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V001")
+        assert waiver.removal_ref == "fix/track-order-not-found-compose-compliance"
+
+    def test_nl_v002_has_separate_removal_scope(self) -> None:
+        v001 = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V001")
+        v002 = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V002")
+        assert v002.removal_ref == "fix/track-order-need-identifiers-compose-compliance"
+        assert v002.removal_ref != v001.removal_ref
+
+    def test_nl_t001_tracked_for_exact_prose_assertion(self) -> None:
         assertions = scan_exact_prose_test_assertions()
-        assert assertions, "expected exact template assertion in order status routing test"
-        assert any("order_status_not_found" in a.pattern for a in assertions)
+        assert assertions
         assert "NL-T001" in TRACKED_VIOLATION_IDS
+        assert "track_order_not_found" in TRACKED_VIOLATION_PATHS
+
+    def test_stale_waiver_without_matching_code_fails(self) -> None:
+        fake_waivers = (
+            TrackedViolation(
+                violation_id="NL-V001",
+                path="track_order_not_found",
+                file="backend/modules/ai/brain/compose/responder.py",
+                action="order_not_found:T.removed_template",
+                owner="ai-platform",
+                reason="stale",
+                removal_ref="fix/x",
+                added_at="2026-07-12",
+                expiry_date="2026-08-31",
+                approved_by="test",
+            ),
+        )
+        original = policy.TRACKED_VIOLATIONS
+        policy.TRACKED_VIOLATIONS = fake_waivers  # type: ignore[misc]
+        policy.TRACKED_VIOLATION_PATHS = frozenset(v.path for v in fake_waivers)
+        try:
+            errors = validate_live_violations_against_waivers()
+            assert any("no longer matches code" in e for e in errors)
+        finally:
+            policy.TRACKED_VIOLATIONS = original
+            policy.TRACKED_VIOLATION_PATHS = frozenset(v.path for v in original)
 
 
 class TestApprovedEmergencyFallbackSurface:

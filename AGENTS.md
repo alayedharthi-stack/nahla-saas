@@ -198,13 +198,17 @@ Fix ownership, state, evidence, routing, composition, and postprocessing. Paraph
 
 ### CI enforcement
 
-Required check: **`constitution-compliance`** (`backend/tests/test_constitution_compliance.py`).
+CI job: **`constitution-compliance`** (`backend/tests/test_constitution_compliance.py`).
 
-Pre-existing violations must be tracked in `TRACKED_VIOLATIONS` with violation ID, owner, expiry, and removal PR — never silently grandfathered.
+This job exists in GitHub Actions but is **not merge-blocking until** a repository admin marks it as a Required Status Check in GitHub branch protection. See `docs/engineering/merge-and-ci-policy.md`.
+
+Pre-existing violations must be tracked in `tracked_violations_baseline.json` with violation ID, owner, `added_at`, `expiry_date`, `approved_by`, and removal reference — never silently grandfathered. New violation IDs require `governance_baseline_version` bump in a dedicated governance PR.
 
 ### AI PR review checklist
 
-Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`. A PR cannot receive PASS or merge approval without completing it.
+Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`.
+
+**Merge gate note:** `constitution-compliance` must be green on the PR, but merge-blocking status depends on GitHub branch protection (owner action). A PR cannot receive PASS or merge approval without completing this checklist.
 
 This rule cannot be bypassed for convenience, fewer files, lower latency, or easier testing.
 
