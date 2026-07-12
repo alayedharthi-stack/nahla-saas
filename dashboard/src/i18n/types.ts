@@ -2103,6 +2103,8 @@ export interface Translations {
         missing:       string
         readyWarn:     string
         ready:         string
+        readyWhatsappData: string
+        readyDataOnly:     string
         futureChannel: string
       }
       readinessPanel: {
