@@ -46,7 +46,7 @@ class TestOrderSupportResponseGoalPreserved:
         decision = _support_decision()
         goal = _compose_response_goal(decision, SuggestionSnapshot())
         assert goal.startswith("existing_order_support —")
-        assert "in_channel_only" in goal
+        assert "support_channel_ownership" in goal
         assert f"order_reference={GENERIC_ORDER_REF}" in goal
         assert "order_verified=False" in goal
 
@@ -59,14 +59,16 @@ class TestOrderSupportResponseGoalPreserved:
         )
         prompt = build_brain_reply_prompt(state)
         assert "existing_order_support —" in prompt
-        assert "in_channel_only" in prompt
+        assert "support_channel_ownership" in prompt
         assert decision.args["response_goal"] in prompt
 
     def test_unverified_shipping_delay_goal_constraints(self) -> None:
-        """B — in-channel support; no off-channel redirect policy in goal."""
+        """B — support-channel ownership; truth constraints without sales fallback."""
         goal = _compose_response_goal(_support_decision(), SuggestionSnapshot())
-        assert "Do NOT redirect them generically to phone" in goal
-        assert "Do NOT invent a contact team" in goal
+        assert "already the merchant's active customer-support channel" in goal
+        assert "no separate support entry point" in goal
+        assert "keep following up through this WhatsApp chat" in goal
+        assert "already in the merchant WhatsApp support channel" in goal
         assert "Do NOT fabricate tracking" in goal
         assert "Do NOT open catalog or restart checkout" in goal
         assert goal != "existing_order_support_ownership:test"
@@ -89,18 +91,19 @@ class TestOrderSupportResponseGoalPreserved:
         )
         goal = _compose_base_response_goal(decision, SuggestionSnapshot())
         assert goal.startswith("shipping_post_order —")
-        assert "in_channel_only" in goal
+        assert "support_channel_ownership" in goal
 
     def test_human_escalation_stays_in_channel_in_goal(self) -> None:
-        """D — escalation policy is in-channel only; no invented contact details."""
+        """D — human help stays on-thread unless platform issues authenticated handoff."""
         goal = compose_order_support_response_goal_for_decision(
             build_order_support_follow_up_args(
                 message="أبغى أحد من الفريق",
                 history=[{"direction": "in", "body": GENERIC_ORDER_REF}],
             )
         )
-        assert "official staff handoff may be triggered by the platform" in goal
-        assert "do not supply phone numbers or email addresses unless they appear in Facts" in goal
+        assert "authenticated staff handoff" in goal
+        assert "configured contact action already present in Facts" in goal
+        assert "keep following up through this WhatsApp chat" in goal
 
     def test_category_discovery_goal_unchanged(self) -> None:
         """E — generic sales/discovery compose path is not altered."""
@@ -111,6 +114,6 @@ class TestOrderSupportResponseGoalPreserved:
             confidence=0.8,
         )
         goal = _compose_base_response_goal(decision, SuggestionSnapshot())
-        assert "in_channel_only" not in goal
+        assert "support_channel_ownership" not in goal
         assert "existing_order_support —" not in goal
         assert "category_discovery" in goal

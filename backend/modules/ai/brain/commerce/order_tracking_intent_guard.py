@@ -521,24 +521,28 @@ def build_order_support_follow_up_args(
     }
 
 
-_IN_CHANNEL_WHATSAPP_ORDER_SUPPORT = (
-    "in_channel_only — the customer is already on WhatsApp with this merchant; "
-    "continue helping in this chat. Do NOT redirect them generically to phone, "
-    "email, or an external sales/support desk. Do NOT invent a contact team or "
-    "off-channel contact method. If human help is truly needed, acknowledge "
-    "in-channel only — official staff handoff may be triggered by the platform; "
-    "do not supply phone numbers or email addresses unless they appear in Facts."
+_SUPPORT_CHANNEL_OWNERSHIP = (
+    "support_channel_ownership — this WhatsApp thread is already the merchant's "
+    "active customer-support channel; the customer reached the store by messaging "
+    "here, so there is no separate support entry point they still need to open. "
+    "Continue the support workflow inside this same conversation — reassurance, "
+    "clarification, and follow-up all happen here. When more human investigation "
+    "is needed, explain naturally that the merchant team will keep following up "
+    "through this WhatsApp chat. Another human or contact path is relevant only "
+    "when the platform issues an authenticated staff handoff or a configured "
+    "contact action already present in Facts."
 )
 
 
 def _base_existing_order_support_response_goal() -> str:
     return (
         "existing_order_support — reply in natural Saudi Arabic about the "
-        "customer's existing order using only known facts. If order_verified "
-        "is false, say the reference is not verified yet and ask only for "
-        "the minimum identifier needed. Do NOT promise carrier changes, "
-        "discounts, or mutations. Do NOT fabricate tracking, carrier, or "
-        "order-status facts without evidence. Do NOT open catalog or restart checkout."
+        "customer's existing order using only known facts. The customer is "
+        "already in the merchant WhatsApp support channel in this thread. "
+        "If order_verified is false, say the reference is not verified yet and "
+        "ask only for the minimum identifier needed. Do NOT promise carrier "
+        "changes, discounts, or mutations. Do NOT fabricate tracking, carrier, "
+        "or order-status facts without evidence. Do NOT open catalog or restart checkout."
     )
 
 
@@ -546,8 +550,10 @@ def _base_shipping_post_order_response_goal() -> str:
     return (
         "shipping_post_order — reply in natural Saudi Arabic about the "
         "customer's order, shipping, or delivery concern using only known "
-        "facts from context. Do NOT fabricate tracking URLs, carrier names, "
-        "or delivery ETAs without evidence. Do NOT open catalog or restart checkout."
+        "facts from context. The customer is already in the merchant WhatsApp "
+        "support channel in this thread. Do NOT fabricate tracking URLs, "
+        "carrier names, or delivery ETAs without evidence. "
+        "Do NOT open catalog or restart checkout."
     )
 
 
@@ -564,7 +570,7 @@ def compose_order_support_response_goal_for_decision(
         else:
             base = _base_existing_order_support_response_goal()
 
-    lines = [base, _IN_CHANNEL_WHATSAPP_ORDER_SUPPORT]
+    lines = [base, _SUPPORT_CHANNEL_OWNERSHIP]
     order_ref = str(payload.get("order_reference") or "").strip()
     if order_ref:
         lines.append(f"order_reference={order_ref}")
