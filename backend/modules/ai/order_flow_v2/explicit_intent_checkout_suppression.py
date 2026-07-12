@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence
 
 from modules.ai.brain.types import (
@@ -95,6 +95,17 @@ class CheckoutSuppressionDecision:
     suppress: bool
     detected_intent: str = ""
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class ExistingOrderSupportYield:
+    should_yield: bool = False
+    detected_intent: str = ""
+    order_reference: str = ""
+    order_verified: bool = False
+    evidence_source: str = ""
+    reason: str = ""
+    follow_up_args: Dict[str, Any] = field(default_factory=dict)
 
 
 def _prep_dict(order_prep: Any) -> Dict[str, Any]:
@@ -478,6 +489,104 @@ def _higher_priority_than_payment(missing_fields: Sequence[str]) -> bool:
     return any(field in missing for field in priority)
 
 
+def should_yield_to_existing_order_support(
+    message: str,
+    *,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    order_prep: Optional[Dict[str, Any]] = None,
+    brain_state: Optional[Dict[str, Any]] = None,
+    history: Optional[Sequence[Any]] = None,
+    commerce_bundle: Optional[Dict[str, Any]] = None,
+) -> ExistingOrderSupportYield:
+    """Yield existing-order support when recent ref continuity owns the turn."""
+    hist = list(history or [])
+    detected = _detect_pending_order_support_intent(
+        message,
+        inbound_metadata=inbound_metadata,
+        history=hist,
+        brain_state=brain_state,
+    )
+    if detected != EXISTING_ORDER_SUPPORT:
+        return ExistingOrderSupportYield(reason="no_support_intent")
+
+    semantic = str(message or "").strip()
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            _EXPLICIT_NEW_SHOP_RE,
+            _norm_ar,
+            build_order_support_follow_up_args,
+            extract_bare_order_reference,
+            extract_order_reference_from_history,
+            is_order_reference_continuity_active,
+        )
+        from modules.ai.media.routing_guard import (  # noqa: PLC0415
+            is_audio_without_trusted_transcript,
+        )
+
+        if semantic and _EXPLICIT_NEW_SHOP_RE.search(_norm_ar(semantic)):
+            return ExistingOrderSupportYield(reason="explicit_new_order")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — new-order probe must not block ownership
+        pass
+
+    try:
+        from modules.ai.order_context_gate import (  # noqa: PLC0415
+            has_explicit_commerce_topic_change,
+        )
+
+        if semantic and has_explicit_commerce_topic_change(semantic):
+            return ExistingOrderSupportYield(reason="explicit_commerce_switch")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — topic-switch probe must not block ownership
+        pass
+
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            build_order_support_follow_up_args,
+            extract_bare_order_reference,
+            extract_order_reference_from_history,
+            is_order_reference_continuity_active,
+        )
+
+        ref = extract_order_reference_from_history(hist) or extract_bare_order_reference(semantic)
+        continuity_active = is_order_reference_continuity_active(hist)
+        bare_ref_now = bool(extract_bare_order_reference(semantic))
+        unclear_audio = is_audio_without_trusted_transcript(
+            inbound_metadata,
+            semantic_message=semantic,
+            inbound_normalized_type=str(
+                (inbound_metadata or {}).get("inbound_normalized_type")
+                or (inbound_metadata or {}).get("type")
+                or ((inbound_metadata or {}).get("normalized_inbound") or {}).get("source_type")
+                or ""
+            ),
+        )
+        if ref and not continuity_active and not bare_ref_now and not unclear_audio:
+            return ExistingOrderSupportYield(reason="reference_continuity_expired")
+
+        follow_up_args = build_order_support_follow_up_args(
+            message=semantic,
+            state=brain_state,
+            history=hist,
+            commerce_bundle=commerce_bundle,
+            unclear_audio=unclear_audio,
+        )
+        evidence_source = "history_reference"
+        if follow_up_args.get("order_verified"):
+            evidence_source = "structured_bundle"
+        elif unclear_audio:
+            evidence_source = "unclear_audio"
+        return ExistingOrderSupportYield(
+            should_yield=True,
+            detected_intent=EXISTING_ORDER_SUPPORT,
+            order_reference=str(follow_up_args.get("order_reference") or ref or ""),
+            order_verified=bool(follow_up_args.get("order_verified")),
+            evidence_source=evidence_source,
+            reason="existing_order_support_ownership",
+            follow_up_args=follow_up_args,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership assembly must not block checkout
+        return ExistingOrderSupportYield(reason="ownership_assembly_failed")
+
+
 def evaluate_stale_checkout_suppression(
     *,
     message: str,
@@ -569,6 +678,7 @@ def log_checkout_suppressed_by_explicit_intent(
 __all__ = [
     "CheckoutSuppressionDecision",
     "EXISTING_ORDER_SUPPORT",
+    "ExistingOrderSupportYield",
     "PAYMENT_BARCODE_IMAGE_REQUEST",
     "PRODUCT_KNOWLEDGE_FACTS",
     "SOCIAL_GREETING",
@@ -585,4 +695,5 @@ __all__ = [
     "is_payment_barcode_image_request",
     "log_checkout_suppressed_by_explicit_intent",
     "should_suppress_stale_checkout_for_message",
+    "should_yield_to_existing_order_support",
 ]

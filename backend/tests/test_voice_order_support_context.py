@@ -18,7 +18,10 @@ from core.wa_draft_confirmation import maybe_inject_draft_flow_reply  # noqa: E4
 from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: E402
     should_block_order_draft_injection,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_LLM_REPLY,
+    ACTION_PROPOSE_DRAFT_ORDER,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E402
     try_order_reference_continuity_decision,
@@ -26,11 +29,13 @@ from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E40
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    INTENT_ASK_PRODUCT,
     INTENT_ASK_SHIPPING,
     Intent,
     MerchantConversationState,
     OrderPreparationState,
 )
+from modules.ai.brain.state.stages import STAGE_ORDERING  # noqa: E402
 from modules.ai.media.routing_guard import (  # noqa: E402
     is_audio_without_trusted_transcript,
     resolve_inbound_semantic_routing,
@@ -40,10 +45,13 @@ from modules.ai.media.routing_guard import (  # noqa: E402
 from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: E402
     EXISTING_ORDER_SUPPORT,
     evaluate_stale_checkout_suppression,
+    should_yield_to_existing_order_support,
 )
 from modules.ai.order_flow_v2.owner import try_handle_order_flow_v2  # noqa: E402
 
 GENERIC_ORDER_REF = "284719365"
+GENERIC_ORDER_REF_OLD = "111222333"
+GENERIC_ORDER_REF_NEW = "444555666"
 GENERIC_PRODUCT = "حذاء رياضي أبيض"
 VOICE_SHIPPING = "الطلب متأخر والشحن ما وصل"
 AUDIO_FALLBACK = "ما قدرنا نسمع الرسالة الصوتية"
@@ -65,6 +73,90 @@ def _stale_prep() -> dict:
         "order_status": "pending_customer_info",
         "line_items": [{"name": GENERIC_PRODUCT, "qty": 1}],
     }
+
+
+def _not_found_follow_up_history() -> list[dict]:
+    return [
+        {"direction": "in", "body": GENERIC_ORDER_REF},
+        {"direction": "out", "body": "لم نجد الطلب"},
+    ]
+
+
+def _expired_ref_history() -> list[dict]:
+    filler = [{"direction": "in", "body": f"سؤال عام {i}"} for i in range(10)]
+    return [{"direction": "in", "body": GENERIC_ORDER_REF_OLD}] + filler
+
+
+def _inactive_ofv2_patches(*, history: list | None = None):
+    return (
+        patch(
+            "modules.ai.order_flow_v2.owner._load_brain_state",
+            return_value=(SimpleNamespace(id=9), {"order_prep": _stale_prep()}),
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.operational_tuple",
+            return_value=(True, False, ""),
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.load_local_draft_evidence",
+            return_value=None,
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.rehydrate_order_prep_patch",
+            return_value={},
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.active_whatsapp_checkout",
+            return_value=False,
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.checkout_has_items",
+            return_value=True,
+        ),
+        patch(
+            "modules.ai.order_flow_v2.owner.pending_order_exists",
+            return_value=True,
+        ),
+        patch(
+            "core.conversation_engine.StateManager.load_history",
+            return_value=history or _pending_history(),
+        ),
+    )
+
+
+def _brain_ordering_ctx(
+    message: str,
+    *,
+    history: list | None = None,
+    intent_name: str = INTENT_ASK_PRODUCT,
+    inbound_metadata: dict | None = None,
+) -> BrainContext:
+    st = MerchantConversationState()
+    st.stage = STAGE_ORDERING
+    st.current_product_focus = {
+        "title": GENERIC_PRODUCT,
+        "external_id": "prod-generic-1",
+    }
+    op = OrderPreparationState()
+    for key, value in _stale_prep().items():
+        setattr(op, key, value)
+    st.order_prep = op
+    return BrainContext(
+        tenant_id=1,
+        customer_phone="966500000099",
+        message=message,
+        intent=Intent(
+            name=intent_name,
+            confidence=0.85,
+            slots={},
+            raw_message=message,
+            extraction_method="rules",
+        ),
+        state=st,
+        facts=CommerceFacts(orderable=True, has_products=True),
+        history=history or _pending_history(),
+        profile={"inbound_metadata": inbound_metadata or {}},
+    )
 
 
 def _audio_meta(*, transcript: str = "", transcript_status: str = "empty") -> dict:
@@ -667,3 +759,160 @@ class TestRoutingGuardHelpers:
             inbound_normalized_type="text",
             history=_pending_history(),
         )
+
+
+class TestInactiveCheckoutExistingOrderSupport:
+    """Production-shaped path: inactive checkout + stale prep + recent ref."""
+
+    def test_inactive_checkout_voice_shipping_ofv2_yields(self) -> None:
+        db = MagicMock()
+        patches = _inactive_ofv2_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            result = try_handle_order_flow_v2(
+                db,
+                tenant_id=1,
+                customer_phone="966500000099",
+                message=VOICE_SHIPPING,
+                inbound_metadata=_audio_meta(transcript=VOICE_SHIPPING),
+                inbound_normalized_type="audio",
+            )
+        assert result.handled is False
+        assert result.reason == "explicit_intent_suppressed:existing_order_support"
+
+    def test_inactive_checkout_text_shipping_ofv2_yields(self) -> None:
+        db = MagicMock()
+        patches = _inactive_ofv2_patches()
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+            result = try_handle_order_flow_v2(
+                db,
+                tenant_id=1,
+                customer_phone="966500000099",
+                message=VOICE_SHIPPING,
+                inbound_metadata={"type": "text"},
+                inbound_normalized_type="text",
+            )
+        assert result.handled is False
+        assert "explicit_intent_suppressed" in (result.reason or "")
+
+    def test_brain_safety_net_routes_to_existing_order_support(self) -> None:
+        ctx = _brain_ordering_ctx(
+            VOICE_SHIPPING,
+            inbound_metadata=_audio_meta(transcript=VOICE_SHIPPING),
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+        assert decision.args.get("topic") == "existing_order_support"
+
+    def test_not_found_ref_shipping_follow_up_stays_unverified(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=_not_found_follow_up_history(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is True
+        assert ownership.order_verified is False
+        assert ownership.follow_up_args.get("order_verified") is False
+
+        ctx = _brain_ordering_ctx(VOICE_SHIPPING, history=_not_found_follow_up_history())
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "existing_order_support"
+        assert decision.args.get("order_verified") is False
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+
+    def test_verified_order_fixture_preserves_structured_evidence(self) -> None:
+        bundle = {
+            "active_order_context": {
+                "reference": GENERIC_ORDER_REF,
+                "order_status": "processing",
+                "order_id": "ord-verified-1",
+            }
+        }
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=_pending_history(),
+            brain_state={"order_prep": _stale_prep()},
+            commerce_bundle=bundle,
+        )
+        assert ownership.should_yield is True
+        assert ownership.order_verified is True
+
+    def test_no_ref_active_checkout_tamam_does_not_yield(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            "تمام",
+            history=[],
+            order_prep=_stale_prep(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is False
+
+    def test_no_ref_generic_product_question_unchanged(self) -> None:
+        msg = f"كم سعر {GENERIC_PRODUCT}؟"
+        ownership = should_yield_to_existing_order_support(
+            msg,
+            history=[],
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is False
+
+    def test_recent_ref_placed_order_statement_blocked(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            "خلاص طلبت",
+            history=_pending_history(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is True
+        assert ownership.detected_intent == EXISTING_ORDER_SUPPORT
+
+    def test_expired_ref_does_not_hijack_product_question(self) -> None:
+        msg = f"كم سعر {GENERIC_PRODUCT}؟"
+        ownership = should_yield_to_existing_order_support(
+            msg,
+            history=_expired_ref_history(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is False
+
+        ctx = _brain_ordering_ctx(msg, history=_expired_ref_history())
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.args.get("topic") != "existing_order_support"
+
+    def test_explicit_new_order_after_expired_ref_may_checkout(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            f"ابي اطلب {GENERIC_PRODUCT}",
+            history=_expired_ref_history(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is False
+
+    def test_newer_reference_supersedes_older(self) -> None:
+        history = [
+            {"direction": "in", "body": GENERIC_ORDER_REF_OLD},
+            {"direction": "in", "body": "سؤال"},
+            {"direction": "in", "body": GENERIC_ORDER_REF_NEW},
+        ]
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=history,
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is True
+        assert ownership.order_reference == GENERIC_ORDER_REF_NEW
+
+    def test_voice_transcript_route_remains_semantic(self) -> None:
+        routing = _dispatch_routing(
+            inbound_metadata={"type": "audio", "transcript_text": VOICE_SHIPPING},
+            history=_pending_history(),
+        )
+        assert routing.semantic_text == VOICE_SHIPPING
+
+    def test_unclear_audio_with_recent_ref_yields_support(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            "",
+            inbound_metadata=_audio_meta(),
+            history=_pending_history(),
+            brain_state={"order_prep": _stale_prep()},
+        )
+        assert ownership.should_yield is True
+        assert ownership.follow_up_args.get("unclear_audio") is True

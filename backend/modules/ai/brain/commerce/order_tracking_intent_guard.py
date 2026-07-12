@@ -244,6 +244,34 @@ def extract_order_reference_from_history(
     return ""
 
 
+ORDER_REF_CONTINUITY_WINDOW = 8
+
+
+def is_order_reference_continuity_active(
+    history: Optional[List[Any]],
+    *,
+    window: int = ORDER_REF_CONTINUITY_WINDOW,
+) -> bool:
+    """True when the latest customer-supplied ref is still in the active support window."""
+    ref = extract_order_reference_from_history(history)
+    if not ref:
+        return False
+    tail = list(history or [])[-window:]
+    for turn in tail:
+        direction = str((turn or {}).get("direction") or "").lower()
+        if direction not in ("in", "inbound", ""):
+            continue
+        body = str((turn or {}).get("body") or "").strip()
+        if not body:
+            continue
+        labeled = _LABELED_ORDER_REF_RE.search(body)
+        if labeled and labeled.group(1) == ref:
+            return True
+        if extract_bare_order_reference(body) == ref:
+            return True
+    return False
+
+
 def has_pending_order_reference_evidence(
     *,
     state: Any = None,
@@ -817,6 +845,7 @@ __all__ = [
     "extract_order_reference_from_history",
     "has_existing_order_evidence",
     "has_pending_order_reference_evidence",
+    "is_order_reference_continuity_active",
     "is_explicit_order_tracking_request",
     "is_general_shipping_duration_inquiry",
     "is_order_support_operational_follow_up",
