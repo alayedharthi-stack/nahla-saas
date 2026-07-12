@@ -726,6 +726,47 @@ def _is_customer_ledger_phone_context(text: str) -> bool:
     return bool(_CUSTOMER_LEDGER_PHONE_CONTEXT_RE.search(text))
 
 
+_ORDER_REFERENCE_NUMBER_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"بهذا\s+الرقم"
+    r"|برقم\s+الطلب"
+    r"|رقم\s+الطلب"
+    r"|لم\s+أجد\s+طلب"
+    r"|ما\s+قدرت\s+ألقى\s+طلب"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_order_reference_phone_context(text: str) -> bool:
+    """True when «رقم» refers to an order reference, not a staff-contact promise."""
+    if not text:
+        return False
+    return bool(_ORDER_REFERENCE_NUMBER_CONTEXT_RE.search(text))
+
+
+_STAFF_CONTACT_PHONE_PROMISE_RE = re.compile(
+    r"تفضّ?ل(?:ي)?\s+(?:ال)?رقم\s+(?!الطلب\b)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _phone_promise_match_is_order_reference_false_positive(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    """True when a phone-promise regex hit is order-reference wording, not staff contact."""
+    span = text[match.start() : match.end()]
+    if _STAFF_CONTACT_PHONE_PROMISE_RE.search(span):
+        return False
+    if re.search(r"هذا(?:ه)?\s+الرقم", span, re.UNICODE | re.IGNORECASE):
+        return True
+    window = text[max(0, match.start() - 8) : min(len(text), match.end() + 12)]
+    if re.search(r"رقم\s+الطلب", window, re.UNICODE | re.IGNORECASE):
+        return True
+    return False
+
+
 # Phone shape — Saudi mobile (05XXXXXXXX / +9665XXXXXXXX / 9665XXXXXXXX),
 # plus generic international (+\d{7,15}) as a permissive fallback.
 _PHONE_DIGITS_RE = re.compile(
@@ -795,18 +836,23 @@ def contains_promised_asset(text: str) -> Optional[str]:
     """
     if not text or not isinstance(text, str):
         return None
-    skip_phone = (
+    skip_standalone_phone = (
         _is_product_option_number_context(text)
         or _is_customer_ledger_phone_context(text)
+        or _is_order_reference_phone_context(text)
     )
     for asset_class, patterns in _PROMISE_PATTERNS.items():
-        if skip_phone and asset_class == ASSET_PHONE:
-            continue
         for pattern in patterns:
-            if pattern.search(text):
+            if asset_class == ASSET_PHONE:
+                for match in pattern.finditer(text):
+                    if not _phone_promise_match_is_order_reference_false_positive(
+                        text, match
+                    ):
+                        return asset_class
+            elif pattern.search(text):
                 return asset_class
     m = _STANDALONE_INTRO.search(text)
-    if m and not skip_phone:
+    if m and not skip_standalone_phone:
         token = (m.group("class") or "").strip()
         if token in ("الرابط", "اللينك"):
             return ASSET_LINK
@@ -907,7 +953,18 @@ def maybe_scrub_unkept_asset_promise(
     rewritten = text
     matched_any = False
     for pattern in _PROMISE_PATTERNS.get(asset_class, ()):
-        if pattern.search(rewritten):
+        if asset_class == ASSET_PHONE:
+
+            def _replace_phone(match: re.Match[str], _replacement: str = replacement) -> str:
+                if _phone_promise_match_is_order_reference_false_positive(text, match):
+                    return match.group(0)
+                return _replacement
+
+            new_text = pattern.sub(_replace_phone, rewritten)
+            if new_text != rewritten:
+                rewritten = new_text
+                matched_any = True
+        elif pattern.search(rewritten):
             rewritten = pattern.sub(replacement, rewritten)
             matched_any = True
     if not matched_any:
