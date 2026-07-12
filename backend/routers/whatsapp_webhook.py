@@ -10282,6 +10282,7 @@ async def _handle_merchant_message(
         # reacts when the assistant is repeating itself or the customer
         # side appears automated.
         _loop_replaced_with_recovery = False
+        _loop_guard_provenance: Dict[str, Any] = {}
         if reply and not _brain_handoff:
             try:
                 from core.ai_pause_guard import (  # noqa: PLC0415
@@ -10296,6 +10297,9 @@ async def _handle_merchant_message(
                     from core.order_flow import _load_brain_state as _loop_load_bs  # noqa: PLC0415
                     from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
                         build_checkout_slot_fallback_reply,
+                    )
+                    from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+                        order_support_reply_protected,
                     )
                     from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
                         has_active_commerce_from_state,
@@ -10312,7 +10316,17 @@ async def _handle_merchant_message(
                         _skip_legacy_loop = should_skip_legacy_order_flow_reply()
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break loop guard
                         pass
-                    if _loop_checkout_active and not _skip_legacy_loop:
+                    _loop_order_support_owned = order_support_reply_protected(
+                        decision_action=str(_br_dec_action or ""),
+                        decision_args=dict(_br_dec_args or {}),
+                    )
+                    if _loop_order_support_owned:
+                        _loop_guard_provenance = {
+                            "pre_loop_guard_text_source": "brain_llm",
+                            "loop_guard_override_applied": False,
+                            "loop_guard_override_skipped_reason": "order_support_owned",
+                        }
+                    elif _loop_checkout_active and not _skip_legacy_loop:
                         _loop_checkout_recovery = (
                             build_checkout_slot_fallback_reply(
                                 state=_loop_bs,
@@ -10478,7 +10492,10 @@ async def _handle_merchant_message(
                 conversation_id=convo.id, tenant_id=tenant_id,
                 extra_metadata=_otp_merge_save_metadata(
                     _outbound_text_tracker,
-                    _persona_ownership.to_metadata(),
+                    {
+                        **_persona_ownership.to_metadata(),
+                        **_loop_guard_provenance,
+                    },
                     persona_compose_event=(
                         _payment_persona_compose_event or _brain_persona_compose_event
                     ),
