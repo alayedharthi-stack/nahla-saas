@@ -1290,6 +1290,31 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
             },
         ],
     },
+    # ── WhatsApp incomplete draft order (no external checkout URL) ────────
+    {
+        "key":            "wa_abandoned_order_draft",
+        "service_key":    "wa_draft_reminder",
+        "name_ar":        "تذكير طلب واتساب غير مكتمل",
+        "description_ar": "تُرسل للعميل الذي بدأ طلباً عبر واتساب ولم يكمله — بدون رابط متجر خارجي",
+        "category":       "UTILITY",
+        "filter_tags":    ["orders", "recovery"],
+        "smart_trigger":  "wa_order_draft_reminder_due",
+        "smart_label":    "يُرسل تلقائياً: طلب واتساب غير مكتمل",
+        "body_slots":     ["customer_name", "store_name"],
+        "slots":          ["customer_name", "store_name"],
+        "components": [
+            {
+                "type": "BODY",
+                "text": (
+                    "مرحباً {{1}} 👋\n\n"
+                    "لديك طلب مبدئي في {{2}} لم يكتمل بعد.\n"
+                    "أكمل الطلب من المحادثة وسنساعدك خطوة بخطوة 🌟"
+                ),
+                "example": {"body_text": [["أحمد", "متجر تجريبي عام"]]},
+            },
+            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
+        ],
+    },
 ]
 
 
