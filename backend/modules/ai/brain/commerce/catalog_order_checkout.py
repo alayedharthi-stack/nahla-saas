@@ -404,6 +404,13 @@ def maybe_enforce_catalog_order_continue_checkout(
     if not is_current_catalog_order_submitted(ctx) and not is_active_catalog_checkout(ctx):
         return decision
 
+    from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+        decision_owned_by_existing_order_support,
+    )
+
+    if decision_owned_by_existing_order_support(decision):
+        return decision
+
     product = _product_from_state(ctx)
     if not product:
         fallback = try_catalog_order_extraction_fallback_decision(ctx)

@@ -23,6 +23,7 @@ from modules.ai.brain.decision.actions import (
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
+    ACTION_TRACK_ORDER,
 )
 from modules.ai.brain.types import BrainContext, Decision
 
@@ -177,11 +178,26 @@ def _has_existing_order_support_context(ctx: BrainContext) -> bool:
     return bool(_recent_customer_order_reference(getattr(ctx, "history", None)))
 
 
-def _decision_owned_by_existing_order_support(decision: Decision) -> bool:
+def decision_owned_by_existing_order_support(decision: Decision) -> bool:
     if str(getattr(decision, "action", "") or "") != ACTION_LLM_REPLY:
         return False
     args = getattr(decision, "args", None) or {}
     return str(args.get("topic") or "").strip() == "existing_order_support"
+
+
+def order_support_reply_protected(
+    *,
+    decision_action: str = "",
+    decision_args: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when post-decision layers must not hijack into checkout continuation."""
+    action = str(decision_action or "")
+    args = decision_args if isinstance(decision_args, dict) else {}
+    if decision_owned_by_existing_order_support(
+        Decision(action=action, args=args, reason="probe"),
+    ):
+        return True
+    return action == ACTION_TRACK_ORDER
 
 
 def _annotate_contract_ownership_preserved(decision: Decision) -> Decision:
@@ -809,7 +825,7 @@ def maybe_enforce_commerce_turn_contract_decision(
             )
             return enforced
 
-    if _decision_owned_by_existing_order_support(decision):
+    if decision_owned_by_existing_order_support(decision):
         preserved = _annotate_contract_ownership_preserved(decision)
         logger.info(
             "[COMMERCE_TURN_CONTRACT/enforce] "
@@ -897,9 +913,11 @@ __all__ = [
     "CommerceTurnContract",
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
+    "decision_owned_by_existing_order_support",
     "is_address_on_file_claim",
     "is_placed_order_statement",
     "is_same_order_confirmation",
     "log_commerce_turn_contract_divergence",
     "maybe_enforce_commerce_turn_contract_decision",
+    "order_support_reply_protected",
 ]
