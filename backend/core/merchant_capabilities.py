@@ -6,13 +6,17 @@ grouping. Read-path only — no outbound sends, no order mutations.
 
 Composes existing authoritative signals:
   * ``sales_channel_capabilities.resolve_merchant_sales_channels``
-  * ``Integration`` rows (any provider, not Salla-specific)
+  * ``store_integration.adapter_capabilities`` (commerce integrations only)
   * ``native_catalog_capability.evaluate_native_catalog_capability``
   * ``merchant_payment_methods.load_merchant_payment_methods``
   * ``TenantSettings.store_settings`` for ``default_order_channel``
 
 KB-only store URLs must NOT activate external checkout (enforced by
 ``store_url_evidence_activates_channel`` in the sales-channel resolver).
+
+``has_payment_link`` means **merchant-level** payment-link generation
+support (store adapter or Moyasar checkout readiness) — NOT a per-order
+``payment_url``. Send-time resolution must still require a real HTTPS URL.
 """
 from __future__ import annotations
 
@@ -65,29 +69,6 @@ class MerchantCapabilities:
         }
 
 
-def _has_active_store_integration(db: Any, tenant_id: int) -> bool:
-    """True when any enabled integration can call its provider API."""
-    if db is None or not tenant_id:
-        return False
-    try:
-        from database.models import Integration  # noqa: PLC0415
-        from services.salla_guard import is_active_binding  # noqa: PLC0415
-
-        rows = (
-            db.query(Integration)
-            .filter(Integration.tenant_id == int(tenant_id))
-            .all()
-        )
-        return any(is_active_binding(row) for row in rows)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "[MerchantCapabilities] integration probe failed tenant=%s: %s",
-            tenant_id,
-            exc,
-        )
-        return False
-
-
 def read_default_order_channel(db: Any, tenant_id: int) -> OrderChannelPreference:
     """Additive read from ``store_settings.default_order_channel``."""
     try:
@@ -122,7 +103,24 @@ def resolve_merchant_mode(caps: MerchantCapabilities) -> MerchantMode:
 def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabilities:
     """Compute tenant capabilities from persisted platform signals."""
     tid = int(tenant_id or 0)
-    has_external_store = _has_active_store_integration(db, tid)
+
+    store_caps = None
+    try:
+        from store_integration.adapter_capabilities import (  # noqa: PLC0415
+            resolve_store_adapter_capabilities,
+        )
+
+        store_caps = resolve_store_adapter_capabilities(db, tid)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[MerchantCapabilities] store adapter caps failed tenant=%s: %s",
+            tid,
+            exc,
+        )
+
+    has_external_store = bool(
+        store_caps and store_caps.has_active_commerce_integration
+    )
 
     channels = None
     try:
@@ -143,7 +141,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
         and channels.online_store.enabled
         and channels.online_store.available
     )
-    # Integration without structured checkout URL must not unlock checkout templates.
+    # Commerce integration without structured checkout URL must not unlock checkout.
     if has_external_store and not supports_external_checkout:
         has_external_store = False
 
@@ -184,16 +182,21 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
 
     supports_bank_transfer = bool(payment and payment.bank_transfer_enabled)
     supports_cod = bool(payment and payment.cash_on_delivery_enabled)
-    has_payment_link = bool(
-        supports_external_checkout
-        or (payment and (payment.moyasar_checkout_ready or payment.moyasar_enabled))
+
+    # Merchant-level payment-link generation — never inferred from store homepage alone.
+    store_payment_links = bool(
+        store_caps and store_caps.supports_payment_link_generation
     )
+    moyasar_payment_links = bool(payment and payment.moyasar_checkout_ready)
+    has_payment_link = bool(store_payment_links or moyasar_payment_links)
 
     supports_external_coupons = bool(
-        supports_external_checkout and has_external_store
+        store_caps and store_caps.supports_coupon_redemption
     )
 
-    has_external_tracking = bool(has_external_store and supports_external_checkout)
+    has_external_tracking = bool(
+        store_caps and store_caps.supports_tracking_urls
+    )
     has_nahla_tracking = False  # PR5 — no public Nahla tracking page yet
 
     return MerchantCapabilities(

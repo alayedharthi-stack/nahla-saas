@@ -444,6 +444,11 @@ def _extract_variant_options(
 @register_adapter("salla")
 class SallaAdapter(BaseStoreAdapter):
     platform = "salla"
+    STORE_CAPABILITIES = {
+        "supports_coupon_redemption": True,
+        "supports_tracking_urls": True,
+        "supports_payment_link_generation": True,
+    }
 
     def __init__(
         self,

@@ -160,19 +160,24 @@ class TestFilterAndGroup:
 
 
 class TestKbUrlDoesNotActivateExternalCheckout:
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
     @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
-    @patch("core.merchant_capabilities._has_active_store_integration", return_value=True)
     def test_kb_only_store_url_blocks_checkout_templates(
         self,
-        _mock_integ,
         mock_channels,
+        mock_store_caps,
     ):
         from core.merchant_capabilities import resolve_merchant_capabilities
         from modules.ai.brain.commerce.sales_channel_capabilities import (
             MerchantSalesChannels,
             SalesChannelSlot,
         )
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
 
+        mock_store_caps.return_value = StoreAdapterCapabilities(
+            provider="salla",
+            has_active_commerce_integration=True,
+        )
         mock_channels.return_value = MerchantSalesChannels(
             store_url="https://kb-only.example.com",
             store_url_source="kb_free_text",
@@ -195,6 +200,209 @@ class TestKbUrlDoesNotActivateExternalCheckout:
         result = filter_and_group_library_templates(get_all_templates(), caps)
         keys = {t["key"] for t in result["templates"]}
         assert "abandoned_cart_reminder" not in keys
+
+
+class TestConservativeCapabilityDerivation:
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
+    @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
+    @patch("core.merchant_payment_methods.load_merchant_payment_methods")
+    def test_checkout_without_coupon_adapter_capability_hides_coupons(
+        self, mock_payment, mock_channels, mock_store_caps,
+    ):
+        from core.merchant_capabilities import resolve_merchant_capabilities
+        from core.merchant_payment_methods import MerchantPaymentMethods
+        from modules.ai.brain.commerce.sales_channel_capabilities import (
+            MerchantSalesChannels,
+            SalesChannelSlot,
+        )
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
+
+        mock_store_caps.return_value = StoreAdapterCapabilities(
+            provider="salla",
+            has_active_commerce_integration=True,
+            supports_coupon_redemption=False,
+            supports_tracking_urls=True,
+            supports_payment_link_generation=True,
+        )
+        mock_channels.return_value = MerchantSalesChannels(
+            online_store=SalesChannelSlot(True, True, "store_url"),
+        )
+        mock_payment.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=False,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=[],
+        )
+        caps = resolve_merchant_capabilities(MagicMock(), 1)
+        assert caps.supports_external_coupons is False
+        tpl = get_template_by_key("seasonal_offer_template")
+        assert tpl is not None
+        assert template_passes_capabilities(resolve_template_filter_meta(tpl), caps) is False
+
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
+    @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
+    @patch("core.merchant_payment_methods.load_merchant_payment_methods")
+    def test_checkout_without_tracking_adapter_capability_hides_tracking(
+        self, mock_payment, mock_channels, mock_store_caps,
+    ):
+        from core.merchant_capabilities import resolve_merchant_capabilities
+        from core.merchant_payment_methods import MerchantPaymentMethods
+        from modules.ai.brain.commerce.sales_channel_capabilities import (
+            MerchantSalesChannels,
+            SalesChannelSlot,
+        )
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
+
+        mock_store_caps.return_value = StoreAdapterCapabilities(
+            provider="salla",
+            has_active_commerce_integration=True,
+            supports_tracking_urls=False,
+            supports_payment_link_generation=True,
+        )
+        mock_channels.return_value = MerchantSalesChannels(
+            online_store=SalesChannelSlot(True, True, "store_url"),
+        )
+        mock_payment.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=False,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=[],
+        )
+        caps = resolve_merchant_capabilities(MagicMock(), 1)
+        assert caps.has_external_tracking is False
+        tpl = get_template_by_key("shipping_update")
+        assert tpl is not None
+        assert template_passes_capabilities(resolve_template_filter_meta(tpl), caps) is False
+
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
+    @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
+    @patch("core.merchant_payment_methods.load_merchant_payment_methods")
+    def test_checkout_alone_does_not_imply_payment_link_capability(
+        self, mock_payment, mock_channels, mock_store_caps,
+    ):
+        from core.merchant_capabilities import resolve_merchant_capabilities
+        from core.merchant_payment_methods import MerchantPaymentMethods
+        from modules.ai.brain.commerce.sales_channel_capabilities import (
+            MerchantSalesChannels,
+            SalesChannelSlot,
+        )
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
+
+        mock_store_caps.return_value = StoreAdapterCapabilities(
+            provider="salla",
+            has_active_commerce_integration=True,
+            supports_payment_link_generation=False,
+        )
+        mock_channels.return_value = MerchantSalesChannels(
+            online_store=SalesChannelSlot(True, True, "store_url"),
+        )
+        mock_payment.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=False,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=[],
+        )
+        caps = resolve_merchant_capabilities(MagicMock(), 1)
+        assert caps.has_payment_link is False
+
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
+    @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
+    @patch("core.merchant_payment_methods.load_merchant_payment_methods")
+    def test_moyasar_checkout_ready_enables_payment_link_capability(
+        self, mock_payment, mock_channels, mock_store_caps,
+    ):
+        from core.merchant_capabilities import resolve_merchant_capabilities
+        from core.merchant_payment_methods import MerchantPaymentMethods
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
+
+        mock_store_caps.return_value = StoreAdapterCapabilities()
+        mock_channels.return_value = None
+        mock_payment.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=False,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=True,
+            moyasar_checkout_ready=True,
+            manual_payment_enabled=False,
+            available_methods=["moyasar"],
+        )
+        caps = resolve_merchant_capabilities(MagicMock(), 1)
+        assert caps.has_payment_link is True
+
+    @patch("store_integration.adapter_capabilities.pick_active_commerce_integration")
+    def test_non_commerce_integration_does_not_activate_external_store(
+        self, mock_pick,
+    ):
+        from store_integration.adapter_capabilities import resolve_store_adapter_capabilities
+
+        mock_pick.return_value = None
+        caps = resolve_store_adapter_capabilities(MagicMock(), 1)
+        assert caps.has_active_commerce_integration is False
+
+    def test_adapter_declaring_capabilities_enables_coupon_and_tracking(self):
+        from store_integration.adapter_capabilities import (
+            StoreAdapterCapabilities,
+            _declared_capabilities,
+        )
+        from store_adapters.salla_adapter import SallaAdapter
+
+        declared = _declared_capabilities(SallaAdapter)
+        assert declared.get("supports_coupon_redemption") is True
+        assert declared.get("supports_tracking_urls") is True
+        assert declared.get("supports_payment_link_generation") is True
+
+        full = StoreAdapterCapabilities(
+            provider="salla",
+            has_active_commerce_integration=True,
+            supports_coupon_redemption=True,
+            supports_tracking_urls=True,
+            supports_payment_link_generation=True,
+        )
+        tpl_coupon = get_template_by_key("seasonal_offer_template")
+        tpl_track = get_template_by_key("shipping_update")
+        assert tpl_coupon and tpl_track
+        ext = _caps(
+            has_external_store=True,
+            supports_external_checkout=True,
+            supports_external_coupons=True,
+            has_external_tracking=True,
+            has_payment_link=True,
+        )
+        assert template_passes_capabilities(resolve_template_filter_meta(tpl_coupon), ext)
+        assert template_passes_capabilities(resolve_template_filter_meta(tpl_track), ext)
+
+    @patch("store_integration.adapter_capabilities.resolve_store_adapter_capabilities")
+    @patch("modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels")
+    @patch("core.merchant_payment_methods.load_merchant_payment_methods")
+    def test_missing_adapter_evidence_defaults_false(
+        self, mock_payment, mock_channels, mock_store_caps,
+    ):
+        from core.merchant_capabilities import resolve_merchant_capabilities
+        from core.merchant_payment_methods import MerchantPaymentMethods
+        from store_integration.adapter_capabilities import StoreAdapterCapabilities
+
+        mock_store_caps.return_value = StoreAdapterCapabilities(
+            provider="unknown",
+            has_active_commerce_integration=True,
+        )
+        mock_channels.return_value = None
+        mock_payment.return_value = MerchantPaymentMethods(
+            bank_transfer_enabled=False,
+            cash_on_delivery_enabled=False,
+            moyasar_enabled=False,
+            moyasar_checkout_ready=False,
+            manual_payment_enabled=False,
+            available_methods=[],
+        )
+        caps = resolve_merchant_capabilities(MagicMock(), 1)
+        assert caps.supports_external_coupons is False
+        assert caps.has_external_tracking is False
+        assert caps.has_payment_link is False
 
 
 class TestFeatureFlag:
