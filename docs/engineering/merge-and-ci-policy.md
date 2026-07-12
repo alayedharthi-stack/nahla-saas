@@ -9,6 +9,7 @@ Nahla engineering policy:
 1. No PR may be merged into `main` unless required CI checks are green.
 2. Required checks:
    - `lint-and-test`
+   - `constitution-compliance`
    - `Scan repository for leaked secrets` / gitleaks
 3. Local test claims are not enough if GitHub CI is red.
 4. If GitHub shows red on a merged PR, treat it as an engineering incident until explained.
@@ -30,6 +31,7 @@ Repository admin must enable:
 - Require status checks to pass before merging
 - Required checks:
   - `lint-and-test`
+  - `constitution-compliance`
   - `Scan repository for leaked secrets`
 - Require branches to be up to date before merging, if practical
 - Restrict or disallow admin bypass
