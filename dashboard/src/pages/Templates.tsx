@@ -17,7 +17,7 @@ import { serviceInfoForKey } from '../i18n/templatesPageLabels'
 import {
   templatesApi, WhatsAppTemplateRecord, CreateTemplatePayload,
   TemplateStatus, TemplateCategory, TemplateComponent, TemplateButton,
-  TemplateVarMapRecord, NahlaLibraryTemplate,
+  TemplateVarMapRecord, NahlaLibraryTemplate, NahlaLibraryGroup,
   TemplateSyncStatus, TemplateSyncResult,
   getBody, getHeader, getFooter, getButtons,
   extractVars, renderBody, countVars,
@@ -1420,6 +1420,8 @@ function NahlaLibraryModal({ onClose, onImported }: {
   }
 
   const [templates, setTemplates]   = useState<NahlaLibraryTemplate[]>([])
+  const [libraryGroups, setLibraryGroups] = useState<NahlaLibraryGroup[]>([])
+  const [activeGroupChannel, setActiveGroupChannel] = useState<string | null>(null)
   const [loading, setLoading]       = useState(true)
   const [activeTag, setActiveTag]   = useState('all')
   const [search, setSearch]         = useState('')
@@ -1431,13 +1433,29 @@ function NahlaLibraryModal({ onClose, onImported }: {
     setLoading(true)
     try {
       const res = await templatesApi.nahlaLibrary({ tag: tag !== 'all' ? tag : undefined, search: q || undefined })
-      setTemplates(res.templates)
+      const groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
+      setLibraryGroups(groups)
+      if (groups.length > 0) {
+        setActiveGroupChannel(groups[0].channel)
+        setTemplates(groups[0].templates ?? [])
+      } else {
+        setActiveGroupChannel(null)
+        setTemplates(res.templates)
+      }
     } catch {
       setTemplates([])
+      setLibraryGroups([])
+      setActiveGroupChannel(null)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  const selectLibraryGroup = (channel: string) => {
+    setActiveGroupChannel(channel)
+    const grp = libraryGroups.find(g => g.channel === channel)
+    if (grp) setTemplates(grp.templates ?? [])
+  }
 
   useEffect(() => { load(activeTag, search) }, [activeTag, search, load])
 
@@ -1494,6 +1512,24 @@ function NahlaLibraryModal({ onClose, onImported }: {
               dir={dir}
             />
           </div>
+          {libraryGroups.length > 1 && (
+            <div className="flex gap-2 flex-wrap">
+              {libraryGroups.map(grp => (
+                <button
+                  key={grp.channel}
+                  type="button"
+                  onClick={() => selectLibraryGroup(grp.channel)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    activeGroupChannel === grp.channel
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {grp.label_ar}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex gap-2 flex-wrap">
             {LIBRARY_TAG_KEYS.map(key => (
               <button

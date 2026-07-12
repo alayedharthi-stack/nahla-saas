@@ -3217,30 +3217,76 @@ async def get_campaign_templates(request: Request, db: Session = Depends(get_db)
 
 @router.get("/templates/nahla-library")
 async def get_nahla_library(
+    request: Request,
     category: Optional[str] = None,
     tag:      Optional[str] = None,
     search:   Optional[str] = None,
+    db:       Session = Depends(get_db),
 ):
     """
     استعراض مكتبة قوالب نحلة الرسمية.
-    لا تحتاج JWT — القوالب عامة ومتاحة لكل التجار.
 
-    Query params:
-      category: MARKETING | UTILITY | ALL (default)
-      tag:      marketing | orders | shipping | recovery | discounts | welcome | all
-      search:   نص البحث
+    Legacy (``CAPABILITY_AWARE_TEMPLATES`` disabled): public catalog filtered
+    by category/tag/search only — identical to pre-PR behaviour.
+
+    Capability-aware (flag enabled): tenant-scoped library filtered by
+    ``MerchantCapabilities`` and grouped by order channel. Requires JWT.
     """
     from services.whatsapp_templates.nahla_templates import (  # noqa: PLC0415
         filter_templates, template_preview, FILTER_TAGS, SMART_TRIGGER_MAP,
         SERVICE_CATALOG,
     )
+    from core.merchant_capabilities import (  # noqa: PLC0415
+        capability_aware_templates_enabled,
+        read_default_order_channel,
+        resolve_merchant_capabilities,
+    )
+
     templates = filter_templates(category=category, tag=tag, search=search)
+
+    if not capability_aware_templates_enabled():
+        return {
+            "templates": [template_preview(t) for t in templates],
+            "total":     len(templates),
+            "filter_tags": FILTER_TAGS,
+            "smart_trigger_map": SMART_TRIGGER_MAP,
+            "service_catalog": SERVICE_CATALOG,
+        }
+
+    tenant_id = resolve_tenant_id(request)
+    caps = resolve_merchant_capabilities(db, tenant_id)
+    default_channel = read_default_order_channel(db, tenant_id)
+
+    from services.whatsapp_templates.template_capability_filter import (  # noqa: PLC0415
+        filter_and_group_library_templates,
+    )
+
+    grouped = filter_and_group_library_templates(
+        templates,
+        caps,
+        default_order_channel=default_channel,
+    )
+
+    def _preview_item(t: dict) -> dict:
+        out = template_preview(t)
+        if t.get("filter_meta"):
+            out["filter_meta"] = t["filter_meta"]
+        return out
+
+    groups_out = []
+    for grp in grouped.get("groups") or []:
+        groups_out.append({
+            **grp,
+            "templates": [_preview_item(t) for t in (grp.get("templates") or [])],
+        })
+
     return {
-        "templates": [template_preview(t) for t in templates],
-        "total":     len(templates),
-        "filter_tags": FILTER_TAGS,
-        "smart_trigger_map": SMART_TRIGGER_MAP,
-        "service_catalog": SERVICE_CATALOG,
+        **grouped,
+        "groups":                groups_out,
+        "templates":             [_preview_item(t) for t in (grouped.get("templates") or [])],
+        "filter_tags":           FILTER_TAGS,
+        "smart_trigger_map":     SMART_TRIGGER_MAP,
+        "service_catalog":       SERVICE_CATALOG,
     }
 
 
