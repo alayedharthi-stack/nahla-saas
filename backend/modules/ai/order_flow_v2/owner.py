@@ -347,7 +347,6 @@ def try_handle_order_flow_v2(
     ownership = should_yield_to_existing_order_support(
         text,
         inbound_metadata=meta,
-        order_prep={**order_prep, **patch},
         brain_state=bs,
         history=recent_history,
     )

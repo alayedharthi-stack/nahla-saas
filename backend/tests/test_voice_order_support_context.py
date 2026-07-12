@@ -24,6 +24,8 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E402
+    build_order_support_follow_up_args,
+    is_order_reference_continuity_active,
     try_order_reference_continuity_decision,
 )
 from modules.ai.brain.types import (  # noqa: E402
@@ -842,7 +844,6 @@ class TestInactiveCheckoutExistingOrderSupport:
         ownership = should_yield_to_existing_order_support(
             "تمام",
             history=[],
-            order_prep=_stale_prep(),
             brain_state={"order_prep": _stale_prep()},
         )
         assert ownership.should_yield is False
@@ -916,3 +917,135 @@ class TestInactiveCheckoutExistingOrderSupport:
         )
         assert ownership.should_yield is True
         assert ownership.follow_up_args.get("unclear_audio") is True
+
+
+class TestArchitecturalCorrections:
+    """PR #565 review fixes: continuity, parity, not-found args."""
+
+    def _stale_state_dict(self) -> dict:
+        return {"order_prep": _stale_prep(), "draft_order_id": "draft-16"}
+
+    def _stale_state_object(self) -> MerchantConversationState:
+        st = MerchantConversationState()
+        op = OrderPreparationState()
+        for key, value in _stale_prep().items():
+            setattr(op, key, value)
+        st.order_prep = op
+        st.draft_order_id = "draft-16"
+        return st
+
+    def test_dict_and_object_state_parity(self) -> None:
+        history = _pending_history()
+        y_dict = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=history,
+            brain_state=self._stale_state_dict(),
+        )
+        y_obj = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=history,
+            brain_state=self._stale_state_object(),
+        )
+        assert y_dict.should_yield == y_obj.should_yield
+        assert y_dict.should_yield is True
+
+    def test_outbound_turns_do_not_consume_inbound_window(self) -> None:
+        history = [{"direction": "in", "body": GENERIC_ORDER_REF}]
+        for _ in range(7):
+            history.append({"direction": "out", "body": "رد تلقائي"})
+        history.append({"direction": "in", "body": VOICE_SHIPPING})
+        assert is_order_reference_continuity_active(history) is True
+
+    def test_ref_plus_six_social_then_shipping_stays_active(self) -> None:
+        history = [{"direction": "in", "body": GENERIC_ORDER_REF}]
+        history.extend({"direction": "in", "body": "هلا كيفك"} for _ in range(6))
+        history.append({"direction": "in", "body": VOICE_SHIPPING})
+        assert is_order_reference_continuity_active(history) is True
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=history,
+            brain_state=self._stale_state_dict(),
+        )
+        assert ownership.should_yield is True
+        dec = try_order_reference_continuity_decision(
+            SimpleNamespace(
+                message=VOICE_SHIPPING,
+                history=history,
+                state=self._stale_state_object(),
+                commerce_bundle={},
+                profile={},
+                tenant_id=1,
+            )
+        )
+        assert dec is not None
+        assert dec.args.get("topic") == "existing_order_support"
+
+    def test_ref_plus_seven_social_then_shipping_expires(self) -> None:
+        history = [{"direction": "in", "body": GENERIC_ORDER_REF}]
+        history.extend({"direction": "in", "body": "هلا كيفك"} for _ in range(7))
+        history.append({"direction": "in", "body": VOICE_SHIPPING})
+        assert is_order_reference_continuity_active(history) is False
+
+    def test_expired_after_eight_newer_inbound_turns(self) -> None:
+        history = [{"direction": "in", "body": GENERIC_ORDER_REF_OLD}]
+        history.extend({"direction": "in", "body": f"رسالة {i}"} for i in range(8))
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=history,
+            brain_state=self._stale_state_dict(),
+        )
+        assert ownership.should_yield is False
+        dec = try_order_reference_continuity_decision(
+            SimpleNamespace(
+                message=VOICE_SHIPPING,
+                history=history,
+                state=self._stale_state_object(),
+                commerce_bundle={},
+                profile={},
+                tenant_id=1,
+            )
+        )
+        assert dec is None
+
+    def test_not_found_follow_up_args_exclude_stale_status(self) -> None:
+        history = _not_found_follow_up_history()
+        args = build_order_support_follow_up_args(
+            message=VOICE_SHIPPING,
+            state=self._stale_state_object(),
+            history=history,
+            commerce_bundle={},
+        )
+        assert args["order_verified"] is False
+        assert args.get("order_status") in ("", None)
+        assert args["order_reference"] == GENERIC_ORDER_REF
+
+    def test_verified_structured_order_preserves_status(self) -> None:
+        bundle = {
+            "active_order_context": {
+                "reference": GENERIC_ORDER_REF,
+                "order_status": "processing",
+                "order_id": "ord-verified-1",
+            }
+        }
+        args = build_order_support_follow_up_args(
+            message=VOICE_SHIPPING,
+            state=self._stale_state_object(),
+            history=_pending_history(),
+            commerce_bundle=bundle,
+        )
+        assert args["order_verified"] is True
+        assert args["order_status"] == "processing"
+
+    def test_no_ref_shipping_stale_prep_does_not_yield(self) -> None:
+        ownership = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=[],
+            brain_state=self._stale_state_dict(),
+        )
+        assert ownership.should_yield is False
+        ownership_obj = should_yield_to_existing_order_support(
+            VOICE_SHIPPING,
+            history=[],
+            brain_state=self._stale_state_object(),
+        )
+        assert ownership_obj.should_yield is False

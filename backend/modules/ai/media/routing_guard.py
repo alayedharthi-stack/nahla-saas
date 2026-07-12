@@ -101,10 +101,10 @@ def should_route_unclear_audio_to_existing_order_support(
         return False
     try:
         from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
-            has_pending_order_reference_evidence,
+            has_order_reference_support_context,
         )
 
-        return has_pending_order_reference_evidence(
+        return has_order_reference_support_context(
             state=brain_state,
             history=list(history or []),
         )

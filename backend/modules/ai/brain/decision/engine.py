@@ -129,18 +129,9 @@ def _try_existing_order_support_ownership_decision(
             if isinstance(profile, dict)
             else {}
         )
-        order_prep: Dict[str, Any] = {}
-        if state is not None:
-            op = getattr(state, "order_prep", None)
-            if op is not None and hasattr(op, "__dict__"):
-                order_prep = dict(vars(op))
-            elif isinstance(op, dict):
-                order_prep = dict(op)
-
         ownership = should_yield_to_existing_order_support(
             ctx.message or "",
             inbound_metadata=inbound_metadata,
-            order_prep=order_prep,
             brain_state=state,
             history=getattr(ctx, "history", None),
             commerce_bundle=getattr(ctx, "commerce_bundle", None) or {},
