@@ -48,6 +48,7 @@ import {
   type ChannelSpecResponse,
   type ProductDetailResponse,
   type ProductSource,
+  type ProductPublicationStatus,
   type ReadinessFieldStatus,
   type MetaSyncPreviewResponse,
   type MetaSyncConfirmResponse,
@@ -901,6 +902,69 @@ function ReadinessPanel(props: { perChannel: ChannelReadiness[] }) {
 // Product Detail Drawer
 // ─────────────────────────────────────────────────────────────────────
 
+function MetaSyncStatusPanel(props: {
+  product: StudioProduct
+  publication: ProductPublicationStatus
+  dr: Translations['catalogMgmt']['studio']['drawer']
+  onRetry: () => void
+  retryBusy: boolean
+}) {
+  const status = (props.product.sync_status || '').toLowerCase()
+  const pub = props.publication
+  let label = props.dr.metaSyncPending
+  let tone = 'text-slate-700 bg-slate-50 border-slate-200'
+  if (status === 'syncing') {
+    label = props.dr.metaSyncSyncing
+    tone = 'text-sky-700 bg-sky-50 border-sky-200'
+  } else if (status === 'blocked') {
+    label = props.dr.metaSyncBlocked
+    tone = 'text-amber-800 bg-amber-50 border-amber-200'
+  } else if (status === 'failed' || status === 'sync_failed') {
+    label = props.dr.metaSyncStateFailed
+    tone = 'text-rose-700 bg-rose-50 border-rose-200'
+  } else if (status === 'synced') {
+    if (pub.visible_in_whatsapp) {
+      label = props.dr.metaSyncVisibleWhatsapp
+    } else if (pub.meta_catalog_synced && pub.waba_catalog_linked !== true) {
+      label = props.dr.metaSyncWabaUncertain
+    } else {
+      label = props.dr.metaSyncSynced
+    }
+    tone = 'text-emerald-700 bg-emerald-50 border-emerald-200'
+  }
+
+  const showRetry = Boolean(props.product.retry_allowed) && status !== 'syncing'
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-bold text-slate-800">{props.dr.metaSyncStatusTitle}</h3>
+          <span className={`inline-flex mt-2 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${tone}`}>
+            {label}
+          </span>
+          {props.product.sync_error_summary && (
+            <p className="text-[11px] text-rose-700 mt-2">{props.product.sync_error_summary}</p>
+          )}
+        </div>
+        {showRetry && (
+          <button
+            type="button"
+            disabled={props.retryBusy}
+            onClick={props.onRetry}
+            className="inline-flex items-center gap-1 text-xs font-semibold text-sky-700 hover:bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-1.5 disabled:opacity-50 shrink-0"
+          >
+            {props.retryBusy
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <RotateCcw className="w-3.5 h-3.5" />}
+            {props.retryBusy ? props.dr.metaSyncRetryRunning : props.dr.metaSyncRetryBtn}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 type AutoSaveStatus = 'idle' | 'pending' | 'saving' | 'saved' | 'error'
 
 function ProductDrawer(props: {
@@ -925,6 +989,7 @@ function ProductDrawer(props: {
   const [metaConfirmBusy, setMetaConfirmBusy] = useState(false)
   const [metaConfirmResult, setMetaConfirmResult] = useState<MetaSyncConfirmResponse | null>(null)
   const [metaConfirmError, setMetaConfirmError] = useState<string | null>(null)
+  const [metaRetryBusy, setMetaRetryBusy] = useState(false)
   const [priceSaveError, setPriceSaveError] = useState<string | null>(null)
   const previewTimer = useRef<number | null>(null)
   const saveTimer = useRef<number | null>(null)
@@ -1183,6 +1248,21 @@ function ProductDrawer(props: {
     }
   }
 
+  const onMetaSyncRetry = async () => {
+    setMetaRetryBusy(true)
+    try {
+      await catalogApi.metaSyncRetry(props.productId)
+      const detail = await catalogApi.productDetail(props.productId)
+      setData(detail)
+      setPerChannel(detail.per_channel)
+      props.onMutated()
+    } catch {
+      window.alert(dr.metaSyncStateFailed)
+    } finally {
+      setMetaRetryBusy(false)
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex" dir={dir}>
       <div className="flex-1 bg-slate-900/40" onClick={props.onClose} />
@@ -1425,6 +1505,16 @@ function ProductDrawer(props: {
                 </div>
               </div>
             </div>
+
+            {data?.publication && isEditable && (
+              <MetaSyncStatusPanel
+                product={data.product}
+                publication={data.publication}
+                dr={dr}
+                onRetry={() => void onMetaSyncRetry()}
+                retryBusy={metaRetryBusy}
+              />
+            )}
 
             {/* Readiness panel */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4">

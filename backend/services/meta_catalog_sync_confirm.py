@@ -4,20 +4,23 @@ services/meta_catalog_sync_confirm.py
 Confirmed one-item Meta catalog push for Nahla-native products only.
 
 Creates a default ProductVariant at confirm time when missing.
-Updates Product.sync_* fields on success/failure.
+Delegates push + verification to native_meta_sync_orchestrator.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from core.catalog import (
     canonical_retailer_id,
     meta_export_rejection_detail,
     product_source,
 )
-from services.meta_catalog_push import MetaCatalogPushError, push_one_meta_catalog_item
+from services.native_meta_sync_orchestrator import (
+    attempt_native_meta_sync,
+    build_sync_response_fields,
+    mark_native_meta_sync_pending,
+)
 from services.meta_catalog_sync_preview import preview_native_meta_sync
 
 logger = logging.getLogger("nahla.meta_catalog_sync_confirm")
@@ -37,24 +40,6 @@ def _load_product(db: Any, tenant_id: int, product_id: int) -> Any:
         .filter(Product.id == int(product_id), Product.tenant_id == int(tenant_id))
         .first()
     )
-
-
-def _sanitize_sync_error(push_result: Dict[str, Any]) -> str:
-    code = str(push_result.get("error") or "meta_push_failed")
-    meta = push_result.get("meta") or {}
-    response = meta.get("response")
-    if isinstance(response, dict):
-        graph_err = response.get("error")
-        if isinstance(graph_err, dict):
-            message = (
-                graph_err.get("error_user_msg")
-                or graph_err.get("message")
-                or graph_err.get("type")
-                or ""
-            )
-            if message:
-                return f"{code}: {str(message)[:480]}"
-    return code[:500]
 
 
 def ensure_native_default_variant(db: Any, parent: Any) -> Tuple[Any, bool]:
@@ -94,17 +79,6 @@ def ensure_native_default_variant(db: Any, parent: Any) -> Tuple[Any, bool]:
     return variant, True
 
 
-def _mark_sync_success(parent: Any) -> None:
-    parent.sync_status = "synced"
-    parent.sync_error = None
-    parent.last_synced_at = datetime.now(timezone.utc)
-
-
-def _mark_sync_failed(parent: Any, message: str) -> None:
-    parent.sync_status = "sync_failed"
-    parent.sync_error = (message or "sync_failed")[:2000]
-
-
 def confirm_native_meta_sync(
     db: Any,
     tenant_id: int,
@@ -133,88 +107,62 @@ def confirm_native_meta_sync(
     if rejection is not None:
         return dict(rejection)
 
-    preview = preview_native_meta_sync(db, tenant_id, product_id)
-    if not preview.get("eligible"):
-        return preview
-
-    fatal_errors = list(preview.get("fatal_errors") or [])
-    if fatal_errors:
-        return {
+    if not mark_native_meta_sync_pending(db, parent):
+        return dict(rejection or {
             "eligible": False,
-            "error_code": "preview_fatal",
-            "message_ar": _CONFIRM_MESSAGE_AR["preview_fatal"],
-            "fatal_errors": fatal_errors,
-            "warnings": list(preview.get("warnings") or []),
-            "preview": preview,
-        }
+            "error_code": "product_not_meta_export_eligible",
+            "message_ar": "هذا المنتج غير قابل للمزامنة مع Meta.",
+        })
+    db.commit()
 
-    _variant, variant_created = ensure_native_default_variant(db, parent)
-    retailer_id = (
-        getattr(_variant, "retailer_id", None)
-        or preview.get("retailer_id")
-        or canonical_retailer_id(parent, fallback_to_synthetic=True)
+    result = attempt_native_meta_sync(
+        db, tenant_id, product_id, client=client,
     )
-
-    try:
-        push_result = push_one_meta_catalog_item(
-            db,
-            int(tenant_id),
-            str(retailer_id),
-            confirm=True,
-            client=client,
-        )
-    except MetaCatalogPushError as exc:
-        _mark_sync_failed(parent, exc.code)
-        db.commit()
-        return {
-            "eligible": False,
-            "ok": False,
-            "error_code": exc.code,
-            "message_ar": _CONFIRM_MESSAGE_AR["push_failed"],
-            "sync_status": parent.sync_status,
-            "sync_error": parent.sync_error,
-            "source": product_source(parent),
-            "ownership_mode": getattr(parent, "ownership_mode", None),
-        }
-
-    if not push_result.get("ok"):
-        err_msg = _sanitize_sync_error(push_result)
-        _mark_sync_failed(parent, err_msg)
-        db.commit()
+    if result.get("skipped"):
         return {
             "eligible": True,
             "ok": False,
-            "confirm": True,
-            "error_code": push_result.get("error") or "meta_push_failed",
+            "error_code": result.get("error_code") or "sync_in_progress",
             "message_ar": _CONFIRM_MESSAGE_AR["push_failed"],
-            "product_id": int(parent.id),
-            "retailer_id": retailer_id,
-            "sync_status": parent.sync_status,
-            "sync_error": parent.sync_error,
-            "source": product_source(parent),
-            "ownership_mode": getattr(parent, "ownership_mode", None),
-            "push": push_result,
-            "variant_created": variant_created,
+            **build_sync_response_fields(parent),
         }
 
-    _mark_sync_success(parent)
-    db.commit()
-
-    return {
+    db.refresh(parent)
+    base = {
         "eligible": True,
-        "ok": True,
         "confirm": True,
-        "product_id": int(parent.id),
+        "product_id": int(product_id),
         "source": product_source(parent),
         "ownership_mode": getattr(parent, "ownership_mode", None),
-        "retailer_id": retailer_id,
-        "sync_status": parent.sync_status,
-        "sync_error": parent.sync_error,
-        "last_synced_at": (
-            parent.last_synced_at.isoformat() if parent.last_synced_at else None
-        ),
-        "variant_created": variant_created,
-        "push": push_result,
+        **build_sync_response_fields(parent),
+    }
+
+    if result.get("ok"):
+        return {
+            **base,
+            "ok": True,
+            "retailer_id": result.get("retailer_id"),
+            "push": result.get("push"),
+        }
+
+    code = str(result.get("error_code") or "meta_push_failed")
+    if code == "preview_fatal":
+        return {
+            **base,
+            "ok": False,
+            "error_code": code,
+            "message_ar": _CONFIRM_MESSAGE_AR["preview_fatal"],
+            "fatal_errors": result.get("fatal_errors") or [],
+            "preview": preview_native_meta_sync(db, tenant_id, product_id),
+        }
+
+    return {
+        **base,
+        "ok": False,
+        "error_code": code,
+        "message_ar": _CONFIRM_MESSAGE_AR["push_failed"],
+        "retailer_id": result.get("retailer_id"),
+        "push": result.get("push"),
     }
 
 
