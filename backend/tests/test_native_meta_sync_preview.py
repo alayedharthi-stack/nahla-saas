@@ -203,7 +203,6 @@ def test_meta_existing_product_preview_rejected():
     [
         ("image_url", None, "missing_image_url"),
         ("price", None, "missing_price"),
-        ("product_url", None, "missing_url"),
     ],
 )
 def test_missing_required_fields_return_fatal_errors(field, value, code):
@@ -225,6 +224,21 @@ def test_missing_required_fields_return_fatal_errors(field, value, code):
         result = preview_native_meta_sync(db, 9, 101)
     assert result["eligible"] is True
     assert any(item["code"] == code for item in result["fatal_errors"])
+
+
+@patch.dict(os.environ, {"NAHLA_PUBLIC_API_BASE_URL": "https://api.nahlah.ai"}, clear=False)
+def test_native_missing_product_url_uses_public_fallback_not_fatal():
+    parent = _native_parent(product_url="https://store.example/p/shoe")
+    parent.extra_metadata = dict(parent.extra_metadata)
+    parent.extra_metadata.pop("product_url", None)
+    variant = _variant(parent)
+    variant.extra_metadata = dict(parent.extra_metadata)
+    db = _mock_db(parent=parent, variant=variant)
+    with patch("services.meta_catalog_push._select_graph_token", return_value={"token": "tok"}):
+        result = preview_native_meta_sync(db, 9, 101)
+    assert result["eligible"] is True
+    assert not any(item["code"] == "missing_url" for item in result["fatal_errors"])
+    assert result["payload"]["url"] == "https://api.nahlah.ai/public/catalog/items/nahla_p_101"
 
 
 def test_missing_catalog_id_returns_catalog_error():

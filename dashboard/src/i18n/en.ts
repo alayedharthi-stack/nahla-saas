@@ -2114,7 +2114,7 @@ const en: Translations = {
         manualCount:            '{count} products',
         manualAlwaysAvailable:  'Always available',
         shopifyPlanned:         'Coming soon',
-        whatsappReady:          'Ready to send',
+        whatsappReady:          'Data ready for WhatsApp',
         whatsappNeedsCatalogId: 'Needs Meta Catalog ID',
         whatsappConnectFirst:   'Connect WhatsApp first',
         aiReadsCatalog:         'Reads from catalog',
@@ -2185,7 +2185,7 @@ const en: Translations = {
       variantsSummary: {
         products:      'Products',
         variants:      'Variants',
-        whatsappReady: 'WhatsApp ready',
+        whatsappReady: 'Data ready for WhatsApp',
         metaReady:     'Meta ready',
         googleReady:   'Google ready',
         needsReview:   'Needs review',
@@ -2239,6 +2239,8 @@ const en: Translations = {
         missing:       '{count} missing',
         readyWarn:     'Ready ⚠',
         ready:         'Ready',
+        readyWhatsappData: 'Product data ready for WhatsApp',
+        readyDataOnly:     'Local data ready',
         futureChannel: 'Future channel',
       },
       readinessPanel: {

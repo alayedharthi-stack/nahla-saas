@@ -235,7 +235,24 @@ def extract_field(product: Any, field_name: str) -> Any:
         return eff or None
 
     # Last resort — attribute access (covers anything we missed).
+    if field_name == "availability":
+        return _availability_from_in_stock(product)
     return _attr(field_name)
+
+
+def _availability_from_in_stock(product: Any) -> str:
+    """Infer Meta-style availability when no explicit value is stored.
+
+    Matches ``meta_catalog_export`` / Meta payload mapping:
+    ``in_stock`` True → ``"in stock"``, False → ``"out of stock"``.
+  """
+    if isinstance(product, Mapping):
+        raw = product.get("in_stock")
+    else:
+        raw = getattr(product, "in_stock", True)
+    if raw is None:
+        raw = True
+    return "in stock" if bool(raw) else "out of stock"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

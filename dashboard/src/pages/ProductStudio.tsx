@@ -806,7 +806,13 @@ function ChannelBadge(props: { c: ChannelReadiness }) {
     } else {
       pillBg = 'bg-emerald-50 border-emerald-200'; pillText = 'text-emerald-700'
       pillIcon = <CheckCircle2 className="w-3 h-3" />
-      label = cb.ready
+      if (props.c.channel === 'whatsapp') {
+        label = cb.readyWhatsappData
+      } else if (props.c.channel === 'meta_catalog') {
+        label = cb.readyDataOnly
+      } else {
+        label = cb.ready
+      }
     }
   }
 
