@@ -87,15 +87,50 @@ The goal is **natural conversation**, not scripted conversation.
 
 Hardcoded **customer-facing conversational templates** are prohibited in normal AI runtime flows.
 
+### Ownership split
+
+**Normal AI runtime customer-facing conversational prose is LLM-owned.**
+
+The **platform** owns:
+
+- trusted facts
+- routing
+- state
+- verified values
+- constraints
+- structured actions
+- CTA/vCard payloads
+- execution state
+- truth and safety
+
+The **LLM** owns:
+
+- greetings
+- apologies
+- acknowledgements
+- explanations
+- clarifications
+- transitions
+- concise conversational wording
+
 The platform must pass **trusted facts** and **structured actions** to the LLM. The LLM must compose customer-facing wording naturally (tone, greetings, apologies, transitions, concise context-aware phrasing).
+
+### Prohibited in normal AI runtime
 
 **Do not add or use in normal runtime paths:**
 
-- Fixed greetings, apologies, or thanks
-- Fixed showroom/location paragraphs or arrival replies
-- Fixed employee-contact sentences
-- Deterministic prose builders that only substitute merchant facts (name, branch, URL, phone)
-- Reusable canned conversational paragraphs or template pools hidden inside runtime code
+- fixed customer-facing replies
+- deterministic prose builders
+- hardcoded greetings, apologies, or clarifications
+- hidden template pools
+- fixed operational sentences
+- postprocessors that replace valid LLM text with deterministic prose
+- dedup substitutes that introduce fixed conversational wording
+- labeling a primary deterministic path as an emergency fallback
+- fixed showroom/location paragraphs or arrival replies
+- fixed employee-contact sentences
+- deterministic prose builders that only substitute merchant facts (name, branch, URL, phone)
+- reusable canned conversational paragraphs or template pools hidden inside runtime code
 
 **Before adding any customer-facing text constant, ask:**
 
@@ -103,7 +138,7 @@ The platform must pass **trusted facts** and **structured actions** to the LLM. 
 
 If **no** — do not add fixed wording; pass structured facts to a grounded compose surface and let the LLM phrase the response.
 
-### Allowed exceptions only
+### Allowed exact-text exceptions only
 
 1. Nahla Templates Library
 2. Templates explicitly created or approved by the merchant
@@ -111,14 +146,87 @@ If **no** — do not add fixed wording; pass structured facts to a grounded comp
 4. OTP / authentication messages
 5. Legally required notices
 6. Security, payment, consent, or safety notices requiring exact deterministic wording
-7. A **minimal emergency fallback** used only when LLM composition fails
+7. A **minimal emergency fallback** used only after a genuine natural-compose failure
+
+Closed registry: `backend/modules/ai/compose/constitutional_policy.py` (`DETERMINISTIC_EXCEPTIONS`).
 
 ### Emergency fallback requirements
 
-- One short factual line
-- No invented facts
-- Not the normal primary path
-- Metadata must record: `compose_source=fallback_deterministic`, `fallback_reason`, and structured action type
+- composition attempted first
+- one short factual line
+- trusted facts only
+- no invented facts
+- not the primary path
+- metadata must record:
+  - `compose_source=fallback_deterministic`
+  - `fallback_reason`
+  - `fallback_action_type`
+  - `chosen_path`
+- measurable and auditable in production
+
+### Runtime metadata contract
+
+For normal AI customer replies, require auditable metadata:
+
+- `compose_source`
+- `response_mode`
+- `chosen_path`
+- `llm_candidate_present`
+- `final_text_transformed`
+- `final_transform_reasons`
+
+For deterministic fallback additionally require:
+
+- `fallback_reason`
+- `fallback_action_type`
+- evidence that natural composition failed before fallback
+
+Allowed `compose_source` values (closed):
+
+- `llm` / `persona_llm`
+- `merchant_template`
+- `meta_template`
+- `legal_exact_text`
+- `security_exact_text`
+- `fallback_deterministic`
+
+Do not accept ambiguous values such as `template` without an approved exception class.
+
+### No phrase-ban fixes
+
+Fix ownership, state, evidence, routing, composition, and postprocessing. Paraphrasing the same deterministic action remains a violation.
+
+### CI enforcement
+
+CI job: **`constitution-compliance`** (`backend/tests/test_constitution_compliance.py`).
+
+This job exists in GitHub Actions but is **not merge-blocking until** a repository admin marks it as a Required Status Check in GitHub branch protection. See `docs/engineering/merge-and-ci-policy.md`.
+
+Pre-existing violations must be tracked in `tracked_violations_baseline.json` with violation ID, owner, `added_at`, `expiry_date`, `approved_by`, and removal reference — never silently grandfathered. New violation IDs require `governance_baseline_version` bump in a dedicated governance PR.
+
+### AI PR review checklist
+
+Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`.
+
+**Merge gate note:** `constitution-compliance` must be green on the PR, but merge-blocking status depends on GitHub branch protection (owner action). A PR cannot receive PASS or merge approval without completing this checklist.
+
+### Final customer text provenance rule
+
+Any review of a PR that touches AI, conversation, compose, routing, dedup, sanitizer, guards, or templates is **incomplete** until the reviewer identifies the **true source** of the final customer-facing text.
+
+The reviewer must state explicitly:
+
+- Did the text come from the **LLM**?
+- From a **template** (and which approved exception class)?
+- From a **sanitizer** replacement?
+- From **dedup** substitution?
+- From an emergency **fallback**?
+- From a **guard** rewrite?
+- Or was a valid LLM candidate **replaced** somewhere along the path?
+
+Trace the full path: **decision → facts → compose → guards → sanitizer → dedup → wire**.
+
+This rule exists because constitutional violations such as `track_order_not_found` hid inside deterministic compose paths until the final outbound source was traced. If this rule had been applied from the start, the violation would have surfaced in the first review.
 
 This rule cannot be bypassed for convenience, fewer files, lower latency, or easier testing.
 

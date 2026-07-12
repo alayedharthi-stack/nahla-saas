@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "governance_baseline_version": 2,
+  "governance_pr": "https://github.com/alayedharthi-stack/nahla-saas/pull/566",
+  "approved_by": "PR #566 governance review; NL-V001/NL-T001 removed in track-order-not-found compose fix",
+  "policy_note": "TRACKED_VIOLATIONS are FAILING POLICY WITH TEMPORARY WAIVER — never approved behavior. New violation IDs require governance_baseline_version bump and explicit owner approval in a dedicated governance PR.",
+  "allowed_violation_ids": [
+    "NL-V002",
+    "NL-T002"
+  ],
+  "violations": [
+    {
+      "violation_id": "NL-V002",
+      "path": "track_order_need_order_number",
+      "file": "backend/modules/ai/brain/compose/responder.py",
+      "action": "need_order_number:T.track_order_need_identifiers",
+      "owner": "ai-platform",
+      "reason": "Normal AI path directly returns T.track_order_need_identifiers() without LLM compose",
+      "removal_ref": "fix/track-order-need-identifiers-compose-compliance",
+      "added_at": "2026-07-12",
+      "expiry_date": "2026-09-30",
+      "approved_by": "PR #566 governance review"
+    },
+    {
+      "violation_id": "NL-T002",
+      "path": "test_order_status_lookup_routing",
+      "file": "backend/tests/test_order_status_lookup_routing.py",
+      "action": "assert_exact_template:track_order_need_identifiers",
+      "owner": "ai-platform",
+      "reason": "Test blesses exact normal-path Arabic for need-identifiers path instead of behavior/metadata",
+      "removal_ref": "fix/track-order-need-identifiers-compose-compliance",
+      "added_at": "2026-07-12",
+      "expiry_date": "2026-09-30",
+      "approved_by": "PR #566 governance review"
+    }
+  ]
+}

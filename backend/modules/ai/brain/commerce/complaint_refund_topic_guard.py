@@ -124,6 +124,7 @@ def should_block_order_draft_injection(
     customer_message: str = "",
     decision: Any = None,
     history: Any = None,
+    inbound_metadata: Any = None,
 ) -> bool:
     """True when WA draft/order-flow injection must not run."""
     try:
@@ -156,6 +157,9 @@ def should_block_order_draft_injection(
             has_pending_order_reference_evidence,
             is_order_support_operational_follow_up,
         )
+        from modules.ai.media.routing_guard import (  # noqa: PLC0415
+            should_route_unclear_audio_to_existing_order_support,
+        )
 
         if has_pending_order_reference_evidence(state=brain_state, history=history) and (
             is_order_support_operational_follow_up(
@@ -164,6 +168,12 @@ def should_block_order_draft_injection(
                 history=history,
             )
             or is_placed_order_statement(customer_message or "")
+            or should_route_unclear_audio_to_existing_order_support(
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+                semantic_message=customer_message or "",
+                history=history,
+                brain_state=brain_state,
+            )
         ):
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support draft block is best-effort

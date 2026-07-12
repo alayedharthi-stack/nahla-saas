@@ -1,0 +1,8 @@
+# Nahla constitutional governance — require explicit review for waiver/allowlist changes.
+AGENTS.md @alayedharthi-stack
+backend/modules/ai/compose/constitutional_policy.py @alayedharthi-stack
+backend/modules/ai/compose/tracked_violations_baseline.json @alayedharthi-stack
+backend/tests/test_constitution_compliance.py @alayedharthi-stack
+.github/workflows/ci.yml @alayedharthi-stack
+docs/engineering/ai-pr-constitution-checklist.md @alayedharthi-stack
+docs/engineering/merge-and-ci-policy.md @alayedharthi-stack

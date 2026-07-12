@@ -5,7 +5,7 @@ import asyncio
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -126,6 +126,7 @@ async def _run_track_turn(
     message: str,
     *,
     slots: dict | None = None,
+    llm_reply: str | None = None,
 ) -> tuple:
     ctx = _ctx(tenant_ctx, message, db=db, slots=slots)
     decision = DefaultDecisionEngine().decide(ctx)
@@ -136,7 +137,15 @@ async def _run_track_turn(
         "modules.ai.brain.intent.link_disambiguation.should_use_generative_tracking_follow_up",
         return_value=False,
     ):
-        reply = await composer.compose(decision, result, ctx)
+        if llm_reply is not None:
+            with patch.object(
+                composer,
+                "_llm_compose",
+                new=AsyncMock(return_value=llm_reply),
+            ):
+                reply = await composer.compose(decision, result, ctx)
+        else:
+            reply = await composer.compose(decision, result, ctx)
     return decision, result, reply, ctx
 
 
@@ -215,18 +224,24 @@ class TestOrderNotFound:
             customer_info={"phone": tenant_ctx.phone},
             line_items=[_GENERIC_ITEM],
         )
+        llm_reply = "ما لقيت طلب بهذا الرقم، تأكد من رقم الطلب لو سمحت."
         decision, result, reply, _ctx_obj = asyncio.run(
             _run_track_turn(
                 db,
                 tenant_ctx,
                 "طلبي رقم 999999",
                 slots={"order_id": "999999"},
+                llm_reply=llm_reply,
             ),
         )
         assert decision.action == ACTION_TRACK_ORDER
         assert result.success is False
         assert result.data.get("message") == "order_not_found"
-        assert reply == T.order_status_not_found()
+        assert result.data.get("chosen_path") == "track_order_not_found"
+        assert result.data.get("compose_source") == "llm"
+        assert result.data.get("response_mode") == "llm"
+        assert reply == llm_reply
+        assert reply != T.order_status_not_found()
         assert "11111" not in reply
         _assert_no_order_status_pressure(reply, result)
 

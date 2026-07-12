@@ -86,6 +86,34 @@ def _add_product_token(slots: set[str], token: str) -> None:
     slots.add(f"product_token:{tok}")
 
 
+def operational_order_reference_slot(text: str) -> str:
+    """
+    Return ``order_ref:<digits>`` when inbound carries a recognized order reference.
+
+    Reuses ``order_tracking_intent_guard`` bare/labeled extractors — no duplicate regex.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    try:
+        from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+            extract_bare_order_reference,
+            extract_order_reference_from_history,
+        )
+
+        bare = extract_bare_order_reference(raw)
+        if bare:
+            return f"order_ref:{bare}"
+        labeled = extract_order_reference_from_history(
+            [{"direction": "inbound", "body": raw}],
+        )
+        if labeled:
+            return f"order_ref:{labeled}"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional tracking guard import
+        return ""
+    return ""
+
+
 def extract_operational_slots(text: str) -> FrozenSet[str]:
     """Return normalized operational slot keys extracted from ``text``."""
     raw = (text or "").strip()
@@ -94,6 +122,10 @@ def extract_operational_slots(text: str) -> FrozenSet[str]:
         return frozenset()
 
     slots: set[str] = set()
+
+    order_ref_slot = operational_order_reference_slot(raw)
+    if order_ref_slot:
+        slots.add(order_ref_slot)
 
     if _BUY_INTENT_RE.search(norm):
         slots.add("intent:buy")
@@ -298,6 +330,10 @@ def should_restore_brain_reply_after_dedup_silence(
     """True when hard dedup would silence a commerce inquiry that already composed."""
     if not (candidate_reply or "").strip():
         return False
+    # Bare/labeled order-reference turns (including same-ref retries after
+    # track_order_not_found) must not end in zero outbound when brain composed.
+    if is_local_order_status_inquiry(current_inbound):
+        return True
     if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
         return False
     if should_bypass_hard_dedup_repeat_availability(current_inbound, previous_outbound):
