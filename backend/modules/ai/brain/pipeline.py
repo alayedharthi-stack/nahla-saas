@@ -5407,6 +5407,20 @@ def _compose_base_response_goal(
             "اختم بسؤال قصير: أي حجم يفضّل؟"
         )
 
+    if decision.action == ACTION_LLM_REPLY:
+        _support_args = decision.args or {}
+        _support_topic = str(_support_args.get("topic") or "").strip()
+        _support_goal = str(_support_args.get("response_goal") or "").strip()
+        if (
+            _support_topic in {"existing_order_support", "shipping_post_order"}
+            or _support_goal.startswith("existing_order_support")
+        ):
+            from .commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                compose_order_support_response_goal_for_decision,
+            )
+
+            return compose_order_support_response_goal_for_decision(_support_args)
+
     parts: List[str] = []
     # ── Relational preference prefix (May 2026 — Tenant 33 #49, Commit 2)
     # When the relational decision router has tagged a goal token on
