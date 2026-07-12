@@ -123,7 +123,7 @@ def pick_active_commerce_integration(db: Any, tenant_id: int) -> Optional[Any]:
             salla_row = pick_active_salla_integration(db, int(tenant_id))
             if salla_row and is_active_binding(salla_row):
                 return salla_row
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — integration picker is best-effort
             logger.debug("[AdapterCaps] salla picker failed tenant=%s: %s", tenant_id, exc)
 
     rows = (

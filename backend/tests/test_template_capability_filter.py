@@ -403,6 +403,8 @@ class TestConservativeCapabilityDerivation:
         assert caps.supports_external_coupons is False
         assert caps.has_external_tracking is False
         assert caps.has_payment_link is False
+        assert caps.supports_external_checkout is False
+        assert caps.supports_whatsapp_orders is False
 
 
 class TestFeatureFlag:

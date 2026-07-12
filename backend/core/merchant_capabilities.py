@@ -81,7 +81,7 @@ def read_default_order_channel(db: Any, tenant_id: int) -> OrderChannelPreferenc
         raw = str(store_cfg.get("default_order_channel") or "adaptive").strip().lower()
         if raw in _VALID_ORDER_CHANNELS:
             return raw  # type: ignore[return-value]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — settings read is best-effort
         logger.debug(
             "[MerchantCapabilities] default_order_channel read failed tenant=%s: %s",
             tenant_id,
@@ -111,7 +111,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
         )
 
         store_caps = resolve_store_adapter_capabilities(db, tid)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — capability probe is best-effort
         logger.debug(
             "[MerchantCapabilities] store adapter caps failed tenant=%s: %s",
             tid,
@@ -129,7 +129,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
         )
 
         channels = resolve_merchant_sales_channels(db, tid)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — capability probe is best-effort
         logger.debug(
             "[MerchantCapabilities] sales channels failed tenant=%s: %s",
             tid,
@@ -147,7 +147,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
 
     whatsapp_toggle = bool(
         channels and channels.whatsapp_quick_order.enabled
-    ) if channels else True
+    ) if channels else False
 
     has_whatsapp_catalog = False
     try:
@@ -158,7 +158,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
         has_whatsapp_catalog = bool(
             evaluate_native_catalog_capability(db, tid).eligible
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — capability probe is best-effort
         logger.debug(
             "[MerchantCapabilities] catalog probe failed tenant=%s: %s",
             tid,
@@ -173,7 +173,7 @@ def resolve_merchant_capabilities(db: Any, tenant_id: int) -> MerchantCapabiliti
         from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
 
         payment = load_merchant_payment_methods(db, tid)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — capability probe is best-effort
         logger.debug(
             "[MerchantCapabilities] payment methods failed tenant=%s: %s",
             tid,
