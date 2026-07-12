@@ -210,6 +210,24 @@ Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`.
 
 **Merge gate note:** `constitution-compliance` must be green on the PR, but merge-blocking status depends on GitHub branch protection (owner action). A PR cannot receive PASS or merge approval without completing this checklist.
 
+### Final customer text provenance rule
+
+Any review of a PR that touches AI, conversation, compose, routing, dedup, sanitizer, guards, or templates is **incomplete** until the reviewer identifies the **true source** of the final customer-facing text.
+
+The reviewer must state explicitly:
+
+- Did the text come from the **LLM**?
+- From a **template** (and which approved exception class)?
+- From a **sanitizer** replacement?
+- From **dedup** substitution?
+- From an emergency **fallback**?
+- From a **guard** rewrite?
+- Or was a valid LLM candidate **replaced** somewhere along the path?
+
+Trace the full path: **decision → facts → compose → guards → sanitizer → dedup → wire**.
+
+This rule exists because constitutional violations such as `track_order_not_found` hid inside deterministic compose paths until the final outbound source was traced. If this rule had been applied from the start, the violation would have surfaced in the first review.
+
 This rule cannot be bypassed for convenience, fewer files, lower latency, or easier testing.
 
 ### Testing guidance

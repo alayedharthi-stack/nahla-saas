@@ -175,6 +175,11 @@ class TestGovernanceWaiverSchema:
     def test_live_baseline_passes_governance_validation(self) -> None:
         assert validate_governance_baseline(as_of=date(2026, 7, 12)) == []
 
+    def test_constitution_documents_final_customer_text_provenance_rule(self) -> None:
+        text = (policy.REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        assert "Final customer text provenance rule" in text
+        assert "true source" in text.lower() or "True source" in text
+
     def test_tracked_violation_is_not_classified_as_approved_exception(self) -> None:
         assert TRACKED_VIOLATION_STATUS == "FAILING_POLICY_WITH_TEMPORARY_WAIVER"
         approved_paths = {exc.action_path for exc in DETERMINISTIC_EXCEPTIONS}
