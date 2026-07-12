@@ -34,11 +34,13 @@ from modules.ai.compose.constitutional_policy import (  # noqa: E402
     TRACKED_VIOLATION_STATUS,
     TRACKED_VIOLATIONS,
     TrackedViolation,
+    ViolationKind,
     classify_untracked_violations,
     format_approved_exception_report,
     format_tracked_violation_report,
     load_governance_baseline,
     scan_compose_boundary_violations,
+    scan_compose_source_snippet,
     scan_exact_prose_test_assertions,
     scan_responder_direct_template_returns,
     validate_governance_baseline,
@@ -280,6 +282,59 @@ class TestExceptionRegistry:
         assert validate_compose_source("llm") is None
 
 
+class TestScannerPatternProofs:
+    """Synthetic AST fixtures proving scanner patterns beyond live responder hits."""
+
+    def test_scanner_detects_direct_template_return(self) -> None:
+        findings = scan_compose_source_snippet(
+            '''
+if msg_key == "order_not_found":
+    result.data["chosen_path"] = "synthetic_direct"
+    return T.order_status_not_found()
+'''
+        )
+        assert any(f.kind == ViolationKind.DIRECT_TEMPLATE_RETURN for f in findings)
+        match = next(f for f in findings if f.path == "synthetic_direct")
+        assert match.template_call == "order_status_not_found"
+
+    def test_scanner_detects_assign_template_then_return(self) -> None:
+        findings = scan_compose_source_snippet(
+            '''
+if msg_key == "order_not_found":
+    result.data["chosen_path"] = "synthetic_assign_return"
+    text = T.order_status_not_found()
+    return text
+'''
+        )
+        assert any(f.kind == ViolationKind.ASSIGNED_TEMPLATE_RETURN for f in findings)
+        match = next(f for f in findings if f.path == "synthetic_assign_return")
+        assert match.template_call == "order_status_not_found"
+
+    def test_scanner_detects_deterministic_builder_call_return(self) -> None:
+        findings = scan_compose_source_snippet(
+            '''
+if topic == "payment_barcode":
+    result.data["chosen_path"] = "synthetic_builder"
+    return payment_barcode_intro_text(ctx)
+'''
+        )
+        assert any(f.kind == ViolationKind.BUILDER_CALL_RETURN for f in findings)
+        match = next(f for f in findings if f.path == "synthetic_builder")
+        assert match.template_call == "payment_barcode_intro_text"
+
+    def test_scanner_detects_fixed_arabic_string_return(self) -> None:
+        findings = scan_compose_source_snippet(
+            '''
+if topic == "greeting":
+    result.data["chosen_path"] = "synthetic_fixed_arabic"
+    return "مرحباً، هذا رد محادثة ثابت"
+'''
+        )
+        assert any(f.kind == ViolationKind.FIXED_STRING_RETURN for f in findings)
+        match = next(f for f in findings if f.path == "synthetic_fixed_arabic")
+        assert match.detail == "return fixed Arabic string literal"
+
+
 class TestRuntimeViolationDetection:
     def test_track_order_not_found_still_detected_until_runtime_fix(self) -> None:
         findings = scan_responder_direct_template_returns()
@@ -288,12 +343,26 @@ class TestRuntimeViolationDetection:
         match = next(f for f in findings if f.path == "track_order_not_found")
         assert match.template_call == "order_status_not_found"
 
-    def test_compose_scan_detects_assigned_template_return_pattern(self) -> None:
+    def test_live_responder_scan_includes_direct_template_returns(self) -> None:
         findings = scan_compose_boundary_violations(
             ["backend/modules/ai/brain/compose/responder.py"]
         )
         kinds = {f.kind.value for f in findings}
         assert "direct_template_return" in kinds
+
+    def test_governance_baseline_rejects_duplicate_violation_ids(self) -> None:
+        raw = json.loads(policy.BASELINE_JSON.read_text(encoding="utf-8"))
+        dup = copy.deepcopy(raw)
+        dup["violations"].append(copy.deepcopy(dup["violations"][0]))
+        dup["allowed_violation_ids"] = [v["violation_id"] for v in dup["violations"]]
+        tmp = policy.REPO_ROOT / ".tmp_dup_baseline_test.json"
+        tmp.write_text(json.dumps(dup), encoding="utf-8")
+        try:
+            errors = validate_governance_baseline(load_governance_baseline(tmp))
+            assert any("duplicate violation_id" in e for e in errors)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
     def test_detected_violations_are_explicitly_tracked_not_silently_grandfathered(self) -> None:
         errors = validate_live_violations_against_waivers()

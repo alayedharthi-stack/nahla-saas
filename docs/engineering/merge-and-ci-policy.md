@@ -63,6 +63,18 @@ Tracked violations (`tracked_violations_baseline.json`) are **FAILING POLICY WIT
 - Expired waivers fail CI automatically.
 - Removal PRs must delete the waiver entry when the runtime violation is fixed.
 
+### Constitution scanner blind spots (known, documented)
+
+Repository CI cannot catch every deterministic prose path. Known limits as of PR #566:
+
+- `return T.<template>()` without `result.data["chosen_path"]` in the same block (many legacy responder paths).
+- `templates.py` function bodies: scanned, but findings require a `chosen_path` assignment in the same block.
+- Sanitizer/dedup postprocessors: metadata contract tested; not all replacement paths are AST-gated.
+- PR-diff context unavailable in CI: baseline JSON lock is static; co-updating `violations` + `allowed_violation_ids` in one PR can pass CI unless GitHub CODEOWNERS review blocks it.
+- Closed builder registry (`payment_barcode_intro_text`, `minimal_emergency_fallback` only): unknown builders are not flagged.
+
+Synthetic pattern proofs live in `TestScannerPatternProofs` inside `test_constitution_compliance.py`.
+
 ## Incident rule
 
 If any red CI is observed on merged PRs:

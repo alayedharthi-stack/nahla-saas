@@ -315,6 +315,8 @@ def validate_governance_baseline(
 
     live_ids = {v.violation_id for v in base.violations}
     allowed_ids = set(base.allowed_violation_ids)
+    if len(base.violations) != len(live_ids):
+        errors.append("duplicate violation_id in violations list")
     if live_ids != allowed_ids:
         errors.append(
             "violations list must match allowed_violation_ids exactly "
@@ -386,14 +388,6 @@ def validate_fallback_metadata(
     if not str(metadata.get("chosen_path") or "").strip():
         errors.append("fallback requires chosen_path")
     return errors
-
-
-def is_approved_exception_path(action_path: str) -> bool:
-    return str(action_path or "").strip() in APPROVED_EXCEPTION_PATHS
-
-
-def is_tracked_violation_path(action_path: str) -> bool:
-    return str(action_path or "").strip() in TRACKED_VIOLATION_PATHS
 
 
 def _is_templates_call(node: ast.AST) -> Optional[str]:
@@ -522,6 +516,22 @@ def _scan_block_for_findings(
     return findings
 
 
+def scan_compose_source_snippet(
+    source: str,
+    *,
+    file_rel: str = "synthetic_scan_fixture.py",
+) -> List[ComposeViolationFinding]:
+    """Parse a Python snippet and return compose-boundary findings (test fixture helper)."""
+    tree = ast.parse(source, filename=file_rel)
+    findings: List[ComposeViolationFinding] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            findings.extend(_scan_block_for_findings(node.body, file_rel=file_rel))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            findings.extend(_scan_block_for_findings(node.body, file_rel=file_rel))
+    return findings
+
+
 def scan_compose_boundary_violations(
   files: Optional[Sequence[str]] = None,
 ) -> List[ComposeViolationFinding]:
@@ -584,10 +594,6 @@ def scan_exact_prose_test_assertions(
                 )
             )
     return findings
-
-
-def _finding_fingerprint(finding: ComposeViolationFinding) -> str:
-    return f"{finding.file}|{finding.path}|{finding.template_call or finding.detail}"
 
 
 def _waiver_matches_finding(violation: TrackedViolation, finding: ComposeViolationFinding) -> bool:
