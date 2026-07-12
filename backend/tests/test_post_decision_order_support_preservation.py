@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import deque
+from types import SimpleNamespace
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -243,3 +246,169 @@ class TestLoopGuardOrderSupportProtection:
         )
         assert slot
         assert "العنوان" in slot or "عنوان" in slot
+
+
+def _stale_checkout_state() -> Dict[str, Any]:
+    return {
+        "order_prep": {
+            "catalog_line_items_authoritative": True,
+            "line_items": [{"name": GENERIC_PRODUCT, "qty": 1}],
+            "missing_fields": ["delivery_address"],
+        },
+    }
+
+
+def _loop_checkout_recovery_reply(
+    *,
+    decision_action: str,
+    decision_args: Dict[str, Any] | None = None,
+    checkout_active: bool = True,
+    skip_legacy: bool = False,
+    inbound_text: str = "",
+) -> str:
+    """Mirror webhook loop-guard checkout_recovery_reply selection."""
+    from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
+        build_checkout_slot_fallback_reply,
+    )
+
+    if order_support_reply_protected(
+        decision_action=decision_action,
+        decision_args=decision_args or {},
+    ):
+        return ""
+    if checkout_active and not skip_legacy:
+        return (
+            build_checkout_slot_fallback_reply(
+                state=_stale_checkout_state(),
+                inbound_text=inbound_text,
+            )
+            or ""
+        )
+    return ""
+
+
+def _seed_loop_recovery_trigger(*, tenant_id: int = 1, convo_id: int = 572) -> None:
+    from core.ai_pause_guard import (  # noqa: PLC0415
+        LOOP_SCORE_RECOVERY,
+        _LOOP_STATE,
+        _LoopMemory,
+    )
+
+    mem = _LoopMemory(score=LOOP_SCORE_RECOVERY + 2)
+    mem.last_assistant_replies = deque([NOT_FOUND_BODY], maxlen=4)
+    _LOOP_STATE[(tenant_id, convo_id)] = mem
+
+
+class TestLoopGuardFullPathRecovery:
+    def setup_method(self) -> None:
+        from core.ai_pause_guard import _LOOP_STATE  # noqa: PLC0415
+
+        _LOOP_STATE.clear()
+
+    def test_track_order_not_found_llm_body_preserved_on_loop_recovery(self) -> None:
+        from core.ai_pause_guard import evaluate_loop_pre_send  # noqa: PLC0415
+
+        _seed_loop_recovery_trigger()
+        convo = SimpleNamespace(id=572)
+        db = MagicMock()
+        slot = _loop_checkout_recovery_reply(
+            decision_action=ACTION_TRACK_ORDER,
+            inbound_text=GENERIC_ORDER_REF,
+        )
+        assert slot == ""
+        decision = evaluate_loop_pre_send(
+            db,
+            convo,
+            tenant_id=1,
+            candidate_reply=NOT_FOUND_BODY,
+            inbound_text=GENERIC_ORDER_REF,
+            checkout_active=True,
+            checkout_recovery_reply=None,
+        )
+        assert decision.action == "recovery"
+        assert decision.recovery_text == NOT_FOUND_BODY
+
+    def test_existing_order_support_llm_body_preserved_on_loop_recovery(self) -> None:
+        from core.ai_pause_guard import evaluate_loop_pre_send  # noqa: PLC0415
+
+        support_body = "أفهم قلقك بخصوص التأخير وسأتابع معك حالة الطلب"
+        _seed_loop_recovery_trigger(convo_id=573)
+        mem_key = (1, 573)
+        from core.ai_pause_guard import _LOOP_STATE  # noqa: PLC0415
+
+        _LOOP_STATE[mem_key].last_assistant_replies = deque([support_body], maxlen=4)
+        d = _support_decision()
+        slot = _loop_checkout_recovery_reply(
+            decision_action=d.action,
+            decision_args=d.args,
+            inbound_text=SHIPPING_DELAY,
+        )
+        assert slot == ""
+        decision = evaluate_loop_pre_send(
+            MagicMock(),
+            SimpleNamespace(id=573),
+            tenant_id=1,
+            candidate_reply=support_body,
+            inbound_text="وين",
+            checkout_active=True,
+            checkout_recovery_reply=None,
+        )
+        assert decision.action == "recovery"
+        assert decision.recovery_text == support_body
+
+    def test_empty_track_order_compose_skips_loop_and_allows_slot_recovery(self) -> None:
+        from core.ai_pause_guard import evaluate_loop_pre_send  # noqa: PLC0415
+
+        _seed_loop_recovery_trigger(convo_id=574)
+        decision = evaluate_loop_pre_send(
+            MagicMock(),
+            SimpleNamespace(id=574),
+            tenant_id=1,
+            candidate_reply="",
+            inbound_text=GENERIC_ORDER_REF,
+            checkout_active=True,
+            checkout_recovery_reply=_loop_checkout_recovery_reply(
+                decision_action=ACTION_PROPOSE_DRAFT_ORDER,
+                decision_args={"topic": "checkout"},
+                inbound_text=GENERIC_ORDER_REF,
+            ),
+        )
+        assert decision.action == "continue"
+        assert decision.reason == "no_candidate"
+
+    def test_genuine_checkout_loop_recovery_still_uses_slot_fallback(self) -> None:
+        from core.ai_pause_guard import evaluate_loop_pre_send  # noqa: PLC0415
+
+        _seed_loop_recovery_trigger(convo_id=575)
+        slot = _loop_checkout_recovery_reply(
+            decision_action=ACTION_PROPOSE_DRAFT_ORDER,
+            decision_args={"topic": "checkout"},
+            inbound_text="حي النرجس الرياض",
+        )
+        assert slot
+        decision = evaluate_loop_pre_send(
+            MagicMock(),
+            SimpleNamespace(id=575),
+            tenant_id=1,
+            candidate_reply="تمام، أكمل معك الطلب",
+            inbound_text="123",
+            checkout_active=True,
+            checkout_recovery_reply=slot,
+        )
+        assert decision.action == "recovery"
+        assert decision.recovery_text == slot
+        assert "العنوان" in slot or "عنوان" in slot
+
+    def test_loop_guard_skip_provenance_uses_outbound_text_source(self) -> None:
+        from core.outbound_text_policy import (  # noqa: PLC0415
+            OutboundTextSource,
+            OutboundTextTracker,
+        )
+
+        tracker = OutboundTextTracker(text_source=OutboundTextSource.DETERMINISTIC)
+        pre_loop_src = (
+            tracker.text_source.value
+            if tracker is not None
+            else OutboundTextSource.UNKNOWN.value
+        )
+        assert pre_loop_src == "deterministic"

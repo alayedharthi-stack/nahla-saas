@@ -10321,8 +10321,17 @@ async def _handle_merchant_message(
                         decision_args=dict(_br_dec_args or {}),
                     )
                     if _loop_order_support_owned:
+                        from core.outbound_text_policy import (  # noqa: PLC0415
+                            OutboundTextSource as _LoopGuardOTS,
+                        )
+
+                        _pre_loop_src = (
+                            _outbound_text_tracker.text_source.value
+                            if _outbound_text_tracker is not None
+                            else _LoopGuardOTS.UNKNOWN.value
+                        )
                         _loop_guard_provenance = {
-                            "pre_loop_guard_text_source": "brain_llm",
+                            "pre_loop_guard_text_source": _pre_loop_src,
                             "loop_guard_override_applied": False,
                             "loop_guard_override_skipped_reason": "order_support_owned",
                         }
