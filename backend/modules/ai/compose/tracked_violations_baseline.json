@@ -1,28 +1,14 @@
 {
   "schema_version": 1,
-  "governance_baseline_version": 1,
+  "governance_baseline_version": 2,
   "governance_pr": "https://github.com/alayedharthi-stack/nahla-saas/pull/566",
-  "approved_by": "PR #566 governance review",
+  "approved_by": "PR #566 governance review; NL-V001/NL-T001 removed in track-order-not-found compose fix",
   "policy_note": "TRACKED_VIOLATIONS are FAILING POLICY WITH TEMPORARY WAIVER — never approved behavior. New violation IDs require governance_baseline_version bump and explicit owner approval in a dedicated governance PR.",
   "allowed_violation_ids": [
-    "NL-V001",
     "NL-V002",
-    "NL-T001",
     "NL-T002"
   ],
   "violations": [
-    {
-      "violation_id": "NL-V001",
-      "path": "track_order_not_found",
-      "file": "backend/modules/ai/brain/compose/responder.py",
-      "action": "order_not_found:T.order_status_not_found",
-      "owner": "ai-platform",
-      "reason": "Normal AI path directly returns T.order_status_not_found() without LLM compose or fallback metadata",
-      "removal_ref": "fix/track-order-not-found-compose-compliance",
-      "added_at": "2026-07-12",
-      "expiry_date": "2026-08-31",
-      "approved_by": "PR #566 governance review"
-    },
     {
       "violation_id": "NL-V002",
       "path": "track_order_need_order_number",
@@ -33,18 +19,6 @@
       "removal_ref": "fix/track-order-need-identifiers-compose-compliance",
       "added_at": "2026-07-12",
       "expiry_date": "2026-09-30",
-      "approved_by": "PR #566 governance review"
-    },
-    {
-      "violation_id": "NL-T001",
-      "path": "test_order_status_lookup_routing",
-      "file": "backend/tests/test_order_status_lookup_routing.py",
-      "action": "assert_exact_template:order_status_not_found",
-      "owner": "ai-platform",
-      "reason": "Test blesses exact normal-path Arabic instead of behavior/metadata",
-      "removal_ref": "fix/track-order-not-found-compose-compliance",
-      "added_at": "2026-07-12",
-      "expiry_date": "2026-08-31",
       "approved_by": "PR #566 governance review"
     },
     {

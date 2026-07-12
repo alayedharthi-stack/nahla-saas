@@ -195,7 +195,7 @@ class TestGovernanceWaiverSchema:
         waiver_report = format_tracked_violation_report()
         assert "APPROVED DETERMINISTIC EXCEPTIONS" in approved_report
         assert "track_order_not_found" not in approved_report
-        assert "NL-V001" in waiver_report
+        assert "NL-V002" in waiver_report
 
 
 class TestAntiGrandfathering:
@@ -241,18 +241,17 @@ class TestAntiGrandfathering:
 class TestPostprocessConstitution:
     def test_sanitizer_replacing_llm_text_with_deterministic_prose_fails(self) -> None:
         from core.outbound_sanitizer import maybe_scrub_unkept_asset_promise
-        from modules.ai.brain.compose import templates as T
 
-        llm_candidate = T.order_status_not_found()
+        llm_candidate = "ما لقيت طلب بهذا الرقم، تأكد من رقم الطلب لو سمحت."
         scrubbed, changed, asset_class = maybe_scrub_unkept_asset_promise(
             llm_candidate,
             has_url=False,
             has_media=False,
             has_phone=False,
         )
-        assert changed is True
-        assert asset_class == "phone"
-        assert scrubbed != llm_candidate
+        assert changed is False
+        assert scrubbed == llm_candidate
+        assert asset_class is None
 
     def test_dedup_substitute_introducing_fixed_conversational_prose_is_detected(self) -> None:
         fixed_substitute = "حالياً لا يوجد رقم تواصل مهيأ لإرساله."
@@ -341,12 +340,10 @@ if topic == "greeting":
 
 
 class TestRuntimeViolationDetection:
-    def test_track_order_not_found_still_detected_until_runtime_fix(self) -> None:
+    def test_track_order_not_found_no_longer_direct_template_return(self) -> None:
         findings = scan_responder_direct_template_returns()
         paths = {f.path for f in findings}
-        assert "track_order_not_found" in paths
-        match = next(f for f in findings if f.path == "track_order_not_found")
-        assert match.template_call == "order_status_not_found"
+        assert "track_order_not_found" not in paths
 
     def test_live_responder_scan_includes_direct_template_returns(self) -> None:
         findings = scan_compose_boundary_violations(
@@ -382,29 +379,24 @@ class TestRuntimeViolationDetection:
         untracked = classify_untracked_violations(scan_compose_boundary_violations())
         assert untracked == []
 
-    def test_nl_v001_removal_ownership(self) -> None:
-        waiver = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V001")
-        assert waiver.removal_ref == "fix/track-order-not-found-compose-compliance"
-
     def test_nl_v002_has_separate_removal_scope(self) -> None:
-        v001 = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V001")
         v002 = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V002")
         assert v002.removal_ref == "fix/track-order-need-identifiers-compose-compliance"
-        assert v002.removal_ref != v001.removal_ref
+        assert "NL-V001" not in TRACKED_VIOLATION_IDS
 
-    def test_nl_t001_tracked_for_exact_prose_assertion(self) -> None:
+    def test_nl_t002_tracked_for_need_identifiers_exact_prose_assertion(self) -> None:
         assertions = scan_exact_prose_test_assertions()
         assert assertions
-        assert "NL-T001" in TRACKED_VIOLATION_IDS
-        assert "track_order_not_found" in TRACKED_VIOLATION_PATHS
+        assert "NL-T002" in TRACKED_VIOLATION_IDS
+        assert "track_order_need_order_number" in TRACKED_VIOLATION_PATHS
 
     def test_stale_waiver_without_matching_code_fails(self) -> None:
         fake_waivers = (
             TrackedViolation(
-                violation_id="NL-V001",
-                path="track_order_not_found",
+                violation_id="NL-V002",
+                path="track_order_need_order_number",
                 file="backend/modules/ai/brain/compose/responder.py",
-                action="order_not_found:T.removed_template",
+                action="need_order_number:T.removed_template",
                 owner="ai-platform",
                 reason="stale",
                 removal_ref="fix/x",

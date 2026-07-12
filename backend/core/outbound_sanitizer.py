@@ -726,6 +726,25 @@ def _is_customer_ledger_phone_context(text: str) -> bool:
     return bool(_CUSTOMER_LEDGER_PHONE_CONTEXT_RE.search(text))
 
 
+_ORDER_REFERENCE_NUMBER_CONTEXT_RE = re.compile(
+    r"(?:"
+    r"بهذا\s+الرقم"
+    r"|برقم\s+الطلب"
+    r"|رقم\s+الطلب"
+    r"|لم\s+أجد\s+طلب"
+    r"|ما\s+قدرت\s+ألقى\s+طلب"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_order_reference_phone_context(text: str) -> bool:
+    """True when «رقم» refers to an order reference, not a staff-contact promise."""
+    if not text:
+        return False
+    return bool(_ORDER_REFERENCE_NUMBER_CONTEXT_RE.search(text))
+
+
 # Phone shape — Saudi mobile (05XXXXXXXX / +9665XXXXXXXX / 9665XXXXXXXX),
 # plus generic international (+\d{7,15}) as a permissive fallback.
 _PHONE_DIGITS_RE = re.compile(
@@ -798,6 +817,7 @@ def contains_promised_asset(text: str) -> Optional[str]:
     skip_phone = (
         _is_product_option_number_context(text)
         or _is_customer_ledger_phone_context(text)
+        or _is_order_reference_phone_context(text)
     )
     for asset_class, patterns in _PROMISE_PATTERNS.items():
         if skip_phone and asset_class == ASSET_PHONE:

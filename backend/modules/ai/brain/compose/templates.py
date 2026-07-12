@@ -601,9 +601,8 @@ def track_order_need_identifiers(**_: Any) -> str:
 
 
 def order_status_not_found(**_: Any) -> str:
-    return (
-        "ما قدرت ألقى طلب بهذا الرقم. تأكد من رقم الطلب وأرسله لي مرة ثانية."
-    )
+    # Emergency fallback only — short, factual, no typo-prone «بهذا الرقم» shape.
+    return "لم أجد طلباً مطابقاً. أرسل رقم الطلب مرة أخرى للتحقق."
 
 
 def order_creation_in_progress(
