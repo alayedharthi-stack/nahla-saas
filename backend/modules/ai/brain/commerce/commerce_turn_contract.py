@@ -177,6 +177,28 @@ def _has_existing_order_support_context(ctx: BrainContext) -> bool:
     return bool(_recent_customer_order_reference(getattr(ctx, "history", None)))
 
 
+def _decision_owned_by_existing_order_support(decision: Decision) -> bool:
+    if str(getattr(decision, "action", "") or "") != ACTION_LLM_REPLY:
+        return False
+    args = getattr(decision, "args", None) or {}
+    return str(args.get("topic") or "").strip() == "existing_order_support"
+
+
+def _annotate_contract_ownership_preserved(decision: Decision) -> Decision:
+    args = dict(getattr(decision, "args", None) or {})
+    action = str(getattr(decision, "action", "") or "")
+    args["pre_contract_action"] = action
+    args["post_contract_action"] = action
+    args["contract_override_applied"] = False
+    args["override_skipped_reason"] = "existing_order_support_owned"
+    return Decision(
+        action=decision.action,
+        args=args,
+        reason=decision.reason,
+        confidence=getattr(decision, "confidence", 1.0),
+    )
+
+
 def _build_existing_order_support_decision(
     ctx: BrainContext,
     *,
@@ -786,6 +808,19 @@ def maybe_enforce_commerce_turn_contract_decision(
                 enforced.action,
             )
             return enforced
+
+    if _decision_owned_by_existing_order_support(decision):
+        preserved = _annotate_contract_ownership_preserved(decision)
+        logger.info(
+            "[COMMERCE_TURN_CONTRACT/enforce] "
+            "event=contract_preserve_existing_order_support "
+            "tenant=%s pre_contract_action=%s post_contract_action=%s "
+            "override_skipped_reason=existing_order_support_owned",
+            getattr(ctx, "tenant_id", None),
+            preserved.args.get("pre_contract_action"),
+            preserved.args.get("post_contract_action"),
+        )
+        return preserved
 
     if not _contract_checkout_enforced(contract):
         return decision
