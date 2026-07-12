@@ -913,6 +913,8 @@ function MetaSyncStatusPanel(props: {
   const pub = props.publication
   let label = props.dr.metaSyncPending
   let tone = 'text-slate-700 bg-slate-50 border-slate-200'
+  const syncedBadges: { label: string; tone: string }[] = []
+
   if (status === 'syncing') {
     label = props.dr.metaSyncSyncing
     tone = 'text-sky-700 bg-sky-50 border-sky-200'
@@ -923,14 +925,34 @@ function MetaSyncStatusPanel(props: {
     label = props.dr.metaSyncStateFailed
     tone = 'text-rose-700 bg-rose-50 border-rose-200'
   } else if (status === 'synced') {
-    if (pub.visible_in_whatsapp) {
-      label = props.dr.metaSyncVisibleWhatsapp
-    } else if (pub.meta_catalog_synced && pub.waba_catalog_linked !== true) {
-      label = props.dr.metaSyncWabaUncertain
-    } else {
-      label = props.dr.metaSyncSynced
+    if (pub.meta_catalog_synced) {
+      syncedBadges.push({
+        label: props.dr.metaSyncSynced,
+        tone: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+      })
     }
-    tone = 'text-emerald-700 bg-emerald-50 border-emerald-200'
+    if (pub.waba_catalog_linked === true) {
+      syncedBadges.push({
+        label: props.dr.metaSyncWabaLinked,
+        tone: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+      })
+    } else if (pub.waba_catalog_linked === false || pub.waba_catalog_linked === null) {
+      syncedBadges.push({
+        label: props.dr.metaSyncWabaUncertain,
+        tone: 'text-amber-800 bg-amber-50 border-amber-200',
+      })
+    }
+    if (pub.visible_in_whatsapp) {
+      syncedBadges.push({
+        label: props.dr.metaSyncVisibleWhatsapp,
+        tone: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+      })
+    } else {
+      syncedBadges.push({
+        label: props.dr.metaSyncWhatsappNotVerified,
+        tone: 'text-amber-800 bg-amber-50 border-amber-200',
+      })
+    }
   }
 
   const showRetry = Boolean(props.product.retry_allowed) && status !== 'syncing'
@@ -940,9 +962,22 @@ function MetaSyncStatusPanel(props: {
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-bold text-slate-800">{props.dr.metaSyncStatusTitle}</h3>
-          <span className={`inline-flex mt-2 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${tone}`}>
-            {label}
-          </span>
+          {syncedBadges.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {syncedBadges.map((badge) => (
+                <span
+                  key={badge.label}
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${badge.tone}`}
+                >
+                  {badge.label}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className={`inline-flex mt-2 items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold ${tone}`}>
+              {label}
+            </span>
+          )}
           {props.product.sync_error_summary && (
             <p className="text-[11px] text-rose-700 mt-2">{props.product.sync_error_summary}</p>
           )}

@@ -2187,7 +2187,9 @@ export interface Translations {
         metaSyncBlocked:          string
         metaSyncStateFailed:      string
         metaSyncSynced:           string
+        metaSyncWabaLinked:       string
         metaSyncWabaUncertain:    string
+        metaSyncWhatsappNotVerified: string
         metaSyncVisibleWhatsapp:  string
         metaSyncRetryBtn:         string
         metaSyncRetryRunning:     string

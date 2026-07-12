@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from core.catalog import CATALOG_STATUS_ACTIVE, catalog_status_of
 from services.channel_specs import CHANNEL_WHATSAPP
 from services.product_readiness import compute_for_channel
 
@@ -43,16 +42,9 @@ def build_product_publication_status(
             cached = sync_meta.get("waba_catalog_linked")
             waba_linked = bool(cached) if cached is not None else None
 
-    active = catalog_status_of(product) == CATALOG_STATUS_ACTIVE
-    in_stock = bool(getattr(product, "in_stock", True))
-
-    visible = bool(
-        data_ready
-        and meta_synced
-        and waba_linked is True
-        and active
-        and in_stock
-    )
+    # WhatsApp per-item visibility is not verified in this PR.
+    # Meta sync + WABA catalog link do not prove the product appears in WA.
+    visible = False
 
     return {
         "data_ready_for_whatsapp": data_ready,

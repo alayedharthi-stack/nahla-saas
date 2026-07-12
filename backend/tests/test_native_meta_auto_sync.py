@@ -205,13 +205,23 @@ def test_waba_unlinked_does_not_fail_meta_sync_status():
     assert pub["visible_in_whatsapp"] is False
 
 
-def test_visible_requires_all_prerequisites():
-    parent = _generic_native_parent(sync_status="synced")
+def test_synced_and_linked_still_not_visible_without_trusted_signal():
+    parent = _generic_native_parent(
+        sync_status="synced",
+        extra_metadata={
+            "currency": "SAR",
+            "image_url": "https://cdn.example/item.webp",
+            "product_url": "https://api.example.com/public/items/nahla_p_501",
+            "sync_meta": {"waba_catalog_linked": True},
+        },
+    )
     pub = build_product_publication_status(
         parent,
         waba_link_status={"ok": True, "expected_catalog_linked": True},
     )
-    assert pub["visible_in_whatsapp"] is True
+    assert pub["meta_catalog_synced"] is True
+    assert pub["waba_catalog_linked"] is True
+    assert pub["visible_in_whatsapp"] is False
 
 
 def test_stale_syncing_is_reclaimable():
