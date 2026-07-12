@@ -327,6 +327,42 @@ def try_handle_order_flow_v2(
             inbound_metadata=meta,
         )
 
+    recent_history: List[Any] = []
+    try:
+        from core.conversation_engine import StateManager  # noqa: PLC0415
+
+        recent_history = StateManager.load_history(
+            db,
+            phone=customer_phone,
+            tenant_id=tenant_id,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — history load must not block checkout owner
+        recent_history = []
+
+    from .explicit_intent_checkout_suppression import (  # noqa: PLC0415
+        log_checkout_suppressed_by_explicit_intent,
+        should_yield_to_existing_order_support,
+    )
+
+    ownership = should_yield_to_existing_order_support(
+        text,
+        inbound_metadata=meta,
+        brain_state=bs,
+        history=recent_history,
+    )
+    if ownership.should_yield:
+        log_checkout_suppressed_by_explicit_intent(
+            tenant_id=int(tenant_id),
+            conversation_id=getattr(conversation, "id", None),
+            detected_intent=ownership.detected_intent,
+            checkout_ref=draft_display_reference(draft_ev),
+            reason=ownership.reason,
+        )
+        return OrderFlowV2Result(
+            handled=False,
+            reason=f"explicit_intent_suppressed:{ownership.detected_intent}",
+        )
+
     _stale_checkout_context = (
         _checkout_active() or (draft_ev is not None and draft_ev.active)
     ) and (
@@ -336,20 +372,7 @@ def try_handle_order_flow_v2(
     if _stale_checkout_context:
         from .explicit_intent_checkout_suppression import (  # noqa: PLC0415
             evaluate_stale_checkout_suppression,
-            log_checkout_suppressed_by_explicit_intent,
         )
-
-        recent_history: List[Any] = []
-        try:
-            from core.conversation_engine import StateManager  # noqa: PLC0415
-
-            recent_history = StateManager.load_history(
-                db,
-                phone=customer_phone,
-                tenant_id=tenant_id,
-            )
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — history load must not block checkout owner
-            recent_history = []
 
         suppression = evaluate_stale_checkout_suppression(
             message=text,

@@ -244,6 +244,130 @@ def extract_order_reference_from_history(
     return ""
 
 
+ORDER_REF_CONTINUITY_WINDOW = 8
+
+
+def _brain_state_field(state: Any, name: str, default: Any = None) -> Any:
+    """Read brain/conversation state fields from dict or object uniformly."""
+    if state is None:
+        return default
+    if isinstance(state, dict):
+        return state.get(name, default)
+    return getattr(state, name, default)
+
+
+def _order_prep_field(state: Any, name: str, default: Any = None) -> Any:
+    """Read order_prep fields from dict-wrapped or object-wrapped state."""
+    op = _brain_state_field(state, "order_prep")
+    if op is None:
+        return default
+    if isinstance(op, dict):
+        return op.get(name, default)
+    return getattr(op, name, default)
+
+
+def _inbound_customer_turns(history: Optional[List[Any]]) -> List[Any]:
+    """Inbound customer turns with non-empty semantic body."""
+    turns: List[Any] = []
+    for turn in history or []:
+        direction = str((turn or {}).get("direction") or "").lower()
+        if direction not in ("in", "inbound", ""):
+            continue
+        body = str((turn or {}).get("body") or "").strip()
+        if not body:
+            continue
+        turns.append(turn)
+    return turns
+
+
+def is_order_reference_continuity_active(
+    history: Optional[List[Any]],
+    *,
+    window: int = ORDER_REF_CONTINUITY_WINDOW,
+) -> bool:
+    """True when the latest customer-supplied ref is in the last N inbound turns."""
+    ref = extract_order_reference_from_history(history)
+    if not ref:
+        return False
+    tail = _inbound_customer_turns(history)[-window:]
+    for turn in tail:
+        body = str((turn or {}).get("body") or "").strip()
+        labeled = _LABELED_ORDER_REF_RE.search(body)
+        if labeled and labeled.group(1) == ref:
+            return True
+        if extract_bare_order_reference(body) == ref:
+            return True
+    return False
+
+
+def has_order_reference_support_context(
+    *,
+    state: Any = None,
+    history: Optional[List[Any]] = None,
+    commerce_bundle: Optional[dict] = None,
+) -> bool:
+    """History ref or structured verified order — not stale draft alone."""
+    if extract_order_reference_from_history(history):
+        return True
+    bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
+    ctx_obj = bundle.get("active_order_context") or {}
+    if isinstance(ctx_obj, dict):
+        order_id = str(ctx_obj.get("order_id") or ctx_obj.get("reference") or "").strip()
+        status = str(ctx_obj.get("order_status") or ctx_obj.get("status") or "").strip().lower()
+        if order_id and status and status not in {"pending_customer_info", "draft"}:
+            return True
+    return False
+
+
+def is_order_support_topic_reset(message: str) -> bool:
+    """Explicit new-order or commerce-topic switch blocks support ownership."""
+    semantic = str(message or "").strip()
+    if not semantic:
+        return False
+    if _EXPLICIT_NEW_SHOP_RE.search(_norm_ar(semantic)):
+        return True
+    try:
+        from modules.ai.order_context_gate import has_explicit_commerce_topic_change  # noqa: PLC0415
+
+        return has_explicit_commerce_topic_change(semantic)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — topic-reset probe must not block routing
+        return False
+
+
+def is_order_support_continuity_allowed(
+    message: str,
+    history: Optional[List[Any]],
+    *,
+    inbound_metadata: Optional[dict] = None,
+) -> bool:
+    """Bounded continuity gate shared by ownership and continuity decision paths."""
+    semantic = str(message or "").strip()
+    if extract_bare_order_reference(semantic):
+        return True
+    if not extract_order_reference_from_history(history):
+        return False
+    try:
+        from modules.ai.media.routing_guard import (  # noqa: PLC0415
+            is_audio_without_trusted_transcript,
+        )
+
+        meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+        if not semantic and is_audio_without_trusted_transcript(
+            meta,
+            semantic_message=semantic,
+            inbound_normalized_type=str(
+                meta.get("inbound_normalized_type")
+                or meta.get("type")
+                or (meta.get("normalized_inbound") or {}).get("source_type")
+                or ""
+            ),
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unclear-audio probe must not block continuity
+        pass
+    return is_order_reference_continuity_active(history)
+
+
 def has_pending_order_reference_evidence(
     *,
     state: Any = None,
@@ -267,18 +391,18 @@ def _is_stale_unverified_draft_evidence(
 ) -> bool:
     """True when persisted evidence is an active draft/checkout, not a verified placed order."""
     if state is not None:
-        op = getattr(state, "order_prep", None)
+        op = _brain_state_field(state, "order_prep")
         if op is not None:
-            if bool(getattr(op, "payment_receipt_received", False)):
+            if bool(_order_prep_field(state, "payment_receipt_received", False)):
                 return False
-            if str(getattr(op, "order_creation_status", "") or "").strip().lower() == "created":
+            if str(_order_prep_field(state, "order_creation_status", "") or "").strip().lower() == "created":
                 return True
-            if str(getattr(op, "order_status", "") or "").strip().lower() in {
+            if str(_order_prep_field(state, "order_status", "") or "").strip().lower() in {
                 "pending_customer_info",
                 "draft",
             }:
                 return True
-        if str(getattr(state, "draft_order_id", "") or "").strip():
+        if str(_brain_state_field(state, "draft_order_id", "") or "").strip():
             return True
 
     bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
@@ -338,32 +462,48 @@ def build_order_support_follow_up_args(
     """LLM args for existing-order support when lookup may still be unresolved."""
     bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
     order_ref = extract_order_reference_from_history(history) or extract_bare_order_reference(message)
-    if not order_ref:
+    status = ""
+
+    ctx_obj = bundle.get("active_order_context") or {}
+    if isinstance(ctx_obj, dict):
+        struct_ref = str(ctx_obj.get("order_id") or ctx_obj.get("reference") or "").strip()
+        struct_status = str(ctx_obj.get("order_status") or ctx_obj.get("status") or "").strip()
+        if struct_ref:
+            order_verified = True
+            order_ref = order_ref or struct_ref
+            status = struct_status
+
+    if not order_verified and not order_ref:
         try:
             from core.active_order_context import resolve_order_reference  # noqa: PLC0415
 
-            order_ref, _mode = resolve_order_reference(
+            resolved_ref, mode = resolve_order_reference(
                 commerce_bundle=bundle,
                 state=state,
                 history=history,
             )
-            if order_ref and _mode == "structured":
+            if resolved_ref and mode == "structured":
                 order_verified = True
+                order_ref = resolved_ref
         except Exception:  # noqa: BLE001  # noqa: silent-ok — order ref resolve is best-effort
             pass
-    status = ""
-    try:
-        from core.active_order_context import resolve_order_status  # noqa: PLC0415
 
-        status, _mode = resolve_order_status(
-            commerce_bundle=bundle,
-            state=state,
-            history=history,
-        )
-        if status and _mode == "structured":
-            order_verified = True
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — order status resolve is best-effort
-        pass
+    if order_verified and not status:
+        try:
+            from core.active_order_context import resolve_order_status  # noqa: PLC0415
+
+            resolved_status, mode = resolve_order_status(
+                commerce_bundle=bundle,
+                state=state,
+                history=history,
+            )
+            if resolved_status and mode == "structured":
+                status = resolved_status
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order status resolve is best-effort
+            pass
+
+    if not order_verified:
+        status = ""
     response_goal = (
         "existing_order_support — reply in natural Saudi Arabic about the "
         "customer's existing order using only known facts. If order_verified "
@@ -411,12 +551,21 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
         )
 
     pending_ref = extract_order_reference_from_history(history)
-    has_pending = has_pending_order_reference_evidence(
+    if not has_order_reference_support_context(
         state=state,
         history=history,
         commerce_bundle=commerce_bundle,
-    )
-    if not has_pending:
+    ):
+        return None
+
+    if is_order_support_topic_reset(message):
+        return None
+
+    if not is_order_support_continuity_allowed(
+        message,
+        history,
+        inbound_metadata=inbound_metadata,
+    ):
         return None
 
     try:
@@ -524,17 +673,22 @@ def try_order_reference_continuity_decision(ctx: Any) -> Optional[Decision]:
     if pending_ref and not _EXPLICIT_NEW_SHOP_RE.search(_norm_ar(message)):
         norm = _norm_ar(message)
         if _EXISTING_ORDER_MESSAGE_RE.search(norm) or _ORDER_SUPPORT_TOPIC_RE.search(norm):
-            return Decision(
-                action=ACTION_LLM_REPLY,
-                args=build_order_support_follow_up_args(
-                    message=message,
-                    state=state,
-                    history=history,
-                    commerce_bundle=commerce_bundle,
-                ),
-                reason="pending order reference — order clarification",
-                confidence=0.9,
-            )
+            if is_order_support_continuity_allowed(
+                message,
+                history,
+                inbound_metadata=inbound_metadata,
+            ):
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args=build_order_support_follow_up_args(
+                        message=message,
+                        state=state,
+                        history=history,
+                        commerce_bundle=commerce_bundle,
+                    ),
+                    reason="pending order reference — order clarification",
+                    confidence=0.9,
+                )
     return None
 
 
@@ -592,16 +746,14 @@ def has_existing_order_evidence(
         pass
 
     if state is not None:
-        if str(getattr(state, "draft_order_id", "") or "").strip():
+        if str(_brain_state_field(state, "draft_order_id", "") or "").strip():
             return True
-        op = getattr(state, "order_prep", None)
-        if op is not None:
-            if str(getattr(op, "salla_order_id", "") or "").strip():
-                return True
-            if str(getattr(op, "order_status", "") or "").strip():
-                return True
-            if getattr(op, "payment_receipt_received", False):
-                return True
+        if str(_order_prep_field(state, "salla_order_id", "") or "").strip():
+            return True
+        if str(_order_prep_field(state, "order_status", "") or "").strip():
+            return True
+        if _order_prep_field(state, "payment_receipt_received", False):
+            return True
 
     bundle = commerce_bundle if isinstance(commerce_bundle, dict) else {}
     ctx_obj = bundle.get("active_order_context") or {}
@@ -816,7 +968,11 @@ __all__ = [
     "extract_bare_order_reference",
     "extract_order_reference_from_history",
     "has_existing_order_evidence",
+    "has_order_reference_support_context",
     "has_pending_order_reference_evidence",
+    "is_order_reference_continuity_active",
+    "is_order_support_continuity_allowed",
+    "is_order_support_topic_reset",
     "is_explicit_order_tracking_request",
     "is_general_shipping_duration_inquiry",
     "is_order_support_operational_follow_up",

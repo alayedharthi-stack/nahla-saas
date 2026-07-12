@@ -113,6 +113,46 @@ def _is_commerce_blocked(ctx: BrainContext) -> bool:
     return False
 
 
+def _try_existing_order_support_ownership_decision(
+    ctx: BrainContext,
+) -> Optional[Decision]:
+    """Secondary belt — block draft/checkout when support owns the turn."""
+    try:
+        from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: PLC0415
+            should_yield_to_existing_order_support,
+        )
+
+        state = getattr(ctx, "state", None)
+        profile = getattr(ctx, "profile", None) or {}
+        inbound_metadata = (
+            profile.get("inbound_metadata")
+            if isinstance(profile, dict)
+            else {}
+        )
+        ownership = should_yield_to_existing_order_support(
+            ctx.message or "",
+            inbound_metadata=inbound_metadata,
+            brain_state=state,
+            history=getattr(ctx, "history", None),
+            commerce_bundle=getattr(ctx, "commerce_bundle", None) or {},
+        )
+        if not ownership.should_yield:
+            return None
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args=dict(ownership.follow_up_args or {}),
+            reason=f"existing_order_support_ownership:{ownership.reason}",
+            confidence=0.93,
+        )
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — ownership belt must not block decide
+        logger.debug(
+            "[EXISTING_ORDER_SUPPORT_OWNERSHIP] skipped tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            exc,
+        )
+        return None
+
+
 def _current_turn_social_noncommerce(ctx: BrainContext) -> Any:
     """Return current-turn social/non-commerce ownership verdict."""
     try:
@@ -1772,6 +1812,9 @@ class DefaultDecisionEngine:
             and not _checkout_topic_blocks()
             and not getattr(_current_social_nc, "matched", False)
         ):
+            _eos_dec = _try_existing_order_support_ownership_decision(ctx)
+            if _eos_dec is not None:
+                return _eos_dec
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
                 "[ORDER FLOW] FORCED action=propose_draft_order "
@@ -3707,6 +3750,9 @@ class DefaultDecisionEngine:
                 and not _checkout_topic_blocks()
                 and not getattr(_current_social_nc, "matched", False)
             ):
+                _eos_dec = _try_existing_order_support_ownership_decision(ctx)
+                if _eos_dec is not None:
+                    return _eos_dec
                 logger.info(
                     "[ORDER FLOW] FORCED action=propose_draft_order "
                     "reason=ordering_stage_safety_net | tenant=%s product=%r intent=%s "
