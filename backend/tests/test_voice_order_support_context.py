@@ -362,7 +362,160 @@ class TestBrainAndDraftGuards:
         assert dec.args.get("topic") == "existing_order_support"
 
 
+def _merchant_handler_db() -> MagicMock:
+    db = MagicMock()
+    db.commit = MagicMock()
+    db.rollback = MagicMock()
+    db.add = MagicMock()
+    db.flush = MagicMock()
+    return db
+
+
+def _merchant_handler_convo() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=42,
+        tenant_id=1,
+        customer_id=7,
+        ai_paused=False,
+        ai_paused_reason=None,
+        is_human_handoff=False,
+        needs_human=False,
+        handoff_active=False,
+        paused_by_human=False,
+        taken_over_at=None,
+        taken_over_by=None,
+        status="active",
+        extra_metadata={},
+    )
+
+
 class TestMerchantWebhookUnclearAudioRoute:
+    def test_merchant_handler_non_empty_text_reaches_save_message(self) -> None:
+        from routers.whatsapp_webhook import _handle_merchant_message
+
+        convo = _merchant_handler_convo()
+        db = _merchant_handler_db()
+        save_mock = MagicMock()
+
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "routers.conversations._get_or_create_conversation",
+            return_value=convo,
+        ), patch(
+            "routers.whatsapp_webhook.StateManager.save_message",
+            save_mock,
+        ), patch(
+            "routers.whatsapp_webhook.StateManager.load_history",
+            return_value=[],
+        ), patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(allowed=True, used_total=0, limit=1000, reason=""),
+        ), patch(
+            "modules.ai.brain.pipeline.get_brain",
+        ) as mock_brain, patch(
+            "modules.ai.routing.conversation_mode.resolve_conversation_mode",
+        ), patch(
+            "modules.ai.routing.conversation_mode.save_lease",
+        ), patch(
+            "core.ownership_state.resolve_ownership_state",
+            return_value=SimpleNamespace(state="ai_active", takeover_class=""),
+        ), patch(
+            "core.ownership_state.attempt_implicit_takeover_recovery",
+            return_value=SimpleNamespace(released=False, reason=""),
+        ), patch(
+            "core.ai_pause_guard.should_skip_ai",
+            return_value=(False, None),
+        ), patch(
+            "modules.ai.order_flow_v2.owner.try_handle_order_flow_v2",
+            return_value=SimpleNamespace(handled=False, reason="not_handled"),
+        ):
+            mock_brain.return_value.process = AsyncMock(
+                return_value={
+                    "reply": "",
+                    "buttons": [],
+                    "decision": SimpleNamespace(action=ACTION_LLM_REPLY, args={}),
+                },
+            )
+            _run(_handle_merchant_message(
+                phone_id="PH1",
+                to="966500000099",
+                text=GENERIC_ORDER_REF,
+                tenant_id=1,
+                db=db,
+            ))
+
+        save_mock.assert_called()
+        first_call = save_mock.call_args_list[0][0]
+        assert first_call[2] == GENERIC_ORDER_REF
+        assert first_call[3] == "inbound"
+
+    def test_merchant_handler_bare_order_ref_reaches_checkout_suppression(self) -> None:
+        from routers.whatsapp_webhook import _handle_merchant_message
+
+        convo = _merchant_handler_convo()
+        db = _merchant_handler_db()
+        ofv2_mock = MagicMock(
+            return_value=SimpleNamespace(
+                handled=False,
+                reason="explicit_intent_suppressed:existing_order_support",
+            ),
+        )
+
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "routers.conversations._get_or_create_conversation",
+            return_value=convo,
+        ), patch(
+            "routers.whatsapp_webhook.StateManager.save_message",
+        ), patch(
+            "routers.whatsapp_webhook.StateManager.load_history",
+            return_value=_pending_history(),
+        ), patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(allowed=True, used_total=0, limit=1000, reason=""),
+        ), patch(
+            "modules.ai.brain.pipeline.get_brain",
+        ) as mock_brain, patch(
+            "modules.ai.routing.conversation_mode.resolve_conversation_mode",
+        ), patch(
+            "modules.ai.routing.conversation_mode.save_lease",
+        ), patch(
+            "core.ownership_state.resolve_ownership_state",
+            return_value=SimpleNamespace(state="ai_active", takeover_class=""),
+        ), patch(
+            "core.ownership_state.attempt_implicit_takeover_recovery",
+            return_value=SimpleNamespace(released=False, reason=""),
+        ), patch(
+            "core.ai_pause_guard.should_skip_ai",
+            return_value=(False, None),
+        ), patch(
+            "modules.ai.order_flow_v2.owner.try_handle_order_flow_v2",
+            ofv2_mock,
+        ):
+            mock_brain.return_value.process = AsyncMock(
+                return_value={
+                    "reply": "",
+                    "buttons": [],
+                    "decision": SimpleNamespace(
+                        action=ACTION_LLM_REPLY,
+                        args={"topic": "existing_order_support"},
+                    ),
+                },
+            )
+            _run(_handle_merchant_message(
+                phone_id="PH1",
+                to="966500000099",
+                text=GENERIC_ORDER_REF,
+                tenant_id=1,
+                db=db,
+            ))
+
+        ofv2_mock.assert_called_once()
+
     def test_merchant_handler_allows_empty_text_for_order_support(self) -> None:
         from routers.whatsapp_webhook import _handle_merchant_message
 
@@ -379,6 +532,7 @@ class TestMerchantWebhookUnclearAudioRoute:
             taken_over_at=None,
             taken_over_by=None,
             status="active",
+            extra_metadata={},
         )
         db = MagicMock()
         db.commit = MagicMock()

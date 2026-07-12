@@ -5653,7 +5653,6 @@ async def _handle_merchant_message(
     if not (text or "").strip():
         _unclear_audio_order_support = False
         try:
-            from core.conversation_engine import StateManager  # noqa: PLC0415
             from modules.ai.media.routing_guard import (  # noqa: PLC0415
                 should_route_unclear_audio_to_existing_order_support,
             )
