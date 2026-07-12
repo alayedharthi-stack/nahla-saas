@@ -204,6 +204,37 @@ class TestTrackOrderNotFoundCompose:
         assert changed is False
         assert scrubbed == llm_reply
 
+    def test_sanitizer_still_scrubs_staff_phone_promise_without_digits(self) -> None:
+        llm_reply = "ما لقيت طلبك، تفضل رقم أبو هشام للتواصل."
+        scrubbed, changed, asset = maybe_scrub_unkept_asset_promise(
+            llm_reply,
+            has_url=False,
+            has_media=False,
+            has_phone=False,
+        )
+        assert changed is True
+        assert asset == "phone"
+        assert "تفضل رقم أبو هشام" not in scrubbed
+        assert "بحالياً" not in scrubbed
+
+    def test_sanitizer_scrubs_phone_promise_but_preserves_order_reference_clause(
+        self,
+    ) -> None:
+        llm_reply = (
+            "ما لقيت طلب بهذا الرقم، تفضل رقم أبو هشام للتواصل."
+        )
+        scrubbed, changed, asset = maybe_scrub_unkept_asset_promise(
+            llm_reply,
+            has_url=False,
+            has_media=False,
+            has_phone=False,
+        )
+        assert changed is True
+        assert asset == "phone"
+        assert "بهذا الرقم" in scrubbed
+        assert "تفضل رقم أبو هشام" not in scrubbed
+        assert "بحالياً" not in scrubbed
+
     def test_order_verified_false_facts_do_not_invent_operational_claims(self) -> None:
         grounded = "ما لقيت طلب بهذا الرقم. أرسل رقم الطلب مرة ثانية للتحقق."
         assert not claims_invented_order_facts(grounded)
