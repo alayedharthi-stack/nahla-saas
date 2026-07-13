@@ -6930,6 +6930,7 @@ async def _handle_merchant_message(
             )
             from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
                 current_trusted_context,
+                pop_shadow_build_error_class,
                 run_trusted_context_shadow,
                 safe_shadow_trace_metadata,
             )
@@ -6950,18 +6951,22 @@ async def _handle_merchant_message(
                 if _tc_snapshot is not None:
                     _trace.extra.update(safe_shadow_trace_metadata(_tc_snapshot))
                 else:
-                    _trace.extra["trusted_context_shadow_status"] = "error"
-                    _trace.extra["error_class"] = "ShadowBuildFailed"
-                    _trace.extra["stage"] = "build"
+                    _build_err = pop_shadow_build_error_class()
+                    if _build_err:
+                        _trace.extra["trusted_context_shadow_status"] = "build_error"
+                        _trace.extra["trusted_context_shadow_error_class"] = _build_err
+                        _trace.extra["trusted_context_shadow_stage"] = "build"
         except Exception as _tc_wire_exc:  # noqa: BLE001
             logger.warning(
                 "[TRUSTED_CONTEXT_SHADOW] wire_failed tenant=%s stage=wireup error_class=%s",
                 tenant_id,
                 _tc_wire_exc.__class__.__name__,
             )
-            _trace.extra["trusted_context_shadow_status"] = "error"
-            _trace.extra["error_class"] = _tc_wire_exc.__class__.__name__
-            _trace.extra["stage"] = "wireup"
+            _trace.extra["trusted_context_shadow_status"] = "wireup_error"
+            _trace.extra["trusted_context_shadow_error_class"] = (
+                _tc_wire_exc.__class__.__name__
+            )
+            _trace.extra["trusted_context_shadow_stage"] = "wireup"
 
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}

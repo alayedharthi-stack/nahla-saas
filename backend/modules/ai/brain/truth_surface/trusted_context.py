@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .contract import TrustedContextSnapshot, TrustedDomain, TrustedFact, TruthSource
 from .flags import is_trusted_context_shadow_enabled
@@ -20,6 +20,14 @@ logger = logging.getLogger("nahla.brain.trusted_context")
 
 _current: ContextVar[Optional[TrustedContextSnapshot]] = ContextVar(
     "trusted_context_snapshot",
+    default=None,
+)
+_turn_scope: ContextVar[Optional[Tuple[int, str, Optional[int]]]] = ContextVar(
+    "trusted_context_turn_scope",
+    default=None,
+)
+_last_build_error_class: ContextVar[Optional[str]] = ContextVar(
+    "trusted_context_last_build_error_class",
     default=None,
 )
 
@@ -579,6 +587,23 @@ def current_trusted_context() -> Optional[TrustedContextSnapshot]:
 
 def clear_trusted_context() -> None:
     _current.set(None)
+    _turn_scope.set(None)
+    _last_build_error_class.set(None)
+
+
+def _turn_scope_key(
+    tenant_id: int,
+    customer_phone: str,
+    conversation_id: Optional[int],
+) -> Tuple[int, str, Optional[int]]:
+    return (int(tenant_id), str(customer_phone or "").strip(), conversation_id)
+
+
+def pop_shadow_build_error_class() -> Optional[str]:
+    """Return and clear the last shadow build error class, if any."""
+    err = _last_build_error_class.get()
+    _last_build_error_class.set(None)
+    return err
 
 
 def safe_shadow_trace_metadata(
@@ -620,9 +645,16 @@ def run_trusted_context_shadow(
     if not is_trusted_context_shadow_enabled():
         return None
 
+    scope = _turn_scope_key(
+        tenant_id,
+        customer_phone,
+        conversation_id or getattr(conversation, "id", None),
+    )
     existing = _current.get()
     if existing is not None:
-        return existing
+        if _turn_scope.get() == scope:
+            return existing
+        clear_trusted_context()
 
     try:
         snapshot = build_trusted_context_snapshot(
@@ -636,6 +668,7 @@ def run_trusted_context_shadow(
             inbound_metadata=inbound_metadata,
         )
     except Exception as exc:  # noqa: BLE001
+        _last_build_error_class.set(exc.__class__.__name__)
         logger.warning(
             "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s stage=build error_class=%s",
             tenant_id,
@@ -644,6 +677,7 @@ def run_trusted_context_shadow(
         return None
 
     set_current_trusted_context(snapshot)
+    _turn_scope.set(scope)
 
     try:
         from core.turn_provenance import current_turn_provenance  # noqa: PLC0415
@@ -683,6 +717,7 @@ __all__ = [
     "build_trusted_context_snapshot",
     "clear_trusted_context",
     "current_trusted_context",
+    "pop_shadow_build_error_class",
     "run_trusted_context_shadow",
     "safe_shadow_trace_metadata",
     "set_current_trusted_context",
