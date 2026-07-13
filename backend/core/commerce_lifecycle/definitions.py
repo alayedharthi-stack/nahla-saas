@@ -4,6 +4,7 @@ Immutable BusinessIntentDefinition records and the initial conservative registry
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Dict, FrozenSet, Mapping, Tuple
 
 from core.commerce_lifecycle.intents import BusinessIntent
@@ -61,6 +62,7 @@ class BusinessIntentDefinition:
     required_evidence: Tuple[str, ...] = ()
     optional_evidence: Tuple[str, ...] = ()
     required_evidence_groups: Tuple[Tuple[str, ...], ...] = ()
+    required_template_evidence: Tuple[str, ...] = ()
     required_capabilities: Tuple[str, ...] = ()
     forbidden_capabilities: Tuple[str, ...] = ()
     open_window_strategy: OpenWindowStrategy = OpenWindowStrategy.SESSION_HANDOFF
@@ -80,13 +82,26 @@ class BusinessIntentDefinition:
         self._validate_template_policy()
         self._validate_idempotency()
         if self.template_variable_map:
-            object.__setattr__(self, "template_variable_map", dict(self.template_variable_map))
+            object.__setattr__(
+                self,
+                "template_variable_map",
+                MappingProxyType(dict(self.template_variable_map)),
+            )
 
     def _validate_evidence_fields(self) -> None:
         seen = set(self.required_evidence)
         if len(seen) != len(self.required_evidence):
             raise ValueError(f"duplicate required_evidence for {self.intent.value}")
-        for name in seen | frozenset(self.optional_evidence):
+        template_seen = set(self.required_template_evidence)
+        if len(template_seen) != len(self.required_template_evidence):
+            raise ValueError(f"duplicate required_template_evidence for {self.intent.value}")
+        overlap = seen & frozenset(self.optional_evidence)
+        if overlap:
+            raise ValueError(
+                f"field appears in both required and optional evidence on {self.intent.value}: "
+                f"{sorted(overlap)}"
+            )
+        for name in seen | template_seen | frozenset(self.optional_evidence):
             if name not in KNOWN_EVIDENCE_FIELDS:
                 raise ValueError(f"unknown evidence field {name!r} on {self.intent.value}")
         for group in self.required_evidence_groups:
@@ -125,6 +140,22 @@ class BusinessIntentDefinition:
                 )
             if not str(slot).strip():
                 raise ValueError(f"empty template slot on {self.intent.value}")
+        if self.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE:
+            declared = (
+                frozenset(self.required_evidence)
+                | frozenset(self.required_template_evidence)
+                | frozenset(self.optional_evidence)
+            )
+            for evidence_field in self.template_variable_map.values():
+                if evidence_field not in declared:
+                    raise ValueError(
+                        f"template_variable_map field {evidence_field!r} must be declared in "
+                        f"required_evidence or required_template_evidence for {self.intent.value}"
+                    )
+        if self.required_template_evidence and self.closed_window_strategy != ClosedWindowStrategy.APPROVED_TEMPLATE:
+            raise ValueError(
+                f"required_template_evidence requires approved_template for {self.intent.value}"
+            )
 
     def _validate_idempotency(self) -> None:
         if not self.idempotency_key_fields:
@@ -165,7 +196,7 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
                 ("tracking_url",),
                 ("tracking_number",),
             ),
-            optional_evidence=("carrier",),
+            optional_evidence=("carrier", "customer_name", "order_number"),
             open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
             closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
             service_key="shipping_tracking",
@@ -174,6 +205,7 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
                 "order_number": "order_number",
                 "tracking_url": "tracking_url",
             },
+            required_template_evidence=("tracking_url",),
             retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(
@@ -181,12 +213,7 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             required_evidence=("delivered_at",),
             optional_evidence=("order_number",),
             open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
-            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
-            service_key="post_delivery",
-            template_variable_map={
-                "customer_name": "customer_name",
-                "order_number": "order_number",
-            },
+            closed_window_strategy=ClosedWindowStrategy.BLOCKED,
             retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(

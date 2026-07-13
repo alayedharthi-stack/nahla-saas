@@ -211,6 +211,30 @@ def validate_evidence(
     )
 
 
+def validate_template_evidence(
+    definition: BusinessIntentDefinition,
+    evidence: OrderLifecycleEvidence,
+) -> EvidenceValidationResult:
+    """Validate evidence required for closed-window approved-template delivery."""
+    missing: list[str] = []
+    invalid: list[str] = []
+
+    for name in definition.required_template_evidence:
+        value = _field_value(evidence, name)
+        if not _field_is_valid(name, value):
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(name)
+            else:
+                invalid.append(name)
+
+    return EvidenceValidationResult(
+        valid=not missing and not invalid,
+        missing_fields=tuple(missing),
+        invalid_fields=tuple(invalid),
+        present_fields=_present_field_names(evidence),
+    )
+
+
 def validate_capabilities(
     definition: BusinessIntentDefinition,
     merchant_capabilities: MerchantCapabilities,
@@ -247,4 +271,5 @@ __all__ = [
     "is_valid_https_evidence_url",
     "validate_capabilities",
     "validate_evidence",
+    "validate_template_evidence",
 ]

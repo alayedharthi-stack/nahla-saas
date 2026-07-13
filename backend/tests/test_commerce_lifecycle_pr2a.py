@@ -30,6 +30,7 @@ from core.commerce_lifecycle.evidence import (
     is_valid_https_evidence_url,
     validate_capabilities,
     validate_evidence,
+    validate_template_evidence,
 )
 from core.commerce_lifecycle.intents import BusinessIntent
 from core.commerce_lifecycle.registry import LifecycleIntentRegistry, get_default_registry
@@ -97,6 +98,14 @@ class TestBusinessIntentDefinition:
             BusinessIntentDefinition(
                 intent=BusinessIntent.ORDER_CANCELLED,
                 required_capabilities=("not_a_real_capability",),
+            )
+
+    def test_rejects_required_optional_overlap(self):
+        with pytest.raises(ValueError, match="required and optional"):
+            BusinessIntentDefinition(
+                intent=BusinessIntent.ORDER_CANCELLED,
+                required_evidence=("order_number",),
+                optional_evidence=("order_number",),
             )
 
     def test_rejects_empty_idempotency_fields(self):
@@ -217,6 +226,23 @@ class TestEvidenceValidation:
         )
         assert result.valid is True
 
+    def test_tracking_number_only_fails_template_evidence_for_shipment(self):
+        definition = get_default_registry().get(BusinessIntent.SHIPMENT_AVAILABLE)
+        evidence = OrderLifecycleEvidence(tracking_number="TRK-12345")
+        business = validate_evidence(definition, evidence)
+        template = validate_template_evidence(definition, evidence)
+        assert business.valid is True
+        assert template.valid is False
+        assert "tracking_url" in template.missing_fields
+
+    def test_tracking_url_satisfies_business_and_template_evidence(self):
+        definition = get_default_registry().get(BusinessIntent.SHIPMENT_AVAILABLE)
+        evidence = OrderLifecycleEvidence(
+            tracking_url="https://track.shipping-provider.io/packages/abc123",
+        )
+        assert validate_evidence(definition, evidence).valid is True
+        assert validate_template_evidence(definition, evidence).valid is True
+
     def test_customer_action_requires_missing_fields(self):
         definition = get_default_registry().get(BusinessIntent.CUSTOMER_ACTION_REQUIRED)
         result = validate_evidence(
@@ -269,6 +295,34 @@ class TestCapabilityValidation:
         evidence = validate_evidence(definition, OrderLifecycleEvidence())
         assert caps.valid is True
         assert evidence.valid is False
+
+
+class TestInitialDefinitionsPolicy:
+    """Service keys must match established Nahla template catalog semantics."""
+
+    _APPROVED_TEMPLATE_BINDINGS = {
+        BusinessIntent.ORDER_CONFIRMED: "order_confirmation",
+        BusinessIntent.SHIPMENT_AVAILABLE: "shipping_tracking",
+        BusinessIntent.REVIEW_REQUEST: "post_delivery",
+    }
+
+    def test_approved_template_service_keys_match_established_semantics(self):
+        registry = get_default_registry()
+        for intent, expected_service_key in self._APPROVED_TEMPLATE_BINDINGS.items():
+            definition = registry.get(intent)
+            assert definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE
+            assert definition.service_key == expected_service_key
+
+    def test_order_delivered_closed_window_blocked_without_ambiguous_service_key(self):
+        definition = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
+        assert definition.closed_window_strategy == ClosedWindowStrategy.BLOCKED
+        assert definition.service_key is None
+
+    def test_post_delivery_not_shared_by_order_delivered(self):
+        delivered = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
+        review = get_default_registry().get(BusinessIntent.REVIEW_REQUEST)
+        assert delivered.service_key is None
+        assert review.service_key == "post_delivery"
 
 
 class TestOutcomes:

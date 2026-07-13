@@ -34,6 +34,7 @@ from core.commerce_lifecycle.evidence import (
     OrderLifecycleEvidence,
     validate_capabilities,
     validate_evidence,
+    validate_template_evidence,
 )
 from core.commerce_lifecycle.intents import BusinessIntent
 from core.commerce_lifecycle.registry import (
@@ -67,4 +68,5 @@ __all__ = [
     "get_default_registry",
     "validate_capabilities",
     "validate_evidence",
+    "validate_template_evidence",
 ]
