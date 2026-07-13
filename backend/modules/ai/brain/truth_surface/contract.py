@@ -9,9 +9,11 @@ Aligned with AGENTS.md:
 """
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class OperationalFactKind(str, Enum):
@@ -46,6 +48,7 @@ class TruthSource(str, Enum):
     ORDER_PREPARATION_STATE = "order_preparation_state"
     TENANT_SETTINGS = "tenant_settings"
     COUPON_TABLE = "coupon_table"
+    PROMOTION_TABLE = "promotion_table"
     MEDIA_REGISTRY = "media_registry"
     CONVERSATION_HISTORY = "conversation_history"
     GOAL_KB_RETRIEVAL = "goal_kb_retrieval"
@@ -125,6 +128,119 @@ class FactDomain(str, Enum):
     PLATFORM = "platform"
     GOAL = "goal"
     STORE = "store"
+
+
+class TrustedDomain(str, Enum):
+    """Core trusted-context domains for pre-decide snapshot."""
+
+    CUSTOMER = "customer"
+    ORDER = "order"
+    PAYMENT = "payment"
+    SHIPMENT = "shipment"
+    CATALOG = "catalog"
+    CAPABILITIES = "capabilities"
+    MERCHANT_POLICY = "merchant_policy"
+    COUPONS = "coupons"
+    PROMOTIONS = "promotions"
+
+
+@dataclass(frozen=True)
+class TrustedFact:
+    """One atomic trusted fact with provenance — no customer-facing prose."""
+
+    domain: TrustedDomain
+    key: str
+    value: Any
+    source: TruthSource
+    path: str = ""
+    confidence: float = 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "domain": self.domain.value,
+            "key": self.key,
+            "value": self.value,
+            "source": self.source.value,
+            "path": self.path,
+            "confidence": self.confidence,
+        }
+
+
+@dataclass
+class TrustedContextSnapshot:
+    """
+    Single authoritative pre-decide context snapshot for one turn.
+
+    Does not contain LLM prose. Consumers request domain projections only.
+    """
+
+    snapshot_id: str = ""
+    tenant_id: int = 0
+    customer_phone: str = ""
+    conversation_id: Optional[int] = None
+    facts: List[TrustedFact] = field(default_factory=list)
+    loaded_domains: List[str] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)
+    built_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    shadow_observability: Dict[str, Any] = field(default_factory=dict)
+
+    def ensure_snapshot_id(self) -> str:
+        if not self.snapshot_id:
+            self.snapshot_id = uuid.uuid4().hex
+        return self.snapshot_id
+
+    def lookup(self, domain: TrustedDomain, key: str) -> Optional[TrustedFact]:
+        for fact in self.facts:
+            if fact.domain == domain and fact.key == key:
+                return fact
+        return None
+
+    def facts_for_domain(self, domain: TrustedDomain) -> Tuple[TrustedFact, ...]:
+        return tuple(f for f in self.facts if f.domain == domain)
+
+    def projection(
+        self,
+        domains: Optional[List[TrustedDomain]] = None,
+    ) -> Dict[str, Any]:
+        """Structured facts projection — safe for DecisionPlan / compose hints."""
+        allowed = {d.value for d in domains} if domains else None
+        out: Dict[str, Dict[str, Any]] = {}
+        for fact in self.facts:
+            if allowed is not None and fact.domain.value not in allowed:
+                continue
+            bucket = out.setdefault(fact.domain.value, {})
+            bucket[fact.key] = fact.value
+        return {
+            "snapshot_id": self.ensure_snapshot_id(),
+            "tenant_id": self.tenant_id,
+            "conversation_id": self.conversation_id,
+            "loaded_domains": list(self.loaded_domains),
+            "sources": list(self.sources),
+            "facts": out,
+        }
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "snapshot_id": self.ensure_snapshot_id(),
+            "tenant_id": self.tenant_id,
+            "customer_phone_tail": (self.customer_phone or "")[-4:],
+            "conversation_id": self.conversation_id,
+            "loaded_domains": self.loaded_domains,
+            "sources": self.sources,
+            "fact_count": len(self.facts),
+            "built_at_ms": self.built_at_ms,
+        }
+        if self.shadow_observability:
+            out["shadow_observability"] = dict(self.shadow_observability)
+        return out
+
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "snapshot_id": self.ensure_snapshot_id(),
+            "loaded_domains": list(self.loaded_domains),
+            "sources": list(self.sources),
+            "fact_count": len(self.facts),
+        }
 
 
 class EffectiveFactStatus(str, Enum):
@@ -335,6 +451,9 @@ __all__ = [
     "OperationalFactsBlock",
     "PERSONALITY_EXCLUDED_SURFACES",
     "SurfacePresence",
+    "TrustedContextSnapshot",
+    "TrustedDomain",
+    "TrustedFact",
     "TruthSource",
     "TruthSurface",
     "TruthSurfaceInventory",
