@@ -16,6 +16,9 @@ Lifecycle does not own:
   * provider status normalization (future PR 2C)
   * order or conversation mutation
   * runtime dispatch, ledger writes, or service-window resolution
+
+PR 2B adds shadow ledger storage under ``core.commerce_lifecycle.ledger`` —
+still no runtime producer wiring in this package.
 """
 from __future__ import annotations
 
