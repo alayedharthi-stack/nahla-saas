@@ -23,6 +23,7 @@ _COUPON_OFFER_PATTERNS: Tuple[re.Pattern[str], ...] = tuple(
         r"كود\s*خصم",
         r"خصم",
         r"عرض(?:ات)?",
+        r"عروض",
         r"\bcoupon\b",
         r"\bpromotion\b",
         r"\bdiscount\b",

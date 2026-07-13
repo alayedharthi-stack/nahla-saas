@@ -396,6 +396,10 @@ def test_lazy_loader_runs_for_coupon_question() -> None:
     assert should_load_coupon_promotion_facts(message="any promotion today?") is True
 
 
+def test_lazy_loader_runs_for_arabic_plural_offers() -> None:
+    assert should_load_coupon_promotion_facts(message="في عروض حالياً؟") is True
+
+
 def test_lazy_loader_skips_unrelated_social_turn() -> None:
     assert should_load_coupon_promotion_facts(message="السلام عليكم كيف حالك") is False
 
