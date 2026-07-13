@@ -1,0 +1,114 @@
+"""
+Layer 2 — DecisionPlanShadow contract (PROPOSED / SHADOW CONTRACT).
+
+Telemetry/coverage comparison only. Enforcement impossible by default.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, FrozenSet, Mapping, Tuple
+
+from ._serialization import filter_known_keys, require_schema_version
+
+CONTRACT_STATUS = "PROPOSED / SHADOW CONTRACT"
+SCHEMA_VERSION = "1"
+
+_DECISION_PLAN_KEYS: FrozenSet[str] = frozenset({
+    "schema_version",
+    "proposed_action",
+    "required_facts",
+    "missing_facts",
+    "loaded_coverage",
+    "constraints",
+    "safety_flags",
+    "reason_codes",
+    "snapshot_ref",
+    "shadow_only",
+})
+
+
+class ProposedActionKind(str, Enum):
+    """Telemetry/coverage labels — never customer clarification or execution."""
+
+    ANSWER_FROM_FACTS = "answer_from_facts"
+    CLARIFY_MISSING = "clarify_missing"
+    DEFER_UNAVAILABLE = "defer_unavailable"
+    NO_OP_SHADOW = "no_op_shadow"
+
+
+@dataclass(frozen=True)
+class DecisionPlanShadow:
+    """
+    Structured shadow plan — reason codes and coverage metadata only.
+
+    ``clarify_missing`` records missing required coverage for drift telemetry.
+    It must never trigger customer clarification, routing, Brain/Compose input,
+  loader selection, or lifecycle execution.
+    """
+
+    proposed_action: ProposedActionKind
+    required_facts: Tuple[str, ...] = ()
+    missing_facts: Tuple[str, ...] = ()
+    loaded_coverage: Tuple[str, ...] = ()
+    constraints: Tuple[str, ...] = ()
+    safety_flags: Tuple[str, ...] = ("shadow_only", "no_enforcement")
+    reason_codes: Tuple[str, ...] = ()
+    snapshot_ref: str = ""
+    schema_version: str = SCHEMA_VERSION
+    shadow_only: bool = True
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCHEMA_VERSION:
+            raise ValueError(f"unsupported schema_version: {self.schema_version!r}")
+        if not self.shadow_only:
+            raise ValueError("DecisionPlanShadow.shadow_only must be True")
+        if not isinstance(self.proposed_action, ProposedActionKind):
+            object.__setattr__(
+                self,
+                "proposed_action",
+                ProposedActionKind(self.proposed_action),
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "proposed_action": self.proposed_action.value,
+            "required_facts": list(self.required_facts),
+            "missing_facts": list(self.missing_facts),
+            "loaded_coverage": list(self.loaded_coverage),
+            "constraints": list(self.constraints),
+            "safety_flags": list(self.safety_flags),
+            "reason_codes": list(self.reason_codes),
+            "snapshot_ref": self.snapshot_ref,
+            "shadow_only": self.shadow_only,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> DecisionPlanShadow:
+        filtered = filter_known_keys(data, _DECISION_PLAN_KEYS)
+        require_schema_version(filtered)
+        return cls(
+            proposed_action=ProposedActionKind(filtered["proposed_action"]),
+            required_facts=tuple(filtered.get("required_facts") or ()),
+            missing_facts=tuple(filtered.get("missing_facts") or ()),
+            loaded_coverage=tuple(filtered.get("loaded_coverage") or ()),
+            constraints=tuple(filtered.get("constraints") or ()),
+            safety_flags=tuple(filtered.get("safety_flags") or ("shadow_only", "no_enforcement")),
+            reason_codes=tuple(filtered.get("reason_codes") or ()),
+            snapshot_ref=str(filtered.get("snapshot_ref") or ""),
+            schema_version=str(filtered.get("schema_version", SCHEMA_VERSION)),
+            shadow_only=bool(filtered.get("shadow_only", True)),
+        )
+
+    def to_metadata(self) -> Dict[str, Any]:
+        """Safe telemetry projection — no facts, prose, or secrets."""
+        return self.to_dict()
+
+
+__all__ = [
+    "CONTRACT_STATUS",
+    "DecisionPlanShadow",
+    "ProposedActionKind",
+    "SCHEMA_VERSION",
+]
