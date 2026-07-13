@@ -581,6 +581,26 @@ def clear_trusted_context() -> None:
     _current.set(None)
 
 
+def safe_shadow_trace_metadata(
+    snapshot: TrustedContextSnapshot,
+) -> Dict[str, Any]:
+    """Safe fields only — no fact payloads or coupon codes."""
+    meta = snapshot.to_metadata()
+    out: Dict[str, Any] = {
+        "trusted_context_shadow_status": "ok",
+        "facts_snapshot_id": meta.get("snapshot_id", ""),
+        "loaded_domains": list(meta.get("loaded_domains") or []),
+        "sources": list(meta.get("sources") or []),
+        "fact_count": int(meta.get("fact_count") or 0),
+    }
+    if snapshot.shadow_observability:
+        out["shadow_observability"] = dict(snapshot.shadow_observability)
+        out["loader_duration_ms"] = snapshot.shadow_observability.get(
+            "loader_duration_ms",
+        )
+    return out
+
+
 def run_trusted_context_shadow(
     *,
     db: Any,
@@ -600,6 +620,10 @@ def run_trusted_context_shadow(
     if not is_trusted_context_shadow_enabled():
         return None
 
+    existing = _current.get()
+    if existing is not None:
+        return existing
+
     try:
         snapshot = build_trusted_context_snapshot(
             db=db,
@@ -613,9 +637,9 @@ def run_trusted_context_shadow(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s err=%s",
+            "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s stage=build error_class=%s",
             tenant_id,
-            exc,
+            exc.__class__.__name__,
         )
         return None
 
@@ -633,9 +657,11 @@ def run_trusted_context_shadow(
         pass
 
     try:
+        log_payload = snapshot.to_log_dict()
+        log_payload["event"] = "TRUSTED_CONTEXT_SHADOW"
         logger.info(
             "[TRUSTED_CONTEXT_SHADOW] %s",
-            json.dumps(snapshot.to_log_dict(), ensure_ascii=False),
+            json.dumps(log_payload, ensure_ascii=False),
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry emit must not break shadow
         pass
@@ -658,6 +684,7 @@ __all__ = [
     "clear_trusted_context",
     "current_trusted_context",
     "run_trusted_context_shadow",
+    "safe_shadow_trace_metadata",
     "set_current_trusted_context",
     "trusted_context_projection_for_compose",
 ]
