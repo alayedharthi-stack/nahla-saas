@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Tuple
 
 from .contract import TrustedContextSnapshot, TrustedDomain, TrustedFact, TruthSource
-from .flags import is_trusted_context_shadow_enabled
+from .flags import is_layer2_shadow_enabled, is_trusted_context_shadow_enabled
 
 logger = logging.getLogger("nahla.brain.trusted_context")
 
@@ -607,6 +608,54 @@ def pop_shadow_build_error_class() -> Optional[str]:
     return err
 
 
+def _attach_layer2_shadow_telemetry(
+    *,
+    snapshot: TrustedContextSnapshot,
+    message: str = "",
+    history: Optional[List[Any]] = None,
+    brain_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Attach validated Layer 2 compare metadata — fail-open, no enforcement."""
+    if not is_layer2_shadow_enabled():
+        return
+
+    started = time.perf_counter()
+    try:
+        from .layer2 import build_decision_plan_shadow, build_intent_evidence  # noqa: PLC0415
+
+        evidence = build_intent_evidence(
+            message=message,
+            history=history,
+            brain_state=brain_state,
+            inbound_metadata=inbound_metadata,
+            source_turn_ref=snapshot.snapshot_id or "",
+        )
+        plan = build_decision_plan_shadow(evidence=evidence, snapshot=snapshot)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        envelope: Dict[str, Any] = {
+            "status": "ok",
+            "intent_evidence": evidence.to_dict(),
+            "decision_plan": plan.to_metadata(),
+            "duration_ms": duration_ms,
+        }
+    except Exception as exc:  # noqa: BLE001
+        envelope = {
+            "status": "error",
+            "stage": "layer2_compare",
+            "error_class": exc.__class__.__name__,
+        }
+        logger.warning(
+            "[TRUSTED_CONTEXT_SHADOW] layer2_failed tenant=%s stage=layer2_compare error_class=%s",
+            snapshot.tenant_id,
+            exc.__class__.__name__,
+        )
+
+    obs = dict(snapshot.shadow_observability or {})
+    obs["layer2_shadow"] = envelope
+    snapshot.shadow_observability = obs
+
+
 def safe_shadow_trace_metadata(
     snapshot: TrustedContextSnapshot,
 ) -> Dict[str, Any]:
@@ -633,6 +682,7 @@ def run_trusted_context_shadow(
     tenant_id: int,
     customer_phone: str,
     message: str = "",
+    history: Optional[List[Any]] = None,
     conversation: Any = None,
     conversation_id: Optional[int] = None,
     brain_state: Any = None,
@@ -679,6 +729,14 @@ def run_trusted_context_shadow(
 
     set_current_trusted_context(snapshot)
     _turn_scope.set(scope)
+
+    _attach_layer2_shadow_telemetry(
+        snapshot=snapshot,
+        message=message,
+        history=history,
+        brain_state=brain_state,
+        inbound_metadata=inbound_metadata,
+    )
 
     try:
         from core.turn_provenance import current_turn_provenance  # noqa: PLC0415

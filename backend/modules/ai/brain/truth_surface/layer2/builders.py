@@ -27,6 +27,7 @@ _COUPON_PATTERNS = (
 _OFFER_PATTERNS = (
     re.compile(r"offer|promotion", re.IGNORECASE),
     re.compile(r"\u0639\u0631\u0636(?:\u0627\u062a)?", re.IGNORECASE),
+    re.compile(r"\u0639\u0631\u0648\u0636", re.IGNORECASE),
 )
 _ORDER_REF_PATTERN = re.compile(r"\b\d{6,}\b")
 _TRACKING_PATTERNS = (

@@ -729,3 +729,163 @@ def test_handle_merchant_message_coupon_loader_failure_fail_open_unchanged(caplo
     assert "secret-value" not in log_text
     assert "snapshot_id" not in log_text
     clear_trusted_context()
+
+
+def test_layer2_flag_disabled_no_envelope_no_builder_calls() -> None:
+    clear_trusted_context()
+    snap = _snapshot()
+    with patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_layer2_shadow_enabled",
+        return_value=False,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.build_trusted_context_snapshot",
+        return_value=snap,
+    ), patch(
+        "modules.ai.brain.truth_surface.layer2.build_intent_evidence",
+    ) as evidence_mock, patch(
+        "modules.ai.brain.truth_surface.layer2.build_decision_plan_shadow",
+    ) as plan_mock:
+        result = run_trusted_context_shadow(
+            db=MagicMock(),
+            tenant_id=1,
+            customer_phone="966500000020",
+            message="عندكم عروض؟",
+        )
+    assert result is snap
+    assert "layer2_shadow" not in (result.shadow_observability or {})
+    evidence_mock.assert_not_called()
+    plan_mock.assert_not_called()
+    clear_trusted_context()
+
+
+def test_layer2_flag_enabled_attaches_safe_envelope_on_offer_turn() -> None:
+    from modules.ai.brain.truth_surface.layer2 import (  # noqa: PLC0415
+        build_decision_plan_shadow,
+        build_intent_evidence,
+    )
+
+    clear_trusted_context()
+    snap = _snapshot(loaded_domains=["customer", "capabilities", "promotions"])
+    with patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_layer2_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.build_trusted_context_snapshot",
+        return_value=snap,
+    ):
+        result = run_trusted_context_shadow(
+            db=MagicMock(),
+            tenant_id=1,
+            customer_phone="966500000021",
+            message="عندكم عروض؟",
+        )
+    assert result is snap
+    layer2 = (result.shadow_observability or {}).get("layer2_shadow")
+    assert layer2 is not None
+    assert layer2["status"] == "ok"
+    assert "intent_evidence" in layer2
+    assert "decision_plan" in layer2
+    assert isinstance(layer2.get("duration_ms"), int)
+
+    expected_evidence = build_intent_evidence(
+        message="عندكم عروض؟",
+        source_turn_ref=snap.snapshot_id or "",
+    )
+    expected_plan = build_decision_plan_shadow(evidence=expected_evidence, snapshot=snap)
+    assert layer2["intent_evidence"] == expected_evidence.to_dict()
+    assert layer2["decision_plan"] == expected_plan.to_metadata()
+    assert "offer_intent" in layer2["intent_evidence"]["trigger_ids"]
+
+    trace = safe_shadow_trace_metadata(snap)
+    log_payload = snap.to_log_dict()
+    for payload in (trace, log_payload):
+        assert "facts" not in payload
+        blob = json.dumps(payload, ensure_ascii=False)
+        assert "عروض" not in blob
+        assert "عندكم" not in blob
+        assert layer2["decision_plan"]["proposed_action"] in blob
+    clear_trusted_context()
+
+
+def test_layer2_compare_failure_fail_open_preserves_snapshot() -> None:
+    clear_trusted_context()
+    snap = _snapshot()
+    snap.snapshot_id = "1234567890abcdef1234567890abcdef"
+    with patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_layer2_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.build_trusted_context_snapshot",
+        return_value=snap,
+    ), patch(
+        "modules.ai.brain.truth_surface.layer2.build_decision_plan_shadow",
+        side_effect=RuntimeError("secret coupon SECRET99"),
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.logger",
+    ) as log_mock:
+        result = run_trusted_context_shadow(
+            db=MagicMock(),
+            tenant_id=1,
+            customer_phone="966500000022",
+            message="عندكم عروض؟",
+        )
+    assert result is snap
+    layer2 = (result.shadow_observability or {}).get("layer2_shadow")
+    assert layer2 == {
+        "status": "error",
+        "stage": "layer2_compare",
+        "error_class": "RuntimeError",
+    }
+    warning_msg = " ".join(str(c) for c in log_mock.warning.call_args[0])
+    assert "layer2_failed" in warning_msg
+    assert "layer2_compare" in warning_msg
+    assert "RuntimeError" in warning_msg
+    assert "SECRET99" not in warning_msg
+    assert pop_shadow_build_error_class() is None
+    clear_trusted_context()
+
+
+def test_layer2_uuid_snapshot_id_produces_ok_envelope() -> None:
+    clear_trusted_context()
+    snap = _snapshot(loaded_domains=["customer", "capabilities", "promotions"])
+    snap.snapshot_id = "1234567890abcdef1234567890abcdef"
+    with patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_layer2_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.build_trusted_context_snapshot",
+        return_value=snap,
+    ):
+        result = run_trusted_context_shadow(
+            db=MagicMock(),
+            tenant_id=1,
+            customer_phone="966500000023",
+            message="عندكم عروض؟",
+        )
+    assert result is snap
+    layer2 = (result.shadow_observability or {}).get("layer2_shadow")
+    assert layer2 is not None
+    assert layer2["status"] == "ok"
+    assert layer2["intent_evidence"]["source_turn_ref"] == snap.snapshot_id
+    assert layer2["decision_plan"]["snapshot_ref"] == snap.snapshot_id
+    assert isinstance(layer2.get("duration_ms"), int)
+    clear_trusted_context()
+
+
+def test_layer2_default_flag_disabled_without_patch(monkeypatch) -> None:
+    monkeypatch.delenv("NAHLA_LAYER2_SHADOW_ENABLED", raising=False)
+    from modules.ai.brain.truth_surface.flags import is_layer2_shadow_enabled  # noqa: PLC0415
+
+    assert is_layer2_shadow_enabled() is False

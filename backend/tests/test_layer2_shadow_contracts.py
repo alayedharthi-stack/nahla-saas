@@ -127,6 +127,19 @@ def test_intent_evidence_rejects_phone_like_source_turn_ref() -> None:
     )
 
 
+def test_uuid_hex_snapshot_ref_with_phone_like_digits_accepted() -> None:
+    """Regression: snapshot_id uuid4().hex may contain 8+ consecutive digits."""
+    uuid_ref = "1234567890abcdef1234567890abcdef"
+    assert len(uuid_ref) == 32
+    evidence = IntentEvidence(confidence=0.9, source_turn_ref=uuid_ref)
+    assert evidence.source_turn_ref == uuid_ref
+    plan = DecisionPlanShadow(
+        proposed_action=ProposedActionKind.NO_OP_SHADOW,
+        snapshot_ref=uuid_ref,
+    )
+    assert plan.snapshot_ref == uuid_ref
+
+
 def test_intent_evidence_rejects_arabic_customer_text_in_evidence_refs() -> None:
     _assert_rejected_and_not_serialized(
         lambda: IntentEvidence(
@@ -314,3 +327,12 @@ def test_build_decision_plan_shadow_defers_without_snapshot() -> None:
     plan = build_decision_plan_shadow(evidence=evidence, snapshot=None)
     assert plan.proposed_action == ProposedActionKind.DEFER_UNAVAILABLE
     assert plan.missing_facts == plan.required_facts
+
+
+def test_build_intent_evidence_arabic_plural_offers_parity() -> None:
+    evidence = build_intent_evidence(message="\u0639\u0646\u062f\u0643\u0645 \u0639\u0631\u0648\u0636\u061f")
+    assert "offer_intent" in evidence.trigger_ids
+    assert TrustedDomain.PROMOTIONS.value in evidence.required_domains
+    blob = json.dumps(evidence.to_dict(), ensure_ascii=False)
+    assert "\u0639\u0631\u0648\u0636" not in blob
+    assert "\u0639\u0646\u062f\u0643\u0645" not in blob
