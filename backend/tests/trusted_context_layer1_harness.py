@@ -34,12 +34,17 @@ from modules.ai.brain.truth_surface.trusted_context import (
 )
 from services.turn_trace import new_trace as _REAL_NEW_TRACE
 
+# Low-entropy test-only values — not production secrets.
+PRIVACY_TEST_COUPON_CODE = "TESTCOUPON99"
+LOADER_ERROR_MSG = "loader-err-msg"
+LOADER_ERROR_BODY = "loader-err-body"
+
 FORBIDDEN_PRIVACY_MARKERS = (
-    "SECRET_COUPON_ABC123",
+    PRIVACY_TEST_COUPON_CODE,
     "PRIVATE_CUSTOMER_VALUE",
     "RAW_PROMO_CONDITION_SECRET",
-    "secret-value",
-    "secret body",
+    LOADER_ERROR_MSG,
+    LOADER_ERROR_BODY,
 )
 
 
@@ -83,6 +88,9 @@ class Layer1Scenario:
     duplicate_turn_calls: int = 1
     concurrent_turn: bool = False
     tenant_b_coupons: Tuple[Dict[str, Any], ...] = ()
+    tenant_b_promotions: Tuple[Dict[str, Any], ...] = ()
+    promotion_conflict_state: str = "none"
+    runtime_defect: str = ""
 
 
 def utcnow() -> datetime:
@@ -240,6 +248,16 @@ def tenant_b_coupons_from_scenario(scenario: Layer1Scenario) -> List[SimpleNames
     return [coupon_record(**dict(item)) for item in scenario.tenant_b_coupons]
 
 
+def tenant_b_promotions_from_scenario(scenario: Layer1Scenario) -> List[SimpleNamespace]:
+    return [promotion_record(**dict(item)) for item in scenario.tenant_b_promotions]
+
+
+def brain_state_namespace(scenario: Layer1Scenario) -> SimpleNamespace:
+    prep = dict(scenario.brain_state or {})
+    focus = prep.pop("current_product_focus", None)
+    return SimpleNamespace(order_prep=prep, current_product_focus=focus)
+
+
 def line_product_ids_from_scenario(scenario: Layer1Scenario) -> Optional[Set[str]]:
     if not scenario.brain_state:
         return None
@@ -273,8 +291,8 @@ def assert_no_privacy_leak(text: str, *, allow_code: Optional[str] = None) -> No
         assert marker not in text
     if allow_code:
         return
-    if "SECRET_COUPON_ABC123" in text:
-        raise AssertionError("raw coupon secret leaked")
+    if PRIVACY_TEST_COUPON_CODE in text:
+        raise AssertionError("raw coupon test code leaked to forbidden surface")
 
 
 def snapshot_domains(snapshot: TrustedContextSnapshot) -> Set[str]:
@@ -290,7 +308,7 @@ def serialized_snapshot_for_leak_check(snapshot: TrustedContextSnapshot) -> str:
 
 
 def run_relevance_contract(scenario: Layer1Scenario) -> None:
-    state = SimpleNamespace(order_prep=dict(scenario.brain_state or {}), current_product_focus=None)
+    state = brain_state_namespace(scenario)
     lazy = should_load_coupon_promotion_facts(
         message=scenario.inbound_text,
         brain_state=state,
@@ -324,6 +342,7 @@ def run_eligibility_contract(scenario: Layer1Scenario, perf: PerfCollector) -> N
             customer_profile=profile,
             basket_total=scenario.basket_total,
             observed_at=observed,
+            conflict_state=scenario.promotion_conflict_state,
         )
     perf.record((time.perf_counter() - started) * 1000)
     if scenario.expected_eligible is not None:
@@ -337,15 +356,18 @@ def run_eligibility_contract(scenario: Layer1Scenario, perf: PerfCollector) -> N
 def run_loader_contract(scenario: Layer1Scenario, perf: PerfCollector) -> None:
     started = time.perf_counter()
     all_coupons = coupons_from_scenario(scenario) + tenant_b_coupons_from_scenario(scenario)
+    all_promotions = promotions_from_scenario(scenario) + tenant_b_promotions_from_scenario(scenario)
     db = tenant_scoped_db(
         coupons=all_coupons,
-        promotions=promotions_from_scenario(scenario),
+        promotions=all_promotions,
         profiles=profile_from_scenario(scenario),
     )
     prep = dict(scenario.brain_state or {})
     if scenario.basket_total is not None:
         prep.setdefault("catalog_checkout_total", scenario.basket_total)
-    state = SimpleNamespace(order_prep=prep, current_product_focus=None)
+    state = brain_state_namespace(scenario)
+    if scenario.basket_total is not None:
+        state.order_prep.setdefault("catalog_checkout_total", scenario.basket_total)
     patchers: List[Any] = []
     if scenario.loader_side_effect is not None:
         patchers.append(
@@ -393,11 +415,24 @@ def run_loader_contract(scenario: Layer1Scenario, perf: PerfCollector) -> None:
                 }
                 foreign_ids = {coupon_record(**item).id for item in scenario.tenant_b_coupons}
                 assert not coupon_ids.intersection(foreign_ids)
+            if scenario.contract_under_test == "tenant_scoped_promotion_query":
+                promo_ids = {
+                    int(f.value.get("promotion_id"))
+                    for f in facts
+                    if f.domain == TrustedDomain.PROMOTIONS
+                    and isinstance(f.value, dict)
+                    and f.value.get("promotion_id")
+                }
+                foreign_ids = {promotion_record(**item).id for item in scenario.tenant_b_promotions}
+                assert not promo_ids.intersection(foreign_ids)
+            if scenario.contract_under_test == "tenant_coupon_count_is_one":
+                coupon_facts = [f for f in facts if f.domain == TrustedDomain.COUPONS]
+                assert len(coupon_facts) == 1
             if scenario.expected_domains_loaded:
                 domains = {f.domain.value for f in facts}
                 for domain in scenario.expected_domains_loaded:
                     assert domain in domains
-            assert "SECRET_COUPON_ABC123" not in json.dumps(obs, ensure_ascii=False)
+            assert PRIVACY_TEST_COUPON_CODE not in json.dumps(obs, ensure_ascii=False)
             db.commit.assert_not_called()
             db.add.assert_not_called()
     finally:
@@ -422,15 +457,18 @@ def run_build_or_shadow_contract(scenario: Layer1Scenario, perf: PerfCollector) 
     started = time.perf_counter()
     clear_trusted_context()
     all_coupons = coupons_from_scenario(scenario) + tenant_b_coupons_from_scenario(scenario)
+    all_promotions = promotions_from_scenario(scenario) + tenant_b_promotions_from_scenario(scenario)
     db = tenant_scoped_db(
         coupons=all_coupons,
-        promotions=promotions_from_scenario(scenario),
+        promotions=all_promotions,
         profiles=profile_from_scenario(scenario),
     )
     prep = dict(scenario.brain_state or {})
     if scenario.basket_total is not None:
         prep.setdefault("catalog_checkout_total", scenario.basket_total)
-    state = SimpleNamespace(order_prep=prep, current_product_focus=None)
+    state = brain_state_namespace(scenario)
+    if scenario.basket_total is not None:
+        state.order_prep.setdefault("catalog_checkout_total", scenario.basket_total)
     patches: List[Any] = [
         patch(
             "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
@@ -516,7 +554,7 @@ def run_build_or_shadow_contract(scenario: Layer1Scenario, perf: PerfCollector) 
                 assert domain in fact_domains(snap) or domain in snapshot_domains(snap)
             leak_text = serialized_snapshot_for_leak_check(snap)
             for secret in scenario.privacy_secrets:
-                if scenario.allow_code_in_snapshot and secret == "SECRET_COUPON_ABC123":
+                if scenario.allow_code_in_snapshot and secret == PRIVACY_TEST_COUPON_CODE:
                     continue
                 assert secret not in leak_text
             trace = safe_shadow_trace_metadata(snap)
@@ -585,31 +623,53 @@ def _run_lifecycle_action(
             assert first.snapshot_id != second.snapshot_id
             return second
         if scenario.lifecycle_action == "concurrent_isolation":
+            snap_by_scope = {
+                ("966500000301", 601): _snapshot_for_lifecycle(
+                    scenario.tenant_id, "966500000301", 601,
+                ),
+                ("966500000302", 602): _snapshot_for_lifecycle(
+                    scenario.tenant_id, "966500000302", 602,
+                ),
+            }
+
+            def _fake_build(**kwargs: Any) -> TrustedContextSnapshot:
+                phone = str(kwargs.get("customer_phone") or "")
+                conversation_id = kwargs.get("conversation_id")
+                if conversation_id is None and kwargs.get("conversation") is not None:
+                    conversation_id = getattr(kwargs["conversation"], "id", None)
+                key = (phone, int(conversation_id or 0))
+                snap = snap_by_scope.get(key)
+                if snap is None:
+                    raise AssertionError(f"unexpected concurrent build scope: {key}")
+                return snap
 
             async def _turn(phone: str, conversation_id: int) -> Tuple[str, str]:
                 clear_trusted_context()
-                snap = _snapshot_for_lifecycle(scenario.tenant_id, phone, conversation_id)
-                with patch(
-                    "modules.ai.brain.truth_surface.trusted_context.build_trusted_context_snapshot",
-                    return_value=snap,
-                ):
-                    result = run_trusted_context_shadow(
-                        db=db,
-                        tenant_id=scenario.tenant_id,
-                        customer_phone=phone,
-                        conversation_id=conversation_id,
-                        message=scenario.inbound_text,
-                        brain_state=state,
-                    )
+                result = run_trusted_context_shadow(
+                    db=db,
+                    tenant_id=scenario.tenant_id,
+                    customer_phone=phone,
+                    conversation_id=conversation_id,
+                    message=scenario.inbound_text,
+                    brain_state=state,
+                )
                 current = current_trusted_context()
                 return result.snapshot_id, current.snapshot_id if current else ""
 
-            async def _run() -> List[Tuple[str, str]]:
-                first = await _turn("966500000301", 601)
-                second = await _turn("966500000302", 602)
-                return [first, second]
+            async def _run_concurrent() -> List[Tuple[str, str]]:
+                with patch.object(
+                    trusted_context,
+                    "build_trusted_context_snapshot",
+                    side_effect=_fake_build,
+                ):
+                    return list(
+                        await asyncio.gather(
+                            _turn("966500000301", 601),
+                            _turn("966500000302", 602),
+                        )
+                    )
 
-            pairs = asyncio.run(_run())
+            pairs = asyncio.run(_run_concurrent())
             clear_trusted_context()
             assert pairs[0][0] == pairs[0][1]
             assert pairs[1][0] == pairs[1][1]
@@ -622,7 +682,7 @@ def _run_lifecycle_action(
                 return_value=True,
             ), patch(
                 "modules.ai.brain.truth_surface.coupon_offer_loader.load_coupon_promotion_facts",
-                side_effect=RuntimeError("secret-value"),
+                side_effect=RuntimeError(LOADER_ERROR_MSG),
             ):
                 failed = run_trusted_context_shadow(
                     db=db,
@@ -649,6 +709,80 @@ def _run_lifecycle_action(
             assert ok is not None
             clear_trusted_context()
             return ok
+        if scenario.lifecycle_action == "pop_error_class_twice":
+            with patch(
+                "modules.ai.brain.truth_surface.coupon_offer_loader.should_load_coupon_promotion_facts",
+                return_value=True,
+            ), patch(
+                "modules.ai.brain.truth_surface.coupon_offer_loader.load_coupon_promotion_facts",
+                side_effect=RuntimeError(LOADER_ERROR_MSG),
+            ):
+                failed = run_trusted_context_shadow(
+                    db=db,
+                    tenant_id=scenario.tenant_id,
+                    customer_phone=scenario.customer_phone,
+                    conversation_id=scenario.conversation_id,
+                    message="عندكم كوبون؟",
+                    brain_state=state,
+                )
+            assert failed is None
+            assert pop_shadow_build_error_class() == "RuntimeError"
+            assert pop_shadow_build_error_class() is None
+            return None
+        if scenario.lifecycle_action == "shadow_disabled_no_context_var":
+            with patch(
+                "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+                return_value=False,
+            ):
+                result = run_trusted_context_shadow(
+                    db=db,
+                    tenant_id=scenario.tenant_id,
+                    customer_phone=scenario.customer_phone,
+                    conversation_id=scenario.conversation_id,
+                    message=scenario.inbound_text,
+                    brain_state=state,
+                )
+            assert result is None
+            assert current_trusted_context() is None
+            return None
+        if scenario.lifecycle_action == "build_exception_clears_context":
+            with patch.object(
+                trusted_context,
+                "build_trusted_context_snapshot",
+                side_effect=RuntimeError(LOADER_ERROR_MSG),
+            ):
+                result = run_trusted_context_shadow(
+                    db=db,
+                    tenant_id=scenario.tenant_id,
+                    customer_phone=scenario.customer_phone,
+                    conversation_id=scenario.conversation_id,
+                    message=scenario.inbound_text,
+                    brain_state=state,
+                )
+            assert result is None
+            assert current_trusted_context() is None
+            return None
+        if scenario.lifecycle_action == "phone_scope_isolation":
+            first = run_trusted_context_shadow(
+                db=db,
+                tenant_id=scenario.tenant_id,
+                customer_phone="966500000301",
+                conversation_id=scenario.conversation_id,
+                message=scenario.inbound_text,
+                brain_state=state,
+            )
+            second = run_trusted_context_shadow(
+                db=db,
+                tenant_id=scenario.tenant_id,
+                customer_phone="966500000302",
+                conversation_id=scenario.conversation_id,
+                message=scenario.inbound_text,
+                brain_state=state,
+            )
+            assert first is not None and second is not None
+            assert first.snapshot_id != second.snapshot_id
+            clear_trusted_context()
+            return second
     raise AssertionError(f"unknown lifecycle_action={scenario.lifecycle_action}")
 
 
@@ -889,3 +1023,10 @@ def execute_scenario(scenario: Layer1Scenario, perf: PerfCollector) -> None:
 
 def unique_contracts(scenarios: Sequence[Layer1Scenario]) -> Set[str]:
     return {scenario.contract_under_test for scenario in scenarios}
+
+
+def family_counts(scenarios: Sequence[Layer1Scenario]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for scenario in scenarios:
+        counts[scenario.family] = counts.get(scenario.family, 0) + 1
+    return counts

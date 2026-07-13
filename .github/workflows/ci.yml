@@ -97,4 +97,5 @@ jobs:
             backend/tests/test_trusted_context_layer1_golden.py \
             backend/tests/test_trusted_context_shadow_wireup.py \
             backend/tests/test_trusted_context_coupons_promotions.py \
+            -m trusted_context_layer1 \
             -q --maxfail=1
