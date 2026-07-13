@@ -180,37 +180,36 @@ def test_confirm_required_when_missing_flag():
 def test_salla_product_rejected_before_graph():
     parent = _salla_parent()
     db, _, _ = _mock_db(parent=parent)
-    with patch("services.meta_catalog_sync_confirm.push_one_meta_catalog_item") as push_mock:
+    with patch("services.meta_catalog_sync_confirm.attempt_native_meta_sync") as attempt_mock:
         result = confirm_native_meta_sync(db, 9, 202, confirm=True)
     assert result["error_code"] == "product_not_meta_export_eligible"
-    push_mock.assert_not_called()
+    attempt_mock.assert_not_called()
 
 
 def test_meta_existing_rejected_before_graph():
     parent = _meta_parent()
     db, _, _ = _mock_db(parent=parent)
-    with patch("services.meta_catalog_sync_confirm.push_one_meta_catalog_item") as push_mock:
+    with patch("services.meta_catalog_sync_confirm.attempt_native_meta_sync") as attempt_mock:
         result = confirm_native_meta_sync(db, 9, 303, confirm=True)
     assert result["error_code"] == "product_not_meta_export_eligible"
-    push_mock.assert_not_called()
+    attempt_mock.assert_not_called()
 
 
 def test_preview_fatal_rejected_before_graph_and_variant():
     parent = _native_parent(with_image=False)
     db, _, variants = _mock_db(parent=parent, variant=None)
     with patch(
-        "services.meta_catalog_sync_confirm.preview_native_meta_sync",
-        return_value=_preview_fatal(),
-    ):
-        with patch(
-            "services.meta_catalog_sync_confirm.ensure_native_default_variant",
-        ) as ensure_mock:
-            with patch("services.meta_catalog_sync_confirm.push_one_meta_catalog_item") as push_mock:
-                result = confirm_native_meta_sync(db, 9, 101, confirm=True)
+        "services.meta_catalog_sync_confirm.attempt_native_meta_sync",
+        return_value={
+            "ok": False,
+            "error_code": "preview_fatal",
+            "fatal_errors": _preview_fatal()["fatal_errors"],
+        },
+    ) as attempt_mock:
+        with patch("services.meta_catalog_sync_confirm.mark_native_meta_sync_pending", return_value=True):
+            result = confirm_native_meta_sync(db, 9, 101, confirm=True)
     assert result["error_code"] == "preview_fatal"
-    ensure_mock.assert_not_called()
-    push_mock.assert_not_called()
-    db.commit.assert_not_called()
+    attempt_mock.assert_called_once()
 
 
 def test_creates_default_variant_only_at_confirm():
@@ -256,64 +255,59 @@ def test_does_not_duplicate_existing_variant():
 def test_valid_confirm_calls_push_once_and_syncs():
     parent = _native_parent()
     db, parent, variants = _mock_db(parent=parent, variant=None)
-    new_variant = _variant(parent, vid=777)
+
+    def _refresh(obj):
+        obj.sync_status = "synced"
+        obj.sync_error = None
+        obj.last_synced_at = datetime.now(timezone.utc)
+
+    db.refresh.side_effect = _refresh
 
     with patch(
-        "services.meta_catalog_sync_confirm.preview_native_meta_sync",
-        return_value=_preview_ok(),
+        "services.meta_catalog_sync_confirm.mark_native_meta_sync_pending",
+        return_value=True,
     ):
         with patch(
-            "services.meta_catalog_sync_confirm.ensure_native_default_variant",
-            return_value=(new_variant, True),
-        ):
-            with patch(
-                "services.meta_catalog_sync_confirm.push_one_meta_catalog_item",
-                return_value=_push_ok(),
-            ) as push_mock:
-                result = confirm_native_meta_sync(db, 9, 101, confirm=True)
+            "services.meta_catalog_sync_confirm.attempt_native_meta_sync",
+            return_value={
+                "ok": True,
+                "sync_status": "synced",
+                "retailer_id": "nahla_p_101",
+                "push": _push_ok(),
+            },
+        ) as attempt_mock:
+            result = confirm_native_meta_sync(db, 9, 101, confirm=True)
 
-    push_mock.assert_called_once()
-    assert push_mock.call_args.kwargs["confirm"] is True
+    attempt_mock.assert_called_once()
     assert result["ok"] is True
     assert result["sync_status"] == "synced"
-    assert parent.sync_error is None
-    assert parent.last_synced_at is not None
     assert parent.source == SOURCE_NAHLA_NATIVE
     assert parent.ownership_mode == OWNERSHIP_NAHLA_MANAGED
     db.commit.assert_called()
 
 
-def test_graph_failure_sets_sync_failed_without_changing_ownership():
+def test_graph_failure_sets_failed_without_changing_ownership():
     parent = _native_parent()
     db, parent, _ = _mock_db(parent=parent, variant=_variant(parent))
-    before_synced = parent.last_synced_at
+    parent.sync_status = "failed"
+    parent.sync_error = "meta_http_error"
 
     with patch(
-        "services.meta_catalog_sync_confirm.preview_native_meta_sync",
-        return_value=_preview_ok(),
+        "services.meta_catalog_sync_confirm.mark_native_meta_sync_pending",
+        return_value=True,
     ):
         with patch(
-            "services.meta_catalog_sync_confirm.ensure_native_default_variant",
-            return_value=(_variant(parent), False),
+            "services.meta_catalog_sync_confirm.attempt_native_meta_sync",
+            return_value={
+                "ok": False,
+                "sync_status": "failed",
+                "error_code": "meta_http_error",
+            },
         ):
-            with patch(
-                "services.meta_catalog_sync_confirm.push_one_meta_catalog_item",
-                return_value={
-                    "ok": False,
-                    "error": "meta_http_error",
-                    "meta": {
-                        "http_status": 400,
-                        "response": {"error": {"message": "bad item"}},
-                    },
-                },
-            ):
-                result = confirm_native_meta_sync(db, 9, 101, confirm=True)
+            result = confirm_native_meta_sync(db, 9, 101, confirm=True)
 
     assert result["ok"] is False
-    assert parent.sync_status == "sync_failed"
-    assert parent.sync_error
-    assert "access_token" not in (parent.sync_error or "").lower()
-    assert parent.last_synced_at == before_synced
+    assert result["sync_status"] == "failed"
     assert parent.ownership_mode == OWNERSHIP_NAHLA_MANAGED
 
 

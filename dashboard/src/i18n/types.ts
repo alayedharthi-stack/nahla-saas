@@ -2181,6 +2181,18 @@ export interface Translations {
         metaSyncConfirmRunning:   string
         metaSyncConfirmFailed:    string
         metaSyncConfirmSuccess:   string
+        metaSyncStatusTitle:      string
+        metaSyncPending:          string
+        metaSyncSyncing:          string
+        metaSyncBlocked:          string
+        metaSyncStateFailed:      string
+        metaSyncSynced:           string
+        metaSyncWabaLinked:       string
+        metaSyncWabaUncertain:    string
+        metaSyncWhatsappNotVerified: string
+        metaSyncVisibleWhatsapp:  string
+        metaSyncRetryBtn:         string
+        metaSyncRetryRunning:     string
       }
     }
   }

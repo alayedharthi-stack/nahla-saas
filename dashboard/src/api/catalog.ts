@@ -292,6 +292,13 @@ export interface StudioFilters {
 }
 
 // Full product detail returned by GET /products/{id}.
+export interface ProductPublicationStatus {
+  data_ready_for_whatsapp: boolean
+  meta_catalog_synced:     boolean
+  waba_catalog_linked:     boolean | null
+  visible_in_whatsapp:     boolean
+}
+
 export interface StudioProduct {
   id:                          number
   tenant_id:                   number
@@ -321,11 +328,18 @@ export interface StudioProduct {
   catalog_status?:            string
   merchant_hidden_at?:        string | null
   meta_removed_at?:           string | null
+  sync_status?:               string | null
+  sync_error_summary?:        string | null
+  meta_item_id?:              string | null
+  last_sync_attempt_at?:      string | null
+  last_synced_at?:            string | null
+  retry_allowed?:             boolean
 }
 
 export interface ProductDetailResponse {
   product:     StudioProduct
   per_channel: ChannelReadiness[]
+  publication: ProductPublicationStatus
 }
 
 // Body for the readiness preview endpoint — mirrors
@@ -541,6 +555,10 @@ export interface ManualProductRow {
   source:                 ProductSource
   image_url:              string
   product_url:            string
+  sync_status?:           string | null
+  sync_error_summary?:    string | null
+  retry_allowed?:         boolean
+  publication?:           ProductPublicationStatus
 }
 
 export interface MetaSyncPreviewIssue {
@@ -710,6 +728,12 @@ export const catalogApi = {
     return apiCall<MetaSyncConfirmResponse>(
       `/merchant/catalog/products/${id}/meta-sync/confirm`,
       { method: 'POST', body: JSON.stringify({ confirm: true }) },
+    )
+  },
+  metaSyncRetry(id: number): Promise<MetaSyncConfirmResponse> {
+    return apiCall<MetaSyncConfirmResponse>(
+      `/merchant/catalog/products/${id}/meta-sync/retry`,
+      { method: 'POST' },
     )
   },
   // Import from Meta — Path 4. Pulls products from Meta Commerce

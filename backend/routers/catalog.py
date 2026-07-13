@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -111,6 +111,12 @@ from services.catalog_media_storage import (
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_sync_preview import preview_native_meta_sync
 from services.meta_catalog_sync_confirm import confirm_native_meta_sync, ensure_native_default_variant
+from services.native_meta_sync_orchestrator import (
+    build_sync_response_fields,
+    mark_native_meta_sync_pending,
+    meta_relevant_patch_keys,
+    schedule_native_meta_sync,
+)
 from services.product_publication_status import build_product_publication_status
 from services.meta_commerce_settings import (
     enable_whatsapp_catalog_visibility,
@@ -2034,6 +2040,50 @@ def _assert_merchant_editable_or_409(p: Product) -> None:
         raise HTTPException(status_code=409, detail=detail)
 
 
+def _publication_for_product(db: Session, tenant_id: int, product: Product) -> Dict[str, Any]:
+    waba = get_waba_catalog_link_status(db, tenant_id)
+    return build_product_publication_status(product, waba_link_status=waba)
+
+
+def _enrich_manual_product_response(
+    db: Session,
+    tenant_id: int,
+    product: Product,
+) -> Dict[str, Any]:
+    payload = _serialise_manual_product(product)
+    payload.update(build_sync_response_fields(product))
+    payload["publication"] = _publication_for_product(db, tenant_id, product)
+    return payload
+
+
+def _enrich_studio_detail_response(
+    db: Session,
+    tenant_id: int,
+    product: Product,
+) -> Dict[str, Any]:
+    body = _serialise_studio_product(product)
+    body.update(build_sync_response_fields(product))
+    return {
+        "product": body,
+        "per_channel": _compute_per_channel(product),
+        "publication": _publication_for_product(db, tenant_id, product),
+    }
+
+
+def _maybe_schedule_meta_resync(
+    background_tasks: BackgroundTasks,
+    db: Session,
+    tenant_id: int,
+    product: Product,
+    changed_keys: set,
+) -> None:
+    if not meta_relevant_patch_keys(changed_keys):
+        return
+    if not mark_native_meta_sync_pending(db, product):
+        return
+    schedule_native_meta_sync(background_tasks, tenant_id, int(product.id))
+
+
 def _serialise_manual_product(p: Product) -> Dict[str, Any]:
     """Render a product row in the shape the dashboard expects.
 
@@ -2098,6 +2148,7 @@ async def merchant_catalog_upload_manual_product_image(
 async def merchant_catalog_create_manual_product(
     payload: _ManualProductIn,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -2167,13 +2218,15 @@ async def merchant_catalog_create_manual_product(
         except CatalogMediaStorageError as exc:
             db.rollback()
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+    mark_native_meta_sync_pending(db, p)
     db.commit()
     db.refresh(p)
+    schedule_native_meta_sync(background_tasks, tenant_id, int(p.id))
     audit(
         "merchant_catalog_create_manual_product",
         tenant_id=tenant_id, product_id=int(p.id), title=p.title[:80],
     )
-    return _serialise_manual_product(p)
+    return _enrich_manual_product_response(db, tenant_id, p)
 
 
 @merchant_router.patch("/products/manual/{product_id}")
@@ -2181,6 +2234,7 @@ async def merchant_catalog_update_manual_product(
     product_id: int,
     payload: _ManualProductPatch,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -2247,13 +2301,14 @@ async def merchant_catalog_update_manual_product(
     if (p.source or "").strip().lower() == "manual":
         p.source = SOURCE_NAHLA_NATIVE
     ensure_native_default_variant(db, p)
+    _maybe_schedule_meta_resync(background_tasks, db, tenant_id, p, set(data.keys()))
     db.commit()
     db.refresh(p)
     audit(
         "merchant_catalog_update_manual_product",
         tenant_id=tenant_id, product_id=int(p.id), fields=sorted(data.keys()),
     )
-    return _serialise_manual_product(p)
+    return _enrich_manual_product_response(db, tenant_id, p)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2669,6 +2724,39 @@ async def merchant_catalog_meta_sync_confirm(
     return result
 
 
+@merchant_router.post("/products/{product_id}/meta-sync/retry")
+async def merchant_catalog_meta_sync_retry(
+    product_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Re-queue Meta sync for one Nahla-native product (background, idempotent)."""
+    tenant_id = resolve_tenant_id(request)
+    p = (
+        db.query(Product)
+        .filter(Product.id == product_id, Product.tenant_id == tenant_id)
+        .first()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="product_not_found")
+    rejection = meta_export_rejection_detail(p)
+    if rejection is not None:
+        raise HTTPException(status_code=409, detail=rejection)
+    if not mark_native_meta_sync_pending(db, p):
+        raise HTTPException(status_code=409, detail=rejection or {"error_code": "not_eligible"})
+    db.commit()
+    db.refresh(p)
+    schedule_native_meta_sync(background_tasks, tenant_id, int(product_id))
+    return {
+        "ok": True,
+        "product_id": int(product_id),
+        **build_sync_response_fields(p),
+        "publication": _publication_for_product(db, tenant_id, p),
+    }
+
+
 @merchant_router.get("/products/{product_id}")
 async def merchant_catalog_product_detail(
     product_id: int,
@@ -2690,11 +2778,7 @@ async def merchant_catalog_product_detail(
     )
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
-    return {
-        "product":     _serialise_studio_product(p),
-        "per_channel": _compute_per_channel(p),
-        "publication": build_product_publication_status(p),
-    }
+    return _enrich_studio_detail_response(db, tenant_id, p)
 
 
 @merchant_router.patch("/products/{product_id}")
@@ -2702,6 +2786,7 @@ async def merchant_catalog_update_product(
     product_id: int,
     payload: _StudioProductPatch,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     _user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -2717,6 +2802,7 @@ async def merchant_catalog_update_product(
     _assert_merchant_editable_or_409(p)
 
     fields = _apply_studio_product_patch(p, payload)
+    _maybe_schedule_meta_resync(background_tasks, db, tenant_id, p, set(fields))
     db.commit()
     db.refresh(p)
     audit(
@@ -2726,11 +2812,7 @@ async def merchant_catalog_update_product(
         source=product_source(p),
         fields=fields,
     )
-    return {
-        "product":     _serialise_studio_product(p),
-        "per_channel": _compute_per_channel(p),
-        "publication": build_product_publication_status(p),
-    }
+    return _enrich_studio_detail_response(db, tenant_id, p)
 
 
 @admin_router.get("/products/{product_id}")
@@ -2750,7 +2832,7 @@ async def admin_catalog_product_detail(
     return {
         "product":     _serialise_studio_product(p),
         "per_channel": _compute_per_channel(p),
-        "publication": build_product_publication_status(p),
+        "publication": _publication_for_product(db, tenant_id, p),
     }
 
 
