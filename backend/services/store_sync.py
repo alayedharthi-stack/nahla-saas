@@ -1705,15 +1705,6 @@ class StoreSyncService:
                 self.db.flush()  # assign PK so we can reference new_row.id below
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(new_row, previous_status=None)
-                _record_external_lifecycle_shadow_best_effort(
-                    self,
-                    order=new_row,
-                    provider=adapter_source,
-                    raw_previous_status=None,
-                    raw_current_status=normalised_status,
-                    normalized_order=normalised,
-                    raw_payload=raw if isinstance(raw, dict) else None,
-                )
 
                 # ── Fire automation events for new orders found via API poll ──
                 # Mirrors handle_order_webhook so confirmation messages are sent
@@ -1791,6 +1782,16 @@ class StoreSyncService:
                             "[StoreSync/poll] automation emit failed tenant=%s order=%s: %s",
                             self.tenant_id, ext_id, _ae,
                         )
+
+                _record_external_lifecycle_shadow_best_effort(
+                    self,
+                    order=new_row,
+                    provider=adapter_source,
+                    raw_previous_status=None,
+                    raw_current_status=normalised_status,
+                    normalized_order=normalised,
+                    raw_payload=raw if isinstance(raw, dict) else None,
+                )
 
                 created += 1
 

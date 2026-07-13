@@ -42,6 +42,15 @@ def normalize_salla_lifecycle_business_intent(
     if not curr or (prev and prev == curr):
         return None
 
+    has_prior = bool(prev) and prev != "unknown"
+
+    if not has_prior:
+        if curr in _CONFIRMATION_STATUSES:
+            return BusinessIntent.ORDER_CONFIRMED
+        if curr in _PAYMENT_PENDING_STATUSES:
+            return BusinessIntent.PAYMENT_NEEDED
+        return None
+
     if curr in _CANCELLED_STATUSES and prev not in _CANCELLED_STATUSES:
         return BusinessIntent.ORDER_CANCELLED
     if curr in _REFUNDED_STATUSES and prev not in _REFUNDED_STATUSES:
@@ -61,12 +70,6 @@ def normalize_salla_lifecycle_business_intent(
         return BusinessIntent.SHIPMENT_AVAILABLE
     if curr in _PAYMENT_PENDING_STATUSES and prev not in _PAYMENT_PENDING_STATUSES:
         return BusinessIntent.PAYMENT_NEEDED
-
-    if not prev or prev == "unknown":
-        if curr in _CONFIRMATION_STATUSES:
-            return BusinessIntent.ORDER_CONFIRMED
-        if curr in _PAYMENT_PENDING_STATUSES:
-            return BusinessIntent.PAYMENT_NEEDED
 
     return None
 

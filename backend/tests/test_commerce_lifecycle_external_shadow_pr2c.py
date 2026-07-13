@@ -82,6 +82,21 @@ class TestSallaNormalization:
         )
         assert intent == BusinessIntent.SHIPMENT_AVAILABLE
 
+    def test_new_confirmed_order_maps_order_confirmed(self):
+        intent = normalize_salla_lifecycle_business_intent(
+            None, "under_review", {"payment_method": "cod"}
+        )
+        assert intent == BusinessIntent.ORDER_CONFIRMED
+
+    def test_first_observation_shipped_returns_none(self):
+        assert normalize_salla_lifecycle_business_intent(None, "shipped", {}) is None
+
+    def test_first_observation_delivered_returns_none(self):
+        assert normalize_salla_lifecycle_business_intent(None, "delivered", {}) is None
+
+    def test_repeated_status_returns_none(self):
+        assert normalize_salla_lifecycle_business_intent("shipped", "shipped", {}) is None
+
     def test_unknown_status_returns_none(self):
         assert normalize_salla_lifecycle_business_intent("foo", "bar", {}) is None
 
@@ -211,6 +226,33 @@ class TestShadowFlag:
         )
         assert result is None
         assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "false"}, clear=False)
+    @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
+    @patch("core.commerce_lifecycle.external_shadow_producer.normalize_external_lifecycle_intent")
+    def test_flag_false_skips_capability_and_normalization(
+        self, mock_normalize, mock_caps
+    ):
+        db, _ = _make_db()
+        record_external_order_transition_shadow(
+            db,
+            tenant_id=1,
+            order=_order_row(),
+            provider="salla",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            normalized_order={"status": "shipped"},
+        )
+        mock_normalize.assert_not_called()
+        mock_caps.assert_not_called()
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "0"}, clear=False)
+    def test_flag_zero_is_false(self):
+        assert commerce_lifecycle_external_shadow_enabled() is False
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "on"}, clear=False)
+    def test_flag_on_is_true(self):
+        assert commerce_lifecycle_external_shadow_enabled() is True
 
     @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "true"}, clear=False)
     @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
