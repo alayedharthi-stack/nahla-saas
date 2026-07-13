@@ -68,3 +68,33 @@ jobs:
 
       - name: Constitution compliance
         run: python -m pytest backend/tests/test_constitution_compliance.py -q
+
+  trusted-context-layer1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          pip install pytest
+
+      - name: Layer 1 Trusted Context validation
+        run: |
+          python -m pytest \
+            backend/tests/test_trusted_context_layer1_mass_validation.py \
+            backend/tests/test_trusted_context_layer1_golden.py \
+            backend/tests/test_trusted_context_shadow_wireup.py \
+            backend/tests/test_trusted_context_coupons_promotions.py \
+            -q --maxfail=1
