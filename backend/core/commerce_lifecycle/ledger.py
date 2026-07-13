@@ -38,6 +38,10 @@ _ALLOWED_DISPATCH_DECISION_KEYS: FrozenSet[str] = frozenset({
     "closed_window_strategy",
     "service_key",
     "reason_code",
+    "business_evidence_valid",
+    "capabilities_valid",
+    "template_evidence_valid",
+    "template_missing_evidence",
 })
 
 _FORBIDDEN_PAYLOAD_KEYS: FrozenSet[str] = frozenset({

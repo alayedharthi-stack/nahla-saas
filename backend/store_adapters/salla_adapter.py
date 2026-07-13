@@ -31,6 +31,7 @@ from store_integration.models import (
 )
 from store_integration.registry import register_adapter
 from store_adapters.base_adapter import BaseStoreAdapter
+from store_adapters.salla_lifecycle import normalize_salla_lifecycle_business_intent
 
 logger = logging.getLogger("nahla.adapter.salla")
 
@@ -449,6 +450,9 @@ class SallaAdapter(BaseStoreAdapter):
         "supports_tracking_urls": True,
         "supports_payment_link_generation": True,
     }
+    normalize_lifecycle_business_intent = staticmethod(
+        normalize_salla_lifecycle_business_intent
+    )
 
     def __init__(
         self,

@@ -325,6 +325,18 @@ class TestPrivacySnapshots:
             "intent": "order_confirmed",
         }
 
+    def test_shadow_dispatch_dimensions_allowlisted(self):
+        decision = sanitize_dispatch_decision({
+            "handoff_kind": "external_lifecycle_shadow",
+            "intent": "shipment_available",
+            "reason_code": "eligible",
+            "business_evidence_valid": "true",
+            "capabilities_valid": "true",
+            "template_evidence_valid": "false",
+            "template_missing_evidence": "tracking_url",
+        })
+        assert decision["template_missing_evidence"] == "tracking_url"
+
     def test_no_destination_persisted(self):
         db, _ = _reserve()
         row = db.query(CommerceLifecycleNotificationLedger).one()
