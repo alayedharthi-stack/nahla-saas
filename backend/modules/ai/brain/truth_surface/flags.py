@@ -10,6 +10,7 @@ import os
 _PHASE1_SHADOW = "NAHLA_TRUTH_SURFACE_SHADOW_ENABLED"
 _UTS_V1_SHADOW = "NAHLA_UTS_V1_SHADOW_ENABLED"
 _UTS_V1_ENFORCE = "NAHLA_UTS_V1_ENFORCE_ENABLED"
+_TRUSTED_CONTEXT_SHADOW = "NAHLA_TRUSTED_CONTEXT_SHADOW_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -37,7 +38,14 @@ def is_uts_v1_enforce_enabled() -> bool:
     return _is_enabled(_UTS_V1_ENFORCE)
 
 
+def is_trusted_context_shadow_enabled() -> bool:
+    """Trusted Context snapshot shadow — on by default. Set false to disable."""
+    raw = os.getenv(_TRUSTED_CONTEXT_SHADOW, "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 __all__ = [
+    "is_trusted_context_shadow_enabled",
     "is_truth_surface_shadow_enabled",
     "is_uts_v1_enforce_enabled",
     "is_uts_v1_shadow_enabled",

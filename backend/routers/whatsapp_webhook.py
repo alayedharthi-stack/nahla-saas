@@ -6922,6 +6922,52 @@ async def _handle_merchant_message(
 
         # Load recent conversation history for both paths
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
+
+        # ── Trusted Context shadow (telemetry only — no prompt/Brain wiring) ──
+        try:
+            from modules.ai.brain.truth_surface.flags import (  # noqa: PLC0415
+                is_trusted_context_shadow_enabled,
+            )
+            from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                current_trusted_context,
+                pop_shadow_build_error_class,
+                run_trusted_context_shadow,
+                safe_shadow_trace_metadata,
+            )
+
+            if is_trusted_context_shadow_enabled():
+                _tc_snapshot = current_trusted_context()
+                if _tc_snapshot is None:
+                    _tc_snapshot = run_trusted_context_shadow(
+                        db=db,
+                        tenant_id=tenant_id,
+                        customer_phone=to,
+                        message=text or "",
+                        conversation=convo,
+                        conversation_id=getattr(convo, "id", None),
+                        brain_state=state,
+                        inbound_metadata=inbound_metadata,
+                    )
+                if _tc_snapshot is not None:
+                    _trace.extra.update(safe_shadow_trace_metadata(_tc_snapshot))
+                else:
+                    _build_err = pop_shadow_build_error_class()
+                    if _build_err:
+                        _trace.extra["trusted_context_shadow_status"] = "build_error"
+                        _trace.extra["trusted_context_shadow_error_class"] = _build_err
+                        _trace.extra["trusted_context_shadow_stage"] = "build"
+        except Exception as _tc_wire_exc:  # noqa: BLE001
+            logger.warning(
+                "[TRUSTED_CONTEXT_SHADOW] wire_failed tenant=%s stage=wireup error_class=%s",
+                tenant_id,
+                _tc_wire_exc.__class__.__name__,
+            )
+            _trace.extra["trusted_context_shadow_status"] = "wireup_error"
+            _trace.extra["trusted_context_shadow_error_class"] = (
+                _tc_wire_exc.__class__.__name__
+            )
+            _trace.extra["trusted_context_shadow_stage"] = "wireup"
+
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
@@ -10282,6 +10328,7 @@ async def _handle_merchant_message(
         # reacts when the assistant is repeating itself or the customer
         # side appears automated.
         _loop_replaced_with_recovery = False
+        _loop_guard_provenance: Dict[str, Any] = {}
         if reply and not _brain_handoff:
             try:
                 from core.ai_pause_guard import (  # noqa: PLC0415
@@ -10296,6 +10343,9 @@ async def _handle_merchant_message(
                     from core.order_flow import _load_brain_state as _loop_load_bs  # noqa: PLC0415
                     from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
                         build_checkout_slot_fallback_reply,
+                    )
+                    from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+                        order_support_reply_protected,
                     )
                     from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
                         has_active_commerce_from_state,
@@ -10312,7 +10362,26 @@ async def _handle_merchant_message(
                         _skip_legacy_loop = should_skip_legacy_order_flow_reply()
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break loop guard
                         pass
-                    if _loop_checkout_active and not _skip_legacy_loop:
+                    _loop_order_support_owned = order_support_reply_protected(
+                        decision_action=str(_br_dec_action or ""),
+                        decision_args=dict(_br_dec_args or {}),
+                    )
+                    if _loop_order_support_owned:
+                        from core.outbound_text_policy import (  # noqa: PLC0415
+                            OutboundTextSource as _LoopGuardOTS,
+                        )
+
+                        _pre_loop_src = (
+                            _outbound_text_tracker.text_source.value
+                            if _outbound_text_tracker is not None
+                            else _LoopGuardOTS.UNKNOWN.value
+                        )
+                        _loop_guard_provenance = {
+                            "pre_loop_guard_text_source": _pre_loop_src,
+                            "loop_guard_override_applied": False,
+                            "loop_guard_override_skipped_reason": "order_support_owned",
+                        }
+                    elif _loop_checkout_active and not _skip_legacy_loop:
                         _loop_checkout_recovery = (
                             build_checkout_slot_fallback_reply(
                                 state=_loop_bs,
@@ -10478,7 +10547,10 @@ async def _handle_merchant_message(
                 conversation_id=convo.id, tenant_id=tenant_id,
                 extra_metadata=_otp_merge_save_metadata(
                     _outbound_text_tracker,
-                    _persona_ownership.to_metadata(),
+                    {
+                        **_persona_ownership.to_metadata(),
+                        **_loop_guard_provenance,
+                    },
                     persona_compose_event=(
                         _payment_persona_compose_event or _brain_persona_compose_event
                     ),
@@ -14291,6 +14363,14 @@ async def _handle_merchant_message(
         # function exited. ``emit()`` is wrapped in its own try/except
         # internally — observability MUST NOT take down the response
         # path under any circumstance.
+        try:
+            from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                clear_trusted_context,
+            )
+
+            clear_trusted_context()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — context cleanup must not block emit
+            pass
         _sync_persona_observability()
         try:
             _trace.emit()

@@ -273,12 +273,7 @@ export const templatesApi = {
     if (params?.tag)      q.set('tag',      params.tag)
     if (params?.search)   q.set('search',   params.search)
     const qs = q.toString() ? `?${q.toString()}` : ''
-    return apiCall<{
-      templates: NahlaLibraryTemplate[]
-      total: number
-      filter_tags: Record<string, string>
-      smart_trigger_map: Record<string, string[]>
-    }>(`/templates/nahla-library${qs}`)
+    return apiCall<NahlaLibraryResponse>(`/templates/nahla-library${qs}`)
   },
 
   importNahlaTemplate: (template_key: string, language = 'ar', custom_name?: string) =>
@@ -332,6 +327,34 @@ export interface NahlaLibraryTemplate {
   step_number?:           number | null
   has_coupon?:            boolean
   trigger_delay_hours?:   number | null
+  filter_meta?: {
+    intent: string
+    order_channel: string
+    required_capabilities: string[]
+    required_variables: string[]
+    required_buttons: string[]
+    customizable: boolean
+  }
+}
+
+export interface NahlaLibraryGroup {
+  channel: string
+  label_ar: string
+  templates: NahlaLibraryTemplate[]
+  total: number
+}
+
+export interface NahlaLibraryResponse {
+  templates: NahlaLibraryTemplate[]
+  total: number
+  filter_tags: Record<string, string>
+  smart_trigger_map?: Record<string, string[]>
+  service_catalog?: Record<string, unknown>
+  capability_aware?: boolean
+  merchant_mode?: 'whatsapp_only' | 'external_store' | 'hybrid'
+  default_order_channel?: 'external_store' | 'whatsapp' | 'adaptive'
+  capabilities?: Record<string, boolean>
+  groups?: NahlaLibraryGroup[]
 }
 
 export interface NahlaSettingsPayload {

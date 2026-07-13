@@ -3681,3 +3681,57 @@ class ProductRanking(Base):
 
     tenant = relationship("Tenant")
     product = relationship("Product")
+
+
+class CommerceLifecycleNotificationLedger(Base):
+    """
+    Shadow-only lifecycle notification idempotency and audit ledger (PR 2B).
+
+    Stores structured dispatch metadata — never customer message text, prompts,
+    tokens, or sensitive evidence values.
+    """
+
+    __tablename__ = "commerce_lifecycle_notification_ledger"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_lifecycle_ledger_tenant_idempotency",
+        ),
+        Index("ix_lifecycle_ledger_tenant_order", "tenant_id", "order_id"),
+        Index(
+            "ix_lifecycle_ledger_tenant_intent",
+            "tenant_id",
+            "business_intent",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    order_id = Column(Integer, nullable=False)
+    business_intent = Column(String(64), nullable=False)
+    channel = Column(String(32), nullable=False)
+    source_event_id = Column(String(128), nullable=True)
+    transition_version = Column(String(64), nullable=True)
+    idempotency_key = Column(String(512), nullable=False)
+    outcome = Column(String(64), nullable=False)
+    reason_code = Column(String(64), nullable=True)
+    dispatch_decision_json = Column(JSONB, nullable=True)
+    capabilities_snapshot_json = Column(JSONB, nullable=True)
+    evidence_present_json = Column(JSONB, nullable=True)
+    automation_execution_id = Column(
+        Integer,
+        ForeignKey("automation_executions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
