@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.trusted_context_layer1
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
