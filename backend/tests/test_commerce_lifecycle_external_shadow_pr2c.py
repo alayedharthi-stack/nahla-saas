@@ -30,15 +30,22 @@ from core.commerce_lifecycle.external_shadow_flags import (  # noqa: E402
     commerce_lifecycle_external_shadow_enabled,
 )
 from core.commerce_lifecycle.external_shadow_producer import (  # noqa: E402
+    _decide_shadow_outcome,
     build_order_lifecycle_evidence,
     record_external_order_transition_shadow,
 )
+from core.commerce_lifecycle.evidence import (  # noqa: E402
+    CapabilityValidationResult,
+    EvidenceValidationResult,
+)
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
 from core.commerce_lifecycle.ledger import ShadowLedgerOutcome  # noqa: E402
+from core.commerce_lifecycle.strategies import ClosedWindowStrategy  # noqa: E402
 from models import CommerceLifecycleNotificationLedger  # noqa: E402
 from store_adapters.salla_lifecycle import normalize_salla_lifecycle_business_intent  # noqa: E402
 from store_integration.lifecycle_normalization import (  # noqa: E402
     build_transition_identity,
+    canonicalize_provider_timestamp,
     normalize_external_lifecycle_intent,
     resolve_lifecycle_intent_normalizer,
 )
@@ -144,6 +151,72 @@ class TestTransitionIdentity:
             raw_payload=payload,
         )
         assert a == b
+
+    def test_z_and_offset_same_transition_version(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-1",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+        )
+        z_payload = {"updated_at": "2026-07-13T10:00:00Z"}
+        offset_payload = {"updated_at": "2026-07-13T10:00:00+00:00"}
+        assert build_transition_identity(**kwargs, raw_payload=z_payload)[1] == (
+            build_transition_identity(**kwargs, raw_payload=offset_payload)[1]
+        )
+
+    def test_offset_same_instant_same_transition_version(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-1",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+        )
+        utc_payload = {"updated_at": "2026-07-13T10:00:00Z"}
+        riyadh_payload = {"updated_at": "2026-07-13T13:00:00+03:00"}
+        assert build_transition_identity(**kwargs, raw_payload=utc_payload)[1] == (
+            build_transition_identity(**kwargs, raw_payload=riyadh_payload)[1]
+        )
+
+    def test_different_instants_different_transition_version(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-1",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+        )
+        a = build_transition_identity(**kwargs, raw_payload={"updated_at": "2026-07-13T10:00:00Z"})
+        b = build_transition_identity(**kwargs, raw_payload={"updated_at": "2026-07-13T11:00:00Z"})
+        assert a[1] != b[1]
+
+    def test_precision_normalization_is_deterministic(self):
+        raw = "2026-07-13T10:00:00.123456Z"
+        assert canonicalize_provider_timestamp(raw) == canonicalize_provider_timestamp(raw)
+
+    def test_invalid_timestamp_uses_deterministic_fallback(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-9",
+            raw_previous_status="pending",
+            raw_current_status="shipped",
+            raw_payload={"updated_at": "not-a-date"},
+        )
+        assert build_transition_identity(**kwargs) == build_transition_identity(**kwargs)
+
+    def test_naive_timestamp_rejected_from_authoritative_identity(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-9",
+            raw_previous_status="pending",
+            raw_current_status="shipped",
+        )
+        with_utc = build_transition_identity(
+            **kwargs, raw_payload={"updated_at": "2026-07-13T10:00:00Z"}
+        )
+        with_naive = build_transition_identity(
+            **kwargs, raw_payload={"updated_at": "2026-07-13T10:00:00"}
+        )
+        assert with_utc[1] != with_naive[1]
 
     def test_different_transition_different_identity(self):
         payload = {"event_id": "evt-1", "updated_at": "2026-07-13T10:00:00Z"}
@@ -329,12 +402,133 @@ class TestShadowFlag:
             raw_payload={
                 "event_id": "evt-dup",
                 "updated_at": "2026-07-13T10:00:00Z",
-                "shipping": {"tracking_link": "https://carrier.example/track/1"},
+                "shipping": {"tracking_link": "https://tracking.shipco.io/track/1"},
             },
         )
         record_external_order_transition_shadow(**kwargs)
         record_external_order_transition_shadow(**kwargs)
         assert db.query(CommerceLifecycleNotificationLedger).count() == 1
+
+
+class TestShadowOutcomeSemantics:
+    def _caps(self):
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "has_external_store": True,
+                "supports_external_checkout": True,
+                "supports_external_coupons": False,
+                "supports_whatsapp_orders": True,
+                "supports_nahla_orders": False,
+                "supports_bank_transfer": False,
+                "supports_cod": True,
+                "has_whatsapp_catalog": False,
+                "has_external_tracking": True,
+                "has_nahla_tracking": False,
+                "has_payment_link": True,
+            }
+        )
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "true"}, clear=False)
+    @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
+    def test_tracking_number_only_is_shadow_eligible_with_template_diagnostic(
+        self, mock_caps
+    ):
+        mock_caps.return_value = self._caps()
+        db, _ = _make_db()
+        order = _order_row(
+            status="shipped",
+            extra_metadata={"tracking_number": "TRK-ONLY", "payment_method": "cod"},
+        )
+        record_external_order_transition_shadow(
+            db,
+            tenant_id=1,
+            order=order,
+            provider="salla",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            normalized_order={"external_id": "ord-99", "status": "shipped"},
+            raw_payload={"event_id": "evt-track-num", "updated_at": "2026-07-13T10:00:00Z"},
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.outcome == ShadowLedgerOutcome.SHADOW_ELIGIBLE.value
+        decision = row.dispatch_decision_json
+        assert decision["business_evidence_valid"] == "true"
+        assert decision["template_evidence_valid"] == "false"
+        assert decision["template_missing_evidence"] == "tracking_url"
+        assert "https://" not in json.dumps(row.evidence_present_json)
+        assert "TRK-ONLY" not in json.dumps(row.dispatch_decision_json)
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "true"}, clear=False)
+    @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
+    def test_no_tracking_evidence_is_shadow_blocked(self, mock_caps):
+        mock_caps.return_value = self._caps()
+        db, _ = _make_db()
+        order = _order_row(status="shipped", extra_metadata={"payment_method": "cod"})
+        record_external_order_transition_shadow(
+            db,
+            tenant_id=1,
+            order=order,
+            provider="salla",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            normalized_order={"external_id": "ord-99", "status": "shipped"},
+            raw_payload={"event_id": "evt-no-track", "updated_at": "2026-07-13T10:00:00Z"},
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.outcome == ShadowLedgerOutcome.SHADOW_BLOCKED.value
+        assert row.dispatch_decision_json["business_evidence_valid"] == "false"
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "true"}, clear=False)
+    @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
+    def test_valid_tracking_url_is_shadow_eligible_with_template_valid(self, mock_caps):
+        mock_caps.return_value = self._caps()
+        db, _ = _make_db()
+        order = _order_row(status="shipped")
+        record_external_order_transition_shadow(
+            db,
+            tenant_id=1,
+            order=order,
+            provider="salla",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            normalized_order={"external_id": "ord-99", "status": "shipped"},
+            raw_payload={
+                "event_id": "evt-track-url",
+                "updated_at": "2026-07-13T10:00:00Z",
+                "shipping": {"tracking_link": "https://tracking.shipco.io/track/1"},
+            },
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.outcome == ShadowLedgerOutcome.SHADOW_ELIGIBLE.value
+        assert row.dispatch_decision_json["template_evidence_valid"] == "true"
+
+    def test_capability_absent_is_shadow_no_notification(self):
+        definition = SimpleNamespace(
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+        )
+        outcome, reason = _decide_shadow_outcome(
+            definition=definition,
+            evidence_result=EvidenceValidationResult(valid=True),
+            cap_result=CapabilityValidationResult(
+                valid=False,
+                missing_capabilities=("has_external_tracking",),
+            ),
+        )
+        assert outcome == ShadowLedgerOutcome.SHADOW_NO_NOTIFICATION
+        assert reason == "missing_capabilities"
+
+    def test_no_template_resolver_or_service_window_imports(self):
+        producer = importlib.import_module(
+            "core.commerce_lifecycle.external_shadow_producer"
+        )
+        src = Path(producer.__file__).read_text(encoding="utf-8")
+        for token in (
+            "service_template_resolver",
+            "delivery_policy",
+            "approved_template",
+            "service_window",
+        ):
+            assert token not in src
 
 
 class TestTruthfulness:
@@ -366,10 +560,51 @@ class TestTruthfulness:
             raw_previous_status="under_review",
             raw_current_status="shipped",
             normalized_order={"external_id": "ord-99", "status": "shipped"},
-            raw_payload={"event_id": "evt-no-track", "updated_at": "t1"},
+            raw_payload={"event_id": "evt-no-track", "updated_at": "2026-07-13T10:00:00Z"},
         )
         row = db.query(CommerceLifecycleNotificationLedger).one()
         assert row.outcome == ShadowLedgerOutcome.SHADOW_BLOCKED.value
+
+    @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "true"}, clear=False)
+    @patch("core.commerce_lifecycle.external_shadow_producer.resolve_merchant_capabilities")
+    def test_dispatch_decision_contains_machine_dimensions_only(self, mock_caps):
+        mock_caps.return_value = SimpleNamespace(
+            to_dict=lambda: {
+                "has_external_store": True,
+                "supports_external_checkout": True,
+                "supports_external_coupons": False,
+                "supports_whatsapp_orders": True,
+                "supports_nahla_orders": False,
+                "supports_bank_transfer": False,
+                "supports_cod": True,
+                "has_whatsapp_catalog": False,
+                "has_external_tracking": True,
+                "has_nahla_tracking": False,
+                "has_payment_link": True,
+            }
+        )
+        db, _ = _make_db()
+        order = _order_row(
+            status="shipped",
+            extra_metadata={"tracking_number": "TRK1", "payment_method": "cod"},
+        )
+        record_external_order_transition_shadow(
+            db,
+            tenant_id=1,
+            order=order,
+            provider="salla",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            normalized_order={"external_id": "ord-99", "status": "shipped"},
+            raw_payload={"event_id": "evt-json", "updated_at": "2026-07-13T10:00:00Z"},
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        decision = row.dispatch_decision_json
+        assert decision["business_evidence_valid"] in {"true", "false"}
+        assert decision["capabilities_valid"] in {"true", "false"}
+        assert decision["template_evidence_valid"] in {"true", "false", "na"}
+        blob = json.dumps(decision)
+        assert "https://" not in blob
 
     def test_checkout_url_does_not_populate_payment_url(self):
         order = _order_row(checkout_url="https://shop.example/checkout")
@@ -425,7 +660,7 @@ class TestTruthfulness:
             raw_payload={
                 "event_id": "evt-json",
                 "updated_at": "t1",
-                "shipping": {"tracking_link": "https://carrier.example/track/1"},
+                "shipping": {"tracking_link": "https://tracking.shipco.io/track/1"},
             },
         )
         row = db.query(CommerceLifecycleNotificationLedger).one()

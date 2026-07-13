@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Tuple
 
 from core.commerce_lifecycle.intents import BusinessIntent
@@ -43,6 +43,32 @@ def normalize_status_slug(value: Any) -> str:
     if isinstance(value, dict):
         return str(value.get("slug") or value.get("name") or "").strip().lower()
     return str(value or "").strip().lower()
+
+
+def canonicalize_provider_timestamp(value: Any) -> Optional[str]:
+    """
+    Canonical UTC timestamp for transition identity only.
+
+    Parses ISO-8601 provider timestamps, normalizes to
+    ``YYYY-MM-DDTHH:MM:SS.ffffffZ``. Naive timestamps are rejected — they are
+    not assumed to be local or server time. Invalid strings return ``None`` so
+    identity uses the documented deterministic fallback (never wall-clock).
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = value.get("date") or value.get("iso") or value.get("formatted")
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    utc = dt.astimezone(timezone.utc)
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond:06d}Z"
 
 
 def _load_adapter_registry() -> dict[str, type]:
@@ -114,9 +140,9 @@ def _extract_provider_updated_at(raw_payload: Optional[Mapping[str, Any]]) -> Op
         val = raw_payload.get(key)
         if isinstance(val, dict):
             val = val.get("date") or val.get("iso") or val.get("formatted")
-        text = str(val or "").strip()
-        if text:
-            return text
+        canonical = canonicalize_provider_timestamp(val)
+        if canonical:
+            return canonical
     return None
 
 
@@ -158,8 +184,9 @@ def build_transition_identity(
       2. external order update id/version
       3. deterministic digest from provider + order id + statuses + updated_at
 
-    ``transition_version`` uses provider ``updated_at`` when present; otherwise a
-    deterministic digest of the transition components (never wall-clock alone).
+    ``transition_version`` hashes a canonical provider ``updated_at`` (when
+    parseable) plus status transition components; otherwise a deterministic
+    digest (never wall-clock alone).
     """
     provider_key = str(provider or "").strip().lower()
     ext_id = str(external_order_id or "").strip()
@@ -226,6 +253,7 @@ __all__ = [
     "ExternalLifecycleTransition",
     "LifecycleIntentNormalizer",
     "build_transition_identity",
+    "canonicalize_provider_timestamp",
     "normalize_external_lifecycle_intent",
     "normalize_status_slug",
     "resolve_lifecycle_intent_normalizer",

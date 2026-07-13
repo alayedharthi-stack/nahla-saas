@@ -169,11 +169,47 @@ def _evidence_field_names(evidence: OrderLifecycleEvidence) -> Tuple[str, ...]:
     return tuple(names)
 
 
+def _build_shadow_dispatch_decision(
+    *,
+    intent: BusinessIntent,
+    reason_code: str,
+    evidence_result: Any,
+    cap_result: Any,
+    template_result: Any,
+    definition: Any,
+) -> dict[str, str]:
+    decision: dict[str, str] = {
+        "handoff_kind": "external_lifecycle_shadow",
+        "intent": intent.value,
+        "reason_code": reason_code,
+        "business_evidence_valid": (
+            "true"
+            if evidence_result is not None and evidence_result.valid
+            else "false"
+        ),
+        "capabilities_valid": (
+            "true" if cap_result is not None and cap_result.valid else "false"
+        ),
+    }
+    if definition is None or not getattr(definition, "required_template_evidence", ()):
+        decision["template_evidence_valid"] = "na"
+    elif template_result is None:
+        decision["template_evidence_valid"] = "na"
+    else:
+        decision["template_evidence_valid"] = (
+            "true" if template_result.valid else "false"
+        )
+        missing = tuple(template_result.missing_fields or ())
+        invalid = tuple(template_result.invalid_fields or ())
+        if missing or invalid:
+            decision["template_missing_evidence"] = ",".join(missing or invalid)
+    return decision
+
+
 def _decide_shadow_outcome(
     *,
     definition: Any,
     evidence_result: Any,
-    template_result: Any,
     cap_result: Any,
 ) -> Tuple[ShadowLedgerOutcome, str]:
     if definition is None:
@@ -188,10 +224,6 @@ def _decide_shadow_outcome(
         if evidence_result.invalid_fields:
             return ShadowLedgerOutcome.SHADOW_BLOCKED, "invalid_evidence"
         return ShadowLedgerOutcome.SHADOW_BLOCKED, "missing_evidence"
-
-    if definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE:
-        if template_result.missing_fields or template_result.invalid_fields:
-            return ShadowLedgerOutcome.SHADOW_BLOCKED, "missing_template_evidence"
 
     if definition.closed_window_strategy == ClosedWindowStrategy.BLOCKED:
         return ShadowLedgerOutcome.SHADOW_NO_NOTIFICATION, "closed_window_blocked"
@@ -280,8 +312,16 @@ def record_external_order_transition_shadow(
         outcome, reason_code = _decide_shadow_outcome(
             definition=definition,
             evidence_result=evidence_result,
-            template_result=template_result,
             cap_result=cap_result,
+        )
+
+        dispatch_decision = _build_shadow_dispatch_decision(
+            intent=intent,
+            reason_code=reason_code,
+            evidence_result=evidence_result,
+            cap_result=cap_result,
+            template_result=template_result,
+            definition=definition,
         )
 
         reserve = reserve_shadow_decision(
@@ -292,11 +332,7 @@ def record_external_order_transition_shadow(
             channel=_SHADOW_CHANNEL,
             source_event_id=source_event_id,
             transition_version=transition_version,
-            dispatch_decision={
-                "handoff_kind": "external_lifecycle_shadow",
-                "intent": intent.value,
-                "reason_code": reason_code,
-            },
+            dispatch_decision=dispatch_decision,
             capabilities_snapshot=merchant_caps.to_dict(),
             evidence_present=evidence_names,
             commit=False,
@@ -342,4 +378,6 @@ def record_external_order_transition_shadow(
 __all__ = [
     "build_order_lifecycle_evidence",
     "record_external_order_transition_shadow",
+    "_build_shadow_dispatch_decision",
+    "_decide_shadow_outcome",
 ]
