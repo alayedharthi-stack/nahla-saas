@@ -5,10 +5,17 @@ Structured evidence only. No DB I/O, no customer prose, no execution.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, FrozenSet, Mapping, Tuple
 
+from ._privacy import (
+    validate_entities,
+    validate_evidence_refs,
+    validate_required_domains,
+    validate_source_turn_ref,
+    validate_trigger_ids,
+)
 from ._serialization import filter_known_keys, require_schema_version
 
 CONTRACT_STATUS = "PROPOSED / SHADOW CONTRACT"
@@ -56,6 +63,15 @@ class IntentEvidence:
             raise ValueError("confidence must be between 0.0 and 1.0 inclusive")
         if not isinstance(self.ambiguity_state, AmbiguityState):
             object.__setattr__(self, "ambiguity_state", AmbiguityState(self.ambiguity_state))
+        object.__setattr__(self, "entities", validate_entities(self.entities))
+        object.__setattr__(self, "required_domains", validate_required_domains(self.required_domains))
+        object.__setattr__(self, "evidence_refs", validate_evidence_refs(self.evidence_refs))
+        object.__setattr__(self, "trigger_ids", validate_trigger_ids(self.trigger_ids))
+        object.__setattr__(
+            self,
+            "source_turn_ref",
+            validate_source_turn_ref(self.source_turn_ref),
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -75,15 +91,15 @@ class IntentEvidence:
         filtered = filter_known_keys(data, _INTENT_EVIDENCE_KEYS)
         require_schema_version(filtered)
         entities_raw = filtered.get("entities") or ()
-        entities = tuple(dict(item) for item in entities_raw)
+        entities = validate_entities(entities_raw)
         return cls(
             confidence=float(filtered["confidence"]),
             entities=entities,
-            required_domains=tuple(filtered.get("required_domains") or ()),
-            evidence_refs=tuple(filtered.get("evidence_refs") or ()),
+            required_domains=validate_required_domains(filtered.get("required_domains") or ()),
+            evidence_refs=validate_evidence_refs(filtered.get("evidence_refs") or ()),
             ambiguity_state=AmbiguityState(filtered.get("ambiguity_state", AmbiguityState.CLEAR.value)),
-            trigger_ids=tuple(filtered.get("trigger_ids") or ()),
-            source_turn_ref=str(filtered.get("source_turn_ref") or ""),
+            trigger_ids=validate_trigger_ids(filtered.get("trigger_ids") or ()),
+            source_turn_ref=validate_source_turn_ref(str(filtered.get("source_turn_ref") or "")),
             schema_version=str(filtered.get("schema_version", SCHEMA_VERSION)),
             shadow_only=bool(filtered.get("shadow_only", True)),
         )

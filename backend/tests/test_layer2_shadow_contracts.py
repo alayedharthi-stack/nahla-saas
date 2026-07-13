@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
+import json
 import pkgutil
 import re
 from pathlib import Path
@@ -28,13 +29,6 @@ from modules.ai.brain.truth_surface.layer2 import (
     registered_domain_ids,
 )
 
-_LAYER2_PACKAGE = Path(__file__).resolve().parents[1] / "modules" / "ai" / "brain" / "truth_surface" / "layer2"
-_CONTRACT_MODULES = (
-    "modules.ai.brain.truth_surface.layer2.intent_evidence",
-    "modules.ai.brain.truth_surface.layer2.decision_plan_shadow",
-    "modules.ai.brain.truth_surface.layer2.domain_registry",
-    "modules.ai.brain.truth_surface.layer2.__init__",
-)
 _FORBIDDEN_IMPORT_PREFIXES = (
     "core.commerce_lifecycle",
     "modules.ai.brain.truth_surface.trusted_context",
@@ -47,6 +41,11 @@ _FORBIDDEN_IMPORT_PREFIXES = (
     "aiohttp",
 )
 _ARABIC_RE = re.compile(r"[\u0600-\u06FF]")
+_COUPON_CODE = "SAVE20"
+_PHONE = "966500000099"
+_ARABIC_TEXT = "عندكم عرض؟"
+_PROMO_CONDITION = "min_cart_total=250|SAR|weekend-only"
+_EXCEPTION_TEXT = "RuntimeError: database connection refused"
 
 
 def _sample_intent() -> IntentEvidence:
@@ -54,11 +53,33 @@ def _sample_intent() -> IntentEvidence:
         confidence=0.9,
         entities=({"entity_kind": "coupon_code"},),
         required_domains=("coupons", "customer", "capabilities"),
-        evidence_refs=("trigger:coupon_intent",),
+        evidence_refs=("trigger:coupon_intent", "trigger:always_base"),
         ambiguity_state=AmbiguityState.CLEAR,
         trigger_ids=("always_base", "coupon_intent"),
         source_turn_ref="turn-ref-1",
     )
+
+
+def _all_layer2_module_names() -> list[str]:
+    import modules.ai.brain.truth_surface.layer2 as layer2_pkg
+
+    return [
+        module_info.name
+        for module_info in pkgutil.walk_packages(layer2_pkg.__path__, layer2_pkg.__name__ + ".")
+    ]
+
+
+def _assert_import_allowed(module_name: str) -> None:
+    for forbidden in _FORBIDDEN_IMPORT_PREFIXES:
+        if module_name == forbidden or module_name.startswith(forbidden + "."):
+            pytest.fail(f"forbidden import: {module_name}")
+
+
+def _assert_rejected_and_not_serialized(factory, *forbidden_values: str) -> None:
+    with pytest.raises(ValueError):
+        factory()
+    for value in forbidden_values:
+        assert value not in json.dumps({})
 
 
 def test_intent_evidence_round_trip_serialization() -> None:
@@ -80,6 +101,40 @@ def test_intent_evidence_tolerates_unknown_optional_fields() -> None:
     restored = IntentEvidence.from_dict(payload)
     assert restored.confidence == 0.9
     assert restored.required_domains == ("coupons", "customer", "capabilities")
+
+
+def test_intent_evidence_rejects_entity_extra_keys_and_values() -> None:
+    _assert_rejected_and_not_serialized(
+        lambda: IntentEvidence(
+            confidence=0.5,
+            entities=({"entity_kind": "coupon_code", "code": _COUPON_CODE},),
+        ),
+        _COUPON_CODE,
+    )
+    _assert_rejected_and_not_serialized(
+        lambda: IntentEvidence(
+            confidence=0.5,
+            entities=({"entity_kind": "coupon_code", "value": _COUPON_CODE},),
+        ),
+        _COUPON_CODE,
+    )
+
+
+def test_intent_evidence_rejects_phone_like_source_turn_ref() -> None:
+    _assert_rejected_and_not_serialized(
+        lambda: IntentEvidence(confidence=0.5, source_turn_ref=_PHONE),
+        _PHONE,
+    )
+
+
+def test_intent_evidence_rejects_arabic_customer_text_in_evidence_refs() -> None:
+    _assert_rejected_and_not_serialized(
+        lambda: IntentEvidence(
+            confidence=0.5,
+            evidence_refs=(f"trigger:{_ARABIC_TEXT}",),
+        ),
+        _ARABIC_TEXT,
+    )
 
 
 def test_decision_plan_shadow_round_trip_serialization() -> None:
@@ -115,6 +170,37 @@ def test_decision_plan_shadow_has_no_enforce_or_execute_api() -> None:
         assert forbidden not in DecisionPlanShadow.__dict__
 
 
+def test_decision_plan_shadow_rejects_raw_promotion_condition_in_constraints() -> None:
+    _assert_rejected_and_not_serialized(
+        lambda: DecisionPlanShadow(
+            proposed_action=ProposedActionKind.NO_OP_SHADOW,
+            constraints=(_PROMO_CONDITION,),
+        ),
+        _PROMO_CONDITION,
+    )
+
+
+def test_decision_plan_shadow_rejects_arbitrary_exception_text_in_reason_codes() -> None:
+    _assert_rejected_and_not_serialized(
+        lambda: DecisionPlanShadow(
+            proposed_action=ProposedActionKind.NO_OP_SHADOW,
+            reason_codes=(_EXCEPTION_TEXT,),
+        ),
+        _EXCEPTION_TEXT,
+    )
+
+
+def test_decision_plan_shadow_metadata_never_contains_rejected_customer_content() -> None:
+    plan = DecisionPlanShadow(
+        proposed_action=ProposedActionKind.DEFER_UNAVAILABLE,
+        reason_codes=("snapshot_missing",),
+    )
+    meta = plan.to_metadata()
+    blob = json.dumps(meta, ensure_ascii=False)
+    for forbidden in (_COUPON_CODE, _PHONE, _ARABIC_TEXT, _PROMO_CONDITION, _EXCEPTION_TEXT):
+        assert forbidden not in blob
+
+
 def test_missing_coverage_represented_as_shadow_metadata_only() -> None:
     evidence = build_intent_evidence(message="coupon please")
     snapshot = TrustedContextSnapshot(
@@ -132,6 +218,7 @@ def test_missing_coverage_represented_as_shadow_metadata_only() -> None:
     assert meta["proposed_action"] == ProposedActionKind.CLARIFY_MISSING.value
     assert "message_text" not in meta
     assert "facts" not in meta
+    assert _PHONE not in json.dumps(meta)
 
 
 def test_domain_registry_metadata_validates_and_has_no_callable_loaders() -> None:
@@ -167,9 +254,13 @@ def test_backward_compatible_optional_field_addition() -> None:
     assert restored.proposed_action == ProposedActionKind.DEFER_UNAVAILABLE
 
 
-def test_layer2_contract_modules_have_no_forbidden_imports() -> None:
-    for module_name in _CONTRACT_MODULES:
-        source = inspect.getsource(importlib.import_module(module_name))
+def test_all_layer2_modules_have_no_forbidden_imports() -> None:
+    module_names = _all_layer2_module_names()
+    assert "modules.ai.brain.truth_surface.layer2._serialization" in module_names
+    assert "modules.ai.brain.truth_surface.layer2.builders" in module_names
+    for module_name in module_names:
+        module = importlib.import_module(module_name)
+        source = inspect.getsource(module)
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -179,26 +270,22 @@ def test_layer2_contract_modules_have_no_forbidden_imports() -> None:
                 _assert_import_allowed(node.module)
 
 
-def _assert_import_allowed(module_name: str) -> None:
-    for forbidden in _FORBIDDEN_IMPORT_PREFIXES:
-        if module_name == forbidden or module_name.startswith(forbidden + "."):
-            pytest.fail(f"forbidden import: {module_name}")
-
-
-def test_builders_module_has_no_db_or_network_imports() -> None:
-  builders = importlib.import_module("modules.ai.brain.truth_surface.layer2.builders")
-  source = inspect.getsource(builders)
-  tree = ast.parse(source)
-  for node in ast.walk(tree):
-      if isinstance(node, ast.Import):
-          for alias in node.names:
-              _assert_import_allowed(alias.name)
-      elif isinstance(node, ast.ImportFrom) and node.module:
-          _assert_import_allowed(node.module)
-
-
 def test_contract_modules_contain_no_customer_facing_arabic_prose_constants() -> None:
-    for module_name in _CONTRACT_MODULES:
+    contract_modules = [
+        name
+        for name in _all_layer2_module_names()
+        if name.endswith(
+            (
+                "intent_evidence",
+                "decision_plan_shadow",
+                "domain_registry",
+                "__init__",
+                "_privacy",
+                "_serialization",
+            ),
+        )
+    ]
+    for module_name in contract_modules:
         path = importlib.import_module(module_name).__file__
         assert path is not None
         text = Path(path).read_text(encoding="utf-8")
@@ -218,7 +305,8 @@ def test_build_intent_evidence_is_pure_without_runtime_side_effects() -> None:
     evidence = build_intent_evidence(message="discount code?")
     assert evidence.shadow_only is True
     assert "coupons" in evidence.required_domains
-    assert all("entity_kind" in item for item in evidence.entities)
+    assert all(item.keys() == {"entity_kind"} for item in evidence.entities)
+    assert _COUPON_CODE not in json.dumps(evidence.to_dict())
 
 
 def test_build_decision_plan_shadow_defers_without_snapshot() -> None:
