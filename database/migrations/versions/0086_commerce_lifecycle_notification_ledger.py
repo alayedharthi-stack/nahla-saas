@@ -40,7 +40,6 @@ def upgrade() -> None:
         sa.Column("order_id", sa.Integer(), nullable=False),
         sa.Column("business_intent", sa.String(length=64), nullable=False),
         sa.Column("channel", sa.String(length=32), nullable=False),
-        sa.Column("destination_hash", sa.String(length=128), nullable=True),
         sa.Column("source_event_id", sa.String(length=128), nullable=True),
         sa.Column("transition_version", sa.String(length=64), nullable=True),
         sa.Column("idempotency_key", sa.String(length=512), nullable=False),

@@ -4,25 +4,41 @@ Shadow-only lifecycle notification ledger (PR 2B).
 Owns idempotency reservation and structured audit metadata for future
 lifecycle dispatch. Does not send messages, select templates, or call AI.
 
-Transaction ownership: callers pass an open SQLAlchemy ``Session`` and are
-responsible for ``commit()`` / ``rollback()`` unless ``commit=True`` is
-passed explicitly to a helper.
+Transaction ownership: callers pass an open SQLAlchemy ``Session`` and own
+``commit()`` / ``rollback()``. Reservation uses a SAVEPOINT via
+``session.begin_nested()`` so duplicate-key conflicts never roll back
+unrelated caller work in the outer transaction.
 """
 from __future__ import annotations
 
 import hashlib
-import os
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from core.commerce_lifecycle.definitions import (
+    KNOWN_CAPABILITY_FIELDS,
+    KNOWN_EVIDENCE_FIELDS,
+)
 from core.commerce_lifecycle.intents import BusinessIntent
 
-COMMERCE_LIFECYCLE_SHADOW_LEDGER_ENABLED_ENV = "COMMERCE_LIFECYCLE_SHADOW_LEDGER_ENABLED"
+_ALLOWED_CHANNELS: FrozenSet[str] = frozenset({
+    "whatsapp",
+})
+
+_ALLOWED_DISPATCH_DECISION_KEYS: FrozenSet[str] = frozenset({
+    "handoff_kind",
+    "intent",
+    "open_window_strategy",
+    "closed_window_strategy",
+    "service_key",
+    "reason_code",
+})
 
 _FORBIDDEN_PAYLOAD_KEYS: FrozenSet[str] = frozenset({
     "message_text",
@@ -41,9 +57,18 @@ _FORBIDDEN_PAYLOAD_KEYS: FrozenSet[str] = frozenset({
     "bank_account",
     "iban",
     "card_number",
+    "customer_name",
+    "customer_phone",
+    "phone",
+    "destination",
+    "destination_hash",
 })
 
-_SENSITIVE_URL_KEY_SUFFIXES = ("_url", "_link")
+_SENT_OUTCOMES: FrozenSet[str] = frozenset({
+    "sent",
+    "delivered",
+    "message_sent",
+})
 
 
 class ShadowLedgerOutcome(str, Enum):
@@ -52,7 +77,6 @@ class ShadowLedgerOutcome(str, Enum):
     SHADOW_RESERVED = "shadow_reserved"
     SHADOW_ELIGIBLE = "shadow_eligible"
     SHADOW_BLOCKED = "shadow_blocked"
-    SHADOW_DUPLICATE = "shadow_duplicate"
     SHADOW_NO_NOTIFICATION = "shadow_no_notification"
     SHADOW_MERCHANT_ACTION = "shadow_merchant_action"
     SHADOW_ERROR = "shadow_error"
@@ -61,7 +85,6 @@ class ShadowLedgerOutcome(str, Enum):
 _MARKABLE_OUTCOMES: FrozenSet[ShadowLedgerOutcome] = frozenset({
     ShadowLedgerOutcome.SHADOW_ELIGIBLE,
     ShadowLedgerOutcome.SHADOW_BLOCKED,
-    ShadowLedgerOutcome.SHADOW_DUPLICATE,
     ShadowLedgerOutcome.SHADOW_NO_NOTIFICATION,
     ShadowLedgerOutcome.SHADOW_MERCHANT_ACTION,
     ShadowLedgerOutcome.SHADOW_ERROR,
@@ -85,13 +108,20 @@ class MarkShadowOutcomeResult:
     reason_code: Optional[str]
 
 
-def is_shadow_ledger_enabled() -> bool:
-    """Feature flag — default false; not wired to runtime producers in PR 2B."""
-    return os.getenv(COMMERCE_LIFECYCLE_SHADOW_LEDGER_ENABLED_ENV, "false").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+def _normalize_required_text(value: str, *, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field} must not be empty")
+    return text
+
+
+def _normalize_optional_transition_field(value: Optional[str], *, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{field} must be None or non-empty text")
+    return text
 
 
 def build_lifecycle_idempotency_key(
@@ -103,45 +133,59 @@ def build_lifecycle_idempotency_key(
     source_event_id: Optional[str] = None,
     transition_version: Optional[str] = None,
 ) -> str:
-    """Canonical idempotency key aligned with PR 2A field names."""
-    intent_value = (
-        business_intent.value
-        if isinstance(business_intent, BusinessIntent)
-        else str(business_intent)
-    )
-    parts = (
-        str(int(tenant_id)),
-        str(int(order_id)),
-        intent_value,
-        str(channel or "").strip().lower(),
-        str(source_event_id or "").strip(),
-        str(transition_version or "").strip(),
-    )
-    return ":".join(parts)
+    """
+    Canonical idempotency digest for ``(tenant_id, idempotency_key)`` uniqueness.
+
+    ``tenant_id`` is enforced by the DB unique constraint and is intentionally
+    omitted from the hashed payload to avoid redundant encoding. Components are
+    canonicalized as JSON then hashed so delimiter characters in event ids cannot
+    collide. ``None`` and ``""`` are not interchangeable — absent fields are
+    ``null`` in the payload; whitespace-only values are rejected.
+    """
+    _validate_tenant_order(tenant_id, order_id)
+    intent_value = _validate_business_intent(business_intent)
+    channel_value = _normalize_required_text(channel, field="channel").lower()
+    if channel_value not in _ALLOWED_CHANNELS:
+        raise ValueError(f"unsupported channel: {channel_value!r}")
+
+    payload = {
+        "order_id": int(order_id),
+        "business_intent": intent_value,
+        "channel": channel_value,
+        "source_event_id": _normalize_optional_transition_field(
+            source_event_id,
+            field="source_event_id",
+        ),
+        "transition_version": _normalize_optional_transition_field(
+            transition_version,
+            field="transition_version",
+        ),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def build_idempotency_key_from_fields(
     key_fields: Sequence[str],
     context: Mapping[str, Any],
 ) -> str:
-    """Build a key using declarative ``idempotency_key_fields`` from PR 2A."""
+    """Build a digest using declarative ``idempotency_key_fields`` from PR 2A."""
     if not key_fields:
         raise ValueError("idempotency_key_fields must not be empty")
-    parts = []
+    payload: dict[str, Any] = {}
     for field in key_fields:
         name = str(field).strip()
         if not name:
             raise ValueError("empty idempotency key field name")
-        parts.append(str(context.get(name, "")).strip())
-    return ":".join(parts)
-
-
-def hash_destination_reference(destination: str) -> str:
-    """Minimized destination reference — SHA-256 hex, no reversible phone storage."""
-    normalized = str(destination or "").strip()
-    if not normalized:
-        raise ValueError("destination reference must not be empty")
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        if name == "tenant_id":
+            continue
+        value = context.get(name)
+        if value is None:
+            payload[name] = None
+        else:
+            payload[name] = str(value).strip()
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _validate_business_intent(business_intent: Union[BusinessIntent, str]) -> str:
@@ -165,25 +209,32 @@ def _validate_tenant_order(tenant_id: int, order_id: int) -> Tuple[int, int]:
     return tid, oid
 
 
-def _reject_forbidden_keys(payload: Mapping[str, Any], *, label: str) -> None:
-    for key in payload:
-        lowered = str(key).lower()
-        if lowered in _FORBIDDEN_PAYLOAD_KEYS:
-            raise ValueError(f"{label} must not contain {key!r}")
-        if any(lowered.endswith(suffix) for suffix in _SENSITIVE_URL_KEY_SUFFIXES):
-            raise ValueError(f"{label} must not contain URL-like key {key!r}")
+def _walk_forbidden_keys(value: Any, *, label: str, path: str = "") -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            key_text = str(key)
+            lowered = key_text.lower()
+            current = f"{path}.{key_text}" if path else key_text
+            if lowered in _FORBIDDEN_PAYLOAD_KEYS:
+                raise ValueError(f"{label} must not contain {current!r}")
+            if any(lowered.endswith(suffix) for suffix in ("_url", "_link")):
+                raise ValueError(f"{label} must not contain URL-like key {current!r}")
+            _walk_forbidden_keys(nested, label=label, path=current)
+    elif isinstance(value, (list, tuple, set)):
+        for idx, nested in enumerate(value):
+            _walk_forbidden_keys(nested, label=label, path=f"{path}[{idx}]")
 
 
 def sanitize_capabilities_snapshot(
     capabilities: Optional[Mapping[str, Any]],
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     if not capabilities:
         return {}
-    out: Dict[str, bool] = {}
+    out: dict[str, bool] = {}
     for key, value in capabilities.items():
         name = str(key).strip()
-        if not name:
-            raise ValueError("capability snapshot keys must not be empty")
+        if name not in KNOWN_CAPABILITY_FIELDS:
+            raise ValueError(f"unknown capability field {name!r}")
         if not isinstance(value, bool):
             raise ValueError(f"capability {name!r} must be boolean")
         out[name] = value
@@ -193,21 +244,34 @@ def sanitize_capabilities_snapshot(
 def sanitize_evidence_present(fields: Optional[Sequence[str]]) -> Tuple[str, ...]:
     if not fields:
         return ()
-    seen = []
+    seen: list[str] = []
     for item in fields:
         name = str(item).strip()
         if not name:
             raise ValueError("evidence field names must not be empty")
+        if name not in KNOWN_EVIDENCE_FIELDS:
+            raise ValueError(f"unknown evidence field {name!r}")
         if name not in seen:
             seen.append(name)
     return tuple(seen)
 
 
-def sanitize_dispatch_decision(payload: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+def sanitize_dispatch_decision(payload: Optional[Mapping[str, Any]]) -> dict[str, str]:
     if not payload:
         return {}
-    _reject_forbidden_keys(payload, label="dispatch_decision_json")
-    return dict(payload)
+    _walk_forbidden_keys(payload, label="dispatch_decision_json")
+    out: dict[str, str] = {}
+    for key, value in payload.items():
+        name = str(key).strip()
+        if name not in _ALLOWED_DISPATCH_DECISION_KEYS:
+            raise ValueError(f"unknown dispatch_decision key {name!r}")
+        if isinstance(value, (dict, list, tuple, set)):
+            raise ValueError(f"dispatch_decision value for {name!r} must be scalar")
+        text = str(value).strip()
+        if not text:
+            raise ValueError(f"dispatch_decision value for {name!r} must not be empty")
+        out[name] = text
+    return out
 
 
 def reserve_shadow_decision(
@@ -219,7 +283,6 @@ def reserve_shadow_decision(
     channel: str,
     source_event_id: Optional[str] = None,
     transition_version: Optional[str] = None,
-    destination_hash: Optional[str] = None,
     dispatch_decision: Optional[Mapping[str, Any]] = None,
     capabilities_snapshot: Optional[Mapping[str, Any]] = None,
     evidence_present: Optional[Sequence[str]] = None,
@@ -227,24 +290,34 @@ def reserve_shadow_decision(
     commit: bool = False,
 ) -> ReserveShadowResult:
     """
-    Atomically reserve a shadow ledger row. Duplicate keys return the existing row.
-    Does not send messages or mutate orders/conversations.
+    Reserve a shadow ledger row inside a SAVEPOINT. Duplicate keys return the
+    existing row without mutating its outcome and without rolling back unrelated
+    caller work in the outer transaction.
     """
     from models import CommerceLifecycleNotificationLedger  # noqa: PLC0415
 
     tid, oid = _validate_tenant_order(tenant_id, order_id)
     intent_value = _validate_business_intent(business_intent)
-    channel_value = str(channel or "").strip().lower()
-    if not channel_value:
-        raise ValueError("channel must not be empty")
+    channel_value = _normalize_required_text(channel, field="channel").lower()
+    if channel_value not in _ALLOWED_CHANNELS:
+        raise ValueError(f"unsupported channel: {channel_value!r}")
+
+    normalized_source_event_id = _normalize_optional_transition_field(
+        source_event_id,
+        field="source_event_id",
+    )
+    normalized_transition_version = _normalize_optional_transition_field(
+        transition_version,
+        field="transition_version",
+    )
 
     idempotency_key = build_lifecycle_idempotency_key(
         tenant_id=tid,
         order_id=oid,
         business_intent=intent_value,
         channel=channel_value,
-        source_event_id=source_event_id,
-        transition_version=transition_version,
+        source_event_id=normalized_source_event_id,
+        transition_version=normalized_transition_version,
     )
 
     row = CommerceLifecycleNotificationLedger(
@@ -252,9 +325,8 @@ def reserve_shadow_decision(
         order_id=oid,
         business_intent=intent_value,
         channel=channel_value,
-        destination_hash=str(destination_hash).strip() if destination_hash else None,
-        source_event_id=str(source_event_id).strip() if source_event_id else None,
-        transition_version=str(transition_version).strip() if transition_version else None,
+        source_event_id=normalized_source_event_id,
+        transition_version=normalized_transition_version,
         idempotency_key=idempotency_key,
         outcome=ShadowLedgerOutcome.SHADOW_RESERVED.value,
         dispatch_decision_json=sanitize_dispatch_decision(dispatch_decision),
@@ -264,18 +336,10 @@ def reserve_shadow_decision(
     )
 
     try:
-        db.add(row)
-        db.flush()
-        if commit:
-            db.commit()
-        return ReserveShadowResult(
-            ledger_id=int(row.id),
-            idempotency_key=idempotency_key,
-            duplicate=False,
-            outcome=row.outcome,
-        )
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
     except IntegrityError:
-        db.rollback()
         existing = (
             db.query(CommerceLifecycleNotificationLedger)
             .filter_by(tenant_id=tid, idempotency_key=idempotency_key)
@@ -287,6 +351,15 @@ def reserve_shadow_decision(
             duplicate=True,
             outcome=existing.outcome,
         )
+
+    if commit:
+        db.commit()
+    return ReserveShadowResult(
+        ledger_id=int(row.id),
+        idempotency_key=idempotency_key,
+        duplicate=False,
+        outcome=row.outcome,
+    )
 
 
 def mark_shadow_outcome(
@@ -306,6 +379,9 @@ def mark_shadow_outcome(
         raise ValueError("tenant_id must be positive")
 
     outcome_value = outcome.value if isinstance(outcome, ShadowLedgerOutcome) else str(outcome)
+    if outcome_value in _SENT_OUTCOMES:
+        raise ValueError(f"outcome {outcome_value!r} is not permitted")
+
     try:
         parsed_outcome = ShadowLedgerOutcome(outcome_value)
     except ValueError as exc:
@@ -314,8 +390,14 @@ def mark_shadow_outcome(
     if parsed_outcome not in _MARKABLE_OUTCOMES:
         raise ValueError(f"outcome {outcome_value!r} is not markable")
 
-    if reason_code is not None and not re.fullmatch(r"[a-z][a-z0-9_]*", str(reason_code)):
-        raise ValueError("reason_code must be machine-readable snake_case")
+    if reason_code is not None:
+        reason_text = str(reason_code).strip()
+        if len(reason_text) > 64:
+            raise ValueError("reason_code exceeds maximum length")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", reason_text):
+            raise ValueError("reason_code must be machine-readable snake_case")
+    else:
+        reason_text = None
 
     row = (
         db.query(CommerceLifecycleNotificationLedger)
@@ -323,13 +405,20 @@ def mark_shadow_outcome(
         .one()
     )
 
+    if row.outcome == parsed_outcome.value:
+        return MarkShadowOutcomeResult(
+            ledger_id=int(row.id),
+            outcome=row.outcome,
+            reason_code=row.reason_code,
+        )
+
     if row.outcome != ShadowLedgerOutcome.SHADOW_RESERVED.value:
         raise ValueError(
             f"ledger {ledger_id} outcome transition not allowed from {row.outcome!r}"
         )
 
     row.outcome = parsed_outcome.value
-    row.reason_code = str(reason_code).strip() if reason_code else None
+    row.reason_code = reason_text
     db.flush()
     if commit:
         db.commit()
@@ -342,14 +431,11 @@ def mark_shadow_outcome(
 
 
 __all__ = [
-    "COMMERCE_LIFECYCLE_SHADOW_LEDGER_ENABLED_ENV",
     "MarkShadowOutcomeResult",
     "ReserveShadowResult",
     "ShadowLedgerOutcome",
     "build_idempotency_key_from_fields",
     "build_lifecycle_idempotency_key",
-    "hash_destination_reference",
-    "is_shadow_ledger_enabled",
     "mark_shadow_outcome",
     "reserve_shadow_decision",
     "sanitize_capabilities_snapshot",

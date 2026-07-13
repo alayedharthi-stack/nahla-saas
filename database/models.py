@@ -3711,7 +3711,6 @@ class CommerceLifecycleNotificationLedger(Base):
     order_id = Column(Integer, nullable=False)
     business_intent = Column(String(64), nullable=False)
     channel = Column(String(32), nullable=False)
-    destination_hash = Column(String(128), nullable=True)
     source_event_id = Column(String(128), nullable=True)
     transition_version = Column(String(64), nullable=True)
     idempotency_key = Column(String(512), nullable=False)
