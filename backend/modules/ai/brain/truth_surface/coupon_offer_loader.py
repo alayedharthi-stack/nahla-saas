@@ -167,7 +167,7 @@ def _resolve_customer_id(
         cid = getattr(identity, "customer_id", None) if identity else None
         if cid is not None:
             return int(cid)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — customer id resolution is best-effort in shadow
         pass
     return None
 
@@ -186,7 +186,7 @@ def _resolve_customer_profile(db: Any, tenant_id: int, customer_id: Optional[int
             )
             .first()
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — profile lookup is best-effort in shadow
         return None
 
 

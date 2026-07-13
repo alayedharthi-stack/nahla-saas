@@ -108,7 +108,7 @@ def _load_customer_order_facts(
             message=message or "",
         )
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.exception(
             "[TRUSTED_CONTEXT] order_context failed tenant=%s err=%s",
             tenant_id,
             exc,
@@ -366,7 +366,7 @@ def _load_payment_shipment_facts(
             source=TruthSource.ORDER_PREPARATION_STATE,
             path="shipment_evidence.tracking_present",
         ))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — shipment evidence is optional in shadow
         pass
 
     return facts
@@ -398,7 +398,7 @@ def _load_capability_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
                 path=f"capabilities.{key}",
             ))
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.exception(
             "[TRUSTED_CONTEXT] capabilities failed tenant=%s err=%s",
             tenant_id,
             exc,
@@ -434,7 +434,7 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             path="commerce_facts.has_coupons",
         ))
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.exception(
             "[TRUSTED_CONTEXT] merchant_policy failed tenant=%s err=%s",
             tenant_id,
             exc,
@@ -468,7 +468,7 @@ def build_trusted_context_snapshot(
             )
             if commerce_bundle:
                 sources.append("active_order_context")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — commerce bundle is optional enrichment
             pass
 
     customer_facts = _load_customer_order_facts(
@@ -550,7 +550,7 @@ def build_trusted_context_snapshot(
                 sources.append("coupon_offer_loader")
                 shadow_observability.update(coupon_obs)
     except Exception as exc:  # noqa: BLE001
-        logger.debug(
+        logger.exception(
             "[TRUSTED_CONTEXT] coupon_promotion_loader failed tenant=%s err=%s",
             tenant_id,
             exc,
@@ -629,7 +629,7 @@ def run_trusted_context_shadow(
             prov.set_facts_version("trusted_context_v1")
             prov.metadata["facts_snapshot_id"] = snapshot.snapshot_id
             prov.metadata["trusted_context"] = snapshot.to_metadata()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance attach must not break shadow
         pass
 
     try:
@@ -637,7 +637,7 @@ def run_trusted_context_shadow(
             "[TRUSTED_CONTEXT_SHADOW] %s",
             json.dumps(snapshot.to_log_dict(), ensure_ascii=False),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry emit must not break shadow
         pass
 
     return snapshot
