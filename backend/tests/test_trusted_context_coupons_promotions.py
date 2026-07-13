@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
@@ -548,3 +550,17 @@ def test_constitution_compliance_stays_green() -> None:
         timeout=120,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+_COMMERCE_AGENT_LAYER1_SKIP = {
+    "test_facts_enter_snapshot_and_projection",
+    "test_no_decision_plan_action_changes",
+}
+
+for _name, _obj in list(globals().items()):
+    if (
+        _name.startswith("test_")
+        and callable(_obj)
+        and _name not in _COMMERCE_AGENT_LAYER1_SKIP
+    ):
+        globals()[_name] = pytest.mark.trusted_context_layer1(_obj)
