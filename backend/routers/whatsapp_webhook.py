@@ -6922,6 +6922,52 @@ async def _handle_merchant_message(
 
         # Load recent conversation history for both paths
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
+
+        # ── Trusted Context shadow (telemetry only — no prompt/Brain wiring) ──
+        try:
+            from modules.ai.brain.truth_surface.flags import (  # noqa: PLC0415
+                is_trusted_context_shadow_enabled,
+            )
+            from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                current_trusted_context,
+                pop_shadow_build_error_class,
+                run_trusted_context_shadow,
+                safe_shadow_trace_metadata,
+            )
+
+            if is_trusted_context_shadow_enabled():
+                _tc_snapshot = current_trusted_context()
+                if _tc_snapshot is None:
+                    _tc_snapshot = run_trusted_context_shadow(
+                        db=db,
+                        tenant_id=tenant_id,
+                        customer_phone=to,
+                        message=text or "",
+                        conversation=convo,
+                        conversation_id=getattr(convo, "id", None),
+                        brain_state=state,
+                        inbound_metadata=inbound_metadata,
+                    )
+                if _tc_snapshot is not None:
+                    _trace.extra.update(safe_shadow_trace_metadata(_tc_snapshot))
+                else:
+                    _build_err = pop_shadow_build_error_class()
+                    if _build_err:
+                        _trace.extra["trusted_context_shadow_status"] = "build_error"
+                        _trace.extra["trusted_context_shadow_error_class"] = _build_err
+                        _trace.extra["trusted_context_shadow_stage"] = "build"
+        except Exception as _tc_wire_exc:  # noqa: BLE001
+            logger.warning(
+                "[TRUSTED_CONTEXT_SHADOW] wire_failed tenant=%s stage=wireup error_class=%s",
+                tenant_id,
+                _tc_wire_exc.__class__.__name__,
+            )
+            _trace.extra["trusted_context_shadow_status"] = "wireup_error"
+            _trace.extra["trusted_context_shadow_error_class"] = (
+                _tc_wire_exc.__class__.__name__
+            )
+            _trace.extra["trusted_context_shadow_stage"] = "wireup"
+
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
@@ -14317,6 +14363,14 @@ async def _handle_merchant_message(
         # function exited. ``emit()`` is wrapped in its own try/except
         # internally — observability MUST NOT take down the response
         # path under any circumstance.
+        try:
+            from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                clear_trusted_context,
+            )
+
+            clear_trusted_context()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — context cleanup must not block emit
+            pass
         _sync_persona_observability()
         try:
             _trace.emit()

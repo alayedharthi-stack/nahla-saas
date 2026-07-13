@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from contextvars import ContextVar
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .contract import TrustedContextSnapshot, TrustedDomain, TrustedFact, TruthSource
 from .flags import is_trusted_context_shadow_enabled
@@ -20,6 +20,14 @@ logger = logging.getLogger("nahla.brain.trusted_context")
 
 _current: ContextVar[Optional[TrustedContextSnapshot]] = ContextVar(
     "trusted_context_snapshot",
+    default=None,
+)
+_turn_scope: ContextVar[Optional[Tuple[int, str, Optional[int]]]] = ContextVar(
+    "trusted_context_turn_scope",
+    default=None,
+)
+_last_build_error_class: ContextVar[Optional[str]] = ContextVar(
+    "trusted_context_last_build_error_class",
     default=None,
 )
 
@@ -579,6 +587,43 @@ def current_trusted_context() -> Optional[TrustedContextSnapshot]:
 
 def clear_trusted_context() -> None:
     _current.set(None)
+    _turn_scope.set(None)
+    _last_build_error_class.set(None)
+
+
+def _turn_scope_key(
+    tenant_id: int,
+    customer_phone: str,
+    conversation_id: Optional[int],
+) -> Tuple[int, str, Optional[int]]:
+    return (int(tenant_id), str(customer_phone or "").strip(), conversation_id)
+
+
+def pop_shadow_build_error_class() -> Optional[str]:
+    """Return and clear the last shadow build error class, if any."""
+    err = _last_build_error_class.get()
+    _last_build_error_class.set(None)
+    return err
+
+
+def safe_shadow_trace_metadata(
+    snapshot: TrustedContextSnapshot,
+) -> Dict[str, Any]:
+    """Safe fields only — no fact payloads or coupon codes."""
+    meta = snapshot.to_metadata()
+    out: Dict[str, Any] = {
+        "trusted_context_shadow_status": "ok",
+        "facts_snapshot_id": meta.get("snapshot_id", ""),
+        "loaded_domains": list(meta.get("loaded_domains") or []),
+        "sources": list(meta.get("sources") or []),
+        "fact_count": int(meta.get("fact_count") or 0),
+    }
+    if snapshot.shadow_observability:
+        out["shadow_observability"] = dict(snapshot.shadow_observability)
+        out["loader_duration_ms"] = snapshot.shadow_observability.get(
+            "loader_duration_ms",
+        )
+    return out
 
 
 def run_trusted_context_shadow(
@@ -600,6 +645,17 @@ def run_trusted_context_shadow(
     if not is_trusted_context_shadow_enabled():
         return None
 
+    scope = _turn_scope_key(
+        tenant_id,
+        customer_phone,
+        conversation_id or getattr(conversation, "id", None),
+    )
+    existing = _current.get()
+    if existing is not None:
+        if _turn_scope.get() == scope:
+            return existing
+        clear_trusted_context()
+
     try:
         snapshot = build_trusted_context_snapshot(
             db=db,
@@ -612,14 +668,16 @@ def run_trusted_context_shadow(
             inbound_metadata=inbound_metadata,
         )
     except Exception as exc:  # noqa: BLE001
+        _last_build_error_class.set(exc.__class__.__name__)
         logger.warning(
-            "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s err=%s",
+            "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s stage=build error_class=%s",
             tenant_id,
-            exc,
+            exc.__class__.__name__,
         )
         return None
 
     set_current_trusted_context(snapshot)
+    _turn_scope.set(scope)
 
     try:
         from core.turn_provenance import current_turn_provenance  # noqa: PLC0415
@@ -633,9 +691,11 @@ def run_trusted_context_shadow(
         pass
 
     try:
+        log_payload = snapshot.to_log_dict()
+        log_payload["event"] = "TRUSTED_CONTEXT_SHADOW"
         logger.info(
             "[TRUSTED_CONTEXT_SHADOW] %s",
-            json.dumps(snapshot.to_log_dict(), ensure_ascii=False),
+            json.dumps(log_payload, ensure_ascii=False),
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry emit must not break shadow
         pass
@@ -657,7 +717,9 @@ __all__ = [
     "build_trusted_context_snapshot",
     "clear_trusted_context",
     "current_trusted_context",
+    "pop_shadow_build_error_class",
     "run_trusted_context_shadow",
+    "safe_shadow_trace_metadata",
     "set_current_trusted_context",
     "trusted_context_projection_for_compose",
 ]
