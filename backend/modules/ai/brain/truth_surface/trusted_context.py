@@ -558,11 +558,12 @@ def build_trusted_context_snapshot(
                 sources.append("coupon_offer_loader")
                 shadow_observability.update(coupon_obs)
     except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "[TRUSTED_CONTEXT] coupon_promotion_loader failed tenant=%s err=%s",
+        logger.warning(
+            "[TRUSTED_CONTEXT_SHADOW] build_failed tenant=%s stage=coupon_promotion_loader error_class=%s",
             tenant_id,
-            exc,
+            exc.__class__.__name__,
         )
+        raise
 
     snapshot = TrustedContextSnapshot(
         tenant_id=int(tenant_id),
