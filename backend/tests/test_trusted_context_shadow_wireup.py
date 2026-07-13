@@ -66,7 +66,13 @@ def _merchant_handler_convo(**kwargs) -> SimpleNamespace:
 
 
 @contextmanager
-def _merchant_handler_patch_ctx(*, convo, shadow_mock=None, history_side_effect=None):
+def _merchant_handler_patch_ctx(
+    *,
+    convo,
+    shadow_mock=None,
+    history_side_effect=None,
+    whatsapp_send_mock=None,
+):
     """Common patches to reach trusted-context wire-up and brain.process."""
     from contextlib import ExitStack
 
@@ -139,7 +145,7 @@ def _merchant_handler_patch_ctx(*, convo, shadow_mock=None, history_side_effect=
         stack.enter_context(patch("core.store_knowledge.build_ai_context", return_value={}))
         stack.enter_context(patch(
             "routers.whatsapp_webhook._send_whatsapp_message",
-            new=AsyncMock(return_value=True),
+            new=whatsapp_send_mock or AsyncMock(return_value=True),
         ))
         stack.enter_context(patch(
             "services.whatsapp_platform.service.provider_post_with_context",
@@ -637,4 +643,87 @@ def test_handle_merchant_message_shadow_fail_open_brain_unchanged() -> None:
     shadow_mock.assert_called_once()
     mock_brain.return_value.process.assert_called_once()
     assert current_trusted_context() is None
+    clear_trusted_context()
+
+
+def test_handle_merchant_message_coupon_loader_failure_fail_open_unchanged(caplog) -> None:
+    import logging
+
+    from modules.ai.brain.truth_surface import trusted_context
+    from modules.ai.brain.truth_surface import coupon_offer_loader
+    from routers.whatsapp_webhook import _handle_merchant_message
+    from services.turn_trace import new_trace as _real_new_trace
+
+    caplog.set_level(logging.WARNING, logger="nahla.brain.trusted_context")
+    caplog.set_level(logging.INFO, logger="nahla.brain.trusted_context")
+
+    clear_trusted_context()
+    convo = _merchant_handler_convo()
+    db = _merchant_handler_db()
+    brain_reply = "نفس الرد"
+    send_mock = AsyncMock(return_value=True)
+    captured_traces: list = []
+
+    def _capture_new_trace(**kwargs):
+        trace = _real_new_trace(**kwargs)
+        captured_traces.append(trace)
+        return trace
+
+    with patch.object(trusted_context, "_load_customer_order_facts", return_value=[]), patch.object(
+        trusted_context, "_load_state_order_facts", return_value=[]
+    ), patch.object(trusted_context, "_load_payment_shipment_facts", return_value=[]), patch.object(
+        trusted_context, "_load_capability_facts", return_value=[]
+    ), patch.object(trusted_context, "_load_merchant_policy_facts", return_value=[]), patch(
+        "core.active_order_context.load_commerce_bundle_from_db", return_value={}
+    ), patch.object(
+        coupon_offer_loader, "should_load_coupon_promotion_facts", return_value=True
+    ), patch.object(
+        coupon_offer_loader,
+        "load_coupon_promotion_facts",
+        side_effect=RuntimeError("secret-value"),
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "services.turn_trace.new_trace",
+        side_effect=_capture_new_trace,
+    ), _merchant_handler_patch_ctx(
+        convo=convo,
+        whatsapp_send_mock=send_mock,
+    ) as (
+        mock_brain,
+        _state,
+    ):
+        mock_brain.return_value.process = AsyncMock(
+            return_value={"reply": brain_reply, "buttons": []},
+        )
+        caplog.clear()
+        _run(_handle_merchant_message(
+            phone_id="PH1",
+            to="966500000099",
+            text="عندكم كوبون؟",
+            tenant_id=1,
+            db=db,
+        ))
+
+    mock_brain.return_value.process.assert_called_once()
+    brain_kwargs = mock_brain.return_value.process.call_args.kwargs
+    assert "trusted_context" not in brain_kwargs
+    assert "projection" not in brain_kwargs
+    assert "known_facts" not in brain_kwargs
+    send_mock.assert_awaited()
+    assert current_trusted_context() is None
+    assert pop_shadow_build_error_class() is None
+    assert len(captured_traces) == 1
+    trace_extra = captured_traces[0].extra
+    assert trace_extra["trusted_context_shadow_status"] == "build_error"
+    assert trace_extra["trusted_context_shadow_error_class"] == "RuntimeError"
+    assert trace_extra["trusted_context_shadow_stage"] == "build"
+
+    log_text = caplog.text
+    assert "stage=coupon_promotion_loader" in log_text
+    assert "stage=build" in log_text
+    assert "RuntimeError" in log_text
+    assert "secret-value" not in log_text
+    assert "snapshot_id" not in log_text
     clear_trusted_context()
