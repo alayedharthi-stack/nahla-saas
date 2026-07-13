@@ -782,6 +782,40 @@ def _normalise_order(raw: Any) -> Dict:
     return apply_salla_order_normalisation(raw, result)
 
 
+def _record_external_lifecycle_shadow_best_effort(
+    sync: "StoreSyncService",
+    *,
+    order: Any,
+    provider: str,
+    raw_previous_status: Optional[str],
+    raw_current_status: str,
+    normalized_order: Dict[str, Any],
+    raw_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Isolated best-effort PR 2C shadow write — never fails order ingestion."""
+    try:
+        from core.commerce_lifecycle.external_shadow_producer import (  # noqa: PLC0415
+            record_external_order_transition_shadow,
+        )
+
+        record_external_order_transition_shadow(
+            sync.db,
+            tenant_id=sync.tenant_id,
+            order=order,
+            provider=provider,
+            raw_previous_status=raw_previous_status,
+            raw_current_status=raw_current_status,
+            normalized_order=normalized_order,
+            raw_payload=raw_payload,
+        )
+    except Exception:
+        logger.exception(
+            "[StoreSync] external lifecycle shadow failed tenant=%s order=%s",
+            sync.tenant_id,
+            getattr(order, "id", None),
+        )
+
+
 def _merge_order_extra_metadata(
     existing: Optional[Dict[str, Any]],
     normalised: Dict[str, Any],
@@ -1640,6 +1674,15 @@ class StoreSyncService:
                 )
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
+                _record_external_lifecycle_shadow_best_effort(
+                    self,
+                    order=existing,
+                    provider=adapter_source,
+                    raw_previous_status=prev_status,
+                    raw_current_status=normalised_status,
+                    normalized_order=normalised,
+                    raw_payload=raw if isinstance(raw, dict) else None,
+                )
                 updated += 1
             else:
                 new_row = Order(
@@ -1662,6 +1705,15 @@ class StoreSyncService:
                 self.db.flush()  # assign PK so we can reference new_row.id below
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(new_row, previous_status=None)
+                _record_external_lifecycle_shadow_best_effort(
+                    self,
+                    order=new_row,
+                    provider=adapter_source,
+                    raw_previous_status=None,
+                    raw_current_status=normalised_status,
+                    normalized_order=normalised,
+                    raw_payload=raw if isinstance(raw, dict) else None,
+                )
 
                 # ── Fire automation events for new orders found via API poll ──
                 # Mirrors handle_order_webhook so confirmation messages are sent
@@ -2747,6 +2799,7 @@ class StoreSyncService:
             return
 
         is_new = False
+        lifecycle_prev_status: Optional[str] = None
         order_row = (
             self.db.query(Order)
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
@@ -2762,6 +2815,7 @@ class StoreSyncService:
         )
 
         if order_row is not None:
+            lifecycle_prev_status = order_row.status
             prev_status = order_row.status
             order_row.status                = normalised["status"]
             order_row.total                 = normalised["total"]
@@ -2821,6 +2875,7 @@ class StoreSyncService:
                 if order_row is None:
                     # Should be impossible, but fail loudly rather than silently.
                     raise
+                lifecycle_prev_status = order_row.status
                 prev_status = order_row.status
                 order_row.status                = normalised["status"]
                 order_row.total                 = normalised["total"]
@@ -3107,6 +3162,16 @@ class StoreSyncService:
                 self.db.commit()
             except Exception:
                 self.db.rollback()
+
+            _record_external_lifecycle_shadow_best_effort(
+                self,
+                order=order_row,
+                provider=webhook_source,
+                raw_previous_status=lifecycle_prev_status,
+                raw_current_status=normalised["status"],
+                normalized_order=normalised,
+                raw_payload=payload if isinstance(payload, dict) else None,
+            )
 
             # Close the offer-decision attribution loop. We do this on every
             # *new* order — not only on `order_paid` — because Salla orders
