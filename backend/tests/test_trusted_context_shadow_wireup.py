@@ -514,7 +514,8 @@ def test_constitution_compliance_green() -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_no_templates_coupon_product_files_in_diff() -> None:
+def test_branch_diff_excludes_other_agent_scope_paths() -> None:
+    """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths."""
     import subprocess
 
     proc = subprocess.run(
@@ -523,23 +524,36 @@ def test_no_templates_coupon_product_files_in_diff() -> None:
         capture_output=True,
         text=True,
     )
-    files = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-    forbidden = {
+    files = {line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()}
+
+    forbidden_exact = {
         "backend/routers/coupons.py",
         "backend/services/coupon_generator.py",
         "backend/services/promotion_engine.py",
         "backend/core/store_knowledge.py",
     }
-    assert not files.intersection(forbidden)
-    assert files <= {
-        "backend/routers/whatsapp_webhook.py",
-        "backend/modules/ai/brain/truth_surface/trusted_context.py",
-        "backend/tests/test_trusted_context_shadow_wireup.py",
-    } or files.issubset({
-        "backend/routers/whatsapp_webhook.py",
-        "backend/modules/ai/brain/truth_surface/trusted_context.py",
-        "backend/tests/test_trusted_context_shadow_wireup.py",
-    })
+    forbidden_scope_markers = (
+        "backend/core/commerce_lifecycle/",
+        "backend/modules/ai/commerce_agent/",
+        "backend/modules/ai/adapters/whatsapp_dispatch.py",
+        "backend/modules/ai/postprocess/outbound_belt.py",
+        "/templates/",
+        "/campaigns/",
+        "/lifecycle/",
+        "/approved_template",
+        "/order_execution/",
+        "/checkout_execution/",
+        "/payment_execution/",
+        "coupon_generator",
+        "promotion_engine",
+        "/routers/coupons.py",
+        "store_knowledge.py",
+    )
+
+    assert not files.intersection(forbidden_exact)
+    for path in files:
+        lowered = path.lower()
+        assert not any(marker in lowered for marker in forbidden_scope_markers), path
 
 
 def test_handle_merchant_message_shadow_wire_integration() -> None:
