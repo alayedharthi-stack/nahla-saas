@@ -11,6 +11,7 @@ _PHASE1_SHADOW = "NAHLA_TRUTH_SURFACE_SHADOW_ENABLED"
 _UTS_V1_SHADOW = "NAHLA_UTS_V1_SHADOW_ENABLED"
 _UTS_V1_ENFORCE = "NAHLA_UTS_V1_ENFORCE_ENABLED"
 _TRUSTED_CONTEXT_SHADOW = "NAHLA_TRUSTED_CONTEXT_SHADOW_ENABLED"
+_LAYER2_SHADOW = "NAHLA_LAYER2_SHADOW_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -44,7 +45,13 @@ def is_trusted_context_shadow_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def is_layer2_shadow_enabled() -> bool:
+    """Layer 2 intent/decision shadow compare telemetry — off by default."""
+    return _is_enabled(_LAYER2_SHADOW)
+
+
 __all__ = [
+    "is_layer2_shadow_enabled",
     "is_trusted_context_shadow_enabled",
     "is_truth_surface_shadow_enabled",
     "is_uts_v1_enforce_enabled",

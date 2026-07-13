@@ -77,6 +77,12 @@ _WHITESPACE_RE = re.compile(r"\s")
 _EVIDENCE_REF_RE = re.compile(r"^trigger:[a-z0-9_]+$")
 _DOMAIN_FACT_RE = re.compile(r"^domain:[a-z_]+$")
 _SNAPSHOT_REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$")
+_UUID_HEX_REF_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _is_uuid_hex_snapshot_ref(value: str) -> bool:
+    """TrustedContextSnapshot.snapshot_id uses uuid.uuid4().hex (32 lowercase hex)."""
+    return _UUID_HEX_REF_RE.fullmatch(value) is not None
 
 
 def _reject_sensitive_text(value: str, *, field_name: str) -> None:
@@ -114,6 +120,8 @@ def validate_source_turn_ref(value: str) -> str:
     text = str(value or "")
     if not text:
         return ""
+    if _is_uuid_hex_snapshot_ref(text):
+        return text
     if not _SOURCE_TURN_REF_RE.fullmatch(text):
         raise ValueError("source_turn_ref has invalid opaque identifier format")
     _reject_sensitive_text(text, field_name="source_turn_ref")
@@ -196,6 +204,8 @@ def validate_snapshot_ref(value: str) -> str:
     text = str(value or "")
     if not text:
         return ""
+    if _is_uuid_hex_snapshot_ref(text):
+        return text
     if not _SNAPSHOT_REF_RE.fullmatch(text):
         raise ValueError("snapshot_ref has invalid opaque identifier format")
     _reject_sensitive_text(text, field_name="snapshot_ref")

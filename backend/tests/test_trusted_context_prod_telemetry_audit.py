@@ -207,6 +207,68 @@ def test_safe_error_event_counts_without_fail() -> None:
     assert report.verdict == TelemetryVerdict.PASS_WITH_FOLLOW_UP
 
 
+def test_safe_layer2_failed_error_event_counts_without_fail() -> None:
+    line = (
+        "WARNING nahla.brain.trusted_context [TRUSTED_CONTEXT_SHADOW] layer2_failed "
+        "tenant=1 stage=layer2_compare error_class=RuntimeError"
+    )
+    report = audit_shadow_telemetry([line], min_samples_for_pass=1)
+    assert report.error_event_count == 1
+    assert report.unsafe_error_event_count == 0
+    assert report.verdict == TelemetryVerdict.PASS_WITH_FOLLOW_UP
+
+
+def test_pass_with_safe_nested_layer2_shadow_metadata() -> None:
+    from modules.ai.brain.truth_surface.contract import TrustedContextSnapshot  # noqa: E402
+    from modules.ai.brain.truth_surface.layer2 import (  # noqa: E402
+        build_decision_plan_shadow,
+        build_intent_evidence,
+    )
+
+    snapshot = TrustedContextSnapshot(
+        tenant_id=1,
+        customer_phone="966500000099",
+        loaded_domains=["customer", "capabilities", "promotions"],
+        facts=[],
+    )
+    snapshot.ensure_snapshot_id()
+    evidence = build_intent_evidence(
+        message="offer please",
+        source_turn_ref="snap-test-ref",
+    )
+    plan = build_decision_plan_shadow(evidence=evidence, snapshot=snapshot)
+    obs = {
+        "loader_duration_ms": 12,
+        "coupon_count": 0,
+        "layer2_shadow": {
+            "status": "ok",
+            "intent_evidence": evidence.to_dict(),
+            "decision_plan": plan.to_metadata(),
+            "duration_ms": 4,
+        },
+    }
+    line = _success_line(shadow_observability=obs)
+    report = audit_shadow_telemetry([line], min_samples_for_pass=1)
+    assert report.verdict == TelemetryVerdict.PASS
+    assert report.forbidden_leak_count == 0
+
+
+def test_fail_on_nested_layer2_shadow_sensitive_leak() -> None:
+    obs = {
+        "loader_duration_ms": 12,
+        "layer2_shadow": {
+            "status": "ok",
+            "intent_evidence": {"facts": {"code": "SECRET10"}},
+            "decision_plan": {"proposed_action": "no_op_shadow"},
+            "duration_ms": 2,
+        },
+    }
+    line = _success_line(shadow_observability=obs)
+    report = audit_shadow_telemetry([line], min_samples_for_pass=1)
+    assert report.verdict == TelemetryVerdict.FAIL
+    assert report.forbidden_leak_count > 0
+
+
 def test_fail_on_unsafe_error_event_with_arbitrary_text() -> None:
     line = _error_line() + " err=database timeout secret"
     report = audit_shadow_telemetry([line], min_samples_for_pass=1)

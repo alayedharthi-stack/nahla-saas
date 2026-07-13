@@ -18,12 +18,12 @@ DEFAULT_MIN_SAMPLES_FOR_PASS = 20
 
 _EVENT_MARKER = "[TRUSTED_CONTEXT_SHADOW]"
 _SUCCESS_EVENT = "TRUSTED_CONTEXT_SHADOW"
-_ERROR_KINDS = ("build_failed", "wire_failed")
+_ERROR_KINDS = ("build_failed", "wire_failed", "layer2_failed")
 
 # Strict safe error line: only tenant, stage, error_class key=value pairs.
 _SAFE_ERROR_LINE_RE = re.compile(
     rf"^\s*.*?{re.escape(_EVENT_MARKER)}\s+"
-    r"(?P<kind>build_failed|wire_failed)\s+"
+    r"(?P<kind>build_failed|wire_failed|layer2_failed)\s+"
     r"tenant=(?P<tenant>\d+)\s+"
     r"stage=(?P<stage>[A-Za-z0-9_]+)\s+"
     r"error_class=(?P<error_class>[A-Za-z0-9_]+)\s*$",

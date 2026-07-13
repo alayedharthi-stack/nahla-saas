@@ -1,7 +1,8 @@
 """
 Layer 2 shadow contracts — PROPOSED / SHADOW CONTRACT only.
 
-Not wired at runtime. No enforcement, telemetry, webhook, Brain, or Compose integration.
+Gate 1: optional fail-open compare telemetry via NAHLA_LAYER2_SHADOW_ENABLED (default off).
+No enforcement, Brain, Compose, loader, or lifecycle integration.
 """
 from __future__ import annotations
 
