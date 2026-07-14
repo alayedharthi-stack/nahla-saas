@@ -134,6 +134,45 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             "do not claim final eligibility unless allow_final_eligibility_claim is true; "
             "no checkout pressure or order prompts; brief Saudi merchant tone"
         )
+    elif bundle.surface == "general_offer_discovery_answer":
+        for key in ("question_route", "forbidden_claims", "facts_snapshot_id"):
+            if key in facts:
+                lines.append(f"{key}: {facts.get(key)}")
+        for bundle_key in ("product_sale_offer_facts", "trusted_coupon_offer_facts"):
+            nested = facts.get(bundle_key)
+            if isinstance(nested, dict) and nested:
+                lines.append(f"{bundle_key}: present")
+                if bundle_key == "product_sale_offer_facts":
+                    if nested.get("sample_products"):
+                        lines.append(f"sample_products: {nested.get('sample_products')}")
+                    lines.append(
+                        f"product_sale_availability: {nested.get('product_sale_availability')}"
+                    )
+                if bundle_key == "trusted_coupon_offer_facts":
+                    lines.append(
+                        f"promotion_availability: {nested.get('promotion_availability')}; "
+                        f"coupon_availability: {nested.get('coupon_availability')}"
+                    )
+        lines.append(
+            "rules: answer general offer discovery from namespaced verified facts only; "
+            "catalog product sale facts and coupon/promotion facts are independent; "
+            "never infer coupon eligibility from catalog sale or vice versa; "
+            "no deterministic merging prose; brief Saudi merchant tone; no checkout pressure"
+        )
+    elif bundle.surface == "product_sale_offer_answer":
+        for key in (
+            "question_kind",
+            "product_sale_availability",
+            "verified_on_sale_product_count",
+            "target_product",
+            "allow_price_mention",
+        ):
+            if key in facts and facts.get(key) is not None:
+                lines.append(f"{key}: {facts.get(key)}")
+        lines.append(
+            "rules: answer product-scoped sale question from catalog verified facts only; "
+            "do not mention coupons or promotions; no checkout pressure; brief Saudi merchant tone"
+        )
     else:
         lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
     return "\n".join(lines)

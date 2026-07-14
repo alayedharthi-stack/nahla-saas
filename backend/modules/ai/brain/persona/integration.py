@@ -143,9 +143,12 @@ def merge_persona_compose_into_extra_metadata(
         "llm_candidate_present",
         "final_text_transformed",
         "final_transform_reasons",
+        "final_customer_text_source",
         "fallback_reason",
         "fallback_action_type",
         "trusted_coupon_offer_compose_active",
+        "general_offer_discovery_compose_active",
+        "product_sale_offer_compose_active",
         "facts_snapshot_id",
     ):
         if event_meta.get(key) is not None:
