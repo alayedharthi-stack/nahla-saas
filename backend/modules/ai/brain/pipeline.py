@@ -3906,6 +3906,12 @@ class MerchantBrain:
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                _tc_offer_facts = dict(
+                    (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
+                        "trusted_coupon_offer_facts",
+                    )
+                    or {}
+                )
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
                     inbound_text=message or "",
@@ -3928,6 +3934,7 @@ class MerchantBrain:
                     ),
                     chosen_path=_chosen_path,
                     kb_availability_facts=(decision.args or {}).get("allowed_facts"),
+                    trusted_coupon_offer_facts=_tc_offer_facts or None,
                 )
                 if _crqg.replaced:
                     reply = _crqg.reply
@@ -4641,6 +4648,29 @@ def _build_reply_state(
                 inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
+        pass
+
+    try:
+        from modules.ai.brain.truth_surface.coupon_offer_consumption_gate import (  # noqa: PLC0415
+            maybe_trusted_coupon_offer_compose_facts,
+            safe_coupon_offer_consumption_trace_metadata,
+        )
+        from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+            current_trusted_context,
+        )
+
+        _tc = current_trusted_context()
+        _tc_coupon_facts = maybe_trusted_coupon_offer_compose_facts(
+            message=ctx.message or "",
+            snapshot=_tc,
+        )
+        if _tc_coupon_facts:
+            known_facts["trusted_coupon_offer_facts"] = _tc_coupon_facts
+            logger.info(
+                "[TRUSTED_COUPON_OFFER_COMPOSE] %s",
+                safe_coupon_offer_consumption_trace_metadata(_tc_coupon_facts),
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — TC coupon compose must not block reply
         pass
 
     if str((decision.args or {}).get("topic") or "") == "kb_availability_facts":

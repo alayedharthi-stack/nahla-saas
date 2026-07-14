@@ -496,6 +496,9 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
     for key in ("availability", "product_focus", "payment_flags", "fulfillment_flags"):
         if key in raw and raw[key]:
             out[key] = raw[key]
+    tc_facts = raw.get("trusted_coupon_offer_facts")
+    if isinstance(tc_facts, dict) and tc_facts:
+        out["trusted_coupon_offer_facts"] = tc_facts
     return out
 
 

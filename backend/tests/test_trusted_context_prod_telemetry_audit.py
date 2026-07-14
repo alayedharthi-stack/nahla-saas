@@ -396,3 +396,31 @@ def test_script_file_pass_with_followup_exits_nonzero_with_require_pass(tmp_path
     out = json.loads(proc.stdout)
     assert out["audit"]["telemetry_log_safety_verdict"] == "PASS_WITH_FOLLOW_UP"
     assert out["source"] == str(log_file)
+
+
+def test_audit_rejects_nested_trusted_coupon_offer_compose_leaks() -> None:
+    leaky = _success_line(
+        trusted_coupon_offer_compose={
+            "status": "ok",
+            "surface": "trusted_coupon_offer_answer",
+            "code": "SAVE10",
+        }
+    )
+    report = audit_shadow_telemetry([leaky], min_samples_for_pass=1)
+    assert report.verdict == TelemetryVerdict.FAIL
+    assert report.forbidden_leak_count >= 1
+
+
+def test_audit_accepts_safe_trusted_coupon_offer_compose_metadata() -> None:
+    safe = _success_line(
+        trusted_coupon_offer_compose={
+            "status": "ok",
+            "surface": "trusted_coupon_offer_answer",
+            "question_kind": "offer",
+            "facts_snapshot_id": "abc123def456",
+        }
+    )
+    report = audit_shadow_telemetry([safe], min_samples_for_pass=1)
+    assert report.forbidden_leak_count == 0
+    assert report.verdict in {TelemetryVerdict.PASS, TelemetryVerdict.PASS_WITH_FOLLOW_UP}
+

@@ -28,6 +28,10 @@ def deterministic_fallback(
         return _payment_media_intro_fallback(bundle)
     if surface == "kb_product_answer":
         return _kb_product_answer_fallback(bundle)
+    if surface == "trusted_coupon_offer_answer":
+        from .trusted_coupon_offer_answer import trusted_coupon_offer_emergency_fallback  # noqa: PLC0415
+
+        return trusted_coupon_offer_emergency_fallback(bundle)
     return _greeting_fallback(ctx, inbound)
 
 

@@ -12,6 +12,7 @@ from .facts_bundle import (
     PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
     PERSONA_SURFACE_KB_PRODUCT_ANSWER,
     PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
+    PERSONA_SURFACE_TRUSTED_COUPON_OFFER_ANSWER,
 )
 from .fallback_catalog import deterministic_fallback
 
@@ -203,6 +204,78 @@ def _apply_kb_product_answer_guards(
                 passed=False,
                 failed_reason="unsupported_superiority_claim",
             )
+
+    return PersonaGuardResult(text=working, passed=True)
+
+
+def _apply_trusted_coupon_offer_answer_guards(
+    text: str,
+    facts: dict[str, Any],
+) -> PersonaGuardResult:
+    working = str(text or "").strip()
+    if not working:
+        return PersonaGuardResult(text="", passed=False, failed_reason="empty_compose")
+
+    if not facts.get("allow_code_mention"):
+        code_markers = (
+            "كود الخصم",
+            "كود خصم",
+            "الكود",
+            "كوبون ",
+            "coupon code",
+            "discount code",
+            "promo code",
+        )
+        if any(m.lower() in working.lower() for m in code_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="coupon_code_disclosure",
+            )
+
+    applied_markers = (
+        "تم تطبيق",
+        "طبقنا",
+        "فعلنا الكوبون",
+        "applied the coupon",
+        "coupon applied",
+    )
+    if any(m in working for m in applied_markers):
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="coupon_applied_claim",
+        )
+
+    if not facts.get("allow_final_eligibility_claim"):
+        final_markers = (
+            "أنت مؤهل",
+            "انت مؤهل",
+            "مؤكد أهليتك",
+            "مؤكد أهليتكم",
+            "definitely eligible",
+            "you are eligible",
+        )
+        if any(m in working for m in final_markers):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="final_eligibility_claim",
+            )
+
+    checkout_markers = (
+        "نكمل الطلب",
+        "اطلب الآن",
+        "أرسل العنوان",
+        "طريقة الدفع",
+        "كم الكمية",
+    )
+    if any(m in working for m in checkout_markers):
+        return PersonaGuardResult(
+            text=working,
+            passed=False,
+            failed_reason="checkout_pressure",
+        )
 
     return PersonaGuardResult(text=working, passed=True)
 
@@ -494,10 +567,17 @@ def apply_persona_compose_guards(
             return catalog_guard
         working = catalog_guard.text
 
+    if bundle.surface == PERSONA_SURFACE_TRUSTED_COUPON_OFFER_ANSWER:
+        coupon_guard = _apply_trusted_coupon_offer_answer_guards(working, facts)
+        if not coupon_guard.passed:
+            return coupon_guard
+        working = coupon_guard.text
+
     # 5 Checkout-pressure guard
     if bundle.surface in PHASE2_SOCIAL_SURFACES or bundle.surface in {
         PERSONA_SURFACE_KB_PRODUCT_ANSWER,
         PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        PERSONA_SURFACE_TRUSTED_COUPON_OFFER_ANSWER,
     }:
         try:
             from ..postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
