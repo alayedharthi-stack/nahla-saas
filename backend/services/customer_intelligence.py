@@ -12,6 +12,12 @@ from sqlalchemy.orm import Session
 from models import Customer, CustomerProfile, Order
 from observability.event_logger import log_event
 from services.offer_decision_flags import DecisionMode, tenant_decision_mode
+from services.order_countability_policy import (
+    COUNTABLE_ORDER_STATUSES,
+    EXCLUDED_ORDER_STATUSES,
+    is_countable_order,
+    order_status_key,
+)
 from utils.phone_utils import normalize_to_e164, normalize_phone_compat
 
 logger = logging.getLogger("nahla.customer_intelligence")
@@ -74,30 +80,6 @@ def _should_update_name(
     existing_trust = _name_trust_level(existing_source)
     return new_trust >= existing_trust
 
-
-COUNTABLE_ORDER_STATUSES = frozenset(
-    {
-        "paid",
-        "confirmed",
-        "processing",
-        "shipped",
-        "out_for_delivery",
-        "delivered",
-        "completed",
-    }
-)
-EXCLUDED_ORDER_STATUSES = frozenset(
-    {
-        "cancelled",
-        "canceled",
-        "failed",
-        "payment_failed",
-        "refunded",
-        "voided",
-        "abandoned",
-        "draft",
-    }
-)
 
 CUSTOMER_STATUS_ORDER = (
     "lead",
@@ -254,37 +236,6 @@ def extract_order_datetime(raw: Any) -> Optional[datetime]:
     return None
 
 
-def order_status_key(order_or_status: Any) -> str:
-    """
-    Return a normalized lowercase status string suitable for comparison
-    against COUNTABLE_ORDER_STATUSES / EXCLUDED_ORDER_STATUSES.
-
-    Heals legacy rows that stored the Salla status as a Python repr of the
-    full status dict (e.g. "{'id': 566146469, 'name': '...',
-    'slug': 'under_review'}") — extracts the slug at READ time so customer
-    classification never depends on a backfill having run.
-    """
-    if isinstance(order_or_status, Order):
-        text = str(getattr(order_or_status, "status", "") or "").strip()
-    else:
-        text = str(order_or_status or "").strip()
-
-    if text.startswith("{"):
-        try:
-            import ast as _ast  # noqa: PLC0415
-            parsed = _ast.literal_eval(text)
-            if isinstance(parsed, dict):
-                text = str(
-                    parsed.get("slug")
-                    or parsed.get("name")
-                    or parsed.get("code")
-                    or text
-                )
-        except (ValueError, SyntaxError):
-            pass
-    return text.strip().lower()
-
-
 def parse_order_total(raw: Any) -> float:
     if isinstance(raw, Order):
         raw = getattr(raw, "total", None)
@@ -313,17 +264,6 @@ def extract_order_customer_name(order_or_payload: Any) -> str:
     elif isinstance(order_or_payload, dict):
         info = dict(order_or_payload.get("customer_info") or order_or_payload.get("customer") or {})
     return str(info.get("name") or order_or_payload.get("customer_name") or "").strip() if isinstance(order_or_payload, dict) else str(info.get("name") or "").strip()
-
-
-def is_countable_order(order_or_status: Any) -> bool:
-    status = order_status_key(order_or_status)
-    if status in EXCLUDED_ORDER_STATUSES:
-        return False
-    if isinstance(order_or_status, Order) and bool(getattr(order_or_status, "is_abandoned", False)):
-        return False
-    if status in COUNTABLE_ORDER_STATUSES:
-        return True
-    return status not in EXCLUDED_ORDER_STATUSES and bool(status)
 
 
 def _days_since_last_seen(metrics: CustomerMetrics, now: datetime) -> Optional[int]:
