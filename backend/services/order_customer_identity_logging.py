@@ -1,0 +1,53 @@
+"""Privacy-safe logging for A1 order-customer identity (no PII identifiers)."""
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+logger = logging.getLogger("nahla.order_customer_identity")
+
+
+def log_identity_sync_event(
+    *,
+    event: str,
+    tenant_id: int,
+    order_source_kind: Optional[str] = None,
+    external_identity_link_state: Optional[str] = None,
+    customer_link_state: Optional[str] = None,
+    link_outcome: Optional[str] = None,
+    matched_via: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    logger.info(
+        "[A1 identity] event=%s tenant_id=%s order_source_kind=%s "
+        "external_link_state=%s customer_link_state=%s link_outcome=%s "
+        "matched_via=%s reason=%s",
+        event,
+        tenant_id,
+        order_source_kind or "-",
+        external_identity_link_state or "-",
+        customer_link_state or "-",
+        link_outcome or "-",
+        matched_via or "-",
+        reason or "-",
+    )
+
+
+def log_identity_sync_failure(
+    *,
+    tenant_id: int,
+    ingest_source: str,
+    exception_class: str,
+    link_outcome: Optional[str] = None,
+) -> None:
+    logger.warning(
+        "[A1 identity] sync_failure tenant_id=%s ingest_source=%s "
+        "exception_class=%s link_outcome=%s",
+        tenant_id,
+        ingest_source,
+        exception_class,
+        link_outcome or "-",
+    )
+
+
+__all__ = ["log_identity_sync_event", "log_identity_sync_failure"]

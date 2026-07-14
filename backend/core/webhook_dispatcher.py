@@ -58,7 +58,10 @@ async def _dispatch_salla(db: Session, event) -> None:
     from routers.webhooks import (  # noqa: PLC0415
         _handle_salla_authorize,
         _disable_salla_integration,
-        _resolve_tenant_from_store,
+    )
+    from services.salla_integration_resolver import (  # noqa: PLC0415
+        extract_canonical_store_id_from_payload,
+        resolve_salla_integration_connection,
     )
 
     payload = event.parsed_payload or {}
@@ -66,7 +69,7 @@ async def _dispatch_salla(db: Session, event) -> None:
         raise RuntimeError("parsed_payload_missing_or_invalid")
 
     event_type = event.event_type or payload.get("event") or "unknown"
-    store_id = event.store_id or str(payload.get("merchant") or payload.get("store_id") or "")
+    store_id = event.store_id or extract_canonical_store_id_from_payload(payload) or ""
     data = payload.get("data") or {}
     if not isinstance(data, dict):
         data = {}
@@ -82,20 +85,27 @@ async def _dispatch_salla(db: Session, event) -> None:
         _disable_salla_integration(db, str(store_id))
         return
 
-    # ── Event types that need a mapped tenant ───────────────────────────────
-    tenant_id = _resolve_tenant_from_store(db, store_id)
-    if tenant_id is None:
-        # This is a real failure that will retry on backoff. If the merchant
-        # is integrating right now the authorize row will land soon and the
-        # retry will succeed. If not, it lands in DLQ and admin can investigate.
+    # ── Event types that need a mapped integration (integration-first) ─────
+    webhook_channel = str(event.provider or "salla")
+    integration_resolution = resolve_salla_integration_connection(
+        db,
+        webhook_provider_channel=webhook_channel,
+        canonical_store_id=str(store_id or ""),
+    )
+    from services.salla_integration_resolver import UnresolvedSallaIntegration  # noqa: PLC0415
+
+    if isinstance(integration_resolution, UnresolvedSallaIntegration):
         log_event(
             EVENTS.DISPATCHER_TENANT_UNRESOLVED,
-            provider="salla",
+            provider=webhook_channel,
             store_id=store_id,
             event_type=event_type,
             webhook_event_id=event.id,
+            reason=integration_resolution.reason,
         )
-        raise RuntimeError(f"tenant_unresolved: store_id={store_id}")
+        raise RuntimeError(f"integration_unresolved: store_id={store_id}")
+
+    tenant_id = int(integration_resolution.tenant_id)
 
     # Stamp tenant_id on the event for observability / admin UI.
     if event.tenant_id != tenant_id:
@@ -104,10 +114,17 @@ async def _dispatch_salla(db: Session, event) -> None:
         db.flush()
 
     from services.store_sync import StoreSyncService  # noqa: PLC0415
-    svc = StoreSyncService(db, tenant_id)
+    svc = StoreSyncService(
+        db,
+        tenant_id,
+        integration_connection_id=int(integration_resolution.integration_id),
+    )
 
     if event_type in ("order.created", "order.updated"):
-        await svc.handle_order_webhook(data)
+        await svc.handle_order_webhook(
+            data,
+            integration_resolution=integration_resolution,
+        )
         # Close the analytics loop: if this order is confirmed, mark the
         # matching ConversationTrace so we know the AI sale converted.
         try:
@@ -126,7 +143,10 @@ async def _dispatch_salla(db: Session, event) -> None:
         return
 
     if event_type in ("customer.created", "customer.updated"):
-        await svc.handle_customer_webhook(data)
+        await svc.handle_customer_webhook(
+            data,
+            integration_connection_id=int(integration_resolution.integration_id),
+        )
         return
 
     # Salla fires `abandoned.cart` (sometimes namespaced as `cart.abandoned`)

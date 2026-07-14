@@ -263,6 +263,32 @@ def get_adapter(tenant_id: int):
         db.close()
 
 
+def adapter_for_integration(integration) -> Any:
+    """Build adapter for a specific Integration row (A1 per-connection poll)."""
+    try:
+        import store_adapters.salla_adapter  # noqa: F401
+    except ImportError:
+        pass
+
+    if integration is None or not getattr(integration, "enabled", False):
+        return None
+
+    adapter_cls = _ADAPTER_REGISTRY.get(integration.provider)
+    if not adapter_cls:
+        logger.warning("[Registry] No adapter class for provider=%s", integration.provider)
+        return None
+
+    cfg = integration.config or {}
+    tenant_id = int(integration.tenant_id)
+    return adapter_cls(
+        api_key=cfg.get("api_key", ""),
+        store_id=cfg.get("store_id", ""),
+        refresh_token=cfg.get("refresh_token", ""),
+        tenant_id=tenant_id,
+        integration_id=integration.id,
+    )
+
+
 def describe_integrations_for_tenant(db: Session, tenant_id: int) -> dict:
     """Return a diagnostic dict for every Salla integration of this tenant.
 
