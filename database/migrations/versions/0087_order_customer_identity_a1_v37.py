@@ -1,12 +1,12 @@
-"""0087 — A1-v3.7 order-customer identity (external profile + dual link semantics).
+"""0087 — A1-v3.7 expand phase (order-customer identity).
 
-Generic platform-wide identity proof:
-- ExternalCustomerProfile per provider connection tuple
-- Dual link fields on orders (customer_link_* vs external_identity_*)
-- Tuple-scoped external coverage + internal customer coverage
-- CHECK constraints for untrusted order_source_kind values
+A1-Expand PR: Alembic head stops at 0087.
+- New tables + nullable order identity columns (no backfill).
+- `order_customer_identity_capability_state` seeded to `expand`.
+- Orders FK/CHECK added NOT VALID (no full-table validation in this release).
+- No orders performance indexes (deferred to A1-Validate PR / 0088).
 
-No backfill. Downgrade drops A1 tables/columns added here.
+Downgrade drops A1 expand objects. Linkage data is not preserved.
 """
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ _FK_ORDERS_EXTERNAL_PROFILE = "fk_orders_external_profile_connection"
 _FK_ECP_TENANT_INTEGRATION = "fk_ecp_tenant_integration"
 _FK_EXT_COV_PROFILE = "fk_ext_cov_tenant_profile"
 _FK_INT_COV_TENANT_CUSTOMER = "fk_int_cov_tenant_customer"
+_CAPABILITY_TABLE = "order_customer_identity_capability_state"
+_CAPABILITY_KEY = "order_customer_identity"
+_CAPABILITY_STATE_EXPAND = "expand"
 
 _CHK_EXTERNAL_NO_CANONICAL = "chk_orders_external_no_canonical_customer"
 _CHK_EXTERNAL_PROFILE_AUTH = "chk_orders_external_profile_authoritative"
@@ -36,6 +39,78 @@ _CHK_NAHL_INTERNAL_AUTH = "chk_orders_nahla_internal_authoritative"
 _CHK_INTERNAL_NO_EXT_AUTH = "chk_orders_internal_no_external_authoritative"
 _CHK_UNTRUSTED_NO_AUTH = "chk_orders_untrusted_no_authoritative"
 _CHK_UNTRUSTED_KINDS = "chk_orders_untrusted_kinds_no_links"
+
+_ORDER_CHECKS = (
+    (_CHK_EXTERNAL_NO_CANONICAL, """
+            order_source_kind IS DISTINCT FROM 'external_provider'
+            OR (
+                customer_id IS NULL
+                AND (customer_link_state = 'unlinked' OR customer_link_state IS NULL)
+                AND customer_link_evidence_class IS NULL
+            )
+            """),
+    (_CHK_EXTERNAL_PROFILE_AUTH, """
+            NOT (
+                order_source_kind = 'external_provider'
+                AND external_identity_evidence_class = 'authoritative'
+            )
+            OR (
+                external_identity_link_state = 'verified'
+                AND external_customer_profile_id IS NOT NULL
+                AND integration_connection_id IS NOT NULL
+                AND external_customer_ref IS NOT NULL
+                AND identity_namespace LIKE 'external_provider_%'
+                AND customer_id IS NULL
+                AND customer_link_state = 'unlinked'
+                AND customer_link_evidence_class IS NULL
+            )
+            """),
+    (_CHK_EXTERNAL_NO_CUST_AUTH, """
+            order_source_kind IS DISTINCT FROM 'external_provider'
+            OR customer_link_evidence_class IS DISTINCT FROM 'authoritative'
+            """),
+    (_CHK_NAHL_INTERNAL_AUTH, """
+            NOT (
+                order_source_kind = 'nahla_internal'
+                AND customer_link_evidence_class = 'authoritative'
+            )
+            OR (
+                customer_link_state = 'verified'
+                AND customer_id IS NOT NULL
+                AND identity_namespace = 'nahla_internal_order_v1'
+                AND external_identity_link_state IS NULL
+                AND external_identity_evidence_class IS NULL
+                AND external_customer_profile_id IS NULL
+                AND integration_connection_id IS NULL
+                AND external_customer_ref IS NULL
+            )
+            """),
+    (_CHK_INTERNAL_NO_EXT_AUTH, """
+            order_source_kind IS DISTINCT FROM 'nahla_internal'
+            OR external_identity_evidence_class IS DISTINCT FROM 'authoritative'
+            """),
+    (_CHK_UNTRUSTED_NO_AUTH, """
+            order_source_kind IN ('nahla_internal', 'external_provider')
+            OR (
+                customer_link_evidence_class IS DISTINCT FROM 'authoritative'
+                AND external_identity_evidence_class IS DISTINCT FROM 'authoritative'
+            )
+            """),
+    (_CHK_UNTRUSTED_KINDS, """
+            order_source_kind NOT IN ('whatsapp', 'manual', 'other')
+            OR (
+                customer_id IS NULL
+                AND external_customer_profile_id IS NULL
+                AND customer_link_evidence_class IS NULL
+                AND external_identity_evidence_class IS NULL
+                AND (customer_link_state = 'unlinked' OR customer_link_state IS NULL)
+                AND (external_identity_link_state = 'unlinked' OR external_identity_link_state IS NULL)
+                AND integration_connection_id IS NULL
+                AND external_customer_ref IS NULL
+                AND identity_namespace IS NULL
+            )
+            """),
+)
 
 
 def _has_table(bind, name: str) -> bool:
@@ -77,10 +152,21 @@ def _has_constraint(bind, table: str, name: str) -> bool:
     return False
 
 
+def _add_check_not_valid(bind, *, table: str, name: str, sql: str) -> None:
+    if _has_constraint(bind, table, name):
+        return
+    op.execute(sa.text(f"ALTER TABLE {table} ADD CONSTRAINT {name} CHECK ({sql}) NOT VALID"))
+
+
+def _add_fk_not_valid(bind, *, table: str, name: str, sql: str) -> None:
+    if _has_constraint(bind, table, name):
+        return
+    op.execute(sa.text(f"ALTER TABLE {table} ADD CONSTRAINT {name} {sql} NOT VALID"))
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
-    # ── customers composite FK target ───────────────────────────────────────
     if not _has_index(bind, "customers", _UQ_CUSTOMERS_TENANT_ID):
         op.create_index(
             _UQ_CUSTOMERS_TENANT_ID,
@@ -89,7 +175,6 @@ def upgrade() -> None:
             unique=True,
         )
 
-    # ── integrations composite FK target ────────────────────────────────────
     if not _has_index(bind, "integrations", _UQ_INTEGRATIONS_TENANT_ID):
         op.create_index(
             _UQ_INTEGRATIONS_TENANT_ID,
@@ -98,7 +183,6 @@ def upgrade() -> None:
             unique=True,
         )
 
-    # ── external_customer_profiles ──────────────────────────────────────────
     if not _has_table(bind, "external_customer_profiles"):
         op.create_table(
             "external_customer_profiles",
@@ -155,7 +239,6 @@ def upgrade() -> None:
                 ["tenant_id", "id"],
             )
 
-    # ── orders identity columns ─────────────────────────────────────────────
     order_cols = [
         ("customer_id", sa.Column("customer_id", sa.Integer(), nullable=True)),
         ("order_source_kind", sa.Column("order_source_kind", sa.String(), nullable=True)),
@@ -195,36 +278,22 @@ def upgrade() -> None:
         if not _has_column(bind, "orders", col_name):
             op.add_column("orders", col_def)
 
-    if not _has_index(bind, "orders", "ix_orders_tenant_customer_id"):
-        op.create_index("ix_orders_tenant_customer_id", "orders", ["tenant_id", "customer_id"])
-    if not _has_index(bind, "orders", "ix_orders_tenant_external_tuple"):
-        op.create_index(
-            "ix_orders_tenant_external_tuple",
-            "orders",
-            ["tenant_id", "identity_namespace", "integration_connection_id", "external_customer_ref"],
-            postgresql_where=sa.text("external_customer_ref IS NOT NULL"),
-        )
-    if not _has_index(bind, "orders", "ix_orders_tenant_order_source_kind"):
-        op.create_index("ix_orders_tenant_order_source_kind", "orders", ["tenant_id", "order_source_kind"])
+    _add_fk_not_valid(
+        bind,
+        table="orders",
+        name=_FK_ORDERS_TENANT_CUSTOMER,
+        sql="FOREIGN KEY (tenant_id, customer_id) REFERENCES customers (tenant_id, id)",
+    )
+    _add_fk_not_valid(
+        bind,
+        table="orders",
+        name=_FK_ORDERS_EXTERNAL_PROFILE,
+        sql=(
+            "FOREIGN KEY (tenant_id, external_customer_profile_id, integration_connection_id) "
+            "REFERENCES external_customer_profiles (tenant_id, id, integration_connection_id)"
+        ),
+    )
 
-    if not _has_constraint(bind, "orders", _FK_ORDERS_TENANT_CUSTOMER):
-        op.create_foreign_key(
-            _FK_ORDERS_TENANT_CUSTOMER,
-            "orders",
-            "customers",
-            ["tenant_id", "customer_id"],
-            ["tenant_id", "id"],
-        )
-    if not _has_constraint(bind, "orders", _FK_ORDERS_EXTERNAL_PROFILE):
-        op.create_foreign_key(
-            _FK_ORDERS_EXTERNAL_PROFILE,
-            "orders",
-            "external_customer_profiles",
-            ["tenant_id", "external_customer_profile_id", "integration_connection_id"],
-            ["tenant_id", "id", "integration_connection_id"],
-        )
-
-    # ── coverage tables ─────────────────────────────────────────────────────
     if not _has_table(bind, "external_customer_profile_order_history_coverage"):
         op.create_table(
             "external_customer_profile_order_history_coverage",
@@ -359,106 +428,42 @@ def upgrade() -> None:
             ["tenant_id", "id"],
         )
 
-    # ── CHECK constraints ───────────────────────────────────────────────────
-    checks = [
-        (
-            _CHK_EXTERNAL_NO_CANONICAL,
+    for name, sql in _ORDER_CHECKS:
+        _add_check_not_valid(bind, table="orders", name=name, sql=sql)
+
+    if not _has_table(bind, _CAPABILITY_TABLE):
+        op.create_table(
+            _CAPABILITY_TABLE,
+            sa.Column("capability_key", sa.String(), primary_key=True),
+            sa.Column("state", sa.String(), nullable=False),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.text("now()"),
+            ),
+            sa.Column("validation_revision", sa.String(), nullable=True),
+            sa.CheckConstraint(
+                "state IN ('expand', 'validated')",
+                name="chk_oci_capability_state",
+            ),
+        )
+    op.execute(
+        sa.text(
+            f"""
+            INSERT INTO {_CAPABILITY_TABLE} (capability_key, state, validation_revision)
+            VALUES ('{_CAPABILITY_KEY}', '{_CAPABILITY_STATE_EXPAND}', NULL)
+            ON CONFLICT (capability_key) DO NOTHING
             """
-            order_source_kind IS DISTINCT FROM 'external_provider'
-            OR (
-                customer_id IS NULL
-                AND (customer_link_state = 'unlinked' OR customer_link_state IS NULL)
-                AND customer_link_evidence_class IS NULL
-            )
-            """,
-        ),
-        (
-            _CHK_EXTERNAL_PROFILE_AUTH,
-            """
-            NOT (
-                order_source_kind = 'external_provider'
-                AND external_identity_evidence_class = 'authoritative'
-            )
-            OR (
-                external_identity_link_state = 'verified'
-                AND external_customer_profile_id IS NOT NULL
-                AND integration_connection_id IS NOT NULL
-                AND external_customer_ref IS NOT NULL
-                AND identity_namespace LIKE 'external_provider_%'
-                AND customer_id IS NULL
-                AND customer_link_state = 'unlinked'
-                AND customer_link_evidence_class IS NULL
-            )
-            """,
-        ),
-        (
-            _CHK_EXTERNAL_NO_CUST_AUTH,
-            """
-            order_source_kind IS DISTINCT FROM 'external_provider'
-            OR customer_link_evidence_class IS DISTINCT FROM 'authoritative'
-            """,
-        ),
-        (
-            _CHK_NAHL_INTERNAL_AUTH,
-            """
-            NOT (
-                order_source_kind = 'nahla_internal'
-                AND customer_link_evidence_class = 'authoritative'
-            )
-            OR (
-                customer_link_state = 'verified'
-                AND customer_id IS NOT NULL
-                AND identity_namespace = 'nahla_internal_order_v1'
-                AND external_identity_link_state IS NULL
-                AND external_identity_evidence_class IS NULL
-                AND external_customer_profile_id IS NULL
-                AND integration_connection_id IS NULL
-                AND external_customer_ref IS NULL
-            )
-            """,
-        ),
-        (
-            _CHK_INTERNAL_NO_EXT_AUTH,
-            """
-            order_source_kind IS DISTINCT FROM 'nahla_internal'
-            OR external_identity_evidence_class IS DISTINCT FROM 'authoritative'
-            """,
-        ),
-        (
-            _CHK_UNTRUSTED_NO_AUTH,
-            """
-            order_source_kind IN ('nahla_internal', 'external_provider')
-            OR (
-                customer_link_evidence_class IS DISTINCT FROM 'authoritative'
-                AND external_identity_evidence_class IS DISTINCT FROM 'authoritative'
-            )
-            """,
-        ),
-        (
-            _CHK_UNTRUSTED_KINDS,
-            """
-            order_source_kind NOT IN ('whatsapp', 'manual', 'other')
-            OR (
-                customer_id IS NULL
-                AND external_customer_profile_id IS NULL
-                AND customer_link_evidence_class IS NULL
-                AND external_identity_evidence_class IS NULL
-                AND (customer_link_state = 'unlinked' OR customer_link_state IS NULL)
-                AND (external_identity_link_state = 'unlinked' OR external_identity_link_state IS NULL)
-                AND integration_connection_id IS NULL
-                AND external_customer_ref IS NULL
-                AND identity_namespace IS NULL
-            )
-            """,
-        ),
-    ]
-    for name, sql in checks:
-        if not _has_constraint(bind, "orders", name):
-            op.execute(sa.text(f"ALTER TABLE orders ADD CONSTRAINT {name} CHECK ({sql})"))
+        )
+    )
 
 
 def downgrade() -> None:
     bind = op.get_bind()
+
+    if _has_table(bind, _CAPABILITY_TABLE):
+        op.drop_table(_CAPABILITY_TABLE)
 
     for name in (
         _CHK_UNTRUSTED_KINDS,
@@ -481,14 +486,6 @@ def downgrade() -> None:
         op.drop_constraint(_FK_ORDERS_EXTERNAL_PROFILE, "orders", type_="foreignkey")
     if _has_constraint(bind, "orders", _FK_ORDERS_TENANT_CUSTOMER):
         op.drop_constraint(_FK_ORDERS_TENANT_CUSTOMER, "orders", type_="foreignkey")
-
-    for idx in (
-        "ix_orders_tenant_order_source_kind",
-        "ix_orders_tenant_external_tuple",
-        "ix_orders_tenant_customer_id",
-    ):
-        if _has_index(bind, "orders", idx):
-            op.drop_index(idx, table_name="orders")
 
     for col in (
         "external_identity_evidence_class",

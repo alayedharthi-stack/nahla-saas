@@ -85,27 +85,57 @@ async def _dispatch_salla(db: Session, event) -> None:
         _disable_salla_integration(db, str(store_id))
         return
 
-    # ── Event types that need a mapped integration (integration-first) ─────
+    # ── Event types that need tenant routing (integration-first, legacy fallback) ─
     webhook_channel = str(event.provider or "salla")
     integration_resolution = resolve_salla_integration_connection(
         db,
         webhook_provider_channel=webhook_channel,
         canonical_store_id=str(store_id or ""),
     )
-    from services.salla_integration_resolver import UnresolvedSallaIntegration  # noqa: PLC0415
+    from services.salla_integration_resolver import (  # noqa: PLC0415
+        ResolvedSallaIntegration,
+        UnresolvedSallaIntegration,
+    )
+    from services.order_customer_identity_logging import (  # noqa: PLC0415
+        log_connection_resolution_status,
+    )
 
-    if isinstance(integration_resolution, UnresolvedSallaIntegration):
-        log_event(
-            EVENTS.DISPATCHER_TENANT_UNRESOLVED,
-            provider=webhook_channel,
-            store_id=store_id,
-            event_type=event_type,
-            webhook_event_id=event.id,
-            reason=integration_resolution.reason,
+    integration_connection_id: int | None = None
+    if isinstance(integration_resolution, ResolvedSallaIntegration):
+        tenant_id = int(integration_resolution.tenant_id)
+        integration_connection_id = int(integration_resolution.integration_id)
+        log_connection_resolution_status(
+            status="resolved",
+            tenant_id=tenant_id,
+            reason=integration_resolution.matched_via,
         )
-        raise RuntimeError(f"integration_unresolved: store_id={store_id}")
+    else:
+        unresolved_reason = (
+            integration_resolution.reason
+            if isinstance(integration_resolution, UnresolvedSallaIntegration)
+            else "integration_unresolved"
+        )
+        from routers.webhooks import _resolve_tenant_from_store  # noqa: PLC0415
 
-    tenant_id = int(integration_resolution.tenant_id)
+        legacy_tenant_id = _resolve_tenant_from_store(db, store_id)
+        if legacy_tenant_id is None:
+            log_event(
+                EVENTS.DISPATCHER_TENANT_UNRESOLVED,
+                provider=webhook_channel,
+                store_id=store_id,
+                event_type=event_type,
+                webhook_event_id=event.id,
+                reason=unresolved_reason,
+            )
+            raise RuntimeError(f"tenant_unresolved: store_id={store_id}")
+
+        tenant_id = int(legacy_tenant_id)
+        integration_resolution = None
+        log_connection_resolution_status(
+            status="unresolved",
+            tenant_id=tenant_id,
+            reason=unresolved_reason,
+        )
 
     # Stamp tenant_id on the event for observability / admin UI.
     if event.tenant_id != tenant_id:
@@ -117,7 +147,7 @@ async def _dispatch_salla(db: Session, event) -> None:
     svc = StoreSyncService(
         db,
         tenant_id,
-        integration_connection_id=int(integration_resolution.integration_id),
+        integration_connection_id=integration_connection_id,
     )
 
     if event_type in ("order.created", "order.updated"):
@@ -145,7 +175,7 @@ async def _dispatch_salla(db: Session, event) -> None:
     if event_type in ("customer.created", "customer.updated"):
         await svc.handle_customer_webhook(
             data,
-            integration_connection_id=int(integration_resolution.integration_id),
+            integration_connection_id=integration_connection_id,
         )
         return
 

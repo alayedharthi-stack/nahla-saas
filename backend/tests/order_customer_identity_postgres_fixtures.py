@@ -81,9 +81,6 @@ def _connect_engine() -> Engine:
 
 
 def _ensure_a1_schema(engine: Engine) -> None:
-    insp = inspect(engine)
-    if "external_customer_profiles" in insp.get_table_names():
-        return
     from alembic import command
     from alembic.config import Config
 
@@ -98,9 +95,41 @@ def _ensure_a1_schema(engine: Engine) -> None:
             str(engine.url.render_as_string(hide_password=False)),
         )
         os.environ["DATABASE_URL"] = str(engine.url.render_as_string(hide_password=False))
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0087")
     finally:
         os.chdir(prev_cwd)
+    _ensure_capability_state_row(engine)
+
+
+def _ensure_capability_state_row(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "external_customer_profiles" not in insp.get_table_names():
+        return
+    if "order_customer_identity_capability_state" not in insp.get_table_names():
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE order_customer_identity_capability_state (
+                        capability_key VARCHAR PRIMARY KEY,
+                        state VARCHAR NOT NULL CHECK (state IN ('expand', 'validated')),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        validation_revision VARCHAR
+                    )
+                    """
+                )
+            )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO order_customer_identity_capability_state
+                    (capability_key, state, validation_revision, updated_at)
+                VALUES ('order_customer_identity', 'expand', NULL, now())
+                ON CONFLICT (capability_key) DO NOTHING
+                """
+            )
+        )
 
 
 @pytest.fixture(scope="module")
@@ -281,11 +310,43 @@ def seed_untrusted_order(session: Session, *, tenant_id: int, kind: str, externa
     return row
 
 
+def seed_capability_state(
+    session: Session,
+    *,
+    state: str,
+    validation_revision: str | None = None,
+) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO order_customer_identity_capability_state
+                (capability_key, state, validation_revision, updated_at)
+            VALUES ('order_customer_identity', :state, :validation_revision, now())
+            ON CONFLICT (capability_key) DO UPDATE
+            SET state = EXCLUDED.state,
+                validation_revision = EXCLUDED.validation_revision,
+                updated_at = now()
+            """
+        ),
+        {"state": state, "validation_revision": validation_revision},
+    )
+    session.flush()
+
+
+def clear_capability_state(session: Session) -> None:
+    session.execute(
+        text("DELETE FROM order_customer_identity_capability_state WHERE capability_key = 'order_customer_identity'")
+    )
+    session.flush()
+
+
 __all__ = [
     "TEST_TENANT_A",
     "TEST_TENANT_B",
+    "clear_capability_state",
     "pg_session",
     "postgres_engine",
+    "seed_capability_state",
     "seed_customer",
     "seed_external_order",
     "seed_external_profile",

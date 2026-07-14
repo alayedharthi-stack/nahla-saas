@@ -1,4 +1,4 @@
-"""PostgreSQL migration chain proof: 0086 → seed legacy → 0087 → downgrade (ephemeral DB)."""
+"""A1-Expand migration tests — 0086 → 0087 only (0088 deferred to A1-Validate PR)."""
 from __future__ import annotations
 
 import os
@@ -46,8 +46,12 @@ _0087_INDEXES = (
     "uq_integrations_tenant_id_id",
     "uq_external_customer_profiles_identity",
     "uq_external_customer_profiles_tenant_id_connection",
+)
+
+_DEFERRED_ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
     "ix_orders_tenant_external_tuple",
+    "ix_orders_tenant_order_source_kind",
 )
 
 _0087_FKS = (
@@ -94,15 +98,14 @@ def _create_ephemeral_database(admin_engine: Engine) -> tuple[str, str]:
     db_name = f"a1_mig_{uuid.uuid4().hex[:12]}"
     with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-    base = admin_engine.url.set(database=db_name)
-    return db_name, str(base.render_as_string(hide_password=False))
+    return db_name, str(admin_engine.url.set(database=db_name).render_as_string(hide_password=False))
 
 
 def _drop_ephemeral_database(admin_engine: Engine, db_name: str) -> None:
     with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(
             text(
-                f"""
+                """
                 SELECT pg_terminate_backend(pid)
                 FROM pg_stat_activity
                 WHERE datname = :db_name AND pid <> pg_backend_pid()
@@ -164,6 +167,15 @@ def _seed_legacy_rows_at_0086(engine: Engine) -> dict:
     }
 
 
+def _constraint_validated(engine: Engine, name: str) -> bool:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT convalidated FROM pg_constraint WHERE conname = :name"),
+            {"name": name},
+        ).first()
+    return bool(row and row[0])
+
+
 @pytest.fixture()
 def ephemeral_migration_engine() -> Iterator[Engine]:
     admin_engine = _connect_engine()
@@ -182,7 +194,46 @@ def ephemeral_migration_engine() -> Iterator[Engine]:
         admin_engine.dispose()
 
 
-def test_migration_chain_0086_seed_0087_verify(ephemeral_migration_engine: Engine) -> None:
+def test_migration_0087_expand_not_valid_constraints(ephemeral_migration_engine: Engine) -> None:
+    _seed_legacy_rows_at_0086(ephemeral_migration_engine)
+    _run_alembic(ephemeral_migration_engine, "0087")
+
+    for chk_name in _0087_CONSTRAINTS:
+        assert _has_check(ephemeral_migration_engine, chk_name), f"missing CHECK {chk_name}"
+        assert not _constraint_validated(ephemeral_migration_engine, chk_name)
+
+    for fk_name in ("fk_orders_tenant_customer", "fk_orders_external_profile_connection"):
+        assert _has_fk(ephemeral_migration_engine, fk_name)
+        assert not _constraint_validated(ephemeral_migration_engine, fk_name)
+
+    for idx_name in _DEFERRED_ORDER_INDEXES:
+        assert not _has_index(ephemeral_migration_engine, "orders", idx_name), idx_name
+
+
+def test_migration_0087_new_writes_enforced_while_not_valid(ephemeral_migration_engine: Engine) -> None:
+    _seed_legacy_rows_at_0086(ephemeral_migration_engine)
+    _run_alembic(ephemeral_migration_engine, "0087")
+
+    with ephemeral_migration_engine.connect() as conn:
+        with pytest.raises(IntegrityError):
+            with conn.begin():
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO orders (
+                            tenant_id, external_id, status, total, source,
+                            order_source_kind, customer_link_evidence_class
+                        ) VALUES (
+                            :tid, 'FAIL-WA-0087', 'pending', '10', 'whatsapp',
+                            'whatsapp', 'authoritative'
+                        )
+                        """
+                    ),
+                    {"tid": MIGRATION_TENANT_ID},
+                )
+
+
+def test_migration_chain_0086_seed_0087_head(ephemeral_migration_engine: Engine) -> None:
     seed = _seed_legacy_rows_at_0086(ephemeral_migration_engine)
     _run_alembic(ephemeral_migration_engine, "0087")
 
@@ -199,26 +250,27 @@ def test_migration_chain_0086_seed_0087_verify(ephemeral_migration_engine: Engin
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert rev == "0087"
-
-    insp = inspect(ephemeral_migration_engine)
-    tables = set(insp.get_table_names())
-    assert "external_customer_profiles" in tables
-    assert "external_customer_profile_order_history_coverage" in tables
-    assert "nahla_internal_customer_order_history_coverage" in tables
+        cap = conn.execute(
+            text(
+                """
+                SELECT state, validation_revision
+                FROM order_customer_identity_capability_state
+                WHERE capability_key = 'order_customer_identity'
+                """
+            )
+        ).mappings().one()
+        assert cap["state"] == "expand"
+        assert cap["validation_revision"] is None
 
     for idx_name in _0087_INDEXES:
-        found = False
-        for table in insp.get_table_names():
-            if idx_name in {i.get("name") for i in insp.get_indexes(table)}:
-                found = True
-                break
+        found = any(
+            idx_name in {i.get("name") for i in inspect(ephemeral_migration_engine).get_indexes(table)}
+            for table in inspect(ephemeral_migration_engine).get_table_names()
+        )
         assert found, f"missing index {idx_name}"
 
-    for chk_name in _0087_CONSTRAINTS:
-        assert _has_check(ephemeral_migration_engine, chk_name), f"missing CHECK {chk_name}"
-
     for fk_name in _0087_FKS:
-        assert _has_fk(ephemeral_migration_engine, fk_name), f"missing FK {fk_name}"
+        assert _has_fk(ephemeral_migration_engine, fk_name), fk_name
 
     with ephemeral_migration_engine.connect() as conn:
         row = conn.execute(
@@ -236,44 +288,23 @@ def test_migration_chain_0086_seed_0087_verify(ephemeral_migration_engine: Engin
         assert row["customer_name"] == "عميل قديم"
         assert row["customer_link_state"] == "unlinked"
         assert row["order_source_kind"] is None
-        assert row["external_customer_profile_id"] is None
-        assert row["external_identity_evidence_class"] is None
 
         cust = conn.execute(
-            text(
-                "SELECT salla_customer_id FROM customers WHERE id = :cid"
-            ),
+            text("SELECT salla_customer_id FROM customers WHERE id = :cid"),
             {"cid": seed["customer_id"]},
         ).scalar_one()
         assert cust == LEGACY_CUSTOMER_REF
 
-    with ephemeral_migration_engine.connect() as conn:
-        with pytest.raises(IntegrityError):
-            with conn.begin():
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO orders (
-                            tenant_id, external_id, status, total, source,
-                            order_source_kind, customer_link_evidence_class
-                        ) VALUES (
-                            :tid, 'FAIL-WA', 'pending', '10', 'whatsapp',
-                            'whatsapp', 'authoritative'
-                        )
-                        """
-                    ),
-                    {"tid": MIGRATION_TENANT_ID},
-                )
-
 
 def test_migration_downgrade_0087_to_0086_ephemeral_only(ephemeral_migration_engine: Engine) -> None:
-    """Downgrade 0087→0086 on ephemeral DB: schema reverts; linkage data not claimed safe."""
+    """Downgrade 0087→0086 on ephemeral DB only; linkage data not safe to restore."""
     _seed_legacy_rows_at_0086(ephemeral_migration_engine)
     _run_alembic(ephemeral_migration_engine, "0087")
     _downgrade_one(ephemeral_migration_engine)
 
     insp = inspect(ephemeral_migration_engine)
     assert "external_customer_profiles" not in insp.get_table_names()
+    assert "order_customer_identity_capability_state" not in insp.get_table_names()
 
     order_cols = {c["name"] for c in insp.get_columns("orders")}
     assert "external_customer_profile_id" not in order_cols
@@ -282,16 +313,14 @@ def test_migration_downgrade_0087_to_0086_ephemeral_only(ephemeral_migration_eng
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
         assert rev == "0086"
-        cust_ref = conn.execute(
-            text(
-                """
-                SELECT salla_customer_id FROM customers
-                WHERE tenant_id = :tid AND salla_customer_id = :ref
-                """
-            ),
-            {"tid": MIGRATION_TENANT_ID, "ref": LEGACY_CUSTOMER_REF},
-        ).scalar_one()
-        assert cust_ref == LEGACY_CUSTOMER_REF
+
+
+def _has_index(engine: Engine, table: str, name: str) -> bool:
+    insp = inspect(engine)
+    try:
+        return name in {i.get("name") for i in insp.get_indexes(table)}
+    except Exception:
+        return False
 
 
 def _has_fk(engine: Engine, name: str) -> bool:

@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from services.order_customer_identity_capability import cap_coverage_status_for_capability
 from services.external_customer_profile_service import upsert_external_customer_profile
 from services.order_customer_identity_contract import (
     CUSTOMER_LINK_SOURCE_NAHL_BRIDGE,
@@ -373,6 +374,11 @@ def reconcile_external_profile_coverage(
 
     completeness = SOURCE_HISTORY_COMPLETE if (unmapped == 0 and mislinked == 0 and linked > 0) else SOURCE_HISTORY_INCOMPLETE
     forward_health = SYNC_HEALTH_HEALTHY if completeness == SOURCE_HISTORY_COMPLETE else SYNC_HEALTH_DEGRADED
+    completeness, forward_health = cap_coverage_status_for_capability(
+        db,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
 
     from models import ExternalCustomerProfileOrderHistoryCoverage  # noqa: PLC0415
 
@@ -432,6 +438,11 @@ def reconcile_internal_customer_coverage(
 
     completeness = SOURCE_HISTORY_COMPLETE if (unmapped == 0 and mislinked == 0 and linked > 0) else SOURCE_HISTORY_INCOMPLETE
     forward_health = SYNC_HEALTH_HEALTHY if completeness == SOURCE_HISTORY_COMPLETE else SYNC_HEALTH_DEGRADED
+    completeness, forward_health = cap_coverage_status_for_capability(
+        db,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
 
     cov = (
         db.query(NahlaInternalCustomerOrderHistoryCoverage)

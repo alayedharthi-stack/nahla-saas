@@ -472,6 +472,22 @@ class ExternalCustomerProfile(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class OrderCustomerIdentityCapabilityState(Base):
+    """Singleton platform capability gate for A1 order-customer identity rollout."""
+    __tablename__ = 'order_customer_identity_capability_state'
+    __table_args__ = (
+        sa.CheckConstraint(
+            "state IN ('expand', 'validated')",
+            name='chk_oci_capability_state',
+        ),
+    )
+
+    capability_key = Column(String, primary_key=True)
+    state = Column(String, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    validation_revision = Column(String, nullable=True)
+
+
 class ExternalCustomerProfileOrderHistoryCoverage(Base):
     __tablename__ = 'external_customer_profile_order_history_coverage'
     __table_args__ = (

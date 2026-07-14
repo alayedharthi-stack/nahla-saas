@@ -50,4 +50,26 @@ def log_identity_sync_failure(
     )
 
 
-__all__ = ["log_identity_sync_event", "log_identity_sync_failure"]
+def log_connection_resolution_status(
+    *,
+    status: str,
+    tenant_id: Optional[int] = None,
+    reason: Optional[str] = None,
+    ingest_source: str = "webhook_dispatcher",
+) -> None:
+    """Privacy-safe connection resolution log (no store_id / refs / PII)."""
+    logger.info(
+        "[A1 identity] connection_resolution_status=%s tenant_id=%s "
+        "ingest_source=%s reason=%s",
+        status,
+        tenant_id if tenant_id is not None else "-",
+        ingest_source,
+        reason or "-",
+    )
+
+
+__all__ = [
+    "log_connection_resolution_status",
+    "log_identity_sync_event",
+    "log_identity_sync_failure",
+]

@@ -141,9 +141,9 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest alembic
 
-      - name: Apply migrations through 0087
+      - name: Apply migrations through 0087 (A1-Expand only)
         working-directory: database
-        run: alembic upgrade head
+        run: alembic upgrade 0087
 
       - name: A1-v3.7 PostgreSQL integration
         run: |
@@ -153,4 +153,7 @@ jobs:
             backend/tests/test_order_customer_identity_ingest_regression.py \
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
+            backend/tests/test_order_customer_identity_capability_gate.py \
+            backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \
+            backend/tests/test_salla_integration_resolver_ambiguity.py \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning

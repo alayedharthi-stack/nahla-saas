@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from services.order_customer_identity_capability import cap_coverage_status_for_capability
 from services.order_customer_identity_contract import (
     EXTERNAL_COVERAGE_SCOPE_CLAIM,
     INTERNAL_COVERAGE_SCOPE_CLAIM,
@@ -77,14 +78,19 @@ def build_safe_external_profile_proof(
         .filter_by(external_customer_profile_id=profile.id)
         .first()
     )
+    completeness = cov.authoritative_source_history_completeness if cov else SOURCE_HISTORY_INCOMPLETE
+    forward_health = cov.forward_sync_health if cov else SYNC_HEALTH_STALE
+    completeness, forward_health = cap_coverage_status_for_capability(
+        db,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
     return SafeExternalProfileSourceHistoryProof(
         subject_kind="external_customer_profile",
         identity_namespace=str(profile.identity_namespace),
         integration_connection_present=profile.integration_connection_id is not None,
-        authoritative_source_history_completeness=(
-            cov.authoritative_source_history_completeness if cov else SOURCE_HISTORY_INCOMPLETE
-        ),
-        forward_sync_health=cov.forward_sync_health if cov else SYNC_HEALTH_STALE,
+        authoritative_source_history_completeness=completeness,
+        forward_sync_health=forward_health,
         linked_orders_in_scope_count=int(cov.linked_orders_in_scope_count if cov else 0),
         unmapped_orders_in_scope_count=int(cov.unmapped_orders_in_scope_count if cov else 0),
         mislinked_orders_in_scope_count=int(cov.mislinked_orders_in_scope_count if cov else 0),
@@ -111,13 +117,18 @@ def build_safe_internal_customer_proof(
         )
         .first()
     )
+    completeness = cov.authoritative_source_history_completeness if cov else SOURCE_HISTORY_INCOMPLETE
+    forward_health = cov.forward_sync_health if cov else SYNC_HEALTH_STALE
+    completeness, forward_health = cap_coverage_status_for_capability(
+        db,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
     return SafeInternalCustomerSourceHistoryProof(
         subject_kind="nahla_internal_customer",
         identity_namespace=NAHLA_INTERNAL_ORDER_V1,
-        authoritative_source_history_completeness=(
-            cov.authoritative_source_history_completeness if cov else SOURCE_HISTORY_INCOMPLETE
-        ),
-        forward_sync_health=cov.forward_sync_health if cov else SYNC_HEALTH_STALE,
+        authoritative_source_history_completeness=completeness,
+        forward_sync_health=forward_health,
         linked_orders_in_scope_count=int(cov.linked_orders_in_scope_count if cov else 0),
         unmapped_orders_in_scope_count=int(cov.unmapped_orders_in_scope_count if cov else 0),
         mislinked_orders_in_scope_count=int(cov.mislinked_orders_in_scope_count if cov else 0),

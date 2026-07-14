@@ -18,6 +18,10 @@ from services.order_customer_identity_contract import (
     ORDER_SOURCE_OTHER,
     ORDER_SOURCE_WHATSAPP,
     POLICY_ELIGIBILITY_READY,
+    SOURCE_HISTORY_COMPLETE,
+    SOURCE_HISTORY_INCOMPLETE,
+    SYNC_HEALTH_DEGRADED,
+    SYNC_HEALTH_HEALTHY,
 )
 from services.order_customer_identity_read_contract import (
     SafeExternalProfileSourceHistoryProof,
@@ -415,6 +419,47 @@ def test_r4_guest_orders_outside_profile_scope(pg_session) -> None:
     assert result.linked == 0
     assert result.unmapped == 0
     assert result.mislinked == 0
+
+
+def test_r5_expand_phase_caps_healthy_then_degrades_on_unmapped(pg_session) -> None:
+    """R5: expand phase never reports healthy/complete; unmapped order stays degraded."""
+    seed_tenant(pg_session, tenant_id=TEST_TENANT_A)
+    intg = seed_integration(pg_session, tenant_id=TEST_TENANT_A, external_store_id="STORE_R5")
+    profile = seed_external_profile(
+        pg_session,
+        tenant_id=TEST_TENANT_A,
+        integration_connection_id=intg.id,
+        external_customer_ref="CR5",
+    )
+    seed_external_order(
+        pg_session,
+        tenant_id=TEST_TENANT_A,
+        external_id="ORD-R5-LINKED",
+        integration_connection_id=intg.id,
+        external_customer_ref="CR5",
+        external_customer_profile_id=profile.id,
+        external_identity_link_state=LINK_STATE_VERIFIED,
+        external_identity_evidence_class=EVIDENCE_AUTHORITATIVE,
+    )
+    first = reconcile_external_profile_coverage(pg_session, profile=profile)
+    assert first.linked == 1
+    assert first.unmapped == 0
+    assert first.completeness == SOURCE_HISTORY_INCOMPLETE
+    assert first.forward_health == SYNC_HEALTH_DEGRADED
+
+    seed_external_order(
+        pg_session,
+        tenant_id=TEST_TENANT_A,
+        external_id="ORD-R5-FAILED-LINK",
+        integration_connection_id=intg.id,
+        external_customer_ref="CR5",
+        external_customer_profile_id=None,
+        external_identity_link_state=LINK_STATE_UNLINKED,
+    )
+    second = reconcile_external_profile_coverage(pg_session, profile=profile)
+    assert second.unmapped >= 1
+    assert second.completeness == SOURCE_HISTORY_INCOMPLETE
+    assert second.forward_health == SYNC_HEALTH_DEGRADED
 
 
 # ── Blocker 2 / S ─────────────────────────────────────────────────────────────
