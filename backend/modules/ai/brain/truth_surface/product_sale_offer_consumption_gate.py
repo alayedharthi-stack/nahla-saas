@@ -28,12 +28,13 @@ def maybe_product_sale_offer_compose_facts(
     *,
     message: str,
     snapshot: Optional[TrustedContextSnapshot],
+    brain_state: Any = None,
 ) -> Optional[Dict[str, Any]]:
     if not is_product_sale_offer_compose_enabled():
         return None
     if snapshot is None:
         return None
-    if not should_load_product_sale_offer_facts(message=message):
+    if not should_load_product_sale_offer_facts(message=message, brain_state=brain_state):
         return None
     if classify_product_sale_question_kind(message) != "product_scoped":
         return None

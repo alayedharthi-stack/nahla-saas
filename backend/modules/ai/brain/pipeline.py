@@ -2860,8 +2860,15 @@ class MerchantBrain:
             from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                 begin_trusted_coupon_offer_text_tracking,
             )
+            from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+                begin_product_sale_offer_text_tracking,
+            )
 
             begin_trusted_coupon_offer_text_tracking(
+                result.data,
+                reply or "",
+            )
+            begin_product_sale_offer_text_tracking(
                 result.data,
                 reply or "",
             )
@@ -3200,8 +3207,17 @@ class MerchantBrain:
                     from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                         note_trusted_coupon_offer_text_change,
                     )
+                    from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+                        note_product_sale_offer_text_change,
+                    )
 
                     note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_scrub,
+                        after=reply,
+                        reason="scrub_internal_markers",
+                    )
+                    note_product_sale_offer_text_change(
                         result.data,
                         before=_orig_scrub,
                         after=reply,
@@ -3233,8 +3249,17 @@ class MerchantBrain:
                     from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                         note_trusted_coupon_offer_text_change,
                     )
+                    from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+                        note_product_sale_offer_text_change,
+                    )
 
                     note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_policy,
+                        after=reply,
+                        reason="sanitize_outbound_text",
+                    )
+                    note_product_sale_offer_text_change(
                         result.data,
                         before=_orig_policy,
                         after=reply,
@@ -4338,8 +4363,12 @@ class MerchantBrain:
 
         try:
             from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
-                extract_constitutional_metadata,
+                extract_constitutional_metadata as extract_coupon_constitutional_metadata,
                 finalize_trusted_coupon_offer_text_provenance,
+            )
+            from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+                extract_constitutional_metadata as extract_product_sale_constitutional_metadata,
+                finalize_product_sale_offer_text_provenance,
             )
 
             finalize_trusted_coupon_offer_text_provenance(
@@ -4347,7 +4376,15 @@ class MerchantBrain:
                 reply or "",
                 guard_replaced=_guard_replaced,
             )
-            _tc_coupon_constitutional_meta = extract_constitutional_metadata(result.data)
+            finalize_product_sale_offer_text_provenance(
+                result.data,
+                reply or "",
+                guard_replaced=_guard_replaced,
+            )
+            _tc_coupon_constitutional_meta = extract_coupon_constitutional_metadata(result.data)
+            _ps_offer_constitutional_meta = extract_product_sale_constitutional_metadata(
+                result.data
+            )
         except Exception as _tc_prov_finalize_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
             logger.debug(
                 "[TRUSTED_COUPON_OFFER_PROVENANCE] finalize skipped tenant=%s err=%s",
@@ -4355,6 +4392,7 @@ class MerchantBrain:
                 _tc_prov_finalize_exc,
             )
             _tc_coupon_constitutional_meta = {}
+            _ps_offer_constitutional_meta = {}
 
         return {
             "reply": reply,
@@ -4403,6 +4441,7 @@ class MerchantBrain:
                 ],
             ),
             **_tc_coupon_constitutional_meta,
+            **_ps_offer_constitutional_meta,
         }
 
 
@@ -4756,6 +4795,7 @@ def _build_reply_state(
             _product_sale_facts = maybe_product_sale_offer_compose_facts(
                 message=ctx.message or "",
                 snapshot=_tc,
+                brain_state=current_state,
             )
             if _product_sale_facts:
                 known_facts["product_sale_offer_facts"] = _product_sale_facts

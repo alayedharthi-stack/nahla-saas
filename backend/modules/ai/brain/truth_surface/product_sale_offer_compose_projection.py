@@ -61,8 +61,12 @@ def _record_from_snapshot(snapshot: TrustedContextSnapshot) -> Dict[str, Any]:
     return {}
 
 
-def _compose_sample_rows(sample: Any) -> List[Dict[str, str]]:
-    if not isinstance(sample, list):
+def _compose_sample_rows(
+    sample: Any,
+    *,
+    allow_price_mention: bool,
+) -> List[Dict[str, str]]:
+    if not allow_price_mention or not isinstance(sample, list):
         return []
     rows: List[Dict[str, str]] = []
     for row in sample[:5]:
@@ -76,6 +80,24 @@ def _compose_sample_rows(sample: Any) -> List[Dict[str, str]]:
             }
         )
     return rows
+
+
+def _compose_target_product(
+    target: Any,
+    *,
+    allow_price_mention: bool,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(target, dict):
+        return None
+    is_on_sale = bool(target.get("is_on_sale"))
+    composed: Dict[str, Any] = {
+        "title": str(target.get("title") or ""),
+        "is_on_sale": is_on_sale,
+    }
+    if allow_price_mention and is_on_sale:
+        composed["sale_price"] = str(target.get("sale_price") or "")
+        composed["regular_price"] = str(target.get("regular_price") or "")
+    return composed
 
 
 def project_product_sale_offer_compose_facts(
@@ -93,13 +115,14 @@ def project_product_sale_offer_compose_facts(
     if availability in _COMPOSE_BLOCKED_AVAILABILITY:
         raise ProductSaleOfferProjectionError("product_sale_unavailable")
 
+    allow_price_mention = bool(record.get("allow_price_mention"))
     payload: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "surface": SURFACE_PRODUCT_SALE,
         "bundle_namespace": "product_sale_offer",
         "question_kind": question_kind,
         "product_sale_availability": availability,
-        "allow_price_mention": bool(record.get("allow_price_mention")),
+        "allow_price_mention": allow_price_mention,
         "facts_snapshot_id": snapshot.ensure_snapshot_id(),
     }
     if "verified_on_sale_product_count" in record:
@@ -107,16 +130,20 @@ def project_product_sale_offer_compose_facts(
             record.get("verified_on_sale_product_count") or 0
         )
     if question_kind == "store_wide":
-        payload["sample_products"] = _compose_sample_rows(record.get("sample_products"))
+        if allow_price_mention and availability == "active_sale_present":
+            sample_rows = _compose_sample_rows(
+                record.get("sample_products"),
+                allow_price_mention=allow_price_mention,
+            )
+            if sample_rows:
+                payload["sample_products"] = sample_rows
     else:
-        target = record.get("target_product")
-        if isinstance(target, dict):
-            payload["target_product"] = {
-                "title": str(target.get("title") or ""),
-                "sale_price": str(target.get("sale_price") or ""),
-                "regular_price": str(target.get("regular_price") or ""),
-                "is_on_sale": bool(target.get("is_on_sale")),
-            }
+        target = _compose_target_product(
+            record.get("target_product"),
+            allow_price_mention=allow_price_mention,
+        )
+        if target is not None:
+            payload["target_product"] = target
 
     extra = set(payload.keys()) - _PRODUCT_SALE_KEYS
     if extra:

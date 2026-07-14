@@ -288,3 +288,61 @@ def test_product_scoped_requires_context_no_count_fields(pg_session) -> None:
     assert "verified_on_sale_product_count" not in record
     assert "on_sale_record_count" not in record
     assert "verified_on_sale_product_count" not in obs
+
+
+def test_pg_excludes_merchant_hidden_from_store_wide_count(pg_session) -> None:
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="مخفي",
+        metadata={"sale_price": "50", "regular_price": "70"},
+        merchant_hidden_at="2026-01-01T00:00:00+00:00",
+    )
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="ظاهر",
+        metadata={"sale_price": "80", "regular_price": "100"},
+    )
+    snap = fetch_store_wide_sale_snapshot(pg_session, tenant_id=_TEST_TENANT_A)
+    assert snap.verified_count == 1
+    assert snap.sample_rows[0].title == "ظاهر"
+
+
+def test_pg_excludes_out_of_stock_from_store_wide_count(pg_session) -> None:
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="غير متوفر",
+        metadata={"sale_price": "50", "regular_price": "70"},
+        in_stock=False,
+    )
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="متوفر",
+        metadata={"sale_price": "80", "regular_price": "100"},
+    )
+    snap = fetch_store_wide_sale_snapshot(pg_session, tenant_id=_TEST_TENANT_A)
+    assert snap.verified_count == 1
+    assert snap.sample_rows[0].title == "متوفر"
+
+
+def test_pg_excludes_inactive_catalog_status_from_store_wide_count(pg_session) -> None:
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="مؤرشف",
+        metadata={"sale_price": "50", "regular_price": "70"},
+        catalog_status="archived",
+    )
+    insert_catalog_product(
+        pg_session,
+        tenant_id=_TEST_TENANT_A,
+        title="نشط",
+        metadata={"sale_price": "80", "regular_price": "100"},
+        catalog_status="active",
+    )
+    snap = fetch_store_wide_sale_snapshot(pg_session, tenant_id=_TEST_TENANT_A)
+    assert snap.verified_count == 1
+    assert snap.sample_rows[0].title == "نشط"

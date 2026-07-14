@@ -257,6 +257,45 @@ def test_project_product_sale_offer_compose_facts_no_ids() -> None:
     assert payload["sample_products"][0].keys() == {"title", "sale_price", "regular_price"}
 
 
+def test_project_product_scoped_none_verified_strips_prices_from_compose() -> None:
+    snap = _snapshot_with_sale_record(
+        {
+            "question_kind": "product_scoped",
+            "product_sale_availability": "none_verified",
+            "verified_on_sale_product_count": 0,
+            "allow_price_mention": False,
+            "target_product": {
+                "title": "عطر ورد 100ml",
+                "sale_price": "249",
+                "regular_price": "249",
+                "is_on_sale": False,
+            },
+        }
+    )
+    payload = project_product_sale_offer_compose_facts(snapshot=snap)
+    target = payload["target_product"]
+    assert target["title"] == "عطر ورد 100ml"
+    assert target["is_on_sale"] is False
+    assert "sale_price" not in target
+    assert "regular_price" not in target
+
+
+def test_project_store_wide_none_verified_omits_sample_products() -> None:
+    snap = _snapshot_with_sale_record(
+        {
+            "question_kind": "store_wide",
+            "product_sale_availability": "none_verified",
+            "verified_on_sale_product_count": 0,
+            "allow_price_mention": False,
+            "sample_products": [
+                {"title": "حذاء رياضي أبيض", "sale_price": "80", "regular_price": "100"},
+            ],
+        }
+    )
+    payload = project_product_sale_offer_compose_facts(snapshot=snap)
+    assert "sample_products" not in payload
+
+
 def test_telemetry_excludes_titles_and_prices() -> None:
     obs = {
         "product_sale_availability": "active_sale_present",
