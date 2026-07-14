@@ -142,32 +142,29 @@ async def _run_one_tick() -> Dict[str, Any]:
             return {"skipped": True, "reason": "advisory_lock_held_by_other_worker"}
 
         from models import Integration  # noqa: PLC0415
-        from store_integration.registry import (  # noqa: PLC0415
-            pick_active_salla_integration,
-        )
+        from store_integration.registry import adapter_for_integration  # noqa: PLC0415
 
-        # Total Salla rows (any state) — for diagnostic logs.
         total_salla = db.query(Integration).filter(
             Integration.provider == "salla",
         ).count()
 
-        # Distinct tenant ids that have ANY Salla row, then dedupe-pick
-        # one canonical integration per tenant.  This guarantees we never
-        # poll the same store twice (manual + Easy Mode duplicates) and
-        # always use the row with the freshest tokens.
-        tenant_rows = (
-            db.query(Integration.tenant_id)
-            .filter(Integration.provider == "salla")
-            .distinct()
+        integrations = (
+            db.query(Integration)
+            .filter(
+                Integration.provider == "salla",
+                Integration.enabled == True,  # noqa: E712
+            )
+            .order_by(Integration.id.asc())
             .all()
         )
-        tenant_ids = sorted({tid for (tid,) in tenant_rows if tid})
+        integrations = [
+            intg for intg in integrations
+            if bool((intg.config or {}).get("api_key"))
+            and not bool((intg.config or {}).get("needs_reauth"))
+            and adapter_for_integration(intg) is not None
+        ]
 
-        integrations = []
-        for tid in tenant_ids:
-            picked = pick_active_salla_integration(db, tid)
-            if picked is not None and picked.enabled:
-                integrations.append(picked)
+        tenant_ids = sorted({int(intg.tenant_id) for intg in integrations if intg.tenant_id})
 
         logger.info(
             "[Salla Orders Poller] active integrations found count=%d "
@@ -182,14 +179,15 @@ async def _run_one_tick() -> Dict[str, Any]:
         lookback_iso = lookback.isoformat()
 
         for intg in integrations:
-            tenant_id = intg.tenant_id
+            tenant_id = int(intg.tenant_id)
             cfg = intg.config or {}
-            store_id      = cfg.get("store_id") or cfg.get("merchant_id")
+            store_id      = cfg.get("store_id") or cfg.get("merchant_id") or intg.external_store_id
             api_key       = cfg.get("api_key", "")
             needs_reauth  = bool(cfg.get("needs_reauth"))
 
             tenant_state: Dict[str, Any] = {
                 "tenant_id":     tenant_id,
+                "integration_id": intg.id,
                 "store_id":      store_id,
                 "token_present": bool(api_key),
                 "needs_reauth":  needs_reauth,
@@ -221,7 +219,7 @@ async def _run_one_tick() -> Dict[str, Any]:
                 continue
 
             try:
-                stats = await _poll_tenant(db, tenant_id, lookback_iso)
+                stats = await _poll_integration(db, intg, lookback_iso)
                 scanned += 1
                 new_orders_total += stats["new_orders"]
                 tenant_state.update({
@@ -297,11 +295,13 @@ async def _run_one_tick() -> Dict[str, Any]:
 # ── Per-tenant work ──────────────────────────────────────────────────────────
 
 
-async def _poll_tenant(db: Session, tenant_id: int, lookback_iso: str) -> Dict[str, Any]:
-    """Poll a single tenant; returns rich stats dict."""
+async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[str, Any]:
+    """Poll a single integration connection; returns rich stats dict."""
+    tenant_id = int(intg.tenant_id)
     started = time.monotonic()
 
     from models import Order  # noqa: PLC0415
+    from store_integration.registry import adapter_for_integration  # noqa: PLC0415
 
     pre_ids = {
         oid for (oid,) in db.query(Order.id).filter(Order.tenant_id == tenant_id).all()
@@ -309,7 +309,13 @@ async def _poll_tenant(db: Session, tenant_id: int, lookback_iso: str) -> Dict[s
 
     from services.store_sync import StoreSyncService  # noqa: PLC0415
 
-    svc = StoreSyncService(db, tenant_id)
+    adapter = adapter_for_integration(intg)
+    svc = StoreSyncService(
+        db,
+        tenant_id,
+        integration_connection_id=int(intg.id),
+        adapter=adapter,
+    )
 
     api_returned = -1  # -1 means "did not capture"
     upserted_total = 0
@@ -507,24 +513,36 @@ async def run_once_for_tenant(
     lookback_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Poll a single tenant immediately, bypassing the schedule.
+    Poll every enabled Salla integration for a tenant (per-connection).
 
-    Returns the same per-tenant stats dict that `_poll_tenant` produces,
-    enriched with the integration's diagnostic context.  Logs everything
-    under [Salla Orders Poller] just like the scheduled tick.
+    Does not use pick_active — each integration row is polled explicitly.
     """
     from core.database import SessionLocal  # noqa: PLC0415
-    from store_integration.registry import (  # noqa: PLC0415
-        pick_active_salla_integration,
-    )
+    from models import Integration  # noqa: PLC0415
+    from store_integration.registry import adapter_for_integration  # noqa: PLC0415
 
     db: Session = SessionLocal()
     try:
-        intg = pick_active_salla_integration(db, tenant_id)
+        integrations = (
+            db.query(Integration)
+            .filter(
+                Integration.tenant_id == int(tenant_id),
+                Integration.provider == "salla",
+                Integration.enabled == True,  # noqa: E712
+            )
+            .order_by(Integration.id.asc())
+            .all()
+        )
+        integrations = [
+            intg for intg in integrations
+            if bool((intg.config or {}).get("api_key"))
+            and not bool((intg.config or {}).get("needs_reauth"))
+            and adapter_for_integration(intg) is not None
+        ]
 
-        if intg is None:
+        if not integrations:
             logger.warning(
-                "[Salla Orders Poller] run_once tenant_id=%s — no Salla integration",
+                "[Salla Orders Poller] run_once tenant_id=%s — no pollable Salla integrations",
                 tenant_id,
             )
             return {
@@ -533,72 +551,65 @@ async def run_once_for_tenant(
                 "tenant_id": tenant_id,
             }
 
-        cfg = intg.config or {}
-        ctx = {
-            "tenant_id":           tenant_id,
-            "integration_id":      intg.id,
-            "enabled":             intg.enabled,
-            "store_id":            cfg.get("store_id") or cfg.get("merchant_id"),
-            "external_store_id":   getattr(intg, "external_store_id", None),
-            "token_present":       bool(cfg.get("api_key")),
-            "refresh_token_present": bool(cfg.get("refresh_token")),
-            "needs_reauth":        bool(cfg.get("needs_reauth")),
-            "no_auto_refresh":     bool(cfg.get("no_auto_refresh")),
-            "soft_disabled":       bool(cfg.get("soft_disabled")),
-            "last_token_refresh":  cfg.get("last_token_refresh"),
-        }
-
-        logger.info(
-            "[Salla Orders Poller] run_once start tenant_id=%s ctx=%s",
-            tenant_id, ctx,
-        )
-
-        if not intg.enabled:
-            return {"ok": False, "reason": "integration_disabled", **ctx}
-        if cfg.get("needs_reauth"):
-            return {"ok": False, "reason": "needs_reauth", **ctx}
-        if not cfg.get("api_key"):
-            return {"ok": False, "reason": "no_api_key", **ctx}
-
         lb_min = lookback_minutes if lookback_minutes is not None else LOOKBACK_MINUTES
         lookback = datetime.now(timezone.utc) - timedelta(minutes=lb_min)
         lookback_iso = lookback.isoformat()
 
-        try:
-            stats = await _poll_tenant(db, tenant_id, lookback_iso)
-        except Exception as exc:
-            logger.exception(
-                "[Salla Orders Poller] run_once tenant_id=%s — exception: %s",
-                tenant_id, exc,
-            )
+        per_integration: list[Dict[str, Any]] = []
+        errors = 0
+        scanned = 0
+        new_orders_total = 0
+
+        for intg in integrations:
+            cfg = intg.config or {}
+            ctx = {
+                "tenant_id":             tenant_id,
+                "integration_id":        intg.id,
+                "enabled":               intg.enabled,
+                "store_id":              cfg.get("store_id") or cfg.get("merchant_id"),
+                "external_store_id":     getattr(intg, "external_store_id", None),
+                "token_present":         bool(cfg.get("api_key")),
+                "refresh_token_present": bool(cfg.get("refresh_token")),
+                "needs_reauth":          bool(cfg.get("needs_reauth")),
+            }
             try:
-                db.rollback()
-            except Exception:
-                pass
-            return {"ok": False, "reason": "exception", "error": repr(exc), **ctx}
+                stats = await _poll_integration(db, intg, lookback_iso)
+                scanned += 1
+                new_orders_total += int(stats.get("new_orders") or 0)
+                per_integration.append({"ok": True, **ctx, **stats})
+            except Exception as exc:
+                errors += 1
+                logger.exception(
+                    "[Salla Orders Poller] run_once tenant_id=%s integration_id=%s — %s",
+                    tenant_id, intg.id, exc,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                per_integration.append({"ok": False, "reason": "exception", "error": repr(exc), **ctx})
 
         result = {
-            "ok": True,
+            "ok": errors == 0,
             "lookback_minutes": lb_min,
-            "lookback_iso":    lookback_iso,
-            **ctx,
-            **stats,
+            "lookback_iso": lookback_iso,
+            "tenant_id": tenant_id,
+            "integrations_polled": len(per_integration),
+            "scanned": scanned,
+            "new_orders": new_orders_total,
+            "errors": errors,
+            "per_integration": per_integration,
         }
         logger.info(
             "[Salla Orders Poller] run_once done tenant_id=%s result=%s",
             tenant_id, result,
         )
-        # Also update the in-memory state for diag UI
         _state["tenants"][tenant_id] = {
             "tenant_id":     tenant_id,
-            "store_id":      ctx["store_id"],
-            "token_present": ctx["token_present"],
-            "needs_reauth":  ctx["needs_reauth"],
             "scanned_at":    datetime.now(timezone.utc).isoformat(),
             "result":        "ok_run_once",
-            "error":         None,
-            "duration_ms":   stats["duration_ms"],
-            "stats":         stats,
+            "integrations_polled": len(per_integration),
+            "new_orders":    new_orders_total,
             "lookback_iso":  lookback_iso,
         }
         return result

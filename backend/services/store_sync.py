@@ -1006,10 +1006,18 @@ class StoreSyncService:
     building the AI-ready StoreKnowledgeSnapshot.
     """
 
-    def __init__(self, db: Session, tenant_id: int):
+    def __init__(
+        self,
+        db: Session,
+        tenant_id: int,
+        *,
+        integration_connection_id: int | None = None,
+        adapter: Any = None,
+    ):
         self.db        = db
         self.tenant_id = tenant_id
-        self._adapter  = None   # lazy-loaded
+        self._integration_connection_id = integration_connection_id
+        self._adapter  = adapter   # lazy-loaded when None
         self._customer_intelligence = CustomerIntelligenceService(db, tenant_id)
 
     # ── Adapter access ─────────────────────────────────────────────────────────
@@ -1018,11 +1026,56 @@ class StoreSyncService:
         if self._adapter is None:
             try:
                 sys.path.insert(0, os.path.abspath(os.path.join(_THIS, "..")))
-                from store_integration.registry import get_adapter  # noqa: PLC0415
-                self._adapter = get_adapter(self.tenant_id)
+                if self._integration_connection_id is not None:
+                    from store_integration.registry import adapter_for_integration  # noqa: PLC0415
+                    from models import Integration  # noqa: PLC0415
+
+                    intg = (
+                        self.db.query(Integration)
+                        .filter_by(id=int(self._integration_connection_id), tenant_id=self.tenant_id)
+                        .first()
+                    )
+                    if intg is not None:
+                        self._adapter = adapter_for_integration(intg)
+                if self._adapter is None:
+                    from store_integration.registry import get_adapter  # noqa: PLC0415
+                    self._adapter = get_adapter(self.tenant_id)
             except Exception as exc:
                 logger.warning("tenant=%s store adapter unavailable: %s", self.tenant_id, exc)
         return self._adapter
+
+    def _apply_a1_external_identity(
+        self,
+        order_row: Any,
+        *,
+        order_payload: dict,
+        integration_resolution: Any,
+        ingest_source: str,
+    ) -> None:
+        from services.order_customer_identity_service import (  # noqa: PLC0415
+            apply_external_order_identity_from_salla,
+        )
+
+        try:
+            apply_external_order_identity_from_salla(
+                self.db,
+                order=order_row,
+                tenant_id=self.tenant_id,
+                integration_resolution=integration_resolution,
+                order_payload=order_payload if isinstance(order_payload, dict) else {},
+                ingest_source=ingest_source,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from services.order_customer_identity_logging import (  # noqa: PLC0415
+                log_identity_sync_failure,
+            )
+
+            log_identity_sync_failure(
+                tenant_id=self.tenant_id,
+                ingest_source=ingest_source,
+                exception_class=type(exc).__name__,
+                link_outcome="exception",
+            )
 
     # ── Job helpers ────────────────────────────────────────────────────────────
 
@@ -1683,6 +1736,21 @@ class StoreSyncService:
                     normalized_order=normalised,
                     raw_payload=raw if isinstance(raw, dict) else None,
                 )
+                if self._integration_connection_id is not None:
+                    from services.salla_integration_resolver import (  # noqa: PLC0415
+                        ResolvedSallaIntegration,
+                    )
+
+                    self._apply_a1_external_identity(
+                        existing,
+                        order_payload=raw if isinstance(raw, dict) else normalised,
+                        integration_resolution=ResolvedSallaIntegration(
+                            integration_id=int(self._integration_connection_id),
+                            tenant_id=int(self.tenant_id),
+                            matched_via="api_poll_explicit",
+                        ),
+                        ingest_source="store_sync.sync_orders",
+                    )
                 updated += 1
             else:
                 new_row = Order(
@@ -1792,6 +1860,21 @@ class StoreSyncService:
                     normalized_order=normalised,
                     raw_payload=raw if isinstance(raw, dict) else None,
                 )
+                if self._integration_connection_id is not None:
+                    from services.salla_integration_resolver import (  # noqa: PLC0415
+                        ResolvedSallaIntegration,
+                    )
+
+                    self._apply_a1_external_identity(
+                        new_row,
+                        order_payload=raw if isinstance(raw, dict) else normalised,
+                        integration_resolution=ResolvedSallaIntegration(
+                            integration_id=int(self._integration_connection_id),
+                            tenant_id=int(self.tenant_id),
+                            matched_via="api_poll_explicit",
+                        ),
+                        ingest_source="store_sync.sync_orders",
+                    )
 
                 created += 1
 
@@ -2326,6 +2409,165 @@ class StoreSyncService:
 
     # ── Customers sync ─────────────────────────────────────────────────────────
 
+    def _upsert_legacy_customer_from_salla_sync_payload(
+        self,
+        raw: Dict,
+        *,
+        sync_source: str,
+        adapter_platform: str,
+    ) -> Optional[str]:
+        """Legacy Customer upsert/update (pre-A1). Writes Customer.salla_customer_id."""
+        ext_id = str(raw.get("id", ""))
+        if not ext_id:
+            return None
+
+        name = (raw.get("first_name", "") + " " + raw.get("last_name", "")).strip()
+        if not name:
+            name = raw.get("name", "")
+        email = raw.get("email", "")
+        raw_phone_str = raw.get("mobile", raw.get("phone", ""))
+        phone = _normalize_phone(raw_phone_str)
+        norm_phone = _e164(raw_phone_str)
+
+        existing = (
+            self.db.query(Customer)
+            .filter(
+                Customer.tenant_id == self.tenant_id,
+                Customer.salla_customer_id == ext_id,
+            )
+            .first()
+        ) if ext_id else None
+
+        if not existing and ext_id:
+            existing = (
+                self.db.query(Customer)
+                .filter(
+                    Customer.tenant_id == self.tenant_id,
+                    Customer.extra_metadata["salla_id"].astext == ext_id,
+                )
+                .first()
+            )
+            if existing:
+                existing.salla_customer_id = ext_id
+
+        if not existing and norm_phone:
+            existing = (
+                self.db.query(Customer)
+                .filter(
+                    Customer.tenant_id == self.tenant_id,
+                    Customer.normalized_phone == norm_phone,
+                )
+                .first()
+            )
+        if not existing and phone:
+            existing = (
+                self.db.query(Customer)
+                .filter(
+                    Customer.tenant_id == self.tenant_id,
+                    Customer.phone == phone,
+                )
+                .first()
+            )
+
+        if existing:
+            if name:
+                from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                apply_customer_name(
+                    existing,
+                    name,
+                    source=sync_source,
+                    platform=adapter_platform,
+                )
+            if email:
+                existing.email = email
+            if phone:
+                existing.phone = phone
+            if norm_phone:
+                existing.normalized_phone = norm_phone
+            if ext_id and not existing.salla_customer_id:
+                existing.salla_customer_id = ext_id
+            if not existing.acquisition_channel:
+                existing.acquisition_channel = "salla_sync"
+
+            prev_meta = dict(existing.extra_metadata or {})
+            tags = set(prev_meta.get("source_tags") or [])
+            tags.add(sync_source)
+            prev_meta.update({
+                "salla_id": ext_id,
+                "source_tags": sorted(tags),
+                "city": raw.get("city", "") or prev_meta.get("city", ""),
+                "country": raw.get("country", "SA") or prev_meta.get("country", "SA"),
+            })
+            existing.extra_metadata = prev_meta
+            return "updated"
+
+        from datetime import timezone as _tz  # noqa: PLC0415
+
+        new_customer = Customer(
+            tenant_id=self.tenant_id,
+            name=None,
+            email=email or None,
+            phone=phone or None,
+            normalized_phone=norm_phone,
+            extra_metadata={
+                "salla_id": ext_id,
+                "source": sync_source,
+                "source_tags": [sync_source],
+                "city": raw.get("city", ""),
+                "country": raw.get("country", "SA"),
+            },
+            salla_customer_id=ext_id or None,
+            acquisition_channel=sync_source,
+            first_seen_at=datetime.now(_tz.utc),
+        )
+        if name:
+            from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+            apply_customer_name(
+                new_customer,
+                name,
+                source=sync_source,
+                platform=adapter_platform,
+            )
+        self.db.add(new_customer)
+        return "created"
+
+    def _upsert_a1_external_profile_side_effect(
+        self,
+        payload: Dict,
+        *,
+        integration_connection_id: int | None = None,
+    ) -> None:
+        """Best-effort A1 ExternalCustomerProfile upsert parallel to legacy Customer sync."""
+        conn_id = (
+            integration_connection_id
+            if integration_connection_id is not None
+            else self._integration_connection_id
+        )
+        if conn_id is None:
+            return
+        try:
+            from services.external_customer_profile_service import (  # noqa: PLC0415
+                upsert_profile_from_salla_customer_sync,
+            )
+
+            upsert_profile_from_salla_customer_sync(
+                self.db,
+                tenant_id=self.tenant_id,
+                integration_connection_id=int(conn_id),
+                payload=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from services.order_customer_identity_logging import log_identity_sync_failure  # noqa: PLC0415
+
+            log_identity_sync_failure(
+                tenant_id=self.tenant_id,
+                ingest_source="salla_customer_sync_a1_side_effect",
+                exception_class=type(exc).__name__,
+                link_outcome="profile_side_effect_failed",
+            )
+
     async def sync_customers(self, incremental: bool = False) -> int:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_customers"):
@@ -2351,131 +2593,24 @@ class StoreSyncService:
         created = 0
         updated = 0
         for raw in raw_list:
-            ext_id = str(raw.get("id", ""))
-            if not ext_id:
-                continue
-            name = (raw.get("first_name", "") + " " + raw.get("last_name", "")).strip()
-            if not name:
-                name = raw.get("name", "")
-            email           = raw.get("email", "")
-            raw_phone_str   = raw.get("mobile", raw.get("phone", ""))
-            phone           = _normalize_phone(raw_phone_str)   # E.164 (display)
-            norm_phone      = _e164(raw_phone_str)               # E.164 or None
-
-            # 1. Try by salla_customer_id column (indexed, migration 0031)
-            existing = (
-                self.db.query(Customer)
-                .filter(
-                    Customer.tenant_id       == self.tenant_id,
-                    Customer.salla_customer_id == ext_id,
+            try:
+                outcome = self._upsert_legacy_customer_from_salla_sync_payload(
+                    raw,
+                    sync_source=sync_source,
+                    adapter_platform=adapter_platform,
                 )
-                .first()
-            ) if ext_id else None
-
-            # 2. Fallback: legacy JSONB salla_id (pre-0031 rows not yet repaired)
-            if not existing and ext_id:
-                existing = (
-                    self.db.query(Customer)
-                    .filter(
-                        Customer.tenant_id == self.tenant_id,
-                        Customer.extra_metadata["salla_id"].astext == ext_id,
-                    )
-                    .first()
+                if outcome == "created":
+                    created += 1
+                elif outcome == "updated":
+                    updated += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "tenant=%s legacy customer sync row failed ext_id=%s: %s",
+                    self.tenant_id,
+                    raw.get("id"),
+                    exc,
                 )
-                if existing:
-                    # Repair: promote to first-class column
-                    existing.salla_customer_id = ext_id
-
-            # 3. Fallback: normalized_phone column — always tenant-scoped
-            if not existing and norm_phone:
-                existing = (
-                    self.db.query(Customer)
-                    .filter(
-                        Customer.tenant_id       == self.tenant_id,
-                        Customer.normalized_phone == norm_phone,
-                    )
-                    .first()
-                )
-            # 4. Last resort: raw phone fallback (legacy rows pre-0032)
-            if not existing and phone:
-                existing = (
-                    self.db.query(Customer)
-                    .filter(
-                        Customer.tenant_id == self.tenant_id,
-                        Customer.phone     == phone,
-                    )
-                    .first()
-                )
-
-            if existing:
-                # ── Update existing customer ──────────────────────────────
-                if name:
-                    from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
-
-                    apply_customer_name(
-                        existing,
-                        name,
-                        source=sync_source,
-                        platform=adapter_platform,
-                    )
-                if email:
-                    existing.email = email
-                if phone:
-                    existing.phone = phone
-                if norm_phone:
-                    existing.normalized_phone = norm_phone
-                if ext_id and not existing.salla_customer_id:
-                    existing.salla_customer_id = ext_id
-                if not existing.acquisition_channel:
-                    existing.acquisition_channel = "salla_sync"
-
-                # Merge metadata carefully:
-                # • DO NOT overwrite "source" — it reflects the customer's
-                #   original acquisition channel (e.g. manual_import). Instead,
-                #   ADD "salla_sync" to the source_tags list so the display
-                #   layer can show composite labels like "سلة • مستورد".
-                prev_meta = dict(existing.extra_metadata or {})
-                tags = set(prev_meta.get("source_tags") or [])
-                tags.add(sync_source)
-                prev_meta.update({
-                    "salla_id":    ext_id,
-                    "source_tags": sorted(tags),
-                    "city":        raw.get("city", "") or prev_meta.get("city", ""),
-                    "country":     raw.get("country", "SA") or prev_meta.get("country", "SA"),
-                })
-                existing.extra_metadata = prev_meta
-                updated += 1
-            else:
-                # ── Create new customer from Salla ────────────────────────
-                from datetime import timezone as _tz  # noqa: PLC0415
-                new_customer = Customer(
-                    tenant_id           = self.tenant_id,
-                    name                = None,
-                    email               = email or None,
-                    phone               = phone or None,
-                    normalized_phone    = norm_phone,
-                    extra_metadata      = {
-                        "salla_id":    ext_id,
-                        "source":      sync_source,
-                        "source_tags": [sync_source],
-                        "city":        raw.get("city", ""),
-                        "country":     raw.get("country", "SA"),
-                    },
-                    salla_customer_id   = ext_id or None,
-                    acquisition_channel = sync_source,
-                    first_seen_at       = datetime.now(_tz.utc),
-                )
-                if name:
-                    from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
-
-                    apply_customer_name(
-                        new_customer,
-                        name,
-                        source=sync_source,
-                        platform=adapter_platform,
-                    )
-                self.db.add(new_customer)
-                created += 1
+            self._upsert_a1_external_profile_side_effect(raw)
         self.db.flush()
         logger.info(
             "tenant=%s customers sync done — created=%d updated=%d",
@@ -2778,7 +2913,12 @@ class StoreSyncService:
                 self.tenant_id, ext_id,
             )
 
-    async def handle_order_webhook(self, payload: Dict) -> None:
+    async def handle_order_webhook(
+        self,
+        payload: Dict,
+        *,
+        integration_resolution: Any = None,
+    ) -> None:
         """
         Process a single order create/update from a platform webhook.
 
@@ -2907,18 +3047,32 @@ class StoreSyncService:
             status=normalised["status"],
         )
 
-        customer = self._customer_intelligence.upsert_customer_from_order(
-            normalised,
-            source="order_webhook",
-            commit=False,
-        )
-        if customer:
-            self._customer_intelligence.recompute_profile_for_customer(
-                customer.id,
-                reason="order_webhook",
-                commit=True,
-                emit_event=True,
+        customer = None
+        if integration_resolution is not None:
+            self._apply_a1_external_identity(
+                order_row,
+                order_payload=payload,
+                integration_resolution=integration_resolution,
+                ingest_source="store_sync.order_webhook",
             )
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        else:
+            customer = self._customer_intelligence.upsert_customer_from_order(
+                normalised,
+                source="order_webhook",
+                commit=False,
+            )
+            if customer:
+                self._customer_intelligence.recompute_profile_for_customer(
+                    customer.id,
+                    reason="order_webhook",
+                    commit=True,
+                    emit_event=True,
+                )
 
         if is_new:
             try:
@@ -3227,17 +3381,22 @@ class StoreSyncService:
 
     # ── Incremental customer update (called by webhook) ───────────────────
 
-    async def handle_customer_webhook(self, payload: Dict) -> None:
+    async def handle_customer_webhook(
+        self,
+        payload: Dict,
+        *,
+        integration_connection_id: int | None = None,
+    ) -> None:
         """Process a single customer create/update from a platform webhook."""
         ext_id = str(payload.get("id", ""))
-        name   = (payload.get("first_name", "") + " " + payload.get("last_name", "")).strip()
-        if not name:
-            name = payload.get("name", "")
-        email  = payload.get("email", "")
-        phone  = _normalize_phone(payload.get("mobile", payload.get("phone", "")))
-
         if not ext_id:
             return
+
+        name = (payload.get("first_name", "") + " " + payload.get("last_name", "")).strip()
+        if not name:
+            name = payload.get("name", "")
+        email = payload.get("email", "")
+        phone = _normalize_phone(payload.get("mobile", payload.get("phone", "")))
 
         existing = self._customer_intelligence.upsert_customer_identity(
             phone=phone,
@@ -3258,17 +3417,32 @@ class StoreSyncService:
         else:
             self.db.commit()
 
+        effective_conn = (
+            integration_connection_id
+            if integration_connection_id is not None
+            else self._integration_connection_id
+        )
+        if effective_conn is not None:
+            self._upsert_a1_external_profile_side_effect(
+                payload,
+                integration_connection_id=int(effective_conn),
+            )
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+
         snap = (
             self.db.query(StoreKnowledgeSnapshot)
             .filter_by(tenant_id=self.tenant_id)
             .first()
         )
         if snap:
-            snap.customer_count           = (
+            snap.customer_count = (
                 self.db.query(Customer).filter_by(tenant_id=self.tenant_id).count()
             )
             snap.last_incremental_sync_at = datetime.now(timezone.utc)
-            snap.updated_at               = datetime.now(timezone.utc)
+            snap.updated_at = datetime.now(timezone.utc)
             self.db.commit()
 
     # ── Product deletion (called by webhook) ──────────────────────────────

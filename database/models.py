@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import uuid
 
 import sqlalchemy as sa
 from sqlalchemy import (
@@ -8,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -16,7 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -380,6 +382,25 @@ class ProductVariant(Base):
 
 class Order(Base):
     __tablename__ = 'orders'
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['tenant_id', 'customer_id'],
+            ['customers.tenant_id', 'customers.id'],
+            name='fk_orders_tenant_customer',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'external_customer_profile_id', 'integration_connection_id'],
+            ['external_customer_profiles.tenant_id', 'external_customer_profiles.id',
+             'external_customer_profiles.integration_connection_id'],
+            name='fk_orders_external_profile_connection',
+        ),
+        Index('ix_orders_tenant_customer_id', 'tenant_id', 'customer_id'),
+        Index(
+            'ix_orders_tenant_external_tuple',
+            'tenant_id', 'identity_namespace', 'integration_connection_id', 'external_customer_ref',
+        ),
+        Index('ix_orders_tenant_order_source_kind', 'tenant_id', 'order_source_kind'),
+    )
     id = Column(Integer, primary_key=True)
     # Platform's internal id (e.g. Salla `id`). Stable, used for upserts.
     external_id = Column(String, index=True, nullable=True)
@@ -402,6 +423,129 @@ class Order(Base):
     extra_metadata = Column('metadata', JSONB, nullable=True)
     tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     tenant = relationship('Tenant', back_populates='orders')
+
+    # ── A1-v3.7 order-customer identity ───────────────────────────────────────
+    customer_id = Column(Integer, nullable=True, index=True)
+    order_source_kind = Column(String, nullable=True, index=True)
+    identity_namespace = Column(String, nullable=True)
+    integration_connection_id = Column(Integer, nullable=True)
+    external_customer_ref = Column(String, nullable=True)
+    external_customer_profile_id = Column(UUID(as_uuid=True), nullable=True)
+    customer_link_state = Column(String, nullable=False, server_default='unlinked', default='unlinked')
+    customer_link_evidence_class = Column(String, nullable=True)
+    customer_link_source = Column(String, nullable=True)
+    customer_linked_at = Column(DateTime(timezone=True), nullable=True)
+    external_identity_link_state = Column(String, nullable=True)
+    external_identity_evidence_class = Column(String, nullable=True)
+
+
+class ExternalCustomerProfile(Base):
+    """Provider-scoped external customer identity (A1-v3.7)."""
+    __tablename__ = 'external_customer_profiles'
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'identity_namespace', 'integration_connection_id', 'external_customer_ref',
+            name='uq_external_customer_profiles_identity',
+        ),
+        UniqueConstraint(
+            'tenant_id', 'id', 'integration_connection_id',
+            name='uq_external_customer_profiles_tenant_id_connection',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'integration_connection_id'],
+            ['integrations.tenant_id', 'integrations.id'],
+            name='fk_ecp_tenant_integration',
+        ),
+        Index('ix_ecp_tenant_integration', 'tenant_id', 'integration_connection_id'),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    identity_namespace = Column(String, nullable=False)
+    integration_connection_id = Column(Integer, nullable=False)
+    external_customer_ref = Column(String, nullable=False)
+    profile_state = Column(String, nullable=False, server_default='active', default='active')
+    profile_source = Column(String, nullable=True)
+    demographics = Column(JSONB, nullable=True)
+    provider_snapshot_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class OrderCustomerIdentityCapabilityState(Base):
+    """Singleton platform capability gate for A1 order-customer identity rollout."""
+    __tablename__ = 'order_customer_identity_capability_state'
+    __table_args__ = (
+        sa.CheckConstraint(
+            "state IN ('expand', 'validated')",
+            name='chk_oci_capability_state',
+        ),
+    )
+
+    capability_key = Column(String, primary_key=True)
+    state = Column(String, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    validation_revision = Column(String, nullable=True)
+
+
+class ExternalCustomerProfileOrderHistoryCoverage(Base):
+    __tablename__ = 'external_customer_profile_order_history_coverage'
+    __table_args__ = (
+        UniqueConstraint('external_customer_profile_id', name='uq_ext_profile_cov_profile_id'),
+        ForeignKeyConstraint(
+            ['tenant_id', 'external_customer_profile_id', 'integration_connection_id'],
+            ['external_customer_profiles.tenant_id', 'external_customer_profiles.id',
+             'external_customer_profiles.integration_connection_id'],
+            name='fk_ext_cov_tenant_profile',
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    external_customer_profile_id = Column(UUID(as_uuid=True), nullable=False)
+    identity_namespace = Column(String, nullable=False)
+    integration_connection_id = Column(Integer, nullable=False)
+    external_customer_ref = Column(String, nullable=False)
+    watermark_at = Column(DateTime(timezone=True), nullable=True)
+    forward_sync_health = Column(String, nullable=False, server_default='stale', default='stale')
+    authoritative_source_history_completeness = Column(
+        String, nullable=False, server_default='incomplete', default='incomplete',
+    )
+    linked_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    unmapped_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    mislinked_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class NahlaInternalCustomerOrderHistoryCoverage(Base):
+    __tablename__ = 'nahla_internal_customer_order_history_coverage'
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'customer_id', 'identity_namespace',
+            name='uq_int_cov_tenant_customer_ns',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'customer_id'],
+            ['customers.tenant_id', 'customers.id'],
+            name='fk_int_cov_tenant_customer',
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, nullable=False)
+    identity_namespace = Column(String, nullable=False, server_default='nahla_internal_order_v1')
+    watermark_at = Column(DateTime(timezone=True), nullable=True)
+    forward_sync_health = Column(String, nullable=False, server_default='stale', default='stale')
+    authoritative_source_history_completeness = Column(
+        String, nullable=False, server_default='incomplete', default='incomplete',
+    )
+    linked_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    unmapped_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    mislinked_orders_in_scope_count = Column(Integer, nullable=False, server_default='0', default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class OrderShipment(Base):
@@ -607,6 +751,7 @@ class Integration(Base):
     __tablename__ = 'integrations'
     __table_args__ = (
         UniqueConstraint('provider', 'external_store_id', name='uq_integrations_provider_external_store_id'),
+        Index('uq_integrations_tenant_id_id', 'tenant_id', 'id', unique=True),
     )
     id = Column(Integer, primary_key=True)
     provider = Column(String, nullable=False)
@@ -677,6 +822,7 @@ class Customer(Base):
         # Kept as a non-unique covering index for display-value queries.
         # Uniqueness responsibility was moved to ix_customers_tenant_normalized_phone.
         Index('ix_customers_tenant_id', 'tenant_id'),
+        Index('uq_customers_tenant_id', 'tenant_id', 'id', unique=True),
         # Partial unique index: one Salla customer per (tenant, salla_customer_id).
         Index(
             'ix_customers_tenant_salla_id',

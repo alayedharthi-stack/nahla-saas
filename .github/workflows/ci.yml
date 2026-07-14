@@ -99,3 +99,61 @@ jobs:
             backend/tests/test_trusted_context_coupons_promotions.py \
             -m trusted_context_layer1 \
             -q --maxfail=1
+
+  a1-postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+      A1_PG_INTEGRATION_REQUIRED: "1"
+      A1_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          pip install pytest alembic
+
+      - name: Apply migrations through 0087 (A1-Expand only)
+        working-directory: database
+        run: alembic upgrade 0087
+
+      - name: A1-v3.7 PostgreSQL integration
+        run: |
+          python -m pytest \
+            backend/tests/test_order_customer_identity_postgres_integration.py \
+            backend/tests/test_order_customer_identity_log_privacy.py \
+            backend/tests/test_order_customer_identity_ingest_regression.py \
+            backend/tests/test_order_customer_identity_legacy_customer_sync.py \
+            backend/tests/test_order_customer_identity_migration_pg.py \
+            backend/tests/test_order_customer_identity_capability_gate.py \
+            backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \
+            backend/tests/test_salla_integration_resolver_ambiguity.py \
+            -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning

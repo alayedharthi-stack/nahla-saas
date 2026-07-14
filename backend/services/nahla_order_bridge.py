@@ -1389,6 +1389,20 @@ def sync_nahla_wa_order(
             existing.extra_metadata = meta
             from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
             stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
+            from services.order_customer_identity_service import (  # noqa: PLC0415
+                apply_nahla_internal_order_identity,
+                apply_whatsapp_order_identity_unlinked,
+            )
+
+            if cust is not None and getattr(cust, "id", None):
+                apply_nahla_internal_order_identity(
+                    existing,
+                    db=db,
+                    tenant_id=tenant_id,
+                    customer_id=int(cust.id),
+                )
+            else:
+                apply_whatsapp_order_identity_unlinked(existing)
             db.add(existing)
             _log_bridge(
                 external_id=external_id,
@@ -1426,6 +1440,20 @@ def sync_nahla_wa_order(
             source                = "whatsapp",
             extra_metadata        = base_meta,
         )
+        from services.order_customer_identity_service import (  # noqa: PLC0415
+            apply_nahla_internal_order_identity,
+            apply_whatsapp_order_identity_unlinked,
+        )
+
+        if cust is not None and getattr(cust, "id", None):
+            apply_nahla_internal_order_identity(
+                order,
+                db=db,
+                tenant_id=tenant_id,
+                customer_id=int(cust.id),
+            )
+        else:
+            apply_whatsapp_order_identity_unlinked(order)
         db.add(order)
         db.flush()
         base_meta = _apply_bridge_shipping_sync(
