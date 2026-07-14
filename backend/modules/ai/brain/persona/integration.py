@@ -138,6 +138,15 @@ def merge_persona_compose_into_extra_metadata(
         "catalog_fact_product_ids",
         "catalog_fact_price_values",
         "catalog_fact_rebuild_source",
+        "compose_source",
+        "response_mode",
+        "llm_candidate_present",
+        "final_text_transformed",
+        "final_transform_reasons",
+        "fallback_reason",
+        "fallback_action_type",
+        "trusted_coupon_offer_compose_active",
+        "facts_snapshot_id",
     ):
         if event_meta.get(key) is not None:
             merged[key] = event_meta.get(key)

@@ -2856,6 +2856,22 @@ class MerchantBrain:
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
 
+        try:
+            from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                begin_trusted_coupon_offer_text_tracking,
+            )
+
+            begin_trusted_coupon_offer_text_tracking(
+                result.data,
+                reply or "",
+            )
+        except Exception as _tc_prov_begin_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+            logger.debug(
+                "[TRUSTED_COUPON_OFFER_PROVENANCE] begin skipped tenant=%s err=%s",
+                tenant_id,
+                _tc_prov_begin_exc,
+            )
+
         if _final_turn_contract is not None:
             try:
                 from .turn.final_turn_audit import audit_final_turn_reply  # noqa: PLC0415
@@ -3180,6 +3196,19 @@ class MerchantBrain:
                     "tenant=%s len_before=%d len_after=%d",
                     tenant_id, len(_orig_scrub or ""), len(reply or ""),
                 )
+                try:
+                    from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                        note_trusted_coupon_offer_text_change,
+                    )
+
+                    note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_scrub,
+                        after=reply,
+                        reason="scrub_internal_markers",
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+                    pass
         except Exception as _scrub_exc:  # noqa: BLE001
             logger.warning(
                 "[BRAIN_SCRUB] failed err=%s — returning original reply",
@@ -3200,6 +3229,19 @@ class MerchantBrain:
                     "len_before=%d len_after=%d",
                     tenant_id, len(_orig_policy or ""), len(reply or ""),
                 )
+                try:
+                    from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                        note_trusted_coupon_offer_text_change,
+                    )
+
+                    note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_policy,
+                        after=reply,
+                        reason="sanitize_outbound_text",
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+                    pass
         except Exception as _policy_exc:  # noqa: BLE001  # noqa: silent-ok — policy scrub must never block reply
             logger.debug(
                 "[BRAIN_SCRUB] policy scrub skipped tenant=%s: %s",
@@ -3906,6 +3948,12 @@ class MerchantBrain:
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                _tc_offer_facts = dict(
+                    (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
+                        "trusted_coupon_offer_facts",
+                    )
+                    or {}
+                )
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
                     inbound_text=message or "",
@@ -3928,6 +3976,7 @@ class MerchantBrain:
                     ),
                     chosen_path=_chosen_path,
                     kb_availability_facts=(decision.args or {}).get("allowed_facts"),
+                    trusted_coupon_offer_facts=_tc_offer_facts or None,
                 )
                 if _crqg.replaced:
                     reply = _crqg.reply
@@ -4287,6 +4336,26 @@ class MerchantBrain:
 
         _catalog_fact_diag = _catalog_fact_guard_diagnostics(result.data)
 
+        try:
+            from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                extract_constitutional_metadata,
+                finalize_trusted_coupon_offer_text_provenance,
+            )
+
+            finalize_trusted_coupon_offer_text_provenance(
+                result.data,
+                reply or "",
+                guard_replaced=_guard_replaced,
+            )
+            _tc_coupon_constitutional_meta = extract_constitutional_metadata(result.data)
+        except Exception as _tc_prov_finalize_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+            logger.debug(
+                "[TRUSTED_COUPON_OFFER_PROVENANCE] finalize skipped tenant=%s err=%s",
+                tenant_id,
+                _tc_prov_finalize_exc,
+            )
+            _tc_coupon_constitutional_meta = {}
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
@@ -4333,6 +4402,7 @@ class MerchantBrain:
                     name for name, fired in (_guard_replaced or {}).items() if fired
                 ],
             ),
+            **_tc_coupon_constitutional_meta,
         }
 
 
@@ -4641,6 +4711,29 @@ def _build_reply_state(
                 inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
+        pass
+
+    try:
+        from modules.ai.brain.truth_surface.coupon_offer_consumption_gate import (  # noqa: PLC0415
+            maybe_trusted_coupon_offer_compose_facts,
+            safe_coupon_offer_consumption_trace_metadata,
+        )
+        from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+            current_trusted_context,
+        )
+
+        _tc = current_trusted_context()
+        _tc_coupon_facts = maybe_trusted_coupon_offer_compose_facts(
+            message=ctx.message or "",
+            snapshot=_tc,
+        )
+        if _tc_coupon_facts:
+            known_facts["trusted_coupon_offer_facts"] = _tc_coupon_facts
+            logger.info(
+                "[TRUSTED_COUPON_OFFER_COMPOSE] %s",
+                safe_coupon_offer_consumption_trace_metadata(_tc_coupon_facts),
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — TC coupon compose must not block reply
         pass
 
     if str((decision.args or {}).get("topic") or "") == "kb_availability_facts":

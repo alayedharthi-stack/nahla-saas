@@ -112,6 +112,28 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
             "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
         )
+    elif bundle.surface == "trusted_coupon_offer_answer":
+        for key in (
+            "question_kind",
+            "coupon_availability",
+            "promotion_availability",
+            "verified_eligible_coupon_count",
+            "verified_eligible_promotion_count",
+            "coupon_record_count",
+            "promotion_record_count",
+            "allow_final_eligibility_claim",
+        ):
+            if key in facts:
+                lines.append(f"{key}: {facts.get(key)}")
+        reason_codes = facts.get("unavailability_reason_codes") or []
+        if reason_codes:
+            lines.append(f"unavailability_reason_codes: {', '.join(str(c) for c in reason_codes)}")
+        lines.append(
+            "rules: answer only the coupon/offer availability question from verified facts; "
+            "never mention coupon codes; never claim a coupon was applied; "
+            "do not claim final eligibility unless allow_final_eligibility_claim is true; "
+            "no checkout pressure or order prompts; brief Saudi merchant tone"
+        )
     else:
         lines.append("rules: no checkout pressure, no slot prompts, no credentials, no fake claims")
     return "\n".join(lines)

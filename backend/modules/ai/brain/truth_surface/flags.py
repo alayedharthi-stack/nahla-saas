@@ -12,6 +12,7 @@ _UTS_V1_SHADOW = "NAHLA_UTS_V1_SHADOW_ENABLED"
 _UTS_V1_ENFORCE = "NAHLA_UTS_V1_ENFORCE_ENABLED"
 _TRUSTED_CONTEXT_SHADOW = "NAHLA_TRUSTED_CONTEXT_SHADOW_ENABLED"
 _LAYER2_SHADOW = "NAHLA_LAYER2_SHADOW_ENABLED"
+_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -50,8 +51,14 @@ def is_layer2_shadow_enabled() -> bool:
     return _is_enabled(_LAYER2_SHADOW)
 
 
+def is_trusted_context_coupon_offer_compose_enabled() -> bool:
+    """Trusted coupon/offer compose consumption — off by default."""
+    return _is_enabled(_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE)
+
+
 __all__ = [
     "is_layer2_shadow_enabled",
+    "is_trusted_context_coupon_offer_compose_enabled",
     "is_trusted_context_shadow_enabled",
     "is_truth_surface_shadow_enabled",
     "is_uts_v1_enforce_enabled",

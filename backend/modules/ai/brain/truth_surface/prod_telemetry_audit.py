@@ -154,8 +154,24 @@ def _payload_has_forbidden_keys(obj: Any, *, depth: int = 0) -> List[str]:
         key_l = str(key).lower()
         if key_l in _FORBIDDEN_PAYLOAD_KEYS or key_l in _PROMOTION_CONDITION_KEYS:
             found.append(str(key))
+        if key_l == "trusted_coupon_offer_compose":
+            found.extend(_audit_trusted_coupon_offer_compose_block(value, depth=depth + 1))
         found.extend(_payload_has_forbidden_keys(value, depth=depth + 1))
     return found
+
+
+def _audit_trusted_coupon_offer_compose_block(obj: Any, *, depth: int = 0) -> List[str]:
+    if depth > 4 or not isinstance(obj, dict):
+        return []
+    leaks: List[str] = []
+    for key in obj:
+        key_l = str(key).lower()
+        if key_l in _FORBIDDEN_PAYLOAD_KEYS or key_l in _PROMOTION_CONDITION_KEYS:
+            leaks.append(str(key))
+    for value in obj.values():
+        if isinstance(value, dict):
+            leaks.extend(_audit_trusted_coupon_offer_compose_block(value, depth=depth + 1))
+    return leaks
 
 
 def _looks_like_full_coupon_code(value: Any) -> bool:

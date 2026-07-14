@@ -37,8 +37,11 @@ def _finalize_commerce_fallback(
     intent_name: str = "",
     decision_topic: str = "",
     protected_final_reply: bool = False,
+    trusted_coupon_offer_facts: Optional[dict] = None,
 ) -> Tuple[str, str]:
     """Block catalog fallback on non-catalog turns; route coupon inquiries safely."""
+    if isinstance(trusted_coupon_offer_facts, dict) and trusted_coupon_offer_facts:
+        return fallback, kind
     try:
         from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
             build_discount_coupon_support_reply,
@@ -631,6 +634,7 @@ def apply_commerce_reply_quality_guard(
     availability_polarity: str = "",
     chosen_path: str = "",
     kb_availability_facts: Optional[Dict[str, Any]] = None,
+    trusted_coupon_offer_facts: Optional[Dict[str, Any]] = None,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     kb_negative = _kb_negative_availability_decision(
@@ -696,6 +700,7 @@ def apply_commerce_reply_quality_guard(
             protected_final_reply=bool(
                 contract is not None and contract.protected_final_reply
             ),
+            trusted_coupon_offer_facts=trusted_coupon_offer_facts,
         )
         if kb_negative and kind == "kb_negative_suppressed":
             return CommerceReplyQualityGuardResult(
@@ -790,6 +795,7 @@ def apply_commerce_reply_quality_guard(
             protected_final_reply=bool(
                 contract is not None and contract.protected_final_reply
             ),
+            trusted_coupon_offer_facts=trusted_coupon_offer_facts,
         )
         used_fallback = True
         if kb_negative and fallback_kind == "kb_negative_suppressed":

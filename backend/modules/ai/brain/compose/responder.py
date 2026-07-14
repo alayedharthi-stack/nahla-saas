@@ -1362,6 +1362,69 @@ class DefaultComposer:
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
+            _trusted_tc_facts = dict(
+                (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
+                    "trusted_coupon_offer_facts",
+                )
+                or {}
+            )
+            if _trusted_tc_facts:
+                try:
+                    from ..persona.trusted_coupon_offer_answer import (  # noqa: PLC0415
+                        try_compose_trusted_coupon_offer_answer,
+                        trusted_coupon_offer_compose_failure_response,
+                    )
+                    from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                    _tc_ai_settings = _ai_settings_from_ctx(ctx)
+                    _tc_text, _tc_result, _tc_event = (
+                        await try_compose_trusted_coupon_offer_answer(
+                            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                            customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                            inbound_text=str(getattr(ctx, "message", "") or ""),
+                            trusted_coupon_offer_facts=_trusted_tc_facts,
+                            ai_settings=_tc_ai_settings,
+                        )
+                    )
+                    if _tc_result is not None and (_tc_text or "").strip():
+                        if isinstance(_tc_event, dict):
+                            result.data.update(_tc_event)
+                        result.data["trusted_coupon_offer_compose_active"] = True
+                        return (_tc_text or "").strip()
+
+                    _fb_reason = "compose_empty"
+                    _fb_text, _fb_event = trusted_coupon_offer_compose_failure_response(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        trusted_coupon_offer_facts=_trusted_tc_facts,
+                        ai_settings=_tc_ai_settings,
+                        fallback_reason=_fb_reason,
+                        llm_candidate_present=bool((_tc_text or "").strip()),
+                    )
+                    result.data.update(_fb_event)
+                    result.data["trusted_coupon_offer_compose_active"] = True
+                    return _fb_text
+                except Exception:
+                    logger.exception(
+                        "[RESPONDER] trusted_coupon_offer_answer compose failed",
+                    )
+                    from ..persona.trusted_coupon_offer_answer import (  # noqa: PLC0415
+                        trusted_coupon_offer_compose_failure_response,
+                    )
+                    from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                    _fb_text, _fb_event = trusted_coupon_offer_compose_failure_response(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        trusted_coupon_offer_facts=_trusted_tc_facts,
+                        ai_settings=_ai_settings_from_ctx(ctx),
+                        fallback_reason="compose_exception",
+                    )
+                    result.data.update(_fb_event)
+                    result.data["trusted_coupon_offer_compose_active"] = True
+                    return _fb_text
             _sel_price = str((decision.args or {}).get("selection_presentation_text") or "").strip()
             if _sel_price and str((decision.args or {}).get("topic") or "") == "selection_context_price":
                 result.data["chosen_path"] = "selection_context_price"
