@@ -143,6 +143,54 @@ def trusted_coupon_offer_emergency_fallback(bundle: PersonaFactsBundle) -> str:
     return "حالة العروض والكوبونات قيد التحقق من بيانات المتجر."
 
 
+def trusted_coupon_offer_compose_failure_response(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    trusted_coupon_offer_facts: dict[str, Any],
+    ai_settings: Optional[dict[str, Any]] = None,
+    fallback_reason: str,
+    llm_candidate_present: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    """Emergency fallback after genuine trusted coupon/offer compose failure."""
+    from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+    from .facts_bundle import PersonaComposeResult  # noqa: PLC0415
+
+    bundle = build_trusted_coupon_offer_answer_facts_bundle(
+        inbound_text=inbound_text,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        trusted_coupon_offer_facts=trusted_coupon_offer_facts,
+        merchant_persona=dict(ai_settings or {}),
+    )
+    fallback_text = trusted_coupon_offer_emergency_fallback(bundle)
+    fallback = PersonaComposeResult(
+        text=fallback_text,
+        source="fallback_deterministic",
+        surface=PERSONA_SURFACE_TRUSTED_COUPON_OFFER_ANSWER,
+        facts_hash=canonical_facts_hash(bundle.verified_facts),
+        guard_passed=True,
+        fallback_reason=str(fallback_reason or "compose_failed"),
+        language=bundle.language,
+        dialect=bundle.dialect,
+        emoji_count=0,
+        latency_ms=0,
+        model="",
+    )
+    event_meta = build_trusted_coupon_offer_answer_event_metadata(
+        fallback,
+        tenant_id=int(tenant_id),
+        compose_facts=trusted_coupon_offer_facts,
+    )
+    event_meta["compose_source"] = "fallback_deterministic"
+    event_meta["llm_candidate_present"] = bool(llm_candidate_present)
+    event_meta["fallback_reason"] = str(fallback_reason or "compose_failed")
+    event_meta["fallback_action_type"] = "trusted_coupon_offer_answer"
+    event_meta["chosen_path"] = "trusted_coupon_offer_compose"
+    return fallback_text.strip(), event_meta
+
+
 async def try_compose_trusted_coupon_offer_answer(
     *,
     tenant_id: int,
@@ -207,6 +255,7 @@ async def try_compose_trusted_coupon_offer_answer(
 __all__ = [
     "build_trusted_coupon_offer_answer_event_metadata",
     "build_trusted_coupon_offer_answer_facts_bundle",
+    "trusted_coupon_offer_compose_failure_response",
     "try_compose_trusted_coupon_offer_answer",
     "trusted_coupon_offer_emergency_fallback",
 ]

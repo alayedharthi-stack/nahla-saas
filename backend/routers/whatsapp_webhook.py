@@ -8644,6 +8644,24 @@ async def _handle_merchant_message(
                                 _brain_persona_compose_event["source"] = _brain_persona_compose.get(
                                     "source"
                                 )
+                        elif (
+                            _brain_chosen_path == "trusted_coupon_offer_compose"
+                            and brain_result.get("trusted_coupon_offer_compose_active")
+                        ):
+                            try:
+                                from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                                    extract_constitutional_metadata,
+                                )
+
+                                _brain_persona_compose_event = extract_constitutional_metadata(
+                                    brain_result,
+                                )
+                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
+                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
+                                _brain_persona_compose_event = {
+                                    "chosen_path": _brain_chosen_path,
+                                    "trusted_coupon_offer_compose_active": True,
+                                }
                         else:
                             _brain_persona_compose_event = None
                         _brain_nc_block = bool(
@@ -9844,6 +9862,19 @@ async def _handle_merchant_message(
                                 before=_po_reply_before_dedup,
                                 after=reply,
                             )
+                            if isinstance(_brain_persona_compose_event, dict):
+                                try:
+                                    from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                                        note_trusted_coupon_offer_dedup_substitution,
+                                    )
+
+                                    note_trusted_coupon_offer_dedup_substitution(
+                                        _brain_persona_compose_event,
+                                        before=_po_reply_before_dedup,
+                                        after=reply,
+                                    )
+                                except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance must not block send
+                                    pass
                             logger.info(
                                 "[CHAT_DEDUP] tenant=%s to=%s tier=hard overlap=%.2f "
                                 "replaced near-duplicate outbound "

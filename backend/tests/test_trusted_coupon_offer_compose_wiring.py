@@ -241,3 +241,65 @@ def test_generic_merchant_eligibility_requires_context_case() -> None:
     facts = reply_state.known_facts.get("trusted_coupon_offer_facts") or {}
     assert facts.get("coupon_availability") == "eligibility_requires_context"
     assert facts.get("allow_final_eligibility_claim") is False
+
+
+async def _run_trusted_coupon_responder_with_try_compose_mock(*, try_compose_side_effect):
+    from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
+    from modules.ai.brain.types import BrainReplyState  # noqa: E402
+
+    compose_facts = _compose_facts()
+    ctx = _minimal_ctx("عندكم عروض؟")
+    ctx.reply_state = BrainReplyState(
+        store_name=_MERCHANT,
+        known_facts={"trusted_coupon_offer_facts": compose_facts},
+    )
+    result = ActionResult(success=True, data={})
+    decision = Decision(action="llm_reply", args={})
+    composer = DefaultComposer()
+
+    with patch(
+        "modules.ai.brain.persona.trusted_coupon_offer_answer.try_compose_trusted_coupon_offer_answer",
+        new_callable=AsyncMock,
+        side_effect=try_compose_side_effect,
+    ) as try_mock, patch.object(
+        composer,
+        "_llm_compose",
+        new_callable=AsyncMock,
+    ) as llm_mock:
+        text = await composer.compose(decision, result, ctx)
+    return text, result, llm_mock, try_mock
+
+
+def test_responder_compose_exception_uses_tagged_fallback_not_llm() -> None:
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("compose blew up")
+
+    text, result, llm_mock, _try_mock = asyncio.run(
+        _run_trusted_coupon_responder_with_try_compose_mock(
+            try_compose_side_effect=_boom,
+        )
+    )
+    llm_mock.assert_not_called()
+    assert result.data.get("compose_source") == "fallback_deterministic"
+    assert result.data.get("fallback_reason") == "compose_exception"
+    assert result.data.get("fallback_action_type") == "trusted_coupon_offer_answer"
+    assert result.data.get("chosen_path") == "trusted_coupon_offer_compose"
+    assert result.data.get("trusted_coupon_offer_compose_active") is True
+    assert (text or "").strip()
+
+
+def test_responder_compose_empty_uses_tagged_fallback_not_llm() -> None:
+    async def _empty(*_args, **_kwargs):
+        return None, None, None
+
+    text, result, llm_mock, _try_mock = asyncio.run(
+        _run_trusted_coupon_responder_with_try_compose_mock(
+            try_compose_side_effect=_empty,
+        )
+    )
+    llm_mock.assert_not_called()
+    assert result.data.get("compose_source") == "fallback_deterministic"
+    assert result.data.get("fallback_reason") == "compose_empty"
+    assert result.data.get("fallback_action_type") == "trusted_coupon_offer_answer"
+    assert result.data.get("chosen_path") == "trusted_coupon_offer_compose"
+    assert (text or "").strip()

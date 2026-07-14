@@ -2856,6 +2856,22 @@ class MerchantBrain:
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
 
+        try:
+            from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                begin_trusted_coupon_offer_text_tracking,
+            )
+
+            begin_trusted_coupon_offer_text_tracking(
+                result.data,
+                reply or "",
+            )
+        except Exception as _tc_prov_begin_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+            logger.debug(
+                "[TRUSTED_COUPON_OFFER_PROVENANCE] begin skipped tenant=%s err=%s",
+                tenant_id,
+                _tc_prov_begin_exc,
+            )
+
         if _final_turn_contract is not None:
             try:
                 from .turn.final_turn_audit import audit_final_turn_reply  # noqa: PLC0415
@@ -3180,6 +3196,19 @@ class MerchantBrain:
                     "tenant=%s len_before=%d len_after=%d",
                     tenant_id, len(_orig_scrub or ""), len(reply or ""),
                 )
+                try:
+                    from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                        note_trusted_coupon_offer_text_change,
+                    )
+
+                    note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_scrub,
+                        after=reply,
+                        reason="scrub_internal_markers",
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+                    pass
         except Exception as _scrub_exc:  # noqa: BLE001
             logger.warning(
                 "[BRAIN_SCRUB] failed err=%s — returning original reply",
@@ -3200,6 +3229,19 @@ class MerchantBrain:
                     "len_before=%d len_after=%d",
                     tenant_id, len(_orig_policy or ""), len(reply or ""),
                 )
+                try:
+                    from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                        note_trusted_coupon_offer_text_change,
+                    )
+
+                    note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_policy,
+                        after=reply,
+                        reason="sanitize_outbound_text",
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+                    pass
         except Exception as _policy_exc:  # noqa: BLE001  # noqa: silent-ok — policy scrub must never block reply
             logger.debug(
                 "[BRAIN_SCRUB] policy scrub skipped tenant=%s: %s",
@@ -4294,6 +4336,26 @@ class MerchantBrain:
 
         _catalog_fact_diag = _catalog_fact_guard_diagnostics(result.data)
 
+        try:
+            from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
+                extract_constitutional_metadata,
+                finalize_trusted_coupon_offer_text_provenance,
+            )
+
+            finalize_trusted_coupon_offer_text_provenance(
+                result.data,
+                reply or "",
+                guard_replaced=_guard_replaced,
+            )
+            _tc_coupon_constitutional_meta = extract_constitutional_metadata(result.data)
+        except Exception as _tc_prov_finalize_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
+            logger.debug(
+                "[TRUSTED_COUPON_OFFER_PROVENANCE] finalize skipped tenant=%s err=%s",
+                tenant_id,
+                _tc_prov_finalize_exc,
+            )
+            _tc_coupon_constitutional_meta = {}
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
@@ -4340,6 +4402,7 @@ class MerchantBrain:
                     name for name, fired in (_guard_replaced or {}).items() if fired
                 ],
             ),
+            **_tc_coupon_constitutional_meta,
         }
 
 
