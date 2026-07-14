@@ -50,6 +50,14 @@ def log_identity_sync_failure(
     )
 
 
+def log_capability_state_read_failure(*, exception_class: str) -> None:
+    """Privacy-safe capability gate read failure (no traceback / DB context)."""
+    logger.warning(
+        "[A1 identity] event=capability_state_read_failure exception_class=%s",
+        exception_class,
+    )
+
+
 def log_connection_resolution_status(
     *,
     status: str,
@@ -69,6 +77,7 @@ def log_connection_resolution_status(
 
 
 __all__ = [
+    "log_capability_state_read_failure",
     "log_connection_resolution_status",
     "log_identity_sync_event",
     "log_identity_sync_failure",

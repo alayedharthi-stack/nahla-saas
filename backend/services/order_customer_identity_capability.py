@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from services.order_customer_identity_logging import log_capability_state_read_failure
 from services.order_customer_identity_contract import (
     CAPABILITY_KEY_ORDER_CUSTOMER_IDENTITY,
     CAPABILITY_STATE_VALIDATED,
@@ -38,7 +39,8 @@ def read_order_customer_identity_capability_state(db: Session) -> Optional[str]:
         if state not in CAPABILITY_STATES:
             return None
         return state
-    except Exception:
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — capability read intentionally fails closed; traceback omitted to protect operational identifiers
+        log_capability_state_read_failure(exception_class=type(exc).__name__)
         return None
 
 

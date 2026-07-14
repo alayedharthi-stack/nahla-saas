@@ -150,7 +150,7 @@ def pg_session(postgres_engine: Engine) -> Generator[Session, None, None]:
     finally:
         try:
             session.rollback()
-        except Exception:
+        except Exception:  # noqa: silent-ok — best-effort cleanup of ephemeral PostgreSQL test database
             pass
         session.close()
         if transaction.is_active:
