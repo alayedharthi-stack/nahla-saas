@@ -13,6 +13,8 @@ _UTS_V1_ENFORCE = "NAHLA_UTS_V1_ENFORCE_ENABLED"
 _TRUSTED_CONTEXT_SHADOW = "NAHLA_TRUSTED_CONTEXT_SHADOW_ENABLED"
 _LAYER2_SHADOW = "NAHLA_LAYER2_SHADOW_ENABLED"
 _TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE_ENABLED"
+_PRODUCT_SALE_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_PRODUCT_SALE_OFFER_COMPOSE_ENABLED"
+_GENERAL_OFFER_DISCOVERY_COMPOSE = "NAHLA_TRUSTED_CONTEXT_GENERAL_OFFER_DISCOVERY_COMPOSE_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -56,8 +58,20 @@ def is_trusted_context_coupon_offer_compose_enabled() -> bool:
     return _is_enabled(_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE)
 
 
+def is_product_sale_offer_compose_enabled() -> bool:
+    """Product-scoped catalog sale compose consumption — off by default."""
+    return _is_enabled(_PRODUCT_SALE_OFFER_COMPOSE)
+
+
+def is_general_offer_discovery_compose_enabled() -> bool:
+    """General offer discovery compose (namespaced bundles) — off by default."""
+    return _is_enabled(_GENERAL_OFFER_DISCOVERY_COMPOSE)
+
+
 __all__ = [
+    "is_general_offer_discovery_compose_enabled",
     "is_layer2_shadow_enabled",
+    "is_product_sale_offer_compose_enabled",
     "is_trusted_context_coupon_offer_compose_enabled",
     "is_trusted_context_shadow_enabled",
     "is_truth_surface_shadow_enabled",

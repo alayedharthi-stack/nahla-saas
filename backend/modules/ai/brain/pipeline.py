@@ -4718,6 +4718,12 @@ def _build_reply_state(
             maybe_trusted_coupon_offer_compose_facts,
             safe_coupon_offer_consumption_trace_metadata,
         )
+        from modules.ai.brain.truth_surface.product_sale_offer_consumption_gate import (  # noqa: PLC0415
+            general_offer_discovery_bundle_trace,
+            maybe_general_offer_discovery_compose_facts,
+            maybe_product_sale_offer_compose_facts,
+            safe_product_sale_consumption_trace_metadata,
+        )
         from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
             current_trusted_context,
         )
@@ -4727,13 +4733,43 @@ def _build_reply_state(
             message=ctx.message or "",
             snapshot=_tc,
         )
-        if _tc_coupon_facts:
-            known_facts["trusted_coupon_offer_facts"] = _tc_coupon_facts
+        _discovery_facts = maybe_general_offer_discovery_compose_facts(
+            message=ctx.message or "",
+            snapshot=_tc,
+            trusted_coupon_offer_facts=_tc_coupon_facts,
+        )
+        if _discovery_facts:
+            known_facts["general_offer_discovery_facts"] = _discovery_facts
             logger.info(
-                "[TRUSTED_COUPON_OFFER_COMPOSE] %s",
-                safe_coupon_offer_consumption_trace_metadata(_tc_coupon_facts),
+                "[GENERAL_OFFER_DISCOVERY_COMPOSE] %s",
+                {
+                    **safe_product_sale_consumption_trace_metadata(_discovery_facts),
+                    **general_offer_discovery_bundle_trace(
+                        message=ctx.message or "",
+                        snapshot=_tc,
+                        trusted_coupon_offer_facts=_tc_coupon_facts,
+                        discovery_facts=_discovery_facts,
+                    ),
+                },
             )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — TC coupon compose must not block reply
+        else:
+            _product_sale_facts = maybe_product_sale_offer_compose_facts(
+                message=ctx.message or "",
+                snapshot=_tc,
+            )
+            if _product_sale_facts:
+                known_facts["product_sale_offer_facts"] = _product_sale_facts
+                logger.info(
+                    "[PRODUCT_SALE_OFFER_COMPOSE] %s",
+                    safe_product_sale_consumption_trace_metadata(_product_sale_facts),
+                )
+            elif _tc_coupon_facts:
+                known_facts["trusted_coupon_offer_facts"] = _tc_coupon_facts
+                logger.info(
+                    "[TRUSTED_COUPON_OFFER_COMPOSE] %s",
+                    safe_coupon_offer_consumption_trace_metadata(_tc_coupon_facts),
+                )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — TC offer compose must not block reply
         pass
 
     if str((decision.args or {}).get("topic") or "") == "kb_availability_facts":

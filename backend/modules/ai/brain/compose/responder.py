@@ -1362,12 +1362,164 @@ class DefaultComposer:
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
-            _trusted_tc_facts = dict(
-                (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
-                    "trusted_coupon_offer_facts",
+            _reply_state = getattr(ctx, "reply_state", None)
+            _known = dict(getattr(_reply_state, "known_facts", None) or {})
+            _discovery_facts = dict(_known.get("general_offer_discovery_facts") or {})
+            _product_sale_facts = dict(_known.get("product_sale_offer_facts") or {})
+            _trusted_tc_facts = dict(_known.get("trusted_coupon_offer_facts") or {})
+
+            if _discovery_facts:
+                from ..persona.general_offer_discovery_answer import (  # noqa: PLC0415
+                    build_general_offer_discovery_facts_bundle,
+                    build_general_offer_discovery_event_metadata,
+                    general_offer_discovery_emergency_fallback,
+                    try_compose_general_offer_discovery_answer,
                 )
-                or {}
-            )
+                from ..persona.fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+                from ..persona.facts_bundle import PersonaComposeResult  # noqa: PLC0415
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                def _discovery_failure(**kwargs):  # type: ignore[no-untyped-def]
+                    bundle = build_general_offer_discovery_facts_bundle(
+                        inbound_text=kwargs["inbound_text"],
+                        tenant_id=kwargs["tenant_id"],
+                        customer_phone=kwargs["customer_phone"],
+                        general_offer_discovery_facts=kwargs["facts"],
+                        merchant_persona=dict(kwargs.get("ai_settings") or {}),
+                    )
+                    fb = PersonaComposeResult(
+                        text=general_offer_discovery_emergency_fallback(bundle),
+                        source="fallback_deterministic",
+                        surface="general_offer_discovery_answer",
+                        facts_hash=canonical_facts_hash(bundle.verified_facts),
+                        guard_passed=True,
+                        fallback_reason=str(kwargs.get("fallback_reason") or "compose_empty"),
+                        language=bundle.language,
+                    )
+                    meta = build_general_offer_discovery_event_metadata(
+                        fb,
+                        tenant_id=int(kwargs["tenant_id"]),
+                        compose_facts=kwargs["facts"],
+                    )
+                    meta["compose_source"] = "fallback_deterministic"
+                    return fb.text.strip(), meta
+
+                try:
+                    _tc_ai_settings = _ai_settings_from_ctx(ctx)
+                    _disc_text, _disc_result, _disc_event = (
+                        await try_compose_general_offer_discovery_answer(
+                            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                            customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                            inbound_text=str(getattr(ctx, "message", "") or ""),
+                            general_offer_discovery_facts=_discovery_facts,
+                            ai_settings=_tc_ai_settings,
+                        )
+                    )
+                    if _disc_result is not None and (_disc_text or "").strip():
+                        if isinstance(_disc_event, dict):
+                            result.data.update(_disc_event)
+                        result.data["general_offer_discovery_compose_active"] = True
+                        return (_disc_text or "").strip()
+                    _fb_text, _fb_event = _discovery_failure(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        facts=_discovery_facts,
+                        ai_settings=_tc_ai_settings,
+                        fallback_reason="compose_empty",
+                    )
+                    result.data.update(_fb_event)
+                    result.data["general_offer_discovery_compose_active"] = True
+                    return _fb_text
+                except Exception:
+                    logger.exception("[RESPONDER] general_offer_discovery compose failed")
+                    _fb_text, _fb_event = _discovery_failure(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        facts=_discovery_facts,
+                        ai_settings=_ai_settings_from_ctx(ctx),
+                        fallback_reason="compose_exception",
+                    )
+                    result.data.update(_fb_event)
+                    result.data["general_offer_discovery_compose_active"] = True
+                    return _fb_text
+
+            if _product_sale_facts:
+                from ..persona.product_sale_offer_answer import (  # noqa: PLC0415
+                    build_product_sale_offer_event_metadata,
+                    build_product_sale_offer_facts_bundle,
+                    product_sale_offer_emergency_fallback,
+                    try_compose_product_sale_offer_answer,
+                )
+                from ..persona.fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+                from ..persona.facts_bundle import PersonaComposeResult  # noqa: PLC0415
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                def _product_sale_failure(**kwargs):  # type: ignore[no-untyped-def]
+                    bundle = build_product_sale_offer_facts_bundle(
+                        inbound_text=kwargs["inbound_text"],
+                        tenant_id=kwargs["tenant_id"],
+                        customer_phone=kwargs["customer_phone"],
+                        product_sale_offer_facts=kwargs["facts"],
+                        merchant_persona=dict(kwargs.get("ai_settings") or {}),
+                    )
+                    fb = PersonaComposeResult(
+                        text=product_sale_offer_emergency_fallback(bundle),
+                        source="fallback_deterministic",
+                        surface="product_sale_offer_answer",
+                        facts_hash=canonical_facts_hash(bundle.verified_facts),
+                        guard_passed=True,
+                        fallback_reason=str(kwargs.get("fallback_reason") or "compose_empty"),
+                        language=bundle.language,
+                    )
+                    meta = build_product_sale_offer_event_metadata(
+                        fb,
+                        tenant_id=int(kwargs["tenant_id"]),
+                        compose_facts=kwargs["facts"],
+                    )
+                    meta["compose_source"] = "fallback_deterministic"
+                    return fb.text.strip(), meta
+
+                try:
+                    _tc_ai_settings = _ai_settings_from_ctx(ctx)
+                    _ps_text, _ps_result, _ps_event = await try_compose_product_sale_offer_answer(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        product_sale_offer_facts=_product_sale_facts,
+                        ai_settings=_tc_ai_settings,
+                    )
+                    if _ps_result is not None and (_ps_text or "").strip():
+                        if isinstance(_ps_event, dict):
+                            result.data.update(_ps_event)
+                        result.data["product_sale_offer_compose_active"] = True
+                        return (_ps_text or "").strip()
+                    _fb_text, _fb_event = _product_sale_failure(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        facts=_product_sale_facts,
+                        ai_settings=_tc_ai_settings,
+                        fallback_reason="compose_empty",
+                    )
+                    result.data.update(_fb_event)
+                    result.data["product_sale_offer_compose_active"] = True
+                    return _fb_text
+                except Exception:
+                    logger.exception("[RESPONDER] product_sale_offer compose failed")
+                    _fb_text, _fb_event = _product_sale_failure(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        facts=_product_sale_facts,
+                        ai_settings=_ai_settings_from_ctx(ctx),
+                        fallback_reason="compose_exception",
+                    )
+                    result.data.update(_fb_event)
+                    result.data["product_sale_offer_compose_active"] = True
+                    return _fb_text
+
             if _trusted_tc_facts:
                 try:
                     from ..persona.trusted_coupon_offer_answer import (  # noqa: PLC0415

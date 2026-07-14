@@ -566,6 +566,36 @@ def build_trusted_context_snapshot(
         )
         raise
 
+    try:
+        from .product_sale_offer_loader import (  # noqa: PLC0415
+            load_product_sale_offer_facts,
+            should_load_product_sale_offer_facts,
+        )
+
+        if should_load_product_sale_offer_facts(
+            message=message,
+            brain_state=brain_state,
+        ):
+            sale_facts, sale_obs = load_product_sale_offer_facts(
+                db=db,
+                tenant_id=tenant_id,
+                message=message,
+                brain_state=brain_state,
+            )
+            if sale_facts:
+                facts.extend(sale_facts)
+                loaded_domains.append("catalog_product_sale")
+                sources.append("product_sale_offer_loader")
+                from .product_sale_offer_consumption_gate import (  # noqa: PLC0415
+                    safe_product_sale_loader_telemetry,
+                )
+
+                shadow_observability.update(
+                    {"product_sale_offer": safe_product_sale_loader_telemetry(sale_obs)}
+                )
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
+        shadow_observability["product_sale_offer_error_class"] = exc.__class__.__name__
+
     snapshot = TrustedContextSnapshot(
         tenant_id=int(tenant_id),
         customer_phone=str(customer_phone or "").strip(),
