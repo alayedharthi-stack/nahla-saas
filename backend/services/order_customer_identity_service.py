@@ -232,13 +232,14 @@ def apply_nahla_internal_order_identity(
 ) -> None:
     """Canonical internal link — sole path that sets Order.customer_id."""
     order.order_source_kind = ORDER_SOURCE_NAHL_INTERNAL
-    order.identity_namespace = NAHLA_INTERNAL_ORDER_V1
     order.customer_id = int(customer_id)
     order.customer_link_state = LINK_STATE_VERIFIED
     order.customer_link_evidence_class = EVIDENCE_AUTHORITATIVE
     order.customer_link_source = CUSTOMER_LINK_SOURCE_NAHL_BRIDGE
     order.customer_linked_at = _utcnow()
     _clear_external_link_fields(order)
+    # Clearing external tuple fields must never erase the internal namespace.
+    order.identity_namespace = NAHLA_INTERNAL_ORDER_V1
     ensure_internal_customer_coverage_row(
         db,
         tenant_id=tenant_id,
