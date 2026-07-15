@@ -15,6 +15,7 @@ _LAYER2_SHADOW = "NAHLA_LAYER2_SHADOW_ENABLED"
 _TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE_ENABLED"
 _PRODUCT_SALE_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_PRODUCT_SALE_OFFER_COMPOSE_ENABLED"
 _GENERAL_OFFER_DISCOVERY_COMPOSE = "NAHLA_TRUSTED_CONTEXT_GENERAL_OFFER_DISCOVERY_COMPOSE_ENABLED"
+_CUSTOMER_CONDITIONAL_COUPON_SHADOW = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -68,7 +69,13 @@ def is_general_offer_discovery_compose_enabled() -> bool:
     return _is_enabled(_GENERAL_OFFER_DISCOVERY_COMPOSE)
 
 
+def is_customer_conditional_coupon_shadow_enabled() -> bool:
+    """Layer 0 conditional-coupon facts shadow/read — off by default."""
+    return _is_enabled(_CUSTOMER_CONDITIONAL_COUPON_SHADOW)
+
+
 __all__ = [
+    "is_customer_conditional_coupon_shadow_enabled",
     "is_general_offer_discovery_compose_enabled",
     "is_layer2_shadow_enabled",
     "is_product_sale_offer_compose_enabled",
