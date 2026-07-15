@@ -142,6 +142,7 @@ class TrustedDomain(str, Enum):
     MERCHANT_POLICY = "merchant_policy"
     COUPONS = "coupons"
     PROMOTIONS = "promotions"
+    CUSTOMER_CONDITIONAL_COUPON = "customer_conditional_coupon"
 
 
 @dataclass(frozen=True)

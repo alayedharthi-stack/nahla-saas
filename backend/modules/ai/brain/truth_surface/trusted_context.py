@@ -596,6 +596,35 @@ def build_trusted_context_snapshot(
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
         shadow_observability["product_sale_offer_error_class"] = exc.__class__.__name__
 
+    try:
+        from .customer_conditional_coupon_loader import (  # noqa: PLC0415
+            load_customer_conditional_coupon_facts,
+            should_load_customer_conditional_coupon_facts,
+        )
+        from .flags import is_customer_conditional_coupon_shadow_enabled  # noqa: PLC0415
+
+        if (
+            is_customer_conditional_coupon_shadow_enabled()
+            and should_load_customer_conditional_coupon_facts(
+                message=message,
+                inbound_metadata=inbound_metadata,
+            )
+        ):
+            cc_facts, cc_obs = load_customer_conditional_coupon_facts(
+                db=db,
+                tenant_id=tenant_id,
+                message=message,
+                conversation=conversation,
+                inbound_metadata=inbound_metadata,
+            )
+            if cc_facts:
+                facts.extend(cc_facts)
+                loaded_domains.append(TrustedDomain.CUSTOMER_CONDITIONAL_COUPON.value)
+                sources.append("customer_conditional_coupon_loader")
+                shadow_observability["customer_conditional_coupon"] = dict(cc_obs)
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
+        shadow_observability["customer_conditional_coupon_error_class"] = exc.__class__.__name__
+
     snapshot = TrustedContextSnapshot(
         tenant_id=int(tenant_id),
         customer_phone=str(customer_phone or "").strip(),
