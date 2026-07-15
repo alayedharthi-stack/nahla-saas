@@ -69,7 +69,51 @@ SYNC_HEALTH_STALE = "stale"
 EXTERNAL_COVERAGE_SCOPE_CLAIM = "external_identity_tuple_bound_orders_only"
 INTERNAL_COVERAGE_SCOPE_CLAIM = "nahla_internal_customer_orders_only"
 
+# Closed identity namespaces for per-subject policy eligibility derivation.
+KNOWN_A1_IDENTITY_NAMESPACES = frozenset({
+    NAHLA_INTERNAL_ORDER_V1,
+    EXTERNAL_PROVIDER_SALLA_V1,
+})
+
+# Fail-closed sentinel for paths that do not derive per-subject eligibility (e.g. tenant report).
 POLICY_ELIGIBILITY_READY = False
+
+
+def derive_policy_eligibility_ready(
+    *,
+    capability_validated: bool,
+    identity_namespace: str,
+    coverage_row_present: bool,
+    authoritative_source_history_completeness: str,
+    forward_sync_health: str,
+    linked_orders_in_scope_count: int,
+    unmapped_orders_in_scope_count: int,
+    mislinked_orders_in_scope_count: int,
+    watermark_present: bool,
+    integration_connection_present: bool = True,
+) -> bool:
+    """Derive per-subject policy eligibility from capped coverage proof (fail-closed)."""
+    if not capability_validated:
+        return False
+    if str(identity_namespace) not in KNOWN_A1_IDENTITY_NAMESPACES:
+        return False
+    if not coverage_row_present:
+        return False
+    if not integration_connection_present:
+        return False
+    if not watermark_present:
+        return False
+    if authoritative_source_history_completeness != SOURCE_HISTORY_COMPLETE:
+        return False
+    if forward_sync_health != SYNC_HEALTH_HEALTHY:
+        return False
+    if int(unmapped_orders_in_scope_count) != 0:
+        return False
+    if int(mislinked_orders_in_scope_count) != 0:
+        return False
+    if int(linked_orders_in_scope_count) <= 0:
+        return False
+    return True
 
 # Platform capability rollout (A1 expand → validate)
 CAPABILITY_KEY_ORDER_CUSTOMER_IDENTITY = "order_customer_identity"
@@ -96,6 +140,7 @@ __all__ = [
     "EXTERNAL_LINK_SOURCE_SALLA_PROFILE",
     "EXTERNAL_PROVIDER_SALLA_V1",
     "INTERNAL_COVERAGE_SCOPE_CLAIM",
+    "KNOWN_A1_IDENTITY_NAMESPACES",
     "LINK_STATE_AMBIGUOUS",
     "LINK_STATE_REJECTED",
     "LINK_STATE_UNLINKED",
@@ -110,6 +155,7 @@ __all__ = [
     "ORDER_SOURCE_WHATSAPP",
     "POLICY_ELIGIBILITY_READY",
     "PROFILE_SOURCE_SALLA_CUSTOMER_SYNC",
+    "derive_policy_eligibility_ready",
     "PROFILE_SOURCE_SALLA_ORDER_REF",
     "SOURCE_HISTORY_COMPLETE",
     "SOURCE_HISTORY_INCOMPLETE",

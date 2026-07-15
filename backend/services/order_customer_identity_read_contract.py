@@ -1,7 +1,16 @@
 """
 Per-subject safe read contracts (A1-v3.7).
 
-No cross-subject aggregate. No PII. policy_eligibility_ready always false.
+No cross-subject aggregate. No PII.
+
+``policy_eligibility_ready`` on these safe per-subject proofs is an
+evidence-derived eligibility signal. It can become true only after the
+capability is validated and the complete per-subject proof passes.
+
+This is distinct from the tenant-level reconciliation report's identically
+named field, which intentionally remains false and must never be consumed as
+per-subject policy eligibility. Future AI and conditional-coupon consumers
+must use only these safe per-subject proof builders.
 """
 from __future__ import annotations
 
@@ -11,14 +20,17 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from services.order_customer_identity_capability import cap_coverage_status_for_capability
+from services.order_customer_identity_capability import (
+    cap_coverage_status_for_capability,
+    order_customer_identity_reconciliation_ready,
+)
 from services.order_customer_identity_contract import (
     EXTERNAL_COVERAGE_SCOPE_CLAIM,
     INTERNAL_COVERAGE_SCOPE_CLAIM,
     NAHLA_INTERNAL_ORDER_V1,
-    POLICY_ELIGIBILITY_READY,
     SOURCE_HISTORY_INCOMPLETE,
     SYNC_HEALTH_STALE,
+    derive_policy_eligibility_ready,
 )
 
 
@@ -85,18 +97,34 @@ def build_safe_external_profile_proof(
         completeness=completeness,
         forward_health=forward_health,
     )
+    capability_validated = order_customer_identity_reconciliation_ready(db)
+    linked = int(cov.linked_orders_in_scope_count if cov else 0)
+    unmapped = int(cov.unmapped_orders_in_scope_count if cov else 0)
+    mislinked = int(cov.mislinked_orders_in_scope_count if cov else 0)
+    watermark_present = bool(cov and cov.watermark_at)
     return SafeExternalProfileSourceHistoryProof(
         subject_kind="external_customer_profile",
         identity_namespace=str(profile.identity_namespace),
         integration_connection_present=profile.integration_connection_id is not None,
         authoritative_source_history_completeness=completeness,
         forward_sync_health=forward_health,
-        linked_orders_in_scope_count=int(cov.linked_orders_in_scope_count if cov else 0),
-        unmapped_orders_in_scope_count=int(cov.unmapped_orders_in_scope_count if cov else 0),
-        mislinked_orders_in_scope_count=int(cov.mislinked_orders_in_scope_count if cov else 0),
-        watermark_present=bool(cov and cov.watermark_at),
+        linked_orders_in_scope_count=linked,
+        unmapped_orders_in_scope_count=unmapped,
+        mislinked_orders_in_scope_count=mislinked,
+        watermark_present=watermark_present,
         coverage_scope_claim=EXTERNAL_COVERAGE_SCOPE_CLAIM,
-        policy_eligibility_ready=POLICY_ELIGIBILITY_READY,
+        policy_eligibility_ready=derive_policy_eligibility_ready(
+            capability_validated=capability_validated,
+            identity_namespace=str(profile.identity_namespace),
+            coverage_row_present=cov is not None,
+            authoritative_source_history_completeness=completeness,
+            forward_sync_health=forward_health,
+            linked_orders_in_scope_count=linked,
+            unmapped_orders_in_scope_count=unmapped,
+            mislinked_orders_in_scope_count=mislinked,
+            watermark_present=watermark_present,
+            integration_connection_present=profile.integration_connection_id is not None,
+        ),
     )
 
 
@@ -124,17 +152,32 @@ def build_safe_internal_customer_proof(
         completeness=completeness,
         forward_health=forward_health,
     )
+    capability_validated = order_customer_identity_reconciliation_ready(db)
+    linked = int(cov.linked_orders_in_scope_count if cov else 0)
+    unmapped = int(cov.unmapped_orders_in_scope_count if cov else 0)
+    mislinked = int(cov.mislinked_orders_in_scope_count if cov else 0)
+    watermark_present = bool(cov and cov.watermark_at)
     return SafeInternalCustomerSourceHistoryProof(
         subject_kind="nahla_internal_customer",
         identity_namespace=NAHLA_INTERNAL_ORDER_V1,
         authoritative_source_history_completeness=completeness,
         forward_sync_health=forward_health,
-        linked_orders_in_scope_count=int(cov.linked_orders_in_scope_count if cov else 0),
-        unmapped_orders_in_scope_count=int(cov.unmapped_orders_in_scope_count if cov else 0),
-        mislinked_orders_in_scope_count=int(cov.mislinked_orders_in_scope_count if cov else 0),
-        watermark_present=bool(cov and cov.watermark_at),
+        linked_orders_in_scope_count=linked,
+        unmapped_orders_in_scope_count=unmapped,
+        mislinked_orders_in_scope_count=mislinked,
+        watermark_present=watermark_present,
         coverage_scope_claim=INTERNAL_COVERAGE_SCOPE_CLAIM,
-        policy_eligibility_ready=POLICY_ELIGIBILITY_READY,
+        policy_eligibility_ready=derive_policy_eligibility_ready(
+            capability_validated=capability_validated,
+            identity_namespace=NAHLA_INTERNAL_ORDER_V1,
+            coverage_row_present=cov is not None,
+            authoritative_source_history_completeness=completeness,
+            forward_sync_health=forward_health,
+            linked_orders_in_scope_count=linked,
+            unmapped_orders_in_scope_count=unmapped,
+            mislinked_orders_in_scope_count=mislinked,
+            watermark_present=watermark_present,
+        ),
     )
 
 
