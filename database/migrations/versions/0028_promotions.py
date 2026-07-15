@@ -47,10 +47,18 @@ Schema
 
 Composite indexes on (tenant_id, status) and (tenant_id, promotion_type)
 power the dashboard queries (`WHERE tenant_id=? AND status='active'`).
-"""
-from alembic import op
-import sqlalchemy as sa
 
+Idempotency (F16)
+─────────────────
+``create_all`` may have pre-created ``promotions`` while ``alembic_version``
+lags behind 0028. Inspector-guarded DDL skips present objects and adds
+missing indexes; clean upgrades unchanged.
+"""
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
 
 revision = "0028"
 down_revision = "0027"
@@ -58,77 +66,104 @@ branch_labels = None
 depends_on = None
 
 
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
 def upgrade() -> None:
-    op.create_table(
-        "promotions",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("tenant_id", sa.Integer(), nullable=False),
-        sa.Column("name", sa.String(), nullable=False),
-        sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("promotion_type", sa.String(), nullable=False),
-        sa.Column("discount_value", sa.Numeric(10, 2), nullable=True),
-        sa.Column("conditions", sa.JSON(), nullable=True),
-        sa.Column("starts_at", sa.DateTime(), nullable=True),
-        sa.Column("ends_at", sa.DateTime(), nullable=True),
-        sa.Column(
-            "status",
-            sa.String(),
-            nullable=False,
-            server_default="draft",
-        ),
-        sa.Column(
-            "usage_count",
-            sa.Integer(),
-            nullable=False,
-            server_default="0",
-        ),
-        sa.Column("usage_limit", sa.Integer(), nullable=True),
-        sa.Column("metadata", sa.JSON(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
-    )
-    op.create_index(
-        "ix_promotions_tenant_id",
-        "promotions",
-        ["tenant_id"],
-    )
-    op.create_index(
-        "ix_promotions_status",
-        "promotions",
-        ["status"],
-    )
-    op.create_index(
-        "ix_promotions_tenant_status",
-        "promotions",
-        ["tenant_id", "status"],
-    )
-    op.create_index(
-        "ix_promotions_tenant_type",
-        "promotions",
-        ["tenant_id", "promotion_type"],
-    )
+    bind = op.get_bind()
+
+    if not _has_table(bind, "promotions"):
+        op.create_table(
+            "promotions",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("tenant_id", sa.Integer(), nullable=False),
+            sa.Column("name", sa.String(), nullable=False),
+            sa.Column("description", sa.Text(), nullable=True),
+            sa.Column("promotion_type", sa.String(), nullable=False),
+            sa.Column("discount_value", sa.Numeric(10, 2), nullable=True),
+            sa.Column("conditions", sa.JSON(), nullable=True),
+            sa.Column("starts_at", sa.DateTime(), nullable=True),
+            sa.Column("ends_at", sa.DateTime(), nullable=True),
+            sa.Column(
+                "status",
+                sa.String(),
+                nullable=False,
+                server_default="draft",
+            ),
+            sa.Column(
+                "usage_count",
+                sa.Integer(),
+                nullable=False,
+                server_default="0",
+            ),
+            sa.Column("usage_limit", sa.Integer(), nullable=True),
+            sa.Column("metadata", sa.JSON(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"]),
+        )
+    if not _has_index(bind, "promotions", "ix_promotions_tenant_id"):
+        op.create_index(
+            "ix_promotions_tenant_id",
+            "promotions",
+            ["tenant_id"],
+        )
+    if not _has_index(bind, "promotions", "ix_promotions_status"):
+        op.create_index(
+            "ix_promotions_status",
+            "promotions",
+            ["status"],
+        )
+    if not _has_index(bind, "promotions", "ix_promotions_tenant_status"):
+        op.create_index(
+            "ix_promotions_tenant_status",
+            "promotions",
+            ["tenant_id", "status"],
+        )
+    if not _has_index(bind, "promotions", "ix_promotions_tenant_type"):
+        op.create_index(
+            "ix_promotions_tenant_type",
+            "promotions",
+            ["tenant_id", "promotion_type"],
+        )
 
     # Drop server defaults once the table is created so the ORM is the
     # single source of truth (mirrors migration 0027's pattern).
-    with op.batch_alter_table("promotions") as batch_op:
-        batch_op.alter_column("status", server_default=None)
-        batch_op.alter_column("usage_count", server_default=None)
+    if _has_table(bind, "promotions"):
+        with op.batch_alter_table("promotions") as batch_op:
+            batch_op.alter_column("status", server_default=None)
+            batch_op.alter_column("usage_count", server_default=None)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_promotions_tenant_type", table_name="promotions")
-    op.drop_index("ix_promotions_tenant_status", table_name="promotions")
-    op.drop_index("ix_promotions_status", table_name="promotions")
-    op.drop_index("ix_promotions_tenant_id", table_name="promotions")
-    op.drop_table("promotions")
+    bind = op.get_bind()
+    if _has_index(bind, "promotions", "ix_promotions_tenant_type"):
+        op.drop_index("ix_promotions_tenant_type", table_name="promotions")
+    if _has_index(bind, "promotions", "ix_promotions_tenant_status"):
+        op.drop_index("ix_promotions_tenant_status", table_name="promotions")
+    if _has_index(bind, "promotions", "ix_promotions_status"):
+        op.drop_index("ix_promotions_status", table_name="promotions")
+    if _has_index(bind, "promotions", "ix_promotions_tenant_id"):
+        op.drop_index("ix_promotions_tenant_id", table_name="promotions")
+    if _has_table(bind, "promotions"):
+        op.drop_table("promotions")

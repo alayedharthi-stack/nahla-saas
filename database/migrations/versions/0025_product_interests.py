@@ -35,12 +35,19 @@ What this migration does
 
 Rollback drops the table and the two columns. The JSONB form continues
 to be populated by the upsert path so historical data is not lost.
+
+Idempotency (F16)
+─────────────────
+``Base.metadata.create_all()`` may have pre-created ``product_interests``
+and the ``products`` stock columns while ``alembic_version`` lags behind
+0025. Inspector-guarded DDL skips present objects and adds missing
+indexes/constraints; clean upgrades are unchanged.
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
-
+from sqlalchemy import inspect
 
 revision: str = "0025"
 down_revision: Union[str, None] = "0024"
@@ -48,52 +55,108 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() -> None:
-    # ── 1) product_interests: notify-me waitlist ──────────────────────────────
-    op.create_table(
-        "product_interests",
-        sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
-        sa.Column("tenant_id", sa.Integer(),
-                  sa.ForeignKey("tenants.id"), nullable=False, index=True),
-        sa.Column("product_id", sa.Integer(),
-                  sa.ForeignKey("products.id"), nullable=False, index=True),
-        sa.Column("customer_id", sa.Integer(),
-                  sa.ForeignKey("customers.id"), nullable=False, index=True),
-        sa.Column("customer_phone", sa.String(), nullable=True),
-        sa.Column("source", sa.String(), nullable=True),
-        sa.Column("notified", sa.Boolean(),
-                  nullable=False, server_default=sa.text("false")),
-        sa.Column("notified_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(),
-                  nullable=False, server_default=sa.func.now()),
-        sa.Column("metadata", sa.JSON(), nullable=True),
-        sa.UniqueConstraint(
-            "tenant_id", "product_id", "customer_id", "notified",
-            name="uq_product_interest_pending_per_customer",
-        ),
-    )
-    op.create_index(
-        "ix_product_interests_pending",
-        "product_interests",
-        ["tenant_id", "product_id", "notified"],
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_column(bind, table_name: str, column_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(bind).get_columns(table_name)
     )
 
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
+def _has_unique_constraint(bind, table_name: str, constraint_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    insp = inspect(bind)
+    try:
+        cons = insp.get_unique_constraints(table_name)
+    except NotImplementedError:
+        return False
+    return any(c.get("name") == constraint_name for c in cons)
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+
+    # ── 1) product_interests: notify-me waitlist ──────────────────────────────
+    if not _has_table(bind, "product_interests"):
+        op.create_table(
+            "product_interests",
+            sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
+            sa.Column("tenant_id", sa.Integer(),
+                      sa.ForeignKey("tenants.id"), nullable=False, index=True),
+            sa.Column("product_id", sa.Integer(),
+                      sa.ForeignKey("products.id"), nullable=False, index=True),
+            sa.Column("customer_id", sa.Integer(),
+                      sa.ForeignKey("customers.id"), nullable=False, index=True),
+            sa.Column("customer_phone", sa.String(), nullable=True),
+            sa.Column("source", sa.String(), nullable=True),
+            sa.Column("notified", sa.Boolean(),
+                      nullable=False, server_default=sa.text("false")),
+            sa.Column("notified_at", sa.DateTime(), nullable=True),
+            sa.Column("created_at", sa.DateTime(),
+                      nullable=False, server_default=sa.func.now()),
+            sa.Column("metadata", sa.JSON(), nullable=True),
+            sa.UniqueConstraint(
+                "tenant_id", "product_id", "customer_id", "notified",
+                name="uq_product_interest_pending_per_customer",
+            ),
+        )
+    if (
+        _has_table(bind, "product_interests")
+        and not _has_unique_constraint(
+            bind, "product_interests", "uq_product_interest_pending_per_customer"
+        )
+        and bind.dialect.name != "sqlite"
+    ):
+        op.create_unique_constraint(
+            "uq_product_interest_pending_per_customer",
+            "product_interests",
+            ["tenant_id", "product_id", "customer_id", "notified"],
+        )
+    if not _has_index(bind, "product_interests", "ix_product_interests_pending"):
+        op.create_index(
+            "ix_product_interests_pending",
+            "product_interests",
+            ["tenant_id", "product_id", "notified"],
+        )
+
     # ── 2) products: stock columns ────────────────────────────────────────────
-    op.add_column(
-        "products",
-        sa.Column("stock_quantity", sa.Integer(), nullable=True),
-    )
-    op.add_column(
-        "products",
-        sa.Column(
-            "in_stock", sa.Boolean(),
-            nullable=False, server_default=sa.text("true"),
-        ),
-    )
+    if not _has_column(bind, "products", "stock_quantity"):
+        op.add_column(
+            "products",
+            sa.Column("stock_quantity", sa.Integer(), nullable=True),
+        )
+    if not _has_column(bind, "products", "in_stock"):
+        op.add_column(
+            "products",
+            sa.Column(
+                "in_stock", sa.Boolean(),
+                nullable=False, server_default=sa.text("true"),
+            ),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("products", "in_stock")
-    op.drop_column("products", "stock_quantity")
-    op.drop_index("ix_product_interests_pending", table_name="product_interests")
-    op.drop_table("product_interests")
+    bind = op.get_bind()
+    if _has_column(bind, "products", "in_stock"):
+        op.drop_column("products", "in_stock")
+    if _has_column(bind, "products", "stock_quantity"):
+        op.drop_column("products", "stock_quantity")
+    if _has_index(bind, "product_interests", "ix_product_interests_pending"):
+        op.drop_index("ix_product_interests_pending", table_name="product_interests")
+    if _has_table(bind, "product_interests"):
+        op.drop_table("product_interests")

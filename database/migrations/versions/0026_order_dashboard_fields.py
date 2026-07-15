@@ -32,10 +32,18 @@ This migration adds three first-class columns:
 All three are nullable so the migration is safe on a populated table.
 A follow-up backfill (`scripts/backfill_order_dashboard_fields.py`) is
 provided to repair existing rows from `customer_info` and `extra_metadata`.
-"""
-from alembic import op
-import sqlalchemy as sa
 
+Idempotency (F16)
+─────────────────
+Forward ORM / ``create_all`` drift may have pre-created the dashboard
+columns and indexes while ``alembic_version`` lags behind 0026.
+Inspector-guarded DDL adds only missing pieces; clean upgrades unchanged.
+"""
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
 
 revision = "0026"
 down_revision = "0025"
@@ -43,36 +51,71 @@ branch_labels = None
 depends_on = None
 
 
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_column(bind, table_name: str, column_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(bind).get_columns(table_name)
+    )
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
 def upgrade() -> None:
-    op.add_column(
-        "orders",
-        sa.Column("external_order_number", sa.String(), nullable=True),
-    )
-    op.add_column(
-        "orders",
-        sa.Column("customer_name", sa.String(), nullable=True),
-    )
-    op.add_column(
-        "orders",
-        sa.Column("source", sa.String(), nullable=True),
-    )
-    op.create_index(
-        "ix_orders_external_order_number",
-        "orders",
-        ["external_order_number"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_orders_source",
-        "orders",
-        ["source"],
-        unique=False,
-    )
+    bind = op.get_bind()
+
+    if not _has_column(bind, "orders", "external_order_number"):
+        op.add_column(
+            "orders",
+            sa.Column("external_order_number", sa.String(), nullable=True),
+        )
+    if not _has_column(bind, "orders", "customer_name"):
+        op.add_column(
+            "orders",
+            sa.Column("customer_name", sa.String(), nullable=True),
+        )
+    if not _has_column(bind, "orders", "source"):
+        op.add_column(
+            "orders",
+            sa.Column("source", sa.String(), nullable=True),
+        )
+    if not _has_index(bind, "orders", "ix_orders_external_order_number"):
+        op.create_index(
+            "ix_orders_external_order_number",
+            "orders",
+            ["external_order_number"],
+            unique=False,
+        )
+    if not _has_index(bind, "orders", "ix_orders_source"):
+        op.create_index(
+            "ix_orders_source",
+            "orders",
+            ["source"],
+            unique=False,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_orders_source", table_name="orders")
-    op.drop_index("ix_orders_external_order_number", table_name="orders")
-    op.drop_column("orders", "source")
-    op.drop_column("orders", "customer_name")
-    op.drop_column("orders", "external_order_number")
+    bind = op.get_bind()
+    if _has_index(bind, "orders", "ix_orders_source"):
+        op.drop_index("ix_orders_source", table_name="orders")
+    if _has_index(bind, "orders", "ix_orders_external_order_number"):
+        op.drop_index("ix_orders_external_order_number", table_name="orders")
+    if _has_column(bind, "orders", "source"):
+        op.drop_column("orders", "source")
+    if _has_column(bind, "orders", "customer_name"):
+        op.drop_column("orders", "customer_name")
+    if _has_column(bind, "orders", "external_order_number"):
+        op.drop_column("orders", "external_order_number")

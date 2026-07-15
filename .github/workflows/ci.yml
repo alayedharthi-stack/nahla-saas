@@ -46,7 +46,9 @@ jobs:
         run: python -m pytest -q --maxfail=1
 
       - name: Guarded staging migration operator tests
-        run: python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
+        run: |
+          python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
+          python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1
 
   constitution-compliance:
     runs-on: ubuntu-latest
@@ -158,6 +160,7 @@ jobs:
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
+            backend/tests/test_legacy_migration_drift_0025_0030_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \
             backend/tests/test_order_customer_identity_reconciliation_report.py \
             backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \
