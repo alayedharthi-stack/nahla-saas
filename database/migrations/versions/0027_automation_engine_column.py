@@ -27,10 +27,19 @@ itself lets:
 Backfill follows the canonical map in `backend/core/automations_seed.py`.
 Anything not recognised falls back to `recovery` (the existing implicit
 default) so legacy rows stay visible somewhere instead of disappearing.
-"""
-from alembic import op
-import sqlalchemy as sa
 
+Idempotency (F16)
+─────────────────
+``create_all`` may have pre-created ``smart_automations.engine`` while
+``alembic_version`` lags behind 0027. Inspector-guarded DDL skips present
+objects; the canonical ``ENGINE_BY_TYPE`` backfill still runs so rows are
+not left on the wrong engine bucket.
+"""
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
 
 revision = "0027"
 down_revision = "0026"
@@ -54,24 +63,49 @@ ENGINE_BY_TYPE = {
 }
 
 
-def upgrade() -> None:
-    op.add_column(
-        "smart_automations",
-        sa.Column(
-            "engine",
-            sa.String(),
-            nullable=False,
-            server_default="recovery",
-        ),
-    )
-    op.create_index(
-        "ix_smart_automations_engine",
-        "smart_automations",
-        ["engine"],
-        unique=False,
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_column(bind, table_name: str, column_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(bind).get_columns(table_name)
     )
 
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
+def upgrade() -> None:
     bind = op.get_bind()
+
+    if not _has_column(bind, "smart_automations", "engine"):
+        op.add_column(
+            "smart_automations",
+            sa.Column(
+                "engine",
+                sa.String(),
+                nullable=False,
+                server_default="recovery",
+            ),
+        )
+    if not _has_index(bind, "smart_automations", "ix_smart_automations_engine"):
+        op.create_index(
+            "ix_smart_automations_engine",
+            "smart_automations",
+            ["engine"],
+            unique=False,
+        )
+
     for automation_type, engine in ENGINE_BY_TYPE.items():
         bind.execute(
             sa.text(
@@ -83,10 +117,14 @@ def upgrade() -> None:
 
     # Drop the server_default once the table is backfilled — the application
     # default ("recovery") is enforced in the ORM model.
-    with op.batch_alter_table("smart_automations") as batch_op:
-        batch_op.alter_column("engine", server_default=None)
+    if _has_column(bind, "smart_automations", "engine"):
+        with op.batch_alter_table("smart_automations") as batch_op:
+            batch_op.alter_column("engine", server_default=None)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_smart_automations_engine", table_name="smart_automations")
-    op.drop_column("smart_automations", "engine")
+    bind = op.get_bind()
+    if _has_index(bind, "smart_automations", "ix_smart_automations_engine"):
+        op.drop_index("ix_smart_automations_engine", table_name="smart_automations")
+    if _has_column(bind, "smart_automations", "engine"):
+        op.drop_column("smart_automations", "engine")

@@ -30,10 +30,19 @@ Schema change
 ─────────────
   tenants.is_platform_tenant  BOOLEAN NOT NULL DEFAULT FALSE
   ix_tenants_is_platform_tenant   (partial helper index — small table)
-"""
-from alembic import op
-import sqlalchemy as sa
 
+Idempotency (F16)
+─────────────────
+Forward ORM / ``create_all`` drift may have pre-created
+``tenants.is_platform_tenant`` while ``alembic_version`` lags behind 0030.
+Inspector-guarded DDL adds only missing columns and indexes; clean
+upgrades unchanged.
+"""
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
 
 revision = "0030"
 down_revision = "0029"
@@ -41,23 +50,52 @@ branch_labels = None
 depends_on = None
 
 
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_column(bind, table_name: str, column_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(bind).get_columns(table_name)
+    )
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
 def upgrade() -> None:
-    op.add_column(
-        "tenants",
-        sa.Column(
-            "is_platform_tenant",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.text("false"),
-        ),
-    )
-    op.create_index(
-        "ix_tenants_is_platform_tenant",
-        "tenants",
-        ["is_platform_tenant"],
-    )
+    bind = op.get_bind()
+
+    if not _has_column(bind, "tenants", "is_platform_tenant"):
+        op.add_column(
+            "tenants",
+            sa.Column(
+                "is_platform_tenant",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("false"),
+            ),
+        )
+    if not _has_index(bind, "tenants", "ix_tenants_is_platform_tenant"):
+        op.create_index(
+            "ix_tenants_is_platform_tenant",
+            "tenants",
+            ["is_platform_tenant"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_tenants_is_platform_tenant", table_name="tenants")
-    op.drop_column("tenants", "is_platform_tenant")
+    bind = op.get_bind()
+    if _has_index(bind, "tenants", "ix_tenants_is_platform_tenant"):
+        op.drop_index("ix_tenants_is_platform_tenant", table_name="tenants")
+    if _has_column(bind, "tenants", "is_platform_tenant"):
+        op.drop_column("tenants", "is_platform_tenant")
