@@ -9,17 +9,38 @@ Changes:
      for non-null values — one WABA per tenant, no cross-tenant sharing.
   2. integrity_events table — append-only structured audit trail for all
      identity-resolution and cross-tenant conflict events.
+
+Idempotency (F16)
+─────────────────
+Startup safe-alters may already have created ``uq_wa_conn_waba_id`` and
+``integrity_events`` while ``alembic_version`` lags behind 0022.
+Inspector-guarded DDL adds only missing indexes/tables; duplicate WABA
+remediation semantics are unchanged.
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 
 revision: str = "0022"
 down_revision: Union[str, None] = "0021"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
 
 
 def upgrade() -> None:
@@ -88,47 +109,52 @@ def upgrade() -> None:
     )
 
     # ── 3. integrity_events: structured identity/cross-tenant event log ────────
-    op.create_table(
-        "integrity_events",
-        sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
-        sa.Column("event", sa.String(), nullable=False, index=True),
-        # event types:
-        #   tenant_resolved          – normal routing, phone_number_id → tenant
-        #   duplicate_identity       – same phone/waba/store_id on >1 tenant
-        #   cross_tenant_conflict    – WA conn and store on different tenants
-        #   write_blocked            – write rejected by integrity guard
-        #   reconciliation_started   – merge workflow initiated (dry_run or live)
-        #   reconciliation_completed – merge workflow finished
-        #   orphaned_wa_connection   – WA conn has no store integration
-        #   orphaned_store           – store integration has no WA conn
-        sa.Column("tenant_id", sa.Integer(), nullable=True, index=True),
-        sa.Column("other_tenant_id", sa.Integer(), nullable=True),
-        sa.Column("phone_number_id", sa.String(), nullable=True),
-        sa.Column("waba_id", sa.String(), nullable=True),
-        sa.Column("store_id", sa.String(), nullable=True),
-        sa.Column("provider", sa.String(), nullable=True),
-        sa.Column("action", sa.String(), nullable=True),
-        sa.Column("result", sa.String(), nullable=True),    # ok | blocked | conflict | fixed
-        sa.Column("detail", sa.Text(), nullable=True),
-        sa.Column("actor", sa.String(), nullable=True),     # system | admin:<email>
-        sa.Column("dry_run", sa.Boolean(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-    )
-    op.create_index(
-        "ix_integrity_events_created_at",
-        "integrity_events",
-        ["created_at"],
-    )
+    if not _has_table(bind, "integrity_events"):
+        op.create_table(
+            "integrity_events",
+            sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
+            sa.Column("event", sa.String(), nullable=False, index=True),
+            # event types:
+            #   tenant_resolved          – normal routing, phone_number_id → tenant
+            #   duplicate_identity       – same phone/waba/store_id on >1 tenant
+            #   cross_tenant_conflict    – WA conn and store on different tenants
+            #   write_blocked            – write rejected by integrity guard
+            #   reconciliation_started   – merge workflow initiated (dry_run or live)
+            #   reconciliation_completed – merge workflow finished
+            #   orphaned_wa_connection   – WA conn has no store integration
+            #   orphaned_store           – store integration has no WA conn
+            sa.Column("tenant_id", sa.Integer(), nullable=True, index=True),
+            sa.Column("other_tenant_id", sa.Integer(), nullable=True),
+            sa.Column("phone_number_id", sa.String(), nullable=True),
+            sa.Column("waba_id", sa.String(), nullable=True),
+            sa.Column("store_id", sa.String(), nullable=True),
+            sa.Column("provider", sa.String(), nullable=True),
+            sa.Column("action", sa.String(), nullable=True),
+            sa.Column("result", sa.String(), nullable=True),    # ok | blocked | conflict | fixed
+            sa.Column("detail", sa.Text(), nullable=True),
+            sa.Column("actor", sa.String(), nullable=True),     # system | admin:<email>
+            sa.Column("dry_run", sa.Boolean(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+        )
+    if not _has_index(bind, "integrity_events", "ix_integrity_events_created_at"):
+        op.create_index(
+            "ix_integrity_events_created_at",
+            "integrity_events",
+            ["created_at"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_integrity_events_created_at", table_name="integrity_events")
-    op.drop_table("integrity_events")
+    bind = op.get_bind()
+    if _has_index(bind, "integrity_events", "ix_integrity_events_created_at"):
+        op.drop_index("ix_integrity_events_created_at", table_name="integrity_events")
+    if _has_table(bind, "integrity_events"):
+        op.drop_table("integrity_events")
     op.execute(
         "DROP INDEX IF EXISTS uq_wa_conn_waba_id"
     )

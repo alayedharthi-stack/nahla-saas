@@ -15,11 +15,19 @@ Changes:
      the application currently only checks in Python, preventing double-insert
      races when two concurrent workers process the same Salla order id.
      Any pre-existing duplicates are merged before the constraint is added.
+
+Idempotency (F16)
+─────────────────
+``Base.metadata.create_all()`` may already have created ``webhook_events``
+while ``alembic_version`` lags behind 0023. Inspector-guarded DDL adds only
+missing tables/indexes. Duplicate-order detection and merge semantics are
+unchanged.
 """
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 
 revision: str = "0023"
@@ -28,66 +36,82 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_table(bind, table_name: str) -> bool:
+    return table_name in inspect(bind).get_table_names()
+
+
+def _has_index(bind, table_name: str, index_name: str) -> bool:
+    if not _has_table(bind, table_name):
+        return False
+    return any(
+        ix["name"] == index_name
+        for ix in inspect(bind).get_indexes(table_name)
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
     # ── 1. webhook_events: durable event log ──────────────────────────────────
-    op.create_table(
-        "webhook_events",
-        sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
-        # tenant_id is nullable: some events (e.g. app.installed) arrive before
-        # tenant mapping exists. The dispatcher resolves it later.
-        sa.Column("tenant_id", sa.Integer(), nullable=True, index=True),
-        sa.Column("provider", sa.String(), nullable=False, index=True),
-        # event_type examples: order.created, order.updated, customer.created,
-        # app.installed, app.uninstalled, product.created, ...
-        sa.Column("event_type", sa.String(), nullable=True, index=True),
-        sa.Column("external_event_id", sa.String(), nullable=True),
-        sa.Column("store_id", sa.String(), nullable=True),
-        sa.Column("raw_headers", sa.JSON(), nullable=True),
-        sa.Column("raw_body", sa.Text(), nullable=True),
-        sa.Column("parsed_payload", sa.JSON(), nullable=True),
-        sa.Column("signature_valid", sa.Boolean(), nullable=True),
-        # FSM: received → processing → processed
-        #                          → failed → processing (retry)
-        #                                  → dead_letter
-        sa.Column(
-            "status", sa.String(), nullable=False, server_default="received", index=True,
-        ),
-        sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column("last_error_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "received_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-    )
-    op.create_index(
-        "ix_webhook_events_status_retry",
-        "webhook_events",
-        ["status", "next_retry_at"],
-    )
-    op.create_index(
-        "ix_webhook_events_tenant_received",
-        "webhook_events",
-        ["tenant_id", "received_at"],
-    )
+    if not _has_table(bind, "webhook_events"):
+        op.create_table(
+            "webhook_events",
+            sa.Column("id", sa.Integer(), primary_key=True, nullable=False),
+            # tenant_id is nullable: some events (e.g. app.installed) arrive before
+            # tenant mapping exists. The dispatcher resolves it later.
+            sa.Column("tenant_id", sa.Integer(), nullable=True, index=True),
+            sa.Column("provider", sa.String(), nullable=False, index=True),
+            # event_type examples: order.created, order.updated, customer.created,
+            # app.installed, app.uninstalled, product.created, ...
+            sa.Column("event_type", sa.String(), nullable=True, index=True),
+            sa.Column("external_event_id", sa.String(), nullable=True),
+            sa.Column("store_id", sa.String(), nullable=True),
+            sa.Column("raw_headers", sa.JSON(), nullable=True),
+            sa.Column("raw_body", sa.Text(), nullable=True),
+            sa.Column("parsed_payload", sa.JSON(), nullable=True),
+            sa.Column("signature_valid", sa.Boolean(), nullable=True),
+            # FSM: received → processing → processed
+            #                          → failed → processing (retry)
+            #                                  → dead_letter
+            sa.Column(
+                "status", sa.String(), nullable=False, server_default="received", index=True,
+            ),
+            sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("last_error", sa.Text(), nullable=True),
+            sa.Column("last_error_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "received_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+        )
+    if not _has_index(bind, "webhook_events", "ix_webhook_events_status_retry"):
+        op.create_index(
+            "ix_webhook_events_status_retry",
+            "webhook_events",
+            ["status", "next_retry_at"],
+        )
+    if not _has_index(bind, "webhook_events", "ix_webhook_events_tenant_received"):
+        op.create_index(
+            "ix_webhook_events_tenant_received",
+            "webhook_events",
+            ["tenant_id", "received_at"],
+        )
     # Partial unique: one row per (provider, external_event_id) when the
     # provider includes an event id in the payload. Prevents the same webhook
     # from being double-processed if Salla ever retries without our idempotency.
@@ -153,12 +177,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     op.execute("DROP INDEX IF EXISTS uq_orders_tenant_external_id")
     op.execute("DROP INDEX IF EXISTS uq_webhook_events_provider_event")
-    op.drop_index(
-        "ix_webhook_events_tenant_received", table_name="webhook_events"
-    )
-    op.drop_index(
-        "ix_webhook_events_status_retry", table_name="webhook_events"
-    )
-    op.drop_table("webhook_events")
+    if _has_index(bind, "webhook_events", "ix_webhook_events_tenant_received"):
+        op.drop_index(
+            "ix_webhook_events_tenant_received", table_name="webhook_events"
+        )
+    if _has_index(bind, "webhook_events", "ix_webhook_events_status_retry"):
+        op.drop_index(
+            "ix_webhook_events_status_retry", table_name="webhook_events"
+        )
+    if _has_table(bind, "webhook_events"):
+        op.drop_table("webhook_events")
