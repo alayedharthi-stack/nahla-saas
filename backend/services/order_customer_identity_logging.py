@@ -58,6 +58,14 @@ def log_capability_state_read_failure(*, exception_class: str) -> None:
     )
 
 
+def log_reconciliation_report_failure(*, exception_class: str) -> None:
+    """Privacy-safe operator-report failure; omit tenant and database context."""
+    logger.warning(
+        "[A1 identity] event=reconciliation_report_failure exception_class=%s",
+        exception_class,
+    )
+
+
 def log_connection_resolution_status(
     *,
     status: str,
@@ -81,4 +89,5 @@ __all__ = [
     "log_connection_resolution_status",
     "log_identity_sync_event",
     "log_identity_sync_failure",
+    "log_reconciliation_report_failure",
 ]
