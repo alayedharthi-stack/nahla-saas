@@ -86,6 +86,7 @@ def test_capability_missing_fail_closed(pg_session) -> None:
     assert proof is not None
     assert proof.authoritative_source_history_completeness == SOURCE_HISTORY_INCOMPLETE
     assert proof.forward_sync_health == SYNC_HEALTH_DEGRADED
+    assert proof.policy_eligibility_ready is False
 
 
 def test_read_capability_rejects_unknown_state_value(pg_session, monkeypatch) -> None:

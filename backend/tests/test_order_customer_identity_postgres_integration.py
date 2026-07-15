@@ -17,7 +17,6 @@ from services.order_customer_identity_contract import (
     ORDER_SOURCE_MANUAL,
     ORDER_SOURCE_OTHER,
     ORDER_SOURCE_WHATSAPP,
-    POLICY_ELIGIBILITY_READY,
     SOURCE_HISTORY_COMPLETE,
     SOURCE_HISTORY_INCOMPLETE,
     SYNC_HEALTH_DEGRADED,
@@ -129,7 +128,7 @@ def test_q3_external_proof_has_no_customer_claim(pg_session) -> None:
     )
     assert proof is not None
     assert proof.subject_kind == "external_customer_profile"
-    assert proof.policy_eligibility_ready is POLICY_ELIGIBILITY_READY
+    assert proof.policy_eligibility_ready is False
     fields = set(SafeExternalProfileSourceHistoryProof.__dataclass_fields__)
     assert "customer_id" not in fields
     assert "customer_link_state" not in fields
