@@ -34,6 +34,12 @@ from services.order_customer_identity_contract import (
     SYNC_HEALTH_STALE,
 )
 from services.order_customer_identity_logging import log_identity_sync_event
+from services.order_customer_identity_reconciliation_classification import (
+    TupleLinkageCounts,
+    classify_external_tuple_order,
+    classify_internal_customer_order,
+    count_classifications,
+)
 from services.salla_integration_resolver import (
     ResolvedSallaIntegration,
     UnresolvedSallaIntegration,
@@ -342,6 +348,35 @@ class ExternalTupleReconcileResult:
     forward_health: str
 
 
+def _result_from_counts(
+    db: Session,
+    *,
+    counts: TupleLinkageCounts,
+) -> ExternalTupleReconcileResult:
+    completeness = (
+        SOURCE_HISTORY_COMPLETE
+        if counts.unmapped == 0 and counts.mislinked == 0 and counts.linked > 0
+        else SOURCE_HISTORY_INCOMPLETE
+    )
+    forward_health = (
+        SYNC_HEALTH_HEALTHY
+        if completeness == SOURCE_HISTORY_COMPLETE
+        else SYNC_HEALTH_DEGRADED
+    )
+    completeness, forward_health = cap_coverage_status_for_capability(
+        db,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
+    return ExternalTupleReconcileResult(
+        linked=counts.linked,
+        unmapped=counts.unmapped,
+        mislinked=counts.mislinked,
+        completeness=completeness,
+        forward_health=forward_health,
+    )
+
+
 def reconcile_external_profile_coverage(
     db: Session,
     *,
@@ -359,26 +394,11 @@ def reconcile_external_profile_coverage(
         Order.external_customer_ref == profile.external_customer_ref,
     )
     orders = db.query(Order).filter(*tuple_filter).all()
-    linked = unmapped = mislinked = 0
-    for order in orders:
-        if (
-            order.external_customer_profile_id == profile.id
-            and order.external_identity_link_state == LINK_STATE_VERIFIED
-            and order.external_identity_evidence_class == EVIDENCE_AUTHORITATIVE
-        ):
-            linked += 1
-        elif order.external_customer_profile_id is None:
-            unmapped += 1
-        else:
-            mislinked += 1
-
-    completeness = SOURCE_HISTORY_COMPLETE if (unmapped == 0 and mislinked == 0 and linked > 0) else SOURCE_HISTORY_INCOMPLETE
-    forward_health = SYNC_HEALTH_HEALTHY if completeness == SOURCE_HISTORY_COMPLETE else SYNC_HEALTH_DEGRADED
-    completeness, forward_health = cap_coverage_status_for_capability(
-        db,
-        completeness=completeness,
-        forward_health=forward_health,
+    counts = count_classifications(
+        classify_external_tuple_order(order=order, profile_id=profile.id)
+        for order in orders
     )
+    result = _result_from_counts(db, counts=counts)
 
     from models import ExternalCustomerProfileOrderHistoryCoverage  # noqa: PLC0415
 
@@ -389,21 +409,15 @@ def reconcile_external_profile_coverage(
     )
     if cov is not None:
         now = _utcnow()
-        cov.linked_orders_in_scope_count = linked
-        cov.unmapped_orders_in_scope_count = unmapped
-        cov.mislinked_orders_in_scope_count = mislinked
-        cov.authoritative_source_history_completeness = completeness
-        cov.forward_sync_health = forward_health
+        cov.linked_orders_in_scope_count = result.linked
+        cov.unmapped_orders_in_scope_count = result.unmapped
+        cov.mislinked_orders_in_scope_count = result.mislinked
+        cov.authoritative_source_history_completeness = result.completeness
+        cov.forward_sync_health = result.forward_health
         cov.watermark_at = now
         cov.updated_at = now
 
-    return ExternalTupleReconcileResult(
-        linked=linked,
-        unmapped=unmapped,
-        mislinked=mislinked,
-        completeness=completeness,
-        forward_health=forward_health,
-    )
+    return result
 
 
 def reconcile_internal_customer_coverage(
@@ -424,25 +438,11 @@ def reconcile_internal_customer_coverage(
         )
         .all()
     )
-    linked = unmapped = mislinked = 0
-    for order in orders:
-        if (
-            order.customer_link_state == LINK_STATE_VERIFIED
-            and order.customer_link_evidence_class == EVIDENCE_AUTHORITATIVE
-        ):
-            linked += 1
-        elif order.customer_id is None:
-            unmapped += 1
-        else:
-            mislinked += 1
-
-    completeness = SOURCE_HISTORY_COMPLETE if (unmapped == 0 and mislinked == 0 and linked > 0) else SOURCE_HISTORY_INCOMPLETE
-    forward_health = SYNC_HEALTH_HEALTHY if completeness == SOURCE_HISTORY_COMPLETE else SYNC_HEALTH_DEGRADED
-    completeness, forward_health = cap_coverage_status_for_capability(
-        db,
-        completeness=completeness,
-        forward_health=forward_health,
+    counts = count_classifications(
+        classify_internal_customer_order(order=order)
+        for order in orders
     )
+    result = _result_from_counts(db, counts=counts)
 
     cov = (
         db.query(NahlaInternalCustomerOrderHistoryCoverage)
@@ -455,21 +455,15 @@ def reconcile_internal_customer_coverage(
     )
     if cov is not None:
         now = _utcnow()
-        cov.linked_orders_in_scope_count = linked
-        cov.unmapped_orders_in_scope_count = unmapped
-        cov.mislinked_orders_in_scope_count = mislinked
-        cov.authoritative_source_history_completeness = completeness
-        cov.forward_sync_health = forward_health
+        cov.linked_orders_in_scope_count = result.linked
+        cov.unmapped_orders_in_scope_count = result.unmapped
+        cov.mislinked_orders_in_scope_count = result.mislinked
+        cov.authoritative_source_history_completeness = result.completeness
+        cov.forward_sync_health = result.forward_health
         cov.watermark_at = now
         cov.updated_at = now
 
-    return ExternalTupleReconcileResult(
-        linked=linked,
-        unmapped=unmapped,
-        mislinked=mislinked,
-        completeness=completeness,
-        forward_health=forward_health,
-    )
+    return result
 
 
 __all__ = [
