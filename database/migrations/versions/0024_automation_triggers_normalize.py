@@ -38,6 +38,13 @@ What this migration does
 Rollback is a no-op beyond restoring the former trigger_event mapping for
 existing rows — zombie rows are not recreated because they served no
 purpose.
+
+Idempotency note
+────────────────
+Schema objects are owned by 0020–0023 (now F16-guarded). This revision is
+data-only: canonical trigger backfill, zombie automation cleanup, and
+in-flight event re-mapping. Re-running on an already-migrated database is
+safe because every UPDATE is predicate-guarded.
 """
 from typing import Sequence, Union
 

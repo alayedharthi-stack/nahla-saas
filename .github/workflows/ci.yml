@@ -123,6 +123,7 @@ jobs:
       DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
       A1_PG_INTEGRATION_REQUIRED: "1"
       A1_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+      LEGACY_MIG_PG_INTEGRATION_REQUIRED: "1"
 
     steps:
       - name: Checkout
@@ -153,6 +154,7 @@ jobs:
             backend/tests/test_order_customer_identity_ingest_regression.py \
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
+            backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \
             backend/tests/test_order_customer_identity_reconciliation_report.py \
             backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \
