@@ -22,6 +22,7 @@ from services.conversation_a1_subject_binding_contract import (
 )
 from services.conversation_a1_subject_read_contract import (
     AuthoritativeA1SubjectHandle,
+    BoundAuthoritativeA1SubjectScope,
     ConversationA1SubjectReadResult,
     EVIDENCE_CLASS_AUTHORITATIVE_A1_POLICY_ELIGIBLE,
     READ_STATUS_RESOLVED,
@@ -42,6 +43,7 @@ from services.conversation_a1_subject_read_contract import (
     UNRESOLVED_REASON_INVALID_TENANT,
     UNRESOLVED_REASON_READ_UNAVAILABLE,
     UNRESOLVED_REASON_SUBJECT_ABSENT_OR_TENANT_MISMATCH,
+    _issue_authoritative_a1_subject_pair,
 )
 from services.conversation_a1_subject_read_logging import log_subject_read_event
 from services.order_customer_identity_contract import EVIDENCE_AUTHORITATIVE
@@ -99,9 +101,7 @@ def _subject_exists_for_tenant(db: Session, *, binding: Any, tenant_id: int) -> 
     return False
 
 
-def _policy_proof_status(
-    db: Session, *, binding: Any, tenant_id: int,
-) -> tuple[bool, bool]:
+def _canonical_policy_proof(db: Session, *, binding: Any, tenant_id: int) -> Any | None:
     if binding.subject_kind == SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER:
         proof = build_safe_internal_customer_proof(
             db, tenant_id=tenant_id, customer_id=binding.internal_customer_id,
@@ -113,15 +113,41 @@ def _policy_proof_status(
             external_customer_profile_id=binding.external_customer_profile_id,
         )
     else:
-        return False, False
+        return None
     if proof is None:
-        return False, False
+        return None
     if (
         str(proof.subject_kind) != str(binding.subject_kind)
         or str(proof.identity_namespace) != str(binding.identity_namespace)
     ):
-        return False, False
-    return True, bool(proof.policy_eligibility_ready)
+        return None
+    return proof
+
+
+def _bound_pair_from_resolution(
+    *,
+    binding: Any,
+    proof: Any,
+    tenant_id: int,
+    conversation_id: int,
+) -> tuple[AuthoritativeA1SubjectHandle, BoundAuthoritativeA1SubjectScope]:
+    pair_kwargs = {
+        "binding_key": binding.id,
+        "tenant_id": tenant_id,
+        "conversation_id": conversation_id,
+        "subject_kind": str(binding.subject_kind),
+        "identity_namespace": str(binding.identity_namespace),
+        "binding_source": str(binding.binding_source),
+        "binding_evidence_class": str(binding.evidence_class),
+        "proof_subject_kind": str(proof.subject_kind),
+        "proof_identity_namespace": str(proof.identity_namespace),
+        "proof_policy_eligibility_ready": bool(proof.policy_eligibility_ready),
+    }
+    if binding.subject_kind == SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER:
+        pair_kwargs["internal_customer_id"] = int(binding.internal_customer_id)
+    elif binding.subject_kind == SUBJECT_KIND_EXTERNAL_CUSTOMER_PROFILE:
+        pair_kwargs["external_customer_profile_id"] = binding.external_customer_profile_id
+    return _issue_authoritative_a1_subject_pair(**pair_kwargs)
 
 
 def resolve_authoritative_a1_subject_for_conversation(
@@ -187,15 +213,20 @@ def resolve_authoritative_a1_subject_for_conversation(
                 return _unresolved(UNRESOLVED_REASON_BINDING_SOURCE_INVALID)
             if not _subject_exists_for_tenant(db, binding=binding, tenant_id=tenant_id):
                 return _unresolved(UNRESOLVED_REASON_SUBJECT_ABSENT_OR_TENANT_MISMATCH)
-            proof_present, policy_ready = _policy_proof_status(
+            proof = _canonical_policy_proof(
                 db, binding=binding, tenant_id=tenant_id,
             )
-            if not proof_present:
+            if proof is None:
                 return _unresolved(UNRESOLVED_REASON_CANONICAL_PROOF_UNAVAILABLE)
-            if not policy_ready:
+            if not proof.policy_eligibility_ready:
                 return _unresolved(UNRESOLVED_REASON_CAPABILITY_POLICY_UNAVAILABLE)
 
-            handle = AuthoritativeA1SubjectHandle(binding.id)
+            handle, bound_scope = _bound_pair_from_resolution(
+                binding=binding,
+                proof=proof,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
             log_subject_read_event(
                 status=READ_STATUS_RESOLVED,
                 evidence_class=EVIDENCE_CLASS_AUTHORITATIVE_A1_POLICY_ELIGIBLE,
@@ -203,6 +234,7 @@ def resolve_authoritative_a1_subject_for_conversation(
             return ConversationA1SubjectReadResult(
                 status=READ_STATUS_RESOLVED,
                 handle=handle,
+                bound_scope=bound_scope,
                 evidence_class=EVIDENCE_CLASS_AUTHORITATIVE_A1_POLICY_ELIGIBLE,
             )
     except Exception:  # noqa: BLE001  # Read contract must fail closed across ORM/proof implementations.
