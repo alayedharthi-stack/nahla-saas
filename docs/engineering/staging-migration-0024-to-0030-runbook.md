@@ -144,7 +144,7 @@ rollback procedure: staging failure recovery remains restore-first.
 | `tenants.is_platform_tenant` | **0087 / 0088** A1 identity |
 | `product_interests`, `promotions`, `offer_decisions` | `alembic upgrade head` wrappers |
 | 0027 `smart_automations.engine` backfill | Bootstrap unfreeze |
-| Order dashboard columns (0026) | DR executor / backup-runner changes |
+| Order dashboard columns (0026) | DR canonical parity contract — see `docs/engineering/staging-dr-canonical-parity-runbook.md` |
 
 Do **not** proceed to 0031 until a separate approved operator slice exists.
 

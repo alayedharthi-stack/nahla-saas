@@ -1,0 +1,25 @@
+{
+  "contract_version": "staging-dr-canonical-parity-v1",
+  "schema_fingerprint_version": "nahla_public_tables_sha256_v1",
+  "source_eligibility_profiles": [
+    {
+      "alembic_revision": "0016",
+      "operator_note": "Legacy staging pin before 0016\u21920024 slice",
+      "profile_id": "staging_pin_0016",
+      "public_table_count": 96
+    },
+    {
+      "alembic_revision": "0024",
+      "operator_note": "Staging pin after 0016\u21920024 slice (pre-0030 tables)",
+      "profile_id": "staging_pin_0024",
+      "public_table_count": 96,
+      "schema_fingerprint_sha256": "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    },
+    {
+      "alembic_revision": "0030",
+      "operator_note": "Staging pin after 0024\u21920030 slice",
+      "profile_id": "staging_pin_0030",
+      "public_table_count": 99
+    }
+  ]
+}
