@@ -57,6 +57,7 @@ jobs:
         run: |
           python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
           python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1
+          python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1
 
   constitution-compliance:
     runs-on: ubuntu-latest
@@ -175,6 +176,7 @@ jobs:
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_legacy_migration_drift_0025_0030_pg.py \
+            backend/tests/test_legacy_migration_drift_0030_0087_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \
             backend/tests/test_order_customer_identity_reconciliation_report.py \
             backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \

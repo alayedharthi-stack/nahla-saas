@@ -4,6 +4,7 @@ A1-Expand PR: Alembic head stops at 0087.
 - New tables + nullable order identity columns (no backfill).
 - `order_customer_identity_capability_state` seeded to `expand`.
 - Orders FK/CHECK added NOT VALID (no full-table validation in this release).
+- `external_customer_profiles` composite FK to integrations added NOT VALID.
 - No orders performance indexes (deferred to A1-Validate PR / 0088).
 
 Downgrade drops A1 expand objects. Linkage data is not preserved.
@@ -230,14 +231,13 @@ def upgrade() -> None:
             "external_customer_profiles",
             ["tenant_id", "integration_connection_id"],
         )
-        if not _has_constraint(bind, "external_customer_profiles", _FK_ECP_TENANT_INTEGRATION):
-            op.create_foreign_key(
-                _FK_ECP_TENANT_INTEGRATION,
-                "external_customer_profiles",
-                "integrations",
-                ["tenant_id", "integration_connection_id"],
-                ["tenant_id", "id"],
-            )
+
+    _add_fk_not_valid(
+        bind,
+        table="external_customer_profiles",
+        name=_FK_ECP_TENANT_INTEGRATION,
+        sql="FOREIGN KEY (tenant_id, integration_connection_id) REFERENCES integrations (tenant_id, id)",
+    )
 
     order_cols = [
         ("customer_id", sa.Column("customer_id", sa.Integer(), nullable=True)),

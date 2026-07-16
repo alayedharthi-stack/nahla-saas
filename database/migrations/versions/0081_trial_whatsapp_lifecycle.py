@@ -26,6 +26,9 @@ def upgrade() -> None:
         )
 
     # Data migration — correct existing tenant trial anchors.
+    # Isolate ORM work in a savepoint so model/schema drift cannot poison
+    # Alembic's outer revision transaction (PostgreSQL abort semantics).
+    savepoint = bind.begin_nested()
     try:
         import os
         import sys
@@ -42,13 +45,15 @@ def upgrade() -> None:
         from sqlalchemy.orm import sessionmaker
         from core.trial_lifecycle import migrate_existing_tenant_trials
 
-        Session = sessionmaker(bind=bind)
-        session = Session()
+        session = sessionmaker(bind=bind)()
         try:
             migrate_existing_tenant_trials(session)
+            session.flush()
         finally:
             session.close()
+        savepoint.commit()
     except Exception as exc:
+        savepoint.rollback()
         # Column add succeeded; log and continue — operator can rerun script.
         import logging
         logging.getLogger("alembic.runtime.migration").warning(

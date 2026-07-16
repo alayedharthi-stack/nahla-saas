@@ -204,9 +204,11 @@ def test_migration_0087_expand_not_valid_constraints(ephemeral_migration_engine:
         assert _has_check(ephemeral_migration_engine, chk_name), f"missing CHECK {chk_name}"
         assert not _constraint_validated(ephemeral_migration_engine, chk_name)
 
-    for fk_name in ("fk_orders_tenant_customer", "fk_orders_external_profile_connection"):
+    for fk_name in _0087_FKS:
         assert _has_fk(ephemeral_migration_engine, fk_name)
-        assert not _constraint_validated(ephemeral_migration_engine, fk_name)
+        assert not _constraint_validated(ephemeral_migration_engine, fk_name), (
+            f"FK {fk_name} must remain NOT VALID at 0087; validation deferred to 0088"
+        )
 
     for idx_name in _DEFERRED_ORDER_INDEXES:
         assert not _has_index(ephemeral_migration_engine, "orders", idx_name), idx_name
