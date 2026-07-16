@@ -41,6 +41,7 @@ from services.conversation_a1_subject_binding_contract import (  # noqa: E402
 )
 from services.conversation_a1_subject_read_contract import (  # noqa: E402
     AuthoritativeA1SubjectHandle,
+    BoundAuthoritativeA1PolicyProofSnapshot,
     BoundAuthoritativeA1SubjectScope,
     READ_STATUS_RESOLVED,
     READ_STATUS_UNRESOLVED,
@@ -71,6 +72,11 @@ from services.order_customer_identity_contract import (  # noqa: E402
     EVIDENCE_INFERRED,
     EXTERNAL_PROVIDER_SALLA_V1,
     NAHLA_INTERNAL_ORDER_V1,
+    SOURCE_HISTORY_COMPLETE,
+    SOURCE_HISTORY_INCOMPLETE,
+    SYNC_HEALTH_DEGRADED,
+    SYNC_HEALTH_HEALTHY,
+    SYNC_HEALTH_STALE,
 )
 
 
@@ -79,6 +85,8 @@ def _ready_proof(*, binding):
         subject_kind=binding.subject_kind,
         identity_namespace=binding.identity_namespace,
         policy_eligibility_ready=True,
+        authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
+        forward_sync_health=SYNC_HEALTH_HEALTHY,
     )
 
 
@@ -96,6 +104,8 @@ def _patch_unready_proof(monkeypatch) -> None:
             subject_kind=binding.subject_kind,
             identity_namespace=binding.identity_namespace,
             policy_eligibility_ready=False,
+            authoritative_source_history_completeness=SOURCE_HISTORY_INCOMPLETE,
+            forward_sync_health=SYNC_HEALTH_STALE,
         ),
     )
 
@@ -161,6 +171,65 @@ def _request(conversation, tenant_id: int = 71):
     )
 
 
+def _assert_resolved_snapshot_matches_scope_proof(
+    scope: BoundAuthoritativeA1SubjectScope,
+    *,
+    authoritative_source_history_completeness: str,
+    forward_sync_health: str,
+) -> None:
+    """Every snapshot accessor must mirror legacy scope proof accessors."""
+    snapshot = scope.proof_snapshot()
+    assert snapshot.subject_kind() == scope.proof_subject_kind()
+    assert snapshot.identity_namespace() == scope.proof_identity_namespace()
+    assert snapshot.policy_eligibility_ready() == scope.proof_policy_eligibility_ready()
+    assert (
+        snapshot.authoritative_source_history_completeness()
+        == authoritative_source_history_completeness
+    )
+    assert snapshot.forward_sync_health() == forward_sync_health
+
+
+@pytest.mark.parametrize(
+    ("seed", "completeness", "sync_health"),
+    [
+        pytest.param("internal", SOURCE_HISTORY_COMPLETE, SYNC_HEALTH_HEALTHY, id="internal"),
+        pytest.param("external", SOURCE_HISTORY_INCOMPLETE, SYNC_HEALTH_DEGRADED, id="external"),
+    ],
+)
+def test_resolved_snapshot_accessors_match_scope_proof(
+    db, monkeypatch, seed, completeness, sync_health,
+) -> None:
+    if seed == "internal":
+        conversation, _, binding = _seed_binding(db)
+    else:
+        conversation, _, binding = _seed_external_binding(db)
+
+    def evaluated_proof(db_arg, *, binding, tenant_id):
+        return SimpleNamespace(
+            subject_kind=binding.subject_kind,
+            identity_namespace=binding.identity_namespace,
+            policy_eligibility_ready=True,
+            authoritative_source_history_completeness=completeness,
+            forward_sync_health=sync_health,
+        )
+
+    monkeypatch.setattr(
+        "services.conversation_a1_subject_read_service._canonical_policy_proof",
+        evaluated_proof,
+    )
+
+    result = resolve_authoritative_a1_subject_for_conversation(db, request=_request(conversation))
+
+    assert result.status == READ_STATUS_RESOLVED
+    assert result.bound_scope is not None
+    _assert_resolved_snapshot_matches_scope_proof(
+        result.bound_scope,
+        authoritative_source_history_completeness=completeness,
+        forward_sync_health=sync_health,
+    )
+    assert result.bound_scope.proof_snapshot().is_bound_to(result.bound_scope)
+
+
 def test_active_authoritative_binding_returns_opaque_handle(db, monkeypatch) -> None:
     conversation, _, binding = _seed_binding(db)
     _patch_ready_proof(monkeypatch)
@@ -183,8 +252,17 @@ def test_active_authoritative_binding_returns_opaque_handle(db, monkeypatch) -> 
     assert result.bound_scope.internal_customer_id() == binding.internal_customer_id
     assert result.bound_scope.external_customer_profile_id() is None
     assert result.bound_scope.proof_policy_eligibility_ready() is True
-    assert not hasattr(result.handle, "__dict__")
-    assert not hasattr(result.bound_scope, "__dict__")
+    snapshot = result.bound_scope.proof_snapshot()
+    assert isinstance(snapshot, BoundAuthoritativeA1PolicyProofSnapshot)
+    assert snapshot.is_bound_to(result.handle)
+    assert snapshot.is_bound_to(result.bound_scope)
+    assert snapshot.subject_kind() == SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER
+    assert snapshot.identity_namespace() == NAHLA_INTERNAL_ORDER_V1
+    assert snapshot.policy_eligibility_ready() is True
+    assert snapshot.authoritative_source_history_completeness() == SOURCE_HISTORY_COMPLETE
+    assert snapshot.forward_sync_health() == SYNC_HEALTH_HEALTHY
+    assert repr(snapshot) == "BoundAuthoritativeA1PolicyProofSnapshot()"
+    assert not hasattr(snapshot, "__dict__")
     assert str(binding.id) not in repr(result)
 
 
@@ -383,6 +461,8 @@ def test_read_logs_and_results_do_not_serialize_private_identifiers(db, monkeypa
     with pytest.raises(TypeError):
         pickle.dumps(result.bound_scope)
     with pytest.raises(TypeError):
+        pickle.dumps(result.bound_scope.proof_snapshot())
+    with pytest.raises(TypeError):
         copy.copy(result.handle)
     with pytest.raises(TypeError):
         copy.copy(result.bound_scope)
@@ -464,7 +544,16 @@ def test_handle_scope_pair_rejects_forgery_and_cross_resolution(db, monkeypatch)
     assert second.handle.is_bound_to(second.bound_scope)
     assert not first.handle.is_bound_to(second.bound_scope)
     assert not second.handle.is_bound_to(first.bound_scope)
+    assert not first.bound_scope.proof_snapshot().is_bound_to(second.bound_scope)
+    assert not second.bound_scope.proof_snapshot().is_bound_to(first.bound_scope)
 
+    forged_proof = SimpleNamespace(
+        subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
+        identity_namespace=NAHLA_INTERNAL_ORDER_V1,
+        policy_eligibility_ready=True,
+        authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
+        forward_sync_health=SYNC_HEALTH_HEALTHY,
+    )
     _, forged_scope = _issue_authoritative_a1_subject_pair(
         binding_key=binding.id,
         tenant_id=72,
@@ -473,18 +562,33 @@ def test_handle_scope_pair_rejects_forgery_and_cross_resolution(db, monkeypatch)
         identity_namespace=NAHLA_INTERNAL_ORDER_V1,
         binding_source=BINDING_SOURCE_WA_ORDER_BRIDGE_AUTHORITATIVE_INTERNAL,
         binding_evidence_class=EVIDENCE_AUTHORITATIVE,
-        proof_subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
-        proof_identity_namespace=NAHLA_INTERNAL_ORDER_V1,
-        proof_policy_eligibility_ready=True,
+        proof=forged_proof,
         internal_customer_id=binding.internal_customer_id,
     )
     assert not first.handle.is_bound_to(forged_scope)
+    assert not forged_scope.proof_snapshot().is_bound_to(first.bound_scope)
 
 
-def test_public_handle_and_scope_construction_is_blocked() -> None:
+def test_public_handle_scope_and_snapshot_construction_is_blocked() -> None:
     binding_id = uuid4()
+    forged_proof = SimpleNamespace(
+        subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
+        identity_namespace=NAHLA_INTERNAL_ORDER_V1,
+        policy_eligibility_ready=True,
+        authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
+        forward_sync_health=SYNC_HEALTH_HEALTHY,
+    )
     with pytest.raises(TypeError, match="cannot be constructed outside Platform resolution"):
         AuthoritativeA1SubjectHandle(binding_id)
+    with pytest.raises(TypeError, match="cannot be constructed outside Platform resolution"):
+        BoundAuthoritativeA1PolicyProofSnapshot(
+            binding_key=binding_id,
+            subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
+            identity_namespace=NAHLA_INTERNAL_ORDER_V1,
+            policy_eligibility_ready=True,
+            authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
+            forward_sync_health=SYNC_HEALTH_HEALTHY,
+        )
     with pytest.raises(TypeError, match="cannot be constructed outside Platform resolution"):
         BoundAuthoritativeA1SubjectScope(
             binding_key=binding_id,
@@ -497,6 +601,7 @@ def test_public_handle_and_scope_construction_is_blocked() -> None:
             proof_subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
             proof_identity_namespace=NAHLA_INTERNAL_ORDER_V1,
             proof_policy_eligibility_ready=True,
+            proof_snapshot=object(),
             internal_customer_id=1,
         )
 
@@ -627,3 +732,55 @@ def test_resolve_has_no_binding_write_side_effects(db, monkeypatch) -> None:
     assert db.query(ConversationA1SubjectBinding).count() == before
     assert not db.dirty
     assert not db.deleted
+
+
+def test_proof_snapshot_reflects_canonical_proof_categorical_fields(db, monkeypatch) -> None:
+    conversation, _, binding = _seed_binding(db)
+
+    def categorical_proof(db_arg, *, binding, tenant_id):
+        return SimpleNamespace(
+            subject_kind=binding.subject_kind,
+            identity_namespace=binding.identity_namespace,
+            policy_eligibility_ready=True,
+            authoritative_source_history_completeness=SOURCE_HISTORY_INCOMPLETE,
+            forward_sync_health=SYNC_HEALTH_DEGRADED,
+        )
+
+    monkeypatch.setattr(
+        "services.conversation_a1_subject_read_service._canonical_policy_proof",
+        categorical_proof,
+    )
+
+    result = resolve_authoritative_a1_subject_for_conversation(db, request=_request(conversation))
+
+    assert result.status == READ_STATUS_RESOLVED
+    snapshot = result.bound_scope.proof_snapshot()
+    assert snapshot.authoritative_source_history_completeness() == SOURCE_HISTORY_INCOMPLETE
+    assert snapshot.forward_sync_health() == SYNC_HEALTH_DEGRADED
+    assert snapshot.policy_eligibility_ready() is True
+    assert snapshot.subject_kind() == str(binding.subject_kind)
+    assert snapshot.identity_namespace() == str(binding.identity_namespace)
+
+
+def test_proof_snapshot_privacy_and_serialization_blocked(db, monkeypatch, caplog) -> None:
+    conversation, customer, binding = _seed_binding(db)
+    _patch_ready_proof(monkeypatch)
+    result = resolve_authoritative_a1_subject_for_conversation(db, request=_request(conversation))
+    snapshot = result.bound_scope.proof_snapshot()
+
+    serialized = repr(snapshot)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    forbidden = (
+        str(binding.id),
+        customer.phone,
+        "private-order-reference",
+    )
+    for value in forbidden:
+        assert value not in serialized
+        assert value not in logged
+    with pytest.raises(TypeError):
+        pickle.dumps(snapshot)
+    with pytest.raises(TypeError):
+        copy.copy(snapshot)
+    with pytest.raises(TypeError):
+        json.dumps({"snapshot": snapshot})

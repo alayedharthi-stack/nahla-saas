@@ -139,9 +139,7 @@ def _bound_pair_from_resolution(
         "identity_namespace": str(binding.identity_namespace),
         "binding_source": str(binding.binding_source),
         "binding_evidence_class": str(binding.evidence_class),
-        "proof_subject_kind": str(proof.subject_kind),
-        "proof_identity_namespace": str(proof.identity_namespace),
-        "proof_policy_eligibility_ready": bool(proof.policy_eligibility_ready),
+        "proof": proof,
     }
     if binding.subject_kind == SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER:
         pair_kwargs["internal_customer_id"] = int(binding.internal_customer_id)

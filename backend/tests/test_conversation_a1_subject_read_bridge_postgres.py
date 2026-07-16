@@ -43,6 +43,8 @@ from services.order_customer_identity_contract import (  # noqa: E402
     EXTERNAL_PROVIDER_SALLA_V1,
     LINK_STATE_VERIFIED,
     NAHLA_INTERNAL_ORDER_V1,
+    SOURCE_HISTORY_COMPLETE,
+    SYNC_HEALTH_HEALTHY,
 )
 from services.order_customer_identity_service import (  # noqa: E402
     reconcile_external_profile_coverage,
@@ -167,6 +169,11 @@ def test_postgres_resolves_only_policy_ready_authoritative_binding(pg_session) -
     assert result.bound_scope is not None
     assert result.handle.is_bound_to(result.bound_scope)
     assert result.bound_scope.proof_policy_eligibility_ready() is True
+    snapshot = result.bound_scope.proof_snapshot()
+    assert snapshot.is_bound_to(result.handle)
+    assert snapshot.authoritative_source_history_completeness() == SOURCE_HISTORY_COMPLETE
+    assert snapshot.forward_sync_health() == SYNC_HEALTH_HEALTHY
+    assert snapshot.policy_eligibility_ready() is True
 
 
 def test_postgres_resolves_external_profile_with_real_canonical_proof(pg_session) -> None:
@@ -188,6 +195,12 @@ def test_postgres_resolves_external_profile_with_real_canonical_proof(pg_session
     assert result.bound_scope.external_customer_profile_id() == profile.id
     assert result.bound_scope.internal_customer_id() is None
     assert result.bound_scope.proof_policy_eligibility_ready() is True
+    snapshot = result.bound_scope.proof_snapshot()
+    assert snapshot.is_bound_to(result.bound_scope)
+    assert snapshot.subject_kind() == SUBJECT_KIND_EXTERNAL_CUSTOMER_PROFILE
+    assert snapshot.identity_namespace() == EXTERNAL_PROVIDER_SALLA_V1
+    assert snapshot.authoritative_source_history_completeness() == SOURCE_HISTORY_COMPLETE
+    assert snapshot.forward_sync_health() == SYNC_HEALTH_HEALTHY
 
 
 def test_postgres_capability_expand_fails_closed(pg_session) -> None:
