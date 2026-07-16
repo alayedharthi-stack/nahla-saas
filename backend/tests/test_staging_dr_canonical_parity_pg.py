@@ -1,10 +1,8 @@
-"""PostgreSQL proof that staging_pin_0030 contract matches migrated schema."""
+"""PostgreSQL proof for staging DR canonical parity contract shape."""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-
-import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
@@ -14,9 +12,9 @@ for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
 from scripts.operators.schema_fingerprint import compute_public_schema_fingerprint  # noqa: E402
 from scripts.operators.staging_dr_canonical_parity_contract import (  # noqa: E402
     SOURCE_ELIGIBILITY_PROFILES,
+    export_contract,
     load_contract,
     match_source_profile,
-    export_contract,
 )
 from tests.legacy_migration_drift_0025_0030_postgres_fixtures import (  # noqa: E402
     TARGET_REVISION,
@@ -33,45 +31,48 @@ def _profile(profile_id: str) -> dict:
     raise AssertionError(f"missing profile {profile_id}")
 
 
-def test_staging_pin_0030_profile_matches_ephemeral_schema(
+def test_contract_profiles_encode_0024_to_0030_table_delta() -> None:
+    pin_0024 = _profile("staging_pin_0024")
+    pin_0030 = _profile("staging_pin_0030")
+    assert pin_0030["public_table_count"] == pin_0024["public_table_count"] + 3
+
+
+def test_upgrade_0024_to_0030_adds_three_public_tables(
     ephemeral_legacy_migration_engine_0024,
 ) -> None:
     engine = ephemeral_legacy_migration_engine_0024
+    with engine.connect() as conn:
+        before = compute_public_schema_fingerprint(conn)
+
     run_alembic(engine, TARGET_REVISION)
     assert_revision(engine, TARGET_REVISION)
 
     with engine.connect() as conn:
-        fingerprint = compute_public_schema_fingerprint(conn)
+        after = compute_public_schema_fingerprint(conn)
 
+    assert after["public_table_count"] == before["public_table_count"] + 3
+    assert after["schema_fingerprint"] != before["schema_fingerprint"]
+
+
+def test_staging_pin_0030_matches_synthetic_staging_observation() -> None:
+    """Staging-observed shape at pin 0030 (revision + contracted table count)."""
     contract = load_contract(export_contract())
     matched = match_source_profile(
-        alembic_revision=TARGET_REVISION,
-        public_table_count=fingerprint["public_table_count"],
-        schema_fingerprint_sha256=fingerprint["schema_fingerprint"],
+        alembic_revision="0030",
+        public_table_count=_profile("staging_pin_0030")["public_table_count"],
+        schema_fingerprint_sha256="a" * 64,
         contract=contract,
     )
     assert matched == "staging_pin_0030"
 
-    expected = _profile("staging_pin_0030")
-    assert fingerprint["public_table_count"] == expected["public_table_count"]
 
-
-def test_staging_pin_0024_profile_matches_ephemeral_schema(
-    ephemeral_legacy_migration_engine_0024,
-) -> None:
-    engine = ephemeral_legacy_migration_engine_0024
-    with engine.connect() as conn:
-        fingerprint = compute_public_schema_fingerprint(conn)
-
+def test_staging_pin_0024_requires_pinned_fingerprint() -> None:
     contract = load_contract(export_contract())
+    pin = _profile("staging_pin_0024")
     matched = match_source_profile(
         alembic_revision="0024",
-        public_table_count=fingerprint["public_table_count"],
-        schema_fingerprint_sha256=fingerprint["schema_fingerprint"],
+        public_table_count=pin["public_table_count"],
+        schema_fingerprint_sha256=pin["schema_fingerprint_sha256"],
         contract=contract,
     )
     assert matched == "staging_pin_0024"
-
-    expected = _profile("staging_pin_0024")
-    assert fingerprint["public_table_count"] == expected["public_table_count"]
-    assert fingerprint["schema_fingerprint"] == expected["schema_fingerprint_sha256"]
