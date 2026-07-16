@@ -53,6 +53,7 @@ from modules.ai.brain.truth_surface.customer_conditional_coupon_repository impor
     promotion_liveness_sql_predicate,
 )
 from modules.ai.brain.truth_surface.customer_conditional_coupon_subject import (  # noqa: E402
+    HANDLE_SOURCE_BRIDGE,
     ConditionalCouponSubjectHandle,
     SubjectResolutionResult,
     resolve_conditional_coupon_subject_handle,
@@ -60,17 +61,22 @@ from modules.ai.brain.truth_surface.customer_conditional_coupon_subject import (
 from modules.ai.brain.truth_surface.trusted_context import (  # noqa: E402
     build_trusted_context_snapshot,
 )
+from services.conversation_a1_subject_binding_contract import (  # noqa: E402
+    BINDING_SOURCE_WA_ORDER_BRIDGE_AUTHORITATIVE_INTERNAL,
+    SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
+)
+from services.conversation_a1_subject_read_contract import (  # noqa: E402
+    _issue_authoritative_a1_subject_pair,
+)
 from services.order_customer_identity_contract import (  # noqa: E402
+    EVIDENCE_AUTHORITATIVE,
     EXTERNAL_PROVIDER_SALLA_V1,
     NAHLA_INTERNAL_ORDER_V1,
     SOURCE_HISTORY_COMPLETE,
+    SOURCE_HISTORY_INCOMPLETE,
     SYNC_HEALTH_HEALTHY,
     SYNC_HEALTH_DEGRADED,
     SYNC_HEALTH_STALE,
-)
-from services.order_customer_identity_read_contract import (  # noqa: E402
-    SafeExternalProfileSourceHistoryProof,
-    SafeInternalCustomerSourceHistoryProof,
 )
 
 
@@ -79,38 +85,18 @@ def _clear_turn_cache() -> None:
     clear_customer_conditional_coupon_turn_cache()
 
 
-def _internal_proof(
+def _resolver_proof_snapshot(
     *,
     ready: bool = True,
     forward_health: str = SYNC_HEALTH_HEALTHY,
-) -> SafeInternalCustomerSourceHistoryProof:
-    return SafeInternalCustomerSourceHistoryProof(
-        subject_kind="nahla_internal_customer",
+    completeness: str = SOURCE_HISTORY_COMPLETE,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
         identity_namespace=NAHLA_INTERNAL_ORDER_V1,
-        authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
+        policy_eligibility_ready=ready,
+        authoritative_source_history_completeness=completeness,
         forward_sync_health=forward_health,
-        linked_orders_in_scope_count=2,
-        unmapped_orders_in_scope_count=0,
-        mislinked_orders_in_scope_count=0,
-        watermark_present=True,
-        coverage_scope_claim="nahla_internal_customer_orders_only",
-        policy_eligibility_ready=ready,
-    )
-
-
-def _external_proof(*, ready: bool = True) -> SafeExternalProfileSourceHistoryProof:
-    return SafeExternalProfileSourceHistoryProof(
-        subject_kind="external_customer_profile",
-        identity_namespace=EXTERNAL_PROVIDER_SALLA_V1,
-        integration_connection_present=True,
-        authoritative_source_history_completeness=SOURCE_HISTORY_COMPLETE,
-        forward_sync_health=SYNC_HEALTH_HEALTHY,
-        linked_orders_in_scope_count=1,
-        unmapped_orders_in_scope_count=0,
-        mislinked_orders_in_scope_count=0,
-        watermark_present=True,
-        coverage_scope_claim="external_identity_tuple_bound_orders_only",
-        policy_eligibility_ready=ready,
     )
 
 
@@ -128,15 +114,41 @@ def _promo(min_orders: int, *, tenant_id: int = 1) -> SimpleNamespace:
     )
 
 
-def _trusted_internal_resolution(*, tenant_id: int = 1, customer_id: int = 55) -> SubjectResolutionResult:
+def _trusted_bridge_resolution(
+    *,
+    tenant_id: int = 1,
+    customer_id: int = 55,
+    conversation_id: int = 1,
+    ready: bool = True,
+    forward_health: str = SYNC_HEALTH_HEALTHY,
+    completeness: str = SOURCE_HISTORY_COMPLETE,
+    include_bound_scope: bool = True,
+) -> SubjectResolutionResult:
+    bridge_handle, bound_scope = _issue_authoritative_a1_subject_pair(
+        binding_key=uuid4(),
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        subject_kind=SUBJECT_KIND_NAHL_INTERNAL_CUSTOMER,
+        identity_namespace=NAHLA_INTERNAL_ORDER_V1,
+        binding_source=BINDING_SOURCE_WA_ORDER_BRIDGE_AUTHORITATIVE_INTERNAL,
+        binding_evidence_class=EVIDENCE_AUTHORITATIVE,
+        proof=_resolver_proof_snapshot(
+            ready=ready,
+            forward_health=forward_health,
+            completeness=completeness,
+        ),
+        internal_customer_id=customer_id,
+    )
     return SubjectResolutionResult(
         status="resolved",
         handle=ConditionalCouponSubjectHandle(
             subject_kind="nahla_internal_customer",
             tenant_id=tenant_id,
             identity_namespace=NAHLA_INTERNAL_ORDER_V1,
-            handle_source="separately_owned_authoritative_bridge",
+            handle_source=HANDLE_SOURCE_BRIDGE,
             customer_id=customer_id,
+            authoritative_a1_subject_handle=bridge_handle,
+            bound_authoritative_a1_subject_scope=bound_scope if include_bound_scope else None,
         ),
     )
 
@@ -223,10 +235,7 @@ def test_internal_subject_shortfall_generic_commerce(
         return_value=[_promo(3)],
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=True),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         return_value=1,
@@ -261,13 +270,10 @@ def test_happy_path_claim_requires_all_authoritative_gates(
     active_target.usage_count = 1
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[active_target],
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=True),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         return_value=2,
@@ -303,25 +309,26 @@ def test_proof_not_ready_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
-        return_value=[_promo(1)],
-    ), patch(
+    ) as discover, patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(ready=False),
     ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=False),
-    ):
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
+    ) as count_mock:
         facts, obs = load_customer_conditional_coupon_facts(
             db=MagicMock(),
             tenant_id=1,
             message="بعد كم طلب؟",
             conversation=SimpleNamespace(customer_id=1),
         )
+    discover.assert_not_called()
+    count_mock.assert_not_called()
     record = facts[0].value
     assert record["order_history_completeness"] == COMPLETENESS_UNVERIFIED
     assert record["closed_reason_code"] == REASON_ORDER_HISTORY_IDENTITY_UNVERIFIED
     assert record["completed_orders_count"] is None
     assert obs["order_count_query_count"] == 0
+    assert obs["usage_evidence_query_count"] == 0
 
 
 def test_target_budget_exceeded_not_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,7 +339,7 @@ def test_target_budget_exceeded_not_unavailable(monkeypatch: pytest.MonkeyPatch)
         return_value=targets,
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ):
         facts, obs = load_customer_conditional_coupon_facts(
             db=MagicMock(),
@@ -355,10 +362,7 @@ def test_turn_dedup_single_count_query(monkeypatch: pytest.MonkeyPatch) -> None:
         return_value=[_promo(2)],
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(customer_id=3),
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=True),
+        return_value=_trusted_bridge_resolution(customer_id=3),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         count_mock,
@@ -381,10 +385,11 @@ def test_turn_dedup_single_count_query(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_subject_resolution_requires_separately_owned_authoritative_bridge() -> None:
     internal_only = resolve_conditional_coupon_subject_handle(
         tenant_id=1,
-        conversation=SimpleNamespace(customer_id=10),
+        conversation=SimpleNamespace(customer_id=10, id=5),
     )
     assert internal_only.status == "unresolved"
     assert internal_only.handle is None
+    assert internal_only.reason_code == "authoritative_subject_handle_unavailable"
 
     external_only = resolve_conditional_coupon_subject_handle(
         tenant_id=1,
@@ -463,10 +468,7 @@ def test_count_query_failure_unavailable(monkeypatch: pytest.MonkeyPatch) -> Non
         return_value=[_promo(1)],
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=True),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         side_effect=ConditionalCouponRepositoryError("db_down"),
@@ -546,34 +548,32 @@ def test_stale_or_degraded_proof_fails_closed(
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(ready=False, forward_health=forward_health),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
-        return_value=[_promo(2)],
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(ready=False, forward_health=forward_health),
-    ):
+    ) as discover, patch(
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
+    ) as count_mock:
         facts, obs = load_customer_conditional_coupon_facts(
             db=MagicMock(),
             tenant_id=1,
             message="بعد كم طلب؟",
         )
+    discover.assert_not_called()
+    count_mock.assert_not_called()
     assert facts[0].value["closed_reason_code"] == reason
     assert obs["order_count_query_count"] == 0
+    assert obs["usage_evidence_query_count"] == 0
 
 
 def test_absent_proof_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(include_bound_scope=False),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[_promo(2)],
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=None,
     ):
         facts, _obs = load_customer_conditional_coupon_facts(
             db=MagicMock(), tenant_id=1, message="بعد كم طلب?",
@@ -585,7 +585,7 @@ def test_target_scan_failure_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         side_effect=ConditionalCouponRepositoryError("query_failed"),
@@ -602,7 +602,7 @@ def test_no_targets_is_not_false_missing_from_unfiltered_scan(
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[],
@@ -631,7 +631,7 @@ def test_non_live_promotion_yields_no_target_and_no_claim(
     monkeypatch.setenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", "true")
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[],
@@ -652,13 +652,10 @@ def test_personalized_usage_gate_blocks_min_orders_claim(
     target.conditions["customer_segments"] = ["repeat_buyers"]
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
-        return_value=_trusted_internal_resolution(),
+        return_value=_trusted_bridge_resolution(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[target],
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         return_value=3,
@@ -709,15 +706,12 @@ def test_tenant_cache_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
         side_effect=[
-            _trusted_internal_resolution(tenant_id=1, customer_id=55),
-            _trusted_internal_resolution(tenant_id=2, customer_id=55),
+            _trusted_bridge_resolution(tenant_id=1, customer_id=55),
+            _trusted_bridge_resolution(tenant_id=2, customer_id=55),
         ],
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.scan_conditional_targets",
         return_value=[_promo(2)],
-    ), patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.build_safe_internal_customer_proof",
-        return_value=_internal_proof(),
     ), patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.count_countable_orders_for_subject",
         count_mock,

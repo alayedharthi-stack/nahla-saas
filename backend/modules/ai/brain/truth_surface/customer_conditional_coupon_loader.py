@@ -14,15 +14,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from services.order_customer_identity_contract import (
     SOURCE_HISTORY_COMPLETE,
+    SOURCE_HISTORY_INCOMPLETE,
     SYNC_HEALTH_DEGRADED,
     SYNC_HEALTH_HEALTHY,
     SYNC_HEALTH_STALE,
 )
-from services.order_customer_identity_read_contract import (
-    SafeExternalProfileSourceHistoryProof,
-    SafeInternalCustomerSourceHistoryProof,
-    build_safe_external_profile_proof,
-    build_safe_internal_customer_proof,
+from services.conversation_a1_subject_read_contract import (
+    BoundAuthoritativeA1PolicyProofSnapshot,
 )
 
 from .contract import TrustedDomain, TrustedFact, TruthSource
@@ -72,6 +70,7 @@ from .customer_conditional_coupon_repository import (
 )
 from .customer_conditional_coupon_subject import (
     ConditionalCouponSubjectHandle,
+    bound_proof_snapshot_from_handle,
     customer_scope_for_handle,
     resolve_conditional_coupon_subject_handle,
 )
@@ -127,37 +126,37 @@ def _cache_key(
     return (int(tenant_id), subject_token, (message or "").strip()[:120])
 
 
-def _load_a1_proof(
-    db: Any,
-    handle: ConditionalCouponSubjectHandle,
-) -> Optional[SafeExternalProfileSourceHistoryProof | SafeInternalCustomerSourceHistoryProof]:
-    if handle.subject_kind == "external_customer_profile":
-        if handle.external_customer_profile_id is None:
-            return None
-        return build_safe_external_profile_proof(
-            db,
-            tenant_id=int(handle.tenant_id),
-            external_customer_profile_id=handle.external_customer_profile_id,
-        )
-    if handle.customer_id is None:
-        return None
-    return build_safe_internal_customer_proof(
-        db,
-        tenant_id=int(handle.tenant_id),
-        customer_id=int(handle.customer_id),
-    )
+def _snapshot_policy_closed_reason(
+    snapshot: BoundAuthoritativeA1PolicyProofSnapshot,
+) -> Optional[str]:
+    """Return a closed reason when resolver-issued snapshot fails pre-scan policy gates."""
+    if not snapshot.policy_eligibility_ready():
+        if snapshot.authoritative_source_history_completeness() != SOURCE_HISTORY_COMPLETE:
+            return REASON_ORDER_HISTORY_COVERAGE_INCOMPLETE
+        if snapshot.forward_sync_health() == SYNC_HEALTH_STALE:
+            return REASON_ORDER_HISTORY_SYNC_STALE
+        if snapshot.forward_sync_health() == SYNC_HEALTH_DEGRADED:
+            return REASON_ORDER_HISTORY_SYNC_DEGRADED
+        return REASON_ORDER_HISTORY_IDENTITY_UNVERIFIED
+    if snapshot.authoritative_source_history_completeness() != SOURCE_HISTORY_COMPLETE:
+        return REASON_ORDER_HISTORY_COVERAGE_INCOMPLETE
+    if snapshot.forward_sync_health() == SYNC_HEALTH_STALE:
+        return REASON_ORDER_HISTORY_SYNC_STALE
+    if snapshot.forward_sync_health() == SYNC_HEALTH_DEGRADED:
+        return REASON_ORDER_HISTORY_SYNC_DEGRADED
+    return None
 
 
-def _completeness_from_proof(
-    proof: SafeExternalProfileSourceHistoryProof | SafeInternalCustomerSourceHistoryProof,
+def _completeness_from_snapshot(
+    snapshot: BoundAuthoritativeA1PolicyProofSnapshot,
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    if not proof.policy_eligibility_ready:
+    if not snapshot.policy_eligibility_ready():
         return COMPLETENESS_UNVERIFIED, None, None
-    if proof.authoritative_source_history_completeness != SOURCE_HISTORY_COMPLETE:
-        return COMPLETENESS_UNVERIFIED, None, proof.forward_sync_health
-    if proof.forward_sync_health != SYNC_HEALTH_HEALTHY:
-        return COMPLETENESS_UNVERIFIED, None, proof.forward_sync_health
-    return COMPLETENESS_VERIFIED, COMPLETENESS_SOURCE_A1_AUTHORITATIVE, proof.forward_sync_health
+    if snapshot.authoritative_source_history_completeness() != SOURCE_HISTORY_COMPLETE:
+        return COMPLETENESS_UNVERIFIED, None, snapshot.forward_sync_health()
+    if snapshot.forward_sync_health() != SYNC_HEALTH_HEALTHY:
+        return COMPLETENESS_UNVERIFIED, None, snapshot.forward_sync_health()
+    return COMPLETENESS_VERIFIED, COMPLETENESS_SOURCE_A1_AUTHORITATIVE, snapshot.forward_sync_health()
 
 
 def _fail_closed_record(
@@ -201,10 +200,14 @@ def load_customer_conditional_coupon_facts(
 
     Inert unless shadow flag + relevance gate pass.
 
-    Full budget after both gates: one deterministic filtered target-discovery
-    query, one A1 proof read, and at most one subject-scoped count query. The
-    bounded cache is keyed by tenant plus authoritative subject scope and never
-    enters facts or telemetry.
+    I/O budget after both gates and a resolved subject:
+    - Subject resolution: one Platform bridge read (one binding query + one A1
+      proof build) that issues the bound proof snapshot consumed here.
+    - Loader: no separate A1 proof read. Snapshot policy gates run before any
+      promotion scan. Only when they pass: one eligible-target scan and at most
+      one subject-scoped count query.
+    - The bounded cache is keyed by tenant plus authoritative subject scope and
+      never enters facts or telemetry.
     """
     started = time.perf_counter()
     gate_skipped_reason: Optional[str] = None
@@ -242,6 +245,7 @@ def load_customer_conditional_coupon_facts(
 
     resolution = resolve_conditional_coupon_subject_handle(
         tenant_id=int(tenant_id),
+        db=db,
         conversation=conversation,
         inbound_metadata=inbound_metadata,
     )
@@ -306,6 +310,49 @@ def load_customer_conditional_coupon_facts(
             "order_history_completeness": COMPLETENESS_UNVERIFIED,
             "forward_sync_health": None,
             "source_contract_version": None,
+            "order_count_query_count": 0,
+            "usage_evidence_query_count": 0,
+            "budget_exceeded": False,
+            "loader_duration_ms": int((time.perf_counter() - started) * 1000),
+        }, cache_key=cache_key)
+
+    proof_snapshot = bound_proof_snapshot_from_handle(handle)
+    if proof_snapshot is None:
+        record = _fail_closed_record(
+            identity_status=IDENTITY_STATUS_RESOLVED,
+            customer_scope=customer_scope,
+            evaluation_state=EVALUATION_REQUIRES_CONTEXT,
+            closed_reason_code=REASON_PROOF_ABSENT,
+        )
+        return _finalize(record, obs_base={
+            "conditional_target_count": 0,
+            "order_history_completeness": COMPLETENESS_UNVERIFIED,
+            "forward_sync_health": None,
+            "source_contract_version": None,
+            "order_count_query_count": 0,
+            "usage_evidence_query_count": 0,
+            "budget_exceeded": False,
+            "loader_duration_ms": int((time.perf_counter() - started) * 1000),
+        }, cache_key=cache_key)
+
+    completeness, completeness_source, forward_health = _completeness_from_snapshot(proof_snapshot)
+    source_contract_version = proof_snapshot.identity_namespace()
+    policy_closed_reason = _snapshot_policy_closed_reason(proof_snapshot)
+    if policy_closed_reason is not None:
+        record = _fail_closed_record(
+            identity_status=IDENTITY_STATUS_RESOLVED,
+            customer_scope=customer_scope,
+            evaluation_state=EVALUATION_REQUIRES_CONTEXT,
+            closed_reason_code=policy_closed_reason,
+        )
+        record["order_history_completeness"] = completeness
+        record["order_history_completeness_source"] = completeness_source
+        assert_fact_record_sanitized(record)
+        return _finalize(record, obs_base={
+            "conditional_target_count": 0,
+            "order_history_completeness": completeness,
+            "forward_sync_health": forward_health,
+            "source_contract_version": source_contract_version,
             "order_count_query_count": 0,
             "usage_evidence_query_count": 0,
             "budget_exceeded": False,
@@ -389,56 +436,6 @@ def load_customer_conditional_coupon_facts(
         row_has_personalised_usage_gate(row)
         for row in all_targets[:MAX_CONDITIONAL_TARGETS]
     )
-
-    proof = _load_a1_proof(db, handle)
-    if proof is None:
-        record = _fail_closed_record(
-            identity_status=IDENTITY_STATUS_RESOLVED,
-            customer_scope=customer_scope,
-            evaluation_state=EVALUATION_REQUIRES_CONTEXT,
-            closed_reason_code=REASON_PROOF_ABSENT,
-        )
-        return _finalize(record, obs_base={
-            "conditional_target_count": conditional_target_count,
-            "order_history_completeness": COMPLETENESS_UNVERIFIED,
-            "forward_sync_health": None,
-            "source_contract_version": None,
-            "order_count_query_count": 0,
-            "usage_evidence_query_count": usage_query_count,
-            "budget_exceeded": False,
-            "loader_duration_ms": int((time.perf_counter() - started) * 1000),
-        }, cache_key=cache_key)
-
-    completeness, completeness_source, forward_health = _completeness_from_proof(proof)
-    source_contract_version = getattr(proof, "identity_namespace", None)
-
-    if not proof.policy_eligibility_ready:
-        reason = REASON_ORDER_HISTORY_IDENTITY_UNVERIFIED
-        if proof.authoritative_source_history_completeness != SOURCE_HISTORY_COMPLETE:
-            reason = REASON_ORDER_HISTORY_COVERAGE_INCOMPLETE
-        elif proof.forward_sync_health == SYNC_HEALTH_STALE:
-            reason = REASON_ORDER_HISTORY_SYNC_STALE
-        elif proof.forward_sync_health == SYNC_HEALTH_DEGRADED:
-            reason = REASON_ORDER_HISTORY_SYNC_DEGRADED
-        record = _fail_closed_record(
-            identity_status=IDENTITY_STATUS_RESOLVED,
-            customer_scope=customer_scope,
-            evaluation_state=EVALUATION_REQUIRES_CONTEXT,
-            closed_reason_code=reason,
-        )
-        record["order_history_completeness"] = completeness
-        record["order_history_completeness_source"] = completeness_source
-        assert_fact_record_sanitized(record)
-        return _finalize(record, obs_base={
-            "conditional_target_count": conditional_target_count,
-            "order_history_completeness": completeness,
-            "forward_sync_health": forward_health,
-            "source_contract_version": source_contract_version,
-            "order_count_query_count": 0,
-            "usage_evidence_query_count": usage_query_count,
-            "budget_exceeded": False,
-            "loader_duration_ms": int((time.perf_counter() - started) * 1000),
-        }, cache_key=cache_key)
 
     try:
         completed_count = count_countable_orders_for_subject(db, handle=handle)
