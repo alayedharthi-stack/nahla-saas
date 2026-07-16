@@ -59,6 +59,21 @@ jobs:
           python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1
           python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1
 
+      - name: Staging DR canonical parity unit tests
+        run: python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1
+
+  staging-dr-executor-artifact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build closed DR executor artifact
+        working-directory: ops/staging_dr_executor
+        run: docker build -t nahla-staging-dr-executor:ci .
+
   constitution-compliance:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -177,6 +192,7 @@ jobs:
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_legacy_migration_drift_0025_0030_pg.py \
             backend/tests/test_legacy_migration_drift_0030_0087_pg.py \
+            backend/tests/test_staging_dr_canonical_parity_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \
             backend/tests/test_order_customer_identity_reconciliation_report.py \
             backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \

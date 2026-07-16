@@ -1,0 +1,20 @@
+{
+  "contract_version": "staging-dr-canonical-parity-v1",
+  "schema_fingerprint_version": "nahla_public_tables_sha256_v1",
+  "source_eligibility_profiles": [
+    {
+      "alembic_revision": "0024",
+      "operator_note": "Prior Phase A source attestation",
+      "profile_id": "staging_pin_0024",
+      "public_table_count": 96,
+      "schema_fingerprint_sha256": "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    },
+    {
+      "alembic_revision": "0030",
+      "operator_note": "Live staging source attestation after successful 0030 restore drill",
+      "profile_id": "staging_pin_0030",
+      "public_table_count": 96,
+      "schema_fingerprint_sha256": "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    }
+  ]
+}
