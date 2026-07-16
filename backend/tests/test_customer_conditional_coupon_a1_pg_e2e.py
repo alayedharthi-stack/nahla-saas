@@ -10,6 +10,11 @@ conversation) is not seeded here: migration ``0089`` enforces
 ``uq_casb_tenant_conversation_active`` (partial unique on active rows). That
 corruption class stays in mocked consumer tests where invalid pairs can be
 injected without fighting PostgreSQL DDL.
+
+Cross-tenant ``internal_customer_id`` corruption is likewise not persisted in PG:
+``fk_casb_tenant_internal_customer`` rejects it at flush. Runtime fail-closed
+loader behavior for a hypothetically readable corrupted binding remains in the
+mocked consumer tests; this file proves PostgreSQL blocks the invalid state.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
 _REPO = Path(__file__).resolve().parents[2]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
@@ -835,11 +841,18 @@ def test_pg_revoked_binding_fails_closed_before_target_scan(
     assert customer.tenant_id == TEST_TENANT_A
 
 
-def test_pg_cross_tenant_binding_subject_fails_closed(
+def test_pg_cross_tenant_binding_corruption_blocked_by_composite_fk(
     pg_session,
     shadow_coupon_enabled: None,
 ) -> None:
-    conversation, _, _ = _seed_policy_ready_chain(pg_session)
+    """
+    PostgreSQL rejects cross-tenant ``internal_customer_id`` at flush.
+
+    Runtime fail-closed loader behavior for a corrupted readable binding is
+    covered in mocked consumer tests; this PG slice proves the invalid state
+    cannot persist under ``fk_casb_tenant_internal_customer``.
+    """
+    conversation, customer, _ = _seed_policy_ready_chain(pg_session)
     seed_tenant(pg_session, tenant_id=TEST_TENANT_B, name="متجر تجريبي آخر")
     other_customer = seed_customer(
         pg_session,
@@ -851,14 +864,20 @@ def test_pg_cross_tenant_binding_subject_fails_closed(
         .filter_by(tenant_id=TEST_TENANT_A, conversation_id=conversation.id)
         .one()
     )
-    binding.internal_customer_id = other_customer.id
-    pg_session.flush()
+    with pytest.raises(IntegrityError, match="fk_casb_tenant_internal_customer"):
+        with pg_session.begin_nested():
+            binding.internal_customer_id = other_customer.id
+            pg_session.flush()
+
+    pg_session.expire(binding)
+    assert binding.internal_customer_id == customer.id
 
     with _no_runtime_side_effects():
         facts, obs = _load_facts(pg_session, conversation)
 
     record = facts[0].value
-    assert record["identity_status"] == "unresolved"
-    assert record["closed_reason_code"] == REASON_CUSTOMER_UNVERIFIED
-    assert obs["order_count_query_count"] == 0
-    assert obs["usage_evidence_query_count"] == 0
+    assert record["identity_status"] == "resolved"
+    assert record["customer_scope"] == "nahla_internal_customer"
+    assert record["allow_min_orders_condition_claim"] is True
+    assert obs["order_count_query_count"] == 1
+    assert obs["usage_evidence_query_count"] == 1
