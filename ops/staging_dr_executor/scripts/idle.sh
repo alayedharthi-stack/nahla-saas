@@ -2,4 +2,3 @@
 set -euo pipefail
 
 echo "nahla-stg-dr-job ready"
-

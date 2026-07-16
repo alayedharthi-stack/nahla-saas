@@ -101,4 +101,3 @@ echo "source_contract_eligible=true"
 echo "matched_source_profile_id=${matched_profile}"
 echo "source_fingerprint_display=${src_fp:0:16}"
 echo "restore_fingerprint_display=${tgt_fp:0:16}"
-
