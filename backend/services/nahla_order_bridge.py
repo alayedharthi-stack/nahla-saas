@@ -970,6 +970,34 @@ def _base_metadata(
     return meta
 
 
+def _maybe_write_conversation_a1_binding(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: int,
+    order: Any,
+) -> None:
+    """Persist authoritative internal conversation→A1-subject binding when provable."""
+    try:
+        from services.conversation_a1_subject_binding_service import (  # noqa: PLC0415
+            write_authoritative_internal_binding_from_verified_order,
+        )
+
+        write_authoritative_internal_binding_from_verified_order(
+            db,
+            tenant_id=int(tenant_id),
+            conversation_id=int(conversation_id),
+            order=order,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[NAHLA_ORDER_BRIDGE] conversation_a1_binding_write_failed "
+            "tenant=%s action=skip skip_reason=binding_write_exception err_class=%s",
+            tenant_id,
+            type(exc).__name__,
+        )
+
+
 def sync_nahla_wa_order(
     db: Any,
     *,
@@ -1401,6 +1429,12 @@ def sync_nahla_wa_order(
                     tenant_id=tenant_id,
                     customer_id=int(cust.id),
                 )
+                _maybe_write_conversation_a1_binding(
+                    db,
+                    tenant_id=tenant_id,
+                    conversation_id=int(conversation_id),
+                    order=existing,
+                )
             else:
                 apply_whatsapp_order_identity_unlinked(existing)
             db.add(existing)
@@ -1456,6 +1490,13 @@ def sync_nahla_wa_order(
             apply_whatsapp_order_identity_unlinked(order)
         db.add(order)
         db.flush()
+        if cust is not None and getattr(cust, "id", None):
+            _maybe_write_conversation_a1_binding(
+                db,
+                tenant_id=tenant_id,
+                conversation_id=int(conversation_id),
+                order=order,
+            )
         base_meta = _apply_bridge_shipping_sync(
             db,
             tenant_id=tenant_id,

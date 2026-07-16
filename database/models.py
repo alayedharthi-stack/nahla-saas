@@ -548,6 +548,99 @@ class NahlaInternalCustomerOrderHistoryCoverage(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class ConversationA1SubjectBinding(Base):
+    """Platform-owned conversation → A1-subject binding (authoritative writers only)."""
+    __tablename__ = 'conversation_a1_subject_bindings'
+    __table_args__ = (
+        sa.CheckConstraint(
+            "binding_state IN ('active', 'revoked', 'superseded')",
+            name='chk_casb_binding_state',
+        ),
+        sa.CheckConstraint(
+            "subject_kind IN ('nahla_internal_customer', 'external_customer_profile')",
+            name='chk_casb_subject_kind',
+        ),
+        sa.CheckConstraint(
+            "evidence_class IN ('authoritative', 'inferred')",
+            name='chk_casb_evidence_class',
+        ),
+        sa.CheckConstraint(
+            "binding_source IN ("
+            "'wa_order_bridge_authoritative_internal', "
+            "'salla_order_conversation_attestation', "
+            "'provider_oauth_session'"
+            ")",
+            name='chk_casb_binding_source',
+        ),
+        sa.CheckConstraint(
+            "provenance_kind IN ('order', 'webhook_event', 'operator')",
+            name='chk_casb_provenance_kind',
+        ),
+        sa.CheckConstraint(
+            """
+            (
+                subject_kind = 'nahla_internal_customer'
+                AND internal_customer_id IS NOT NULL
+                AND external_customer_profile_id IS NULL
+                AND identity_namespace = 'nahla_internal_order_v1'
+            )
+            OR (
+                subject_kind = 'external_customer_profile'
+                AND external_customer_profile_id IS NOT NULL
+                AND internal_customer_id IS NULL
+                AND identity_namespace LIKE 'external_provider_%'
+            )
+            """,
+            name='chk_casb_subject_xor',
+        ),
+        sa.CheckConstraint(
+            """
+            (binding_state = 'active' AND revoked_at IS NULL)
+            OR
+            (binding_state IN ('revoked', 'superseded') AND revoked_at IS NOT NULL)
+            """,
+            name='chk_casb_state_revocation_timestamp',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'conversation_id'],
+            ['conversations.tenant_id', 'conversations.id'],
+            name='fk_casb_tenant_conversation',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'internal_customer_id'],
+            ['customers.tenant_id', 'customers.id'],
+            name='fk_casb_tenant_internal_customer',
+        ),
+        Index('ix_casb_tenant_conversation', 'tenant_id', 'conversation_id'),
+        Index('ix_casb_tenant_conversation_state', 'tenant_id', 'conversation_id', 'binding_state'),
+        Index(
+            'uq_casb_tenant_conversation_active',
+            'tenant_id',
+            'conversation_id',
+            unique=True,
+            postgresql_where=sa.text("binding_state = 'active'"),
+            sqlite_where=sa.text("binding_state = 'active'"),
+        ),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    conversation_id = Column(Integer, nullable=False)
+    subject_kind = Column(String, nullable=False)
+    identity_namespace = Column(String, nullable=False)
+    internal_customer_id = Column(Integer, nullable=True)
+    external_customer_profile_id = Column(UUID(as_uuid=True), nullable=True)
+    binding_state = Column(String, nullable=False)
+    evidence_class = Column(String, nullable=False)
+    binding_source = Column(String, nullable=False)
+    provenance_kind = Column(String, nullable=False)
+    provenance_id = Column(String, nullable=False)
+    bound_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class OrderShipment(Base):
     """Internal shipment record for merchant fulfillment (foundation — no carrier API)."""
     __tablename__ = 'order_shipments'
@@ -943,6 +1036,9 @@ class KnowledgePolicy(Base):
 
 class Conversation(Base):
     __tablename__ = 'conversations'
+    __table_args__ = (
+        Index('uq_conversations_tenant_id', 'tenant_id', 'id', unique=True),
+    )
     id = Column(Integer, primary_key=True)
     external_id = Column(String, nullable=True, index=True)
     status = Column(String, nullable=False)

@@ -95,7 +95,9 @@ def _ensure_a1_schema(engine: Engine) -> None:
             str(engine.url.render_as_string(hide_password=False)),
         )
         os.environ["DATABASE_URL"] = str(engine.url.render_as_string(hide_password=False))
-        command.upgrade(cfg, "0087")
+        # Current in-tree A1 chain is 0087 → 0089. Deferred validation is not
+        # a revision yet and must not be selected by this integration fixture.
+        command.upgrade(cfg, "0089")
     finally:
         os.chdir(prev_cwd)
     _ensure_capability_state_row(engine)

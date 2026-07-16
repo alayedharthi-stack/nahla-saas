@@ -147,9 +147,9 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest alembic
 
-      - name: Apply migrations through 0087 (A1-Expand only)
+      - name: Apply migrations through 0089 (A1 binding PR1)
         working-directory: database
-        run: alembic upgrade 0087
+        run: python -m alembic upgrade 0089
 
       - name: A1-v3.7 PostgreSQL integration
         run: |
@@ -159,6 +159,7 @@ jobs:
             backend/tests/test_order_customer_identity_ingest_regression.py \
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
+            backend/tests/test_conversation_a1_subject_binding_migration_pg.py \
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_legacy_migration_drift_0025_0030_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \

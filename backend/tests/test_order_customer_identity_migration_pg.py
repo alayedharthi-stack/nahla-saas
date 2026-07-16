@@ -30,6 +30,8 @@ from tests.order_customer_identity_postgres_fixtures import (  # noqa: E402
 MIGRATION_TENANT_ID = 880_001
 LEGACY_CUSTOMER_REF = "LEG-CUST-1"
 LEGACY_ORDER_EXT_ID = "LEG-ORD-1"
+_EXPAND_MIGRATION_TARGET = "0087"
+_REPOSITORY_ALEMBIC_HEAD = "0089"
 
 _0087_CONSTRAINTS = (
     "chk_orders_external_no_canonical_customer",
@@ -233,9 +235,11 @@ def test_migration_0087_new_writes_enforced_while_not_valid(ephemeral_migration_
                 )
 
 
-def test_migration_chain_0086_seed_0087_head(ephemeral_migration_engine: Engine) -> None:
+def test_migration_chain_0086_seed_0087_target_repository_0089_head(
+    ephemeral_migration_engine: Engine,
+) -> None:
     seed = _seed_legacy_rows_at_0086(ephemeral_migration_engine)
-    _run_alembic(ephemeral_migration_engine, "0087")
+    _run_alembic(ephemeral_migration_engine, _EXPAND_MIGRATION_TARGET)
 
     prev_cwd = os.getcwd()
     try:
@@ -245,11 +249,13 @@ def test_migration_chain_0086_seed_0087_head(ephemeral_migration_engine: Engine)
         os.chdir(prev_cwd)
     heads = script.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "0087"
+    # This test intentionally stops its ephemeral database at A1-Expand 0087,
+    # while the repository's sole current script head includes PR1 binding 0089.
+    assert heads[0] == _REPOSITORY_ALEMBIC_HEAD
 
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert rev == "0087"
+        assert rev == _EXPAND_MIGRATION_TARGET
         cap = conn.execute(
             text(
                 """
