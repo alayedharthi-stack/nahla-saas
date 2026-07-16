@@ -1,4 +1,4 @@
-# A1-v3.7 order-customer identity — two-PR rollout
+# A1-v3.7 order-customer identity — rollout
 
 
 
@@ -6,25 +6,23 @@
 
 
 
-**Alembic head in A1-Expand must be `0087` only.** Production `alembic upgrade head` after Expand merge applies expand objects only — not validate/index work.
+**Current Alembic single head is `0089`.** Production and CI use `alembic upgrade head`, which today applies the committed graph through `0089_conversation_a1_subject_bindings` (down_revision `0087`).
 
 
 
-Do not rely on operator docs to “stop at 0087” while the branch still ships `0088` in `migrations/versions/`.
+**Do not confuse the deferred validation artifact named `0088` with an applied revision.** The file `0088_order_customer_identity_a1_validate.py` lives in `.a1-validate-deferred/` and is **not** in the Alembic `migrations/versions/` chain. Capability rows may carry `validation_revision = '0088'` as a label for that deferred artifact; that string does not mean revision `0088` ran.
 
 
 
-| PR | Revision | When |
+| Stage | Revision / artifact | Status in repo today |
 
-|----|----------|------|
+|-------|----------------------|----------------------|
 
-| **A1-Expand** (this branch) | `0087` | Now |
+| **A1-Expand** | `0087` | Applied (in chain) |
 
-| **A1-Validate** (separate PR) | `0088` | After Expand merge + staging `0087` + backfill/reconciliation report + separate approval |
+| **Conversation bindings substrate** | `0089` | Applied (current head) |
 
-
-
-Deferred Validate artifacts live in `.a1-validate-deferred/` (not in Alembic chain for Expand).
+| **A1-Validate** (separate PR) | deferred `0088` artifact | **Not** in Alembic chain; separate approval + maintenance window |
 
 
 
@@ -32,7 +30,11 @@ Deferred Validate artifacts live in `.a1-validate-deferred/` (not in Alembic cha
 
 
 
-## A1-Expand (`0087`) — safe first release
+## Applied chain (`0087` → `0089`)
+
+
+
+### `0087` — order-customer identity expand
 
 
 
@@ -52,7 +54,7 @@ Included:
 
 
 
-**Not** included (deferred to A1-Validate):
+Deferred to the **validation artifact** (not yet merged as Alembic head):
 
 
 
@@ -64,7 +66,19 @@ Included:
 
 
 
-### Application behavior after Expand merge
+### `0089` — conversation → A1-subject bindings
+
+
+
+- `conversation_a1_subject_bindings` with active/revoked/superseded semantics
+
+- Partial unique index `uq_casb_tenant_conversation_active` (one active binding per tenant+conversation)
+
+- Composite FK to conversations via `uq_conversations_tenant_id`
+
+
+
+### Application behavior after `0089`
 
 
 
@@ -72,11 +86,11 @@ Included:
 
 - **Reconciliation must not report `healthy` or `complete`** until capability state is `validated` (`order_customer_identity_capability_state`).
 
-- **Do not enable** reconciliation consumers, feature flags, or “healthy” dashboards based on coverage rows until **A1-Validate** is deployed.
+- **Do not enable** reconciliation consumers, feature flags, or “healthy” dashboards based on coverage rows until the **deferred validation artifact** is deployed as a future Alembic revision.
 
 
 
-CI job `a1-postgres-integration` runs `alembic upgrade 0087` (not `head` beyond 0087).
+CI job `a1-postgres-integration` runs `alembic upgrade head` (currently `0089`). It does **not** apply `.a1-validate-deferred/` artifacts.
 
 
 
@@ -84,7 +98,7 @@ CI job `a1-postgres-integration` runs `alembic upgrade 0087` (not `head` beyond 
 
 
 
-## A1-Validate (`0088`) — separate maintenance window
+## Deferred validation artifact (`0088` filename) — separate maintenance window
 
 
 
@@ -92,41 +106,33 @@ Prerequisites:
 
 
 
-1. A1-Expand merged and `0087` applied in staging/production
+1. Expand + bindings head (`0089`) applied in staging/production
 
 2. Backfill / reconciliation report reviewed
 
 3. Separate rollout approval
 
+4. Merge deferred artifact into `migrations/versions/` as a new revision (future PR)
 
 
-Includes:
+
+Includes (when promoted from `.a1-validate-deferred/`):
 
 
 
 - `CREATE INDEX CONCURRENTLY` on `orders` (Alembic autocommit blocks)
 
 - `VALIDATE CONSTRAINT` for all orders FK/CHECK from `0087`
+
 - Set `order_customer_identity_capability_state.state = validated` (with `validation_revision`)
+
 - Query-plan validation
 
 - Rollback/runbook (see deferred migration downgrade)
 
 
 
-Deploy:
-
-
-
-```bash
-
-cd database && alembic upgrade 0088
-
-```
-
-
-
-After Validate, reconciliation may report `complete` / `healthy` when tuple scope is fully linked.
+After Validate deploy, reconciliation may report `complete` / `healthy` when tuple scope is fully linked.
 
 
 
@@ -142,7 +148,9 @@ After Validate, reconciliation may report `complete` / `healthy` when tuple scop
 
 |--------|--------|
 
-| `0088` downgrade | Drops concurrent `orders` indexes only |
+| Deferred `0088` downgrade (when merged) | Drops concurrent `orders` indexes only |
+
+| `0089` downgrade | Drops binding rows and related indexes |
 
 | `0087` downgrade | Drops A1 tables/columns/constraints — **linkage data lost** |
 
@@ -156,19 +164,19 @@ Ephemeral tests may downgrade `0087→0086` only in throwaway databases.
 
 
 
-## Operator checklist — Expand
+## Operator checklist — current head (`0089`)
 
 
 
-1. Merge **A1-Expand** only; confirm Alembic head is `0087`.
+1. Confirm `alembic heads` shows single head `0089`.
 
-2. Deploy app + `alembic upgrade head` (equals `0087` until Validate PR merges).
+2. Deploy app + `alembic upgrade head`.
 
 3. Monitor ingest; confirm no lock incidents on `orders`.
 
-4. Run backfill/reconciliation report — expect **degraded / incomplete** coverage (by design).
+4. Run backfill/reconciliation report — expect **degraded / incomplete** coverage until validated capability is set **after** future Validate deploy.
 
-5. **Do not** treat coverage as production-ready or enable consumers.
+5. **Do not** treat coverage as production-ready or enable consumers until Validate revision merges.
 
 
 
@@ -178,11 +186,10 @@ Ephemeral tests may downgrade `0087→0086` only in throwaway databases.
 
 1. Separate approval granted.
 
-2. `alembic upgrade 0088` in low-traffic window.
+2. Promote deferred artifact to Alembic; deploy `alembic upgrade head` in low-traffic window.
 
 3. Verify `pg_constraint.convalidated = true` for all orders A1 constraints.
 
 4. Verify indexes: `ix_orders_tenant_customer_id`, `ix_orders_tenant_external_tuple`, `ix_orders_tenant_order_source_kind`.
 
 5. Only then enable reconciliation consumers / healthy signals.
-
