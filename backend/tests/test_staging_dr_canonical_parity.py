@@ -16,7 +16,7 @@ from scripts.operators import staging_dr_canonical_parity_contract as contract  
 
 
 PIN_0024_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
-PIN_0030_FP = "a" * 64  # synthetic 64-hex for unit tests only
+PIN_0030_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 
 
 def _loaded_contract() -> dict:
@@ -32,12 +32,23 @@ def test_exported_contract_matches_baked_json() -> None:
     assert contract.load_contract(baked)["contract_version"] == contract.CONTRACT_VERSION
 
 
-def test_match_source_profile_requires_exact_revision_and_table_count() -> None:
+def test_all_concrete_profiles_require_exact_fingerprint_pins() -> None:
+    assert all(
+        len(profile["schema_fingerprint_sha256"]) == 64
+        for profile in contract.SOURCE_ELIGIBILITY_PROFILES
+    )
+    malformed = contract.export_contract()
+    del malformed["source_eligibility_profiles"][0]["schema_fingerprint_sha256"]
+    with pytest.raises(ValueError, match="profile_shape_invalid"):
+        contract.load_contract(malformed)
+
+
+def test_staging_pin_0030_requires_exact_attested_values() -> None:
     loaded = _loaded_contract()
     assert (
         contract.match_source_profile(
             alembic_revision="0030",
-            public_table_count=99,
+            public_table_count=96,
             schema_fingerprint_sha256=PIN_0030_FP,
             contract=loaded,
         )
@@ -46,8 +57,17 @@ def test_match_source_profile_requires_exact_revision_and_table_count() -> None:
     assert (
         contract.match_source_profile(
             alembic_revision="0030",
-            public_table_count=96,
+            public_table_count=99,
             schema_fingerprint_sha256=PIN_0030_FP,
+            contract=loaded,
+        )
+        is None
+    )
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0030",
+            public_table_count=96,
+            schema_fingerprint_sha256="a" * 64,
             contract=loaded,
         )
         is None
@@ -81,8 +101,8 @@ def test_evaluate_parity_fail_closed_when_manifest_mismatch() -> None:
     result = contract.evaluate_parity(
         source_revision="0030",
         restore_revision="0024",
-        source_table_count=99,
-        restore_table_count=99,
+        source_table_count=96,
+        restore_table_count=96,
         source_fingerprint_sha256=PIN_0030_FP,
         restore_fingerprint_sha256=PIN_0030_FP,
         contract=loaded,
@@ -96,8 +116,8 @@ def test_evaluate_parity_passes_for_matched_0030_profile() -> None:
     result = contract.evaluate_parity(
         source_revision="0030",
         restore_revision="0030",
-        source_table_count=99,
-        restore_table_count=99,
+        source_table_count=96,
+        restore_table_count=96,
         source_fingerprint_sha256=PIN_0030_FP,
         restore_fingerprint_sha256=PIN_0030_FP,
         contract=loaded,
@@ -107,14 +127,14 @@ def test_evaluate_parity_passes_for_matched_0030_profile() -> None:
     assert result["matched_source_profile_id"] == "staging_pin_0030"
 
 
-def test_evaluate_observation_rejects_ineligible_source_after_restore_match() -> None:
+def test_evaluate_observation_rejects_equal_but_unpinned_0030_schema() -> None:
     observation = {
         "source_revision": "0030",
         "restore_revision": "0030",
         "source_table_count": 96,
         "restore_table_count": 96,
-        "source_fingerprint_sha256": PIN_0024_FP,
-        "restore_fingerprint_sha256": PIN_0024_FP,
+        "source_fingerprint_sha256": "a" * 64,
+        "restore_fingerprint_sha256": "a" * 64,
     }
     with pytest.raises(parity.ParityFailure, match="source_contract_ineligible"):
         parity.evaluate_observation(observation)

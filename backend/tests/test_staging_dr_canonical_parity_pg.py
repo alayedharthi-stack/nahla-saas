@@ -31,15 +31,10 @@ def _profile(profile_id: str) -> dict:
     raise AssertionError(f"missing profile {profile_id}")
 
 
-def test_contract_profiles_encode_0024_to_0030_table_delta() -> None:
-    pin_0024 = _profile("staging_pin_0024")
-    pin_0030 = _profile("staging_pin_0030")
-    assert pin_0030["public_table_count"] == pin_0024["public_table_count"] + 3
-
-
 def test_upgrade_0024_to_0030_adds_three_public_tables(
     ephemeral_legacy_migration_engine_0024,
 ) -> None:
+    """Migration-chain delta is not evidence for the live staging pin count."""
     engine = ephemeral_legacy_migration_engine_0024
     with engine.connect() as conn:
         before = compute_public_schema_fingerprint(conn)
@@ -54,16 +49,23 @@ def test_upgrade_0024_to_0030_adds_three_public_tables(
     assert after["schema_fingerprint"] != before["schema_fingerprint"]
 
 
-def test_staging_pin_0030_matches_synthetic_staging_observation() -> None:
-    """Staging-observed shape at pin 0030 (revision + contracted table count)."""
+def test_staging_pin_0030_matches_live_attested_values() -> None:
+    """Profile matches the recorded live staging source attestation."""
     contract = load_contract(export_contract())
+    pin = _profile("staging_pin_0030")
     matched = match_source_profile(
         alembic_revision="0030",
-        public_table_count=_profile("staging_pin_0030")["public_table_count"],
-        schema_fingerprint_sha256="a" * 64,
+        public_table_count=96,
+        schema_fingerprint_sha256=(
+            "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+        ),
         contract=contract,
     )
     assert matched == "staging_pin_0030"
+    assert pin["public_table_count"] == 96
+    assert pin["schema_fingerprint_sha256"] == (
+        "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    )
 
 
 def test_staging_pin_0024_requires_pinned_fingerprint() -> None:

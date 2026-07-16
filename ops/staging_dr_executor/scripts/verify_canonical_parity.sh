@@ -81,7 +81,7 @@ matched_profile="$(
   jq -r --arg rev "${src_revision}" --argjson tbl "${src_tables}" --arg fp "${src_fp}" '
     .source_eligibility_profiles[]
     | select(.alembic_revision == $rev and .public_table_count == $tbl)
-    | select((.schema_fingerprint_sha256 // "") == "" or .schema_fingerprint_sha256 == $fp)
+    | select(.schema_fingerprint_sha256 == $fp)
     | .profile_id
   ' "${CONTRACT_FILE}" | head -n 1
 )"

@@ -1,9 +1,9 @@
 """Closed contract for staging DR canonical parity verification.
 
 Source eligibility is explicit and versioned: each approved staging pin is a
-profile (revision + public table count, optional fingerprint pin).  The verifier
-never upgrades eligibility implicitly when staging advances — operators add a
-new profile in a dedicated contract bump.
+profile (revision + public table count + exact fingerprint). The verifier never
+upgrades eligibility implicitly when staging advances — operators add a new
+evidence-backed profile in a dedicated contract bump.
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ REQUIRED_PROFILE_KEYS = frozenset(
         "profile_id",
         "alembic_revision",
         "public_table_count",
+        "schema_fingerprint_sha256",
     }
 )
 
@@ -41,25 +42,22 @@ class SourceEligibilityProfile(TypedDict, total=False):
 
 SOURCE_ELIGIBILITY_PROFILES: tuple[SourceEligibilityProfile, ...] = (
     {
-        "profile_id": "staging_pin_0016",
-        "alembic_revision": "0016",
-        "public_table_count": 96,
-        "operator_note": "Legacy staging pin before 0016→0024 slice",
-    },
-    {
         "profile_id": "staging_pin_0024",
         "alembic_revision": "0024",
         "public_table_count": 96,
         "schema_fingerprint_sha256": (
             "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
         ),
-        "operator_note": "Staging pin after 0016→0024 slice (pre-0030 tables)",
+        "operator_note": "Prior Phase A source attestation",
     },
     {
         "profile_id": "staging_pin_0030",
         "alembic_revision": "0030",
-        "public_table_count": 99,
-        "operator_note": "Staging pin after 0024→0030 slice",
+        "public_table_count": 96,
+        "schema_fingerprint_sha256": (
+            "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+        ),
+        "operator_note": "Live staging source attestation after successful 0030 restore drill",
     },
 )
 
@@ -76,7 +74,7 @@ def export_contract() -> dict[str, Any]:
 
 
 def _normalize_profile(raw: Mapping[str, Any]) -> SourceEligibilityProfile:
-    if set(raw) < REQUIRED_PROFILE_KEYS:
+    if not REQUIRED_PROFILE_KEYS <= set(raw):
         raise ValueError("profile_shape_invalid")
     profile_id = raw["profile_id"]
     revision = raw["alembic_revision"]
@@ -92,11 +90,10 @@ def _normalize_profile(raw: Mapping[str, Any]) -> SourceEligibilityProfile:
         "alembic_revision": revision,
         "public_table_count": table_count,
     }
-    fingerprint = raw.get("schema_fingerprint_sha256")
-    if fingerprint is not None:
-        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
-            raise ValueError("profile_fingerprint_invalid")
-        normalized["schema_fingerprint_sha256"] = fingerprint
+    fingerprint = raw["schema_fingerprint_sha256"]
+    if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+        raise ValueError("profile_fingerprint_invalid")
+    normalized["schema_fingerprint_sha256"] = fingerprint
     note = raw.get("operator_note")
     if note is not None:
         if not isinstance(note, str):
@@ -150,8 +147,7 @@ def match_source_profile(
             continue
         if profile["public_table_count"] != public_table_count:
             continue
-        pinned = profile.get("schema_fingerprint_sha256")
-        if pinned and pinned != schema_fingerprint_sha256:
+        if profile["schema_fingerprint_sha256"] != schema_fingerprint_sha256:
             continue
         return profile["profile_id"]
     return None

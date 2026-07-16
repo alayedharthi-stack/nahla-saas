@@ -24,17 +24,32 @@ Controlled, staging-gated verification that a **restore target** matches the
 | `schema_fingerprint_version` | `nahla_public_tables_sha256_v1` |
 | Algorithm | SHA-256 hex digest of comma-joined **sorted public base table names** |
 | Parity scope | Source and restore must match on revision, table count, and full fingerprint |
-| Source eligibility | Source must match **one** `source_eligibility_profiles[]` entry in the baked contract |
+| Source eligibility | Source must match **one** `source_eligibility_profiles[]` entry on exact revision, table count, and full fingerprint |
 
 ## Source eligibility profiles (v1)
 
 | `profile_id` | `alembic_revision` | `public_table_count` | Fingerprint pin |
 |--------------|-------------------|----------------------|-----------------|
-| `staging_pin_0016` | `0016` | `96` | none |
-| `staging_pin_0024` | `0024` | `96` | pinned (Phase A attestation) |
-| `staging_pin_0030` | `0030` | `99` | none (parity + PG test) |
+| `staging_pin_0024` | `0024` | `96` | `1b9aca…f5f54ae` (prior Phase A attestation) |
+| `staging_pin_0030` | `0030` | `96` | `1b9aca…f5f54ae` (live source attestation during successful 0030 restore drill) |
 
-Advancing staging requires a **contract bump** (new `profile_id`, never an implicit revision switch in shell).
+Every profile requires a full 64-hex fingerprint pin. A historical `0016` hardcoded
+gate is deliberately not retained as an eligibility profile: no full fingerprint
+evidence was captured for it. Advancing staging requires a **contract bump** (new
+`profile_id` with attested revision, count, and fingerprint; never an implicit
+revision switch in shell).
+
+## Why the PG migration test reports `+3`
+
+The PostgreSQL migration test starts from a clean, ephemeral `0024` schema and
+proves that migrations `0025–0029` add three public tables. That is a
+**migration-chain behavior test**, not a measurement of live staging. The live
+staging source attestation at revision `0030` measured `96` public tables and
+fingerprint
+`1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae`;
+those measured values control `staging_pin_0030`. The difference may reflect
+pre-existing schema/drift history and must not be converted into a `99` live
+staging claim without a new source attestation.
 
 ## Operator invocation (post-deploy)
 
@@ -71,7 +86,7 @@ Commit both the Python contract and `ops/staging_dr_executor/contracts/canonical
 | Artifact | Location |
 |----------|----------|
 | Unit tests (gates + script guard) | `backend/tests/test_staging_dr_canonical_parity.py` |
-| PostgreSQL profile proof | `backend/tests/test_staging_dr_canonical_parity_pg.py` (`a1-postgres-integration` job) |
+| PostgreSQL proof | `backend/tests/test_staging_dr_canonical_parity_pg.py` (`a1-postgres-integration` job); proves the clean-chain `+3` migration delta separately from the live `0030` pin |
 | Executor image build smoke | `staging-dr-executor-artifact` job in `.github/workflows/ci.yml` |
 
 ## Related (out of scope)
