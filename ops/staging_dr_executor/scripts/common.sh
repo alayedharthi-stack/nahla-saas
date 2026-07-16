@@ -15,4 +15,4 @@ require_staging_identity() {
 key_fingerprint() {
   printf '%s' "${NAHLA_STG_DR_ENCRYPT_KEY}" | sha256sum | awk '{print $1}' | cut -c1-16
 }
-
+

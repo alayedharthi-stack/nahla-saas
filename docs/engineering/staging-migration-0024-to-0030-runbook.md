@@ -55,7 +55,7 @@ export NAHLA_SKIP_DB_BOOTSTRAP=1   # recommended for entire maintenance window
 python scripts/operators/staging_migration_0024_to_0030.py preflight
 ```
 
-Exit `0` → JSON manifest on stdout (`phase=preflight`).  
+Exit `0` → JSON manifest on stdout (`phase=preflight`).
 Exit `1` → safe JSON error: `outcome`, `error_class`, `stage` only (no traceback, DSN, or row data).
 
 ### 2. Controlled migration (operator GO)
