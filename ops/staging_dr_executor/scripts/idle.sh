@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
+set -eu
 echo "nahla-stg-dr-job ready"
+exec sleep infinity

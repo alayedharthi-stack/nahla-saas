@@ -60,7 +60,9 @@ jobs:
           python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1
 
       - name: Staging DR canonical parity unit tests
-        run: python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1
+        run: |
+          python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1
+          python -m pytest backend/tests/test_staging_dr_executor_image.py -q --maxfail=1
 
   staging-dr-executor-artifact:
     runs-on: ubuntu-latest
@@ -73,6 +75,17 @@ jobs:
       - name: Build closed DR executor artifact
         working-directory: ops/staging_dr_executor
         run: docker build -t nahla-staging-dr-executor:ci .
+
+      - name: Verify executor image scripts and long-running entrypoint
+        run: |
+          set -euo pipefail
+          for script in backup.sh restore_verify.sh target_preflight.sh common.sh idle.sh verify_canonical_parity.sh; do
+            docker run --rm nahla-staging-dr-executor:ci test -x "/dr/scripts/${script}"
+          done
+          docker run --rm nahla-staging-dr-executor:ci test -f /dr/contracts/canonical_parity.json
+          docker run --rm nahla-staging-dr-executor:ci grep -q 'exec sleep infinity' /dr/scripts/idle.sh
+          docker run --rm nahla-staging-dr-executor:ci which aws
+          docker run --rm nahla-staging-dr-executor:ci which jq
 
   constitution-compliance:
     runs-on: ubuntu-latest
