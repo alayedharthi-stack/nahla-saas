@@ -201,8 +201,8 @@ def test_partial_active_index_allows_multiple_non_active_rows(pg_engine: Engine)
     tenant_id = 992_000_000 + (uuid.uuid4().int % 900_000)
     with pg_engine.begin() as conn:
         conn.execute(
-            text("INSERT INTO tenants (id, name) VALUES (:tid, 'partial-index-test')"),
-            {"tid": tenant_id},
+            text("INSERT INTO tenants (id, name) VALUES (:tid, :name)"),
+            {"tid": tenant_id, "name": f"partial-index-{tenant_id}"},
         )
         customer_id = conn.execute(
             text("INSERT INTO customers (tenant_id, name) VALUES (:tid, 'عميل') RETURNING id"),
@@ -375,8 +375,13 @@ def test_state_revocation_timestamp_invariant(
     tenant_id = 993_000_000 + (uuid.uuid4().int % 900_000)
     with pg_engine.begin() as conn:
         conn.execute(
-            text("INSERT INTO tenants (id, name) VALUES (:tid, 'state-test')"),
-            {"tid": tenant_id},
+            text("INSERT INTO tenants (id, name) VALUES (:tid, :name)"),
+            {
+                "tid": tenant_id,
+                "name": (
+                    f"state-{binding_state}-{revoked_at_sql.lower()}-{tenant_id}"
+                ),
+            },
         )
         customer_id = conn.execute(
             text("INSERT INTO customers (tenant_id, name) VALUES (:tid, 'عميل') RETURNING id"),
@@ -424,8 +429,8 @@ def test_non_active_state_accepts_revocation_timestamp(
     tenant_id = 995_000_000 + (uuid.uuid4().int % 900_000)
     with pg_engine.begin() as conn:
         conn.execute(
-            text("INSERT INTO tenants (id, name) VALUES (:tid, 'lifecycle-success')"),
-            {"tid": tenant_id},
+            text("INSERT INTO tenants (id, name) VALUES (:tid, :name)"),
+            {"tid": tenant_id, "name": f"lifecycle-{binding_state}-{tenant_id}"},
         )
         customer_id = conn.execute(
             text("INSERT INTO customers (tenant_id, name) VALUES (:tid, 'عميل') RETURNING id"),
@@ -479,7 +484,7 @@ def _seed_concurrency_fixture(engine: Engine) -> tuple[int, int, int, int, int]:
     tenant_id = 994_000_000 + (uuid.uuid4().int % 900_000)
     Session = sessionmaker(bind=engine, expire_on_commit=False)
     with Session.begin() as session:
-        session.add(Tenant(id=tenant_id, name="متجر تجريبي عام"))
+        session.add(Tenant(id=tenant_id, name=f"binding-concurrency-{tenant_id}"))
         customer_a = Customer(tenant_id=tenant_id, name="أحمد سالم")
         customer_b = Customer(tenant_id=tenant_id, name="نورة عبدالله")
         session.add_all((customer_a, customer_b))
