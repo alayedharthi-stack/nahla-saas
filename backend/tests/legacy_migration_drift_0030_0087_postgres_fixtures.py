@@ -194,7 +194,7 @@ def seed_duplicate_product_external_id(engine: Engine, tenant_id: int = MIGRATIO
         conn.execute(
             text(
                 """
-                INSERT INTO products (tenant_id, name, price, in_stock, external_id)
+                INSERT INTO products (tenant_id, title, price, in_stock, external_id)
                 VALUES
                     (:tid, 'حذاء رياضي أبيض', '199.00', true, 'STORE-SKU-1'),
                     (:tid, 'قميص قطني أزرق', '89.00', true, 'STORE-SKU-1')
@@ -211,7 +211,7 @@ def seed_product_with_metadata_variants(engine: Engine, tenant_id: int = MIGRATI
             text(
                 """
                 INSERT INTO products (
-                    tenant_id, name, price, in_stock,
+                    tenant_id, title, price, in_stock,
                     metadata
                 )
                 VALUES (
@@ -232,7 +232,7 @@ def seed_product_without_variants(engine: Engine, tenant_id: int = MIGRATION_TEN
         product_id = conn.execute(
             text(
                 """
-                INSERT INTO products (tenant_id, name, price, in_stock)
+                INSERT INTO products (tenant_id, title, price, in_stock)
                 VALUES (:tid, 'عطر ورد 100ml', '149.00', true)
                 RETURNING id
                 """
