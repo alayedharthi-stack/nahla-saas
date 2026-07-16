@@ -50,6 +50,7 @@ jobs:
           python -m pytest \
             backend/tests/test_customer_conditional_coupon_layer0.py \
             backend/tests/test_customer_conditional_coupon_subject_bridge_consumer.py \
+            backend/tests/test_customer_conditional_coupon_shadow_readiness.py \
             -q --maxfail=1
 
       - name: Guarded staging migration operator tests
