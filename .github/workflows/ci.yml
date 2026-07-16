@@ -45,6 +45,13 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Customer conditional coupon Layer 0 consumer tests
+        run: |
+          python -m pytest \
+            backend/tests/test_customer_conditional_coupon_layer0.py \
+            backend/tests/test_customer_conditional_coupon_subject_bridge_consumer.py \
+            -q --maxfail=1
+
       - name: Guarded staging migration operator tests
         run: |
           python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
