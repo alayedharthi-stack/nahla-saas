@@ -99,7 +99,9 @@ def _seed_generic_commerce_linked_scope(
     *,
     tenant_id: int = TEST_TENANT_A,
     tenant_name: str | None = None,
+    store_suffix: str | None = None,
 ) -> None:
+    suffix = store_suffix or str(tenant_id)
     seed_tenant(
         pg_session,
         tenant_id=tenant_id,
@@ -109,7 +111,7 @@ def _seed_generic_commerce_linked_scope(
     intg = seed_integration(
         pg_session,
         tenant_id=tenant_id,
-        external_store_id="STORE-GENERIC",
+        external_store_id=f"STORE-GENERIC-{suffix}",
     )
     profile = seed_external_profile(
         pg_session,
