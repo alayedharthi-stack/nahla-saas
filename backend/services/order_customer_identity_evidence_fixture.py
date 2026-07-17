@@ -44,7 +44,7 @@ from services.order_customer_identity_evidence_fixture_contract import (
 )
 from services.order_customer_identity_logging import log_evidence_fixture_failure
 from services.order_customer_identity_reconciliation_write import (
-    read_alembic_revision,
+    read_alembic_revisions,
     read_capability_detail,
     validate_capability_and_revision_gates,
 )
@@ -236,6 +236,7 @@ class OrderCustomerIdentityEvidenceFixtureResult:
     capability_state_readable: bool = False
     capability_validation_revision: Optional[str] = None
     alembic_revision: Optional[str] = None
+    alembic_revisions: List[str] = field(default_factory=list)
     alembic_revision_is_0087: bool = False
     alembic_revision_is_0088: bool = False
     fixture_namespace: str = FIXTURE_NAMESPACE
@@ -267,6 +268,7 @@ class OrderCustomerIdentityEvidenceFixtureResult:
                 "state_readable": bool(self.capability_state_readable),
                 "validation_revision": self.capability_validation_revision,
                 "alembic_revision": self.alembic_revision,
+                "alembic_revisions": list(self.alembic_revisions),
                 "alembic_revision_is_0087": bool(self.alembic_revision_is_0087),
                 "alembic_revision_is_0088": bool(self.alembic_revision_is_0088),
             },
@@ -300,12 +302,12 @@ class OrderCustomerIdentityEvidenceFixtureResult:
 def validate_fixture_cleanup_capability_and_revision_gates(
     db: Session,
 ) -> FixtureGateFailure | None:
-    revision = read_alembic_revision(db)
-    if revision is None:
+    revisions = read_alembic_revisions(db)
+    if not revisions:
         return FixtureGateFailure("revision_rejected", "alembic_version_missing")
-    if revision == "0089":
+    if revisions == frozenset({"0089"}):
         return FixtureGateFailure("revision_rejected", "revision_is_0089_not_0088")
-    if revision != CLEANUP_ALEMBIC_REVISION:
+    if revisions != frozenset({CLEANUP_ALEMBIC_REVISION}):
         return FixtureGateFailure("revision_rejected", "revision_not_exactly_0088")
 
     state, validation_revision = read_capability_detail(db)
@@ -343,9 +345,11 @@ def _apply_common_gates(
         result.access_status = "tenant_missing"
         return FixtureGateFailure("tenant_rejected", "tenant_missing")
 
-    result.alembic_revision = read_alembic_revision(db)
-    result.alembic_revision_is_0087 = result.alembic_revision == "0087"
-    result.alembic_revision_is_0088 = result.alembic_revision == CLEANUP_ALEMBIC_REVISION
+    revisions = read_alembic_revisions(db)
+    result.alembic_revisions = sorted(revisions)
+    result.alembic_revision = next(iter(revisions)) if len(revisions) == 1 else None
+    result.alembic_revision_is_0087 = revisions == frozenset({"0087"})
+    result.alembic_revision_is_0088 = revisions == frozenset({CLEANUP_ALEMBIC_REVISION})
     state, validation_revision = read_capability_detail(db)
     result.capability_state = state
     result.capability_state_readable = state is not None

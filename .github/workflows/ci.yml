@@ -58,6 +58,7 @@ jobs:
           python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
           python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1
           python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1
+          python -m pytest backend/tests/test_staging_migration_0088_to_0089_operators.py -q --maxfail=1
 
       - name: Staging DR canonical parity unit tests
         run: |
@@ -200,6 +201,7 @@ jobs:
             backend/tests/test_order_customer_identity_migration_pg.py \
             backend/tests/test_order_customer_identity_migration_validate_pg.py \
             backend/tests/test_staging_migration_0087_to_0088_operators.py \
+            backend/tests/test_staging_migration_0088_to_0089_attach_pg.py \
             backend/tests/test_conversation_a1_subject_binding_migration_pg.py \
             backend/tests/test_conversation_a1_subject_read_bridge_postgres.py \
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \

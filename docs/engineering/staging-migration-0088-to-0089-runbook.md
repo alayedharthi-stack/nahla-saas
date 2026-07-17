@@ -111,9 +111,9 @@ staging recovery.
 
 ## Future operator plan (coupon shadow observation)
 
-1. Merge this PR (operator + tests + runbook only).
-2. Execute guarded `0087 → 0088` operator on experimental staging (separate approval).
-3. Attest `staging_pin_0088` DR profile + backup/restore drill.
-4. Execute this `0088 + 0089` attachment operator after DR prerequisite is green.
-5. Run coupon shadow **read-only** observation probes (no runtime flags).
-6. Evaluate shadow readiness before any activation slice.
+1. Start from current experimental staging at validated `0088`; do not re-run or
+   revert `0088`.
+2. Attest `staging_pin_0088` DR profile + backup/restore drill.
+3. Execute this `0088 + 0089` attachment operator after the DR prerequisite is green.
+4. Run coupon shadow **read-only** observation probes (no runtime flags).
+5. Evaluate shadow readiness before any activation slice.
