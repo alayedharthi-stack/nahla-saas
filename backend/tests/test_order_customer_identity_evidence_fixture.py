@@ -97,7 +97,10 @@ def _staging_env(**overrides: str) -> dict[str, str]:
         "RAILWAY_ENVIRONMENT_NAME": "staging",
         CONFIRMATION_ENV_WRITE: CONFIRMATION_TOKEN_WRITE,
         CONFIRMATION_ENV_CLEANUP: CONFIRMATION_TOKEN_CLEANUP,
-        "DATABASE_URL": os.environ.get("DATABASE_URL", ""),
+        "DATABASE_URL": (
+            "postgresql://nahla:nahla_password@"
+            "postgres-staging.railway.internal:5432/nahla_saas"
+        ),
     }
     base.update(overrides)
     return base
@@ -359,11 +362,8 @@ def test_cleanup_dry_run_does_not_delete(pg_session) -> None:
     assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == 2
 
 
-def test_cli_write_requires_confirmation_token(pg_session, postgres_engine) -> None:
-    _seed_gates(pg_session)
-    pg_session.commit()
-    db_url = str(postgres_engine.url.render_as_string(hide_password=False))
-    env = _staging_env(DATABASE_URL=db_url)
+def test_cli_write_requires_confirmation_token() -> None:
+    env = _staging_env()
     env.pop(CONFIRMATION_ENV_WRITE, None)
 
     proc = subprocess.run(
@@ -380,11 +380,8 @@ def test_cli_write_requires_confirmation_token(pg_session, postgres_engine) -> N
     assert payload["gate_stage"] == "dangerous_action_not_confirmed"
 
 
-def test_cli_cleanup_requires_separate_confirmation_token(pg_session, postgres_engine) -> None:
-    _seed_gates(pg_session)
-    pg_session.commit()
-    db_url = str(postgres_engine.url.render_as_string(hide_password=False))
-    env = _staging_env(DATABASE_URL=db_url)
+def test_cli_cleanup_requires_separate_confirmation_token() -> None:
+    env = _staging_env()
     env.pop(CONFIRMATION_ENV_CLEANUP, None)
 
     proc = subprocess.run(
