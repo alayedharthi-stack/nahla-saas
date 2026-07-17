@@ -1,0 +1,10 @@
+title = "nahla gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "A1 evidence fixture contract uses metadata field name constants, not secrets"
+paths = [
+  '''backend/services/order_customer_identity_evidence_fixture_contract\.py''',
+]
