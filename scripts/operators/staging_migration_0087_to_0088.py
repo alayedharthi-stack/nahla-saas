@@ -175,6 +175,40 @@ def validate_constraint_violation_preflight(conn: Connection) -> GateFailure | N
     return None
 
 
+def _linked_orders_in_scope_total_from_aggregate(
+    aggregate: Any,
+) -> tuple[int | None, GateFailure | None]:
+    if not isinstance(aggregate, Mapping):
+        return None, GateFailure(
+            "g4_evidence_rejected",
+            "reconciliation_report_aggregate_invalid",
+        )
+    if "linked_orders_in_scope_total" not in aggregate:
+        return None, GateFailure(
+            "g4_evidence_rejected",
+            "reconciliation_report_aggregate_missing_linked_total",
+        )
+    raw = aggregate["linked_orders_in_scope_total"]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None, GateFailure(
+            "g4_evidence_rejected",
+            "reconciliation_report_aggregate_invalid_linked_total",
+        )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, GateFailure(
+            "g4_evidence_rejected",
+            "reconciliation_report_aggregate_invalid_linked_total",
+        )
+    if value < 0:
+        return None, GateFailure(
+            "g4_evidence_rejected",
+            "reconciliation_report_aggregate_invalid_linked_total",
+        )
+    return value, None
+
+
 def validate_g4_ready_for_validate(
     engine: Engine,
     *,
@@ -192,14 +226,17 @@ def validate_g4_ready_for_validate(
             tenant_id,
             max_subjects_per_kind=max_subjects_per_kind,
         )
+        linked_total, aggregate_failure = _linked_orders_in_scope_total_from_aggregate(
+            report.aggregate
+        )
+        if aggregate_failure:
+            return None, aggregate_failure
         summary = {
             "tenant_id": int(tenant_id),
             "ready_for_validate": bool(report.ready_for_validate),
             "access_status": report.access_status,
             "readiness_blockers_count": len(report.readiness_blockers),
-            "aggregate_linked_orders_in_scope_total": int(
-                report.aggregate.linked_orders_in_scope_total
-            ),
+            "aggregate_linked_orders_in_scope_total": int(linked_total),
         }
         if report.access_status != "ok":
             return summary, GateFailure("g4_evidence_rejected", "reconciliation_report_access_not_ok")

@@ -25,6 +25,7 @@ from services.order_customer_identity_contract import (
 from services.order_customer_identity_evidence_fixture import (
     execute_order_customer_identity_evidence_fixture_cleanup,
     execute_order_customer_identity_evidence_fixture_seed,
+    validate_fixture_cleanup_capability_and_revision_gates,
 )
 from services.order_customer_identity_evidence_fixture_contract import (
     CONFIRMATION_ENV_CLEANUP,
@@ -126,6 +127,15 @@ def _seed_gates(pg_session, *, tenant_id: int = TEST_TENANT_A) -> None:
     )
     _set_alembic_revision(pg_session, "0087")
     seed_capability_state(pg_session, state=CAPABILITY_STATE_EXPAND)
+
+
+def _set_post_validate_cleanup_gates(pg_session) -> None:
+    _set_alembic_revision(pg_session, "0088")
+    seed_capability_state(
+        pg_session,
+        state=CAPABILITY_STATE_VALIDATED,
+        validation_revision="0088",
+    )
 
 
 def _count_fixture_orders(pg_session, *, tenant_id: int) -> int:
@@ -319,6 +329,68 @@ def test_fail_closed_when_capability_validated(pg_session) -> None:
     assert result.gate_stage == "capability_state_validated"
 
 
+def test_cleanup_rejected_at_0087_expand(pg_session) -> None:
+    _seed_gates(pg_session)
+    execute_order_customer_identity_evidence_fixture_seed(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+
+    cleanup = execute_order_customer_identity_evidence_fixture_cleanup(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=True,
+    )
+    assert cleanup.access_status == "gate_rejected"
+    assert cleanup.gate_stage == "revision_not_exactly_0088"
+    assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == 2
+
+
+def test_cleanup_allowed_at_0088_validated(pg_session) -> None:
+    _seed_gates(pg_session)
+    execute_order_customer_identity_evidence_fixture_seed(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+    _set_post_validate_cleanup_gates(pg_session)
+
+    cleanup = execute_order_customer_identity_evidence_fixture_cleanup(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+    assert cleanup.outcome == "success"
+    assert cleanup.alembic_revision_is_0088 is True
+    assert cleanup.cleanup_deleted["orders"] == 2
+    assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == 0
+
+
+def test_cleanup_rejected_at_0089(pg_session) -> None:
+    _seed_gates(pg_session)
+    _set_alembic_revision(pg_session, "0089")
+    seed_capability_state(
+        pg_session,
+        state=CAPABILITY_STATE_VALIDATED,
+        validation_revision="0088",
+    )
+
+    failure = validate_fixture_cleanup_capability_and_revision_gates(pg_session)
+    assert failure is not None
+    assert failure.stage == "revision_is_0089_not_0088"
+
+
+def test_cleanup_rejected_when_validated_without_revision(pg_session) -> None:
+    _seed_gates(pg_session)
+    _set_alembic_revision(pg_session, "0088")
+    seed_capability_state(pg_session, state=CAPABILITY_STATE_VALIDATED)
+
+    failure = validate_fixture_cleanup_capability_and_revision_gates(pg_session)
+    assert failure is not None
+    assert failure.stage == "capability_validation_revision_missing"
+
+
 def test_cleanup_deletes_only_fixture_owned_rows(pg_session) -> None:
     _seed_gates(pg_session)
     execute_order_customer_identity_evidence_fixture_seed(
@@ -326,6 +398,7 @@ def test_cleanup_deletes_only_fixture_owned_rows(pg_session) -> None:
         TEST_TENANT_A,
         dry_run=False,
     )
+    _set_post_validate_cleanup_gates(pg_session)
 
     intg = seed_integration(
         pg_session,
@@ -406,6 +479,7 @@ def test_cleanup_dry_run_does_not_delete(pg_session) -> None:
         TEST_TENANT_A,
         dry_run=False,
     )
+    _set_post_validate_cleanup_gates(pg_session)
 
     preview = execute_order_customer_identity_evidence_fixture_cleanup(
         pg_session,

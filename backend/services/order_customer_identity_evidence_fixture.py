@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Set
 from sqlalchemy.orm import Session
 
 from services.order_customer_identity_evidence_fixture_contract import (
+    CLEANUP_ALEMBIC_REVISION,
+    CAPABILITY_STATE_VALIDATED,
     FIXTURE_EXTERNAL_CUSTOMER_REF,
     FIXTURE_EXTERNAL_ID_PREFIX,
     FIXTURE_EXTERNAL_ORDER_SUFFIX,
@@ -38,6 +40,7 @@ from services.order_customer_identity_evidence_fixture_contract import (
     MAX_INTEGRATIONS,
     MAX_INTERNAL_CUSTOMERS,
     MAX_INTERNAL_ORDERS,
+    VALIDATION_REVISION_0088,
 )
 from services.order_customer_identity_logging import log_evidence_fixture_failure
 from services.order_customer_identity_reconciliation_write import (
@@ -234,6 +237,7 @@ class OrderCustomerIdentityEvidenceFixtureResult:
     capability_validation_revision: Optional[str] = None
     alembic_revision: Optional[str] = None
     alembic_revision_is_0087: bool = False
+    alembic_revision_is_0088: bool = False
     fixture_namespace: str = FIXTURE_NAMESPACE
     existing_shape: Dict[str, int] = field(default_factory=dict)
     would_create: Dict[str, int] = field(default_factory=dict)
@@ -264,6 +268,7 @@ class OrderCustomerIdentityEvidenceFixtureResult:
                 "validation_revision": self.capability_validation_revision,
                 "alembic_revision": self.alembic_revision,
                 "alembic_revision_is_0087": bool(self.alembic_revision_is_0087),
+                "alembic_revision_is_0088": bool(self.alembic_revision_is_0088),
             },
             "fixture_namespace": self.fixture_namespace,
             "shape": {
@@ -292,9 +297,34 @@ class OrderCustomerIdentityEvidenceFixtureResult:
         )
 
 
+def validate_fixture_cleanup_capability_and_revision_gates(
+    db: Session,
+) -> FixtureGateFailure | None:
+    revision = read_alembic_revision(db)
+    if revision is None:
+        return FixtureGateFailure("revision_rejected", "alembic_version_missing")
+    if revision == "0089":
+        return FixtureGateFailure("revision_rejected", "revision_is_0089_not_0088")
+    if revision != CLEANUP_ALEMBIC_REVISION:
+        return FixtureGateFailure("revision_rejected", "revision_not_exactly_0088")
+
+    state, validation_revision = read_capability_detail(db)
+    if state is None:
+        return FixtureGateFailure("capability_rejected", "capability_state_missing")
+    if state != CAPABILITY_STATE_VALIDATED:
+        return FixtureGateFailure("capability_rejected", "capability_state_not_validated")
+    if validation_revision is None:
+        return FixtureGateFailure("capability_rejected", "capability_validation_revision_missing")
+    if validation_revision != VALIDATION_REVISION_0088:
+        return FixtureGateFailure("capability_rejected", "capability_validation_revision_mismatch")
+    return None
+
+
 def _apply_common_gates(
     db: Session,
     result: OrderCustomerIdentityEvidenceFixtureResult,
+    *,
+    mode: str,
 ) -> Optional[FixtureGateFailure]:
     input_failure = validate_fixture_input(tenant_id=result.tenant_id)
     if input_failure:
@@ -315,18 +345,27 @@ def _apply_common_gates(
 
     result.alembic_revision = read_alembic_revision(db)
     result.alembic_revision_is_0087 = result.alembic_revision == "0087"
+    result.alembic_revision_is_0088 = result.alembic_revision == CLEANUP_ALEMBIC_REVISION
     state, validation_revision = read_capability_detail(db)
     result.capability_state = state
     result.capability_state_readable = state is not None
     result.capability_validation_revision = validation_revision
 
-    capability_failure = validate_capability_and_revision_gates(db)
+    if mode == "cleanup":
+        capability_failure = validate_fixture_cleanup_capability_and_revision_gates(db)
+    else:
+        capability_failure = validate_capability_and_revision_gates(db)
+        if capability_failure:
+            capability_failure = FixtureGateFailure(
+                capability_failure.error_class,
+                capability_failure.stage,
+            )
     if capability_failure:
         result.outcome = "failed"
         result.access_status = "gate_rejected"
         result.gate_stage = capability_failure.stage
         result.gate_error_class = capability_failure.error_class
-        return FixtureGateFailure(capability_failure.error_class, capability_failure.stage)
+        return capability_failure
     return None
 
 
@@ -506,7 +545,7 @@ def execute_order_customer_identity_evidence_fixture_seed(
         fixture_generated_at_utc=_utcnow_iso(),
     )
     try:
-        gate = _apply_common_gates(db, result)
+        gate = _apply_common_gates(db, result, mode="seed")
         if gate:
             return result
 
@@ -633,7 +672,7 @@ def execute_order_customer_identity_evidence_fixture_cleanup(
         fixture_generated_at_utc=_utcnow_iso(),
     )
     try:
-        gate = _apply_common_gates(db, result)
+        gate = _apply_common_gates(db, result, mode="cleanup")
         if gate:
             return result
 
@@ -777,5 +816,6 @@ __all__ = [
     "OrderCustomerIdentityEvidenceFixtureResult",
     "execute_order_customer_identity_evidence_fixture_cleanup",
     "execute_order_customer_identity_evidence_fixture_seed",
+    "validate_fixture_cleanup_capability_and_revision_gates",
     "validate_fixture_input",
 ]

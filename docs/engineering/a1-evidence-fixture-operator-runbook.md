@@ -42,12 +42,27 @@ The harness:
    `RAILWAY_ENVIRONMENT_NAME=staging`. Production markers are rejected.
 2. **Database allowlist** — `DATABASE_URL` host must be
    `postgres-staging.railway.internal`.
-3. **Alembic exactly `0087`** — rejects `0088`, `0089`, and unknown revisions.
-4. **Capability `expand` only** — `order_customer_identity_capability_state.state = expand`
-   and `validation_revision IS NULL`.
-5. **Explicit `--tenant-id`** (positive integer). No all-tenant mode.
+3. **Explicit `--tenant-id`** (positive integer). No all-tenant mode.
 
-Dry-run (default) validates gates and reports `would_create` without mutations.
+### Seed / write gates (pre-0088 only)
+
+4. **Alembic exactly `0087`** — rejects `0088`, `0089`, and unknown revisions.
+5. **Capability `expand` only** — `order_customer_identity_capability_state.state = expand`
+   and `validation_revision IS NULL`.
+
+Dry-run seed (default) validates gates and reports `would_create` without mutations.
+
+### Cleanup gates (post-0088 validate only)
+
+Cleanup is allowed **only after** successful `0088` validation:
+
+4. **Alembic exactly `0088`** — rejects `0087`, `0089`, and unknown revisions.
+5. **Capability `validated` only** — `state = validated` and
+   `validation_revision = '0088'` exactly. Rejects `expand`, partial, or
+   mismatched validation revision.
+
+Dry-run cleanup validates gates and reports `cleanup.selected` without mutations.
+Write cleanup still requires the separate cleanup confirmation token (below).
 
 ---
 
@@ -133,7 +148,7 @@ never deleted.
 | `dry_run` / `read_only` | `true` unless `--write` |
 | `outcome` | `success`, `failed`, or `aborted` |
 | `access_status` | `ok`, `gate_rejected`, `tenant_missing`, `execution_failed` |
-| `capability` | State, revision, Alembic pin (aggregates only) |
+| `capability` | State, revision, Alembic pin (`alembic_revision_is_0087` for seed; `alembic_revision_is_0088` for cleanup) |
 | `fixture_namespace` | `a1_g4_generic_commerce_v1` |
 | `shape` | `existing`, `would_create`, `created`, `skipped_existing` counts |
 | `authoritative` | Internal/external authoritative order counts |
@@ -156,9 +171,10 @@ external reference, profile UUID, raw SQL, DB URLs, or exception text.
 5. Re-run the read-only report until `ready_for_validate: true`.
 6. Proceed to deferred `0088` only with separate rollout approval — see
    `docs/engineering/staging-migration-0087-to-0088-runbook.md`.
-7. **Retain fixture rows until validation outcome**; clean up only after success
-   or explicit no-go (see cleanup section below).
-7. **Cleanup fixtures** when the staging experiment ends.
+7. **Retain fixture rows until validation outcome**; run **cleanup only after**
+   successful `0088` validate (`alembic_version = 0088`, capability
+   `validated`, `validation_revision = 0088`).
+8. **Cleanup fixtures** when the staging experiment ends (post-validate gates).
 
 ---
 
