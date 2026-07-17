@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from services.order_customer_identity_contract import (
     CAPABILITY_STATE_EXPAND,
