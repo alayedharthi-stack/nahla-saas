@@ -43,6 +43,13 @@ Before completing the manual checklist, archive references to:
 2. **DB capability evidence** — A1 capability row read or reconciliation report output showing `validated` (see [a1-reconciliation-operator-runbook.md](./a1-reconciliation-operator-runbook.md)).
 3. **Sanitized observation** — Layer 0 `fact_record` + `telemetry` copied from staging shadow observation (schema-valid only).
 
+For staging blocked solely by missing fixture data at `{0088, 0089}` + validated A1,
+seed the minimal tuple first via
+[customer-conditional-coupon-shadow-fixture-runbook.md](./customer-conditional-coupon-shadow-fixture-runbook.md).
+That harness does **not** enable the shadow flag; a **separate, time-boxed** shadow-only
+observation window is required afterward (see fixture runbook § Future shadow-only
+observation window).
+
 This encoder does not fetch or verify any of the above.
 
 ## Manual checklist items (all required)
