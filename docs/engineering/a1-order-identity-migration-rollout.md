@@ -58,7 +58,7 @@ Includes:
 - `VALIDATE CONSTRAINT` for all orders FK/CHECK from `0087`
 - Set `order_customer_identity_capability_state.state = validated`
 
-Operator: `scripts/operators/staging_migration_0087_to_0088.py`  
+Operator: `scripts/operators/staging_migration_0087_to_0088.py`
 Runbook: `docs/engineering/staging-migration-0087-to-0088-runbook.md`
 
 After Validate deploy, reconciliation may report `complete` / `healthy` when tuple scope is fully linked.
