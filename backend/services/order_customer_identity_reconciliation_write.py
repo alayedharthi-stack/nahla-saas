@@ -27,9 +27,9 @@ from services.order_customer_identity_reconciliation_report import (
     _rollup_internal_customers,
 )
 from services.order_customer_identity_reconciliation_write_contract import (
-    ALEMBIC_REVISIONS_0087_COMPATIBLE,
     CAPABILITY_KEY,
     CAPABILITY_STATE_EXPAND as CONTRACT_CAPABILITY_STATE_EXPAND,
+    REQUIRED_ALEMBIC_REVISION,
     WRITE_SCHEMA_VERSION,
 )
 from services.order_customer_identity_service import (
@@ -70,7 +70,7 @@ class OrderCustomerIdentityReconciliationWriteResult:
     capability_state_readable: bool = False
     capability_validation_revision: Optional[str] = None
     alembic_revision: Optional[str] = None
-    revision_0087_compatible: bool = False
+    alembic_revision_is_0087: bool = False
     max_subjects_per_kind: int = DEFAULT_MAX_SUBJECTS_PER_KIND
     external_profiles_selected: int = 0
     internal_customers_selected: int = 0
@@ -110,7 +110,7 @@ class OrderCustomerIdentityReconciliationWriteResult:
                 "state_readable": bool(self.capability_state_readable),
                 "validation_revision": self.capability_validation_revision,
                 "alembic_revision": self.alembic_revision,
-                "revision_0087_compatible": bool(self.revision_0087_compatible),
+                "alembic_revision_is_0087": bool(self.alembic_revision_is_0087),
             },
             "batch": {
                 "max_subjects_per_kind": int(self.max_subjects_per_kind),
@@ -182,8 +182,8 @@ def validate_capability_and_revision_gates(
     revision = read_alembic_revision(db)
     if revision is None:
         return WriteGateFailure("revision_rejected", "alembic_version_missing")
-    if revision not in ALEMBIC_REVISIONS_0087_COMPATIBLE:
-        return WriteGateFailure("revision_rejected", "revision_not_0087_compatible")
+    if revision != REQUIRED_ALEMBIC_REVISION:
+        return WriteGateFailure("revision_rejected", "revision_not_exactly_0087")
 
     state, validation_revision = read_capability_detail(db)
     if state is None:
@@ -314,8 +314,8 @@ def execute_order_customer_identity_reconciliation_write(
 
         capability_failure = validate_capability_and_revision_gates(db)
         result.alembic_revision = read_alembic_revision(db)
-        result.revision_0087_compatible = (
-            result.alembic_revision in ALEMBIC_REVISIONS_0087_COMPATIBLE
+        result.alembic_revision_is_0087 = (
+            result.alembic_revision == REQUIRED_ALEMBIC_REVISION
         )
         state, validation_revision = read_capability_detail(db)
         result.capability_state = state or read_order_customer_identity_capability_state(db)

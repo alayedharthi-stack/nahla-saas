@@ -2,7 +2,7 @@
 """Tenant-scoped A1 order-customer identity reconciliation write operator.
 
 Dry-run by default (no coverage mutations). Writes require staging identity,
-database allowlist, capability ``expand``, 0087-compatible revision, and an
+database allowlist, capability ``expand``, exact Alembic revision 0087, and an
 explicit confirmation token.
 
 Usage::

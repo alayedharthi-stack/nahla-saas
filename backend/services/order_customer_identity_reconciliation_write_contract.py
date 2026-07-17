@@ -9,8 +9,8 @@ CONFIRMATION_ENV = "NAHLA_A1_RECONCILE_WRITE_CONFIRM"
 DEFAULT_MAX_SUBJECTS_PER_KIND = 1_000
 MAX_SUBJECTS_PER_KIND = 1_000
 
-# Alembic revisions that include 0087 Expand schema (0088 is deferred / not in chain).
-ALEMBIC_REVISIONS_0087_COMPATIBLE = frozenset({"0087", "0089"})
+# This pre-0088 validation maintenance operator is pinned to Expand exactly.
+REQUIRED_ALEMBIC_REVISION = "0087"
 
 CAPABILITY_KEY = "order_customer_identity"
 CAPABILITY_STATE_EXPAND = "expand"
@@ -22,7 +22,6 @@ STAGING_ENVIRONMENT_VALUE = "staging"
 STAGING_IDENTITY_CLASS = "railway_staging_desirable_growth"
 
 __all__ = [
-    "ALEMBIC_REVISIONS_0087_COMPATIBLE",
     "CAPABILITY_KEY",
     "CAPABILITY_STATE_EXPAND",
     "CONFIRMATION_ENV",
@@ -34,5 +33,6 @@ __all__ = [
     "STAGING_IDENTITY_CLASS",
     "STAGING_PROJECT_ENV",
     "STAGING_PROJECT_VALUE",
+    "REQUIRED_ALEMBIC_REVISION",
     "WRITE_SCHEMA_VERSION",
 ]

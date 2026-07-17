@@ -139,7 +139,7 @@ Official bounded operator for tenant-scoped coverage backfill. **Dry-run is the 
 
 Before any `--write` run:
 
-1. **0087 Expand applied** — Alembic revision is `0087` or `0089` (both include Expand schema). Revisions before `0087` are rejected (`revision_not_0087_compatible`).
+1. **0087 Expand applied exactly** — Alembic revision must be exactly `0087`. This pre-0088 validation maintenance path rejects `0088`, `0089`, and unknown revisions (`revision_not_exactly_0087`); a missing revision row is rejected as `alembic_version_missing`.
 2. **Capability `expand` only** — `order_customer_identity_capability_state.state = expand` and `validation_revision IS NULL`. Rejects `validated`, missing/unknown capability, or `validation_revision` already set (pre-0088 label).
 3. **Staging identity** — `RAILWAY_PROJECT_NAME=desirable-growth`, `RAILWAY_ENVIRONMENT_NAME=staging`. Production markers rejected.
 4. **Database allowlist** — `DATABASE_URL` host must be `postgres-staging.railway.internal` (no production hosts).
@@ -199,7 +199,7 @@ Machine-readable JSON. Closed top-level fields:
 | `access_status` | `ok` \| `gate_rejected` \| `tenant_missing` \| `enumeration_truncated` \| `degraded` |
 | `gate_stage` / `gate_error_class` | Set when preflight gates reject (writes only for env gates) |
 | `tenant_present` | Tenant row exists |
-| `capability` | `state`, `state_readable`, `validation_revision`, `alembic_revision`, `revision_0087_compatible` |
+| `capability` | `state`, `state_readable`, `validation_revision`, `alembic_revision`, `alembic_revision_is_0087` |
 | `batch` | `max_subjects_per_kind`, selected counts, `enumeration_truncated` |
 | `execution` | `subjects_attempted/succeeded/failed`, `coverage_rows_created/updated`, `committed` |
 | `aggregate` | `linked/unmapped/mislinked_orders_in_scope_total` |

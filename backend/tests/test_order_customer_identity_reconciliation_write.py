@@ -25,6 +25,7 @@ from services.order_customer_identity_contract import (
 from services.order_customer_identity_logging import log_reconciliation_write_failure
 from services.order_customer_identity_reconciliation_write import (
     execute_order_customer_identity_reconciliation_write,
+    validate_capability_and_revision_gates,
 )
 from services.order_customer_identity_reconciliation_write_contract import (
     CONFIRMATION_ENV,
@@ -70,6 +71,14 @@ _REPO = Path(__file__).resolve().parents[2]
 _CLI = "backend/scripts/reconcile_order_customer_identity_coverage.py"
 
 
+def _set_alembic_revision(pg_session, revision: str) -> None:
+    pg_session.execute(
+        text("UPDATE alembic_version SET version_num = :revision"),
+        {"revision": revision},
+    )
+    pg_session.flush()
+
+
 def _staging_env(**overrides: str) -> dict[str, str]:
     base = {
         "RAILWAY_PROJECT_NAME": "desirable-growth",
@@ -108,6 +117,7 @@ def _seed_generic_commerce_linked_scope(
         tenant_id=tenant_id,
         name=tenant_name or _GENERIC_TENANT_NAME,
     )
+    _set_alembic_revision(pg_session, "0087")
     seed_capability_state(pg_session, state=CAPABILITY_STATE_EXPAND)
     intg = seed_integration(
         pg_session,
@@ -317,6 +327,18 @@ def test_rejects_missing_capability(pg_session) -> None:
 
     assert result.outcome == "failed"
     assert result.gate_stage == "capability_state_missing"
+
+
+@pytest.mark.parametrize("revision", ("0088", "0089", "0099"))
+def test_rejects_non_0087_revisions(pg_session, revision: str) -> None:
+    _seed_generic_commerce_linked_scope(pg_session)
+    _set_alembic_revision(pg_session, revision)
+
+    failure = validate_capability_and_revision_gates(pg_session)
+
+    assert failure is not None
+    assert failure.error_class == "revision_rejected"
+    assert failure.stage == "revision_not_exactly_0087"
 
 
 def test_subject_failure_reports_categories_without_hidden_success(pg_session) -> None:
