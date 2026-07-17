@@ -153,7 +153,7 @@ def read_alembic_revision(db: Session) -> Optional[str]:
     try:
         row = db.execute(_REVISION_SQL).first()
         return str(row[0]).strip() if row and row[0] is not None else None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — revision read fails closed to None for gate checks
         return None
 
 
@@ -172,7 +172,7 @@ def read_capability_detail(db: Session) -> Tuple[Optional[str], Optional[str]]:
             else None
         )
         return state, validation_revision
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — revision read fails closed to None for gate checks
         return None, None
 
 

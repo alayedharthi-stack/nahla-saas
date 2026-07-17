@@ -94,8 +94,17 @@ def _assert_no_pii_in_write(payload: Dict[str, Any], *, known_safe: tuple[str, .
         assert not pattern.search(blob), f"PII pattern {pattern.pattern!r} matched write JSON"
 
 
-def _seed_generic_commerce_linked_scope(pg_session, *, tenant_id: int = TEST_TENANT_A) -> None:
-    seed_tenant(pg_session, tenant_id=tenant_id, name=_GENERIC_TENANT_NAME)
+def _seed_generic_commerce_linked_scope(
+    pg_session,
+    *,
+    tenant_id: int = TEST_TENANT_A,
+    tenant_name: str | None = None,
+) -> None:
+    seed_tenant(
+        pg_session,
+        tenant_id=tenant_id,
+        name=tenant_name or _GENERIC_TENANT_NAME,
+    )
     seed_capability_state(pg_session, state=CAPABILITY_STATE_EXPAND)
     intg = seed_integration(
         pg_session,
@@ -204,7 +213,11 @@ def test_write_updates_coverage_and_is_idempotent(pg_session) -> None:
 
 def test_tenant_isolation_does_not_touch_other_tenant(pg_session) -> None:
     _seed_generic_commerce_linked_scope(pg_session, tenant_id=TEST_TENANT_A)
-    _seed_generic_commerce_linked_scope(pg_session, tenant_id=TEST_TENANT_B)
+    _seed_generic_commerce_linked_scope(
+        pg_session,
+        tenant_id=TEST_TENANT_B,
+        tenant_name="متجر تجريبي ب",
+    )
     before_b = _watermark_count(pg_session, tenant_id=TEST_TENANT_B)
 
     result = execute_order_customer_identity_reconciliation_write(
