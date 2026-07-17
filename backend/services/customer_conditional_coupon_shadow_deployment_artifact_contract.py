@@ -11,7 +11,8 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from types import ModuleType
+from typing import Any, Mapping
 
 CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v1"
 ARTIFACT_KIND = "nahla_saas_conditional_coupon_shadow_slice"
@@ -62,6 +63,11 @@ OBSERVATION_BLOCKER_UNPINNED_REDEPLOY = "observation_flag_toggle_without_pinned_
 OBSERVATION_BLOCKER_INVENTORY_NOT_VERIFIED = "observation_flag_toggle_without_module_inventory"
 
 _PINNED_REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+IMPORT_FAILURE_IMPORT_FAILED = "import_failed"
+IMPORT_FAILURE_MISSING_SYMBOL = "missing_symbol"
+IMPORT_FAILURE_PROVENANCE_UNAVAILABLE = "module_provenance_unavailable"
+IMPORT_FAILURE_PROVENANCE_OUTSIDE_BACKEND = "module_provenance_outside_backend_root"
 
 
 @dataclass(frozen=True)
@@ -156,25 +162,73 @@ def _shadow_flag_accessor_in_source(flags_path: Path) -> bool:
     return f"def {SHADOW_FLAG_ACCESSOR}(" in source
 
 
+def _module_is_under_backend(module: ModuleType, backend_root: Path) -> tuple[bool, str | None]:
+    raw_file = getattr(module, "__file__", None)
+    if not isinstance(raw_file, str) or not raw_file:
+        return False, IMPORT_FAILURE_PROVENANCE_UNAVAILABLE
+    try:
+        resolved_file = Path(raw_file).resolve(strict=True)
+        resolved_file.relative_to(backend_root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False, IMPORT_FAILURE_PROVENANCE_OUTSIDE_BACKEND
+    return True, None
+
+
+def _affected_import_roots() -> frozenset[str]:
+    return frozenset(module_name.partition(".")[0] for module_name, _ in REQUIRED_IMPORT_CHECKS)
+
+
+def _is_affected_module(module_name: str, roots: frozenset[str]) -> bool:
+    return any(module_name == root or module_name.startswith(f"{root}.") for root in roots)
+
+
+def _restore_module_state(snapshot: Mapping[str, ModuleType]) -> None:
+    """Restore the exact pre-check module mapping after isolated imports."""
+    for module_name in tuple(sys.modules):
+        if module_name not in snapshot:
+            sys.modules.pop(module_name, None)
+    for module_name, module in snapshot.items():
+        if sys.modules.get(module_name) is not module:
+            sys.modules[module_name] = module
+
+
 def _verify_importability(backend_root: Path) -> tuple[bool, tuple[str, ...]]:
     repo_root = backend_root.parent
-    paths = [str(repo_root), str(backend_root)]
+    isolated_paths = [str(backend_root), str(repo_root)]
     failures: list[str] = []
     saved_path = list(sys.path)
+    module_snapshot = dict(sys.modules)
+    affected_roots = _affected_import_roots()
     try:
-        for entry in paths:
-            if entry not in sys.path:
-                sys.path.insert(0, entry)
+        for module_name in tuple(sys.modules):
+            if _is_affected_module(module_name, affected_roots):
+                sys.modules.pop(module_name, None)
+        importlib.invalidate_caches()
+        sys.path[:] = [
+            entry for entry in sys.path if entry not in isolated_paths
+        ]
+        sys.path[:0] = isolated_paths
         for module_name, symbol in REQUIRED_IMPORT_CHECKS:
             try:
                 module = importlib.import_module(module_name)
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"{module_name}:import_error:{exc.__class__.__name__}")
+            except Exception:  # noqa: BLE001
+                failures.append(f"{module_name}:{IMPORT_FAILURE_IMPORT_FAILED}")
+                continue
+            provenance_ok, provenance_failure = _module_is_under_backend(
+                module,
+                backend_root,
+            )
+            if not provenance_ok:
+                failures.append(f"{module_name}:{provenance_failure}")
                 continue
             if not hasattr(module, symbol):
-                failures.append(f"{module_name}:missing_symbol:{symbol}")
+                failures.append(
+                    f"{module_name}:{IMPORT_FAILURE_MISSING_SYMBOL}:{symbol}"
+                )
     finally:
         sys.path[:] = saved_path
+        _restore_module_state(module_snapshot)
+        importlib.invalidate_caches()
     return len(failures) == 0, tuple(failures)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -13,6 +14,9 @@ _REPO = os.path.abspath(os.path.join(_BACKEND, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from services import (  # noqa: E402
+    customer_conditional_coupon_shadow_deployment_artifact_contract as artifact_contract,
+)
 from services.customer_conditional_coupon_shadow_deployment_artifact_contract import (  # noqa: E402
     CONTRACT_VERSION,
     DeploymentArtifactEvaluation,
@@ -93,6 +97,74 @@ def test_missing_shadow_flag_accessor_fails_contract(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.inventory.shadow_flag_accessor_present is False
     assert SHADOW_FLAG_ACCESSOR in missing_module_labels(result.inventory)
+
+
+def test_importability_evicts_stale_module_and_restores_process_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "coupon_shadow_stale_probe"
+    symbol = "required_symbol"
+    backend = tmp_path / "target" / "backend"
+    backend.mkdir(parents=True)
+    (backend / f"{module_name}.py").write_text(
+        "this is not valid python !!!\n",
+        encoding="utf-8",
+    )
+
+    stale = ModuleType(module_name)
+    stale.__file__ = str(tmp_path / "other_checkout" / f"{module_name}.py")
+    setattr(stale, symbol, object())
+    monkeypatch.setitem(sys.modules, module_name, stale)
+    before_modules = dict(sys.modules)
+    monkeypatch.setattr(
+        artifact_contract,
+        "REQUIRED_IMPORT_CHECKS",
+        ((module_name, symbol),),
+    )
+
+    ok, failures = artifact_contract._verify_importability(backend)
+
+    assert ok is False
+    assert failures == (
+        f"{module_name}:{artifact_contract.IMPORT_FAILURE_IMPORT_FAILED}",
+    )
+    assert sys.modules.get(module_name) is stale
+    assert dict(sys.modules) == before_modules
+
+
+def test_importability_rejects_module_resolved_outside_artifact_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = "coupon_shadow_external_probe"
+    symbol = "required_symbol"
+    backend = tmp_path / "target" / "backend"
+    backend.mkdir(parents=True)
+    external = tmp_path / "other_checkout"
+    external.mkdir()
+    (external / f"{module_name}.py").write_text(
+        f"{symbol} = True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(external))
+    monkeypatch.setattr(
+        artifact_contract,
+        "REQUIRED_IMPORT_CHECKS",
+        ((module_name, symbol),),
+    )
+    sys.modules.pop(module_name, None)
+    before_modules = dict(sys.modules)
+
+    ok, failures = artifact_contract._verify_importability(backend)
+
+    assert ok is False
+    assert failures == (
+        f"{module_name}:{artifact_contract.IMPORT_FAILURE_PROVENANCE_OUTSIDE_BACKEND}",
+    )
+    assert str(external) not in " ".join(failures)
+    assert module_name not in sys.modules
+    assert dict(sys.modules) == before_modules
 
 
 def test_observation_flag_toggle_without_pinned_revision_is_forbidden() -> None:
