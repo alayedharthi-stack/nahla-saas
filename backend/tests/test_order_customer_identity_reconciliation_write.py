@@ -351,19 +351,38 @@ def _database_url(postgres_engine) -> str:
     return str(postgres_engine.url.render_as_string(hide_password=False))
 
 
-def test_cli_dry_run_default_success(pg_session, postgres_engine) -> None:
-    _seed_generic_commerce_linked_scope(pg_session)
-    env = {**os.environ, "DATABASE_URL": _database_url(postgres_engine)}
-    result = subprocess.run(
-        [sys.executable, _CLI, "--tenant-id", str(TEST_TENANT_A)],
-        cwd=_REPO,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+def _load_cli_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "reconcile_cli",
+        _REPO / "backend" / "scripts" / "reconcile_order_customer_identity_coverage.py",
     )
-    assert result.returncode == 0
-    payload = json.loads(result.stdout)
+    assert spec and spec.loader
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    return cli
+
+
+def _patch_cli_session(monkeypatch, cli, pg_session) -> None:
+    class _SessionFactory:
+        def __call__(self):
+            return pg_session
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli, "sessionmaker", lambda bind: _SessionFactory())
+
+
+def test_cli_dry_run_default_success(pg_session, postgres_engine, monkeypatch, capsys) -> None:
+    _seed_generic_commerce_linked_scope(pg_session)
+    cli = _load_cli_module()
+    monkeypatch.setenv("DATABASE_URL", _database_url(postgres_engine))
+    _patch_cli_session(monkeypatch, cli, pg_session)
+    monkeypatch.setattr(sys, "argv", [_CLI, "--tenant-id", str(TEST_TENANT_A)])
+    assert cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
     assert payload["write_schema_version"] == WRITE_SCHEMA_VERSION
     assert payload["dry_run"] is True
     _assert_no_pii_in_write(payload, known_safe=(str(TEST_TENANT_A),))
@@ -409,17 +428,10 @@ def test_cli_write_requires_staging_database_host(pg_session, postgres_engine) -
 
 
 def test_cli_write_success_with_confirmation_in_process(pg_session, postgres_engine, monkeypatch) -> None:
-    import importlib.util
-
     _seed_generic_commerce_linked_scope(pg_session)
+    cli = _load_cli_module()
     monkeypatch.setenv("DATABASE_URL", _database_url(postgres_engine))
-    spec = importlib.util.spec_from_file_location(
-        "reconcile_cli",
-        _REPO / "backend" / "scripts" / "reconcile_order_customer_identity_coverage.py",
-    )
-    assert spec and spec.loader
-    cli = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cli)
+    _patch_cli_session(monkeypatch, cli, pg_session)
     monkeypatch.setattr(cli, "_validate_write_gates", lambda _env: None)
     monkeypatch.setattr(
         sys,
