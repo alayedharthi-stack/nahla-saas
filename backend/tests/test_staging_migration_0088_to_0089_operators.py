@@ -90,8 +90,21 @@ def test_wrong_start_revision_rejects_0089_only() -> None:
     assert failure.stage == "revision_is_0089_not_0088"
 
 
-def test_dr_profile_prerequisite_missing_until_contract_bump() -> None:
+def test_dr_profile_prerequisite_satisfied_when_0088_in_contract() -> None:
     failure = attach_op.validate_dr_restore_profile_prerequisite()
+    assert failure is None
+
+
+def test_dr_profile_prerequisite_missing_without_0088_profile() -> None:
+    from scripts.operators import staging_dr_canonical_parity_contract as contract  # noqa: PLC0415
+
+    without_0088 = tuple(
+        profile
+        for profile in contract.SOURCE_ELIGIBILITY_PROFILES
+        if profile.get("alembic_revision") != "0088"
+    )
+    with patch.object(contract, "SOURCE_ELIGIBILITY_PROFILES", without_0088):
+        failure = attach_op.validate_dr_restore_profile_prerequisite()
     assert failure is not None
     assert failure.stage == "restore_profile_0088_not_in_contract"
 
