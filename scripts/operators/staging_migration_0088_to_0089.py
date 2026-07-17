@@ -36,6 +36,7 @@ from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
 )
 from scripts.operators.staging_migration_0087_to_0088_contract import (  # noqa: E402
     CAPABILITY_KEY,
+    CAPABILITY_STATE_EXPAND,
     CAPABILITY_STATE_VALIDATED,
     VALIDATION_REVISION,
 )

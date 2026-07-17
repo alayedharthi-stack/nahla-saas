@@ -193,3 +193,22 @@ def test_run_controlled_migration_success_path() -> None:
     assert manifest["phase"] == "post_success"
     assert manifest["restore_first_policy"]
     assert "staging_pin_0088" in manifest["restore_first_policy"]
+
+
+def test_post_attach_validation_detects_0088_capability_regression() -> None:
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.connect.return_value.__enter__.return_value = conn
+    conn.execute.return_value.mappings.return_value.first.return_value = {
+        "state": "expand",
+        "validation_revision": "0088",
+    }
+
+    with (
+        patch.object(attach_op.gates, "validate_post_success_revisions", return_value=None),
+        patch.object(attach_op, "validate_post_success_validate_invariants", return_value=None),
+    ):
+        failure = attach_op.validate_post_success_attach_invariants(engine)
+
+    assert failure is not None
+    assert failure.stage == "capability_regressed_to_expand"
