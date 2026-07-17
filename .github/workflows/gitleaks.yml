@@ -56,9 +56,8 @@ jobs:
           # GITHUB_TOKEN required so SARIF uploads to Code Scanning succeed
           # AND so PR comments are posted on findings.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Custom allowlist for operator-contract false positives (metadata field
-          # constants that match generic-api-key heuristics).
-          GITLEAKS_CONFIG: .gitleaks.toml
+          # Use the upstream default config for now; once we publish a
+          # custom ``.gitleaks.toml`` (Phase 2) we'll pin it here.
           GITLEAKS_ENABLE_COMMENTS: "true"
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
           GITLEAKS_ENABLE_SUMMARY: "true"
