@@ -24,6 +24,10 @@ for p in (str(_REPO), str(_BACKEND), str(_DATABASE)):
         sys.path.insert(0, p)
 
 from tests.order_customer_identity_postgres_fixtures import _connect_engine  # noqa: E402
+from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
+    collect_constraint_violation_counts,
+    validate_constraint_violation_preflight,
+)
 
 MIGRATION_TENANT_ID = 880_002
 _REPOSITORY_ALEMBIC_HEADS = frozenset({"0088", "0089"})
@@ -221,12 +225,17 @@ def test_migration_0088_idempotent_rerun(ephemeral_validate_engine: Engine) -> N
 def test_migration_0088_blocked_when_constraint_violation_present(
     ephemeral_validate_engine: Engine,
 ) -> None:
-    """Simulate pre-0087 legacy drift: row present before NOT VALID CHECK attached."""
+    """An orphaned tenant/customer tuple blocks preflight and 0088 validation.
+
+    ``session_replication_role`` is transaction-local and only permits this
+    throwaway PostgreSQL fixture to model legacy FK drift. CHECK constraints
+    remain active, so the row is valid for every non-target 0087 CHECK.
+    """
     with ephemeral_validate_engine.begin() as conn:
         conn.execute(
             text(
                 """
-                ALTER TABLE orders DROP CONSTRAINT chk_orders_untrusted_kinds_no_links
+                SET LOCAL session_replication_role = replica
                 """
             )
         )
@@ -235,41 +244,37 @@ def test_migration_0088_blocked_when_constraint_violation_present(
                 """
                 INSERT INTO orders (
                     tenant_id, external_id, status, total, source,
-                    order_source_kind, customer_link_evidence_class
+                    customer_id, order_source_kind, identity_namespace,
+                    customer_link_state, customer_link_evidence_class
                 ) VALUES (
-                    :tid, 'VIOLATE-0088', 'pending', '10', 'whatsapp',
-                    'whatsapp', 'authoritative'
+                    :tid, 'VIOLATE-0088', 'pending', '10', 'internal',
+                    :orphan_customer_id, 'nahla_internal',
+                    'nahla_internal_order_v1', 'verified', 'authoritative'
                 )
                 """
             ),
-            {"tid": MIGRATION_TENANT_ID},
-        )
-        conn.execute(
-            text(
-                """
-                ALTER TABLE orders ADD CONSTRAINT chk_orders_untrusted_kinds_no_links
-                CHECK (
-                    order_source_kind NOT IN ('whatsapp', 'manual', 'other')
-                    OR (
-                        customer_id IS NULL
-                        AND external_customer_profile_id IS NULL
-                        AND customer_link_evidence_class IS NULL
-                        AND external_identity_evidence_class IS NULL
-                        AND (customer_link_state = 'unlinked' OR customer_link_state IS NULL)
-                        AND (external_identity_link_state = 'unlinked' OR external_identity_link_state IS NULL)
-                        AND integration_connection_id IS NULL
-                        AND external_customer_ref IS NULL
-                        AND identity_namespace IS NULL
-                    )
-                ) NOT VALID
-                """
-            )
+            {"tid": MIGRATION_TENANT_ID, "orphan_customer_id": 9_999_999},
         )
 
-    with pytest.raises(Exception):
+    with ephemeral_validate_engine.connect() as conn:
+        violation_counts = collect_constraint_violation_counts(conn)
+        assert violation_counts["fk_orders_tenant_customer"] == 1
+        assert violation_counts["violation_rows_total"] == 1
+        assert all(
+            count == 0
+            for name, count in violation_counts.items()
+            if name not in {"fk_orders_tenant_customer", "violation_rows_total"}
+        )
+        preflight_failure = validate_constraint_violation_preflight(conn)
+        assert preflight_failure is not None
+        assert preflight_failure.error_class == "constraint_violation_preflight_failed"
+        assert preflight_failure.stage == "orders_constraint_violations_present"
+
+    with pytest.raises(IntegrityError, match="fk_orders_tenant_customer"):
         _run_alembic(ephemeral_validate_engine, "0088")
 
     with ephemeral_validate_engine.connect() as conn:
+        assert not _constraint_validated(ephemeral_validate_engine, "fk_orders_tenant_customer")
         cap = conn.execute(
             text(
                 """
