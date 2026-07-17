@@ -17,7 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
-CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v2"
+CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v3"
 ARTIFACT_KIND = "nahla_saas_conditional_coupon_shadow_slice"
 
 # Container layout baked by the shared Dockerfile (WORKDIR /app, COPY . .).
@@ -49,7 +49,14 @@ REQUIRED_COMPOSE_CONSUMER_FILES = frozenset(
 REQUIRED_PERSONA_COMPOSE_FILES = frozenset(
     {
         "customer_conditional_coupon_answer.py",
+        "customer_conditional_coupon_claim_classification.py",
         "customer_conditional_coupon_provenance.py",
+    }
+)
+
+REQUIRED_POSTPROCESS_GUARD_FILES = frozenset(
+    {
+        "customer_conditional_coupon_general_llm_evidence_guard.py",
     }
 )
 
@@ -88,6 +95,14 @@ REQUIRED_IMPORT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "modules.ai.brain.persona.customer_conditional_coupon_provenance",
         "extract_constitutional_metadata",
+    ),
+    (
+        "modules.ai.brain.persona.customer_conditional_coupon_claim_classification",
+        "classify_customer_conditional_coupon_claim_violation",
+    ),
+    (
+        "modules.ai.brain.postprocess.customer_conditional_coupon_general_llm_evidence_guard",
+        "apply_customer_conditional_coupon_general_llm_evidence_guard",
     ),
     (
         "services.customer_conditional_coupon_shadow_fixture",
@@ -196,7 +211,17 @@ def required_relative_paths() -> frozenset[str]:
         f"modules/ai/brain/persona/{name}"
         for name in REQUIRED_PERSONA_COMPOSE_FILES
     )
-    return truth_surface | compose_consumer | persona_compose | REQUIRED_FIXTURE_OPERATOR_FILES
+    postprocess_guard = frozenset(
+        f"modules/ai/brain/postprocess/{name}"
+        for name in REQUIRED_POSTPROCESS_GUARD_FILES
+    )
+    return (
+        truth_surface
+        | compose_consumer
+        | persona_compose
+        | postprocess_guard
+        | REQUIRED_FIXTURE_OPERATOR_FILES
+    )
 
 
 def _flags_source_path(backend_root: Path) -> Path:

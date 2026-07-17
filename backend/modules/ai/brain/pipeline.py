@@ -2886,6 +2886,63 @@ class MerchantBrain:
                 _tc_prov_begin_exc,
             )
 
+        try:
+            from modules.ai.brain.postprocess.customer_conditional_coupon_general_llm_evidence_guard import (  # noqa: PLC0415
+                apply_customer_conditional_coupon_general_llm_evidence_guard,
+                should_apply_customer_conditional_coupon_general_llm_evidence_guard,
+            )
+            from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                note_customer_conditional_coupon_text_change,
+            )
+
+            _cc_guard_facts = dict(
+                (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
+                    "customer_conditional_coupon_facts",
+                )
+                or {}
+            )
+            if should_apply_customer_conditional_coupon_general_llm_evidence_guard(
+                customer_conditional_coupon_facts=_cc_guard_facts or None,
+                customer_conditional_coupon_compose_active=bool(
+                    result.data.get("customer_conditional_coupon_compose_active")
+                ),
+            ):
+                _cc_general_guard = apply_customer_conditional_coupon_general_llm_evidence_guard(
+                    reply or "",
+                    customer_conditional_coupon_facts=_cc_guard_facts,
+                )
+                if _cc_general_guard.rejected:
+                    _orig_cc_guard = reply
+                    reply = _cc_general_guard.reply
+                    result.data["customer_conditional_coupon_general_llm_guard_rejected"] = True
+                    result.data["conditional_coupon_guard_failed_reason"] = (
+                        _cc_general_guard.failed_reason
+                    )
+                    result.data["final_text_transformed"] = True
+                    _cc_transform_reasons = [
+                        str(r)
+                        for r in (result.data.get("final_transform_reasons") or [])
+                        if r
+                    ]
+                    if "customer_conditional_coupon_general_llm_evidence_guard" not in _cc_transform_reasons:
+                        _cc_transform_reasons.append(
+                            "customer_conditional_coupon_general_llm_evidence_guard"
+                        )
+                    result.data["final_transform_reasons"] = _cc_transform_reasons
+                    note_customer_conditional_coupon_text_change(
+                        result.data,
+                        before=_orig_cc_guard,
+                        after=reply,
+                        reason="customer_conditional_coupon_general_llm_evidence_guard",
+                    )
+        except Exception as _cc_general_guard_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.warning(
+                "[CUSTOMER_CONDITIONAL_COUPON_GENERAL_LLM_GUARD] pipeline hook failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                _cc_general_guard_exc,
+            )
+
         if _final_turn_contract is not None:
             try:
                 from .turn.final_turn_audit import audit_final_turn_reply  # noqa: PLC0415
@@ -3435,6 +3492,8 @@ class MerchantBrain:
         )
 
         _guard_replaced: dict[str, bool] = {}
+        if result.data.get("customer_conditional_coupon_general_llm_guard_rejected"):
+            _guard_replaced["customer_conditional_coupon_general_llm_evidence_guard"] = True
         _op = getattr(new_state, "order_prep", None)
 
         try:

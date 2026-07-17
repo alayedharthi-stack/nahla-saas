@@ -285,100 +285,20 @@ def _apply_customer_conditional_coupon_answer_guards(
     text: str,
     facts: dict[str, Any],
 ) -> PersonaGuardResult:
+    from .customer_conditional_coupon_claim_classification import (  # noqa: PLC0415
+        classify_customer_conditional_coupon_claim_violation,
+    )
+
     working = str(text or "").strip()
     if not working:
         return PersonaGuardResult(text="", passed=False, failed_reason="empty_compose")
 
-    issuance_markers = (
-        "تم إصدار",
-        "صدر الكوبون",
-        "أصدرنا الكوبون",
-        "coupon issued",
-        "issued your coupon",
-    )
-    if any(m in working for m in issuance_markers):
+    failed_reason = classify_customer_conditional_coupon_claim_violation(working, facts)
+    if failed_reason:
         return PersonaGuardResult(
             text=working,
             passed=False,
-            failed_reason="coupon_issued_claim",
-        )
-
-    applied_markers = (
-        "تم تطبيق",
-        "طبقنا",
-        "فعلنا الكوبون",
-        "applied the coupon",
-        "coupon applied",
-    )
-    if any(m in working for m in applied_markers):
-        return PersonaGuardResult(
-            text=working,
-            passed=False,
-            failed_reason="coupon_applied_claim",
-        )
-
-    code_markers = (
-        "كود الخصم",
-        "كود خصم",
-        "الكود",
-        "كوبون ",
-        "coupon code",
-        "discount code",
-        "promo code",
-    )
-    if any(m.lower() in working.lower() for m in code_markers):
-        return PersonaGuardResult(
-            text=working,
-            passed=False,
-            failed_reason="coupon_code_disclosure",
-        )
-
-    final_coupon_markers = (
-        "الكوبون جاهز",
-        "كوبونك جاهز",
-        "your coupon is ready",
-        "coupon is active",
-    )
-    if any(m in working for m in final_coupon_markers):
-        return PersonaGuardResult(
-            text=working,
-            passed=False,
-            failed_reason="final_coupon_claim",
-        )
-
-    allow_min_orders_claim = bool(facts.get("allow_min_orders_condition_claim"))
-    min_orders_state = str(facts.get("min_orders_condition_state") or "").strip()
-    satisfied_markers = (
-        "أنت مؤهل",
-        "انت مؤهل",
-        "مستوفي الشروط",
-        "استوفيت الشروط",
-        "أكملت الطلبات",
-        "اكملت الطلبات",
-        "definitely eligible",
-        "you are eligible",
-        "condition satisfied",
-    )
-    if not allow_min_orders_claim or min_orders_state != "satisfied":
-        if any(m in working for m in satisfied_markers):
-            return PersonaGuardResult(
-                text=working,
-                passed=False,
-                failed_reason="final_min_orders_eligibility_claim",
-            )
-
-    checkout_markers = (
-        "نكمل الطلب",
-        "اطلب الآن",
-        "أرسل العنوان",
-        "طريقة الدفع",
-        "كم الكمية",
-    )
-    if any(m in working for m in checkout_markers):
-        return PersonaGuardResult(
-            text=working,
-            passed=False,
-            failed_reason="checkout_pressure",
+            failed_reason=failed_reason,
         )
 
     return PersonaGuardResult(text=working, passed=True)

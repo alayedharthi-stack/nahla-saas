@@ -16,6 +16,8 @@ CONSTITUTIONAL_METADATA_KEYS = (
     "fallback_reason",
     "fallback_action_type",
     "customer_conditional_coupon_compose_active",
+    "customer_conditional_coupon_general_llm_fallthrough",
+    "conditional_coupon_guard_failed_reason",
     "facts_snapshot_id",
 )
 
@@ -26,12 +28,21 @@ class _CustomerConditionalCouponProvenanceTracker:
     reasons: list[str] = field(default_factory=list)
 
 
+def _conditional_coupon_provenance_tracking_active(
+    result_data: Mapping[str, Any],
+) -> bool:
+    return bool(
+        result_data.get("customer_conditional_coupon_compose_active")
+        or result_data.get("customer_conditional_coupon_general_llm_fallthrough")
+    )
+
+
 def begin_customer_conditional_coupon_text_tracking(
     result_data: MutableMapping[str, Any],
     compose_text: str,
 ) -> bool:
-    """Snapshot compose candidate text when conditional-coupon compose is active."""
-    if not result_data.get("customer_conditional_coupon_compose_active"):
+    """Snapshot compose candidate text for persona or general-LLM fallthrough paths."""
+    if not _conditional_coupon_provenance_tracking_active(result_data):
         return False
     result_data[_TRACKER_KEY] = _CustomerConditionalCouponProvenanceTracker(
         candidate=str(compose_text or ""),
@@ -88,7 +99,7 @@ def note_customer_conditional_coupon_dedup_substitution(
     after: str,
 ) -> None:
     """Record webhook dedup substitution on constitutional provenance metadata."""
-    if not target.get("customer_conditional_coupon_compose_active"):
+    if not _conditional_coupon_provenance_tracking_active(target):
         return
     if (before or "") == (after or ""):
         return
@@ -104,7 +115,7 @@ def extract_constitutional_metadata(
 ) -> Dict[str, Any]:
     if not isinstance(source, Mapping):
         return {}
-    if not source.get("customer_conditional_coupon_compose_active"):
+    if not _conditional_coupon_provenance_tracking_active(source):
         return {}
     return {
         key: source[key]
