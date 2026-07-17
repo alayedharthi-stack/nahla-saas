@@ -755,6 +755,13 @@ async def on_startup() -> None:
                 # ── Step C: Apply normal application migrations through 0089 ─
                 # 0088 is a sibling maintenance-only validation branch from 0087
                 # and must only run via the guarded 0087→0088 operator.
+                from scripts.operators.bootstrap_migration_contract import (  # noqa: PLC0415
+                    build_normal_bootstrap_upgrade_argv,
+                )
+
+                _bootstrap_upgrade_cmd = build_normal_bootstrap_upgrade_argv(
+                    python_executable=sys.executable,
+                )
                 # capture_output so the real Alembic error surfaces in
                 # Railway logs instead of being silently swallowed.
                 logger.info(
@@ -763,7 +770,7 @@ async def on_startup() -> None:
                 _t0 = _t.monotonic()
                 try:
                     _alembic = subprocess.run(
-                        [sys.executable, "-m", "alembic", "upgrade", "0089"],
+                        _bootstrap_upgrade_cmd,
                         cwd=_DATABASE_DIR,
                         check=False,
                         env=os.environ.copy(),
