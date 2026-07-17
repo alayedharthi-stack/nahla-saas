@@ -365,12 +365,19 @@ def _load_cli_module():
 
 
 def _patch_cli_session(monkeypatch, cli, pg_session) -> None:
-    class _SessionFactory:
-        def __call__(self):
-            return pg_session
+    class _SessionProxy:
+        def __init__(self, session: Session) -> None:
+            self._session = session
 
         def close(self) -> None:
             return None
+
+        def __getattr__(self, name: str):
+            return getattr(self._session, name)
+
+    class _SessionFactory:
+        def __call__(self):
+            return _SessionProxy(pg_session)
 
     monkeypatch.setattr(cli, "sessionmaker", lambda bind: _SessionFactory())
 
