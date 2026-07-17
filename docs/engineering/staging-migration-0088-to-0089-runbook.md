@@ -28,11 +28,28 @@ apply both sibling heads from `0087` in one step.
    and `validation_revision = '0088'`.
 3. **All `0088` invariants** — orders FK/CHECK validated, deferred indexes valid.
 4. **No pre-attach `0089` objects** — `conversation_a1_subject_bindings` absent.
-5. **DR restore profile `staging_pin_0088`** — must exist in
-   `staging_dr_canonical_parity_contract.py` (contract bump after live 0088
-   attestation). Operator preflight/run **fails closed** until this profile is
-   added with evidence-backed fingerprint.
+5. **DR restore profile `staging_pin_0088`** — present in
+   `staging_dr_canonical_parity_contract.py` (evidence-backed contract bump after
+   live 0088 attestation; see provenance below).
 6. **Separate rollout approval** granted (PR merge ≠ production execute).
+
+## DR profile provenance (`staging_pin_0088`)
+
+Read-only live staging source attestation collected **2026-07-17** after PR #615
+merge and guarded `0087→0088` validation (single `alembic_version` row `0088`,
+capability `validated` / `validation_revision='0088'`, no `0089` objects):
+
+| Field | Measured value |
+|-------|----------------|
+| `migration_revision` | `0088` |
+| `public_table_count` | `101` |
+| `schema_fingerprint_version` | `nahla_public_tables_sha256_v1` |
+| `schema_fingerprint_sha256` | `2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db` |
+
+Fingerprint matches `staging_pin_0087` because `0088` validates constraints and
+indexes only; public base table names are unchanged. Revision pin remains
+strict — `staging_pin_0087` does **not** satisfy restore-first policy for
+validated `0088` staging.
 
 ## Operator commands
 
@@ -107,13 +124,13 @@ staging recovery.
 - Does **not** enable AI runtime, coupon shadow activation, or reconciliation consumers
 - Does **not** mutate orders/links or capability state beyond coexistence checks
 - Does **not** deploy Railway services or change provider configuration
-- Does **not** add `staging_pin_0088` DR profile (separate attestation PR)
 
-## Future operator plan (coupon shadow observation)
+## Operator sequence (coupon shadow observation)
 
 1. Start from current experimental staging at validated `0088`; do not re-run or
    revert `0088`.
-2. Attest `staging_pin_0088` DR profile + backup/restore drill.
+2. Merge DR contract bump adding `staging_pin_0088` (this attestation PR) and
+   complete backup/restore drill with `matched_source_profile_id=staging_pin_0088`.
 3. Execute this `0088 + 0089` attachment operator after the DR prerequisite is green.
 4. Run coupon shadow **read-only** observation probes (no runtime flags).
 5. Evaluate shadow readiness before any activation slice.
