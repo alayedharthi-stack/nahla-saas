@@ -34,7 +34,7 @@ Execute stages **in order**. Do not skip. Take an approved backup **before each 
 
 | Requirement | Value / check |
 |-------------|----------------|
-| Prior slice complete | Staging `alembic_version` exactly **`0030`** before Stage A; exactly **`0032`** before Stage B |
+| Prior slice complete | Staging `alembic_version` exactly **`0030`** before Stage A; exactly **`0032`** before Stage B; exactly **`0083`** before Stage C |
 | Branch merged & deployed to **staging** app container | Runners ship with app image |
 | `RAILWAY_PROJECT_NAME` | `desirable-growth` |
 | `RAILWAY_ENVIRONMENT_NAME` | `staging` |
@@ -171,9 +171,32 @@ python scripts/operators/staging_migration_0032_to_0083.py run --timeout-sec 360
 
 Invokes exactly: `python -m alembic upgrade 0083`.
 
+### Stage B completion attestation (provenance)
+
+After guarded Stage B `run` and post-validation pass (`post_validation.schema_ok=true`),
+record live source evidence before any Stage C backup/restore drill:
+
+| Field | Attested value |
+|-------|----------------|
+| `alembic_revision` | `0083` |
+| `public_table_count` | `96` |
+| `schema_fingerprint_version` | `nahla_public_tables_sha256_v1` |
+| `schema_fingerprint_sha256` | `1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae` |
+
+Stage C DR canonical parity requires the versioned contract profile
+`staging_pin_0083` (exact revision, table count, and fingerprint pin). See
+`docs/engineering/staging-dr-canonical-parity-runbook.md`. Parity verification
+fails closed when the source does not match a contracted profile.
+
 ## Stage C — 0083 → 0087 (A1-Expand)
 
 ### Gates beyond standard staging identity
+
+0. **DR canonical parity (hard gate)** — pre-stage backup/restore drill must match
+   `staging_pin_0083` on the live source (exact revision `0083`, `96` public
+   tables, fingerprint
+   `1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae`). See
+   `docs/engineering/staging-dr-canonical-parity-runbook.md`.
 
 1. **Catalog audit (hard gate)** — no pre-existing A1-expand tables (`external_customer_profiles`, `order_customer_identity_capability_state`, `conversation_a1_subject_bindings`). Optional standalone audit:
 

@@ -94,6 +94,7 @@ fingerprint — and that the source is an **explicitly contracted** staging pin
 | `staging_pin_0024` | `0024` | `96` | `1b9aca…f5f54ae` (prior Phase A attestation) |
 | `staging_pin_0030` | `0030` | `96` | `1b9aca…f5f54ae` (live source attestation during successful 0030 restore drill) |
 | `staging_pin_0032` | `0032` | `96` | `1b9aca…f5f54ae` (guarded Stage A post-validation attestation) |
+| `staging_pin_0083` | `0083` | `96` | `1b9aca…f5f54ae` (guarded Stage B post-validation attestation) |
 
 Every profile requires a full 64-hex fingerprint pin. Advancing staging requires
 a **contract bump** (new `profile_id` with attested revision, count, and
@@ -113,6 +114,7 @@ Sanitized success markers:
 - `revision_parity=true`
 - `public_table_count_parity=true`
 - `source_contract_eligible=true`
+- `matched_source_profile_id=staging_pin_0083` (when staging is pinned at 0083 after guarded Stage B)
 - `matched_source_profile_id=staging_pin_0032` (when staging is pinned at 0032 after guarded Stage A)
 - `matched_source_profile_id=staging_pin_0030` (when staging is pinned at 0030)
 
@@ -132,7 +134,11 @@ those measured values control `staging_pin_0030`. After guarded Stage A
 (0030→0032), live staging attestation measured the same `96` public tables and
 fingerprint
 `1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae` at revision
-`0032`; those measured values control `staging_pin_0032`.
+`0032`; those measured values control `staging_pin_0032`. After guarded Stage B
+(0032→0083), live staging attestation measured the same `96` public tables and
+fingerprint
+`1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae` at revision
+`0083`; those measured values control `staging_pin_0083`.
 
 ## Regenerating the baked contract
 
