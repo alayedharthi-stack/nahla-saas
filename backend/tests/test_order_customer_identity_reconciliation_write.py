@@ -402,7 +402,10 @@ def test_cli_write_rejects_without_confirmation(pg_session, postgres_engine) -> 
     _seed_generic_commerce_linked_scope(pg_session)
     env = {
         **os.environ,
-        "DATABASE_URL": _database_url(postgres_engine),
+        "DATABASE_URL": (
+            "postgresql://nahla:nahla_password@"
+            "postgres-staging.railway.internal:5432/nahla_saas"
+        ),
         "RAILWAY_PROJECT_NAME": "desirable-growth",
         "RAILWAY_ENVIRONMENT_NAME": "staging",
     }
