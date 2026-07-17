@@ -225,7 +225,11 @@ def test_seed_is_idempotent_on_rerun(pg_session) -> None:
 
     assert first.committed is True
     assert second.committed is False
-    assert second.outcome == "success"
+    assert second.outcome == "success", (
+        second.gate_stage,
+        second.gate_error_class,
+        second.existing_shape,
+    )
     assert sum(second.skipped_existing.values()) >= 2
     assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == 2
 

@@ -471,6 +471,7 @@ def execute_order_customer_identity_evidence_fixture_seed(
         if gate:
             return result
 
+        db.expire_all()
         existing = _count_fixture_shape(db, tenant_id=int(tenant_id))
         result.existing_shape = existing
 
@@ -597,6 +598,7 @@ def execute_order_customer_identity_evidence_fixture_cleanup(
         if gate:
             return result
 
+        db.expire_all()
         fixture_orders = _fixture_orders_for_tenant(db, tenant_id=int(tenant_id))
         fixture_integrations = _fixture_integrations_for_tenant(db, tenant_id=int(tenant_id))
         fixture_customers = _fixture_customers_for_tenant(db, tenant_id=int(tenant_id))
