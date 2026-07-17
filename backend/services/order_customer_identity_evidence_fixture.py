@@ -78,14 +78,33 @@ def _fixture_marker(*, slot: str) -> Dict[str, str]:
 
 
 def _merge_fixture_metadata(row: Any, *, slot: str) -> None:
-    meta = dict(getattr(row, "extra_metadata", None) or {})
-    meta.update(_fixture_marker(slot=slot))
-    row.extra_metadata = meta
+    marker = _fixture_marker(slot=slot)
+    extra = getattr(row, "extra_metadata", None)
+    if extra is not None or hasattr(row, "extra_metadata"):
+        meta = dict(extra or {})
+        meta.update(marker)
+        row.extra_metadata = meta
+        return
+    config = getattr(row, "config", None)
+    if config is not None or hasattr(row, "config"):
+        cfg = dict(config or {})
+        cfg.update(marker)
+        row.config = cfg
 
 
 def _row_has_fixture_namespace(row: Any) -> bool:
     meta = getattr(row, "extra_metadata", None) or {}
-    return str(meta.get(FIXTURE_MARKER_FIELD) or "").strip() == FIXTURE_NAMESPACE
+    if str(meta.get(FIXTURE_MARKER_FIELD) or "").strip() == FIXTURE_NAMESPACE:
+        return True
+    cfg = getattr(row, "config", None) or {}
+    return str(cfg.get(FIXTURE_MARKER_FIELD) or "").strip() == FIXTURE_NAMESPACE
+
+
+def _integration_is_fixture_owned(row: Any, *, tenant_id: int) -> bool:
+    return (
+        int(row.tenant_id) == int(tenant_id)
+        and str(row.external_store_id or "").strip() == _fixture_store_id(tenant_id)
+    )
 
 
 def _generic_internal_line_items() -> List[Dict[str, Any]]:
@@ -125,7 +144,7 @@ def _fixture_integrations_for_tenant(db: Session, *, tenant_id: int) -> List[Any
         )
         .all()
     )
-    return [row for row in rows if _row_has_fixture_namespace(row)]
+    return [row for row in rows if _integration_is_fixture_owned(row, tenant_id=tenant_id)]
 
 
 def _fixture_customers_for_tenant(db: Session, *, tenant_id: int) -> List[Any]:
@@ -142,15 +161,19 @@ def _fixture_customers_for_tenant(db: Session, *, tenant_id: int) -> List[Any]:
 def _fixture_profiles_for_tenant(db: Session, *, tenant_id: int) -> List[Any]:
     from models import ExternalCustomerProfile  # noqa: PLC0415
 
+    integration_ids = [int(row.id) for row in _fixture_integrations_for_tenant(db, tenant_id=tenant_id)]
+    if not integration_ids:
+        return []
     rows = (
         db.query(ExternalCustomerProfile)
         .filter(
             ExternalCustomerProfile.tenant_id == int(tenant_id),
             ExternalCustomerProfile.external_customer_ref == FIXTURE_EXTERNAL_CUSTOMER_REF,
+            ExternalCustomerProfile.integration_connection_id.in_(integration_ids),
         )
         .all()
     )
-    return [row for row in rows if _row_has_fixture_namespace(row)]
+    return list(rows)
 
 
 def _count_fixture_shape(db: Session, *, tenant_id: int) -> Dict[str, int]:
@@ -439,16 +462,6 @@ def _ensure_external_order(
         ingest_source="a1_evidence_fixture",
     )
     _merge_fixture_metadata(row, slot=FIXTURE_SLOT_EXTERNAL_ORDER)
-    if row.external_customer_profile_id is not None:
-        from models import ExternalCustomerProfile  # noqa: PLC0415
-
-        profile = (
-            db.query(ExternalCustomerProfile)
-            .filter(ExternalCustomerProfile.id == row.external_customer_profile_id)
-            .first()
-        )
-        if profile is not None:
-            _merge_fixture_metadata(profile, slot=FIXTURE_SLOT_EXTERNAL_ORDER)
     db.flush()
     return row, True
 
@@ -691,6 +704,9 @@ def execute_order_customer_identity_evidence_fixture_cleanup(
         if profile_ids:
             from models import ExternalCustomerProfile  # noqa: PLC0415
 
+            fixture_integration_ids = {
+                int(row.id) for row in _fixture_integrations_for_tenant(db, tenant_id=int(tenant_id))
+            }
             for profile in (
                 db.query(ExternalCustomerProfile)
                 .filter(
@@ -699,7 +715,10 @@ def execute_order_customer_identity_evidence_fixture_cleanup(
                 )
                 .all()
             ):
-                if _row_has_fixture_namespace(profile):
+                if (
+                    profile.external_customer_ref == FIXTURE_EXTERNAL_CUSTOMER_REF
+                    and int(profile.integration_connection_id) in fixture_integration_ids
+                ):
                     db.delete(profile)
                     deleted["external_profiles"] += 1
 
