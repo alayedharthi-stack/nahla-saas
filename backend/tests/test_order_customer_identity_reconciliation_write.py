@@ -347,14 +347,13 @@ def test_log_reconciliation_write_failure_no_pii(caplog: pytest.LogCaptureFixtur
     assert "order_id" not in blob
 
 
-def _database_url(pg_session) -> str:
-    bind = pg_session.get_bind()
-    return str(bind.url.render_as_string(hide_password=False))
+def _database_url(postgres_engine) -> str:
+    return str(postgres_engine.url.render_as_string(hide_password=False))
 
 
-def test_cli_dry_run_default_success(pg_session) -> None:
+def test_cli_dry_run_default_success(pg_session, postgres_engine) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
-    env = {**os.environ, "DATABASE_URL": _database_url(pg_session)}
+    env = {**os.environ, "DATABASE_URL": _database_url(postgres_engine)}
     result = subprocess.run(
         [sys.executable, _CLI, "--tenant-id", str(TEST_TENANT_A)],
         cwd=_REPO,
@@ -370,11 +369,11 @@ def test_cli_dry_run_default_success(pg_session) -> None:
     _assert_no_pii_in_write(payload, known_safe=(str(TEST_TENANT_A),))
 
 
-def test_cli_write_rejects_without_confirmation(pg_session) -> None:
+def test_cli_write_rejects_without_confirmation(pg_session, postgres_engine) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
     env = {
         **os.environ,
-        "DATABASE_URL": _database_url(pg_session),
+        "DATABASE_URL": _database_url(postgres_engine),
         "RAILWAY_PROJECT_NAME": "desirable-growth",
         "RAILWAY_ENVIRONMENT_NAME": "staging",
     }
@@ -391,7 +390,7 @@ def test_cli_write_rejects_without_confirmation(pg_session) -> None:
     assert payload["gate_stage"] == "dangerous_action_not_confirmed"
 
 
-def test_cli_write_requires_staging_database_host(pg_session) -> None:
+def test_cli_write_requires_staging_database_host(pg_session, postgres_engine) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
     env = _staging_env(
         DATABASE_URL="postgresql://user:pass@production.example.com:5432/nahla",
@@ -409,11 +408,11 @@ def test_cli_write_requires_staging_database_host(pg_session) -> None:
     assert payload["gate_stage"] == "database_host_not_allowlisted"
 
 
-def test_cli_write_success_with_confirmation_in_process(pg_session, monkeypatch) -> None:
+def test_cli_write_success_with_confirmation_in_process(pg_session, postgres_engine, monkeypatch) -> None:
     import importlib.util
 
     _seed_generic_commerce_linked_scope(pg_session)
-    monkeypatch.setenv("DATABASE_URL", _database_url(pg_session))
+    monkeypatch.setenv("DATABASE_URL", _database_url(postgres_engine))
     spec = importlib.util.spec_from_file_location(
         "reconcile_cli",
         _REPO / "backend" / "scripts" / "reconcile_order_customer_identity_coverage.py",
