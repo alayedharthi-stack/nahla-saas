@@ -174,7 +174,11 @@ def test_write_creates_authoritative_internal_and_external_evidence(pg_session) 
         dry_run=False,
     )
 
-    assert result.outcome == "success"
+    assert result.outcome == "success", (
+        result.gate_stage,
+        result.gate_error_class,
+        result.access_status,
+    )
     assert result.committed is True
     assert result.created["internal_orders"] == 1
     assert result.created["external_orders"] == 1

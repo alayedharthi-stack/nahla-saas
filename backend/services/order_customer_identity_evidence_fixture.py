@@ -442,7 +442,11 @@ def _ensure_external_order(
     if row.external_customer_profile_id is not None:
         from models import ExternalCustomerProfile  # noqa: PLC0415
 
-        profile = db.get(ExternalCustomerProfile, row.external_customer_profile_id)
+        profile = (
+            db.query(ExternalCustomerProfile)
+            .filter(ExternalCustomerProfile.id == row.external_customer_profile_id)
+            .first()
+        )
         if profile is not None:
             _merge_fixture_metadata(profile, slot=FIXTURE_SLOT_EXTERNAL_ORDER)
     db.flush()
@@ -512,13 +516,13 @@ def execute_order_customer_identity_evidence_fixture_seed(
         if created_integration:
             created["integrations"] = 1
         if integration is None:
-            raise RuntimeError("integration_missing_after_ensure")
+            raise ValueError("integration_missing_after_ensure")
 
         customer, created_customer = _ensure_internal_customer(db, tenant_id=int(tenant_id), dry_run=False)
         if created_customer:
             created["internal_customers"] = 1
         if customer is None:
-            raise RuntimeError("customer_missing_after_ensure")
+            raise ValueError("customer_missing_after_ensure")
 
         _, created_internal = _ensure_internal_order(
             db,
@@ -552,6 +556,8 @@ def execute_order_customer_identity_evidence_fixture_seed(
         log_evidence_fixture_failure(exception_class=type(exc).__name__)
         result.outcome = "failed"
         result.access_status = "execution_failed"
+        result.gate_stage = "execution_exception"
+        result.gate_error_class = type(exc).__name__
         return result
 
 
@@ -714,6 +720,8 @@ def execute_order_customer_identity_evidence_fixture_cleanup(
         log_evidence_fixture_failure(exception_class=type(exc).__name__)
         result.outcome = "failed"
         result.access_status = "execution_failed"
+        result.gate_stage = "execution_exception"
+        result.gate_error_class = type(exc).__name__
         return result
 
 
