@@ -1,10 +1,8 @@
 """Closed contract for staging legacy migration 0083 → 0087 operator gates (A1-Expand).
 
-Repository note: migration 0089 (`0089_conversation_a1_subject_bindings.py`) is
-merged on origin/main (PR #596) but is explicitly out of scope for this operator
-slice. Alembic repository head may be 0089 while staging runners stop at 0087.
-Staging advancement 0087→0089 is a separate later operator slice. Migration 0088
-(A1-Validate) is deferred/out of scope.
+Repository note: migration ``0088`` (A1-Validate) and ``0089`` are sibling heads from
+``0087``. This operator stops at ``0087``; ``0088`` validate and ``0089`` bindings
+are separate later operator slices.
 """
 from __future__ import annotations
 
@@ -29,7 +27,8 @@ MAX_MIGRATION_TIMEOUT_SEC = 3600
 MAX_DUPLICATE_TENANT_PRODUCT_EXTERNAL_ID_GROUPS = 0
 PRODUCTS_TENANT_EXTERNAL_ID_INDEX = "uq_products_tenant_external_id_nonempty"
 
-REPOSITORY_MERGED_BUT_OUT_OF_SCOPE_REVISIONS = ("0088", "0089")
+REPOSITORY_MERGED_BUT_OUT_OF_SCOPE_REVISIONS = ("0089",)
+# Sibling head 0088 (A1-Validate) is a separate staging operator slice.
 
 REQUIRED_TABLES = (
     "external_customer_profiles",

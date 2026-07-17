@@ -154,7 +154,10 @@ external reference, profile UUID, raw SQL, DB URLs, or exception text.
 4. If coverage/watermarks are missing, run the **reconciliation write operator**
    (`reconcile_order_customer_identity_coverage.py --write`) in a separate step.
 5. Re-run the read-only report until `ready_for_validate: true`.
-6. Proceed to deferred `0088` only with separate rollout approval.
+6. Proceed to deferred `0088` only with separate rollout approval — see
+   `docs/engineering/staging-migration-0087-to-0088-runbook.md`.
+7. **Retain fixture rows until validation outcome**; clean up only after success
+   or explicit no-go (see cleanup section below).
 7. **Cleanup fixtures** when the staging experiment ends.
 
 ---
