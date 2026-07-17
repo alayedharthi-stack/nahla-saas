@@ -118,7 +118,11 @@ def _assert_no_pii_in_fixture(payload: Dict[str, Any], *, known_safe: tuple[str,
 
 
 def _seed_gates(pg_session, *, tenant_id: int = TEST_TENANT_A) -> None:
-    seed_tenant(pg_session, tenant_id=tenant_id, name=_GENERIC_TENANT_NAME)
+    seed_tenant(
+        pg_session,
+        tenant_id=tenant_id,
+        name=f"{_GENERIC_TENANT_NAME} ({tenant_id})",
+    )
     _set_alembic_revision(pg_session, "0087")
     seed_capability_state(pg_session, state=CAPABILITY_STATE_EXPAND)
 
