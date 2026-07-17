@@ -4,10 +4,8 @@ Deterministic inventory + importability checks for a purported shadow-capable
 ``nahla-saas`` artifact (repo checkout or ``/app`` container layout). Does not
 enable runtime flags, touch Railway, or mutate coupon logic.
 
-PR-C follow-up: compose-consumer modules (``customer_conditional_coupon_compose_projection``,
-``customer_conditional_coupon_consumption_gate``, ``customer_conditional_coupon_answer``)
-are intentionally excluded from this shadow deployment artifact — compose remains
-default-off and is not part of the shadow observation slice inventory gate.
+Post-PR-620 enablement-blocker follow-up: compose-consumer modules, provenance,
+and persona guard surfaces are part of the closed artifact inventory gate.
 """
 from __future__ import annotations
 
@@ -19,7 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
-CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v1"
+CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v2"
 ARTIFACT_KIND = "nahla_saas_conditional_coupon_shadow_slice"
 
 # Container layout baked by the shared Dockerfile (WORKDIR /app, COPY . .).
@@ -28,6 +26,8 @@ BACKEND_REL = "backend"
 
 SHADOW_FLAG_ENV = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED"
 SHADOW_FLAG_ACCESSOR = "is_customer_conditional_coupon_shadow_enabled"
+COMPOSE_FLAG_ENV = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED"
+COMPOSE_FLAG_ACCESSOR = "is_customer_conditional_coupon_compose_enabled"
 SHADOW_FLAG_MODULE = "modules.ai.brain.truth_surface.flags"
 
 # Layer 0 truth-surface modules required for shadow observation.
@@ -35,6 +35,21 @@ REQUIRED_TRUTH_SURFACE_FILES = frozenset(
     {
         "customer_conditional_coupon_loader.py",
         "customer_conditional_coupon_shadow_readiness.py",
+    }
+)
+
+# PR-620 compose-consumer slice (default-off; inventory must be present before enablement).
+REQUIRED_COMPOSE_CONSUMER_FILES = frozenset(
+    {
+        "customer_conditional_coupon_compose_projection.py",
+        "customer_conditional_coupon_consumption_gate.py",
+    }
+)
+
+REQUIRED_PERSONA_COMPOSE_FILES = frozenset(
+    {
+        "customer_conditional_coupon_answer.py",
+        "customer_conditional_coupon_provenance.py",
     }
 )
 
@@ -49,6 +64,7 @@ REQUIRED_FIXTURE_OPERATOR_FILES = frozenset(
 
 REQUIRED_IMPORT_CHECKS: tuple[tuple[str, str], ...] = (
     (SHADOW_FLAG_MODULE, SHADOW_FLAG_ACCESSOR),
+    (SHADOW_FLAG_MODULE, COMPOSE_FLAG_ACCESSOR),
     (
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader",
         "load_customer_conditional_coupon_facts",
@@ -56,6 +72,22 @@ REQUIRED_IMPORT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "modules.ai.brain.truth_surface.customer_conditional_coupon_shadow_readiness",
         "evaluate_coupon_shadow_readiness",
+    ),
+    (
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_projection",
+        "project_customer_conditional_coupon_compose_facts",
+    ),
+    (
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate",
+        "maybe_customer_conditional_coupon_compose_facts",
+    ),
+    (
+        "modules.ai.brain.persona.customer_conditional_coupon_answer",
+        "try_compose_customer_conditional_coupon_answer",
+    ),
+    (
+        "modules.ai.brain.persona.customer_conditional_coupon_provenance",
+        "extract_constitutional_metadata",
     ),
     (
         "services.customer_conditional_coupon_shadow_fixture",
@@ -82,6 +114,7 @@ class DeploymentArtifactInventory:
     present_files: tuple[str, ...]
     missing_files: tuple[str, ...]
     shadow_flag_accessor_present: bool
+    compose_flag_accessor_present: bool
     import_checks_ok: bool
     import_failures: tuple[str, ...]
 
@@ -90,6 +123,7 @@ class DeploymentArtifactInventory:
         return (
             not self.missing_files
             and self.shadow_flag_accessor_present
+            and self.compose_flag_accessor_present
             and self.import_checks_ok
         )
 
@@ -114,6 +148,7 @@ class DeploymentArtifactEvaluation:
             "inventory_ok": inv.ok,
             "missing_files": list(inv.missing_files),
             "present_files": list(inv.present_files),
+            "compose_flag_accessor_present": inv.compose_flag_accessor_present,
             "shadow_flag_accessor_present": inv.shadow_flag_accessor_present,
         }
 
@@ -153,7 +188,15 @@ def required_relative_paths() -> frozenset[str]:
         f"modules/ai/brain/truth_surface/{name}"
         for name in REQUIRED_TRUTH_SURFACE_FILES
     )
-    return truth_surface | REQUIRED_FIXTURE_OPERATOR_FILES
+    compose_consumer = frozenset(
+        f"modules/ai/brain/truth_surface/{name}"
+        for name in REQUIRED_COMPOSE_CONSUMER_FILES
+    )
+    persona_compose = frozenset(
+        f"modules/ai/brain/persona/{name}"
+        for name in REQUIRED_PERSONA_COMPOSE_FILES
+    )
+    return truth_surface | compose_consumer | persona_compose | REQUIRED_FIXTURE_OPERATOR_FILES
 
 
 def _flags_source_path(backend_root: Path) -> Path:
@@ -165,6 +208,13 @@ def _shadow_flag_accessor_in_source(flags_path: Path) -> bool:
         return False
     source = flags_path.read_text(encoding="utf-8")
     return f"def {SHADOW_FLAG_ACCESSOR}(" in source
+
+
+def _compose_flag_accessor_in_source(flags_path: Path) -> bool:
+    if not flags_path.is_file():
+        return False
+    source = flags_path.read_text(encoding="utf-8")
+    return f"def {COMPOSE_FLAG_ACCESSOR}(" in source
 
 
 def _module_is_under_backend(module: ModuleType, backend_root: Path) -> tuple[bool, str | None]:
@@ -249,6 +299,7 @@ def evaluate_deployment_artifact_inventory(artifact_root: Path) -> DeploymentArt
             missing.append(rel)
 
     shadow_flag_ok = _shadow_flag_accessor_in_source(_flags_source_path(backend_root))
+    compose_flag_ok = _compose_flag_accessor_in_source(_flags_source_path(backend_root))
     import_ok, import_failures = _verify_importability(backend_root)
 
     return DeploymentArtifactInventory(
@@ -257,6 +308,7 @@ def evaluate_deployment_artifact_inventory(artifact_root: Path) -> DeploymentArt
         present_files=tuple(present),
         missing_files=tuple(missing),
         shadow_flag_accessor_present=shadow_flag_ok,
+        compose_flag_accessor_present=compose_flag_ok,
         import_checks_ok=import_ok,
         import_failures=import_failures,
     )
@@ -308,6 +360,9 @@ def evaluate_observation_window_preflight(
                 shadow_flag_accessor_present=bool(
                     inventory.get("shadow_flag_accessor_present")
                 ),
+                compose_flag_accessor_present=bool(
+                    inventory.get("compose_flag_accessor_present")
+                ),
                 import_checks_ok=bool(inventory.get("import_checks_ok")),
                 import_failures=tuple(inventory.get("import_failures", ())),
             ),
@@ -327,6 +382,8 @@ def evaluate_observation_window_preflight(
         if not evaluation.ok:
             blockers.append(OBSERVATION_BLOCKER_INVENTORY_NOT_VERIFIED)
             if evaluation.inventory.missing_files or not evaluation.inventory.shadow_flag_accessor_present:
+                blockers.append(OBSERVATION_BLOCKER_MISSING_SLICE)
+            if not evaluation.inventory.compose_flag_accessor_present:
                 blockers.append(OBSERVATION_BLOCKER_MISSING_SLICE)
 
     code: str | None = None
@@ -356,6 +413,8 @@ def missing_module_labels(inventory: DeploymentArtifactInventory) -> list[str]:
         labels.append(Path(rel).name)
     if not inventory.shadow_flag_accessor_present:
         labels.append(SHADOW_FLAG_ACCESSOR)
+    if not inventory.compose_flag_accessor_present:
+        labels.append(COMPOSE_FLAG_ACCESSOR)
     for failure in inventory.import_failures:
         if failure.endswith(f":missing_symbol:{SHADOW_FLAG_ACCESSOR}"):
             if SHADOW_FLAG_ACCESSOR not in labels:
@@ -365,6 +424,8 @@ def missing_module_labels(inventory: DeploymentArtifactInventory) -> list[str]:
 
 __all__ = [
     "ARTIFACT_KIND",
+    "COMPOSE_FLAG_ACCESSOR",
+    "COMPOSE_FLAG_ENV",
     "CONTRACT_VERSION",
     "DEPLOYMENT_APP_ROOT",
     "DeploymentArtifactEvaluation",
@@ -373,8 +434,10 @@ __all__ = [
     "OBSERVATION_BLOCKER_MISSING_SLICE",
     "OBSERVATION_BLOCKER_UNPINNED_REDEPLOY",
     "ObservationWindowPreflight",
+    "REQUIRED_COMPOSE_CONSUMER_FILES",
     "REQUIRED_FIXTURE_OPERATOR_FILES",
     "REQUIRED_IMPORT_CHECKS",
+    "REQUIRED_PERSONA_COMPOSE_FILES",
     "REQUIRED_TRUTH_SURFACE_FILES",
     "SHADOW_FLAG_ACCESSOR",
     "SHADOW_FLAG_ENV",
