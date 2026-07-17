@@ -64,12 +64,17 @@ IDs, phone numbers, or raw provenance refs in log lines.
 PR1 validates **source state** only. AI consumption requires PR2 read bridge +
 separate flag gate (see platform identity bridge audit).
 
-## Alembic chain safety
+## Alembic topology and bootstrap safety
 
-The deferred A1-Validate artifact named `0088` is deliberately outside
-`database/migrations/versions`, so it is not an Alembic revision and does not
-form a second head. PR1 is the current in-tree chain: `0087 → 0089`.
+`0088` (A1-Validate) and `0089` (these conversation bindings) are sibling
+heads with `down_revision = "0087"`.
 
-When A1-Validate is approved, promote its contents as a **new revision `0090`**
-with `down_revision = "0089"` (and rename its deferred file accordingly).
-Do not add an in-tree `0088` after `0089`; that would create divergent heads.
+- Normal application bootstrap, Compose migration, and the admin migration
+  endpoint explicitly target **`0089`**. They never use bare `head` and never
+  invoke `0088`.
+- `0088` is a deferred validation maintenance path. It runs only from an
+  environment pinned exactly at `0087`, through
+  `scripts/operators/staging_migration_0087_to_0088.py`, after the G4 gate and
+  its read-only violation preflight pass.
+- The guarded `0087 → 0088` operation rejects `0089`; applying conversation
+  bindings and A1 validation in one bootstrap operation is unsupported.

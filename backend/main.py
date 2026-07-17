@@ -596,7 +596,7 @@ async def on_startup() -> None:
     #    lifespan startup event. Previously this was awaited inline,
     #    which meant uvicorn would not serve a single HTTP request
     #    (not even /alive, /healthz, /auth/ping) until the entire
-    #    cleanup_salla_duplicates + ``alembic upgrade head`` chain
+    #    cleanup_salla_duplicates + ``alembic upgrade 0089`` chain
     #    finished. On Railway this is observed as: TCP connects fine,
     #    request bytes are sent fine, but the client gets ``0 bytes
     #    received`` and times out — because uvicorn refuses to
@@ -679,7 +679,7 @@ async def on_startup() -> None:
 
                 # ── Step B: Stamp Alembic to 0016 if tables exist but alembic_version
                 #    doesn't.  The DB was previously managed by Base.metadata.create_all();
-                #    without this stamp, 'alembic upgrade head' tries to run 0001 which
+                #    without this stamp, 'alembic upgrade 0089' tries to run 0001 which
                 #    immediately fails with "relation tenants already exists".
                 _db_url = os.environ.get("DATABASE_URL", "")
                 if _db_url:
@@ -752,16 +752,18 @@ async def on_startup() -> None:
                             _stamp_exc,
                         )
 
-                # ── Step C: Apply any pending migrations (0017, 0018, …) ────
+                # ── Step C: Apply normal application migrations through 0089 ─
+                # 0088 is a sibling maintenance-only validation branch from 0087
+                # and must only run via the guarded 0087→0088 operator.
                 # capture_output so the real Alembic error surfaces in
                 # Railway logs instead of being silently swallowed.
                 logger.info(
-                    "[BOOT/db] Step C: alembic upgrade head (timeout=%ds)", _T_UPGRADE,
+                    "[BOOT/db] Step C: alembic upgrade 0089 (timeout=%ds)", _T_UPGRADE,
                 )
                 _t0 = _t.monotonic()
                 try:
                     _alembic = subprocess.run(
-                        [sys.executable, "-m", "alembic", "upgrade", "head"],
+                        [sys.executable, "-m", "alembic", "upgrade", "0089"],
                         cwd=_DATABASE_DIR,
                         check=False,
                         env=os.environ.copy(),
@@ -779,7 +781,7 @@ async def on_startup() -> None:
                 _elapsed = _t.monotonic() - _t0
                 if _alembic.stdout:
                     logger.info(
-                        "[BOOT/db] Step C: alembic upgrade head stdout (rc=%d, elapsed=%.1fs):\n%s",
+                        "[BOOT/db] Step C: alembic upgrade 0089 stdout (rc=%d, elapsed=%.1fs):\n%s",
                         _alembic.returncode, _elapsed, _alembic.stdout.strip(),
                     )
                 if _alembic.returncode != 0:
@@ -792,7 +794,7 @@ async def on_startup() -> None:
                     )
                     return  # do NOT raise — caller already logs and continues
                 logger.info(
-                    "[BOOT/db] Step C: alembic upgrade head OK rc=0 elapsed=%.1fs",
+                    "[BOOT/db] Step C: alembic upgrade 0089 OK rc=0 elapsed=%.1fs",
                     _elapsed,
                 )
 
