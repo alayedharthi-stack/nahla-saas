@@ -18,6 +18,13 @@ Guarded operator for the **deferred validation** slice only. Targets exactly
    (sibling branch; apply `0089` in a separate later slice).
 6. **Constraint preflight clean** — operator aggregate violation counts all zero.
 7. **Separate rollout approval** granted (this PR merge ≠ production execute).
+8. **DR canonical parity (hard gate)** — pre-maintenance backup/restore drill must
+   match `staging_pin_0087` on the live source (exact revision `0087`, `101` public
+   tables, fingerprint
+   `2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db`). See
+   `docs/engineering/staging-dr-canonical-parity-runbook.md`. Provenance: fresh
+   read-only `postgres-staging` attestation collected Jul 2026 before the guarded
+   `0087 → 0088` maintenance window (PR #612 merged; `0088` not yet executed).
 
 ## Operator commands
 
@@ -82,7 +89,8 @@ On **any** migration or post-validation failure:
 
 1. **Stop** — do not retry in place.
 2. **Restore** staging from the latest verified backup (DR restore path).
-3. Re-run G4 read-only report and operator preflight from restored `0087` state.
+3. Re-run DR canonical parity against `staging_pin_0087` and G4 read-only report
+   and operator preflight from restored `0087` state.
 4. Root-cause constraint violations before a second attempt.
 
 Downgrade `0088 → 0087` is for ephemeral test databases only, not staging recovery.
