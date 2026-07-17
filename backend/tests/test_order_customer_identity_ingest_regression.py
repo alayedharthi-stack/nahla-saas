@@ -93,6 +93,7 @@ def test_nahla_internal_sets_customer_id(db) -> None:
     assert order.customer_id == cust.id
     assert order.customer_link_state == LINK_STATE_VERIFIED
     assert order.external_customer_profile_id is None
+    assert order.external_identity_link_state is None
 
 
 def test_whatsapp_unlinked_clears_both_axes(db) -> None:

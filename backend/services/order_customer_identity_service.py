@@ -72,6 +72,16 @@ def _clear_external_link_fields(order: Any) -> None:
     order.identity_namespace = None
 
 
+def _null_external_link_fields_for_internal_authoritative(order: Any) -> None:
+    """0087 CHECK requires NULL external tuple fields on internal authoritative rows."""
+    order.external_customer_profile_id = None
+    order.external_identity_link_state = None
+    order.external_identity_evidence_class = None
+    order.integration_connection_id = None
+    order.external_customer_ref = None
+    order.identity_namespace = None
+
+
 def apply_external_order_identity_unlinked(
     order: Any,
     *,
@@ -237,8 +247,8 @@ def apply_nahla_internal_order_identity(
     order.customer_link_evidence_class = EVIDENCE_AUTHORITATIVE
     order.customer_link_source = CUSTOMER_LINK_SOURCE_NAHL_BRIDGE
     order.customer_linked_at = _utcnow()
-    _clear_external_link_fields(order)
-    # Clearing external tuple fields must never erase the internal namespace.
+    _null_external_link_fields_for_internal_authoritative(order)
+    # Internal authoritative rows keep only the internal namespace populated.
     order.identity_namespace = NAHLA_INTERNAL_ORDER_V1
     ensure_internal_customer_coverage_row(
         db,
