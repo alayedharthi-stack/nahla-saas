@@ -132,5 +132,6 @@ staging recovery.
 2. Merge DR contract bump adding `staging_pin_0088` (this attestation PR) and
    complete backup/restore drill with `matched_source_profile_id=staging_pin_0088`.
 3. Execute this `0088 + 0089` attachment operator after the DR prerequisite is green.
-4. Run coupon shadow **read-only** observation probes (no runtime flags).
+4. Run coupon shadow **read-only** observation probes via
+   `scripts/operators/customer_conditional_coupon_shadow_observation.py` (no persistent runtime flags).
 5. Evaluate shadow readiness before any activation slice.
