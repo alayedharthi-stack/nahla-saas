@@ -127,14 +127,28 @@ fails closed when the source does not match a contracted profile.
 | `total_products_count` | **Informational** | Catalog size — informs timeout sizing |
 | `products_with_metadata_variants_array` | **Informational** | 0064 multi-variant backfill workload estimate |
 | `products_without_variant_rows` | **Informational** | Rows 0064 will INSERT on upgrade |
+| `cross_merchant_signals_table_preexisting` | **Informational** | `1` if 0033 drift collision shape detected |
+| `learned_sales_policies_table_preexisting` | **Informational** | `1` if 0034 drift collision shape detected |
 | `product_variants_table_preexisting` | **Informational** | `1` if drift collision shape detected |
 | `product_groups_table_preexisting` | **Informational** | `1` if catalog-intelligence table drift |
+| `product_group_items_table_preexisting` | **Informational** | `1` if 0083 catalog join-table drift |
 | `product_relations_table_preexisting` | **Informational** | `1` if catalog-intelligence table drift |
 | `product_rankings_table_preexisting` | **Informational** | `1` if catalog-intelligence table drift |
 | `products_has_variants_column_preexisting` | **Informational** | `1` if forward-ORM column drift |
 | `products_default_variant_id_column_preexisting` | **Informational** | `1` if forward-ORM column drift |
+| `stage_b_catalog_missing_index_count` | **Informational** | Count of contract-required indexes absent pre-GO |
+| `stage_b_catalog_missing_unique_constraint_count` | **Informational** | Count of contract-required unique constraints absent pre-GO |
 
 Stage B has **no duplicate hard-stop preflight** in this slice. Hard gates are identity, binding, bootstrap freeze, confirmation, exact start revision `0032`, post-success contract at `0083`, and DR canonical parity eligibility via `staging_pin_0032` on the pre-stage backup/restore drill.
+
+### Stage B retry prerequisites (F16 drift guards on 0033–0049)
+
+| Prerequisite | Check |
+|--------------|-------|
+| Migrations **0033–0049** merged with F16 inspector guards | Required for safe retry when `create_all` pre-created equivalent objects |
+| Preflight `cross_merchant_signals_table_preexisting` / `learned_sales_policies_table_preexisting` | Informational — `1` means drift path; upgrade converges only when shapes are equivalent |
+| Preflight `stage_b_catalog_missing_*_count` | Informational — non-zero means partial catalog drift; post-success contract is authoritative |
+| High `stage_b_catalog_missing_unique_constraint_count` with tables present | Investigate before GO — may indicate non-equivalent partial schema outside guard boundary |
 
 ### Bounded timeout policy
 

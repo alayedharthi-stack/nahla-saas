@@ -18,11 +18,16 @@ or the runtime guard.
 
 Revision ID: 0046
 Revises: 0045
+
+Idempotency (F16)
+─────────────────
+Data-only sanitation runs only when 0045 pause columns exist.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect
 
 revision = "0046"
 down_revision = "0045"
@@ -39,8 +44,24 @@ _VALID_REASONS = (
 )
 
 
+def _has_column(bind, table_name: str, column_name: str) -> bool:
+    if table_name not in inspect(bind).get_table_names():
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(bind).get_columns(table_name)
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
+    if not (
+        _has_column(bind, "conversations", "ai_paused")
+        and _has_column(bind, "conversations", "ai_paused_reason")
+        and _has_column(bind, "conversations", "ai_paused_by")
+    ):
+        return
+
     bind.execute(
         sa.text(
             """

@@ -90,21 +90,106 @@ _PRODUCTS_WITHOUT_VARIANT_ROWS_SQL = text(
 
 _TOTAL_PRODUCTS_SQL = text("SELECT count(*)::int FROM products")
 
+_INDEX_EXISTS_SQL = text(
+    """
+    SELECT count(*)::int
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND tablename = :table_name
+      AND indexname = :index_name
+    """
+)
+
+_UNIQUE_CONSTRAINT_EXISTS_SQL = text(
+    """
+    SELECT count(*)::int
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = 'public'
+      AND t.relname = :table_name
+      AND c.conname = :constraint_name
+      AND c.contype = 'u'
+    """
+)
+
+_STAGE_B_CATALOG_UNIQUE_CONSTRAINTS: tuple[tuple[str, str], ...] = (
+    ("product_groups", "uq_product_groups_tenant_slug"),
+    ("product_group_items", "uq_product_group_items_group_product"),
+    ("product_relations", "uq_product_relations_tenant_pair_type"),
+    ("product_rankings", "uq_product_rankings_tenant_product"),
+    ("product_variants", "uq_variants_product_salla"),
+)
+
 
 def _table_exists(conn: Connection, table_name: str) -> bool:
-    return int(conn.execute(_TABLE_EXISTS_SQL, {"table_name": table_name}).scalar_one()) > 0
+    if conn.dialect.name == "postgresql":
+        return int(conn.execute(_TABLE_EXISTS_SQL, {"table_name": table_name}).scalar_one()) > 0
+    return table_name in inspect(conn).get_table_names()
 
 
 def _column_exists(conn: Connection, table_name: str, column_name: str) -> bool:
-    return (
-        int(
-            conn.execute(
-                _COLUMN_EXISTS_SQL,
-                {"table_name": table_name, "column_name": column_name},
-            ).scalar_one()
+    if conn.dialect.name == "postgresql":
+        return (
+            int(
+                conn.execute(
+                    _COLUMN_EXISTS_SQL,
+                    {"table_name": table_name, "column_name": column_name},
+                ).scalar_one()
+            )
+            > 0
         )
-        > 0
+    if not _table_exists(conn, table_name):
+        return False
+    return any(
+        c["name"] == column_name
+        for c in inspect(conn).get_columns(table_name)
     )
+
+
+def _index_exists(conn: Connection, table_name: str, index_name: str) -> bool:
+    return int(
+        conn.execute(
+            _INDEX_EXISTS_SQL,
+            {"table_name": table_name, "index_name": index_name},
+        ).scalar_one()
+    ) > 0
+
+
+def _unique_constraint_exists(conn: Connection, table_name: str, constraint_name: str) -> bool:
+    return int(
+        conn.execute(
+            _UNIQUE_CONSTRAINT_EXISTS_SQL,
+            {"table_name": table_name, "constraint_name": constraint_name},
+        ).scalar_one()
+    ) > 0
+
+
+def _count_missing_stage_b_catalog_indexes(conn: Connection) -> int:
+    if conn.dialect.name != "postgresql":
+        return 0
+    missing = 0
+    for table_name, indexes in REQUIRED_INDEXES.items():
+        if not _table_exists(conn, table_name):
+            missing += len(indexes)
+            continue
+        for index_name in indexes:
+            if not _index_exists(conn, table_name, index_name):
+                missing += 1
+    return missing
+
+
+def _count_missing_stage_b_catalog_unique_constraints(conn: Connection) -> int:
+    if conn.dialect.name != "postgresql":
+        return 0
+    missing = 0
+    for table_name, constraint_name in _STAGE_B_CATALOG_UNIQUE_CONSTRAINTS:
+        if not _table_exists(conn, table_name):
+            missing += 1
+            continue
+        if not _unique_constraint_exists(conn, table_name, constraint_name):
+            missing += 1
+    return missing
 
 
 def validate_staging_identity(env: Mapping[str, str] | None = None) -> GateFailure | None:
@@ -140,6 +225,12 @@ def validate_timeout_policy(timeout_sec: int) -> GateFailure | None:
 def collect_destructive_preflight_counts(conn: Connection) -> dict[str, int]:
     """Aggregate-only drift / backfill workload indicators for 0033–0083."""
     counts: dict[str, int] = {
+        "cross_merchant_signals_table_preexisting": int(
+            _table_exists(conn, "cross_merchant_signals")
+        ),
+        "learned_sales_policies_table_preexisting": int(
+            _table_exists(conn, "learned_sales_policies")
+        ),
         "product_variants_table_preexisting": int(_table_exists(conn, "product_variants")),
         "products_has_variants_column_preexisting": int(
             _column_exists(conn, "products", "has_variants")
@@ -148,24 +239,32 @@ def collect_destructive_preflight_counts(conn: Connection) -> dict[str, int]:
             _column_exists(conn, "products", "default_variant_id")
         ),
         "product_groups_table_preexisting": int(_table_exists(conn, "product_groups")),
+        "product_group_items_table_preexisting": int(_table_exists(conn, "product_group_items")),
         "product_relations_table_preexisting": int(_table_exists(conn, "product_relations")),
         "product_rankings_table_preexisting": int(_table_exists(conn, "product_rankings")),
+        "stage_b_catalog_missing_index_count": _count_missing_stage_b_catalog_indexes(conn),
+        "stage_b_catalog_missing_unique_constraint_count": (
+            _count_missing_stage_b_catalog_unique_constraints(conn)
+        ),
         "total_products_count": 0,
         "products_with_metadata_variants_array": 0,
         "products_without_variant_rows": 0,
     }
     if _table_exists(conn, "products"):
-        counts["total_products_count"] = int(conn.execute(_TOTAL_PRODUCTS_SQL).scalar_one())
-        if _column_exists(conn, "products", "metadata"):
-            counts["products_with_metadata_variants_array"] = int(
-                conn.execute(_PRODUCTS_METADATA_VARIANTS_SQL).scalar_one()
-            )
-        if _table_exists(conn, "product_variants"):
-            counts["products_without_variant_rows"] = int(
-                conn.execute(_PRODUCTS_WITHOUT_VARIANT_ROWS_SQL).scalar_one()
-            )
-        elif counts["total_products_count"] > 0:
-            counts["products_without_variant_rows"] = counts["total_products_count"]
+        if conn.dialect.name == "postgresql":
+            counts["total_products_count"] = int(conn.execute(_TOTAL_PRODUCTS_SQL).scalar_one())
+            if _column_exists(conn, "products", "metadata"):
+                counts["products_with_metadata_variants_array"] = int(
+                    conn.execute(_PRODUCTS_METADATA_VARIANTS_SQL).scalar_one()
+                )
+            if _table_exists(conn, "product_variants"):
+                counts["products_without_variant_rows"] = int(
+                    conn.execute(_PRODUCTS_WITHOUT_VARIANT_ROWS_SQL).scalar_one()
+                )
+            elif counts["total_products_count"] > 0:
+                counts["products_without_variant_rows"] = counts["total_products_count"]
+        else:
+            counts["total_products_count"] = int(conn.execute(text("SELECT count(*) FROM products")).scalar_one())
     return counts
 
 

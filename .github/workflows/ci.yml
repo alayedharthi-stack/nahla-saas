@@ -204,6 +204,8 @@ jobs:
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_legacy_migration_drift_0025_0030_pg.py \
+            backend/tests/test_legacy_migration_drift_0032_0083_pg.py \
+            backend/tests/test_staging_migration_0032_to_0083_operator.py \
             backend/tests/test_legacy_migration_drift_0030_0087_pg.py \
             backend/tests/test_staging_dr_canonical_parity_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \

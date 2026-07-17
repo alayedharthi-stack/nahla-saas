@@ -22,12 +22,19 @@ Columns
 * ``source_type``         — manual | system | imported  (default 'manual')
 * ``coupon_level``        — bronze | silver | gold | vip   (nullable)
 * ``allocation_channel``  — ai | campaign | autopilot | shared (nullable)
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when forward-ORM drift pre-created
+columns or indexes while ``alembic_version`` is still at 0037. Backfill
+UPDATEs are idempotent and only run when the promoted columns exist.
 """
 from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
 
+from migration_inspector_helpers import has_column, has_index
 
 revision = "0038"
 down_revision = "0037"
@@ -36,70 +43,75 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "coupons",
-        sa.Column(
-            "source_type",
-            sa.String(),
-            nullable=False,
-            server_default=sa.text("'manual'"),
-        ),
-    )
-    op.add_column("coupons", sa.Column("coupon_level", sa.String(), nullable=True))
-    op.add_column("coupons", sa.Column("allocation_channel", sa.String(), nullable=True))
+    bind = op.get_bind()
 
-    op.create_index("ix_coupons_source_type", "coupons", ["source_type"])
-    op.create_index("ix_coupons_coupon_level", "coupons", ["coupon_level"])
+    if not has_column(bind, "coupons", "source_type"):
+        op.add_column(
+            "coupons",
+            sa.Column(
+                "source_type",
+                sa.String(),
+                nullable=False,
+                server_default=sa.text("'manual'"),
+            ),
+        )
+    if not has_column(bind, "coupons", "coupon_level"):
+        op.add_column("coupons", sa.Column("coupon_level", sa.String(), nullable=True))
+    if not has_column(bind, "coupons", "allocation_channel"):
+        op.add_column("coupons", sa.Column("allocation_channel", sa.String(), nullable=True))
 
-    # ── Backfill from extra_metadata.source ──────────────────────────────
-    # Auto-pool rows write source='auto'; promotion materialiser writes
-    # 'promotion'; on-demand AI writes 'auto' too. Map them all to 'system'
-    # so the dashboard collapses the implementation detail into a single
-    # merchant-facing bucket.
-    op.execute("""
-        UPDATE coupons
-           SET source_type = 'system'
-         WHERE LOWER(COALESCE(metadata->>'source', '')) IN
-               ('auto', 'auto_generated', 'system', 'pool', 'automation', 'promotion')
-            OR (metadata->>'auto_generated')::text = 'true'
-    """)
-    op.execute("""
-        UPDATE coupons
-           SET source_type = 'imported'
-         WHERE LOWER(COALESCE(metadata->>'source', '')) IN
-               ('salla', 'zid', 'imported')
-            OR (metadata->>'salla_synced')::text = 'true'
-            AND source_type = 'manual'
-    """)
+    if not has_index(bind, "coupons", "ix_coupons_source_type"):
+        op.create_index("ix_coupons_source_type", "coupons", ["source_type"])
+    if not has_index(bind, "coupons", "ix_coupons_coupon_level"):
+        op.create_index("ix_coupons_coupon_level", "coupons", ["coupon_level"])
 
-    # ── Backfill coupon_level from segment / VIP flag ────────────────────
-    op.execute("""
-        UPDATE coupons
-           SET coupon_level = CASE
-               WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('vip','at_risk') THEN 'vip'
-               WHEN LOWER(COALESCE(metadata->>'target_segment', '')) = 'gold' THEN 'gold'
-               WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('active','silver') THEN 'silver'
-               WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('new','bronze','lead') THEN 'bronze'
-               WHEN (metadata->>'vip')::text = 'true' THEN 'vip'
-               ELSE NULL
-           END
-         WHERE coupon_level IS NULL
-    """)
+    if has_column(bind, "coupons", "source_type"):
+        # ── Backfill from extra_metadata.source ──────────────────────────────
+        op.execute("""
+            UPDATE coupons
+               SET source_type = 'system'
+             WHERE LOWER(COALESCE(metadata->>'source', '')) IN
+                   ('auto', 'auto_generated', 'system', 'pool', 'automation', 'promotion')
+                OR (metadata->>'auto_generated')::text = 'true'
+        """)
+        op.execute("""
+            UPDATE coupons
+               SET source_type = 'imported'
+             WHERE LOWER(COALESCE(metadata->>'source', '')) IN
+                   ('salla', 'zid', 'imported')
+                OR (metadata->>'salla_synced')::text = 'true'
+                AND source_type = 'manual'
+        """)
 
-    # ── Backfill allocation_channel ──────────────────────────────────────
-    op.execute("""
-        UPDATE coupons
-           SET allocation_channel = CASE
-               WHEN metadata->>'campaign_id' IS NOT NULL THEN 'campaign'
-               WHEN LOWER(COALESCE(metadata->>'source', '')) IN ('automation','auto') THEN 'autopilot'
-               WHEN LOWER(COALESCE(metadata->>'source', '')) = 'promotion' THEN 'shared'
-               WHEN LOWER(COALESCE(metadata->>'channel', '')) IN ('ai','chat','brain') THEN 'ai'
-               ELSE NULL
-           END
-         WHERE allocation_channel IS NULL
-    """)
+    if has_column(bind, "coupons", "coupon_level"):
+        op.execute("""
+            UPDATE coupons
+               SET coupon_level = CASE
+                   WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('vip','at_risk') THEN 'vip'
+                   WHEN LOWER(COALESCE(metadata->>'target_segment', '')) = 'gold' THEN 'gold'
+                   WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('active','silver') THEN 'silver'
+                   WHEN LOWER(COALESCE(metadata->>'target_segment', '')) IN ('new','bronze','lead') THEN 'bronze'
+                   WHEN (metadata->>'vip')::text = 'true' THEN 'vip'
+                   ELSE NULL
+               END
+             WHERE coupon_level IS NULL
+        """)
 
-    op.alter_column("coupons", "source_type", server_default=None)
+    if has_column(bind, "coupons", "allocation_channel"):
+        op.execute("""
+            UPDATE coupons
+               SET allocation_channel = CASE
+                   WHEN metadata->>'campaign_id' IS NOT NULL THEN 'campaign'
+                   WHEN LOWER(COALESCE(metadata->>'source', '')) IN ('automation','auto') THEN 'autopilot'
+                   WHEN LOWER(COALESCE(metadata->>'source', '')) = 'promotion' THEN 'shared'
+                   WHEN LOWER(COALESCE(metadata->>'channel', '')) IN ('ai','chat','brain') THEN 'ai'
+                   ELSE NULL
+               END
+             WHERE allocation_channel IS NULL
+        """)
+
+    if has_column(bind, "coupons", "source_type"):
+        op.alter_column("coupons", "source_type", server_default=None)
 
 
 def downgrade() -> None:
