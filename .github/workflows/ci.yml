@@ -55,6 +55,9 @@ jobs:
             backend/tests/test_customer_conditional_coupon_compose_projection.py \
             backend/tests/test_customer_conditional_coupon_compose_wiring.py \
             backend/tests/test_customer_conditional_coupon_compose_eval_fixtures.py \
+            backend/tests/test_customer_conditional_coupon_compose_provenance_integration.py \
+            backend/tests/test_customer_conditional_coupon_compose_collision.py \
+            backend/tests/test_customer_conditional_coupon_compose_guards.py \
             -q --maxfail=1
 
       - name: Coupon shadow observation probe tests

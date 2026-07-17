@@ -28,6 +28,18 @@ from modules.ai.brain.turn_owner_contract import get_turn_owner_contract
 logger = logging.getLogger("nahla.brain.postprocess.commerce_reply_quality_guard")
 
 
+def _conditional_coupon_compose_collision_active(
+    *,
+    customer_conditional_coupon_facts: Optional[dict] = None,
+    customer_conditional_coupon_compose_active: bool = False,
+) -> bool:
+    if customer_conditional_coupon_compose_active:
+        return True
+    return isinstance(customer_conditional_coupon_facts, dict) and bool(
+        customer_conditional_coupon_facts
+    )
+
+
 def _finalize_commerce_fallback(
     fallback: str,
     kind: str,
@@ -38,10 +50,17 @@ def _finalize_commerce_fallback(
     decision_topic: str = "",
     protected_final_reply: bool = False,
     trusted_coupon_offer_facts: Optional[dict] = None,
+    customer_conditional_coupon_facts: Optional[dict] = None,
+    customer_conditional_coupon_compose_active: bool = False,
 ) -> Tuple[str, str]:
     """Block catalog fallback on non-catalog turns; route coupon inquiries safely."""
     if isinstance(trusted_coupon_offer_facts, dict) and trusted_coupon_offer_facts:
         return fallback, kind
+    if _conditional_coupon_compose_collision_active(
+        customer_conditional_coupon_facts=customer_conditional_coupon_facts,
+        customer_conditional_coupon_compose_active=customer_conditional_coupon_compose_active,
+    ):
+        return "", "conditional_coupon_compose_collision_suppressed"
     try:
         from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
             build_discount_coupon_support_reply,
@@ -635,6 +654,8 @@ def apply_commerce_reply_quality_guard(
     chosen_path: str = "",
     kb_availability_facts: Optional[Dict[str, Any]] = None,
     trusted_coupon_offer_facts: Optional[Dict[str, Any]] = None,
+    customer_conditional_coupon_facts: Optional[Dict[str, Any]] = None,
+    customer_conditional_coupon_compose_active: bool = False,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     kb_negative = _kb_negative_availability_decision(
@@ -701,6 +722,8 @@ def apply_commerce_reply_quality_guard(
                 contract is not None and contract.protected_final_reply
             ),
             trusted_coupon_offer_facts=trusted_coupon_offer_facts,
+            customer_conditional_coupon_facts=customer_conditional_coupon_facts,
+            customer_conditional_coupon_compose_active=customer_conditional_coupon_compose_active,
         )
         if kb_negative and kind == "kb_negative_suppressed":
             return CommerceReplyQualityGuardResult(
@@ -712,6 +735,15 @@ def apply_commerce_reply_quality_guard(
                 fallback_kind=kind,
             )
         if not fallback and kind == "social_suppressed":
+            return CommerceReplyQualityGuardResult(
+                reply="",
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind=kind,
+            )
+        if not fallback and kind == "conditional_coupon_compose_collision_suppressed":
             return CommerceReplyQualityGuardResult(
                 reply="",
                 replaced=False,
@@ -796,6 +828,8 @@ def apply_commerce_reply_quality_guard(
                 contract is not None and contract.protected_final_reply
             ),
             trusted_coupon_offer_facts=trusted_coupon_offer_facts,
+            customer_conditional_coupon_facts=customer_conditional_coupon_facts,
+            customer_conditional_coupon_compose_active=customer_conditional_coupon_compose_active,
         )
         used_fallback = True
         if kb_negative and fallback_kind == "kb_negative_suppressed":
@@ -804,6 +838,9 @@ def apply_commerce_reply_quality_guard(
             needs_fallback = False
             fallback_kind = ""
         if not text and fallback_kind == "social_suppressed":
+            used_fallback = False
+            needs_fallback = False
+        if not text and fallback_kind == "conditional_coupon_compose_collision_suppressed":
             used_fallback = False
             needs_fallback = False
 

@@ -18,6 +18,7 @@ from services import (  # noqa: E402
     customer_conditional_coupon_shadow_deployment_artifact_contract as artifact_contract,
 )
 from services.customer_conditional_coupon_shadow_deployment_artifact_contract import (  # noqa: E402
+    COMPOSE_FLAG_ACCESSOR,
     CONTRACT_VERSION,
     DeploymentArtifactEvaluation,
     DeploymentArtifactInventory,
@@ -38,6 +39,7 @@ def test_repo_root_passes_shadow_deployment_artifact_contract() -> None:
     assert result.ok is True
     assert result.inventory.missing_files == ()
     assert result.inventory.shadow_flag_accessor_present is True
+    assert result.inventory.compose_flag_accessor_present is True
     assert result.inventory.import_checks_ok is True
 
 
@@ -48,6 +50,16 @@ def test_contract_requires_layer0_modules_fixture_operator_and_flag_accessor() -
         "modules/ai/brain/truth_surface/customer_conditional_coupon_shadow_readiness.py"
         in rels
     )
+    assert (
+        "modules/ai/brain/truth_surface/customer_conditional_coupon_compose_projection.py"
+        in rels
+    )
+    assert (
+        "modules/ai/brain/truth_surface/customer_conditional_coupon_consumption_gate.py"
+        in rels
+    )
+    assert "modules/ai/brain/persona/customer_conditional_coupon_answer.py" in rels
+    assert "modules/ai/brain/persona/customer_conditional_coupon_provenance.py" in rels
     assert "services/customer_conditional_coupon_shadow_fixture.py" in rels
     assert "scripts/seed_customer_conditional_coupon_shadow_fixture.py" in rels
 
@@ -232,6 +244,7 @@ def test_regression_staging_b4f11547_missing_slice_shape() -> None:
             "modules/ai/brain/truth_surface/customer_conditional_coupon_shadow_readiness.py",
         ),
         shadow_flag_accessor_present=False,
+        compose_flag_accessor_present=False,
         import_checks_ok=False,
         import_failures=(
             "modules.ai.brain.truth_surface.flags:import_error:ModuleNotFoundError",

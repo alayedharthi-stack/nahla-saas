@@ -17,6 +17,7 @@ from .compose_guards import apply_guards_or_fallback, apply_persona_compose_guar
 from .facts_bundle import (
     PHASE2_SOCIAL_SURFACES,
     PERSONA_COMPOSER_SURFACES,
+    PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER,
     PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
     PersonaComposeResult,
     PersonaConstraints,
@@ -274,12 +275,13 @@ class FactBoundPersonaComposer:
             )
 
         if not (raw_text or "").strip():
-            raw_text = deterministic_fallback(
-                bundle,
-                ctx=ctx,
-                reason=fallback_reason or "empty_llm",
-            )
-            source = "fallback_deterministic"
+            if surface != PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
+                raw_text = deterministic_fallback(
+                    bundle,
+                    ctx=ctx,
+                    reason=fallback_reason or "empty_llm",
+                )
+                source = "fallback_deterministic"
 
         final_text, guard = apply_guards_or_fallback(
             raw_text,

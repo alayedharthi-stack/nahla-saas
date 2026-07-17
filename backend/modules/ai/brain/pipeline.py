@@ -2860,11 +2860,18 @@ class MerchantBrain:
             from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                 begin_trusted_coupon_offer_text_tracking,
             )
+            from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                begin_customer_conditional_coupon_text_tracking,
+            )
             from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                 begin_product_sale_offer_text_tracking,
             )
 
             begin_trusted_coupon_offer_text_tracking(
+                result.data,
+                reply or "",
+            )
+            begin_customer_conditional_coupon_text_tracking(
                 result.data,
                 reply or "",
             )
@@ -3207,11 +3214,20 @@ class MerchantBrain:
                     from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                         note_trusted_coupon_offer_text_change,
                     )
+                    from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                        note_customer_conditional_coupon_text_change,
+                    )
                     from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                         note_product_sale_offer_text_change,
                     )
 
                     note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_scrub,
+                        after=reply,
+                        reason="scrub_internal_markers",
+                    )
+                    note_customer_conditional_coupon_text_change(
                         result.data,
                         before=_orig_scrub,
                         after=reply,
@@ -3249,11 +3265,20 @@ class MerchantBrain:
                     from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                         note_trusted_coupon_offer_text_change,
                     )
+                    from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                        note_customer_conditional_coupon_text_change,
+                    )
                     from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                         note_product_sale_offer_text_change,
                     )
 
                     note_trusted_coupon_offer_text_change(
+                        result.data,
+                        before=_orig_policy,
+                        after=reply,
+                        reason="sanitize_outbound_text",
+                    )
+                    note_customer_conditional_coupon_text_change(
                         result.data,
                         before=_orig_policy,
                         after=reply,
@@ -3979,6 +4004,12 @@ class MerchantBrain:
                     )
                     or {}
                 )
+                _cc_coupon_facts = dict(
+                    (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
+                        "customer_conditional_coupon_facts",
+                    )
+                    or {}
+                )
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
                     inbound_text=message or "",
@@ -4002,6 +4033,10 @@ class MerchantBrain:
                     chosen_path=_chosen_path,
                     kb_availability_facts=(decision.args or {}).get("allowed_facts"),
                     trusted_coupon_offer_facts=_tc_offer_facts or None,
+                    customer_conditional_coupon_facts=_cc_coupon_facts or None,
+                    customer_conditional_coupon_compose_active=bool(
+                        result.data.get("customer_conditional_coupon_compose_active")
+                    ),
                 )
                 if _crqg.replaced:
                     reply = _crqg.reply
@@ -4366,6 +4401,10 @@ class MerchantBrain:
                 extract_constitutional_metadata as extract_coupon_constitutional_metadata,
                 finalize_trusted_coupon_offer_text_provenance,
             )
+            from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                extract_constitutional_metadata as extract_conditional_coupon_constitutional_metadata,
+                finalize_customer_conditional_coupon_text_provenance,
+            )
             from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                 extract_constitutional_metadata as extract_product_sale_constitutional_metadata,
                 finalize_product_sale_offer_text_provenance,
@@ -4376,12 +4415,20 @@ class MerchantBrain:
                 reply or "",
                 guard_replaced=_guard_replaced,
             )
+            finalize_customer_conditional_coupon_text_provenance(
+                result.data,
+                reply or "",
+                guard_replaced=_guard_replaced,
+            )
             finalize_product_sale_offer_text_provenance(
                 result.data,
                 reply or "",
                 guard_replaced=_guard_replaced,
             )
             _tc_coupon_constitutional_meta = extract_coupon_constitutional_metadata(result.data)
+            _cc_coupon_constitutional_meta = extract_conditional_coupon_constitutional_metadata(
+                result.data
+            )
             _ps_offer_constitutional_meta = extract_product_sale_constitutional_metadata(
                 result.data
             )
@@ -4392,6 +4439,7 @@ class MerchantBrain:
                 _tc_prov_finalize_exc,
             )
             _tc_coupon_constitutional_meta = {}
+            _cc_coupon_constitutional_meta = {}
             _ps_offer_constitutional_meta = {}
 
         return {
@@ -4441,6 +4489,7 @@ class MerchantBrain:
                 ],
             ),
             **_tc_coupon_constitutional_meta,
+            **_cc_coupon_constitutional_meta,
             **_ps_offer_constitutional_meta,
         }
 

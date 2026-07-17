@@ -8662,6 +8662,24 @@ async def _handle_merchant_message(
                                     "chosen_path": _brain_chosen_path,
                                     "trusted_coupon_offer_compose_active": True,
                                 }
+                        elif (
+                            _brain_chosen_path == "customer_conditional_coupon_compose"
+                            and brain_result.get("customer_conditional_coupon_compose_active")
+                        ):
+                            try:
+                                from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                                    extract_constitutional_metadata,
+                                )
+
+                                _brain_persona_compose_event = extract_constitutional_metadata(
+                                    brain_result,
+                                )
+                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
+                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
+                                _brain_persona_compose_event = {
+                                    "chosen_path": _brain_chosen_path,
+                                    "customer_conditional_coupon_compose_active": True,
+                                }
                         elif _brain_chosen_path in (
                             "general_offer_discovery_compose",
                             "product_sale_offer_compose",
@@ -9893,11 +9911,19 @@ async def _handle_merchant_message(
                                     from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
                                         note_trusted_coupon_offer_dedup_substitution,
                                     )
+                                    from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                                        note_customer_conditional_coupon_dedup_substitution,
+                                    )
                                     from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                                         note_product_sale_offer_dedup_substitution,
                                     )
 
                                     note_trusted_coupon_offer_dedup_substitution(
+                                        _brain_persona_compose_event,
+                                        before=_po_reply_before_dedup,
+                                        after=reply,
+                                    )
+                                    note_customer_conditional_coupon_dedup_substitution(
                                         _brain_persona_compose_event,
                                         before=_po_reply_before_dedup,
                                         after=reply,
