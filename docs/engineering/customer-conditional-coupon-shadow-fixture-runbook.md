@@ -147,6 +147,34 @@ CI regression: `backend/tests/test_customer_conditional_coupon_shadow_deployment
 
 ---
 
+## Tracked shadow observation probe (read-only)
+
+Use the closed operator at `scripts/operators/customer_conditional_coupon_shadow_observation.py`
+for staging observation and CI — **not** untracked `.dr-staging-tmp/` scripts.
+
+| Property | Contract |
+|----------|----------|
+| **SessionLocal import** | `from database.session import SessionLocal` only (`database/__init__.py` is empty in `/app`) |
+| **Default-off** | No DB I/O when the shadow flag is unset (`zero_io_contract`) |
+| **Process-scoped shadow** | Set `NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED=true` only for the probe process (inline SSH); never leave persistent Railway vars set |
+| **Guards** | No compose flags; `materialise_for_customer` must not run |
+| **Output** | Closed JSON (`coupon_shadow_observation_probe_v1`) |
+
+Local default-off check (no Railway/network):
+
+```bash
+python -m scripts.operators.customer_conditional_coupon_shadow_observation default-off
+```
+
+CI regression: `backend/tests/test_customer_conditional_coupon_shadow_observation_probe.py`.
+
+**Prior failure prevented:** stock untracked observation remote used
+`from database import SessionLocal`, which raises `ImportError` in the deployed
+`/app` layout and aborted observation with `observation_failed` after preflight
+passed on deploy `599b4297`.
+
+---
+
 ## Future shadow-only observation window (separate step)
 
 This harness **prepares data only**. Shadow observation is a **later, separately
