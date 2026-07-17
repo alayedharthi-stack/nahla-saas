@@ -49,6 +49,25 @@ def test_upgrade_0024_to_0030_adds_three_public_tables(
     assert after["schema_fingerprint"] != before["schema_fingerprint"]
 
 
+def test_staging_pin_0083_matches_live_attested_values() -> None:
+    """Profile matches guarded Stage B live staging source attestation."""
+    contract = load_contract(export_contract())
+    pin = _profile("staging_pin_0083")
+    matched = match_source_profile(
+        alembic_revision="0083",
+        public_table_count=96,
+        schema_fingerprint_sha256=(
+            "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+        ),
+        contract=contract,
+    )
+    assert matched == "staging_pin_0083"
+    assert pin["public_table_count"] == 96
+    assert pin["schema_fingerprint_sha256"] == (
+        "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    )
+
+
 def test_staging_pin_0032_matches_live_attested_values() -> None:
     """Profile matches guarded Stage A live staging source attestation."""
     contract = load_contract(export_contract())
