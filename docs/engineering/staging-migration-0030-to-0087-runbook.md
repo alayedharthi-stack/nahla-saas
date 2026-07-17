@@ -1,6 +1,6 @@
 # Staging legacy migration 0030 → 0087 — operator runbook (A1 Expand)
 
-Controlled, staging-gated operator surface for the legacy recovery chain **0031–0087** when staging is pinned at **`0030`** after the successful 0024→0030 slice. This runbook covers three bounded guarded stages only — not backup storage, deploy, production execution, bootstrap unfreeze, or migrations **0088 / 0089 / head**.
+Controlled, staging-gated operator surface for the legacy recovery chain **0031–0087** when staging advances through three bounded guarded stages. This runbook covers three bounded guarded stages only — not backup storage, deploy, production execution, bootstrap unfreeze, or migrations **0088 / 0089 / head**.
 
 ## Repository boundary (read before GO)
 
@@ -14,7 +14,7 @@ Runners in this PR invoke exactly `alembic upgrade 0032`, `0083`, or `0087` — 
 
 ## Why this exists
 
-- Staging controlled migration reached **`0030`**; bootstrap remains frozen (`NAHLA_SKIP_DB_BOOTSTRAP=1`).
+- Staging controlled migration reached **`0030`** via the 0024→0030 slice; guarded Stage A advances staging to **`0032`**. Bootstrap remains frozen (`NAHLA_SKIP_DB_BOOTSTRAP=1`).
 - App head expects schema through **0087** (A1-Expand) but staging must advance in **three bounded stages** with backup/restore between each.
 - **0031 / 0032** contain customer duplicate data gates — Stage A preflight surfaces aggregate duplicate counts before GO.
 - **0064** introduces variant backfill workload — Stage B uses a longer bounded timeout policy.
@@ -34,7 +34,7 @@ Execute stages **in order**. Do not skip. Take an approved backup **before each 
 
 | Requirement | Value / check |
 |-------------|----------------|
-| Prior slice complete | Staging `alembic_version` exactly **`0030`** before Stage A |
+| Prior slice complete | Staging `alembic_version` exactly **`0030`** before Stage A; exactly **`0032`** before Stage B |
 | Branch merged & deployed to **staging** app container | Runners ship with app image |
 | `RAILWAY_PROJECT_NAME` | `desirable-growth` |
 | `RAILWAY_ENVIRONMENT_NAME` | `staging` |
@@ -96,6 +96,23 @@ python scripts/operators/staging_migration_0030_to_0032.py run --timeout-sec 180
 
 Invokes exactly: `python -m alembic upgrade 0032` with `cwd=database/`.
 
+### Stage A completion attestation (provenance)
+
+After guarded Stage A `run` and post-validation pass, record live source evidence
+before any Stage B backup/restore drill:
+
+| Field | Attested value |
+|-------|----------------|
+| `alembic_revision` | `0032` |
+| `public_table_count` | `96` |
+| `schema_fingerprint_version` | `nahla_public_tables_sha256_v1` |
+| `schema_fingerprint_sha256` | `1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae` |
+
+Stage B DR canonical parity requires the versioned contract profile
+`staging_pin_0032` (exact revision, table count, and fingerprint pin). See
+`docs/engineering/staging-dr-canonical-parity-runbook.md`. Parity verification
+fails closed when the source does not match a contracted profile.
+
 ## Stage B — 0032 → 0083
 
 ### Hazards
@@ -117,7 +134,7 @@ Invokes exactly: `python -m alembic upgrade 0032` with `cwd=database/`.
 | `products_has_variants_column_preexisting` | **Informational** | `1` if forward-ORM column drift |
 | `products_default_variant_id_column_preexisting` | **Informational** | `1` if forward-ORM column drift |
 
-Stage B has **no duplicate hard-stop preflight** in this slice. Hard gates are identity, binding, bootstrap freeze, confirmation, exact start revision `0032`, and post-success contract at `0083`.
+Stage B has **no duplicate hard-stop preflight** in this slice. Hard gates are identity, binding, bootstrap freeze, confirmation, exact start revision `0032`, post-success contract at `0083`, and DR canonical parity eligibility via `staging_pin_0032` on the pre-stage backup/restore drill.
 
 ### Bounded timeout policy
 
@@ -226,4 +243,5 @@ Invokes exactly: `python -m alembic upgrade 0087`.
 ## Related
 
 - 0024→0030 runner — `docs/engineering/staging-migration-0024-to-0030-runbook.md`
+- DR canonical parity contract — `docs/engineering/staging-dr-canonical-parity-runbook.md`
 - A1 identity rollout — `docs/engineering/a1-order-identity-migration-rollout.md`

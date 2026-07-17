@@ -17,6 +17,7 @@ from scripts.operators import staging_dr_canonical_parity_contract as contract  
 
 PIN_0024_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 PIN_0030_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+PIN_0032_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 
 
 def _loaded_contract() -> dict:
@@ -41,6 +42,37 @@ def test_all_concrete_profiles_require_exact_fingerprint_pins() -> None:
     del malformed["source_eligibility_profiles"][0]["schema_fingerprint_sha256"]
     with pytest.raises(ValueError, match="profile_shape_invalid"):
         contract.load_contract(malformed)
+
+
+def test_staging_pin_0032_requires_exact_attested_values() -> None:
+    loaded = _loaded_contract()
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0032",
+            public_table_count=96,
+            schema_fingerprint_sha256=PIN_0032_FP,
+            contract=loaded,
+        )
+        == "staging_pin_0032"
+    )
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0032",
+            public_table_count=99,
+            schema_fingerprint_sha256=PIN_0032_FP,
+            contract=loaded,
+        )
+        is None
+    )
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0032",
+            public_table_count=96,
+            schema_fingerprint_sha256="b" * 64,
+            contract=loaded,
+        )
+        is None
+    )
 
 
 def test_staging_pin_0030_requires_exact_attested_values() -> None:
@@ -109,6 +141,22 @@ def test_evaluate_parity_fail_closed_when_manifest_mismatch() -> None:
     )
     assert result["canonical_manifest_parity"] is False
     assert result["source_contract_eligible"] is False
+
+
+def test_evaluate_parity_passes_for_matched_0032_profile() -> None:
+    loaded = _loaded_contract()
+    result = contract.evaluate_parity(
+        source_revision="0032",
+        restore_revision="0032",
+        source_table_count=96,
+        restore_table_count=96,
+        source_fingerprint_sha256=PIN_0032_FP,
+        restore_fingerprint_sha256=PIN_0032_FP,
+        contract=loaded,
+    )
+    assert result["canonical_manifest_parity"] is True
+    assert result["source_contract_eligible"] is True
+    assert result["matched_source_profile_id"] == "staging_pin_0032"
 
 
 def test_evaluate_parity_passes_for_matched_0030_profile() -> None:
