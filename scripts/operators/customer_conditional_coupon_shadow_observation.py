@@ -81,12 +81,21 @@ def verify_session_local_import() -> dict[str, Any]:
     }
 
 
+_LAYER0_ZERO_IO_GATE_REASONS = frozenset(
+    {"layer0_flags_disabled", "shadow_flag_disabled"},
+)
+
+
+def _is_zero_io_gate_skipped(reason: object) -> bool:
+    return str(reason or "") in _LAYER0_ZERO_IO_GATE_REASONS
+
+
 def execute_default_off_probe(
     *,
     message: str | None = None,
     app_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Default-off loader contract: zero DB I/O when the shadow flag is unset."""
+    """Default-off loader contract: zero DB I/O when shadow and compose flags are unset."""
     with with_app_container_paths(app_root):
         from modules.ai.brain.truth_surface.customer_conditional_coupon_loader import (
             load_customer_conditional_coupon_facts,
@@ -101,7 +110,7 @@ def execute_default_off_probe(
             message=message or OBSERVATION_PROBE_MESSAGE,
         )
         zero_io = (
-            telemetry.get("gate_skipped_reason") == "shadow_flag_disabled"
+            _is_zero_io_gate_skipped(telemetry.get("gate_skipped_reason"))
             and telemetry.get("order_count_query_count") == 0
             and telemetry.get("usage_evidence_query_count") == 0
             and len(facts) == 0
@@ -119,6 +128,7 @@ def execute_default_off_probe(
 
 def _compose_flags_enabled() -> bool:
     from modules.ai.brain.truth_surface.flags import (
+        is_customer_conditional_coupon_compose_enabled,
         is_general_offer_discovery_compose_enabled,
         is_product_sale_offer_compose_enabled,
         is_trusted_context_coupon_offer_compose_enabled,
@@ -130,6 +140,7 @@ def _compose_flags_enabled() -> bool:
             is_trusted_context_coupon_offer_compose_enabled,
             is_product_sale_offer_compose_enabled,
             is_general_offer_discovery_compose_enabled,
+            is_customer_conditional_coupon_compose_enabled,
         )
     )
 

@@ -67,6 +67,10 @@ def test_default_off_probe_zero_io_contract(monkeypatch: pytest.MonkeyPatch) -> 
         "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED",
         raising=False,
     )
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     result = probe.execute_default_off_probe(app_root=_REPO)
     assert result["ok"] is True
     assert result["phase"] == "default_off_verify"
@@ -118,6 +122,7 @@ def test_process_scoped_shadow_observation_no_materialise(
         "NAHLA_TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE_ENABLED",
         "NAHLA_TRUSTED_CONTEXT_PRODUCT_SALE_OFFER_COMPOSE_ENABLED",
         "NAHLA_TRUSTED_CONTEXT_GENERAL_OFFER_DISCOVERY_COMPOSE_ENABLED",
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
     ):
         monkeypatch.delenv(flag, raising=False)
 
