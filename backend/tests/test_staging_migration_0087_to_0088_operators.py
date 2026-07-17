@@ -195,7 +195,7 @@ def test_g4_gate_rejects_ready_for_validate_false() -> None:
         ready_for_validate=False,
         access_status="ok",
         readiness_blockers=["watermark_missing"],
-        aggregate=SimpleNamespace(linked_orders_in_scope_total=0),
+        aggregate={"linked_orders_in_scope_total": 0},
     )
     session = MagicMock()
     engine = MagicMock()
@@ -217,3 +217,87 @@ def test_g4_gate_rejects_ready_for_validate_false() -> None:
     assert failure.stage == "ready_for_validate_false"
     assert summary is not None
     assert summary["ready_for_validate"] is False
+
+
+def test_g4_gate_reads_dict_shaped_report_aggregate() -> None:
+    report = SimpleNamespace(
+        ready_for_validate=True,
+        access_status="ok",
+        readiness_blockers=[],
+        aggregate={"linked_orders_in_scope_total": 3},
+    )
+    session = MagicMock()
+    engine = MagicMock()
+    with (
+        patch(
+            "services.order_customer_identity_reconciliation_report.build_order_customer_identity_reconciliation_report",
+            return_value=report,
+        ),
+        patch(
+            "scripts.operators.staging_migration_0087_to_0088.sessionmaker",
+            return_value=lambda bind=None: session,
+        ),
+    ):
+        summary, failure = validate_op.validate_g4_ready_for_validate(
+            engine, tenant_id=1, max_subjects_per_kind=1000
+        )
+
+    assert failure is None
+    assert summary is not None
+    assert summary["aggregate_linked_orders_in_scope_total"] == 3
+
+
+def test_g4_gate_rejects_non_dict_report_aggregate() -> None:
+    report = SimpleNamespace(
+        ready_for_validate=True,
+        access_status="ok",
+        readiness_blockers=[],
+        aggregate=SimpleNamespace(linked_orders_in_scope_total=1),
+    )
+    session = MagicMock()
+    engine = MagicMock()
+    with (
+        patch(
+            "services.order_customer_identity_reconciliation_report.build_order_customer_identity_reconciliation_report",
+            return_value=report,
+        ),
+        patch(
+            "scripts.operators.staging_migration_0087_to_0088.sessionmaker",
+            return_value=lambda bind=None: session,
+        ),
+    ):
+        summary, failure = validate_op.validate_g4_ready_for_validate(
+            engine, tenant_id=1, max_subjects_per_kind=1000
+        )
+
+    assert failure is not None
+    assert failure.stage == "reconciliation_report_aggregate_invalid"
+    assert summary is None
+
+
+def test_g4_gate_rejects_missing_linked_total_in_aggregate() -> None:
+    report = SimpleNamespace(
+        ready_for_validate=True,
+        access_status="ok",
+        readiness_blockers=[],
+        aggregate={"unmapped_orders_in_scope_total": 0},
+    )
+    session = MagicMock()
+    engine = MagicMock()
+    with (
+        patch(
+            "services.order_customer_identity_reconciliation_report.build_order_customer_identity_reconciliation_report",
+            return_value=report,
+        ),
+        patch(
+            "scripts.operators.staging_migration_0087_to_0088.sessionmaker",
+            return_value=lambda bind=None: session,
+        ),
+    ):
+        summary, failure = validate_op.validate_g4_ready_for_validate(
+            engine, tenant_id=1, max_subjects_per_kind=1000
+        )
+
+    assert failure is not None
+    assert failure.stage == "reconciliation_report_aggregate_missing_linked_total"
+    assert summary is None
