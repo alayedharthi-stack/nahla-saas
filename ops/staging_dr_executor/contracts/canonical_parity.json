@@ -29,6 +29,13 @@
       "profile_id": "staging_pin_0083",
       "public_table_count": 96,
       "schema_fingerprint_sha256": "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
+    },
+    {
+      "alembic_revision": "0087",
+      "operator_note": "Live staging source attestation after guarded Stage C (0083\u21920087) post-validation",
+      "profile_id": "staging_pin_0087",
+      "public_table_count": 101,
+      "schema_fingerprint_sha256": "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
     }
   ]
 }

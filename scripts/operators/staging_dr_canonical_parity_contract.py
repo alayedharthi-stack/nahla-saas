@@ -77,6 +77,15 @@ SOURCE_ELIGIBILITY_PROFILES: tuple[SourceEligibilityProfile, ...] = (
         ),
         "operator_note": "Live staging source attestation after guarded Stage B (0032→0083) post-validation",
     },
+    {
+        "profile_id": "staging_pin_0087",
+        "alembic_revision": "0087",
+        "public_table_count": 101,
+        "schema_fingerprint_sha256": (
+            "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
+        ),
+        "operator_note": "Live staging source attestation after guarded Stage C (0083→0087) post-validation",
+    },
 )
 
 
