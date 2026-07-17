@@ -1366,7 +1366,35 @@ class DefaultComposer:
             _known = dict(getattr(_reply_state, "known_facts", None) or {})
             _discovery_facts = dict(_known.get("general_offer_discovery_facts") or {})
             _product_sale_facts = dict(_known.get("product_sale_offer_facts") or {})
+            _conditional_cc_facts = dict(_known.get("customer_conditional_coupon_facts") or {})
             _trusted_tc_facts = dict(_known.get("trusted_coupon_offer_facts") or {})
+
+            if _conditional_cc_facts:
+                try:
+                    from ..persona.customer_conditional_coupon_answer import (  # noqa: PLC0415
+                        try_compose_customer_conditional_coupon_answer,
+                    )
+                    from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                    _cc_ai_settings = _ai_settings_from_ctx(ctx)
+                    _cc_text, _cc_result, _cc_event = (
+                        await try_compose_customer_conditional_coupon_answer(
+                            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                            customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                            inbound_text=str(getattr(ctx, "message", "") or ""),
+                            customer_conditional_coupon_facts=_conditional_cc_facts,
+                            ai_settings=_cc_ai_settings,
+                        )
+                    )
+                    if _cc_result is not None and (_cc_text or "").strip():
+                        if isinstance(_cc_event, dict):
+                            result.data.update(_cc_event)
+                        result.data["customer_conditional_coupon_compose_active"] = True
+                        return (_cc_text or "").strip()
+                except Exception:
+                    logger.exception(
+                        "[RESPONDER] customer_conditional_coupon_answer compose failed",
+                    )
 
             if _discovery_facts:
                 from ..persona.general_offer_discovery_answer import (  # noqa: PLC0415

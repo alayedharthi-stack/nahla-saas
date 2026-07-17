@@ -3,6 +3,11 @@
 Deterministic inventory + importability checks for a purported shadow-capable
 ``nahla-saas`` artifact (repo checkout or ``/app`` container layout). Does not
 enable runtime flags, touch Railway, or mutate coupon logic.
+
+PR-C follow-up: compose-consumer modules (``customer_conditional_coupon_compose_projection``,
+``customer_conditional_coupon_consumption_gate``, ``customer_conditional_coupon_answer``)
+are intentionally excluded from this shadow deployment artifact — compose remains
+default-off and is not part of the shadow observation slice inventory gate.
 """
 from __future__ import annotations
 

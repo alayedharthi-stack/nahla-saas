@@ -52,6 +52,9 @@ jobs:
             backend/tests/test_customer_conditional_coupon_subject_bridge_consumer.py \
             backend/tests/test_customer_conditional_coupon_shadow_readiness.py \
             backend/tests/test_customer_conditional_coupon_shadow_deployment_artifact.py \
+            backend/tests/test_customer_conditional_coupon_compose_projection.py \
+            backend/tests/test_customer_conditional_coupon_compose_wiring.py \
+            backend/tests/test_customer_conditional_coupon_compose_eval_fixtures.py \
             -q --maxfail=1
 
       - name: Guarded staging migration operator tests
