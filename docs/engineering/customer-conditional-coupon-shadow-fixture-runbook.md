@@ -108,6 +108,45 @@ text, credentials, stack traces.
 
 ---
 
+## Deployment artifact preflight (required before observation flag toggle)
+
+Toggling `NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED` on
+Railway can trigger a redeploy. **Do not toggle the observation flag** until both
+gates below pass. This prevents the `staging_deploy_missing_layer0_modules` abort
+seen when staging ran deploy `b4f11547` without the Layer 0 slice while DB/fixture
+preflight was already green.
+
+| Gate | Operator action |
+|------|-----------------|
+| **Pinned source revision** | Record the intended `nahla-saas` git SHA (≥7 hex chars) that is deployed or will be deployed **before** any shadow-flag change. Unpinned flag toggles are forbidden (`observation_flag_toggle_without_pinned_revision`). |
+| **Module inventory** | Verify the deployed artifact (or local checkout at the pinned SHA) contains loader, shadow-readiness encoder, shadow flag accessor, and post-#617 fixture operator paths. |
+
+Programmatic check (no Railway/network; does not enable flags):
+
+```bash
+python -c "
+from pathlib import Path
+from services.customer_conditional_coupon_shadow_deployment_artifact_contract import (
+    evaluate_observation_window_preflight,
+    evaluate_shadow_deployment_artifact,
+)
+pin = '<PINNED_GIT_SHA>'
+inv = evaluate_shadow_deployment_artifact(Path('.'))
+pf = evaluate_observation_window_preflight(
+    pinned_source_revision=pin,
+    inventory=inv,
+    observation_flag_change_requested=True,
+)
+print(pf.to_dict())
+assert pf.ok, pf.blockers
+"
+```
+
+CI regression: `backend/tests/test_customer_conditional_coupon_shadow_deployment_artifact.py`
+(enforced in the **Customer conditional coupon Layer 0 consumer tests** job).
+
+---
+
 ## Future shadow-only observation window (separate step)
 
 This harness **prepares data only**. Shadow observation is a **later, separately
@@ -115,8 +154,9 @@ approved** operator action:
 
 1. Confirm fixture seed succeeded (`bridge_resolved=true`,
    `active_conditional_targets>=1`).
-2. Obtain change approval for a **time-boxed** staging window.
-3. Set `NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED=true` only
+2. Complete **deployment artifact preflight** (pinned SHA + module inventory) above.
+3. Obtain change approval for a **time-boxed** staging window.
+4. Set `NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED=true` only
    for that window (never default-on in production).
 4. Trigger a **non-customer** internal observation path (playground / controlled
    inbound replay) and archive sanitized `fact_record` + `telemetry` only.
