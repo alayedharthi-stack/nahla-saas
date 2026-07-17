@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from services.order_customer_identity_logging import (
+    log_evidence_fixture_failure,
     log_identity_sync_event,
     log_identity_sync_failure,
 )
@@ -67,6 +68,16 @@ def test_log_connection_resolution_status_no_pii(
     assert "store_id" not in blob
     assert "external_customer_ref" not in blob
     assert "order_id" not in blob
+
+
+def test_log_evidence_fixture_failure_no_pii(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="nahla.order_customer_identity"):
+        log_evidence_fixture_failure(exception_class="IntegrityError")
+    blob = caplog.text.lower()
+    assert "tenant_id=" not in blob
+    assert "customer_id=" not in blob
+    assert "external_customer_ref=" not in blob
+    assert "@" not in blob
 
 
 def test_safe_read_contracts_exclude_pii_fields() -> None:

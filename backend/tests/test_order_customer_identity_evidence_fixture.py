@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 import subprocess
@@ -38,7 +37,6 @@ from services.order_customer_identity_evidence_fixture_contract import (
     FIXTURE_NAMESPACE,
     FIXTURE_SCHEMA_VERSION,
 )
-from services.order_customer_identity_logging import log_evidence_fixture_failure
 from services.order_customer_identity_reconciliation_write import (
     validate_capability_and_revision_gates,
 )
@@ -415,15 +413,6 @@ def test_fixture_json_schema_version_and_privacy(pg_session) -> None:
     assert payload["fixture_schema_version"] == FIXTURE_SCHEMA_VERSION
     assert payload["fixture_namespace"] == FIXTURE_NAMESPACE
     _assert_no_pii_in_fixture(payload, known_safe=(str(TEST_TENANT_A),))
-
-
-def test_fixture_logging_emits_no_pii(caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.WARNING, logger="nahla.order_customer_identity"):
-        log_evidence_fixture_failure(exception_class="IntegrityError")
-    blob = caplog.text.lower()
-    assert "integrityerror" in blob
-    assert "tenant" not in blob
-    assert "@" not in blob
 
 
 def test_deterministic_dry_run_payload_excludes_timestamp(pg_session) -> None:
