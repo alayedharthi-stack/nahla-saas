@@ -49,73 +49,71 @@ ANTI-LEAK GUARANTEES
 * No raw text / id / money columns — only categorical buckets.
 * JSONB ``extra`` is filtered through ``sanitize_extra`` at write time
   so unknown keys are dropped before they reach the database.
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when ``Base.metadata.create_all()``
+pre-created semantically equivalent objects while ``alembic_version`` is
+still at 0032.
 """
+from __future__ import annotations
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
+from migration_inspector_helpers import has_index, has_table
 
-revision      = "0033"
+revision = "0033"
 down_revision = "0032"
 branch_labels = None
-depends_on    = None
+depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "cross_merchant_signals",
-        sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("tenant_hash",  sa.String(length=64), nullable=False),
-        sa.Column("industry",     sa.String(length=64), nullable=False, server_default="unknown"),
-        sa.Column("intent",       sa.String(length=64), nullable=False, server_default="unknown"),
-        sa.Column("action",       sa.String(length=64), nullable=False, server_default="unknown"),
-        sa.Column("ui_mode",      sa.String(length=32), nullable=False, server_default="unknown"),
-        sa.Column("outcome",      sa.String(length=32), nullable=False, server_default="unknown"),
-        sa.Column("value_bucket", sa.String(length=32), nullable=False, server_default="unknown"),
-        sa.Column("turn_index",   sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("model_path",   sa.String(length=32), nullable=False, server_default="rule"),
-        sa.Column("latency_ms",   sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("tier",         sa.String(length=16), nullable=False, server_default="global"),
-        sa.Column("extra",        JSONB(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-    )
+    bind = op.get_bind()
 
-    op.create_index(
-        "ix_cross_merchant_signals_tenant_hash",
-        "cross_merchant_signals",
-        ["tenant_hash"],
-    )
-    op.create_index(
-        "ix_xms_industry_action",
-        "cross_merchant_signals",
-        ["industry", "action"],
-    )
-    op.create_index(
-        "ix_xms_action_outcome",
-        "cross_merchant_signals",
-        ["action", "outcome"],
-    )
-    op.create_index(
-        "ix_xms_tier_industry",
-        "cross_merchant_signals",
-        ["tier", "industry"],
-    )
-    op.create_index(
-        "ix_xms_created_at",
-        "cross_merchant_signals",
-        ["created_at"],
-    )
+    if not has_table(bind, "cross_merchant_signals"):
+        op.create_table(
+            "cross_merchant_signals",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("tenant_hash", sa.String(length=64), nullable=False),
+            sa.Column("industry", sa.String(length=64), nullable=False, server_default="unknown"),
+            sa.Column("intent", sa.String(length=64), nullable=False, server_default="unknown"),
+            sa.Column("action", sa.String(length=64), nullable=False, server_default="unknown"),
+            sa.Column("ui_mode", sa.String(length=32), nullable=False, server_default="unknown"),
+            sa.Column("outcome", sa.String(length=32), nullable=False, server_default="unknown"),
+            sa.Column("value_bucket", sa.String(length=32), nullable=False, server_default="unknown"),
+            sa.Column("turn_index", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("model_path", sa.String(length=32), nullable=False, server_default="rule"),
+            sa.Column("latency_ms", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("tier", sa.String(length=16), nullable=False, server_default="global"),
+            sa.Column("extra", JSONB(), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.text("now()"),
+                nullable=False,
+            ),
+        )
+
+    for index_name, columns in (
+        ("ix_cross_merchant_signals_tenant_hash", ("tenant_hash",)),
+        ("ix_xms_industry_action", ("industry", "action")),
+        ("ix_xms_action_outcome", ("action", "outcome")),
+        ("ix_xms_tier_industry", ("tier", "industry")),
+        ("ix_xms_created_at", ("created_at",)),
+    ):
+        if has_table(bind, "cross_merchant_signals") and not has_index(
+            bind, "cross_merchant_signals", index_name,
+        ):
+            op.create_index(index_name, "cross_merchant_signals", list(columns))
 
 
 def downgrade() -> None:
-    op.drop_index("ix_xms_created_at",      table_name="cross_merchant_signals")
-    op.drop_index("ix_xms_tier_industry",   table_name="cross_merchant_signals")
-    op.drop_index("ix_xms_action_outcome",  table_name="cross_merchant_signals")
+    op.drop_index("ix_xms_created_at", table_name="cross_merchant_signals")
+    op.drop_index("ix_xms_tier_industry", table_name="cross_merchant_signals")
+    op.drop_index("ix_xms_action_outcome", table_name="cross_merchant_signals")
     op.drop_index("ix_xms_industry_action", table_name="cross_merchant_signals")
     op.drop_index(
         "ix_cross_merchant_signals_tenant_hash",

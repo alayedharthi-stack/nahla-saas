@@ -3,11 +3,19 @@
 Revision ID: 0042
 Revises: 0041
 Create Date: 2026-04-30
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when forward-ORM drift pre-created
+the table, unique constraint, or index while ``alembic_version`` is still
+at 0041.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+
+from migration_inspector_helpers import has_index, has_table, has_unique_constraint
 
 revision = "0042"
 down_revision = "0041"
@@ -16,35 +24,53 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "salla_trial_ledger",
-        sa.Column("id",                     sa.Integer(),                    primary_key=True),
-        sa.Column("salla_store_id",         sa.String(),  nullable=False),
-        sa.Column("merchant_id",            sa.String(),  nullable=True),
-        sa.Column("trial_used",             sa.Boolean(), nullable=False, server_default="true"),
-        sa.Column("first_trial_started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("first_trial_plan",       sa.String(),  nullable=True),
-        sa.Column("source",                 sa.String(),  nullable=False, server_default="salla"),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.text("NOW()"),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.text("NOW()"),
-        ),
-        sa.UniqueConstraint("salla_store_id", name="uq_salla_trial_ledger_store_id"),
-    )
-    op.create_index(
-        "ix_salla_trial_ledger_salla_store_id",
-        "salla_trial_ledger",
-        ["salla_store_id"],
-        unique=True,
-    )
+    bind = op.get_bind()
+
+    if not has_table(bind, "salla_trial_ledger"):
+        op.create_table(
+            "salla_trial_ledger",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("salla_store_id", sa.String(), nullable=False),
+            sa.Column("merchant_id", sa.String(), nullable=True),
+            sa.Column("trial_used", sa.Boolean(), nullable=False, server_default="true"),
+            sa.Column("first_trial_started_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("first_trial_plan", sa.String(), nullable=True),
+            sa.Column("source", sa.String(), nullable=False, server_default="salla"),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.text("NOW()"),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.text("NOW()"),
+            ),
+            sa.UniqueConstraint("salla_store_id", name="uq_salla_trial_ledger_store_id"),
+        )
+
+    if (
+        has_table(bind, "salla_trial_ledger")
+        and not has_unique_constraint(bind, "salla_trial_ledger", "uq_salla_trial_ledger_store_id")
+        and bind.dialect.name != "sqlite"
+    ):
+        op.create_unique_constraint(
+            "uq_salla_trial_ledger_store_id",
+            "salla_trial_ledger",
+            ["salla_store_id"],
+        )
+
+    if has_table(bind, "salla_trial_ledger") and not has_index(
+        bind, "salla_trial_ledger", "ix_salla_trial_ledger_salla_store_id",
+    ):
+        op.create_index(
+            "ix_salla_trial_ledger_salla_store_id",
+            "salla_trial_ledger",
+            ["salla_store_id"],
+            unique=True,
+        )
 
 
 def downgrade() -> None:

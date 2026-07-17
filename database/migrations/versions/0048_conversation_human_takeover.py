@@ -22,11 +22,19 @@ post-deploy load.
 
 Revision ID: 0048
 Revises: 0047
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when forward-ORM drift pre-created
+columns while ``alembic_version`` is still at 0047. Backfill runs only
+when ``needs_human`` exists.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+
+from migration_inspector_helpers import has_column
 
 revision = "0048"
 down_revision = "0047"
@@ -35,34 +43,29 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "conversations",
-        sa.Column("needs_human", sa.Boolean(), nullable=False, server_default="false"),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column("handoff_active", sa.Boolean(), nullable=False, server_default="false"),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column("taken_over_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column("taken_over_by", sa.String(), nullable=True),
-    )
+    bind = op.get_bind()
 
-    op.execute(
-        """
-        UPDATE conversations
-        SET needs_human    = TRUE,
-            handoff_active = TRUE,
-            taken_over_at  = COALESCE(taken_over_at, NOW() AT TIME ZONE 'utc')
-        WHERE is_human_handoff = TRUE
-           OR paused_by_human  = TRUE
-           OR status           = 'human'
-        """
-    )
+    for column_name, column in (
+        ("needs_human", sa.Column("needs_human", sa.Boolean(), nullable=False, server_default="false")),
+        ("handoff_active", sa.Column("handoff_active", sa.Boolean(), nullable=False, server_default="false")),
+        ("taken_over_at", sa.Column("taken_over_at", sa.DateTime(timezone=True), nullable=True)),
+        ("taken_over_by", sa.Column("taken_over_by", sa.String(), nullable=True)),
+    ):
+        if not has_column(bind, "conversations", column_name):
+            op.add_column("conversations", column)
+
+    if has_column(bind, "conversations", "needs_human"):
+        op.execute(
+            """
+            UPDATE conversations
+            SET needs_human    = TRUE,
+                handoff_active = TRUE,
+                taken_over_at  = COALESCE(taken_over_at, NOW() AT TIME ZONE 'utc')
+            WHERE is_human_handoff = TRUE
+               OR paused_by_human  = TRUE
+               OR status           = 'human'
+            """
+        )
 
 
 def downgrade() -> None:

@@ -14,11 +14,19 @@ time (UTC) so delayed delivery of old history does not trigger AI.
 
 Revision ID: 0047
 Revises: 0046
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when forward-ORM drift pre-created
+columns while ``alembic_version`` is still at 0046. Backfill runs only
+when ``whatsapp_ai_live_since`` exists.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+
+from migration_inspector_helpers import has_column
 
 revision = "0047"
 down_revision = "0046"
@@ -27,50 +35,45 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column(
-            "whatsapp_ai_live_since",
-            sa.DateTime(timezone=True),
-            nullable=True,
-        ),
-    )
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column(
-            "whatsapp_history_sync_status",
-            sa.String(),
-            nullable=False,
-            server_default="completed",
-        ),
-    )
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column("history_sync_started_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column("history_sync_completed_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column("synced_conversations_count", sa.Integer(), nullable=False, server_default="0"),
-    )
-    op.add_column(
-        "whatsapp_connections",
-        sa.Column("synced_messages_count", sa.Integer(), nullable=False, server_default="0"),
-    )
+    bind = op.get_bind()
 
-    # Connected integrations only — avoid answering AI on stale history
-    # that arrives after deploy without ever giving a cutoff.
-    op.execute(
-        """
-        UPDATE whatsapp_connections
-        SET whatsapp_ai_live_since = NOW() AT TIME ZONE 'utc'
-        WHERE status = 'connected'
-          AND whatsapp_ai_live_since IS NULL
-        """
-    )
+    for column_name, column in (
+        (
+            "whatsapp_ai_live_since",
+            sa.Column("whatsapp_ai_live_since", sa.DateTime(timezone=True), nullable=True),
+        ),
+        (
+            "whatsapp_history_sync_status",
+            sa.Column(
+                "whatsapp_history_sync_status",
+                sa.String(),
+                nullable=False,
+                server_default="completed",
+            ),
+        ),
+        ("history_sync_started_at", sa.Column("history_sync_started_at", sa.DateTime(timezone=True), nullable=True)),
+        ("history_sync_completed_at", sa.Column("history_sync_completed_at", sa.DateTime(timezone=True), nullable=True)),
+        (
+            "synced_conversations_count",
+            sa.Column("synced_conversations_count", sa.Integer(), nullable=False, server_default="0"),
+        ),
+        (
+            "synced_messages_count",
+            sa.Column("synced_messages_count", sa.Integer(), nullable=False, server_default="0"),
+        ),
+    ):
+        if not has_column(bind, "whatsapp_connections", column_name):
+            op.add_column("whatsapp_connections", column)
+
+    if has_column(bind, "whatsapp_connections", "whatsapp_ai_live_since"):
+        op.execute(
+            """
+            UPDATE whatsapp_connections
+            SET whatsapp_ai_live_since = NOW() AT TIME ZONE 'utc'
+            WHERE status = 'connected'
+              AND whatsapp_ai_live_since IS NULL
+            """
+        )
 
 
 def downgrade() -> None:

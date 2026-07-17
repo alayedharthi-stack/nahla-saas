@@ -14,12 +14,19 @@ Adds the loop-guard state needed by core/ai_pause_guard:
 
 Revision ID: 0045
 Revises: 0044
+
+Idempotency (F16)
+─────────────────
+Guarded by inspector checks — safe when forward-ORM drift pre-created
+columns while ``alembic_version`` is still at 0044.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from migration_inspector_helpers import has_column
 
 revision = "0045"
 down_revision = "0044"
@@ -28,40 +35,32 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "conversations",
-        sa.Column(
-            "ai_paused",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column("ai_paused_reason", sa.String(), nullable=True),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column(
-            "ai_paused_at",
-            sa.DateTime(timezone=True),
-            nullable=True,
-        ),
-    )
-    op.add_column(
-        "conversations",
-        sa.Column("ai_paused_by", sa.String(), nullable=True),
-    )
+    bind = op.get_bind()
 
-    op.add_column(
-        "tenants",
-        sa.Column(
-            "ai_blocked_numbers",
-            postgresql.JSONB(astext_type=sa.Text()),
-            nullable=True,
+    for column_name, column in (
+        (
+            "ai_paused",
+            sa.Column("ai_paused", sa.Boolean(), nullable=False, server_default=sa.false()),
         ),
-    )
+        ("ai_paused_reason", sa.Column("ai_paused_reason", sa.String(), nullable=True)),
+        (
+            "ai_paused_at",
+            sa.Column("ai_paused_at", sa.DateTime(timezone=True), nullable=True),
+        ),
+        ("ai_paused_by", sa.Column("ai_paused_by", sa.String(), nullable=True)),
+    ):
+        if not has_column(bind, "conversations", column_name):
+            op.add_column("conversations", column)
+
+    if not has_column(bind, "tenants", "ai_blocked_numbers"):
+        op.add_column(
+            "tenants",
+            sa.Column(
+                "ai_blocked_numbers",
+                postgresql.JSONB(astext_type=sa.Text()),
+                nullable=True,
+            ),
+        )
 
 
 def downgrade() -> None:
