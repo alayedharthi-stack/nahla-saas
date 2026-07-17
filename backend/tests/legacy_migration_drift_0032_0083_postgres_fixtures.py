@@ -91,6 +91,15 @@ _DRIFT_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_variants_tenant_retailer ON product_variants (tenant_id, retailer_id)",
+    # Known forward-ORM 0064 drift: the parent flags can exist even though
+    # Alembic has not recorded 0064 yet.  Deliberately leave its migration-
+    # owned index absent so the guard must still create it.
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS has_variants BOOLEAN NOT NULL DEFAULT false",
+    """
+    ALTER TABLE products
+    ADD COLUMN IF NOT EXISTS default_variant_id INTEGER
+    REFERENCES product_variants(id)
+    """,
     """
     CREATE TABLE IF NOT EXISTS product_groups (
         id              SERIAL PRIMARY KEY,

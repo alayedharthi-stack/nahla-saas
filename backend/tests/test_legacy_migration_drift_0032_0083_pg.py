@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 _REPO = Path(__file__).resolve().parents[2]
 for p in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
@@ -54,11 +55,16 @@ def test_drifted_upgrade_is_idempotent_on_repeat(
     assert_schema_at_0083(ephemeral_legacy_migration_engine_0032)
 
 
-def test_0064_missing_parent_columns_and_zero_backfill_on_drift_path(
+def test_0064_precreated_parent_columns_and_zero_backfill_on_drift_path(
     ephemeral_legacy_migration_engine_0032: Engine,
 ) -> None:
-    """0064 adds parent columns and skips backfill when variant rows already exist."""
+    """0064 accepts known parent-column drift and preserves zero-work backfill."""
     seed_create_all_drift_0033_0083(ephemeral_legacy_migration_engine_0032)
+    pre_upgrade_columns = {
+        column["name"]
+        for column in inspect(ephemeral_legacy_migration_engine_0032).get_columns("products")
+    }
+    assert {"has_variants", "default_variant_id"} <= pre_upgrade_columns
 
     with ephemeral_legacy_migration_engine_0032.begin() as conn:
         conn.execute(
@@ -95,6 +101,7 @@ def test_0064_missing_parent_columns_and_zero_backfill_on_drift_path(
 
     before_count = _variant_count(ephemeral_legacy_migration_engine_0032, MIGRATION_PRODUCT_ID)
     run_alembic(ephemeral_legacy_migration_engine_0032, TARGET_REVISION)
+    run_alembic(ephemeral_legacy_migration_engine_0032, TARGET_REVISION)
     after_count = _variant_count(ephemeral_legacy_migration_engine_0032, MIGRATION_PRODUCT_ID)
 
     assert before_count == after_count == 1
@@ -111,6 +118,11 @@ def test_0064_missing_parent_columns_and_zero_backfill_on_drift_path(
         ).mappings().one()
     assert row["has_variants"] is False
     assert row["default_variant_id"] is not None
+    indexes = {
+        index["name"]
+        for index in inspect(ephemeral_legacy_migration_engine_0032).get_indexes("products")
+    }
+    assert "ix_products_default_variant" in indexes
 
 
 def test_inequivalent_product_variants_shape_fails_closed(
@@ -118,7 +130,10 @@ def test_inequivalent_product_variants_shape_fails_closed(
 ) -> None:
     """Arbitrary partial drift without product_id is not reconciled silently."""
     seed_inequivalent_product_variants_drift(ephemeral_legacy_migration_engine_0032)
-    with pytest.raises(Exception):
+    # Observed PG failure is psycopg2.errors.UndefinedColumn, wrapped by
+    # SQLAlchemy as ProgrammingError/DBAPIError when 0064 attempts its
+    # migration-owned retailer index.  This is intentionally not hidden.
+    with pytest.raises(DBAPIError, match="retailer_id"):
         run_alembic(ephemeral_legacy_migration_engine_0032, TARGET_REVISION)
 
 
