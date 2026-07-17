@@ -347,9 +347,14 @@ def test_log_reconciliation_write_failure_no_pii(caplog: pytest.LogCaptureFixtur
     assert "order_id" not in blob
 
 
+def _database_url(pg_session) -> str:
+    bind = pg_session.get_bind()
+    return str(bind.url.render_as_string(hide_password=False))
+
+
 def test_cli_dry_run_default_success(pg_session) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
-    env = {**os.environ, "DATABASE_URL": str(pg_session.bind.url.render_as_string(hide_password=False))}
+    env = {**os.environ, "DATABASE_URL": _database_url(pg_session)}
     result = subprocess.run(
         [sys.executable, _CLI, "--tenant-id", str(TEST_TENANT_A)],
         cwd=_REPO,
@@ -369,7 +374,7 @@ def test_cli_write_rejects_without_confirmation(pg_session) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
     env = {
         **os.environ,
-        "DATABASE_URL": str(pg_session.bind.url.render_as_string(hide_password=False)),
+        "DATABASE_URL": _database_url(pg_session),
         "RAILWAY_PROJECT_NAME": "desirable-growth",
         "RAILWAY_ENVIRONMENT_NAME": "staging",
     }
@@ -408,10 +413,7 @@ def test_cli_write_success_with_confirmation_in_process(pg_session, monkeypatch)
     import importlib.util
 
     _seed_generic_commerce_linked_scope(pg_session)
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        str(pg_session.bind.url.render_as_string(hide_password=False)),
-    )
+    monkeypatch.setenv("DATABASE_URL", _database_url(pg_session))
     spec = importlib.util.spec_from_file_location(
         "reconcile_cli",
         _REPO / "backend" / "scripts" / "reconcile_order_customer_identity_coverage.py",
