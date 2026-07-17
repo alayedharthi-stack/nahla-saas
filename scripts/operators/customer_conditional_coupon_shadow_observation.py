@@ -63,15 +63,11 @@ def with_app_container_paths(app_root: Path | None = None) -> Iterator[Path]:
 
 def verify_session_local_import() -> dict[str, Any]:
     """Regression guard: legacy ``from database import SessionLocal`` fails in ``/app``."""
-    try:
-        importlib.import_module("database")
-    except Exception:  # noqa: BLE001
-        pass
-    legacy_ok = True
+    legacy_ok = False
     try:
         database = importlib.import_module("database")
         legacy_ok = hasattr(database, "SessionLocal")
-    except Exception:  # noqa: BLE001
+    except ImportError:
         legacy_ok = False
 
     session_module = importlib.import_module(SESSION_LOCAL_MODULE)
