@@ -365,7 +365,9 @@ def _load_cli_module():
     return cli
 
 
-def _patch_cli_session(monkeypatch, cli, pg_session) -> None:
+def _patch_cli_session(monkeypatch, pg_session) -> None:
+    import sqlalchemy.orm
+
     class _SessionProxy:
         def __init__(self, session: Session) -> None:
             self._session = session
@@ -380,14 +382,14 @@ def _patch_cli_session(monkeypatch, cli, pg_session) -> None:
         def __call__(self):
             return _SessionProxy(pg_session)
 
-    monkeypatch.setattr(cli, "sessionmaker", lambda bind: _SessionFactory())
+    monkeypatch.setattr(sqlalchemy.orm, "sessionmaker", lambda bind: _SessionFactory())
 
 
 def test_cli_dry_run_default_success(pg_session, postgres_engine, monkeypatch, capsys) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
     cli = _load_cli_module()
     monkeypatch.setenv("DATABASE_URL", _database_url(postgres_engine))
-    _patch_cli_session(monkeypatch, cli, pg_session)
+    _patch_cli_session(monkeypatch, pg_session)
     monkeypatch.setattr(sys, "argv", [_CLI, "--tenant-id", str(TEST_TENANT_A)])
     assert cli.main() == 0
     payload = json.loads(capsys.readouterr().out)
@@ -439,7 +441,7 @@ def test_cli_write_success_with_confirmation_in_process(pg_session, postgres_eng
     _seed_generic_commerce_linked_scope(pg_session)
     cli = _load_cli_module()
     monkeypatch.setenv("DATABASE_URL", _database_url(postgres_engine))
-    _patch_cli_session(monkeypatch, cli, pg_session)
+    _patch_cli_session(monkeypatch, pg_session)
     monkeypatch.setattr(cli, "_validate_write_gates", lambda _env: None)
     monkeypatch.setattr(
         sys,
