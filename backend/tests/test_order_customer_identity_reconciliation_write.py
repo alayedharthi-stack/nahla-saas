@@ -425,7 +425,7 @@ def test_cli_write_rejects_without_confirmation(pg_session, postgres_engine) -> 
 def test_cli_write_requires_staging_database_host(pg_session, postgres_engine) -> None:
     _seed_generic_commerce_linked_scope(pg_session)
     env = _staging_env(
-        DATABASE_URL="postgresql://user:pass@production.example.com:5432/nahla",
+        DATABASE_URL="postgresql://user:pass@db-other.example.com:5432/nahla",
     )
     result = subprocess.run(
         [sys.executable, _CLI, "--tenant-id", str(TEST_TENANT_A), "--write"],
