@@ -418,12 +418,11 @@ def test_fixture_json_schema_version_and_privacy(pg_session) -> None:
 
 
 def test_fixture_logging_emits_no_pii(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.WARNING, logger="nahla.order_customer_identity")
-    log_evidence_fixture_failure(exception_class="IntegrityError")
-    assert caplog.records
-    blob = " ".join(r.getMessage() for r in caplog.records)
-    assert "IntegrityError" in blob
-    assert "tenant" not in blob.lower()
+    with caplog.at_level(logging.WARNING, logger="nahla.order_customer_identity"):
+        log_evidence_fixture_failure(exception_class="IntegrityError")
+    blob = caplog.text.lower()
+    assert "integrityerror" in blob
+    assert "tenant" not in blob
     assert "@" not in blob
 
 
