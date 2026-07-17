@@ -189,6 +189,21 @@ def test_write_creates_authoritative_internal_and_external_evidence(pg_session) 
     assert result.created["external_orders"] == 1
     assert result.authoritative_internal_orders == 1
     assert result.authoritative_external_orders == 1
+    fixture_config = pg_session.execute(
+        text(
+            """
+            SELECT config
+            FROM integrations
+            WHERE tenant_id = :tenant_id
+              AND external_store_id = :external_store_id
+            """
+        ),
+        {
+            "tenant_id": TEST_TENANT_A,
+            "external_store_id": f"{FIXTURE_EXTERNAL_ID_PREFIX}-{TEST_TENANT_A}-STORE",
+        },
+    ).scalar_one()
+    assert fixture_config[FIXTURE_MARKER_FIELD] == FIXTURE_NAMESPACE
 
     row = pg_session.execute(
         text(
@@ -237,6 +252,27 @@ def test_seed_is_idempotent_on_rerun(pg_session) -> None:
     )
     assert sum(second.skipped_existing.values()) >= 2
     assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == 2
+
+
+def test_seed_adopts_and_marks_legacy_fixture_integration(pg_session) -> None:
+    _seed_gates(pg_session)
+    legacy = seed_integration(
+        pg_session,
+        tenant_id=TEST_TENANT_A,
+        external_store_id=f"{FIXTURE_EXTERNAL_ID_PREFIX}-{TEST_TENANT_A}-STORE",
+        config={"api_key": "fixture-no-network", "api_sync_enabled": False},
+    )
+
+    result = execute_order_customer_identity_evidence_fixture_seed(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+
+    assert result.outcome == "success"
+    assert result.created["integrations"] == 0
+    pg_session.refresh(legacy)
+    assert legacy.config[FIXTURE_MARKER_FIELD] == FIXTURE_NAMESPACE
 
 
 def test_tenant_isolation_does_not_touch_other_tenant(pg_session) -> None:
@@ -319,6 +355,25 @@ def test_cleanup_deletes_only_fixture_owned_rows(pg_session) -> None:
         external_identity_link_state=LINK_STATE_VERIFIED,
         external_identity_evidence_class=EVIDENCE_AUTHORITATIVE,
     )
+    # Same deterministic-looking store ID alone is not ownership. A different
+    # provider integration and profile must survive cleanup without the marker.
+    from models import Integration
+
+    lookalike = Integration(
+        tenant_id=TEST_TENANT_A,
+        provider="zid",
+        external_store_id=f"{FIXTURE_EXTERNAL_ID_PREFIX}-{TEST_TENANT_A}-STORE",
+        config={"api_sync_enabled": False},
+        enabled=True,
+    )
+    pg_session.add(lookalike)
+    pg_session.flush()
+    lookalike_profile = seed_external_profile(
+        pg_session,
+        tenant_id=TEST_TENANT_A,
+        integration_connection_id=lookalike.id,
+        external_customer_ref=FIXTURE_EXTERNAL_CUSTOMER_REF,
+    )
     pg_session.flush()
 
     cleanup = execute_order_customer_identity_evidence_fixture_cleanup(
@@ -340,6 +395,8 @@ def test_cleanup_deletes_only_fixture_owned_rows(pg_session) -> None:
         {"tenant_id": TEST_TENANT_A, "external_id": _NON_FIXTURE_ORDER_EXT},
     ).scalar_one()
     assert int(prod_count) == 1
+    assert pg_session.get(Integration, lookalike.id) is not None
+    assert pg_session.get(type(lookalike_profile), lookalike_profile.id) is not None
 
 
 def test_cleanup_dry_run_does_not_delete(pg_session) -> None:

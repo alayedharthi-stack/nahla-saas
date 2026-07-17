@@ -104,6 +104,8 @@ def _integration_is_fixture_owned(row: Any, *, tenant_id: int) -> bool:
     return (
         int(row.tenant_id) == int(tenant_id)
         and str(row.external_store_id or "").strip() == _fixture_store_id(tenant_id)
+        and str((row.config or {}).get(FIXTURE_MARKER_FIELD) or "").strip()
+        == FIXTURE_NAMESPACE
     )
 
 
@@ -145,6 +147,21 @@ def _fixture_integrations_for_tenant(db: Session, *, tenant_id: int) -> List[Any
         .all()
     )
     return [row for row in rows if _integration_is_fixture_owned(row, tenant_id=tenant_id)]
+
+
+def _legacy_fixture_integration_candidate(db: Session, *, tenant_id: int) -> Any | None:
+    """Return only the pre-marker Salla fixture candidate for explicit seed adoption."""
+    from models import Integration  # noqa: PLC0415
+
+    return (
+        db.query(Integration)
+        .filter(
+            Integration.tenant_id == int(tenant_id),
+            Integration.provider == "salla",
+            Integration.external_store_id == _fixture_store_id(tenant_id),
+        )
+        .first()
+    )
 
 
 def _fixture_customers_for_tenant(db: Session, *, tenant_id: int) -> List[Any]:
@@ -341,6 +358,15 @@ def _ensure_integration(db: Session, *, tenant_id: int, dry_run: bool) -> tuple[
     existing = _fixture_integrations_for_tenant(db, tenant_id=tenant_id)
     if existing:
         return existing[0], False
+    # Versions of this harness before persisted ownership marking created the
+    # same deterministic Salla integration. Seed may adopt that exact legacy
+    # candidate by writing the marker; cleanup never adopts unmarked rows.
+    legacy = _legacy_fixture_integration_candidate(db, tenant_id=tenant_id)
+    if legacy is not None:
+        if not dry_run:
+            _merge_fixture_metadata(legacy, slot=FIXTURE_SLOT_INTEGRATION)
+            db.flush()
+        return legacy, False
     if dry_run:
         return None, True
     from models import Integration  # noqa: PLC0415
