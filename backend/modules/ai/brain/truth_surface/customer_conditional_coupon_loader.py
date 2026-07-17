@@ -74,7 +74,7 @@ from .customer_conditional_coupon_subject import (
     customer_scope_for_handle,
     resolve_conditional_coupon_subject_handle,
 )
-from .flags import is_customer_conditional_coupon_shadow_enabled
+from .flags import is_customer_conditional_coupon_layer0_enabled
 
 _CONDITIONAL_COUPON_PATTERNS: Tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE | re.UNICODE)
@@ -212,8 +212,8 @@ def load_customer_conditional_coupon_facts(
     started = time.perf_counter()
     gate_skipped_reason: Optional[str] = None
 
-    if not is_customer_conditional_coupon_shadow_enabled():
-        gate_skipped_reason = "shadow_flag_disabled"
+    if not is_customer_conditional_coupon_layer0_enabled():
+        gate_skipped_reason = "layer0_flags_disabled"
         return [], build_sanitized_telemetry(
             conditional_target_count=0,
             order_history_completeness=COMPLETENESS_UNVERIFIED,

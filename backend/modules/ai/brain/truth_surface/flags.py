@@ -16,6 +16,9 @@ _TRUSTED_CONTEXT_COUPON_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_COUPON_OFFER_COMP
 _PRODUCT_SALE_OFFER_COMPOSE = "NAHLA_TRUSTED_CONTEXT_PRODUCT_SALE_OFFER_COMPOSE_ENABLED"
 _GENERAL_OFFER_DISCOVERY_COMPOSE = "NAHLA_TRUSTED_CONTEXT_GENERAL_OFFER_DISCOVERY_COMPOSE_ENABLED"
 _CUSTOMER_CONDITIONAL_COUPON_SHADOW = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED"
+_CUSTOMER_CONDITIONAL_COUPON_COMPOSE = (
+    "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED"
+)
 
 
 def _is_enabled(flag: str) -> bool:
@@ -74,7 +77,22 @@ def is_customer_conditional_coupon_shadow_enabled() -> bool:
     return _is_enabled(_CUSTOMER_CONDITIONAL_COUPON_SHADOW)
 
 
+def is_customer_conditional_coupon_compose_enabled() -> bool:
+    """Conditional-coupon compose consumer — off by default."""
+    return _is_enabled(_CUSTOMER_CONDITIONAL_COUPON_COMPOSE)
+
+
+def is_customer_conditional_coupon_layer0_enabled() -> bool:
+    """Layer 0 loader gate — shadow or compose flag (relevance applied separately)."""
+    return (
+        is_customer_conditional_coupon_shadow_enabled()
+        or is_customer_conditional_coupon_compose_enabled()
+    )
+
+
 __all__ = [
+    "is_customer_conditional_coupon_compose_enabled",
+    "is_customer_conditional_coupon_layer0_enabled",
     "is_customer_conditional_coupon_shadow_enabled",
     "is_general_offer_discovery_compose_enabled",
     "is_layer2_shadow_enabled",

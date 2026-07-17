@@ -162,8 +162,12 @@ def test_should_load_conditional_intent_generic_merchant() -> None:
     )
 
 
-def test_shadow_flag_default_off_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_layer0_flags_default_off_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", raising=False)
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     facts, obs = load_customer_conditional_coupon_facts(
         db=MagicMock(),
         tenant_id=1,
@@ -171,8 +175,34 @@ def test_shadow_flag_default_off_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
         conversation=SimpleNamespace(customer_id=9),
     )
     assert facts == []
-    assert obs["gate_skipped_reason"] == "shadow_flag_disabled"
+    assert obs["gate_skipped_reason"] == "layer0_flags_disabled"
     assert obs["order_count_query_count"] == 0
+
+
+def test_compose_only_flag_loads_facts_without_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", raising=False)
+    monkeypatch.setenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        "true",
+    )
+    with patch(
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.resolve_conditional_coupon_subject_handle",
+        return_value=SubjectResolutionResult(status="unresolved", handle=None, reason_code="x"),
+    ):
+        facts, obs = load_customer_conditional_coupon_facts(
+            db=MagicMock(),
+            tenant_id=1,
+            message="بعد كم طلب؟",
+        )
+    assert len(facts) == 1
+    assert obs.get("gate_skipped_reason") is None
+
+
+def test_shadow_flag_default_off_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backward-compatible alias — both flags off."""
+    test_layer0_flags_default_off_no_io(monkeypatch)
 
 
 def test_not_relevant_skips_db(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,7 +520,7 @@ def test_extract_min_orders_threshold_from_promotion() -> None:
     assert extract_min_orders_threshold(promo) == 3
 
 
-def test_trusted_fact_domain_and_no_compose_imports() -> None:
+def test_trusted_fact_domain_and_compose_wiring_present() -> None:
     fact = TrustedFact(
         domain=TrustedDomain.CUSTOMER_CONDITIONAL_COUPON,
         key="customer_conditional_coupon:eligibility",
@@ -501,7 +531,8 @@ def test_trusted_fact_domain_and_no_compose_imports() -> None:
     assert fact.domain == TrustedDomain.CUSTOMER_CONDITIONAL_COUPON
     compose_path = os.path.join(_BACKEND, "modules", "ai", "brain", "compose", "responder.py")
     compose_source = open(compose_path, encoding="utf-8").read()
-    assert "customer_conditional_coupon" not in compose_source
+    assert "customer_conditional_coupon_answer" in compose_source
+    assert "try_compose_customer_conditional_coupon_answer" in compose_source
 
 
 def test_internal_count_scoped_query() -> None:
@@ -723,6 +754,10 @@ def test_tenant_cache_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_trusted_context_double_gate_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", raising=False)
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_loader.load_customer_conditional_coupon_facts",
     ) as loader:

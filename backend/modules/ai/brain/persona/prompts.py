@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .facts_bundle import PersonaFactsBundle
+from .facts_bundle import PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER, PersonaFactsBundle
 
 
 def _resolve_catalog_visible_price(product: dict[str, Any]) -> Any:
@@ -22,6 +22,10 @@ def _resolve_catalog_visible_price(product: dict[str, Any]) -> Any:
 
 def build_system_prompt(bundle: PersonaFactsBundle) -> str:
     lang = str(bundle.language or "ar").lower()
+    if bundle.surface == PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
+        if lang.startswith("en"):
+            return _CUSTOMER_CONDITIONAL_COUPON_ANSWER_ENGLISH_SYSTEM
+        return _CUSTOMER_CONDITIONAL_COUPON_ANSWER_ARABIC_SYSTEM
     if lang.startswith("en"):
         return _ENGLISH_SYSTEM
     return _ARABIC_SYSTEM.format(
@@ -112,6 +116,21 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
             "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
         )
+    elif bundle.surface == PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
+        for key in (
+            "identity_status",
+            "min_orders_condition_state",
+            "conditional_coupon_evaluation_state",
+            "order_history_completeness",
+            "completed_orders_count",
+            "min_orders_for_eligibility",
+            "orders_shortfall",
+            "allow_min_orders_condition_claim",
+            "closed_reason_code",
+            "facts_snapshot_id",
+        ):
+            if key in facts and facts.get(key) is not None:
+                lines.append(f"{key}: {facts.get(key)}")
     elif bundle.surface == "trusted_coupon_offer_answer":
         for key in (
             "question_kind",
@@ -192,4 +211,25 @@ _ARABIC_SYSTEM = """أنت مساعد تاجر سعودي ودود على وات
 _ENGLISH_SYSTEM = """You are a warm Saudi merchant assistant on WhatsApp.
 Write one short natural reply in professional English.
 No checkout pressure, no slot prompts, no payment credentials, no unverified claims.
+No support-bot openers. Optional 0–1 emoji. Reply text only."""
+
+_CUSTOMER_CONDITIONAL_COUPON_ANSWER_ARABIC_SYSTEM = """أنت مساعد تاجر سعودي ودود على واتساب.
+السطح: customer_conditional_coupon_answer
+النبرة: warm_saudi_merchant
+الحد الأقصى: 380 حرفاً.
+أجب فقط عن سؤال كوبون الشرط بعد عدد الطلبات من الحقائق المؤكدة في رسالة المستخدم.
+ممنوع: ذكر أكواد كوبون أو إصدار كوبون أو إرسال كود.
+ممنوع: ادعاء أهلية نهائية إلا إذا كان allow_min_orders_condition_claim=true في الحقائق.
+ممنوع: ضغط شراء، طلب عنوان/اسم/دفع، آيبان، روابط دفع.
+ممنوع: عبارات بوت الدعم مثل «كيف أقدر أساعدك اليوم؟» أو «تم استلام رسالتك».
+ممنوع: لهجات غير سعودية (شنو، إزاي، كيفك، شو، بدك، …).
+الإيموجي اختياري 0–1 فقط.
+أجب بجملة أو جملتين فقط — النص النهائي للعميل بدون شرح."""
+
+_CUSTOMER_CONDITIONAL_COUPON_ANSWER_ENGLISH_SYSTEM = """You are a warm Saudi merchant assistant on WhatsApp.
+Surface: customer_conditional_coupon_answer. Max 380 characters.
+Answer only the min-orders conditional coupon question from verified facts in the user message.
+Never mention coupon codes, issuance, or send a code.
+Do not claim final eligibility unless allow_min_orders_condition_claim=true in facts.
+No checkout pressure, slot prompts, payment credentials, or unverified claims.
 No support-bot openers. Optional 0–1 emoji. Reply text only."""

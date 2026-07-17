@@ -570,6 +570,10 @@ def test_untrusted_conversation_customer_id_is_ignored(db, monkeypatch) -> None:
 
 def test_shadow_flag_off_never_invokes_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED", raising=False)
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_subject."
         "resolve_authoritative_a1_subject_for_conversation",
@@ -584,7 +588,7 @@ def test_shadow_flag_off_never_invokes_bridge(monkeypatch: pytest.MonkeyPatch) -
             conversation=SimpleNamespace(id=1),
         )
         assert facts == []
-        assert obs["gate_skipped_reason"] == "shadow_flag_disabled"
+        assert obs["gate_skipped_reason"] == "layer0_flags_disabled"
         bridge.assert_not_called()
         resolver.assert_not_called()
 

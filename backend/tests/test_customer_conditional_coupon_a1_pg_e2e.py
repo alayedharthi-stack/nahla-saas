@@ -430,13 +430,17 @@ def test_pg_shadow_flag_default_off_no_facts_or_queries(
         "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED",
         raising=False,
     )
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     conversation, _, _ = _seed_policy_ready_chain(pg_session)
 
     with _no_runtime_side_effects():
         facts, obs = _load_facts(pg_session, conversation)
 
     assert facts == []
-    assert obs["gate_skipped_reason"] == "shadow_flag_disabled"
+    assert obs["gate_skipped_reason"] == "layer0_flags_disabled"
     assert obs["order_count_query_count"] == 0
     assert obs["usage_evidence_query_count"] == 0
 

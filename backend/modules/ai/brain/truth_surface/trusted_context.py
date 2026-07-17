@@ -601,10 +601,10 @@ def build_trusted_context_snapshot(
             load_customer_conditional_coupon_facts,
             should_load_customer_conditional_coupon_facts,
         )
-        from .flags import is_customer_conditional_coupon_shadow_enabled  # noqa: PLC0415
+        from .flags import is_customer_conditional_coupon_layer0_enabled  # noqa: PLC0415
 
         if (
-            is_customer_conditional_coupon_shadow_enabled()
+            is_customer_conditional_coupon_layer0_enabled()
             and should_load_customer_conditional_coupon_facts(
                 message=message,
                 inbound_metadata=inbound_metadata,

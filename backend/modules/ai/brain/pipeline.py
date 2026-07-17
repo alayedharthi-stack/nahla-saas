@@ -4768,6 +4768,29 @@ def _build_reply_state(
         )
 
         _tc = current_trusted_context()
+        _tc_conditional_facts = None
+        try:
+            from modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate import (  # noqa: PLC0415
+                maybe_customer_conditional_coupon_compose_facts,
+                safe_customer_conditional_coupon_consumption_trace_metadata,
+            )
+
+            _tc_conditional_facts = maybe_customer_conditional_coupon_compose_facts(
+                message=ctx.message or "",
+                snapshot=_tc,
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+            )
+            if _tc_conditional_facts:
+                known_facts["customer_conditional_coupon_facts"] = _tc_conditional_facts
+                logger.info(
+                    "[CUSTOMER_CONDITIONAL_COUPON_COMPOSE] %s",
+                    safe_customer_conditional_coupon_consumption_trace_metadata(
+                        _tc_conditional_facts
+                    ),
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — CC compose must not block reply
+            pass
+
         _tc_coupon_facts = maybe_trusted_coupon_offer_compose_facts(
             message=ctx.message or "",
             snapshot=_tc,
@@ -4777,7 +4800,9 @@ def _build_reply_state(
             snapshot=_tc,
             trusted_coupon_offer_facts=_tc_coupon_facts,
         )
-        if _discovery_facts:
+        if _tc_conditional_facts:
+            pass
+        elif _discovery_facts:
             known_facts["general_offer_discovery_facts"] = _discovery_facts
             logger.info(
                 "[GENERAL_OFFER_DISCOVERY_COMPOSE] %s",
