@@ -1,21 +1,21 @@
 # Staging legacy migration 0030 → 0087 — operator runbook (A1 Expand)
 
-Controlled, staging-gated operator surface for the legacy recovery chain **0031–0087** when staging advances through three bounded guarded stages. This runbook covers three bounded guarded stages only — not backup storage, deploy, production execution, bootstrap unfreeze, or migrations **0088 / 0089 / head**.
+Controlled, staging-gated operator surface for the legacy recovery chain **0031–0087** when staging advances through three bounded guarded stages. This runbook covers three bounded guarded stages only — not backup storage, deploy, production execution, bootstrap unfreeze, the guarded `0087 → 0088` validation operation, normal `0089` bootstrap, or bare `head`.
 
 ## Repository boundary (read before GO)
 
 | Revision | Status in repository | Status in this operator slice |
 |----------|----------------------|-------------------------------|
 | **0087** | Merged (A1-Expand) | **Final target** for Stage C |
-| **0088** | Deferred (`.a1-validate-deferred/`) | **Out of scope** — separate A1-Validate operator slice |
-| **0089** | **Merged on `origin/main`** (PR #596, `0089_conversation_a1_subject_bindings.py`). Alembic repository head may be **0089** while staging runners stop at **0087**. | **Out of scope** — separate later operator slice for staging 0087→0089 |
+| **0088** | A1-Validate sibling head from `0087` | **Out of scope** — guarded `0087 → 0088` maintenance operation only; never normal bootstrap |
+| **0089** | Conversation-bindings sibling head from `0087` | **Out of scope** — normal application bootstrap target (`alembic upgrade 0089`) |
 
 Runners in this PR invoke exactly `alembic upgrade 0032`, `0083`, or `0087` — never `head`, never `0089`.
 
 ## Why this exists
 
 - Staging controlled migration reached **`0030`** via the 0024→0030 slice; guarded Stage A advances staging to **`0032`**. Bootstrap remains frozen (`NAHLA_SKIP_DB_BOOTSTRAP=1`).
-- App head expects schema through **0087** (A1-Expand) but staging must advance in **three bounded stages** with backup/restore between each.
+- Normal application bootstrap targets **0089**, but this staging recovery path must remain bootstrap-frozen and advance only through **0087** in three bounded stages with backup/restore between each.
 - **0031 / 0032** contain customer duplicate data gates — Stage A preflight surfaces aggregate duplicate counts before GO.
 - **0064** introduces variant backfill workload — Stage B uses a longer bounded timeout policy.
 - **0087** adds A1-Expand objects with **NOT VALID** constraints — Stage C adds catalog audit + extension gates.
@@ -225,7 +225,7 @@ fails closed when the source does not match a contracted profile.
 
 ### Post-success contract (0087 only)
 
-- `alembic_version = 0087` (repository head may be `0089`; runners never target `0089` or `head`)
+- `alembic_version = 0087` (repository has sibling heads `0088` and `0089`; runners never target either sibling or `head`)
 - `uq_products_tenant_external_id_nonempty` index on `products` exists and is **valid** (`indisvalid = true`)
 - `order_customer_identity_capability_state.state = expand`
 - Orders FK/CHECK constraints present and **NOT VALID** (`convalidated = false`)
@@ -248,8 +248,8 @@ Invokes exactly: `python -m alembic upgrade 0087`.
 
 | Out of scope | Notes |
 |--------------|-------|
-| **0088** A1-Validate | Separate maintenance window; see `docs/engineering/a1-order-identity-migration-rollout.md` |
-| **0089** conversation bindings | **Present in repository** (PR #596); **not executed** by these runners |
+| **0088** A1-Validate | Guarded `0087 → 0088` maintenance operation only; see `docs/engineering/staging-migration-0087-to-0088-runbook.md` |
+| **0089** conversation bindings | Normal bootstrap target; **not executed** by these bootstrap-frozen runners |
 | `alembic upgrade head` | Forbidden for this window |
 | Bootstrap unfreeze | `NAHLA_SKIP_DB_BOOTSTRAP` must remain `1` |
 | DR executor / backup-runner changes | Separate operator slices |

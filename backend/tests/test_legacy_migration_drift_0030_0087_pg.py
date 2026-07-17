@@ -69,14 +69,14 @@ def test_clean_chain_upgrade_0030_to_0087(
     assert_schema_at_0087_expand(ephemeral_legacy_migration_engine_0030)
 
 
-def test_repository_head_may_be_0089_while_runner_stops_at_0087() -> None:
+def test_repository_parallel_heads_0088_0089_while_expand_runner_stops_at_0087() -> None:
     prev_cwd = os.getcwd()
     try:
         os.chdir(_REPO / "database")
-        heads = ScriptDirectory("migrations").get_heads()
+        heads = set(ScriptDirectory("migrations").get_heads())
     finally:
         os.chdir(prev_cwd)
-    assert "0089" in heads
+    assert heads == frozenset({"0088", "0089"})
     assert FINAL_TARGET == "0087"
 
 

@@ -1,30 +1,24 @@
-# A1-Validate (deferred — separate PR)
+# A1-Validate (deferred — promoted in feat/a1-validate-0088)
 
-This folder holds the **A1-Validate** rollout artifacts. They are **not** part of the
-A1-Expand branch/PR and must not be merged until:
+This folder is the **source archive** for the A1-Validate rollout. The tracked
+artifacts now live in-tree:
 
-1. A1-Expand and the conversation binding PR are merged, with the in-tree
-   migration chain applied through `0089`.
-2. Backfill/reconciliation report is reviewed.
-3. Separate rollout approval is granted.
+| Archive | Promoted location |
+|---------|-------------------|
+| `0088_order_customer_identity_a1_validate.py` | `database/migrations/versions/0088_order_customer_identity_a1_validate.py` |
+| `test_order_customer_identity_migration_validate_pg.py` | `backend/tests/test_order_customer_identity_migration_validate_pg.py` |
 
-## Contents
+Operator + runbook:
 
-- `0088_order_customer_identity_a1_validate.py` — deferred migration content
-  (CONCURRENTLY indexes + VALIDATE CONSTRAINT). The filename is historical only;
-  it is not an Alembic revision in the current tree.
-- `test_order_customer_identity_migration_validate_pg.py` — deferred PostgreSQL
-  tests to copy when opening the Validate PR.
+- `scripts/operators/staging_migration_0087_to_0088.py`
+- `scripts/operators/staging_migration_0087_to_0088_contract.py`
+- `docs/engineering/staging-migration-0087-to-0088-runbook.md`
 
-## Promotion plan
+## Topology
 
-When Validate is approved:
+- Revision **`0088`** branches from **`0087`** (sibling to **`0089`**).
+- Staging operator targets **`0087 → 0088` only** — never `head` or `0089`.
+- CI/integration fixtures continue to use **`alembic upgrade 0089`**.
 
-1. Promote the deferred migration content as new revision **`0090`** with
-   `down_revision = "0089"`.
-2. Rename/adapt the deferred PostgreSQL tests to target `0090`.
-3. Review the migration and validation plan in its separate PR before any
-   environment execution.
-
-Do **not** run `alembic upgrade 0088`, do not copy `0088` into
-`database/migrations/versions`, and do not create a second Alembic head.
+Do not re-copy archive files into `migrations/versions/` without a deliberate
+rollout PR.

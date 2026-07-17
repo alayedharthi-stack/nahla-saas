@@ -184,12 +184,11 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest alembic
 
-      # The committed migration graph has one current head (0089). Keep this
-      # job on `head`; deferred validation artifacts are intentionally not
-      # Alembic revisions and must not be selected here.
-      - name: Apply current single migration head
+      # Parallel heads: 0088 (A1-Validate) and 0089 (bindings). Pin CI to 0089
+      # so capability stays expand; never use bare `head` here.
+      - name: Apply integration migration path (0089 only)
         working-directory: database
-        run: python -m alembic upgrade head
+        run: python -m alembic upgrade 0089
 
       - name: A1-v3.7 PostgreSQL integration
         run: |
@@ -199,6 +198,8 @@ jobs:
             backend/tests/test_order_customer_identity_ingest_regression.py \
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
+            backend/tests/test_order_customer_identity_migration_validate_pg.py \
+            backend/tests/test_staging_migration_0087_to_0088_operators.py \
             backend/tests/test_conversation_a1_subject_binding_migration_pg.py \
             backend/tests/test_conversation_a1_subject_read_bridge_postgres.py \
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \

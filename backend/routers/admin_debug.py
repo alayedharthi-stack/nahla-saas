@@ -2156,7 +2156,7 @@ async def admin_debug_db_schema_health(
     Why this exists
     ───────────────
     The lifespan bootstrap (``backend/main.py:_bootstrap_db_schema``)
-    runs ``alembic upgrade head`` in a background thread with a
+    runs ``alembic upgrade 0089`` in a background thread with a
     180s timeout. If it fails / times out / is skipped by
     ``NAHLA_SKIP_DB_BOOTSTRAP=1``, the next failed-migration error
     only surfaces when an HTTP request hits a SQL query referencing
@@ -2237,7 +2237,7 @@ async def admin_debug_db_schema_health(
     hints:  List[str] = []
     if skip_bootstrap:
         issues.append(
-            "NAHLA_SKIP_DB_BOOTSTRAP=1 — alembic upgrade head is "
+            "NAHLA_SKIP_DB_BOOTSTRAP=1 — alembic upgrade 0089 is "
             "DISABLED at startup. Unset this env var on Railway and "
             "redeploy, or call POST /admin/debug/run-migrations to "
             "apply pending migrations once on demand."
@@ -2265,7 +2265,7 @@ async def admin_debug_db_schema_health(
             )
         hints.append(
             "Quick fix: POST /admin/debug/run-migrations to apply "
-            "alembic upgrade head in the running container. Always "
+            "alembic upgrade 0089 in the running container. Always "
             "back up the DB first if you have any doubt."
         )
 
@@ -2365,14 +2365,14 @@ async def admin_debug_run_migrations(
 
     logger.warning(
         "[admin-debug] run-migrations invoked by admin — "
-        "alembic upgrade head (cwd=%s, timeout=%ds)",
+        "alembic upgrade 0089 (cwd=%s, timeout=%ds)",
         database_dir, body.timeout_seconds,
     )
 
     start = time.monotonic()
     try:
         result = subprocess.run(
-            [_sys.executable, "-m", "alembic", "upgrade", "head"],
+            [_sys.executable, "-m", "alembic", "upgrade", "0089"],
             cwd=database_dir,
             check=False,
             env=os.environ.copy(),
@@ -2392,7 +2392,7 @@ async def admin_debug_run_migrations(
                 "code": "alembic_timeout",
                 "timeout_seconds": body.timeout_seconds,
                 "message": (
-                    "alembic upgrade head did not finish within the "
+                    "alembic upgrade 0089 did not finish within the "
                     "timeout. The migration may be holding a lock — "
                     "inspect Railway logs and consider terminating "
                     "the locking session."
@@ -2426,7 +2426,7 @@ async def admin_debug_run_migrations(
                 "stdout":     stdout,
                 "stderr":     stderr,
                 "message": (
-                    "alembic upgrade head returned a non-zero exit "
+                    "alembic upgrade 0089 returned a non-zero exit "
                     "code. Inspect 'stderr' for the offending "
                     "migration."
                 ),
@@ -2444,7 +2444,7 @@ async def admin_debug_run_migrations(
         "stdout":     stdout,
         "stderr":     stderr,
         "message": (
-            "alembic upgrade head completed successfully. Re-call "
+            "alembic upgrade 0089 completed successfully. Re-call "
             "GET /admin/debug/db-schema-health to confirm the head "
             "matches the codebase and that all critical columns are "
             "present."

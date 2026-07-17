@@ -228,15 +228,19 @@ Machine-readable JSON. Closed top-level fields:
 
 ## Separate approval steps for `0088`
 
-1. A1-Expand merged; `0087` applied in target environment
+1. A1-Expand merged; `0087` applied in target environment (staging pinned at `0087`)
 2. Per-tenant **write reconciliation** (if coverage/watermarks missing) via `reconcile_order_customer_identity_coverage.py`
-3. Per-tenant **read-only report** reviewed; `ready_for_validate: true` where required
-4. Separate rollout approval granted (see `docs/engineering/a1-order-identity-migration-rollout.md`)
-5. Maintenance window: `cd database && alembic upgrade 0088`
-6. Verify constraints validated and indexes present
-7. Only then enable reconciliation consumers / healthy runtime signals
+3. Per-tenant **read-only report** reviewed; `ready_for_validate: true` where required (tenant 1 on experimental staging)
+4. **Fixture evidence retained** until validation outcome — see `docs/engineering/a1-evidence-fixture-operator-runbook.md`
+5. Separate rollout approval granted (see `docs/engineering/a1-order-identity-migration-rollout.md`)
+6. Maintenance window: operator `scripts/operators/staging_migration_0087_to_0088.py run --tenant-id <ID>` (never `head`)
+7. Verify constraints validated, indexes present, capability `validated`
+8. **Fixture cleanup** after success or no-go decision
+9. Only then enable reconciliation consumers / healthy runtime signals
 
-Deferred Validate artifacts: `.a1-validate-deferred/` (not part of Expand branch).
+Tracked operator + runbook: `docs/engineering/staging-migration-0087-to-0088-runbook.md`.
+
+Deferred source archive: `.a1-validate-deferred/` (promoted into this PR as revision `0088`).
 
 ## Generic merchant scenario
 
