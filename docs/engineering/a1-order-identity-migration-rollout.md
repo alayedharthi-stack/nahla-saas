@@ -65,6 +65,27 @@ After Validate deploy, reconciliation may report `complete` / `healthy` when tup
 
 ---
 
+## `0088 + 0089` — staging attachment (coupon shadow observation substrate)
+
+Sibling attach only: staging already at validated `0088` advances to **both heads**
+(`0088` + `0089`) via `alembic upgrade 0089` without re-running Validate.
+
+Prerequisites:
+
+1. Validated `0088` exactly (single `alembic_version` row)
+2. DR restore profile `staging_pin_0088` in canonical parity contract
+3. Operator preflight: `0088` invariants + no pre-attach `0089` objects
+4. Separate rollout approval
+
+Operator: `scripts/operators/staging_migration_0088_to_0089.py`
+Runbook: `docs/engineering/staging-migration-0088-to-0089-runbook.md`
+
+Post-attach `alembic_version` contains **two rows**. Capability stays
+`validated` / `validation_revision = '0088'`. Does **not** enable coupon shadow
+runtime activation.
+
+---
+
 ## `0089` — conversation → A1-subject bindings
 
 Unchanged sibling path from `0087`. Validate PR does **not** modify `0089`.

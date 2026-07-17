@@ -38,6 +38,7 @@ from services.order_customer_identity_service import (
 )
 
 _REVISION_SQL = text("SELECT version_num FROM alembic_version LIMIT 1")
+_REVISIONS_SQL = text("SELECT version_num FROM alembic_version ORDER BY version_num")
 _CAPABILITY_DETAIL_SQL = text(
     """
     SELECT state, validation_revision
@@ -157,6 +158,19 @@ def read_alembic_revision(db: Session) -> Optional[str]:
         return None
 
 
+def read_alembic_revisions(db: Session) -> frozenset[str]:
+    """Return the full Alembic revision set; multi-head databases have multiple rows."""
+    try:
+        rows = db.execute(_REVISIONS_SQL).fetchall()
+        return frozenset(
+            str(row[0]).strip()
+            for row in rows
+            if row and row[0] is not None and str(row[0]).strip()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — revision read fails closed to empty set
+        return frozenset()
+
+
 def read_capability_detail(db: Session) -> Tuple[Optional[str], Optional[str]]:
     try:
         row = db.execute(
@@ -179,10 +193,10 @@ def read_capability_detail(db: Session) -> Tuple[Optional[str], Optional[str]]:
 def validate_capability_and_revision_gates(
     db: Session,
 ) -> WriteGateFailure | None:
-    revision = read_alembic_revision(db)
-    if revision is None:
+    revisions = read_alembic_revisions(db)
+    if not revisions:
         return WriteGateFailure("revision_rejected", "alembic_version_missing")
-    if revision != REQUIRED_ALEMBIC_REVISION:
+    if revisions != frozenset({REQUIRED_ALEMBIC_REVISION}):
         return WriteGateFailure("revision_rejected", "revision_not_exactly_0087")
 
     state, validation_revision = read_capability_detail(db)

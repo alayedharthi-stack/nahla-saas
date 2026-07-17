@@ -19,6 +19,7 @@ _ALLOWED_STAGING_DATABASE_HOST = "postgres-staging.railway.internal"
 _POSTGRES_SCHEMES = frozenset({"postgresql", "postgresql+psycopg2"})
 
 _REVISION_SQL = text("SELECT version_num FROM alembic_version LIMIT 1")
+_REVISIONS_SQL = text("SELECT version_num FROM alembic_version ORDER BY version_num")
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,37 @@ def validate_confirmation(
 def read_alembic_revision(conn: Connection) -> str | None:
     row = conn.execute(_REVISION_SQL).first()
     return row[0] if row else None
+
+
+def read_alembic_revisions(conn: Connection) -> frozenset[str]:
+    rows = conn.execute(_REVISIONS_SQL).fetchall()
+    return frozenset(row[0] for row in rows)
+
+
+def validate_exact_revisions(
+    conn: Connection,
+    *,
+    expected: frozenset[str],
+    wrong_stage: str,
+) -> GateFailure | None:
+    revisions = read_alembic_revisions(conn)
+    if not revisions:
+        return GateFailure("wrong_revision", "alembic_version_missing")
+    if revisions != expected:
+        return GateFailure("wrong_revision", wrong_stage)
+    return None
+
+
+def validate_post_success_revisions(
+    conn: Connection,
+    *,
+    expected: frozenset[str],
+    wrong_stage: str,
+) -> GateFailure | None:
+    revisions = read_alembic_revisions(conn)
+    if revisions != expected:
+        return GateFailure("post_validation_failed", wrong_stage)
+    return None
 
 
 def validate_start_revision(

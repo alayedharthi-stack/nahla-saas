@@ -90,6 +90,16 @@ def _set_alembic_revision(pg_session, revision: str) -> None:
     pg_session.flush()
 
 
+def _set_alembic_revisions(pg_session, *revisions: str) -> None:
+    pg_session.execute(text("DELETE FROM alembic_version"))
+    for revision in revisions:
+        pg_session.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": revision},
+        )
+    pg_session.flush()
+
+
 def _staging_env(**overrides: str) -> dict[str, str]:
     base = {
         "RAILWAY_PROJECT_NAME": "desirable-growth",
@@ -316,6 +326,24 @@ def test_fail_closed_when_revision_not_0087(pg_session) -> None:
     assert result.gate_stage == "revision_not_exactly_0087"
 
 
+def test_seed_rejects_dual_head_0087_0089_without_mutations(pg_session) -> None:
+    _seed_gates(pg_session)
+    _set_alembic_revisions(pg_session, "0087", "0089")
+    before = _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A)
+
+    result = execute_order_customer_identity_evidence_fixture_seed(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+
+    assert result.access_status == "gate_rejected"
+    assert result.gate_stage == "revision_not_exactly_0087"
+    assert result.committed is False
+    assert result.alembic_revisions == ["0087", "0089"]
+    assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == before
+
+
 def test_fail_closed_when_capability_validated(pg_session) -> None:
     _seed_gates(pg_session)
     seed_capability_state(pg_session, state=CAPABILITY_STATE_VALIDATED, validation_revision="0088")
@@ -379,6 +407,35 @@ def test_cleanup_rejected_at_0089(pg_session) -> None:
     failure = validate_fixture_cleanup_capability_and_revision_gates(pg_session)
     assert failure is not None
     assert failure.stage == "revision_is_0089_not_0088"
+
+
+def test_cleanup_rejects_dual_head_0088_0089_without_mutations(pg_session) -> None:
+    _seed_gates(pg_session)
+    seeded = execute_order_customer_identity_evidence_fixture_seed(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+    assert seeded.outcome == "success"
+    _set_alembic_revisions(pg_session, "0088", "0089")
+    seed_capability_state(
+        pg_session,
+        state=CAPABILITY_STATE_VALIDATED,
+        validation_revision="0088",
+    )
+    before = _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A)
+
+    cleanup = execute_order_customer_identity_evidence_fixture_cleanup(
+        pg_session,
+        TEST_TENANT_A,
+        dry_run=False,
+    )
+
+    assert cleanup.access_status == "gate_rejected"
+    assert cleanup.gate_stage == "revision_not_exactly_0088"
+    assert cleanup.committed is False
+    assert cleanup.alembic_revisions == ["0088", "0089"]
+    assert _count_fixture_orders(pg_session, tenant_id=TEST_TENANT_A) == before
 
 
 def test_cleanup_rejected_when_validated_without_revision(pg_session) -> None:
