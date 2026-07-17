@@ -281,7 +281,7 @@ def test_blocked_by_budget_telemetry_target_overflow() -> None:
 
 def test_blocked_by_budget_telemetry_gate_skipped() -> None:
     result = evaluate_coupon_shadow_readiness(
-        _base_evidence(gate_skipped_reason="shadow_flag_disabled"),
+        _base_evidence(gate_skipped_reason="layer0_flags_disabled"),
     )
     assert result.outcome == OUTCOME_BLOCKED_BUDGET_TELEMETRY
 
@@ -322,6 +322,10 @@ def test_shadow_flag_default_off_no_loader_io(monkeypatch: pytest.MonkeyPatch) -
         "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENABLED",
         raising=False,
     )
+    monkeypatch.delenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        raising=False,
+    )
     facts, obs = load_customer_conditional_coupon_facts(
         db=MagicMock(),
         tenant_id=1,
@@ -329,7 +333,7 @@ def test_shadow_flag_default_off_no_loader_io(monkeypatch: pytest.MonkeyPatch) -
         conversation=SimpleNamespace(customer_id=9),
     )
     assert facts == []
-    assert obs["gate_skipped_reason"] == "shadow_flag_disabled"
+    assert obs["gate_skipped_reason"] == "layer0_flags_disabled"
     assert obs["order_count_query_count"] == 0
 
     evidence = build_evidence_from_layer0_observation(
