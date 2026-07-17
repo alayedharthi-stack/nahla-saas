@@ -20,6 +20,7 @@ PIN_0030_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 PIN_0032_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 PIN_0083_FP = "1b9aca690e4eba0a0ffa1df8d59ecdd316d1a7f150e65bd2635d7fca4f5f54ae"
 PIN_0087_FP = "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
+PIN_0088_FP = "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
 
 
 def _loaded_contract() -> dict:
@@ -44,6 +45,47 @@ def test_all_concrete_profiles_require_exact_fingerprint_pins() -> None:
     del malformed["source_eligibility_profiles"][0]["schema_fingerprint_sha256"]
     with pytest.raises(ValueError, match="profile_shape_invalid"):
         contract.load_contract(malformed)
+
+
+def test_staging_pin_0088_requires_exact_attested_values() -> None:
+    loaded = _loaded_contract()
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0088",
+            public_table_count=101,
+            schema_fingerprint_sha256=PIN_0088_FP,
+            contract=loaded,
+        )
+        == "staging_pin_0088"
+    )
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0088",
+            public_table_count=99,
+            schema_fingerprint_sha256=PIN_0088_FP,
+            contract=loaded,
+        )
+        is None
+    )
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0088",
+            public_table_count=101,
+            schema_fingerprint_sha256="e" * 64,
+            contract=loaded,
+        )
+        is None
+    )
+    # Same fingerprint as 0087 does not satisfy the 0088 revision pin.
+    assert (
+        contract.match_source_profile(
+            alembic_revision="0087",
+            public_table_count=101,
+            schema_fingerprint_sha256=PIN_0088_FP,
+            contract=loaded,
+        )
+        == "staging_pin_0087"
+    )
 
 
 def test_staging_pin_0087_requires_exact_attested_values() -> None:
@@ -205,6 +247,22 @@ def test_evaluate_parity_fail_closed_when_manifest_mismatch() -> None:
     )
     assert result["canonical_manifest_parity"] is False
     assert result["source_contract_eligible"] is False
+
+
+def test_evaluate_parity_passes_for_matched_0088_profile() -> None:
+    loaded = _loaded_contract()
+    result = contract.evaluate_parity(
+        source_revision="0088",
+        restore_revision="0088",
+        source_table_count=101,
+        restore_table_count=101,
+        source_fingerprint_sha256=PIN_0088_FP,
+        restore_fingerprint_sha256=PIN_0088_FP,
+        contract=loaded,
+    )
+    assert result["canonical_manifest_parity"] is True
+    assert result["source_contract_eligible"] is True
+    assert result["matched_source_profile_id"] == "staging_pin_0088"
 
 
 def test_evaluate_parity_passes_for_matched_0087_profile() -> None:

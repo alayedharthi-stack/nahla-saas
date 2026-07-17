@@ -36,6 +36,13 @@
       "profile_id": "staging_pin_0087",
       "public_table_count": 101,
       "schema_fingerprint_sha256": "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
+    },
+    {
+      "alembic_revision": "0088",
+      "operator_note": "Live staging source attestation after guarded A1-Validate (0087\u21920088) post-validation",
+      "profile_id": "staging_pin_0088",
+      "public_table_count": 101,
+      "schema_fingerprint_sha256": "2d3c6f4ffdd011517352efa5f1b1d881c30b66bf189e478197a6fad0777890db"
     }
   ]
 }
