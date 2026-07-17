@@ -75,7 +75,7 @@ def test_0064_missing_parent_columns_and_zero_backfill_on_drift_path(
         conn.execute(
             text(
                 """
-                INSERT INTO products (id, tenant_id, name, price, in_stock)
+                INSERT INTO products (id, tenant_id, title, price, in_stock)
                 VALUES (:pid, :tid, 'حذاء رياضي أبيض', '199.00', true)
                 ON CONFLICT (id) DO NOTHING
                 """
