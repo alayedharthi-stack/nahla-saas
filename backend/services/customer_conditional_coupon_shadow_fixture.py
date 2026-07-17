@@ -485,7 +485,11 @@ def _populate_observation_readiness(
     db: Session,
     result: CustomerConditionalCouponShadowFixtureResult,
 ) -> None:
+    from modules.ai.brain.truth_surface.customer_conditional_coupon_contract import (  # noqa: PLC0415
+        MAX_CONDITIONAL_TARGETS,
+    )
     from modules.ai.brain.truth_surface.customer_conditional_coupon_repository import (  # noqa: PLC0415
+        ConditionalCouponRepositoryError,
         scan_conditional_targets,
     )
 
@@ -501,9 +505,13 @@ def _populate_observation_readiness(
             conversation=conversations[0],
         )
     try:
-        targets, _overflow = scan_conditional_targets(db, tenant_id=int(result.tenant_id))
+        targets = scan_conditional_targets(
+            db,
+            tenant_id=int(result.tenant_id),
+            limit=MAX_CONDITIONAL_TARGETS + 1,
+        )
         result.active_conditional_targets = len(targets)
-    except Exception:  # noqa: BLE001
+    except ConditionalCouponRepositoryError:
         result.active_conditional_targets = 0
 
 
