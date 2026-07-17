@@ -59,7 +59,12 @@ def test_contract_requires_layer0_modules_fixture_operator_and_flag_accessor() -
         in rels
     )
     assert "modules/ai/brain/persona/customer_conditional_coupon_answer.py" in rels
+    assert "modules/ai/brain/persona/customer_conditional_coupon_claim_classification.py" in rels
     assert "modules/ai/brain/persona/customer_conditional_coupon_provenance.py" in rels
+    assert (
+        "modules/ai/brain/postprocess/customer_conditional_coupon_general_llm_evidence_guard.py"
+        in rels
+    )
     assert "services/customer_conditional_coupon_shadow_fixture.py" in rels
     assert "scripts/seed_customer_conditional_coupon_shadow_fixture.py" in rels
 

@@ -1647,6 +1647,18 @@ class DefaultComposer:
                     ctx,
                     decision,
                 )
+            if _conditional_cc_facts and not result.data.get(
+                "customer_conditional_coupon_compose_active"
+            ):
+                result.data["customer_conditional_coupon_general_llm_fallthrough"] = True
+                result.data.setdefault(
+                    "facts_snapshot_id",
+                    str(_conditional_cc_facts.get("facts_snapshot_id") or ""),
+                )
+                result.data.setdefault(
+                    "response_mode",
+                    "customer_conditional_coupon_general_llm",
+                )
             text = await self._llm_compose(ctx, result, decision=decision)
             if _topic == "social_persona_ack":
                 text = self._social_persona_emergency_fallback_if_needed(
