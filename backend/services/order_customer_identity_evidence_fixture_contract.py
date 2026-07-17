@@ -22,8 +22,8 @@ STAGING_IDENTITY_CLASS = "railway_staging_desirable_growth"
 
 # Isolated deterministic namespace — never overlaps production rows.
 FIXTURE_NAMESPACE = "a1_g4_generic_commerce_v1"
-FIXTURE_MARKER_KEY = "a1_evidence_fixture_namespace"
-FIXTURE_SLOT_KEY = "a1_evidence_fixture_slot"
+FIXTURE_MARKER_FIELD = "a1_evidence_fixture_namespace"
+FIXTURE_SLOT_FIELD = "a1_evidence_fixture_slot"
 FIXTURE_EXTERNAL_ID_PREFIX = "A1G4FX"
 
 # Bounded fixture shape (strict caps; no batch growth).
@@ -64,14 +64,14 @@ __all__ = [
     "FIXTURE_EXTERNAL_ORDER_SUFFIX",
     "FIXTURE_EXTERNAL_STORE_SUFFIX",
     "FIXTURE_INTERNAL_ORDER_SUFFIX",
-    "FIXTURE_MARKER_KEY",
+    "FIXTURE_MARKER_FIELD",
     "FIXTURE_NAMESPACE",
     "FIXTURE_SCHEMA_VERSION",
     "FIXTURE_SLOT_EXTERNAL_ORDER",
     "FIXTURE_SLOT_INTEGRATION",
     "FIXTURE_SLOT_INTERNAL_CUSTOMER",
     "FIXTURE_SLOT_INTERNAL_ORDER",
-    "FIXTURE_SLOT_KEY",
+    "FIXTURE_SLOT_FIELD",
     "GENERIC_CITY",
     "GENERIC_EXTERNAL_CUSTOMER_NAME",
     "GENERIC_INTERNAL_CUSTOMER_NAME",

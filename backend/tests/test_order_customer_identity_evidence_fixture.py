@@ -34,7 +34,7 @@ from services.order_customer_identity_evidence_fixture_contract import (
     CONFIRMATION_TOKEN_WRITE,
     FIXTURE_EXTERNAL_CUSTOMER_REF,
     FIXTURE_EXTERNAL_ID_PREFIX,
-    FIXTURE_MARKER_KEY,
+    FIXTURE_MARKER_FIELD,
     FIXTURE_NAMESPACE,
     FIXTURE_SCHEMA_VERSION,
 )
@@ -139,7 +139,7 @@ def _count_fixture_orders(pg_session, *, tenant_id: int) -> int:
             {
                 "tenant_id": int(tenant_id),
                 "prefix": prefix,
-                "marker_key": FIXTURE_MARKER_KEY,
+                "marker_key": FIXTURE_MARKER_FIELD,
                 "marker_value": FIXTURE_NAMESPACE,
             },
         ).scalar_one()
@@ -193,7 +193,7 @@ def test_write_creates_authoritative_internal_and_external_evidence(pg_session) 
         ),
         {
             "tenant_id": TEST_TENANT_A,
-            "marker_key": FIXTURE_MARKER_KEY,
+            "marker_key": FIXTURE_MARKER_FIELD,
             "marker_value": FIXTURE_NAMESPACE,
         },
     ).mappings().all()

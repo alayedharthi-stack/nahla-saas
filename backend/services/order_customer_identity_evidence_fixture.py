@@ -19,14 +19,14 @@ from services.order_customer_identity_evidence_fixture_contract import (
     FIXTURE_EXTERNAL_ORDER_SUFFIX,
     FIXTURE_EXTERNAL_STORE_SUFFIX,
     FIXTURE_INTERNAL_ORDER_SUFFIX,
-    FIXTURE_MARKER_KEY,
+    FIXTURE_MARKER_FIELD,
     FIXTURE_NAMESPACE,
     FIXTURE_SCHEMA_VERSION,
     FIXTURE_SLOT_EXTERNAL_ORDER,
     FIXTURE_SLOT_INTEGRATION,
     FIXTURE_SLOT_INTERNAL_CUSTOMER,
     FIXTURE_SLOT_INTERNAL_ORDER,
-    FIXTURE_SLOT_KEY,
+    FIXTURE_SLOT_FIELD,
     GENERIC_CITY,
     GENERIC_EXTERNAL_CUSTOMER_NAME,
     GENERIC_INTERNAL_CUSTOMER_NAME,
@@ -72,8 +72,8 @@ def _fixture_store_id(tenant_id: int) -> str:
 
 def _fixture_marker(*, slot: str) -> Dict[str, str]:
     return {
-        FIXTURE_MARKER_KEY: FIXTURE_NAMESPACE,
-        FIXTURE_SLOT_KEY: slot,
+        FIXTURE_MARKER_FIELD: FIXTURE_NAMESPACE,
+        FIXTURE_SLOT_FIELD: slot,
     }
 
 
@@ -85,7 +85,7 @@ def _merge_fixture_metadata(row: Any, *, slot: str) -> None:
 
 def _row_has_fixture_namespace(row: Any) -> bool:
     meta = getattr(row, "extra_metadata", None) or {}
-    return str(meta.get(FIXTURE_MARKER_KEY) or "").strip() == FIXTURE_NAMESPACE
+    return str(meta.get(FIXTURE_MARKER_FIELD) or "").strip() == FIXTURE_NAMESPACE
 
 
 def _generic_internal_line_items() -> List[Dict[str, Any]]:
@@ -156,10 +156,10 @@ def _fixture_profiles_for_tenant(db: Session, *, tenant_id: int) -> List[Any]:
 def _count_fixture_shape(db: Session, *, tenant_id: int) -> Dict[str, int]:
     orders = _fixture_orders_for_tenant(db, tenant_id=tenant_id)
     internal_orders = sum(
-        1 for order in orders if str((order.extra_metadata or {}).get(FIXTURE_SLOT_KEY)) == FIXTURE_SLOT_INTERNAL_ORDER
+        1 for order in orders if str((order.extra_metadata or {}).get(FIXTURE_SLOT_FIELD)) == FIXTURE_SLOT_INTERNAL_ORDER
     )
     external_orders = sum(
-        1 for order in orders if str((order.extra_metadata or {}).get(FIXTURE_SLOT_KEY)) == FIXTURE_SLOT_EXTERNAL_ORDER
+        1 for order in orders if str((order.extra_metadata or {}).get(FIXTURE_SLOT_FIELD)) == FIXTURE_SLOT_EXTERNAL_ORDER
     )
     return {
         "integrations": len(_fixture_integrations_for_tenant(db, tenant_id=tenant_id)),
@@ -355,7 +355,7 @@ def _ensure_internal_customer(db: Session, *, tenant_id: int, dry_run: bool) -> 
 
 def _existing_fixture_order(db: Session, *, tenant_id: int, slot: str) -> Any | None:
     for order in _fixture_orders_for_tenant(db, tenant_id=tenant_id):
-        if str((order.extra_metadata or {}).get(FIXTURE_SLOT_KEY)) == slot:
+        if str((order.extra_metadata or {}).get(FIXTURE_SLOT_FIELD)) == slot:
             return order
     return None
 
