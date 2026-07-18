@@ -88,6 +88,10 @@ jobs:
           python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1
           python -m pytest backend/tests/test_staging_migration_0088_to_0089_operators.py -q --maxfail=1
 
+      - name: Tenant merchant clone operator tests
+        run: |
+          python -m pytest backend/tests/test_tenant_merchant_clone_operator.py -q --maxfail=1
+
       - name: Staging DR canonical parity unit tests
         run: |
           python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1
