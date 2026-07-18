@@ -1660,6 +1660,15 @@ class DefaultComposer:
                     "customer_conditional_coupon_general_llm",
                 )
             text = await self._llm_compose(ctx, result, decision=decision)
+            if result.data.get("customer_conditional_coupon_general_llm_fallthrough"):
+                from ..persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                    stamp_customer_conditional_coupon_general_llm_compose_metadata,
+                )
+
+                stamp_customer_conditional_coupon_general_llm_compose_metadata(
+                    result.data,
+                    llm_candidate=text or "",
+                )
             if _topic == "social_persona_ack":
                 text = self._social_persona_emergency_fallback_if_needed(
                     text, ctx, result,

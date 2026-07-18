@@ -257,5 +257,8 @@ def test_compose_failure_general_llm_unsafe_text_rejected_at_guard() -> None:
     text, guarded, result = asyncio.run(_run_compose_failure_general_llm_pipeline())
     assert text == "كود الخصم ABC123 جاهز لك."
     assert result.data.get("customer_conditional_coupon_general_llm_fallthrough") is True
+    assert result.data.get("compose_source") == "llm"
+    assert result.data.get("chosen_path") == "customer_conditional_coupon_general_llm_fallthrough"
+    assert result.data.get("llm_candidate_present") is True
     assert guarded.rejected is True
     assert guarded.reply == ""

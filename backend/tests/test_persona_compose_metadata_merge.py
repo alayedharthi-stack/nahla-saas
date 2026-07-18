@@ -41,6 +41,25 @@ class TestPersonaComposeMetadataMerge:
         assert merged["facts_snapshot_id"] == "snap-merge-001"
         assert merged["final_transform_reasons"] == ["commerce_reply_quality_guard"]
 
+    def test_merge_preserves_general_llm_fallthrough_constitutional_metadata(self) -> None:
+        event_meta = {
+            "chosen_path": "customer_conditional_coupon_general_llm_fallthrough",
+            "compose_source": "llm",
+            "response_mode": "customer_conditional_coupon_general_llm",
+            "llm_candidate_present": True,
+            "final_text_transformed": True,
+            "final_transform_reasons": ["customer_conditional_coupon_general_llm_evidence_guard"],
+            "final_customer_text_source": "guard_rewrite",
+            "customer_conditional_coupon_general_llm_fallthrough": True,
+            "conditional_coupon_guard_failed_reason": "coupon_code_disclosure",
+            "facts_snapshot_id": "snap-merge-general-llm",
+        }
+        merged = merge_persona_compose_into_extra_metadata({}, event_meta)
+        assert merged["chosen_path"] == "customer_conditional_coupon_general_llm_fallthrough"
+        assert merged["compose_source"] == "llm"
+        assert merged["customer_conditional_coupon_general_llm_fallthrough"] is True
+        assert merged["final_customer_text_source"] == "guard_rewrite"
+
     def test_merge_preserves_zero_len_diagnostics(self) -> None:
         event_meta = {
             "chosen_path": "fact_bound_persona_compose",

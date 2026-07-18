@@ -13,6 +13,7 @@ CONSTITUTIONAL_METADATA_KEYS = (
     "llm_candidate_present",
     "final_text_transformed",
     "final_transform_reasons",
+    "final_customer_text_source",
     "fallback_reason",
     "fallback_action_type",
     "customer_conditional_coupon_compose_active",
@@ -20,6 +21,8 @@ CONSTITUTIONAL_METADATA_KEYS = (
     "conditional_coupon_guard_failed_reason",
     "facts_snapshot_id",
 )
+
+GENERAL_LLM_FALLTHROUGH_CHOSEN_PATH = "customer_conditional_coupon_general_llm_fallthrough"
 
 
 @dataclass
@@ -35,6 +38,25 @@ def _conditional_coupon_provenance_tracking_active(
         result_data.get("customer_conditional_coupon_compose_active")
         or result_data.get("customer_conditional_coupon_general_llm_fallthrough")
     )
+
+
+def stamp_customer_conditional_coupon_general_llm_compose_metadata(
+    result_data: MutableMapping[str, Any],
+    *,
+    llm_candidate: str,
+) -> None:
+    """Stamp constitutional compose metadata for persona-fail general-LLM fallthrough."""
+    if not result_data.get("customer_conditional_coupon_general_llm_fallthrough"):
+        return
+    candidate = str(llm_candidate or "")
+    result_data["compose_source"] = "llm"
+    result_data.setdefault("response_mode", "customer_conditional_coupon_general_llm")
+    result_data["chosen_path"] = GENERAL_LLM_FALLTHROUGH_CHOSEN_PATH
+    result_data["llm_candidate_present"] = bool(candidate.strip())
+    result_data["final_text_transformed"] = False
+    result_data["final_transform_reasons"] = []
+    result_data.setdefault("fallback_reason", "")
+    result_data.setdefault("fallback_action_type", "")
 
 
 def begin_customer_conditional_coupon_text_tracking(
@@ -91,6 +113,29 @@ def finalize_customer_conditional_coupon_text_provenance(
     result_data["final_text_transformed"] = transformed
     result_data["final_transform_reasons"] = reasons if transformed else []
 
+    compose_source = str(result_data.get("compose_source") or "")
+    is_general_llm = bool(result_data.get("customer_conditional_coupon_general_llm_fallthrough"))
+    guard_names = [
+        str(name or "").strip()
+        for name, fired in (guard_replaced or {}).items()
+        if fired and str(name or "").strip()
+    ]
+    if compose_source == "fallback_deterministic":
+        result_data["final_customer_text_source"] = "fallback_deterministic"
+    elif guard_names and candidate.strip() != final.strip():
+        result_data["final_customer_text_source"] = "guard_rewrite"
+    elif "chat_dedup_substitution" in reasons:
+        result_data["final_customer_text_source"] = "dedup_substitution"
+    elif transformed:
+        if is_general_llm or compose_source == "llm":
+            result_data["final_customer_text_source"] = "llm_postprocess"
+        else:
+            result_data["final_customer_text_source"] = "persona_llm_postprocess"
+    elif is_general_llm or compose_source == "llm":
+        result_data["final_customer_text_source"] = "llm"
+    else:
+        result_data["final_customer_text_source"] = "persona_llm"
+
 
 def note_customer_conditional_coupon_dedup_substitution(
     target: MutableMapping[str, Any],
@@ -108,6 +153,7 @@ def note_customer_conditional_coupon_dedup_substitution(
         reasons.append("chat_dedup_substitution")
     target["final_text_transformed"] = True
     target["final_transform_reasons"] = reasons
+    target["final_customer_text_source"] = "dedup_substitution"
 
 
 def extract_constitutional_metadata(
@@ -126,9 +172,11 @@ def extract_constitutional_metadata(
 
 __all__ = [
     "CONSTITUTIONAL_METADATA_KEYS",
+    "GENERAL_LLM_FALLTHROUGH_CHOSEN_PATH",
     "begin_customer_conditional_coupon_text_tracking",
     "extract_constitutional_metadata",
     "finalize_customer_conditional_coupon_text_provenance",
     "note_customer_conditional_coupon_dedup_substitution",
     "note_customer_conditional_coupon_text_change",
+    "stamp_customer_conditional_coupon_general_llm_compose_metadata",
 ]
