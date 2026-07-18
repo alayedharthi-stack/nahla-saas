@@ -8725,6 +8725,24 @@ async def _handle_merchant_message(
                                         brain_result.get("product_sale_offer_compose_active")
                                     ),
                                 }
+                        elif (
+                            _brain_chosen_path == "track_order_need_order_number"
+                            and brain_result.get("track_order_need_identifiers_compose_active")
+                        ):
+                            try:
+                                from modules.ai.brain.persona.track_order_need_identifiers_provenance import (  # noqa: PLC0415
+                                    extract_constitutional_metadata,
+                                )
+
+                                _brain_persona_compose_event = extract_constitutional_metadata(
+                                    brain_result,
+                                )
+                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
+                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
+                                _brain_persona_compose_event = {
+                                    "chosen_path": _brain_chosen_path,
+                                    "track_order_need_identifiers_compose_active": True,
+                                }
                         else:
                             _brain_persona_compose_event = None
                         _brain_nc_block = bool(
@@ -9936,6 +9954,9 @@ async def _handle_merchant_message(
                                     from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                                         note_product_sale_offer_dedup_substitution,
                                     )
+                                    from modules.ai.brain.persona.track_order_need_identifiers_provenance import (  # noqa: PLC0415
+                                        note_track_order_need_identifiers_dedup_substitution,
+                                    )
 
                                     note_trusted_coupon_offer_dedup_substitution(
                                         _brain_persona_compose_event,
@@ -9948,6 +9969,11 @@ async def _handle_merchant_message(
                                         after=reply,
                                     )
                                     note_product_sale_offer_dedup_substitution(
+                                        _brain_persona_compose_event,
+                                        before=_po_reply_before_dedup,
+                                        after=reply,
+                                    )
+                                    note_track_order_need_identifiers_dedup_substitution(
                                         _brain_persona_compose_event,
                                         before=_po_reply_before_dedup,
                                         after=reply,

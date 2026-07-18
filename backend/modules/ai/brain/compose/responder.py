@@ -1065,7 +1065,7 @@ class DefaultComposer:
             if msg_key == "need_order_number":
                 result.data["chosen_path"] = "track_order_need_order_number"
                 result.data.pop("pending_candidates", None)
-                return T.track_order_need_identifiers()
+                return await self._compose_track_order_need_identifiers(ctx, result)
             if msg_key == "order_not_found":
                 result.data["chosen_path"] = "track_order_not_found"
                 result.data.pop("pending_candidates", None)
@@ -1089,7 +1089,7 @@ class DefaultComposer:
                     pass
                 result.data["chosen_path"] = "track_order_need_order_number"
                 result.data.pop("pending_candidates", None)
-                return T.track_order_need_identifiers()
+                return await self._compose_track_order_need_identifiers(ctx, result)
             result.data["chosen_path"] = "track_order_status"
             result.data.pop("pending_candidates", None)
             return self._with_follow_up(
@@ -2003,6 +2003,41 @@ class DefaultComposer:
         )
 
     # ── LLM delegation ───────────────────────────────────────────────────────
+
+    async def _compose_track_order_need_identifiers(
+        self,
+        ctx: BrainContext,
+        result: ActionResult,
+    ) -> str:
+        from core.outbound_text_policy import mark_compose_llm  # noqa: PLC0415
+
+        from .track_order_need_identifiers_compose import (  # noqa: PLC0415
+            build_track_order_need_identifiers_compose_decision,
+            extract_track_order_need_identifiers_facts,
+            format_track_order_need_identifiers_facts_overlay,
+            is_usable_llm_reply,
+            record_fallback_metadata,
+            record_llm_compose_metadata,
+        )
+
+        facts = extract_track_order_need_identifiers_facts(ctx, result)
+        result.data["track_order_need_identifiers"] = dict(facts)
+        result.data["compose_facts_overlay"] = (
+            format_track_order_need_identifiers_facts_overlay(facts)
+        )
+        compose_decision = build_track_order_need_identifiers_compose_decision(facts)
+        mark_compose_llm(result)
+        try:
+            reply = await self._llm_compose(ctx, result, decision=compose_decision)
+        except Exception:  # noqa: BLE001
+            reply = ""
+        if is_usable_llm_reply(reply):
+            record_llm_compose_metadata(result, llm_candidate=str(reply or ""))
+            result.data.pop("compose_facts_overlay", None)
+            return str(reply)
+        record_fallback_metadata(result, reason="compose_failed_or_empty")
+        result.data.pop("compose_facts_overlay", None)
+        return T.track_order_need_identifiers_emergency_fallback()
 
     async def _compose_track_order_not_found(
         self,
