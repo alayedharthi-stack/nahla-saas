@@ -26,6 +26,15 @@ def _is_forbidden_key(key: str) -> bool:
     return any(marker in normalized for marker in FORBIDDEN_JSON_KEY_MARKERS)
 
 
+def _is_integration_email_field_key(key: str) -> bool:
+    normalized = _normalize_key(key)
+    if normalized == "email":
+        return True
+    if normalized.endswith("_email"):
+        return True
+    return key.endswith("Email")
+
+
 def scrub_json_value(value: Any, *, path: str = "") -> tuple[Any, list[str]]:
     """Recursively scrub known secret/PII keys. Returns (scrubbed, transformations)."""
     transformations: list[str] = []
@@ -93,16 +102,66 @@ def scrub_whatsapp_settings(whatsapp_settings: Mapping[str, Any] | None) -> dict
     return scrubbed if isinstance(scrubbed, dict) else base
 
 
+def _scrub_integration_value(value: Any, *, path: str = "") -> tuple[Any, list[str]]:
+    """Recursively scrub integration config — email-suffix keys and known secrets."""
+    transformations: list[str] = []
+
+    if isinstance(value, Mapping):
+        scrubbed: dict[str, Any] = {}
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else key
+            if _is_integration_email_field_key(key):
+                scrubbed[key] = ""
+                transformations.append(f"scrub_integration_email_key:{child_path}")
+                continue
+            normalized = _normalize_key(key)
+            if any(
+                marker in normalized
+                for marker in ("token", "secret", "password", "oauth", "api_key")
+            ):
+                scrubbed[key] = ""
+                transformations.append(f"scrub_integration_secret_key:{child_path}")
+                continue
+            if _is_forbidden_key(key):
+                replacement = SCRUBBED_JSON_KEY_REPLACEMENTS.get(normalized)
+                if replacement is not None:
+                    scrubbed[key] = replacement
+                    transformations.append(f"scrub_integration_key:{child_path}")
+                    continue
+                return value, [f"unhandled_forbidden_key:{child_path}"]
+            cleaned, child_transforms = _scrub_integration_value(child, path=child_path)
+            if any(t.startswith("unhandled_forbidden_key:") for t in child_transforms):
+                return value, child_transforms
+            scrubbed[key] = cleaned
+            transformations.extend(child_transforms)
+        return scrubbed, transformations
+
+    if isinstance(value, list):
+        cleaned_list: list[Any] = []
+        for idx, item in enumerate(value):
+            cleaned, child_transforms = _scrub_integration_value(
+                item,
+                path=f"{path}[{idx}]",
+            )
+            if any(t.startswith("unhandled_forbidden_key:") for t in child_transforms):
+                return value, child_transforms
+            cleaned_list.append(cleaned)
+            transformations.extend(child_transforms)
+        return cleaned_list, transformations
+
+    if isinstance(value, str):
+        if _EMAIL_RE.search(value):
+            return "", [f"scrub_integration_email_literal:{path or 'root'}"]
+        if _PHONE_RE.fullmatch(value.strip()):
+            return PHONE_SCRUB_PLACEHOLDER, [
+                f"scrub_integration_phone_literal:{path or 'root'}"
+            ]
+    return value, transformations
+
+
 def scrub_integration_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
     base = dict(copy.deepcopy(config or {}))
-    for key in list(base.keys()):
-        normalized = _normalize_key(key)
-        if any(
-            marker in normalized
-            for marker in ("token", "secret", "password", "oauth", "api_key")
-        ):
-            base[key] = ""
-    scrubbed, transforms = scrub_json_value(base)
+    scrubbed, transforms = _scrub_integration_value(base)
     if any(t.startswith("unhandled_forbidden_key:") for t in transforms):
         raise ValueError("integration_config_unhandled_forbidden_key")
     return scrubbed if isinstance(scrubbed, dict) else base
