@@ -89,18 +89,17 @@ def _fallback_metadata(*, compose_attempted: bool = True) -> Dict[str, Any]:
 
 
 def _sample_waiver(**overrides: object) -> TrackedViolation:
-    base = TRACKED_VIOLATIONS[0]
     data = {
-        "violation_id": base.violation_id,
-        "path": base.path,
-        "file": base.file,
-        "action": base.action,
-        "owner": base.owner,
-        "reason": base.reason,
-        "removal_ref": base.removal_ref,
-        "added_at": base.added_at,
-        "expiry_date": base.expiry_date,
-        "approved_by": base.approved_by,
+        "violation_id": "NL-V999",
+        "path": "synthetic_waiver_test",
+        "file": "backend/modules/ai/brain/compose/responder.py",
+        "action": "fake:T.fake_template",
+        "owner": "ai-platform",
+        "reason": "synthetic waiver schema test fixture",
+        "removal_ref": "fix/synthetic",
+        "added_at": "2026-07-12",
+        "expiry_date": "2026-12-31",
+        "approved_by": "test",
     }
     data.update(overrides)
     return TrackedViolation(**data)  # type: ignore[arg-type]
@@ -195,7 +194,9 @@ class TestGovernanceWaiverSchema:
         waiver_report = format_tracked_violation_report()
         assert "APPROVED DETERMINISTIC EXCEPTIONS" in approved_report
         assert "track_order_not_found" not in approved_report
-        assert "NL-V002" in waiver_report
+        assert "track_order_need_order_number" not in approved_report
+        assert "NL-V002" not in waiver_report
+        assert "NL-T002" not in waiver_report
 
 
 class TestAntiGrandfathering:
@@ -345,17 +346,33 @@ class TestRuntimeViolationDetection:
         paths = {f.path for f in findings}
         assert "track_order_not_found" not in paths
 
-    def test_live_responder_scan_includes_direct_template_returns(self) -> None:
-        findings = scan_compose_boundary_violations(
-            ["backend/modules/ai/brain/compose/responder.py"]
-        )
-        kinds = {f.kind.value for f in findings}
-        assert "direct_template_return" in kinds
+    def test_track_order_need_order_number_no_longer_direct_template_return(self) -> None:
+        findings = scan_responder_direct_template_returns()
+        paths = {f.path for f in findings}
+        assert "track_order_need_order_number" not in paths
+
+    def test_live_responder_scan_has_no_tracked_track_order_template_paths(self) -> None:
+        findings = scan_responder_direct_template_returns()
+        paths = {f.path for f in findings}
+        assert "track_order_need_order_number" not in paths
+        assert "track_order_not_found" not in paths
 
     def test_governance_baseline_rejects_duplicate_violation_ids(self) -> None:
         raw = json.loads(policy.BASELINE_JSON.read_text(encoding="utf-8"))
         dup = copy.deepcopy(raw)
-        dup["violations"].append(copy.deepcopy(dup["violations"][0]))
+        sample = {
+            "violation_id": "NL-V999",
+            "path": "synthetic_duplicate_test",
+            "file": "backend/modules/ai/brain/compose/responder.py",
+            "action": "fake:T.fake_template",
+            "owner": "ai-platform",
+            "reason": "duplicate guard test",
+            "removal_ref": "fix/x",
+            "added_at": "2026-07-12",
+            "expiry_date": "2026-12-31",
+            "approved_by": "test",
+        }
+        dup["violations"].extend([sample, copy.deepcopy(sample)])
         dup["allowed_violation_ids"] = [v["violation_id"] for v in dup["violations"]]
         tmp = policy.REPO_ROOT / ".tmp_dup_baseline_test.json"
         tmp.write_text(json.dumps(dup), encoding="utf-8")
@@ -379,16 +396,10 @@ class TestRuntimeViolationDetection:
         untracked = classify_untracked_violations(scan_compose_boundary_violations())
         assert untracked == []
 
-    def test_nl_v002_has_separate_removal_scope(self) -> None:
-        v002 = next(v for v in TRACKED_VIOLATIONS if v.violation_id == "NL-V002")
-        assert v002.removal_ref == "fix/track-order-need-identifiers-compose-compliance"
-        assert "NL-V001" not in TRACKED_VIOLATION_IDS
-
-    def test_nl_t002_tracked_for_need_identifiers_exact_prose_assertion(self) -> None:
-        assertions = scan_exact_prose_test_assertions()
-        assert assertions
-        assert "NL-T002" in TRACKED_VIOLATION_IDS
-        assert "track_order_need_order_number" in TRACKED_VIOLATION_PATHS
+    def test_nl_v002_and_nl_t002_removed_from_baseline(self) -> None:
+        assert "NL-V002" not in TRACKED_VIOLATION_IDS
+        assert "NL-T002" not in TRACKED_VIOLATION_IDS
+        assert "track_order_need_order_number" not in TRACKED_VIOLATION_PATHS
 
     def test_stale_waiver_without_matching_code_fails(self) -> None:
         fake_waivers = (

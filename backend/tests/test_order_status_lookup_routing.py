@@ -195,14 +195,25 @@ class TestMissingOrderNumber:
     def test_track_without_number_asks_order_number_only(
         self, db, tenant_ctx,
     ) -> None:
+        llm_reply = "أرسل رقم الطلب لو سمحت حتى أتحقق لك من حالته."
         decision, result, reply, _ctx_obj = asyncio.run(
-            _run_track_turn(db, tenant_ctx, "وين طلبي؟"),
+            _run_track_turn(
+                db,
+                tenant_ctx,
+                "وين طلبي؟",
+                llm_reply=llm_reply,
+            ),
         )
         assert decision.action == ACTION_TRACK_ORDER
         assert result.success is False
         assert result.data.get("message") == "need_order_number"
-        assert reply == T.track_order_need_identifiers()
-        assert "رقم الطلب" in reply
+        assert result.data.get("chosen_path") == "track_order_need_order_number"
+        assert result.data.get("compose_source") == "llm"
+        assert result.data.get("response_mode") == "llm"
+        assert result.data.get("final_customer_text_source") == "llm"
+        assert reply == llm_reply
+        assert reply != T.track_order_need_identifiers()
+        assert "رقم الطلب" in reply or "order number" in reply.lower()
         for phrase in _PHONE_ASK:
             assert phrase not in reply
         for phrase in _CHECKOUT_FIELDS:

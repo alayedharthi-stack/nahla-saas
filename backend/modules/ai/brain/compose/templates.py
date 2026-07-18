@@ -600,6 +600,11 @@ def track_order_need_identifiers(**_: Any) -> str:
     return "أرسل رقم الطلب لو سمحت، وأتحقق لك من حالته."
 
 
+def track_order_need_identifiers_emergency_fallback(**_: Any) -> str:
+    # Emergency fallback only — short factual clarification, no lookup implication.
+    return "أحتاج رقم الطلب للتحقق من حالته."
+
+
 def order_status_not_found(**_: Any) -> str:
     # Emergency fallback only — short, factual, no typo-prone «بهذا الرقم» shape.
     return "لم أجد طلباً مطابقاً. أرسل رقم الطلب مرة أخرى للتحقق."

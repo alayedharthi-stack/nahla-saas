@@ -2866,6 +2866,9 @@ class MerchantBrain:
             from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
                 begin_product_sale_offer_text_tracking,
             )
+            from modules.ai.brain.persona.track_order_need_identifiers_provenance import (  # noqa: PLC0415
+                begin_track_order_need_identifiers_text_tracking,
+            )
 
             begin_trusted_coupon_offer_text_tracking(
                 result.data,
@@ -2876,6 +2879,10 @@ class MerchantBrain:
                 reply or "",
             )
             begin_product_sale_offer_text_tracking(
+                result.data,
+                reply or "",
+            )
+            begin_track_order_need_identifiers_text_tracking(
                 result.data,
                 reply or "",
             )
@@ -4468,6 +4475,10 @@ class MerchantBrain:
                 extract_constitutional_metadata as extract_product_sale_constitutional_metadata,
                 finalize_product_sale_offer_text_provenance,
             )
+            from modules.ai.brain.persona.track_order_need_identifiers_provenance import (  # noqa: PLC0415
+                extract_constitutional_metadata as extract_track_need_ids_constitutional_metadata,
+                finalize_track_order_need_identifiers_text_provenance,
+            )
 
             finalize_trusted_coupon_offer_text_provenance(
                 result.data,
@@ -4484,11 +4495,19 @@ class MerchantBrain:
                 reply or "",
                 guard_replaced=_guard_replaced,
             )
+            finalize_track_order_need_identifiers_text_provenance(
+                result.data,
+                reply or "",
+                guard_replaced=_guard_replaced,
+            )
             _tc_coupon_constitutional_meta = extract_coupon_constitutional_metadata(result.data)
             _cc_coupon_constitutional_meta = extract_conditional_coupon_constitutional_metadata(
                 result.data
             )
             _ps_offer_constitutional_meta = extract_product_sale_constitutional_metadata(
+                result.data
+            )
+            _track_need_ids_constitutional_meta = extract_track_need_ids_constitutional_metadata(
                 result.data
             )
         except Exception as _tc_prov_finalize_exc:  # noqa: BLE001  # noqa: silent-ok — provenance must not block reply
@@ -4500,6 +4519,7 @@ class MerchantBrain:
             _tc_coupon_constitutional_meta = {}
             _cc_coupon_constitutional_meta = {}
             _ps_offer_constitutional_meta = {}
+            _track_need_ids_constitutional_meta = {}
 
         return {
             "reply": reply,
@@ -4550,6 +4570,7 @@ class MerchantBrain:
             **_tc_coupon_constitutional_meta,
             **_cc_coupon_constitutional_meta,
             **_ps_offer_constitutional_meta,
+            **_track_need_ids_constitutional_meta,
         }
 
 
