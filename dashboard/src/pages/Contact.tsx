@@ -8,7 +8,7 @@ import { COMPANY_INFO } from '../config/companyInfo'
 
 export default function Contact() {
   return (
-    <div className="min-h-screen bg-slate-50 py-12 px-4" dir="ltr">
+    <div className="min-h-screen bg-slate-50 py-12 px-4" lang="en" dir="ltr">
       <div className="max-w-2xl mx-auto">
 
         {/* Header */}
