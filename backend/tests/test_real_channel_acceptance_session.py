@@ -17,20 +17,27 @@ from scripts.operators.real_channel_acceptance_session import (  # noqa: E402
     complete_scenario,
     load_session,
     record_device_attestation,
+    start_session,
 )
 from scripts.operators.real_channel_conversational_acceptance_contract import (  # noqa: E402
+    CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_DEVICE_ATTESTATION_REQUIRED,
     CODE_HUMAN_ASSESSMENT_REQUIRED,
+    CODE_TENANT_1_PASS_ARTIFACT_INVALID,
+    CODE_TENANT_NOT_ALLOWED,
     EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
     EVIDENCE_CHANNEL_DIRECT_CODE_PROBE,
     EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK,
     EVIDENCE_HMAC_KEY_ENV,
+    PHASE_TENANT_48_SALLA_MINIMAL,
     REVIEWER_ID_ENV,
     SESSION_DIR_ENV,
     SESSION_SCHEMA_VERSION,
     SESSION_STATE_HUMAN_ASSESSED,
     SESSION_STATE_OBSERVED,
+    TENANT_48_SALLA_MINIMAL,
     hmac_identifier,
+    resolve_acceptance_phase,
 )
 
 
@@ -194,3 +201,27 @@ def test_complete_requires_human_assessment(
     (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
     with pytest.raises(ValueError, match=CODE_HUMAN_ASSESSMENT_REQUIRED):
         complete_scenario(session_id, app_root=_REPO)
+
+
+def test_resolve_acceptance_phase_accepts_tenant_48() -> None:
+    assert resolve_acceptance_phase(TENANT_48_SALLA_MINIMAL) == PHASE_TENANT_48_SALLA_MINIMAL
+
+
+def test_resolve_acceptance_phase_rejects_arbitrary_tenant() -> None:
+    with pytest.raises(ValueError, match=CODE_TENANT_NOT_ALLOWED):
+        resolve_acceptance_phase(99)
+
+
+def test_tenant_48_start_blocked_without_gates_not_tenant_1_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED", raising=False)
+    result = start_session(tenant_id=TENANT_48_SALLA_MINIMAL, app_root=_REPO)
+    assert result["ok"] is False
+    assert CODE_ACCEPTANCE_NOT_ENABLED in result["blockers"]
+    assert CODE_TENANT_1_PASS_ARTIFACT_INVALID not in result["blockers"]
+
+
+def test_arbitrary_tenant_start_rejected() -> None:
+    with pytest.raises(ValueError, match="tenant_not_allowed"):
+        start_session(tenant_id=99, app_root=_REPO)

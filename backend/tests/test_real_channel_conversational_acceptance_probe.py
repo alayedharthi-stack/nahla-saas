@@ -19,6 +19,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_ARCH001_SIGNOFF_MISSING,
+    CODE_MANIFEST_INVALID,
+    CODE_TENANT_NOT_ALLOWED,
     EXECUTION_CONFIRM_ENV,
     EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
     MANIFEST_SCHEMA_VERSION,
@@ -26,10 +28,13 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     PHASE_DEFAULT_OFF,
     PHASE_TENANT_1_INTENSIVE,
     PHASE_TENANT_33_LIMITED,
+    PHASE_TENANT_48_SALLA_MINIMAL,
     REPORT_SCHEMA_VERSION,
     SCENARIO_TAXONOMY,
     TENANT_1_PASS_CONFIRM_ENV,
+    TENANT_48_SALLA_MINIMAL,
     load_scenario_manifest,
+    resolve_acceptance_phase,
     validate_manifest,
 )
 from scripts.operators.real_channel_acceptance_manifest_builder import (  # noqa: E402
@@ -57,9 +62,56 @@ def test_manifest_scenario_counts() -> None:
     manifest = load_scenario_manifest(_REPO)
     t1 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_1_INTENSIVE]
     t33 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_33_LIMITED]
+    t48 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_48_SALLA_MINIMAL]
     assert len(t1) == 49
     assert len(t33) == 16
-    assert manifest["scenario_count"] == 65
+    assert len(t48) == 16
+    assert manifest["scenario_count"] == 81
+    assert manifest["phase_scenario_counts"] == {
+        PHASE_TENANT_1_INTENSIVE: 49,
+        PHASE_TENANT_33_LIMITED: 16,
+        PHASE_TENANT_48_SALLA_MINIMAL: 16,
+    }
+
+
+def test_tenant_48_phase_independent_of_tenant_1_pass() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    phase_row = next(
+        row for row in manifest["phases"] if row["phase"] == PHASE_TENANT_48_SALLA_MINIMAL
+    )
+    assert phase_row["tenant_id"] == TENANT_48_SALLA_MINIMAL
+    assert phase_row["requires_tenant_1_pass"] is False
+    assert phase_row["independent_of_tenant_1_pass_artifact"] is True
+    for row in manifest["scenarios"]:
+        if row["phase"] == PHASE_TENANT_48_SALLA_MINIMAL:
+            assert row["tenant_id"] == TENANT_48_SALLA_MINIMAL
+            assert row["preconditions"]["tenant_1_pass_required"] is False
+            assert row["scenario_id"].startswith("t48_")
+
+
+def test_resolve_acceptance_phase_rejects_arbitrary_tenant() -> None:
+    with pytest.raises(ValueError, match=CODE_TENANT_NOT_ALLOWED):
+        resolve_acceptance_phase(7)
+
+
+def test_manifest_rejects_arbitrary_tenant_id() -> None:
+    manifest = build_manifest()
+    manifest["scenarios"] = list(manifest["scenarios"])
+    manifest["scenarios"][0] = dict(manifest["scenarios"][0])
+    manifest["scenarios"][0]["tenant_id"] = 99
+    with pytest.raises(ValueError, match=CODE_MANIFEST_INVALID):
+        validate_manifest(manifest)
+
+
+def test_tenant_48_session_start_still_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.operators.real_channel_acceptance_session import start_session
+
+    monkeypatch.delenv(MASTER_ENABLE_ENV, raising=False)
+    result = start_session(tenant_id=TENANT_48_SALLA_MINIMAL, app_root=_REPO)
+    assert result["ok"] is False
+    assert CODE_ACCEPTANCE_NOT_ENABLED in result["blockers"]
 
 
 def test_tenant_33_requires_tenant_1_pass_in_preconditions() -> None:

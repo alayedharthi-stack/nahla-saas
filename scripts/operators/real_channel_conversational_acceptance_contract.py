@@ -38,9 +38,11 @@ REVIEWER_ID_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_REVIEWER_ID"
 PINNED_REVISION_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION"
 TENANT_1_PHONE_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE"
 TENANT_33_PHONE_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE"
+TENANT_48_PHONE_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE"
 ALLOWLIST_PHONES_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_ALLOWLIST_PHONES"
 TENANT_1_CONVERSATION_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_CONVERSATION_ID"
 TENANT_33_CONVERSATION_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_CONVERSATION_ID"
+TENANT_48_CONVERSATION_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_CONVERSATION_ID"
 
 # ── Channel / provider preflight env (existence checked; values never logged) ─
 CHANNEL_PREFLIGHT_ENV_NAMES: tuple[str, ...] = (
@@ -59,7 +61,10 @@ CHANNEL_PREFLIGHT_ENV_NAMES: tuple[str, ...] = (
 # ── Tenants (platform-wide; no merchant-specific runtime logic) ────────────────
 TENANT_1_INTENSIVE = 1
 TENANT_33_LIMITED = 33
-ACCEPTANCE_TENANTS = frozenset({TENANT_1_INTENSIVE, TENANT_33_LIMITED})
+TENANT_48_SALLA_MINIMAL = 48
+ACCEPTANCE_TENANTS = frozenset(
+    {TENANT_1_INTENSIVE, TENANT_33_LIMITED, TENANT_48_SALLA_MINIMAL}
+)
 
 # ── Rate / cost caps (per operator session) ──────────────────────────────────
 MAX_SCENARIOS_PER_SESSION = 60
@@ -80,6 +85,7 @@ PHASE_CONFIG_SNAPSHOT = "config_snapshot"
 PHASE_CHANNEL_HEALTH = "channel_health"
 PHASE_TENANT_1_INTENSIVE = "tenant_1_intensive"
 PHASE_TENANT_33_LIMITED = "tenant_33_limited"
+PHASE_TENANT_48_SALLA_MINIMAL = "tenant_48_salla_minimal"
 PHASE_DEFECT_BUNDLE = "defect_bundle"
 PHASE_TEARDOWN = "teardown"
 PHASE_SUMMARY = "summary"
@@ -94,6 +100,7 @@ GATE_PHASES = frozenset(
         PHASE_CHANNEL_HEALTH,
         PHASE_TENANT_1_INTENSIVE,
         PHASE_TENANT_33_LIMITED,
+        PHASE_TENANT_48_SALLA_MINIMAL,
         PHASE_DEFECT_BUNDLE,
         PHASE_TEARDOWN,
     }
@@ -275,6 +282,33 @@ def load_scenario_manifest(app_root: Path | None = None) -> dict[str, Any]:
     return payload
 
 
+ACCEPTANCE_PHASE_BY_TENANT: dict[int, str] = {
+    TENANT_1_INTENSIVE: PHASE_TENANT_1_INTENSIVE,
+    TENANT_33_LIMITED: PHASE_TENANT_33_LIMITED,
+    TENANT_48_SALLA_MINIMAL: PHASE_TENANT_48_SALLA_MINIMAL,
+}
+ACCEPTANCE_TENANT_BY_PHASE: dict[str, int] = {
+    phase: tenant_id for tenant_id, phase in ACCEPTANCE_PHASE_BY_TENANT.items()
+}
+PHASE_EXPECTED_SCENARIO_COUNTS: dict[str, int] = {
+    PHASE_TENANT_1_INTENSIVE: 49,
+    PHASE_TENANT_33_LIMITED: 16,
+    PHASE_TENANT_48_SALLA_MINIMAL: 16,
+}
+PHASE_SCENARIO_ID_PREFIX: dict[str, str] = {
+    PHASE_TENANT_1_INTENSIVE: "t1_",
+    PHASE_TENANT_33_LIMITED: "t33_",
+    PHASE_TENANT_48_SALLA_MINIMAL: "t48_",
+}
+
+
+def resolve_acceptance_phase(tenant_id: int) -> str:
+    try:
+        return ACCEPTANCE_PHASE_BY_TENANT[tenant_id]
+    except KeyError as exc:
+        raise ValueError(CODE_TENANT_NOT_ALLOWED) from exc
+
+
 def validate_manifest(payload: Mapping[str, Any]) -> None:
     if payload.get("manifest_schema_version") != MANIFEST_SCHEMA_VERSION:
         raise ValueError(CODE_MANIFEST_INVALID)
@@ -282,8 +316,37 @@ def validate_manifest(payload: Mapping[str, Any]) -> None:
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError(CODE_MANIFEST_INVALID)
 
+    manifest_phases = payload.get("phases")
+    if not isinstance(manifest_phases, list) or not manifest_phases:
+        raise ValueError(CODE_MANIFEST_INVALID)
+    declared_phase_counts = payload.get("phase_scenario_counts")
+    if not isinstance(declared_phase_counts, Mapping):
+        raise ValueError(CODE_MANIFEST_INVALID)
+
+    seen_manifest_phases: set[str] = set()
+    for phase_row in manifest_phases:
+        if not isinstance(phase_row, Mapping):
+            raise ValueError(CODE_MANIFEST_INVALID)
+        phase = str(phase_row.get("phase") or "")
+        tenant_id = phase_row.get("tenant_id")
+        if phase not in ACCEPTANCE_TENANT_BY_PHASE or tenant_id not in ACCEPTANCE_TENANTS:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if ACCEPTANCE_TENANT_BY_PHASE[phase] != tenant_id:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if phase in seen_manifest_phases:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        seen_manifest_phases.add(phase)
+        if phase == PHASE_TENANT_33_LIMITED and not phase_row.get("requires_tenant_1_pass"):
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if phase == PHASE_TENANT_48_SALLA_MINIMAL and phase_row.get("requires_tenant_1_pass"):
+            raise ValueError(CODE_MANIFEST_INVALID)
+    if seen_manifest_phases != set(ACCEPTANCE_TENANT_BY_PHASE):
+        raise ValueError(CODE_MANIFEST_INVALID)
+
     seen_ids: set[str] = set()
     taxonomy_seen: set[str] = set()
+    phase_counts: dict[str, int] = {phase: 0 for phase in ACCEPTANCE_TENANT_BY_PHASE}
+    phase_ids: dict[str, list[str]] = {phase: [] for phase in ACCEPTANCE_TENANT_BY_PHASE}
     for row in scenarios:
         if not isinstance(row, Mapping):
             raise ValueError(CODE_MANIFEST_INVALID)
@@ -300,6 +363,17 @@ def validate_manifest(payload: Mapping[str, Any]) -> None:
         tenant_id = row.get("tenant_id")
         if tenant_id not in ACCEPTANCE_TENANTS:
             raise ValueError(CODE_MANIFEST_INVALID)
+
+        phase = str(row.get("phase") or "")
+        if phase not in ACCEPTANCE_TENANT_BY_PHASE:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if ACCEPTANCE_TENANT_BY_PHASE[phase] != tenant_id:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        id_prefix = PHASE_SCENARIO_ID_PREFIX[phase]
+        if not scenario_id.startswith(id_prefix):
+            raise ValueError(CODE_MANIFEST_INVALID)
+        phase_counts[phase] += 1
+        phase_ids[phase].append(scenario_id)
 
         execution_path = str(row.get("execution_path") or "")
         if execution_path not in EXECUTION_PATHS:
@@ -326,20 +400,31 @@ def validate_manifest(payload: Mapping[str, Any]) -> None:
             if required_key not in row:
                 raise ValueError(CODE_MANIFEST_INVALID)
 
+    for phase, expected in PHASE_EXPECTED_SCENARIO_COUNTS.items():
+        if phase_counts.get(phase) != expected:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if int(declared_phase_counts.get(phase) or -1) != expected:
+            raise ValueError(CODE_MANIFEST_INVALID)
+        if len(phase_ids[phase]) != len(set(phase_ids[phase])):
+            raise ValueError(CODE_MANIFEST_INVALID)
+
     if not taxonomy_seen.issuperset(set(SCENARIO_TAXONOMY)):
         missing = sorted(set(SCENARIO_TAXONOMY) - taxonomy_seen)
         raise ValueError(f"{CODE_MANIFEST_INVALID}:missing_taxonomy:{','.join(missing)}")
 
 
 def count_scenarios_by_phase(manifest: Mapping[str, Any]) -> dict[str, int]:
-    counts = {"tenant_1_intensive": 0, "tenant_33_limited": 0, "total": 0}
+    counts = {
+        PHASE_TENANT_1_INTENSIVE: 0,
+        PHASE_TENANT_33_LIMITED: 0,
+        PHASE_TENANT_48_SALLA_MINIMAL: 0,
+        "total": 0,
+    }
     for row in manifest.get("scenarios", []):
         phase = str(row.get("phase") or "")
         counts["total"] += 1
-        if phase == PHASE_TENANT_1_INTENSIVE:
-            counts["tenant_1_intensive"] += 1
-        elif phase == PHASE_TENANT_33_LIMITED:
-            counts["tenant_33_limited"] += 1
+        if phase in counts:
+            counts[phase] += 1
     return counts
 
 
@@ -360,6 +445,8 @@ def required_config_snapshot_keys() -> tuple[str, ...]:
 
 
 __all__ = [
+    "ACCEPTANCE_PHASE_BY_TENANT",
+    "ACCEPTANCE_TENANT_BY_PHASE",
     "ACCEPTANCE_TENANTS",
     "ALLOWLIST_PHONES_ENV",
     "ARCH001_SHADOW_SIGNOFF_ENV",
@@ -442,7 +529,9 @@ __all__ = [
     "PHASE_TEARDOWN",
     "PHASE_TENANT_1_INTENSIVE",
     "PHASE_TENANT_33_LIMITED",
-    "PINNED_REVISION_ENV",
+    "PHASE_EXPECTED_SCENARIO_COUNTS",
+    "PHASE_SCENARIO_ID_PREFIX",
+    "PHASE_TENANT_48_SALLA_MINIMAL",
     "PROVENANCE_FIELDS",
     "REPORT_SCHEMA_VERSION",
     "SCENARIO_TAXONOMY",
@@ -458,6 +547,10 @@ __all__ = [
     "TENANT_33_CONVERSATION_ENV",
     "TENANT_33_LIMITED",
     "TENANT_33_PHONE_ENV",
+    "TENANT_48_CONVERSATION_ENV",
+    "TENANT_48_PHONE_ENV",
+    "TENANT_48_SALLA_MINIMAL",
+    "resolve_acceptance_phase",
     "count_scenarios_by_phase",
     "env_flag_enabled",
     "hash_identifier",

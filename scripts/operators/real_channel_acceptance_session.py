@@ -63,6 +63,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     MAX_SESSION_COST_USD,
     PHASE_TENANT_1_INTENSIVE,
     PHASE_TENANT_33_LIMITED,
+    PHASE_TENANT_48_SALLA_MINIMAL,
     PINNED_REVISION_ENV,
     PROVENANCE_FIELDS,
     REVIEWER_ID_ENV,
@@ -81,10 +82,13 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     TENANT_1_PHONE_ENV,
     TENANT_33_LIMITED,
     TENANT_33_PHONE_ENV,
+    TENANT_48_PHONE_ENV,
+    TENANT_48_SALLA_MINIMAL,
     env_flag_enabled,
     hmac_identifier,
     load_scenario_manifest,
     parse_allowlist_phones,
+    resolve_acceptance_phase,
 )
 
 DEPLOYMENT_ID_ENV = "RAILWAY_DEPLOYMENT_ID"
@@ -174,16 +178,22 @@ def _engine():
     return create_engine(database_url, pool_pre_ping=True)
 
 
+_PHONE_ENV_BY_TENANT = {
+    TENANT_1_INTENSIVE: TENANT_1_PHONE_ENV,
+    TENANT_33_LIMITED: TENANT_33_PHONE_ENV,
+    TENANT_48_SALLA_MINIMAL: TENANT_48_PHONE_ENV,
+}
+
+
 def _phone_env_for_tenant(tenant_id: int) -> str:
-    return TENANT_1_PHONE_ENV if tenant_id == TENANT_1_INTENSIVE else TENANT_33_PHONE_ENV
+    try:
+        return _PHONE_ENV_BY_TENANT[tenant_id]
+    except KeyError as exc:
+        raise ValueError("tenant_not_allowed") from exc
 
 
 def _phase_for_tenant(tenant_id: int) -> str:
-    if tenant_id == TENANT_1_INTENSIVE:
-        return PHASE_TENANT_1_INTENSIVE
-    if tenant_id == TENANT_33_LIMITED:
-        return PHASE_TENANT_33_LIMITED
-    raise ValueError("tenant_not_allowed")
+    return resolve_acceptance_phase(tenant_id)
 
 
 def _redact_ai_settings(ai_settings: Mapping[str, Any], *, key: str) -> dict[str, Any]:
@@ -1119,7 +1129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     start = sub.add_parser("start-session")
-    start.add_argument("--tenant", type=int, choices=[1, 33], required=True)
+    start.add_argument("--tenant", type=int, choices=[1, 33, 48], required=True)
     for command in (
         "next-scenario",
         "observe",
