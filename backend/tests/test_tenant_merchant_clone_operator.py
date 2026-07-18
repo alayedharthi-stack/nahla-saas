@@ -21,15 +21,21 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     ALLOWED_TABLE_NAMES,
     APPLY_CONFIRM_ENV,
     APPLY_CONFIRM_TOKEN,
+    CLONE_PROFILE_FULL_MERCHANT,
+    CLONE_PROFILE_SALLA_MINIMAL,
     DEFAULT_ACCEPTANCE_TENANT_ID,
     DENIED_TABLES,
     DRY_RUN_DIGEST_SCHEMA_VERSION,
+    EXCLUDED_OPERATIONAL_TABLES,
     EXPECTED_SOURCE_ALEMBIC_HEADS,
     EXPECTED_TARGET_ALEMBIC_HEADS,
     PRESERVE_TENANT_IDENTITY_MODE,
     PRODUCTION_IDENTITY_CLASS,
     PRODUCTION_SOURCE_CONFIRM_ENV,
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
+    allowed_table_names_for_profile,
+    resolve_clone_profile,
+    table_specs_for_profile,
 )
 from scripts.operators.real_channel_conversational_acceptance_contract import (  # noqa: E402
     PHASE_TENANT_33_LIMITED,
@@ -89,11 +95,13 @@ def _sqlite_engine_with_revisions(revisions: frozenset[str]) -> object:
 
 def _topology_digest_payload(
     *,
+    profile: str = CLONE_PROFILE_SALLA_MINIMAL,
     source_heads: list[str],
     target_heads: list[str],
 ) -> dict[str, object]:
     return {
         "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+        "profile": profile,
         "identity_mode": PRESERVE_TENANT_IDENTITY_MODE,
         "source_database_identity_digest": "sha256:source",
         "target_database_identity_digest": "sha256:target",
@@ -103,11 +111,184 @@ def _topology_digest_payload(
         "table_counts": {},
         "source_checksums": {},
         "dependency_order": [],
+        "excluded_operational_source_counts": {},
         "denied_domain_source_counts": {},
         "target_denied_domain_counts": {},
         "source_alembic_heads": source_heads,
         "target_alembic_heads": target_heads,
     }
+
+
+def test_clone_profile_missing_rejected() -> None:
+    with pytest.raises(ValueError, match="clone_profile_missing"):
+        resolve_clone_profile(None)
+    failure = clone_op.validate_clone_profile(None)
+    assert failure is not None
+    assert failure.stage == "clone_profile_missing"
+
+
+def test_clone_profile_unknown_rejected() -> None:
+    with pytest.raises(ValueError, match="clone_profile_unknown"):
+        resolve_clone_profile("not_a_real_profile")
+    failure = clone_op.validate_clone_profile("not_a_real_profile")
+    assert failure is not None
+    assert failure.stage == "clone_profile_unknown"
+
+
+def test_salla_minimal_profile_dependency_order_has_no_fk_gaps() -> None:
+    specs = table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    seen: set[str] = set()
+    parent_for_column = {
+        "product_id": "products",
+        "group_id": "product_groups",
+        "variant_id": "product_variants",
+        "source_product_id": "products",
+        "target_product_id": "products",
+        "section_id": "merchant_knowledge_sections",
+        "media_id": "ai_media_library",
+    }
+    for spec in specs:
+        for column in spec.remap_fk_columns:
+            parent = parent_for_column[column]
+            assert parent in seen, f"{spec.name}.{column} requires {parent} earlier"
+        seen.add(spec.name)
+    names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    for required in (
+        "products",
+        "product_variants",
+        "integrations",
+        "merchant_knowledge_sections",
+        "delivery_zones",
+        "shipping_fees",
+        "store_knowledge_snapshots",
+    ):
+        assert required in names
+    assert "coupons" not in names
+    assert "whatsapp_templates" not in names
+    assert "smart_automations" not in names
+
+
+def test_salla_minimal_excludes_operational_tables_from_contract() -> None:
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    full_names = allowed_table_names_for_profile(CLONE_PROFILE_FULL_MERCHANT)
+    assert EXCLUDED_OPERATIONAL_TABLES.issubset(full_names)
+    assert not EXCLUDED_OPERATIONAL_TABLES & minimal_names
+
+
+def test_coupon_like_source_rows_report_excluded_not_copied() -> None:
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    for coupon_table in ("coupons", "coupon_rules", "manual_coupons", "promotions"):
+        assert coupon_table not in minimal_names
+        assert coupon_table in EXCLUDED_OPERATIONAL_TABLES
+    simulated_plan = {
+        "table_counts": {name: 0 for name in minimal_names},
+        "excluded_operational_source_counts": {
+            "coupons": 4413,
+            "coupon_rules": 0,
+            "manual_coupons": 0,
+            "promotions": 0,
+        },
+    }
+    assert simulated_plan["table_counts"].get("coupons", 0) == 0
+    assert simulated_plan["excluded_operational_source_counts"]["coupons"] == 4413
+
+
+def test_minimal_profile_excludes_automation_template_channel_tables() -> None:
+    names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    for excluded in (
+        "whatsapp_templates",
+        "smart_automations",
+        "automation_rules",
+        "merchant_branches",
+        "branch_contacts",
+        "merchant_widgets",
+        "widget_settings",
+    ):
+        assert excluded not in names
+
+
+def test_dry_run_digest_differs_between_full_and_minimal_profiles() -> None:
+    payload_full = _topology_digest_payload(
+        profile=CLONE_PROFILE_FULL_MERCHANT,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    payload_full["dependency_order"] = [
+        spec.name for spec in table_specs_for_profile(CLONE_PROFILE_FULL_MERCHANT)
+    ]
+    payload_minimal = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    payload_minimal["dependency_order"] = [
+        spec.name for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    ]
+    assert clone_op.compute_dry_run_digest(payload_full) != clone_op.compute_dry_run_digest(
+        payload_minimal
+    )
+
+
+def test_apply_rejects_profile_mismatch() -> None:
+    minimal_digest = clone_op.compute_dry_run_digest(
+        _topology_digest_payload(
+            profile=CLONE_PROFILE_SALLA_MINIMAL,
+            source_heads=["0089"],
+            target_heads=["0088", "0089"],
+        )
+    )
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": minimal_digest,
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_FULL_MERCHANT,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="profile-drift-test",
+        dry_run_digest=minimal_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="clone_profile_mismatch"):
+            clone_op.apply_clone(request)
+
+
+def test_integration_row_scrubbed_and_disabled() -> None:
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "provider": "salla",
+        "external_store_id": "store-123",
+        "enabled": True,
+        "config": {"access_token": "secret", "store_id": "123"},
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name="integrations",
+        spec_json_columns=("config",),
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=(),
+        scrub_phone_columns=(),
+        deferred_fk_columns=(),
+    )
+    assert transformed["enabled"] is False
+    assert transformed["external_store_id"] is None
+    assert transformed["config"]["access_token"] == ""
+    assert transformed["config"]["store_id"] == "123"
+    assert any("integrations.disabled_until_staging_credentials" in t for t in transforms)
 
 
 def test_revision_topology_source_0089_target_dual_head_accepted() -> None:
@@ -157,10 +338,12 @@ def test_revision_topology_unknown_head_rejected_on_either_side() -> None:
 
 def test_dry_run_digest_changes_when_topology_heads_change() -> None:
     payload_a = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
         target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
     )
     payload_b = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_heads=sorted({"0088", "0089"}),
         target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
     )
@@ -172,13 +355,16 @@ def test_dry_run_digest_changes_when_topology_heads_change() -> None:
 def test_apply_revalidation_rejects_topology_drift() -> None:
     stale_digest = clone_op.compute_dry_run_digest(
         _topology_digest_payload(
+            profile=CLONE_PROFILE_SALLA_MINIMAL,
             source_heads=["0088", "0089"],
             target_heads=["0088", "0089"],
         )
     )
     fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
         "dry_run_digest": clone_op.compute_dry_run_digest(
             _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
                 source_heads=["0089"],
                 target_heads=["0088", "0089"],
             )
@@ -189,6 +375,7 @@ def test_apply_revalidation_rejects_topology_drift() -> None:
     }
     request = clone_op.build_request_from_env(
         mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=48,
         target_tenant_id=48,
         clone_id="topology-drift-test",
@@ -210,6 +397,7 @@ def test_apply_revalidation_rejects_topology_drift() -> None:
 def test_preserve_tenant_48_cross_database_identity_mode() -> None:
     request = clone_op.build_request_from_env(
         mode="dry-run",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=48,
         target_tenant_id=48,
         clone_id=None,
@@ -251,6 +439,7 @@ def test_scrub_json_phone_literal() -> None:
 def test_same_tenant_id_across_distinct_database_endpoints_is_accepted() -> None:
     request = clone_op.build_request_from_env(
         mode="dry-run",
+        profile=CLONE_PROFILE_FULL_MERCHANT,
         source_tenant_id=33,
         target_tenant_id=33,
         clone_id=None,
@@ -270,6 +459,7 @@ def test_same_database_rejected_even_with_distinct_credentials() -> None:
     )
     request = clone_op.build_request_from_env(
         mode="dry-run",
+        profile=CLONE_PROFILE_FULL_MERCHANT,
         source_tenant_id=33,
         target_tenant_id=33,
         clone_id=None,
@@ -296,6 +486,7 @@ def test_target_non_staging_host_rejected() -> None:
     env["DATABASE_URL"] = "postgresql://operator:password@localhost/nahla"
     request = clone_op.build_request_from_env(
         mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=33,
         target_tenant_id=33,
         clone_id="c1",
@@ -320,7 +511,15 @@ def test_main_dry_run_gate_failure_emits_json(capsys: pytest.CaptureFixture[str]
     env["RAILWAY_ENVIRONMENT_NAME"] = "production"
     with patch.dict(os.environ, env, clear=False):
         rc = clone_op.main(
-            ["dry-run", "--source-tenant-id", "33", "--target-tenant-id", "33"]
+            [
+                "dry-run",
+                "--profile",
+                CLONE_PROFILE_SALLA_MINIMAL,
+                "--source-tenant-id",
+                "33",
+                "--target-tenant-id",
+                "33",
+            ]
         )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out.strip())
@@ -444,6 +643,7 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
     }
     dry_request = clone_op.build_request_from_env(
         mode="dry-run",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=tenant_id,
         target_tenant_id=tenant_id,
         clone_id="tenant-33-cross-db-test",
@@ -452,15 +652,19 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
         env=env,
     )
     plan = clone_op.build_plan(dry_request)
+    assert plan["profile"] == CLONE_PROFILE_SALLA_MINIMAL
     assert plan["identity_mode"] == PRESERVE_TENANT_IDENTITY_MODE
     assert plan["database_identities_distinct"] is True
     assert plan["source_database_identity_digest"] != plan["target_database_identity_digest"]
     assert plan["target_tenant_bootstrap_planned"] is True
     assert plan["table_counts"]["products"] == 3
+    assert plan["table_counts"].get("manual_coupons", 0) == 0
+    assert plan["excluded_operational_source_counts"].get("manual_coupons", 0) == 1
 
     manifest_path = tmp_path / "tenant-33-clone-manifest.json"
     apply_request = clone_op.build_request_from_env(
         mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=tenant_id,
         target_tenant_id=tenant_id,
         clone_id=dry_request.clone_id,
@@ -484,6 +688,10 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
         assert settings["ai_settings"]["ai_test_allowed_numbers"] == []
         assert settings["whatsapp_settings"]["access_token"] == ""
         assert settings["whatsapp_settings"]["phone_number"] == ""
+        assert conn.execute(
+            text("SELECT COUNT(*) FROM manual_coupons WHERE tenant_id=:tid"),
+            {"tid": tenant_id},
+        ).scalar_one() == 0
         for table in ("users", "customers", "orders", "message_events", "whatsapp_connections"):
             assert conn.execute(
                 text(f"SELECT COUNT(*) FROM {table} WHERE tenant_id=:tid"),
@@ -492,6 +700,7 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
 
     cleanup_request = clone_op.build_request_from_env(
         mode="cleanup",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=tenant_id,
         target_tenant_id=tenant_id,
         clone_id=result["clone_id"],
@@ -523,6 +732,7 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
     existing_manifest_path = tmp_path / "existing-shell-manifest.json"
     existing_apply_request = clone_op.build_request_from_env(
         mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=tenant_id,
         target_tenant_id=tenant_id,
         clone_id="tenant-33-existing-shell-test",
@@ -534,6 +744,7 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
     assert existing_result["target_tenant_bootstrapped"] is False
     existing_cleanup_request = clone_op.build_request_from_env(
         mode="cleanup",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=tenant_id,
         target_tenant_id=tenant_id,
         clone_id=existing_result["clone_id"],

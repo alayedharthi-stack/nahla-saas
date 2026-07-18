@@ -13,8 +13,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
-MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v2"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v3"
+MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v4"
+
+# Closed clone profiles — ``--profile`` is required; no default (fail closed).
+CLONE_PROFILE_FULL_MERCHANT = "full_merchant_acceptance"
+CLONE_PROFILE_SALLA_MINIMAL = "salla_acceptance_minimal"
+KNOWN_CLONE_PROFILES: FrozenSet[str] = frozenset(
+    {CLONE_PROFILE_FULL_MERCHANT, CLONE_PROFILE_SALLA_MINIMAL}
+)
 DEFAULT_ACCEPTANCE_TENANT_ID = 33
 PRESERVE_TENANT_IDENTITY_MODE = "preserve_tenant_id_cross_database"
 REMAP_TENANT_IDENTITY_MODE = "remap_tenant_id_cross_database"
@@ -143,8 +150,8 @@ class CloneTableSpec:
     scrub_phone_columns: Tuple[str, ...] = ()
 
 
-# Closed allow-list — exact dependency order for Tenant 33 acceptance scope.
-ALLOWED_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
+# Closed allow-list — exact dependency order for full Tenant 33 acceptance scope.
+FULL_MERCHANT_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
     CloneTableSpec("tenant_settings", upsert_on_tenant=True, json_columns=("whatsapp_settings", "ai_settings", "store_settings", "notification_settings", "metadata")),
     CloneTableSpec("commerce_permissions", upsert_on_tenant=True),
     CloneTableSpec("delivery_zones"),
@@ -226,7 +233,114 @@ ALLOWED_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
     ),
 )
 
-ALLOWED_TABLE_NAMES: FrozenSet[str] = frozenset(spec.name for spec in ALLOWED_TABLE_SPECS)
+# Minimal Salla acceptance — catalog, KB, shipping, scrubbed integration metadata only.
+SALLA_ACCEPTANCE_MINIMAL_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
+    CloneTableSpec("tenant_settings", upsert_on_tenant=True, json_columns=("whatsapp_settings", "ai_settings", "store_settings", "notification_settings", "metadata")),
+    CloneTableSpec("commerce_permissions", upsert_on_tenant=True),
+    CloneTableSpec("delivery_zones"),
+    CloneTableSpec("shipping_fees"),
+    CloneTableSpec(
+        "products",
+        json_columns=("metadata", "recommendation_tags", "source_conflict_detail"),
+        deferred_fk_columns=("default_variant_id",),
+    ),
+    CloneTableSpec(
+        "product_variants",
+        remap_fk_columns=("product_id",),
+        json_columns=("metadata", "options"),
+    ),
+    CloneTableSpec("product_groups", json_columns=("metadata_json",)),
+    CloneTableSpec(
+        "product_group_items",
+        remap_fk_columns=("group_id", "product_id", "variant_id"),
+    ),
+    CloneTableSpec(
+        "product_relations",
+        remap_fk_columns=("source_product_id", "target_product_id"),
+    ),
+    CloneTableSpec("ai_media_library", json_columns=("tags",)),
+    CloneTableSpec("merchant_knowledge_sections", json_columns=("metadata_json", "conflicts_json")),
+    CloneTableSpec(
+        "merchant_knowledge_media",
+        remap_fk_columns=("section_id", "media_id"),
+    ),
+    CloneTableSpec(
+        "merchant_knowledge_section_products",
+        remap_fk_columns=("section_id", "product_id"),
+    ),
+    CloneTableSpec(
+        "integrations",
+        json_columns=("config",),
+    ),
+    CloneTableSpec(
+        "store_knowledge_snapshots",
+        upsert_on_tenant=True,
+        json_columns=(
+            "store_profile",
+            "catalog_summary",
+            "shipping_summary",
+            "policy_summary",
+            "coupon_summary",
+        ),
+    ),
+)
+
+PROFILE_TABLE_SPECS: dict[str, Tuple[CloneTableSpec, ...]] = {
+    CLONE_PROFILE_FULL_MERCHANT: FULL_MERCHANT_TABLE_SPECS,
+    CLONE_PROFILE_SALLA_MINIMAL: SALLA_ACCEPTANCE_MINIMAL_TABLE_SPECS,
+}
+
+# Operational merchant config present in full profile but excluded from minimal.
+EXCLUDED_OPERATIONAL_TABLES: FrozenSet[str] = frozenset(
+    {
+        "product_rankings",
+        "coupons",
+        "coupon_rules",
+        "promotions",
+        "manual_coupons",
+        "whatsapp_templates",
+        "smart_automations",
+        "automation_rules",
+        "merchant_branches",
+        "branch_contacts",
+        "branch_escalation_steps",
+        "branch_arrival_keywords",
+        "knowledge_policies",
+        "merchant_addons",
+        "merchant_widgets",
+        "widget_settings",
+    }
+)
+
+# Backward-compatible alias for full merchant profile consumers.
+ALLOWED_TABLE_SPECS: Tuple[CloneTableSpec, ...] = FULL_MERCHANT_TABLE_SPECS
+ALLOWED_TABLE_NAMES: FrozenSet[str] = frozenset(
+    spec.name for spec in FULL_MERCHANT_TABLE_SPECS
+)
+
+
+def resolve_clone_profile(profile: str | None) -> str:
+    """Fail closed when profile is missing or unknown."""
+    normalized = (profile or "").strip()
+    if not normalized:
+        raise ValueError("clone_profile_missing")
+    if normalized not in KNOWN_CLONE_PROFILES:
+        raise ValueError("clone_profile_unknown")
+    return normalized
+
+
+def table_specs_for_profile(profile: str) -> Tuple[CloneTableSpec, ...]:
+    return PROFILE_TABLE_SPECS[resolve_clone_profile(profile)]
+
+
+def allowed_table_names_for_profile(profile: str) -> FrozenSet[str]:
+    return frozenset(spec.name for spec in table_specs_for_profile(profile))
+
+
+def excluded_operational_tables_for_profile(profile: str) -> FrozenSet[str]:
+    if resolve_clone_profile(profile) == CLONE_PROFILE_SALLA_MINIMAL:
+        return EXCLUDED_OPERATIONAL_TABLES
+    return frozenset()
 
 # Hard deny — never read for copy; dry-run proves zero writes to these domains.
 DENIED_TABLES: FrozenSet[str] = frozenset(

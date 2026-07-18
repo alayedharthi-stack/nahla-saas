@@ -34,8 +34,6 @@ for _entry in (str(_REPO_ROOT), str(_REPO_ROOT / "backend"), str(_REPO_ROOT / "d
 
 from scripts.operators import staging_migration_operator_gates as gates  # noqa: E402
 from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
-    ALLOWED_TABLE_SPECS,
-    ALLOWED_TABLE_NAMES,
     APPLY_CONFIRM_ENV,
     APPLY_CONFIRM_TOKEN,
     CLEANUP_CONFIRM_ENV,
@@ -48,6 +46,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     EXPECTED_TARGET_ALEMBIC_HEADS,
     GLOBAL_STRIP_COLUMNS,
     KNOWN_ALEMBIC_REVISIONS,
+    KNOWN_CLONE_PROFILES,
     MANIFEST_SCHEMA_VERSION,
     MASTER_ENABLE_ENV,
     PHONE_SCRUB_PLACEHOLDER,
@@ -71,6 +70,10 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     TARGET_PROJECT_ENV,
     TARGET_TEST_SLUG_MARKERS,
     TENANT_COPY_COLUMNS,
+    allowed_table_names_for_profile,
+    excluded_operational_tables_for_profile,
+    resolve_clone_profile,
+    table_specs_for_profile,
 )
 from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
     scrub_ai_settings,
@@ -96,6 +99,7 @@ class CloneRequest:
     source_database_url: str
     target_database_url: str
     mode: str
+    profile: str
     clone_id: str
     dry_run_digest: str | None
     manifest_path: Path | None
@@ -289,10 +293,13 @@ def validate_target_alembic_heads(conn: Connection) -> GateFailure | None:
 def validate_schema_compatibility(
     source_conn: Connection,
     target_conn: Connection,
+    *,
+    profile: str,
 ) -> GateFailure | None:
     """Fail closed before row reads if source lacks target-required columns."""
     source_inspector = inspect(source_conn)
     target_inspector = inspect(target_conn)
+    table_specs = table_specs_for_profile(profile)
 
     if "tenants" not in source_inspector.get_table_names():
         return GateFailure("preflight_failed", "schema_compat:tenants:source_table_missing")
@@ -306,7 +313,7 @@ def validate_schema_compatibility(
             f"schema_compat:tenants:source_missing_columns:{missing_tenant[0]}",
         )
 
-    for spec in ALLOWED_TABLE_SPECS:
+    for spec in table_specs:
         table = spec.name
         if table not in target_inspector.get_table_names():
             return GateFailure("preflight_failed", f"schema_compat:{table}:target_table_missing")
@@ -472,9 +479,25 @@ def _target_tenant_row(conn: Connection, tenant_id: int) -> Mapping[str, Any] | 
     ).mappings().first()
 
 
+def excluded_operational_source_counts(
+    conn: Connection,
+    tenant_id: int,
+    *,
+    profile: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for table in sorted(excluded_operational_tables_for_profile(profile)):
+        if table not in inspect(conn).get_table_names():
+            continue
+        counts[table] = allowed_table_count(conn, table, tenant_id)
+    return counts
+
+
 def validate_target_shell(
     conn: Connection,
     target_tenant_id: int,
+    *,
+    profile: str,
 ) -> tuple[str, GateFailure | None]:
     """Allow absent shell or a strictly empty, acceptance-marked existing shell."""
     row = _target_tenant_row(conn, target_tenant_id)
@@ -519,7 +542,7 @@ def validate_target_shell(
     if row["pickup_enabled"] not in (None, True):
         return "", GateFailure("preflight_failed", "target_tenant_shell_not_empty")
 
-    for table in sorted(ALLOWED_TABLE_NAMES):
+    for table in sorted(allowed_table_names_for_profile(profile)):
         if allowed_table_count(conn, table, target_tenant_id):
             return "", GateFailure("preflight_failed", f"target_allowed_rows_present:{table}")
     target_denied = denied_domain_zero_proof(conn, target_tenant_id)
@@ -687,6 +710,10 @@ def _transform_row(
         out, json_transforms = scrub_row_json_columns(out, spec_json_columns, table=spec_name)
         transformations.extend(json_transforms)
 
+    if spec_name == "integrations":
+        out["enabled"] = False
+        transformations.append("force:integrations.disabled_until_staging_credentials")
+
     for column in spec_json_columns:
         if column in row and row[column] is not None:
             violations = scan_for_unhandled_forbidden_keys(row[column])
@@ -703,6 +730,8 @@ def _insert_row(conn: Connection, table: str, row: Mapping[str, Any]) -> int:
 
 
 def build_plan(request: CloneRequest) -> dict[str, Any]:
+    table_specs = table_specs_for_profile(request.profile)
+    allowed_names = allowed_table_names_for_profile(request.profile)
     source_engine = connect_engine(request.source_database_url, read_only=True)
     target_engine = connect_engine(request.target_database_url)
     try:
@@ -723,7 +752,11 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 if failure:
                     raise ValueError(f"{label}:{failure.stage}")
 
-            failure = validate_schema_compatibility(source_conn, target_conn)
+            failure = validate_schema_compatibility(
+                source_conn,
+                target_conn,
+                profile=request.profile,
+            )
             if failure:
                 raise ValueError(failure.stage)
 
@@ -740,34 +773,46 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
             target_shell_state, failure = validate_target_shell(
                 target_conn,
                 request.target_tenant_id,
+                profile=request.profile,
             )
             if failure:
                 raise ValueError(failure.stage)
 
             table_counts: dict[str, int] = {}
-            dependency_order = [spec.name for spec in ALLOWED_TABLE_SPECS]
+            dependency_order = [spec.name for spec in table_specs]
             transformations: list[str] = [
                 "tenant_scalars",
                 "force:tenant_settings.ai_settings.store_ai_mode=test",
                 "force:tenant_settings.ai_settings.ai_test_allowed_numbers=[]",
                 "strip:channel_credentials_and_bindings",
             ]
+            if "integrations" in allowed_names:
+                transformations.append(
+                    "force:integrations.disabled_until_staging_credentials"
+                )
 
-            for spec in ALLOWED_TABLE_SPECS:
+            for spec in table_specs:
                 table_counts[spec.name] = allowed_table_count(
                     source_conn,
                     spec.name,
                     request.source_tenant_id,
                 )
 
+            excluded_operational_counts = excluded_operational_source_counts(
+                source_conn,
+                request.source_tenant_id,
+                profile=request.profile,
+            )
+            planned_copied_rows = sum(table_counts.values())
+
             source_checksums = {
                 table: table_count_checksum(source_conn, table, request.source_tenant_id)
-                for table in ALLOWED_TABLE_NAMES
+                for table in allowed_names
                 if table != "tenant_settings"
             }
             target_before = {
                 table: table_count_checksum(target_conn, table, request.target_tenant_id)
-                for table in ALLOWED_TABLE_NAMES
+                for table in allowed_names
                 if table != "tenant_settings"
             }
             denied_proof = denied_domain_zero_proof(source_conn, request.source_tenant_id)
@@ -778,6 +823,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
 
             digest_payload = {
                 "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+                "profile": request.profile,
                 "identity_mode": identity_mode(request),
                 "source_database_identity_digest": source_database_digest,
                 "target_database_identity_digest": target_database_digest,
@@ -787,6 +833,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "table_counts": table_counts,
                 "source_checksums": source_checksums,
                 "dependency_order": dependency_order,
+                "excluded_operational_source_counts": excluded_operational_counts,
                 "denied_domain_source_counts": denied_proof,
                 "target_denied_domain_counts": target_denied_proof,
                 "source_alembic_heads": source_alembic_heads,
@@ -799,6 +846,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "mode": request.mode,
                 "clone_id": request.clone_id,
                 "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+                "profile": request.profile,
                 "identity_mode": identity_mode(request),
                 "source_database_identity_digest": source_database_digest,
                 "target_database_identity_digest": target_database_digest,
@@ -809,6 +857,8 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "target_tenant_bootstrap_planned": target_shell_state == "bootstrap_required",
                 "dependency_order": dependency_order,
                 "table_counts": table_counts,
+                "planned_copied_rows": planned_copied_rows,
+                "excluded_operational_source_counts": excluded_operational_counts,
                 "source_checksums": source_checksums,
                 "target_checksums_before": target_before,
                 "denied_domain_source_counts": denied_proof,
@@ -828,18 +878,23 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
     if not request.dry_run_digest:
         raise ValueError("dry_run_digest_missing")
 
+    table_specs = table_specs_for_profile(request.profile)
+    allowed_names = allowed_table_names_for_profile(request.profile)
     source_engine = connect_engine(request.source_database_url, read_only=True)
     target_engine = connect_engine(request.target_database_url)
-    id_maps: dict[str, dict[int, int]] = {spec.name: {} for spec in ALLOWED_TABLE_SPECS}
-    id_maps["products"] = {}
-    id_maps["product_variants"] = {}
-    id_maps["product_groups"] = {}
-    id_maps["merchant_knowledge_sections"] = {}
-    id_maps["ai_media_library"] = {}
-    id_maps["coupons"] = {}
-    id_maps["whatsapp_templates"] = {}
-    id_maps["merchant_branches"] = {}
-    id_maps["branch_contacts"] = {}
+    id_maps: dict[str, dict[int, int]] = {spec.name: {} for spec in table_specs}
+    for parent in (
+        "products",
+        "product_variants",
+        "product_groups",
+        "merchant_knowledge_sections",
+        "ai_media_library",
+        "coupons",
+        "whatsapp_templates",
+        "merchant_branches",
+        "branch_contacts",
+    ):
+        id_maps.setdefault(parent, {})
     manifest_rows: dict[str, list[int]] = {}
     transformations: list[str] = []
     unrelated_before: dict[str, str] = {}
@@ -849,6 +904,8 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
     try:
         with source_engine.connect() as source_conn:
             plan = build_plan(request)
+            if plan.get("profile") != request.profile:
+                raise ValueError("clone_profile_mismatch")
             if plan["dry_run_digest"] != request.dry_run_digest:
                 raise ValueError("dry_run_digest_mismatch")
 
@@ -856,7 +913,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
             unrelated_tenant_id = int(unrelated_raw) if unrelated_raw else None
             if unrelated_tenant_id is not None:
                 with target_engine.connect() as target_conn:
-                    for table in ALLOWED_TABLE_NAMES:
+                    for table in allowed_names:
                         if table in inspect(target_conn).get_table_names():
                             unrelated_before[table] = table_count_checksum(
                                 target_conn, table, unrelated_tenant_id
@@ -866,6 +923,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                 shell_state, shell_failure = validate_target_shell(
                     target_conn,
                     request.target_tenant_id,
+                    profile=request.profile,
                 )
                 if shell_failure:
                     raise ValueError(shell_failure.stage)
@@ -884,7 +942,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                 )
                 transformations.extend(tenant_transforms)
 
-                for spec in ALLOWED_TABLE_SPECS:
+                for spec in table_specs:
                     rows = source_conn.execute(
                         text(
                             f"SELECT * FROM {spec.name} "
@@ -1001,6 +1059,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "clone_id": request.clone_id,
+            "profile": request.profile,
             "identity_mode": identity_mode(request),
             "source_database_identity_digest": plan["source_database_identity_digest"],
             "target_database_identity_digest": plan["target_database_identity_digest"],
@@ -1039,6 +1098,11 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
         raise ValueError("manifest_schema_mismatch")
     if manifest.get("clone_id") != request.clone_id:
         raise ValueError("clone_id_mismatch")
+    manifest_profile = manifest.get("profile")
+    if manifest_profile != request.profile:
+        raise ValueError("clone_profile_mismatch")
+
+    cleanup_specs = table_specs_for_profile(str(manifest_profile))
 
     target_engine = connect_engine(request.target_database_url)
     deleted: dict[str, int] = {}
@@ -1060,7 +1124,7 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
                     ),
                     {"ids": product_ids, "tid": request.target_tenant_id},
                 )
-            for spec in reversed(ALLOWED_TABLE_SPECS):
+            for spec in reversed(cleanup_specs):
                 ids = manifest.get("manifest_rows", {}).get(spec.name) or []
                 if not ids:
                     continue
@@ -1118,7 +1182,18 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
         target_engine.dispose()
 
 
+def validate_clone_profile(profile: str | None) -> GateFailure | None:
+    try:
+        resolve_clone_profile(profile)
+    except ValueError as exc:
+        return GateFailure("operator_rejected", str(exc))
+    return None
+
+
 def run_gates(request: CloneRequest) -> GateFailure | None:
+    failure = validate_clone_profile(request.profile)
+    if failure:
+        return failure
     for validator in (
         lambda: validate_database_url_scheme(request.source_database_url, stage="source"),
         lambda: validate_database_url_scheme(request.target_database_url, stage="target"),
@@ -1145,6 +1220,7 @@ def run_gates(request: CloneRequest) -> GateFailure | None:
 def build_request_from_env(
     *,
     mode: str,
+    profile: str,
     source_tenant_id: int,
     target_tenant_id: int,
     clone_id: str | None,
@@ -1161,6 +1237,7 @@ def build_request_from_env(
         source_database_url=source_url,
         target_database_url=target_url,
         mode=mode,
+        profile=resolve_clone_profile(profile),
         clone_id=clone_id or str(uuid.uuid4()),
         dry_run_digest=dry_run_digest or (env_map.get(DRY_RUN_DIGEST_ENV) or "").strip() or None,
         manifest_path=manifest_path,
@@ -1181,6 +1258,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=DEFAULT_ACCEPTANCE_TENANT_ID,
     )
+    parser.add_argument(
+        "--profile",
+        required=True,
+        choices=sorted(KNOWN_CLONE_PROFILES),
+        help="Closed clone profile (required; no default)",
+    )
     parser.add_argument("--clone-id", default="")
     parser.add_argument("--dry-run-digest", default="")
     parser.add_argument("--manifest-path", default="")
@@ -1189,6 +1272,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode = {"dry-run": "dry-run", "apply": "apply", "cleanup": "cleanup"}[args.command]
     request = build_request_from_env(
         mode=mode,
+        profile=args.profile,
         source_tenant_id=args.source_tenant_id,
         target_tenant_id=args.target_tenant_id,
         clone_id=args.clone_id or None,
