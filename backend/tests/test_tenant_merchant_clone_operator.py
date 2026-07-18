@@ -352,6 +352,8 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
     target_engine = create_engine(target_url, pool_pre_ping=True)
     tenant_id = DEFAULT_ACCEPTANCE_TENANT_ID
     with source_engine.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version WHERE version_num = '0088'"))
+    with source_engine.begin() as conn:
         conn.execute(text("DELETE FROM tenant_settings WHERE tenant_id=:tid"), {"tid": tenant_id})
         conn.execute(text("DELETE FROM products WHERE tenant_id=:tid"), {"tid": tenant_id})
         conn.execute(
