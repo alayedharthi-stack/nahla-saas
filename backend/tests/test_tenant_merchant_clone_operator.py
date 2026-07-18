@@ -5,10 +5,11 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 _REPO = Path(__file__).resolve().parents[2]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
@@ -23,6 +24,8 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     DEFAULT_ACCEPTANCE_TENANT_ID,
     DENIED_TABLES,
     DRY_RUN_DIGEST_SCHEMA_VERSION,
+    EXPECTED_SOURCE_ALEMBIC_HEADS,
+    EXPECTED_TARGET_ALEMBIC_HEADS,
     PRESERVE_TENANT_IDENTITY_MODE,
     PRODUCTION_IDENTITY_CLASS,
     PRODUCTION_SOURCE_CONFIRM_ENV,
@@ -66,6 +69,156 @@ def _clone_pg_urls() -> tuple[str, str]:
         (os.environ.get("TENANT_CLONE_PG_SOURCE_DATABASE_URL") or "").strip(),
         (os.environ.get("TENANT_CLONE_PG_TARGET_DATABASE_URL") or "").strip(),
     )
+
+
+def _sqlite_engine_with_revisions(revisions: frozenset[str]) -> object:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR)"))
+        for revision in sorted(revisions):
+            conn.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:rev)"),
+                {"rev": revision},
+            )
+    return engine
+
+
+def _topology_digest_payload(
+    *,
+    source_heads: list[str],
+    target_heads: list[str],
+) -> dict[str, object]:
+    return {
+        "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+        "identity_mode": PRESERVE_TENANT_IDENTITY_MODE,
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+        "source_tenant_id": 48,
+        "target_tenant_id": 48,
+        "target_shell_state": "bootstrap_required",
+        "table_counts": {},
+        "source_checksums": {},
+        "dependency_order": [],
+        "denied_domain_source_counts": {},
+        "target_denied_domain_counts": {},
+        "source_alembic_heads": source_heads,
+        "target_alembic_heads": target_heads,
+    }
+
+
+def test_revision_topology_source_0089_target_dual_head_accepted() -> None:
+    source_engine = _sqlite_engine_with_revisions(frozenset({"0089"}))
+    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0089"}))
+    with source_engine.connect() as source_conn, target_engine.connect() as target_conn:
+        assert clone_op.validate_source_alembic_heads(source_conn) is None
+        assert clone_op.validate_target_alembic_heads(target_conn) is None
+
+
+def test_revision_topology_source_dual_head_rejected() -> None:
+    engine = _sqlite_engine_with_revisions(frozenset({"0088", "0089"}))
+    with engine.connect() as conn:
+        failure = clone_op.validate_source_alembic_heads(conn)
+    assert failure is not None
+    assert failure.stage == "source_alembic_multi_head_drift"
+
+
+def test_revision_topology_source_0088_only_rejected() -> None:
+    engine = _sqlite_engine_with_revisions(frozenset({"0088"}))
+    with engine.connect() as conn:
+        failure = clone_op.validate_source_alembic_heads(conn)
+    assert failure is not None
+    assert failure.stage == "source_alembic_revision_mismatch"
+
+
+def test_revision_topology_target_single_0089_rejected() -> None:
+    engine = _sqlite_engine_with_revisions(frozenset({"0089"}))
+    with engine.connect() as conn:
+        failure = clone_op.validate_target_alembic_heads(conn)
+    assert failure is not None
+    assert failure.stage == "target_alembic_revision_missing:0088"
+
+
+def test_revision_topology_unknown_head_rejected_on_either_side() -> None:
+    source_engine = _sqlite_engine_with_revisions(frozenset({"0090"}))
+    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0089", "0090"}))
+    with source_engine.connect() as conn:
+        failure = clone_op.validate_source_alembic_heads(conn)
+        assert failure is not None
+        assert failure.stage == "source_alembic_unknown_revision"
+    with target_engine.connect() as conn:
+        failure = clone_op.validate_target_alembic_heads(conn)
+        assert failure is not None
+        assert failure.stage == "target_alembic_unknown_revision"
+
+
+def test_dry_run_digest_changes_when_topology_heads_change() -> None:
+    payload_a = _topology_digest_payload(
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    payload_b = _topology_digest_payload(
+        source_heads=sorted({"0088", "0089"}),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    digest_a = clone_op.compute_dry_run_digest(payload_a)
+    digest_b = clone_op.compute_dry_run_digest(payload_b)
+    assert digest_a != digest_b
+
+
+def test_apply_revalidation_rejects_topology_drift() -> None:
+    stale_digest = clone_op.compute_dry_run_digest(
+        _topology_digest_payload(
+            source_heads=["0088", "0089"],
+            target_heads=["0088", "0089"],
+        )
+    )
+    fresh_plan = {
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                source_heads=["0089"],
+                target_heads=["0088", "0089"],
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="topology-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
+
+
+def test_preserve_tenant_48_cross_database_identity_mode() -> None:
+    request = clone_op.build_request_from_env(
+        mode="dry-run",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id=None,
+        dry_run_digest=None,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    assert clone_op.validate_source_target_distinct(request) is None
+    assert clone_op.identity_mode(request) == PRESERVE_TENANT_IDENTITY_MODE
 
 
 def test_contract_allow_deny_disjoint() -> None:
@@ -198,6 +351,8 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
     source_engine = create_engine(source_url, pool_pre_ping=True)
     target_engine = create_engine(target_url, pool_pre_ping=True)
     tenant_id = DEFAULT_ACCEPTANCE_TENANT_ID
+    with source_engine.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version WHERE version_num = '0088'"))
     with source_engine.begin() as conn:
         conn.execute(text("DELETE FROM tenant_settings WHERE tenant_id=:tid"), {"tid": tenant_id})
         conn.execute(text("DELETE FROM products WHERE tenant_id=:tid"), {"tid": tenant_id})
