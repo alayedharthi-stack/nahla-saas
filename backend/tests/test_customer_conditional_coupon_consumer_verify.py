@@ -269,13 +269,29 @@ def test_operator_module_present_in_current_verifier_artifact() -> None:
     assert operator_path.is_file()
 
 
-def test_operator_absent_at_pinned_target_runtime_revision() -> None:
+def test_operator_present_at_pinned_target_runtime_revision() -> None:
     proc = subprocess.run(
         [
             "git",
             "cat-file",
             "-e",
             f"{PINNED_TARGET_RUNTIME_REVISION}:scripts/operators/customer_conditional_coupon_consumer_verify.py",
+        ],
+        cwd=_REPO,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+
+
+def test_operator_absent_at_prior_target_runtime_revision() -> None:
+    prior = "10848a4633723fa3f4aff7801fc92fd1ac393efb"
+    proc = subprocess.run(
+        [
+            "git",
+            "cat-file",
+            "-e",
+            f"{prior}:scripts/operators/customer_conditional_coupon_consumer_verify.py",
         ],
         cwd=_REPO,
         capture_output=True,

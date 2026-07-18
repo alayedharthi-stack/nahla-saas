@@ -5,10 +5,11 @@ from typing import Any, Mapping
 
 REPORT_SCHEMA_VERSION = "coupon_consumer_verify_v1"
 
-# Evidence-backed **target runtime** pin from successful consumer E2E (main @ 10848a46).
-# The verifier operator may ship in later tooling commits; attestation must prove this
-# exact revision via in-container build injects or an external checkout at the pin.
-PINNED_TARGET_RUNTIME_REVISION = "10848a4633723fa3f4aff7801fc92fd1ac393efb"
+# Evidence-backed **target runtime** pin from post-#625 consumer revision attestation
+# (main @ 8ea344fc). The verifier operator may ship in later tooling commits;
+# attestation must prove this exact revision via in-container build injects or an
+# external checkout at the pin.
+PINNED_TARGET_RUNTIME_REVISION = "8ea344fc9d786c19d9dbaa00ec6d6bc98e683f1e"
 PINNED_TARGET_RUNTIME_REVISION_SHORT = PINNED_TARGET_RUNTIME_REVISION[:8]
 
 # Back-compat aliases (PR #624 naming).
