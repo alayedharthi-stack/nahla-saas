@@ -114,7 +114,8 @@ DEFAULT_AI: Dict[str, Any] = {
         "dua",
         "payment_media_intro",
     ],
-    "persona_composer_allowlist_tenants": [33],
+    # Deny-all default — acceptance tenants must opt in via stored ai_settings.
+    "persona_composer_allowlist_tenants": [],
 }
 
 DEFAULT_STORE: Dict[str, Any] = {

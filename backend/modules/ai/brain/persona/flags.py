@@ -6,25 +6,23 @@ from typing import Any, Optional, Set
 
 from core.tenant import STORE_AI_MODE_TEST, merge_ai_defaults, resolve_store_ai_mode
 
-_DEFAULT_ALLOWLIST_TENANTS: frozenset[int] = frozenset({33})
-
 
 def _normalize_phone(phone: str) -> str:
     return "".join(ch for ch in str(phone or "") if ch.isdigit())
 
 
 def _allowed_tenants(ai_settings: dict[str, Any]) -> Set[int]:
+    """Resolve explicit per-tenant allowlist; missing/empty/malformed → deny all."""
     raw = ai_settings.get("persona_composer_allowlist_tenants")
-    if isinstance(raw, list) and raw:
-        out: set[int] = set()
-        for item in raw:
-            try:
-                out.add(int(item))
-            except (TypeError, ValueError):
-                continue
-        if out:
-            return out
-    return set(_DEFAULT_ALLOWLIST_TENANTS)
+    if not isinstance(raw, list):
+        return set()
+    out: set[int] = set()
+    for item in raw:
+        try:
+            out.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def persona_composer_allowlist_result(

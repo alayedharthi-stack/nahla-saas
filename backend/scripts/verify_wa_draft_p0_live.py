@@ -4,7 +4,7 @@ verify_wa_draft_p0_live.py
 Live / staging verification for P0 WhatsApp draft-order fix.
 
 Runs a multi-turn cart + catalog + draft-confirmation simulation against
-a real tenant DB (default: tenant 33), then checks:
+a real tenant DB (requires ``--tenant``), then checks:
 
   1. Draft order upserted via nahla_order_bridge
   2. Non-empty outbound reply injected (draft confirmation)
@@ -327,7 +327,7 @@ def run_scenario(db, tenant_id: int, recorder: _OutboundRecorder) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tenant", type=int, default=33)
+    parser.add_argument("--tenant", type=int, required=True, help="Tenant id to verify")
     parser.add_argument("--audit-only", action="store_true")
     parser.add_argument("--audit-hours", type=int, default=72)
     args = parser.parse_args()

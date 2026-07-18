@@ -77,10 +77,11 @@ class TestPersonaComposeGate:
                 "persona_composer_enabled": True,
                 "store_ai_mode": STORE_AI_MODE_TEST,
                 "ai_test_allowed_numbers": ["966542980511"],
+                "persona_composer_allowlist_tenants": [8201],
             }
         )
         assert is_persona_composer_enforce_enabled(
-            tenant_id=33,
+            tenant_id=8201,
             customer_phone="966542980511",
             ai_settings=ai,
         )
@@ -91,6 +92,7 @@ class TestPersonaComposeGate:
                 "persona_composer_enabled": True,
                 "store_ai_mode": STORE_AI_MODE_TEST,
                 "ai_test_allowed_numbers": ["966542980511"],
+                "persona_composer_allowlist_tenants": [8201],
             }
         )
         assert not is_persona_composer_enforce_enabled(
@@ -115,11 +117,13 @@ class TestPersonaComposeGate:
 
     def test_should_enforce_on_ctx_when_configured(self) -> None:
         ctx = _ctx(
+            tenant_id=8201,
             ai_settings={
                 "persona_composer_enabled": True,
                 "store_ai_mode": STORE_AI_MODE_TEST,
                 "ai_test_allowed_numbers": ["966542980511"],
-            }
+                "persona_composer_allowlist_tenants": [8201],
+            },
         )
         assert should_enforce_persona_compose(ctx, surface="social_checkin")
 

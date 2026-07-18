@@ -5,7 +5,7 @@
 > **Constitution:** Evidence first. Architecture first. Root cause first. Fix later.
 > We do not fix conversations. We do not fix merchants. We fix systems.
 >
-> **Last updated:** 2026-06-06
+> **Last updated:** 2026-07-18
 
 ---
 
@@ -216,6 +216,16 @@ These have **approved design + implemented code behind flags** and can start sta
 | ARCH-009 – 013 | Knowledge Architecture Audit + Rebuild Plan (agent transcript 2026-06) |
 | UTS | `backend/modules/ai/brain/truth_surface/` |
 | Constitution | `AGENTS.md`, `.cursor/agents/dastoor-handasat-nahla.md` |
+| Fixed-tenant policy | `backend/modules/platform/fixed_tenant_policy.py`, `test_fixed_tenant_policy.py`, `test_constitution_compliance.py` |
+
+---
+
+## Platform tenant isolation (acceptance vs runtime)
+
+| Topic | Status | Notes |
+|-------|--------|-------|
+| **Tenant 33 (acceptance merchant)** | **Acceptance-only** | Real-channel acceptance, manifests, and labeled operator tooling may reference tenant 33 explicitly. Production runtime defaults and ops-script implicit defaults must **not** depend on tenant 33. Enforced by `fixed_tenant_policy` AST gate in `constitution-compliance` CI. |
+| **Platform tenant 1 (`PLATFORM_TENANT_ID`)** | **Pending migration** | Separate auth/platform-tenant convention remains unchanged in this track. Narrow literal registry in `fixed_tenant_policy.PLATFORM_TENANT_LITERAL_REGISTRY`; full removal tracked as follow-up — **do not expand** new runtime dependencies on tenant 1. |
 
 ---
 
@@ -223,5 +233,6 @@ These have **approved design + implemented code behind flags** and can start sta
 
 | Date | Change |
 |------|--------|
+| 2026-07-18 | Tenant 33 confined to acceptance/tests/manifests; deny-all persona composer default; static CI gate |
 | 2026-06-06 | Initial registry — 13 initiatives + satellite UTS/slim slices |
 | 2026-06-06 | ARCH-005/006 B0 implemented — unified `[BRAIN_STATE_SLIM]` v2 telemetry |
