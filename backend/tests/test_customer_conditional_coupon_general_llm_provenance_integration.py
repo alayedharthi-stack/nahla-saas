@@ -200,6 +200,7 @@ def test_pipeline_safe_general_llm_fallthrough_provenance_after_sanitize() -> No
     clear_trusted_context()
     brain = get_brain()
     snap = _conditional_snapshot()
+    expected_snapshot_id = snap.ensure_snapshot_id()
 
     stack = _brain_process_patches(brain, snap, llm_text=_SAFE_WITH_LEAK)
     with stack:
@@ -224,9 +225,45 @@ def test_pipeline_safe_general_llm_fallthrough_provenance_after_sanitize() -> No
         assert result.get("final_text_transformed") is True
         assert "sanitize_outbound_text" in list(result.get("final_transform_reasons") or [])
         assert result.get("final_customer_text_source") == "llm_postprocess"
-        assert result.get("facts_snapshot_id")
+        assert result.get("facts_snapshot_id") == expected_snapshot_id
         assert _SANITIZER_LEAK_PREFIX.strip() not in (result.get("reply") or "")
         assert _SAFE_UNCERTAINTY in (result.get("reply") or "")
+        assert _DISCOUNT_FALLBACK not in (result.get("reply") or "")
+    finally:
+        clear_trusted_context()
+
+
+def test_pipeline_safe_general_llm_fallthrough_without_text_transform() -> None:
+    from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+
+    clear_trusted_context()
+    brain = get_brain()
+    snap = _conditional_snapshot()
+    expected_snapshot_id = snap.ensure_snapshot_id()
+
+    stack = _brain_process_patches(brain, snap, llm_text=_SAFE_UNCERTAINTY)
+    with stack:
+        result = _run(
+            brain.process(
+                db=MagicMock(),
+                tenant_id=9002,
+                customer_phone=_PHONE,
+                message=_MESSAGE,
+                history=[],
+                profile={"preferred_language": "ar"},
+                conversation_id=53,
+            )
+        )
+
+    try:
+        assert result.get("customer_conditional_coupon_general_llm_fallthrough") is True
+        assert result.get("compose_source") == "llm"
+        assert result.get("chosen_path") == "customer_conditional_coupon_general_llm_fallthrough"
+        assert result.get("facts_snapshot_id") == expected_snapshot_id
+        assert result.get("final_customer_text_source") == "llm"
+        assert result.get("final_text_transformed") is False
+        assert result.get("final_transform_reasons") == []
+        assert result.get("reply") == _SAFE_UNCERTAINTY
         assert _DISCOUNT_FALLBACK not in (result.get("reply") or "")
     finally:
         clear_trusted_context()
@@ -313,8 +350,6 @@ def test_webhook_dedup_updates_general_llm_fallthrough_provenance_metadata() -> 
         "facts_snapshot_id": "snap-integration-general-llm-dedup",
     }
 
-    note_calls: list[dict] = []
-
     with _merchant_handler_patch_ctx(
         convo=convo,
         history_side_effect=_dedup_history,
@@ -343,6 +378,10 @@ def test_webhook_dedup_updates_general_llm_fallthrough_provenance_metadata() -> 
     assert saved_metadata.get("chosen_path") == "customer_conditional_coupon_general_llm_fallthrough"
     assert saved_metadata.get("final_text_transformed") is True
     assert saved_metadata.get("final_customer_text_source") == "dedup_substitution"
+    assert (
+        saved_metadata.get("facts_snapshot_id")
+        == "snap-integration-general-llm-dedup"
+    )
     assert "chat_dedup_substitution" in list(
         saved_metadata.get("final_transform_reasons") or []
     )
