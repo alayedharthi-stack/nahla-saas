@@ -35,6 +35,23 @@ Meta/360dialog → POST /webhook/whatsapp[/360dialog]
 `_handle_merchant_message`) bypass HTTP webhook ingress. They are useful for
 diagnostics but **must not** be labeled real-channel E2E evidence.
 
+**Critical boundary:** a locally generated signed HTTP POST to
+`/webhook/whatsapp*` is also **not** actual-channel E2E. It proves only ingress,
+signature, normalization, and routing integration. Launch acceptance requires:
+
+```
+private allowlisted test phone/device
+  → Meta/360dialog inbound delivery
+  → Nahla webhook + AI
+  → Meta/360dialog outbound provider ID/status
+  → receipt visible on the same private test device
+```
+
+The runner therefore classifies an otherwise valid-looking persisted webhook
+row as `direct_signed_webhook_integration_probe` until a named reviewer records
+the real-device send and receipt attestation. Database fixtures and direct code
+markers can never be upgraded.
+
 ## Preconditions (readiness)
 
 | Gate | Requirement |
@@ -47,7 +64,9 @@ diagnostics but **must not** be labeled real-channel E2E evidence.
 | Master gate | `NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED` unset or not truthy (default-off) |
 | Execution confirm | `NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM=true` (human) |
 | ARCH-001 signoff env | `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM=true` |
-| Tenant 1 pass (T33 only) | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_CONFIRM=true` |
+| Tenant 1 pass (T33 only) | HMAC-signed Tenant 1 PASS artifact with teardown verified |
+| Deployment identity | Exact `RAILWAY_DEPLOYMENT_ID` plus pinned revision |
+| Evidence identity | Keyed hashes via `NAHLA_REAL_CHANNEL_ACCEPTANCE_EVIDENCE_HMAC_KEY` |
 
 ## Credential / test-number env refs (names only)
 
@@ -56,8 +75,12 @@ diagnostics but **must not** be labeled real-channel E2E evidence.
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED` | Master execution gate (default off) |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM` | Human execution confirmation |
 | `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM` | ARCH-001 shadow signoff attestation |
-| `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_CONFIRM` | Tenant 1 pass gate for Tenant 33 |
+| `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` | Signed Tenant 1 PASS artifact path |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION` | Deploy revision pin |
+| `NAHLA_REAL_CHANNEL_ACCEPTANCE_EVIDENCE_HMAC_KEY` | Evidence signing/keyed-hash secret |
+| `NAHLA_REAL_CHANNEL_ACCEPTANCE_REVIEWER_ID` | Secret reviewer identity reference |
+| `NAHLA_REAL_CHANNEL_ACCEPTANCE_SESSION_DIR` | Optional local secure session directory |
+| `RAILWAY_DEPLOYMENT_ID` | Exact deployed instance identity |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE` | Tenant 1 test phone (secret) |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE` | Tenant 33 test phone (secret) |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_ALLOWLIST_PHONES` | Comma-separated allowlist (secrets) |
@@ -113,16 +136,77 @@ python scripts/probe_d360_forwarding.py --tenant 33
 
 ## Execution (after ARCH-001 ends — not now)
 
-1. Set env gates and pinned revision on staging operator shell only.
-2. Capture config snapshot (`config_snapshot` phase output).
-3. Run channel health probes; exit non-zero → BLOCK.
-4. Execute Tenant 1 scenarios sequentially; record evidence per scenario.
-5. On Tenant 1 pass, set `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_CONFIRM=true`.
-6. Execute Tenant 33 limited scenarios.
-7. Archive evidence; run teardown.
+1. Set secret env references, gates, exact revision, and deployment ID.
+2. Run channel health probes; any non-zero result is **BLOCK**.
+3. Start the Tenant 1 session (read-only DB snapshot and event/usage cursors).
+4. For each scenario, obtain instructions, send from the real private WhatsApp
+   test device, observe DB/provider evidence, and record device + human review.
+5. Complete all scenarios and teardown. Teardown requires exact config
+   fingerprint equality and emits a signed Tenant 1 PASS artifact only when all
+   49 scenarios passed.
+6. Point `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` at that signed
+   artifact, then start Tenant 33.
 
-Real inbound must use signed HTTP POST to `/webhook/whatsapp` or
-`/webhook/whatsapp/360dialog` — not internal handler shortcuts.
+### Session commands/state machine
+
+```bash
+# STARTED: snapshots exact config fingerprint and DB/event/AI-usage cursors.
+python -m scripts.operators.real_channel_acceptance_session start-session --tenant 1
+
+# STARTED → AWAITING_DEVICE_SEND: prints the test input and manual/device boundary.
+python -m scripts.operators.real_channel_acceptance_session next-scenario --session-id <SESSION_ID>
+
+# Human or authorized existing test-device automation sends from WhatsApp now.
+# No runner command sends a message.
+
+# AWAITING_DEVICE_SEND → OBSERVED: polls persisted inbound/outbound/AI evidence.
+python -m scripts.operators.real_channel_acceptance_session observe --session-id <SESSION_ID>
+# `poll` is an alias for repeated one-shot observation while no inbound exists.
+python -m scripts.operators.real_channel_acceptance_session poll --session-id <SESSION_ID>
+
+# Attest the real device boundary; reviewer identity comes from secret env.
+python -m scripts.operators.real_channel_acceptance_session record-device-attestation \
+  --session-id <SESSION_ID> --provider 360dialog \
+  --sent-from-private-device yes --outbound-received yes
+
+# Separate naturalness/context/audio/truthfulness review.
+python -m scripts.operators.real_channel_acceptance_session record-human-assessment \
+  --session-id <SESSION_ID> --naturalness pass \
+  --context-continuity pass --audio-quality not_applicable \
+  --operational-truthfulness pass
+
+# HUMAN_ASSESSED → SCENARIO_COMPLETED
+python -m scripts.operators.real_channel_acceptance_session complete-scenario --session-id <SESSION_ID>
+python -m scripts.operators.real_channel_acceptance_session session-status --session-id <SESSION_ID>
+python -m scripts.operators.real_channel_acceptance_session emit-defect-bundle --session-id <SESSION_ID>
+python -m scripts.operators.real_channel_acceptance_session teardown --session-id <SESSION_ID>
+```
+
+State sequence:
+
+```
+started → awaiting_device_send → observed → human_assessed
+        → scenario_completed → ... → completed → torn_down
+```
+
+No Web/WhatsApp automation is introduced. If an authorized test-device
+integration is not already available, sending and receipt confirmation remain
+manual and reviewer-attested.
+
+### Evidence channel enum
+
+| Value | Launch acceptance |
+|-------|-------------------|
+| `actual_provider_channel` | Eligible, only after provider-shaped evidence and device attestation |
+| `direct_signed_webhook_integration_probe` | Never |
+| `direct_code_probe` | Never |
+
+`merchant_assistant_constitution_smoke.py` is explicitly non-use for this
+program. Its hardcoded phones were removed; it now reads secret env refs and
+labels output `direct_code_probe`. Its separate refs are
+`NAHLA_CONSTITUTION_SMOKE_PHONE`,
+`NAHLA_CONSTITUTION_SMOKE_ALLOWED_PHONES`, and
+`NAHLA_CONSTITUTION_SMOKE_HASH_KEY`.
 
 ## Rate / cost caps (per session)
 
@@ -144,6 +228,10 @@ Real inbound must use signed HTTP POST to `/webhook/whatsapp` or
 - Provenance fields present in message metadata
 - Latency and LLM/tool calls within cap
 - Cross-tenant isolation holds
+- New inbound event is after the session cursor and opening time
+- Sender HMAC matches the secret allowlisted test phone
+- Inbound and outbound provider IDs are present and reject synthetic markers
+- Direct signed HTTP or DB-only evidence cannot produce actual-channel PASS
 
 ### Manual (human assessment)
 
@@ -167,10 +255,18 @@ Real inbound must use signed HTTP POST to `/webhook/whatsapp` or
 ```bash
 python -m scripts.operators.real_channel_conversational_acceptance teardown
 python -m scripts.operators.product_availability_truth_guard_shadow_observation teardown
+# Unset NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED and
+# NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM before session teardown.
+python -m scripts.operators.real_channel_acceptance_session teardown --session-id <SESSION_ID>
 ```
 
 Restore tenant `ai_settings` from config snapshot. Verify allowlist unchanged.
 Archive evidence to `docs/engineering/staging-evidence/`.
+
+The runner performs no tenant mutations. Teardown compares the complete current
+`ai_settings` HMAC with the start snapshot and fails with `config_drift` if
+anything changed. The operator must restore the external configuration exactly
+before teardown can pass; no raw allowlist is written to disk.
 
 ## Artifacts
 
@@ -180,7 +276,14 @@ Archive evidence to `docs/engineering/staging-evidence/`.
 | Evidence schema | `docs/engineering/real-channel-acceptance-evidence-schema.md` |
 | Operator contract | `scripts/operators/real_channel_conversational_acceptance_contract.py` |
 | Operator | `scripts/operators/real_channel_conversational_acceptance.py` |
+| Session runner | `scripts/operators/real_channel_acceptance_session.py` |
 | CI probe tests | `backend/tests/test_real_channel_conversational_acceptance_probe.py` |
+| Session/PG refusal tests | `backend/tests/test_real_channel_acceptance_session.py`, `backend/tests/test_real_channel_acceptance_session_pg.py` |
+
+`run_ai_commerce_confidence_suite.py` was evaluated but not added as a second
+full CI invocation: its constituent tests already run in the repository-wide
+unit job. The launch-critical bounded subset is the acceptance contract/session
+tests above, including PostgreSQL fixture refusal.
 
 ## GO / BLOCK
 

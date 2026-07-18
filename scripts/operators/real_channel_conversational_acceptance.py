@@ -41,6 +41,9 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     DEFECT_BUNDLE_DIR,
     EVIDENCE_ACCUMULATION_DIR,
     EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
+    EVIDENCE_CHANNEL_DIRECT_CODE_PROBE,
+    EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK,
     EXECUTION_CONFIRM_ENV,
     EXECUTION_PATH_DIRECT_CODE_PROBE,
     EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
@@ -319,10 +322,18 @@ def execute_scenario_plan(
     app_root: Path | None = None,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """List scenarios for a phase. Execution is blocked unless dry_run=False and gates pass."""
+    """List scenarios only; actual execution belongs to the session runner."""
+    if not dry_run:
+        return _report(
+            phase,
+            ok=False,
+            code=CODE_REAL_CHANNEL_REQUIRED,
+            note=(
+                "Use scripts.operators.real_channel_acceptance_session; this "
+                "planning operator cannot execute or award channel evidence."
+            ),
+        )
     blocked = _execution_gates(phase=phase, tenant_id=TENANT_1_INTENSIVE if phase == PHASE_TENANT_1_INTENSIVE else TENANT_33_LIMITED)
-    if blocked and not dry_run:
-        return blocked
 
     try:
         manifest = load_scenario_manifest(app_root)
@@ -354,7 +365,7 @@ def execute_scenario_plan(
         note=(
             "plan_only_no_messages_sent"
             if dry_run
-            else "execution_requires_real_channel_webhook_path"
+            else "execution_requires_actual_provider_channel_and_test_device"
         ),
     )
 
@@ -416,12 +427,14 @@ def build_evidence_record(
         "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
         "scenario_id": scenario_id,
         "correlation_id": correlation_id,
-        "execution_path": execution_path,
-        "execution_path_label": (
-            "real_channel_webhook"
-            if execution_path == EXECUTION_PATH_REAL_CHANNEL_WEBHOOK
-            else "direct_code_probe_NOT_REAL_CHANNEL"
-        ),
+        "evidence_channel": execution_path,
+        "execution_path_label": {
+            EVIDENCE_CHANNEL_ACTUAL_PROVIDER: "actual_provider_channel",
+            EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK: (
+                "direct_signed_webhook_integration_probe_NOT_REAL_CHANNEL"
+            ),
+            EVIDENCE_CHANNEL_DIRECT_CODE_PROBE: "direct_code_probe_NOT_REAL_CHANNEL",
+        }.get(execution_path, "unknown_NOT_REAL_CHANNEL"),
         "recorded_at_utc": _utc_now(),
         "pass_fail": pass_fail,
         "provenance_chain": {key: provenance.get(key) for key in PROVENANCE_FIELDS},

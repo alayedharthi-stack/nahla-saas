@@ -89,7 +89,7 @@ def test_execution_blocked_without_gates(monkeypatch: pytest.MonkeyPatch) -> Non
         phase=PHASE_TENANT_1_INTENSIVE, app_root=_REPO, dry_run=False
     )
     assert result["ok"] is False
-    assert result["code"] == CODE_ACCEPTANCE_NOT_ENABLED
+    assert result["code"] == "real_channel_required"
 
 
 def test_tenant_33_blocked_without_tenant_1_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,7 +101,7 @@ def test_tenant_33_blocked_without_tenant_1_pass(monkeypatch: pytest.MonkeyPatch
         phase=PHASE_TENANT_33_LIMITED, app_root=_REPO, dry_run=False
     )
     assert result["ok"] is False
-    assert result["code"] == "tenant_1_not_passed"
+    assert result["code"] == "real_channel_required"
 
 
 def test_arch001_signoff_gate_default_off(monkeypatch: pytest.MonkeyPatch) -> None:

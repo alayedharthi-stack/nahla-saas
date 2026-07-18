@@ -1,5 +1,5 @@
 {
-  "manifest_schema_version": "real_channel_acceptance_scenario_manifest_v1",
+  "manifest_schema_version": "real_channel_acceptance_scenario_manifest_v2",
   "description": "Post-ARCH-001-shadow real-channel conversational acceptance scenarios. Tenant 1 intensive (synthetic/test-store) then Tenant 33 limited (real catalog, private allowlisted numbers only).",
   "phases": [
     {
@@ -22,7 +22,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "general_inquiry_faq",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -59,7 +59,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_playground_regression_scenarios.py"
       ],
@@ -80,6 +80,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "ما هي ساعات العمل؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -87,7 +110,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "general_inquiry_faq",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -123,7 +146,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_playground_regression_scenarios.py"
       ],
@@ -144,6 +167,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "كيف الشحن للرياض؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -151,7 +197,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "catalog_search_availability",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -187,7 +233,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -208,6 +254,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل متوفر حذاء رياضي أبيض؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -215,7 +284,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "catalog_search_availability",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -250,7 +319,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -271,6 +340,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أرسل المنتجات المتوفرة"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -278,7 +370,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "catalog_search_availability",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -313,7 +405,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -334,6 +426,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عندكم عطر ورد 100ml بأحجام مختلفة؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -341,7 +456,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "catalog_search_availability",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -376,7 +491,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -397,6 +512,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل متوفر منتج غير موجود XYZ-999؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -404,7 +542,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -440,7 +578,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -461,6 +599,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي قميص قطني أزرق مقاس M"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -468,7 +629,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -503,7 +664,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -524,6 +685,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "الرياض حي النرجس"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -531,7 +715,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -566,7 +750,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -587,6 +771,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "نعم أكد الطلب"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -594,7 +801,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -630,7 +837,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -651,6 +858,30 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "interactive",
+        "input": {
+          "channel": "whatsapp",
+          "type": "interactive",
+          "body": "catalog_selection",
+          "product": "حذاء رياضي أبيض"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -658,7 +889,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -693,7 +924,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -714,6 +945,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "كم الإجمالي؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -721,7 +975,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "interruption_topic_switch",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -757,7 +1011,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_social_human_context_e2e.py"
       ],
@@ -778,6 +1032,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "بالمناسبة كيف الشحن؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -785,7 +1062,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "interruption_topic_switch",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -820,7 +1097,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_social_human_context_e2e.py"
       ],
@@ -841,6 +1118,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "شكراً على المساعدة"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -848,7 +1148,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "resume_after_interruption",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -883,7 +1183,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -904,6 +1204,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "نكمل الطلب"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -911,7 +1234,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "resume_after_interruption",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -946,7 +1269,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_social_human_context_e2e.py"
       ],
@@ -967,6 +1290,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "السلام عليكم"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -974,7 +1320,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "conditional_coupons_offers",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1009,7 +1355,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_customer_conditional_coupon_layer0.py"
       ],
@@ -1030,6 +1376,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عندكم عروض للعملاء الدائمين؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1037,7 +1406,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "conditional_coupons_offers",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1072,7 +1441,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_customer_conditional_coupon_compose_guards.py"
       ],
@@ -1093,6 +1462,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي كوبون خصم"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1100,7 +1492,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "conditional_coupons_offers",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1135,7 +1527,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_sale_offer_acceptance.py"
       ],
@@ -1156,6 +1548,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "وش العروض الحالية؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1163,7 +1578,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tracking_with_identifier",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1198,7 +1613,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -1219,6 +1634,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "تتبع طلب RRRD1234"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1226,7 +1664,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tracking_without_identifier",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1261,7 +1699,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -1282,6 +1720,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "وين طلبي؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1289,7 +1750,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tracking_not_found",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1324,7 +1785,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_order_status_lookup_routing.py"
       ],
@@ -1345,6 +1806,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "تتبع طلب NOTFOUND999"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1352,7 +1836,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tracking_success",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1388,7 +1872,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_order_status_lookup_routing.py"
       ],
@@ -1409,6 +1893,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "تتبع طلب KNOWNGOOD1"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1416,7 +1923,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "identity_profile_address_continuity",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1451,7 +1958,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -1472,6 +1979,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اسمي أحمد سالم"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1479,7 +2009,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "identity_profile_address_continuity",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1514,7 +2044,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -1535,6 +2065,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عنواني الرياض حي الملقا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1542,7 +2095,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "identity_profile_address_continuity",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1577,7 +2130,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -1598,6 +2151,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "استخدم عنواني المحفوظ"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1605,7 +2181,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "memory_cross_turn",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1640,7 +2216,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_social_human_context_e2e.py"
       ],
@@ -1661,6 +2237,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي حذاء رياضي أبيض ثم قميص قطني أزرق"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1668,7 +2267,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "memory_cross_conversation",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1703,7 +2302,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_social_human_context_e2e.py"
       ],
@@ -1724,6 +2323,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "نفس طلب الأمس"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1731,7 +2353,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "memory_tenant_boundary",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1766,7 +2388,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -1787,6 +2409,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل تعرف طلبات متجر آخر؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1794,7 +2439,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "language_arabic",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1827,7 +2472,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_nahla_doctrine_commerce_personality.py"
       ],
@@ -1848,6 +2493,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "السلام عليكم، وش المتوفر؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1855,7 +2523,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "language_english",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1888,7 +2556,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_nahla_doctrine_commerce_personality.py"
       ],
@@ -1909,6 +2577,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "Hi, what products do you have?"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1916,7 +2607,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "language_mixed",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -1949,7 +2640,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_nahla_doctrine_commerce_personality.py"
       ],
@@ -1970,6 +2661,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "Hi, هل عندكم delivery today؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -1977,7 +2691,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "voice_note_transcription",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2012,7 +2726,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -2033,6 +2747,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "audio",
+        "input": {
+          "channel": "whatsapp",
+          "type": "audio",
+          "body": "voice_note_sample_ref"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2040,7 +2777,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "media_image_handling",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2075,7 +2812,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -2096,6 +2833,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "image",
+        "input": {
+          "channel": "whatsapp",
+          "type": "image",
+          "body": "product_image_sample_ref"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2103,7 +2863,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "audio_unsupported_corrupt",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2138,7 +2898,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -2159,6 +2919,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "audio",
+        "input": {
+          "channel": "whatsapp",
+          "type": "audio",
+          "body": "corrupt_audio_sample_ref"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2166,7 +2949,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tool_timeout",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2201,7 +2984,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -2222,6 +3005,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "ابحث عن عطر ورد 100ml"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2229,7 +3035,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tool_error_retry",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2264,7 +3070,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -2285,6 +3091,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "حدث خطأ؟ حاول مرة ثانية"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2292,7 +3121,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "tool_idempotency",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2327,7 +3156,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -2348,6 +3177,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أرسل نفس الرابط مرتين"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2355,7 +3207,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "payment_truth",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2390,7 +3242,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_constitution_compliance.py"
       ],
@@ -2411,6 +3263,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل استلمتم الدفع؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2418,7 +3293,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "shipment_truth",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2453,7 +3328,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_constitution_compliance.py"
       ],
@@ -2474,6 +3349,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل تم الشحن؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2481,7 +3379,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "handoff_escalation",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2517,7 +3415,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_store_ai_pause.py"
       ],
@@ -2538,6 +3436,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي أكلم موظف"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2545,7 +3466,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "pause_blocklist",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2580,7 +3501,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_store_ai_pause.py"
       ],
@@ -2601,6 +3522,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": false,
+        "test_device_receipt_attestation": false,
+        "outbound_expected": false,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2608,7 +3552,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "subscription_guard",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2643,7 +3587,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_billing_scenarios.py"
       ],
@@ -2664,6 +3608,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": false,
+        "test_device_receipt_attestation": false,
+        "outbound_expected": false,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2671,7 +3638,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "webhook_duplicate",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2707,7 +3674,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -2728,6 +3695,30 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اختبار تكرار",
+          "wa_msg_id": "fixed-dup-id"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2735,7 +3726,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "webhook_replay",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2771,7 +3762,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -2792,6 +3783,30 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "replay test",
+          "replay": true
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2799,7 +3814,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "webhook_out_of_order",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2835,7 +3850,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -2856,6 +3871,30 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "out of order",
+          "sequence": 2
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2863,7 +3902,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "sanitizer_guard",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2898,7 +3937,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_constitution_compliance.py"
       ],
@@ -2919,6 +3958,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اختبار sanitizer"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2926,7 +3988,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "dedup_guard",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -2961,7 +4023,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -2982,6 +4044,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اختبار dedup"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -2989,7 +4074,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "cross_tenant_isolation",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3024,7 +4109,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -3045,6 +4130,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عرض منتجات متجر آخر"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3052,7 +4160,7 @@
       "phase": "tenant_1_intensive",
       "taxonomy": "cost_latency_budget",
       "tenant_id": 1,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3088,7 +4196,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/scripts/run_ai_commerce_confidence_suite.py"
       ],
@@ -3109,6 +4217,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3116,7 +4247,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "general_inquiry_faq",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3153,7 +4284,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_playground_regression_scenarios.py"
       ],
@@ -3174,6 +4305,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "كيف الشحن للرياض؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3181,7 +4335,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "catalog_search_availability",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3217,7 +4371,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -3238,6 +4392,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل متوفر منتج غير موجود XYZ-999؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3245,7 +4422,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "multi_turn_order_construction",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3281,7 +4458,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -3302,6 +4479,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "كم الإجمالي؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3309,7 +4509,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "tracking_with_identifier",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3345,7 +4545,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -3366,6 +4566,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "تتبع طلب RRRD1234"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3373,7 +4596,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "tracking_without_identifier",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3409,7 +4632,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -3430,6 +4653,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "وين طلبي؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3437,7 +4683,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "conditional_coupons_offers",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3473,7 +4719,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_sale_offer_acceptance.py"
       ],
@@ -3494,6 +4740,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "وش العروض الحالية؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3501,7 +4770,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "payment_truth",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3537,7 +4806,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_constitution_compliance.py"
       ],
@@ -3558,6 +4827,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل استلمتم الدفع؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3565,7 +4857,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "shipment_truth",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3601,7 +4893,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_constitution_compliance.py"
       ],
@@ -3622,6 +4914,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل تم الشحن؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3629,7 +4944,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "handoff_escalation",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3666,7 +4981,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_store_ai_pause.py"
       ],
@@ -3687,6 +5002,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي أكلم موظف"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3694,7 +5032,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "pause_blocklist",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3730,7 +5068,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_store_ai_pause.py"
       ],
@@ -3751,6 +5089,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": false,
+        "test_device_receipt_attestation": false,
+        "outbound_expected": false,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3758,7 +5119,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "language_arabic",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3792,7 +5153,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_nahla_doctrine_commerce_personality.py"
       ],
@@ -3813,6 +5174,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "السلام عليكم، وش المتوفر؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3820,7 +5204,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "language_mixed",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3854,7 +5238,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_nahla_doctrine_commerce_personality.py"
       ],
@@ -3875,6 +5259,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "Hi, هل عندكم delivery today؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3882,7 +5289,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "voice_note_transcription",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3918,7 +5325,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],
@@ -3939,6 +5346,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "audio",
+        "input": {
+          "channel": "whatsapp",
+          "type": "audio",
+          "body": "voice_note_sample_ref"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -3946,7 +5376,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "webhook_duplicate",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -3983,7 +5413,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -4004,6 +5434,30 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اختبار تكرار",
+          "wa_msg_id": "fixed-dup-id"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -4011,7 +5465,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "cross_tenant_isolation",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -4047,7 +5501,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_product_availability_truth_guard.py"
       ],
@@ -4068,6 +5522,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عرض منتجات متجر آخر"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     },
     {
@@ -4075,7 +5552,7 @@
       "phase": "tenant_33_limited",
       "taxonomy": "cost_latency_budget",
       "tenant_id": 33,
-      "execution_path": "real_channel_webhook",
+      "execution_path": "actual_provider_channel",
       "preconditions": {
         "store_ai_mode": "test",
         "store_ai_enabled": true,
@@ -4112,7 +5589,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "reset_conversation_sales_state_dry_run",
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
         "backend/scripts/run_ai_commerce_confidence_suite.py"
       ],
@@ -4133,6 +5610,29 @@
           "provider_send_without_allowlist"
         ],
         "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
       }
     }
   ]

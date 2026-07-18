@@ -18,6 +18,7 @@ nahla-backups/
 audit_*.txt
 pg_logs_*.txt
 trace_*.txt
+.nahla-acceptance-sessions/
 
 # ── Python compiled / cache ───────────────────────────────────────────────────
 __pycache__/
