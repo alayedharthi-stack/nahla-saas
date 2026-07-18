@@ -217,8 +217,9 @@ def test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards(
         )
         conn.execute(
             text(
-                "INSERT INTO tenant_settings(tenant_id,ai_settings,whatsapp_settings) "
-                "VALUES (:tid,CAST(:ai AS jsonb),CAST(:wa AS jsonb))"
+                "INSERT INTO tenant_settings"
+                "(tenant_id,show_nahla_branding,branding_text,ai_settings,whatsapp_settings) "
+                "VALUES (:tid,true,'Powered by Nahla',CAST(:ai AS jsonb),CAST(:wa AS jsonb))"
             ),
             {
                 "tid": tenant_id,

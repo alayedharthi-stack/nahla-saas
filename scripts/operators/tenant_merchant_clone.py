@@ -831,6 +831,8 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                         "tenant_settings",
                         {
                             "tenant_id": request.target_tenant_id,
+                            "show_nahla_branding": True,
+                            "branding_text": "Powered by Nahla",
                             "whatsapp_settings": {},
                             "ai_settings": scrub_ai_settings({}),
                             "store_settings": {},
