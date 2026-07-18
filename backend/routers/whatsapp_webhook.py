@@ -10333,6 +10333,7 @@ async def _handle_merchant_message(
                         chosen_path=_pavg_path,
                         tenant_id=tenant_id,
                         conversation_id=getattr(convo, "id", None),
+                        invocation_site="webhook",
                     )
                     _pavg_replaced = bool(_pavg_result.replaced)
                     if _pavg_replaced:
