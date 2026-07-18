@@ -1,10 +1,9 @@
 /**
  * TrustBlock.tsx
  *
- * Saudi commercial registration & business-authentication trust block.
+ * Saudi National Unified Number & business-lookup trust block.
  * Shown at the bottom of the public Landing, Login and Register pages
- * to surface that Nahla is a legally registered Saudi business and
- * authenticated by the Ministry of Commerce platform.
+ * to surface official business lookup links for Nahlah Ai Establishment.
  *
  * Design notes:
  *   - All icons come from lucide-react so nothing can render as a
@@ -22,61 +21,62 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import type { Lang } from '../i18n/types'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 const TRUST_COPY: Record<Lang, {
   dir: 'rtl' | 'ltr'
-  crAria: (n: string) => string
+  nationalNumberAria: (n: string) => string
   mocAlt: string
-  crLabel: string
+  nationalNumberLabel: string
   title: string
   subtitle: string
-  crPrefix: string
-  mocVerified: string
+  numberPrefix: string
+  mocLookup: string
   authAria: string
   authTitle: string
-  verifiedBy: string
+  lookupBy: string
   sbcName: string
   privacy: string
 }> = {
   ar: {
     dir: 'rtl',
-    crAria: (n) => `السجل التجاري ${n} — موثق لدى وزارة التجارة`,
+    nationalNumberAria: (n) => `الرقم الوطني الموحد ${n} — الاستعلام عبر المركز السعودي للأعمال`,
     mocAlt: 'شعار وزارة التجارة',
-    crLabel: 'السجل التجاري',
-    title: 'نحلة مسجلة في المملكة العربية السعودية',
-    subtitle: 'نحلة علامة تجارية سعودية مسجلة',
-    crPrefix: 'سجل تجاري رقم:',
-    mocVerified: 'موثق لدى وزارة التجارة',
-    authAria: 'الانتقال إلى منصة توثيق الأعمال للتحقق من نحلة',
-    authTitle: 'اضغط للتحقق من توثيق نحلة لدى منصة توثيق الأعمال',
-    verifiedBy: 'موثّق لدى',
+    nationalNumberLabel: 'الرقم الوطني الموحد',
+    title: 'نحلة AI — مؤسسة نحلة أي آي',
+    subtitle: 'منصة تقنية سعودية — يمكنك الاطلاع على بيانات المنشأة عبر الروابط الرسمية للاستعلام',
+    numberPrefix: 'الرقم الوطني الموحد:',
+    mocLookup: 'الموقع الرسمي لوزارة التجارة',
+    authAria: 'الانتقال إلى منصة المركز السعودي للأعمال للاطلاع على خدمات الاستعلام',
+    authTitle: 'الاطلاع على خدمات الاستعلام في المركز السعودي للأعمال',
+    lookupBy: 'الاستعلام عبر',
     sbcName: 'المركز السعودي للأعمال',
-    privacy: 'بياناتك آمنة ومشفرة 100% ولا نشاركها مع أي جهة خارجية',
+    privacy: 'تُعالج البيانات وفق سياسة الخصوصية المنشورة',
   },
   en: {
     dir: 'ltr',
-    crAria: (n) => `Commercial registration ${n} — verified with the Ministry of Commerce`,
+    nationalNumberAria: (n) => `National Unified Number ${n} — official business lookup via Saudi Business Centre`,
     mocAlt: 'Ministry of Commerce logo',
-    crLabel: 'Commercial registration',
-    title: 'Nahla is registered in Saudi Arabia',
-    subtitle: 'Nahla is a registered Saudi trademark',
-    crPrefix: 'CR number:',
-    mocVerified: 'Verified with the Ministry of Commerce',
-    authAria: 'Open the Saudi Business Centre to verify Nahla',
-    authTitle: 'Click to verify Nahla on the Business Centre platform',
-    verifiedBy: 'Verified by',
+    nationalNumberLabel: 'National Unified Number',
+    title: 'Nahlah AI — Nahlah Ai Establishment',
+    subtitle: 'Saudi technology platform — view business details via official lookup links',
+    numberPrefix: 'National Unified Number:',
+    mocLookup: 'Ministry of Commerce official website',
+    authAria: 'Open the Saudi Business Centre for official business lookup services',
+    authTitle: 'View business lookup services on the Saudi Business Centre',
+    lookupBy: 'Business lookup via',
     sbcName: 'Saudi Business Centre',
-    privacy: 'Your data is encrypted and we do not share it with third parties',
+    privacy: 'Data is handled according to the published Privacy Policy.',
   },
 }
 
 // ─── Verifiable destinations ──────────────────────────────────────────────
-const COMMERCIAL_REGISTRY_NUMBER = '7050202485'
+const NATIONAL_UNIFIED_NUMBER = COMPANY_INFO.nationalUnifiedNumber
 
 // "الاستعلام عن متجر إلكتروني موثق" on the Saudi Business Centre — visitors
-// who tap the CR number land on the official lookup so trust is verifiable,
-// not just claimed.
-const COMMERCIAL_REGISTRY_URL =
+// who tap the national unified number land on the official lookup so trust
+// is verifiable, not just claimed.
+const BUSINESS_LOOKUP_URL =
   'https://business.sa/eservices/details/3fd371e5-11de-4078-08cf-08dbf015747a'
 
 // "خدمة توثيق التجارة الإلكترونية" on the same Saudi Business Centre. The
@@ -154,16 +154,16 @@ export default function TrustBlock({
     >
       <div className={`grid ${gridCols} items-stretch gap-4 p-5 sm:p-6`}>
 
-        {/* Commercial registry card */}
+        {/* National unified number lookup card */}
         <a
-          href={COMMERCIAL_REGISTRY_URL}
+          href={BUSINESS_LOOKUP_URL}
           target="_blank"
           rel="noopener noreferrer"
           className="group flex items-center gap-3 px-4 py-3.5 transition-all duration-300 hover:-translate-y-0.5 hover:bg-white/[0.06] hover:border-white/[0.18]"
           style={CARD_SURFACE_STYLE}
           onMouseEnter={e => { e.currentTarget.style.boxShadow = CARD_HOVER_SHADOW }}
           onMouseLeave={e => { e.currentTarget.style.boxShadow = '' }}
-          aria-label={t.crAria(COMMERCIAL_REGISTRY_NUMBER)}
+          aria-label={t.nationalNumberAria(NATIONAL_UNIFIED_NUMBER)}
         >
           <img
             src={MOC_LOGO_SRC}
@@ -175,13 +175,13 @@ export default function TrustBlock({
           />
           <div className="flex flex-col text-start leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
-              {t.crLabel}
+              {t.nationalNumberLabel}
             </span>
             <span
               className="font-bold tracking-wider text-base sm:text-[17px] font-mono mt-0.5"
               style={{ color: '#F59E0B' }}
             >
-              {COMMERCIAL_REGISTRY_NUMBER}
+              {NATIONAL_UNIFIED_NUMBER}
             </span>
           </div>
         </a>
@@ -199,15 +199,15 @@ export default function TrustBlock({
               {t.subtitle}
             </p>
             <p className="text-slate-300 text-[12px] sm:text-[13px] leading-relaxed">
-              {t.crPrefix}{' '}
+              {t.numberPrefix}{' '}
               <a
-                href={COMMERCIAL_REGISTRY_URL}
+                href={BUSINESS_LOOKUP_URL}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-bold tracking-wider font-mono hover:underline transition-colors"
                 style={{ color: '#F59E0B' }}
               >
-                {COMMERCIAL_REGISTRY_NUMBER}
+                {NATIONAL_UNIFIED_NUMBER}
               </a>
             </p>
             <a
@@ -218,7 +218,7 @@ export default function TrustBlock({
               style={{ color: '#10B981' }}
             >
               <ShieldCheck className="w-4 h-4 shrink-0" />
-              {t.mocVerified}
+              {t.mocLookup}
             </a>
           </div>
         </div>
@@ -251,7 +251,7 @@ export default function TrustBlock({
           </div>
           <div className="flex flex-col text-start leading-tight">
             <span className="text-slate-300 text-[11px] sm:text-xs font-medium">
-              {t.verifiedBy}
+              {t.lookupBy}
             </span>
             <span className="text-white font-bold text-[14px] sm:text-[15px] mt-0.5">
               {t.sbcName}
@@ -264,10 +264,12 @@ export default function TrustBlock({
         </a>
       </div>
 
-      {/* ── Bottom strip — encryption / privacy reassurance ─────────── */}
+      {/* ── Bottom strip — published privacy policy ─────────────────── */}
       <div className="border-t border-white/10 bg-slate-950/40 px-4 sm:px-6 py-3 flex items-center justify-center gap-2 text-slate-100 text-[12px] sm:text-[13px] font-medium text-center">
         <Lock className="w-4 h-4 shrink-0" style={{ color: '#10B981' }} />
-        <span>{t.privacy}</span>
+        <a href="/privacy" className="hover:underline underline-offset-2">
+          {t.privacy}
+        </a>
       </div>
     </div>
   )

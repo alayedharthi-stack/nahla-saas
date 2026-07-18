@@ -44,6 +44,7 @@ import {
   startEmbeddedSdkHandshake,
   waitForEmbeddedSdkContext,
 } from '../lib/embeddedSdkHandshake'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 // ── Immediate ready signal — fires before React even renders ───────────────────
 // Salla requires app.ready within milliseconds of the iframe URL loading.
@@ -665,7 +666,7 @@ export default function SallaEmbedded() {
                 {lang === 'ar' ? 'إكمال الربط من سلة' : 'Complete link from Salla'}
               </button>
               <a
-                href="mailto:support@nahlah.ai"
+                href={`mailto:${COMPANY_INFO.email}`}
                 className="text-slate-500 text-xs text-center hover:text-slate-400"
               >
                 {lang === 'ar' ? 'تواصل مع الدعم' : t.errors.contactSupport}
@@ -689,7 +690,7 @@ export default function SallaEmbedded() {
                 {t.errors.retry}
               </button>
               <a
-                href="mailto:support@nahlah.ai"
+                href={`mailto:${COMPANY_INFO.email}`}
                 className="text-slate-500 text-xs text-center hover:text-slate-400"
               >
                 {t.errors.contactSupport}

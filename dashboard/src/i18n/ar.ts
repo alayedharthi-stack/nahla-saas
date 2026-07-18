@@ -3,6 +3,7 @@ import { customersPageAr } from './customersPageLabels'
 import { campaignsListAr } from './campaignsListPageLabels'
 import { templatesPageExtraAr } from './templatesPageLabels'
 import { landingPricingAr } from './landingPricingLabels'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 /**
  * Arabic translations — primary language for Nahla SaaS.
@@ -925,7 +926,7 @@ const ar: Translations = {
       defaultPendingMessage:   'سيتواصل معك فريق نحلة قريباً لإتمام ربط واتساب.',
       requestTimeLabel:        'وقت الطلب:',
       contactInstructions:     'يمكنك أيضاً التواصل معنا على:',
-      supportEmail:            'support@nahlah.ai',
+      supportEmail:            COMPANY_INFO.email,
       manualSetupLink:         'اقرأ دليل الربط اليدوي',
     },
     connLabels: {

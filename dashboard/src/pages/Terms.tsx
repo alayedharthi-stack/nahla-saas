@@ -4,6 +4,8 @@
  * Route: /terms
  * Required by Meta for WhatsApp Business Platform app review.
  */
+import { COMPANY_INFO } from '../config/companyInfo'
+
 export default function Terms() {
   return (
     <div className="min-h-screen bg-slate-50 py-12 px-4" dir="ltr">
@@ -43,32 +45,23 @@ export default function Terms() {
             </h2>
             <div className="grid gap-4 sm:grid-cols-2 sm:gap-6">
               <div className="space-y-2" dir="ltr">
-                <p>
-                  Nahlah AI is a technology platform owned and operated by Nahlah Ai Establishment,
-                  Saudi Arabia.
-                </p>
-                <p>National Number: 7050202485</p>
+                <p>{COMPANY_INFO.legalStatement.en}</p>
+                <p>National Number: {COMPANY_INFO.nationalUnifiedNumber}</p>
                 <p>
                   National Address:
                   <br />
-                  Al Halaqa Western 1,
-                  <br />
-                  Al Halqah Al Gharbia District,
-                  <br />
-                  At Taif 26563,
-                  <br />
-                  Kingdom of Saudi Arabia.
+                  {COMPANY_INFO.address.enLines.map((line) => (
+                    <span key={line}>
+                      {line}
+                      <br />
+                    </span>
+                  ))}
                 </p>
               </div>
               <div className="space-y-2 text-slate-600" dir="rtl">
-                <p>
-                  نحلة AI منصة تقنية مملوكة ومشغلة من مؤسسة نحلة أي آي، المملكة العربية السعودية.
-                </p>
-                <p>الرقم الوطني الموحد: 7050202485</p>
-                <p>
-                  العنوان الوطني: الحلقة الغربية 1، حي الحلقة الغربية، الطائف 26563، المملكة
-                  العربية السعودية.
-                </p>
+                <p>{COMPANY_INFO.legalStatement.ar}</p>
+                <p>الرقم الوطني الموحد: {COMPANY_INFO.nationalUnifiedNumber}</p>
+                <p>العنوان الوطني: {COMPANY_INFO.address.ar}</p>
               </div>
             </div>
           </section>
@@ -192,10 +185,10 @@ export default function Terms() {
               For questions regarding these Terms of Service, please contact:
             </p>
             <a
-              href="mailto:support@nahlah.ai"
+              href={`mailto:${COMPANY_INFO.email}`}
               className="inline-block mt-3 px-4 py-2.5 bg-slate-800 text-white text-sm font-semibold rounded-xl hover:bg-slate-700 transition-colors"
             >
-              support@nahlah.ai
+              {COMPANY_INFO.email}
             </a>
           </section>
 

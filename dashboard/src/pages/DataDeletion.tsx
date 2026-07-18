@@ -1,4 +1,5 @@
 import LegalFooter from '../components/LegalFooter'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 /**
  * DataDeletion.tsx
@@ -66,10 +67,10 @@ export default function DataDeletion() {
               sending an email to:
             </p>
             <a
-              href="mailto:support@nahlah.ai"
+              href={`mailto:${COMPANY_INFO.email}`}
               className="inline-block mt-3 px-4 py-2.5 bg-violet-600 text-white text-sm font-semibold rounded-xl hover:bg-violet-500 transition-colors"
             >
-              support@nahlah.ai
+              {COMPANY_INFO.email}
             </a>
           </section>
 
@@ -117,10 +118,10 @@ export default function DataDeletion() {
               If you have any questions about this policy or your data, please
               contact our support team at{' '}
               <a
-                href="mailto:support@nahlah.ai"
+                href={`mailto:${COMPANY_INFO.email}`}
                 className="text-violet-600 underline underline-offset-2 hover:text-violet-500"
               >
-                support@nahlah.ai
+                {COMPANY_INFO.email}
               </a>.
             </p>
           </section>
