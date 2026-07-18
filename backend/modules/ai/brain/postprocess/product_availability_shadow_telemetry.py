@@ -157,8 +157,8 @@ def emit_shadow_observation(observation: ProductAvailabilityShadowObservation) -
     payload = observation.to_dict()
     try:
         logger.info("%s %s", _LOG_PREFIX, json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry emit must not block guard
+        logger.debug("%s emit_failed", _LOG_PREFIX)
 
 
 def aggregate_shadow_observations(
