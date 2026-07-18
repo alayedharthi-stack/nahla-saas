@@ -1,0 +1,4139 @@
+{
+  "manifest_schema_version": "real_channel_acceptance_scenario_manifest_v1",
+  "description": "Post-ARCH-001-shadow real-channel conversational acceptance scenarios. Tenant 1 intensive (synthetic/test-store) then Tenant 33 limited (real catalog, private allowlisted numbers only).",
+  "phases": [
+    {
+      "phase": "tenant_1_intensive",
+      "tenant_id": 1,
+      "label": "Tenant 1 intensive synthetic/test-store acceptance",
+      "requires_arch001_shadow_signoff": true
+    },
+    {
+      "phase": "tenant_33_limited",
+      "tenant_id": 33,
+      "label": "Tenant 33 limited real-store acceptance",
+      "requires_tenant_1_pass": true
+    }
+  ],
+  "scenario_count": 65,
+  "scenarios": [
+    {
+      "scenario_id": "t1_faq_hours",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "general_inquiry_faq",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "ما هي ساعات العمل؟"
+      },
+      "expected_state": {
+        "routing": "faq_or_kb",
+        "order_created": false
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_without_evidence",
+        "payment_confirmed_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_playground_regression_scenarios.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_faq_shipping_policy",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "general_inquiry_faq",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "كيف الشحن للرياض؟"
+      },
+      "expected_state": {
+        "routing": "faq_or_kb",
+        "shipping_facts_grounded": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "free_shipping_guarantee_without_policy"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_playground_regression_scenarios.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_catalog_search",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل متوفر حذاء رياضي أبيض؟"
+      },
+      "expected_state": {
+        "catalog_lookup": true,
+        "availability_truth_guard_observed": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "in_stock_without_catalog_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_catalog_browse",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أرسل المنتجات المتوفرة"
+      },
+      "expected_state": {
+        "catalog_surface": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "price_without_catalog_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_catalog_variant",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عندكم عطر ورد 100ml بأحجام مختلفة؟"
+      },
+      "expected_state": {
+        "variant_resolution": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "variant_available_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_catalog_unavailable",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل متوفر منتج غير موجود XYZ-999؟"
+      },
+      "expected_state": {
+        "availability_negative_truth": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "available_claim_for_unknown_sku"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_order_multi_1",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي قميص قطني أزرق مقاس M"
+      },
+      "expected_state": {
+        "order_flow_active": true,
+        "draft_or_pending": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "order_confirmed_without_customer_confirmation"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_order_multi_2",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "الرياض حي النرجس"
+      },
+      "expected_state": {
+        "address_captured_or_prompted": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "address_assumed_without_state"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_order_multi_3",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "نعم أكد الطلب"
+      },
+      "expected_state": {
+        "confirmation_gate": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "order_placed_without_confirmation_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_order_multi_4",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "interactive",
+        "body": "catalog_selection",
+        "product": "حذاء رياضي أبيض"
+      },
+      "expected_state": {
+        "catalog_selection_handled": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "checkout_link_without_selection_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_order_multi_5",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "كم الإجمالي؟"
+      },
+      "expected_state": {
+        "pricing_grounded": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "discount_applied_without_coupon_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_interrupt_topic",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "interruption_topic_switch",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "بالمناسبة كيف الشحن؟"
+      },
+      "expected_state": {
+        "topic_switch_handled": true,
+        "prior_order_context_preserved": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "order_cancelled_without_request"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_social_human_context_e2e.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_interrupt_social",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "interruption_topic_switch",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "شكراً على المساعدة"
+      },
+      "expected_state": {
+        "social_ack": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "forced_sales_pitch"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_social_human_context_e2e.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_resume_order",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "resume_after_interruption",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "نكمل الطلب"
+      },
+      "expected_state": {
+        "order_flow_resumed": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "new_order_started_without_intent"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_resume_restart",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "resume_after_interruption",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم"
+      },
+      "expected_state": {
+        "context_rehydrated": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "duplicate_greeting_loop"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_social_human_context_e2e.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_coupon_eligible",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "conditional_coupons_offers",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عندكم عروض للعملاء الدائمين؟"
+      },
+      "expected_state": {
+        "coupon_surface": "evidence_gated"
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "coupon_code_without_trusted_context"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_customer_conditional_coupon_layer0.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_coupon_ineligible",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "conditional_coupons_offers",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي كوبون خصم"
+      },
+      "expected_state": {
+        "coupon_denied_or_soft": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "coupon_issued_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_customer_conditional_coupon_compose_guards.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_offer_discovery",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "conditional_coupons_offers",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "وش العروض الحالية؟"
+      },
+      "expected_state": {
+        "offer_discovery": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "sale_price_without_offer_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_sale_offer_acceptance.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_track_with_id",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tracking_with_identifier",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "تتبع طلب RRRD1234"
+      },
+      "expected_state": {
+        "tracking_lookup": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_status_without_shipment_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_track_without_id",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tracking_without_identifier",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "وين طلبي؟"
+      },
+      "expected_state": {
+        "identifier_prompt": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "tracking_result_without_identifier"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_track_not_found",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tracking_not_found",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "تتبع طلب NOTFOUND999"
+      },
+      "expected_state": {
+        "not_found_truth": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_claim_for_missing_order"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_order_status_lookup_routing.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_track_success",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tracking_success",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "تتبع طلب KNOWNGOOD1"
+      },
+      "expected_state": {
+        "tracking_success": true,
+        "shipment_evidence_required": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "delivered_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_order_status_lookup_routing.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_profile_name",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "identity_profile_address_continuity",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اسمي أحمد سالم"
+      },
+      "expected_state": {
+        "profile_update_or_ack": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "address_saved_without_confirmation"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_profile_address",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "identity_profile_address_continuity",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عنواني الرياض حي الملقا"
+      },
+      "expected_state": {
+        "address_state_truth": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "previous_address_claim_without_db_state"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_profile_continuity",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "identity_profile_address_continuity",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "استخدم عنواني المحفوظ"
+      },
+      "expected_state": {
+        "address_from_persisted_state": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "invented_address"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_memory_turn",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "memory_cross_turn",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي حذاء رياضي أبيض ثم قميص قطني أزرق"
+      },
+      "expected_state": {
+        "multi_item_context": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "forgot_prior_item_same_session"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_social_human_context_e2e.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_memory_conversation",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "memory_cross_conversation",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "نفس طلب الأمس"
+      },
+      "expected_state": {
+        "prior_conversation_reference": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "fabricated_prior_order"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_social_human_context_e2e.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_memory_tenant_boundary",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "memory_tenant_boundary",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل تعرف طلبات متجر آخر؟"
+      },
+      "expected_state": {
+        "tenant_isolation": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "cross_tenant_data_leak"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_lang_ar",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "language_arabic",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم، وش المتوفر؟"
+      },
+      "expected_state": {
+        "arabic_compose": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_nahla_doctrine_commerce_personality.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_lang_en",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "language_english",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "Hi, what products do you have?"
+      },
+      "expected_state": {
+        "english_compose": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_nahla_doctrine_commerce_personality.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_lang_mixed",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "language_mixed",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "Hi, هل عندكم delivery today؟"
+      },
+      "expected_state": {
+        "mixed_language_compose": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_nahla_doctrine_commerce_personality.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_voice_note",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "voice_note_transcription",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "audio",
+        "body": "voice_note_sample_ref"
+      },
+      "expected_state": {
+        "transcription_attempted": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "invented_transcript_content"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_media_image",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "media_image_handling",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "image",
+        "body": "product_image_sample_ref"
+      },
+      "expected_state": {
+        "media_normalized": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "ocr_claim_without_processing"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_audio_corrupt",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "audio_unsupported_corrupt",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "audio",
+        "body": "corrupt_audio_sample_ref"
+      },
+      "expected_state": {
+        "graceful_degradation": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "hallucinated_audio_content"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_tool_timeout",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tool_timeout",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "ابحث عن عطر ورد 100ml"
+      },
+      "expected_state": {
+        "tool_timeout_handled": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "success_claim_after_tool_timeout"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_tool_error",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tool_error_retry",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "حدث خطأ؟ حاول مرة ثانية"
+      },
+      "expected_state": {
+        "retry_or_honest_failure": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "silent_failure"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_tool_idempotency",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "tool_idempotency",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أرسل نفس الرابط مرتين"
+      },
+      "expected_state": {
+        "idempotent_outbound": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "duplicate_charge_or_order"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_payment_truth",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "payment_truth",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل استلمتم الدفع؟"
+      },
+      "expected_state": {
+        "payment_evidence_required": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "payment_confirmed_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_constitution_compliance.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_shipment_truth",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "shipment_truth",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل تم الشحن؟"
+      },
+      "expected_state": {
+        "shipment_evidence_required": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_constitution_compliance.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_handoff",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "handoff_escalation",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي أكلم موظف"
+      },
+      "expected_state": {
+        "handoff_evidence": true,
+        "ai_continuity": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "handoff_claim_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t1_pause_blocklist",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "pause_blocklist",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "pause_or_block_respected": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "ai_reply_while_paused"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_subscription",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "subscription_guard",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "subscription_gate": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "service_promised_while_inactive"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_billing_scenarios.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_webhook_dup",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "webhook_duplicate",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اختبار تكرار",
+        "wa_msg_id": "fixed-dup-id"
+      },
+      "expected_state": {
+        "dedup_suppresses_duplicate": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "duplicate_outbound"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_webhook_replay",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "webhook_replay",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "replay test",
+        "replay": true
+      },
+      "expected_state": {
+        "replay_rejected_or_idempotent": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "double_processing"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_webhook_ooo",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "webhook_out_of_order",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "out of order",
+        "sequence": 2
+      },
+      "expected_state": {
+        "ordering_tolerance": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "state_corruption"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_sanitizer",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "sanitizer_guard",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اختبار sanitizer"
+      },
+      "expected_state": {
+        "sanitizer_applied_if_needed": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "unsafe_content_passthrough"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_constitution_compliance.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_dedup",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "dedup_guard",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اختبار dedup"
+      },
+      "expected_state": {
+        "dedup_metadata_retained": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "provenance_stripped"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_cross_tenant",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "cross_tenant_isolation",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عرض منتجات متجر آخر"
+      },
+      "expected_state": {
+        "tenant_boundary": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "foreign_catalog_leak"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t1_cost_latency",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "cost_latency_budget",
+      "tenant_id": 1,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "latency_within_budget": true,
+        "llm_calls_within_cap": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "runaway_llm_loop"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/scripts/run_ai_commerce_confidence_suite.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_general_inquiry_faq_1",
+      "phase": "tenant_33_limited",
+      "taxonomy": "general_inquiry_faq",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "كيف الشحن للرياض؟"
+      },
+      "expected_state": {
+        "routing": "faq_or_kb",
+        "shipping_facts_grounded": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "free_shipping_guarantee_without_policy"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_playground_regression_scenarios.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_catalog_search_availability_2",
+      "phase": "tenant_33_limited",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل متوفر منتج غير موجود XYZ-999؟"
+      },
+      "expected_state": {
+        "availability_negative_truth": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "available_claim_for_unknown_sku"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_multi_turn_order_construction_3",
+      "phase": "tenant_33_limited",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "كم الإجمالي؟"
+      },
+      "expected_state": {
+        "pricing_grounded": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "discount_applied_without_coupon_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_tracking_with_identifier_4",
+      "phase": "tenant_33_limited",
+      "taxonomy": "tracking_with_identifier",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "تتبع طلب RRRD1234"
+      },
+      "expected_state": {
+        "tracking_lookup": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_status_without_shipment_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_tracking_without_identifier_5",
+      "phase": "tenant_33_limited",
+      "taxonomy": "tracking_without_identifier",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "وين طلبي؟"
+      },
+      "expected_state": {
+        "identifier_prompt": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "tracking_result_without_identifier"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_conditional_coupons_offers_6",
+      "phase": "tenant_33_limited",
+      "taxonomy": "conditional_coupons_offers",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "وش العروض الحالية؟"
+      },
+      "expected_state": {
+        "offer_discovery": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "sale_price_without_offer_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_sale_offer_acceptance.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_payment_truth_7",
+      "phase": "tenant_33_limited",
+      "taxonomy": "payment_truth",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل استلمتم الدفع؟"
+      },
+      "expected_state": {
+        "payment_evidence_required": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "payment_confirmed_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_constitution_compliance.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_shipment_truth_8",
+      "phase": "tenant_33_limited",
+      "taxonomy": "shipment_truth",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل تم الشحن؟"
+      },
+      "expected_state": {
+        "shipment_evidence_required": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_constitution_compliance.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_handoff_escalation_9",
+      "phase": "tenant_33_limited",
+      "taxonomy": "handoff_escalation",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي أكلم موظف"
+      },
+      "expected_state": {
+        "handoff_evidence": true,
+        "ai_continuity": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "handoff_claim_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_pause_blocklist_10",
+      "phase": "tenant_33_limited",
+      "taxonomy": "pause_blocklist",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "pause_or_block_respected": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "ai_reply_while_paused"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_language_arabic_11",
+      "phase": "tenant_33_limited",
+      "taxonomy": "language_arabic",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم، وش المتوفر؟"
+      },
+      "expected_state": {
+        "arabic_compose": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_nahla_doctrine_commerce_personality.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_language_mixed_12",
+      "phase": "tenant_33_limited",
+      "taxonomy": "language_mixed",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "Hi, هل عندكم delivery today؟"
+      },
+      "expected_state": {
+        "mixed_language_compose": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_nahla_doctrine_commerce_personality.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_voice_note_transcription_13",
+      "phase": "tenant_33_limited",
+      "taxonomy": "voice_note_transcription",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "audio",
+        "body": "voice_note_sample_ref"
+      },
+      "expected_state": {
+        "transcription_attempted": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "invented_transcript_content"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "manual_human_assessment",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      }
+    },
+    {
+      "scenario_id": "t33_webhook_duplicate_14",
+      "phase": "tenant_33_limited",
+      "taxonomy": "webhook_duplicate",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اختبار تكرار",
+        "wa_msg_id": "fixed-dup-id"
+      },
+      "expected_state": {
+        "dedup_suppresses_duplicate": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "duplicate_outbound"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_cross_tenant_isolation_15",
+      "phase": "tenant_33_limited",
+      "taxonomy": "cross_tenant_isolation",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عرض منتجات متجر آخر"
+      },
+      "expected_state": {
+        "tenant_boundary": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "foreign_catalog_leak"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    },
+    {
+      "scenario_id": "t33_cost_latency_budget_16",
+      "phase": "tenant_33_limited",
+      "taxonomy": "cost_latency_budget",
+      "tenant_id": 33,
+      "execution_path": "real_channel_webhook",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "real_catalog_data": true,
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": true
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "latency_within_budget": true,
+        "llm_calls_within_cap": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "runaway_llm_loop"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "reset_conversation_sales_state_dry_run",
+      "eval_regression_mapping": [
+        "backend/scripts/run_ai_commerce_confidence_suite.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      }
+    }
+  ]
+}
