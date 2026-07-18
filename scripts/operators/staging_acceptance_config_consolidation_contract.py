@@ -4,9 +4,8 @@ Consolidates channel/config variables from a legacy staging app service onto the
 canonical staging app service within ``desirable-growth`` / ``staging``. Default-off;
 no Railway mutations unless all fail-closed gates pass after ARCH-001 shadow teardown.
 
-Railway service IDs are contract-pinned staging allowlist entries. Operators discover
-live IDs via ``railway status --json`` and bump this contract in a dedicated PR
-before the first apply — never copy production IDs or values.
+Railway resource IDs are pinned from authenticated, read-only ``railway list --json``
+inventory. Never copy production variables or secret values.
 """
 from __future__ import annotations
 
@@ -28,16 +27,18 @@ STAGING_PROJECT_VALUE = "desirable-growth"
 STAGING_ENVIRONMENT_VALUE = "staging"
 STAGING_IDENTITY_CLASS = "railway_staging_desirable_growth"
 
-# ── Closed Railway ID allowlist (staging only — bump via PR after discovery) ──
-# Discover: railway link --project desirable-growth --environment staging
-#           railway status --json
-STAGING_RAILWAY_PROJECT_ID = "00000000-0000-4000-8000-000000000001"
-STAGING_RAILWAY_ENVIRONMENT_ID = "00000000-0000-4000-8000-000000000002"
+# ── Closed Railway ID allowlist (staging only) ────────────────────────────────
+# Source: authenticated read-only `railway list --json`, verified 2026-07-18.
+STAGING_RAILWAY_PROJECT_ID = "f0090862-0a40-4293-bd5d-e94df58762b5"
+STAGING_RAILWAY_ENVIRONMENT_ID = "b3d51523-7544-4d5c-b510-631b334cd8a7"
+PRODUCTION_RAILWAY_ENVIRONMENT_IDS = frozenset(
+    {"ede962ce-3042-4dae-94de-623837e83ed9"}
+)
 
 CANONICAL_SERVICE_NAME = "nahla-saas"
-CANONICAL_SERVICE_ID = "00000000-0000-4000-8000-000000000003"
+CANONICAL_SERVICE_ID = "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
 LEGACY_SOURCE_SERVICE_NAME = "nahla-saas-staging"
-LEGACY_SOURCE_SERVICE_ID = "00000000-0000-4000-8000-000000000004"
+LEGACY_SOURCE_SERVICE_ID = "d0282eea-05fe-49bf-bd58-e663e8585516"
 
 STAGING_SERVICE_ALLOWLIST: dict[str, str] = {
     CANONICAL_SERVICE_NAME: CANONICAL_SERVICE_ID,
@@ -176,6 +177,10 @@ _VALUE_LIKE_RE = re.compile(
     r"(?i)(secret|token|password|key|api_key|database_url|redis_url|authorization)"
 )
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_SENTINEL_UUID_PREFIXES = ("00000000-", "11111111-", "ffffffff-")
 
 
 def env_flag_enabled(raw: str | None) -> bool:
@@ -217,6 +222,98 @@ def all_migratable_keys() -> tuple[str, ...]:
     return MIGRATABLE_VARIABLE_KEYS + REFERENCE_BINDABLE_KEYS
 
 
+def is_placeholder_or_sentinel_uuid(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return (
+        not _UUID_RE.fullmatch(normalized)
+        or normalized.startswith(_SENTINEL_UUID_PREFIXES)
+    )
+
+
+def validate_pinned_identity_contract() -> str | None:
+    pinned = (
+        STAGING_RAILWAY_PROJECT_ID,
+        STAGING_RAILWAY_ENVIRONMENT_ID,
+        CANONICAL_SERVICE_ID,
+        LEGACY_SOURCE_SERVICE_ID,
+    )
+    if any(is_placeholder_or_sentinel_uuid(value) for value in pinned):
+        return "placeholder_or_sentinel_uuid"
+    if len(set(pinned)) != len(pinned):
+        return "pinned_identity_ids_not_distinct"
+    if CANONICAL_SERVICE_NAME == LEGACY_SOURCE_SERVICE_NAME:
+        return "service_names_not_distinct"
+    if set(STAGING_SERVICE_ALLOWLIST) != {
+        CANONICAL_SERVICE_NAME,
+        LEGACY_SOURCE_SERVICE_NAME,
+    }:
+        return "service_allowlist_names_invalid"
+    if STAGING_SERVICE_ALLOWLIST[CANONICAL_SERVICE_NAME] != CANONICAL_SERVICE_ID:
+        return "canonical_service_mapping_invalid"
+    if STAGING_SERVICE_ALLOWLIST[LEGACY_SOURCE_SERVICE_NAME] != LEGACY_SOURCE_SERVICE_ID:
+        return "legacy_service_mapping_invalid"
+    return None
+
+
+def validate_readonly_inventory_identity(inventory: Mapping[str, Any]) -> str | None:
+    """Validate the pinned IDs against Railway ``list --json`` project schema."""
+    if inventory.get("id") != STAGING_RAILWAY_PROJECT_ID:
+        return "inventory_project_id_mismatch"
+    if inventory.get("name") != STAGING_PROJECT_VALUE:
+        return "inventory_project_name_mismatch"
+
+    environments = inventory.get("environments")
+    if not isinstance(environments, Mapping):
+        return "inventory_environments_invalid"
+    environment_edges = environments.get("edges")
+    if not isinstance(environment_edges, list):
+        return "inventory_environment_edges_invalid"
+
+    staging_node: Mapping[str, Any] | None = None
+    for edge in environment_edges:
+        if not isinstance(edge, Mapping) or not isinstance(edge.get("node"), Mapping):
+            return "inventory_environment_edge_invalid"
+        node = edge["node"]
+        if node.get("id") in PRODUCTION_RAILWAY_ENVIRONMENT_IDS:
+            if node.get("name") != "production":
+                return "production_environment_identity_drift"
+        if node.get("name") == STAGING_ENVIRONMENT_VALUE:
+            staging_node = node
+    if staging_node is None:
+        return "inventory_staging_environment_missing"
+    if staging_node.get("id") != STAGING_RAILWAY_ENVIRONMENT_ID:
+        return "inventory_staging_environment_id_mismatch"
+
+    instances = staging_node.get("serviceInstances")
+    if not isinstance(instances, Mapping) or not isinstance(instances.get("edges"), list):
+        return "inventory_staging_instances_invalid"
+    staging_service_ids = {
+        edge.get("node", {}).get("serviceId")
+        for edge in instances["edges"]
+        if isinstance(edge, Mapping) and isinstance(edge.get("node"), Mapping)
+    }
+    if not {CANONICAL_SERVICE_ID, LEGACY_SOURCE_SERVICE_ID} <= staging_service_ids:
+        return "inventory_staging_service_relationship_mismatch"
+
+    services = inventory.get("services")
+    if not isinstance(services, Mapping) or not isinstance(services.get("edges"), list):
+        return "inventory_services_invalid"
+    names_by_id: dict[str, str] = {}
+    for edge in services["edges"]:
+        if not isinstance(edge, Mapping) or not isinstance(edge.get("node"), Mapping):
+            return "inventory_service_edge_invalid"
+        node = edge["node"]
+        service_id = node.get("id")
+        service_name = node.get("name")
+        if isinstance(service_id, str) and isinstance(service_name, str):
+            names_by_id[service_id] = service_name
+    if names_by_id.get(CANONICAL_SERVICE_ID) != CANONICAL_SERVICE_NAME:
+        return "inventory_canonical_service_name_mismatch"
+    if names_by_id.get(LEGACY_SOURCE_SERVICE_ID) != LEGACY_SOURCE_SERVICE_NAME:
+        return "inventory_legacy_service_name_mismatch"
+    return validate_pinned_identity_contract()
+
+
 def validate_railway_identity(
     *,
     project_id: str,
@@ -224,8 +321,13 @@ def validate_railway_identity(
     service_id: str,
     service_name: str,
 ) -> str | None:
+    contract_failure = validate_pinned_identity_contract()
+    if contract_failure is not None:
+        return contract_failure
     if project_id != STAGING_RAILWAY_PROJECT_ID:
         return "project_id_not_allowlisted"
+    if environment_id in PRODUCTION_RAILWAY_ENVIRONMENT_IDS:
+        return "production_environment_id_forbidden"
     if environment_id != STAGING_RAILWAY_ENVIRONMENT_ID:
         return "environment_id_not_allowlisted"
     expected_id = STAGING_SERVICE_ALLOWLIST.get(service_name)
@@ -376,6 +478,7 @@ __all__ = [
     "PHASE_VERIFY",
     "PINNED_REVISION_ENV",
     "PROTECTED_VARIABLE_KEYS",
+    "PRODUCTION_RAILWAY_ENVIRONMENT_IDS",
     "REFERENCE_BINDABLE_KEYS",
     "REPORT_SCHEMA_VERSION",
     "SIGNATURE_MODE_KEYS",
@@ -383,7 +486,6 @@ __all__ = [
     "SNAPSHOT_KEY_ENV",
     "SNAPSHOT_SCHEMA_VERSION",
     "STAGING_ENVIRONMENT_ENV",
-    "STAGING_ENVIRONMENT_ID",
     "STAGING_ENVIRONMENT_ID_ENV",
     "STAGING_ENVIRONMENT_VALUE",
     "STAGING_IDENTITY_CLASS",
@@ -400,7 +502,10 @@ __all__ = [
     "env_flag_enabled",
     "fingerprint_value",
     "is_reference_bindable",
+    "is_placeholder_or_sentinel_uuid",
     "presence_only",
     "sanitize_report_payload",
     "validate_railway_identity",
+    "validate_pinned_identity_contract",
+    "validate_readonly_inventory_identity",
 ]

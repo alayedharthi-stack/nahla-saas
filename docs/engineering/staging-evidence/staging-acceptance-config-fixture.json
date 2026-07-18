@@ -1,10 +1,9 @@
 {
-  "project_id": "00000000-0000-4000-8000-000000000001",
-  "environment_id": "00000000-0000-4000-8000-000000000002",
+  "project_id": "f0090862-0a40-4293-bd5d-e94df58762b5",
+  "environment_id": "b3d51523-7544-4d5c-b510-631b334cd8a7",
   "canonical": {
-    "service_id": "00000000-0000-4000-8000-000000000003",
+    "service_id": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
     "service_name": "nahla-saas",
-    "deployment_id": "dep-canonical-staging-example",
     "source_revision": "abc1234567890",
     "domains": ["nahla-saas-staging.up.railway.app"],
     "routes": ["/webhook/whatsapp", "/version", "/health"],
@@ -16,9 +15,8 @@
     }
   },
   "legacy_source": {
-    "service_id": "00000000-0000-4000-8000-000000000004",
+    "service_id": "d0282eea-05fe-49bf-bd58-e663e8585516",
     "service_name": "nahla-saas-staging",
-    "deployment_id": "dep-legacy-staging-example",
     "source_revision": "def0987654321",
     "domains": ["nahla-saas-staging-legacy.up.railway.app"],
     "routes": ["/webhook/whatsapp"],

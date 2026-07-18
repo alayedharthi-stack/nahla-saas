@@ -13,19 +13,25 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from scripts.operators import staging_acceptance_config_consolidation as operator  # noqa: E402
+from scripts.operators import staging_acceptance_config_consolidation_contract as contract  # noqa: E402
 from scripts.operators.staging_acceptance_config_consolidation_contract import (  # noqa: E402
     APPLY_CONFIRM_ENV,
     APPLY_CONFIRM_TOKEN,
     ARCH001_SHADOW_MODE_ENV,
     ARCH001_SHADOW_SIGNOFF_ENV,
     ARCH001_TEARDOWN_PROOF_ENV,
+    CANONICAL_SERVICE_ID,
     CANONICAL_SERVICE_NAME,
     CODE_ARCH001_SHADOW_ACTIVE,
     CODE_CONFLICT_DETECTED,
     CODE_CONSOLIDATION_NOT_ENABLED,
     CODE_PRODUCTION_REJECTED,
     CODE_SECRET_LEAKAGE,
+    LEGACY_SOURCE_SERVICE_ID,
     LEGACY_SOURCE_SERVICE_NAME,
+    PRODUCTION_RAILWAY_ENVIRONMENT_IDS,
+    STAGING_RAILWAY_ENVIRONMENT_ID,
+    STAGING_RAILWAY_PROJECT_ID,
     MASTER_ENABLE_ENV,
     MIGRATABLE_VARIABLE_KEYS,
     PHASE_DEFAULT_OFF,
@@ -33,6 +39,9 @@ from scripts.operators.staging_acceptance_config_consolidation_contract import (
     STAGING_ENVIRONMENT_ENV,
     STAGING_PROJECT_ENV,
     fingerprint_value,
+    is_placeholder_or_sentinel_uuid,
+    validate_pinned_identity_contract,
+    validate_readonly_inventory_identity,
 )
 from scripts.operators.staging_acceptance_config_consolidation import (  # noqa: E402
     InMemoryRailwayClient,
@@ -60,6 +69,55 @@ _HMAC_KEY = "test-hmac-key-never-commit"
 
 def _observation() -> RailwayObservation:
     return load_fixture_observation(_FIXTURE)
+
+
+def _railway_inventory_project() -> dict[str, object]:
+    """Minimal authenticated `railway list --json` project schema."""
+    return {
+        "id": STAGING_RAILWAY_PROJECT_ID,
+        "name": "desirable-growth",
+        "environments": {
+            "edges": [
+                {
+                    "node": {
+                        "id": STAGING_RAILWAY_ENVIRONMENT_ID,
+                        "name": "staging",
+                        "serviceInstances": {
+                            "edges": [
+                                {"node": {"serviceId": CANONICAL_SERVICE_ID}},
+                                {"node": {"serviceId": LEGACY_SOURCE_SERVICE_ID}},
+                            ]
+                        },
+                    }
+                },
+                {
+                    "node": {
+                        "id": next(iter(PRODUCTION_RAILWAY_ENVIRONMENT_IDS)),
+                        "name": "production",
+                        "serviceInstances": {
+                            "edges": [{"node": {"serviceId": CANONICAL_SERVICE_ID}}]
+                        },
+                    }
+                },
+            ]
+        },
+        "services": {
+            "edges": [
+                {
+                    "node": {
+                        "id": CANONICAL_SERVICE_ID,
+                        "name": CANONICAL_SERVICE_NAME,
+                    }
+                },
+                {
+                    "node": {
+                        "id": LEGACY_SOURCE_SERVICE_ID,
+                        "name": LEGACY_SOURCE_SERVICE_NAME,
+                    }
+                },
+            ]
+        },
+    }
 
 
 def test_default_off_probe_contract() -> None:
@@ -90,6 +148,125 @@ def test_railway_allowlist_accepts_fixture() -> None:
     obs = _observation()
     result = gate_railway_allowlist(obs)
     assert result["ok"] is True
+
+
+def test_pinned_ids_are_exact_distinct_non_placeholder_uuids() -> None:
+    pinned = {
+        STAGING_RAILWAY_PROJECT_ID,
+        STAGING_RAILWAY_ENVIRONMENT_ID,
+        CANONICAL_SERVICE_ID,
+        LEGACY_SOURCE_SERVICE_ID,
+    }
+    assert len(pinned) == 4
+    assert not any(is_placeholder_or_sentinel_uuid(value) for value in pinned)
+    assert validate_pinned_identity_contract() is None
+
+
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        "00000000-0000-4000-8000-000000000001",
+        "11111111-1111-4111-8111-111111111111",
+        "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "not-a-uuid",
+    ],
+)
+def test_placeholder_and_sentinel_uuids_are_rejected(sentinel: str) -> None:
+    assert is_placeholder_or_sentinel_uuid(sentinel) is True
+
+
+def test_contract_rejects_future_placeholder_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        contract,
+        "CANONICAL_SERVICE_ID",
+        "00000000-0000-4000-8000-000000000003",
+    )
+    assert validate_pinned_identity_contract() == "placeholder_or_sentinel_uuid"
+
+
+def test_readonly_railway_inventory_schema_matches_pinned_names_and_ids() -> None:
+    inventory = _railway_inventory_project()
+    assert validate_readonly_inventory_identity(inventory) is None
+
+
+def test_readonly_inventory_rejects_swapped_service_names() -> None:
+    inventory = _railway_inventory_project()
+    service_edges = inventory["services"]["edges"]  # type: ignore[index]
+    service_edges[0]["node"]["name"] = LEGACY_SOURCE_SERVICE_NAME
+    service_edges[1]["node"]["name"] = CANONICAL_SERVICE_NAME
+    assert (
+        validate_readonly_inventory_identity(inventory)
+        == "inventory_canonical_service_name_mismatch"
+    )
+
+
+def test_readonly_inventory_rejects_missing_staging_relationship() -> None:
+    inventory = _railway_inventory_project()
+    staging_node = inventory["environments"]["edges"][0]["node"]  # type: ignore[index]
+    staging_node["serviceInstances"]["edges"] = [
+        {"node": {"serviceId": CANONICAL_SERVICE_ID}}
+    ]
+    assert (
+        validate_readonly_inventory_identity(inventory)
+        == "inventory_staging_service_relationship_mismatch"
+    )
+
+
+def test_swapped_canonical_and_legacy_service_ids_are_rejected() -> None:
+    obs = _observation()
+    swapped = RailwayObservation(
+        project_id=obs.project_id,
+        environment_id=obs.environment_id,
+        canonical=ServiceSnapshot(
+            service_id=LEGACY_SOURCE_SERVICE_ID,
+            service_name=CANONICAL_SERVICE_NAME,
+            variables={},
+            deployment_id="",
+            source_revision="",
+            domains=(),
+            routes=(),
+        ),
+        legacy_source=ServiceSnapshot(
+            service_id=CANONICAL_SERVICE_ID,
+            service_name=LEGACY_SOURCE_SERVICE_NAME,
+            variables={},
+            deployment_id="",
+            source_revision="",
+            domains=(),
+            routes=(),
+        ),
+    )
+    result = gate_railway_allowlist(swapped)
+    assert result["ok"] is False
+    assert result["stage"] == "service_id_not_allowlisted"
+
+
+def test_wrong_staging_environment_id_is_rejected() -> None:
+    obs = _observation()
+    wrong_environment = RailwayObservation(
+        project_id=obs.project_id,
+        environment_id="22222222-2222-4222-8222-222222222222",
+        canonical=obs.canonical,
+        legacy_source=obs.legacy_source,
+    )
+    result = gate_railway_allowlist(wrong_environment)
+    assert result["ok"] is False
+    assert result["stage"] == "environment_id_not_allowlisted"
+
+
+def test_known_production_environment_id_is_always_rejected() -> None:
+    obs = _observation()
+    production = RailwayObservation(
+        project_id=obs.project_id,
+        environment_id=next(iter(PRODUCTION_RAILWAY_ENVIRONMENT_IDS)),
+        canonical=obs.canonical,
+        legacy_source=obs.legacy_source,
+    )
+    result = gate_railway_allowlist(production)
+    assert result["ok"] is False
+    assert result["stage"] == "production_environment_id_forbidden"
 
 
 def test_arch001_shadow_active_blocks() -> None:
