@@ -50,6 +50,16 @@ from modules.ai.brain.types import (  # noqa: E402
 _MERCHANT = "متجر تجريبي عام"
 _PRODUCT = "قميص قطني أزرق"
 _MESSAGE = "بعد كم طلب يصل كوبون متجر تجريبي عام؟"
+_TENANT = 8101
+_PHONE = "966500011122"
+
+
+def _eligible_ai_settings() -> dict:
+    return {
+        "store_ai_mode": "test",
+        "customer_conditional_coupon_compose_allowlist_tenants": [_TENANT],
+        "ai_test_allowed_numbers": [_PHONE],
+    }
 
 _FORBIDDEN_CLAIM_PATTERNS = (
     re.compile(r"كود\s*الكوبون", re.IGNORECASE | re.UNICODE),
@@ -159,7 +169,9 @@ def test_cc_projection_fixtures(
     gated = maybe_customer_conditional_coupon_compose_facts(
         message=_MESSAGE,
         snapshot=snap,
-        tenant_id=8101,
+        tenant_id=_TENANT,
+        customer_phone=_PHONE,
+        ai_settings=_eligible_ai_settings(),
     )
     assert gated is not None, fixture_id
     assert projected["allow_min_orders_condition_claim"] is expect_allow, fixture_id
@@ -196,8 +208,8 @@ def test_cc_05_compose_end_to_end_metadata_and_no_forbidden_claims(
         from modules.ai.brain.types import BrainReplyState  # noqa: PLC0415
 
         ctx = BrainContext(
-            tenant_id=8101,
-            customer_phone="966500011122",
+            tenant_id=_TENANT,
+            customer_phone=_PHONE,
             message=_MESSAGE,
             intent=Intent(name=INTENT_GENERAL, confidence=0.9),
             state=MerchantConversationState(stage="browsing", customer_goal="general_help"),
@@ -212,9 +224,22 @@ def test_cc_05_compose_end_to_end_metadata_and_no_forbidden_claims(
         result = ActionResult(success=True, data={})
         composer = DefaultComposer()
         with patch(
+            "modules.ai.brain.persona.customer_conditional_coupon_answer."
+            "evaluate_customer_conditional_coupon_compose_canary",
+        ) as canary_mock, patch(
             "modules.ai.brain.persona.fact_bound_composer.FactBoundPersonaComposer.compose",
             new_callable=AsyncMock,
         ) as compose_mock:
+            from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (  # noqa: PLC0415
+                CustomerConditionalCouponComposeCanaryDecision,
+                REASON_ALLOWED,
+            )
+
+            canary_mock.return_value = CustomerConditionalCouponComposeCanaryDecision(
+                allowed=True,
+                reason=REASON_ALLOWED,
+                compose_master_enabled=True,
+            )
             from modules.ai.brain.persona.facts_bundle import PersonaComposeResult  # noqa: PLC0415
 
             compose_mock.return_value = PersonaComposeResult(
