@@ -46,7 +46,7 @@ Telemetry keys (no PII / no allowlist contents):
 
 1. **Live shadow evidence** — archived sign-off:
    `docs/engineering/staging-evidence/conditional-coupon-shadow-signoff-2026-07-18.json`
-2. **Exact revision attestation** — consumer verifier pin (current: `8ea344fc` short;
+2. **Exact revision attestation** — consumer verifier pin (current: `f2118de` short;
    do **not** bump pin until this slice is the selected staging runtime).
 3. **A1 validated** — dual-head `0088`/`0089`, capability `validated` @ `0088`.
 4. **Tenant test mode** — `store_ai_mode=test` on the canary tenant only.
