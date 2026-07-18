@@ -42,6 +42,15 @@ from modules.ai.brain.types import (  # noqa: E402
 
 _MERCHANT = "متجر تجريبي عام"
 _MIN_ORDERS_MESSAGE = "بعد كم طلب يصل الكوبون؟"
+_COMPOSE_PHONE = "966500000001"
+
+
+def _eligible_compose_ai_settings(*, tenant_id: int = 9001) -> dict:
+    return {
+        "store_ai_mode": "test",
+        "customer_conditional_coupon_compose_allowlist_tenants": [int(tenant_id)],
+        "ai_test_allowed_numbers": [_COMPOSE_PHONE],
+    }
 
 
 def _compose_facts(**overrides):
@@ -125,7 +134,7 @@ def _minimal_ctx(message: str) -> BrainContext:
     )
     return BrainContext(
         tenant_id=9001,
-        customer_phone="966500000001",
+        customer_phone=_COMPOSE_PHONE,
         message=message,
         intent=Intent(name=INTENT_GENERAL, confidence=0.9),
         state=_state(),
@@ -151,11 +160,19 @@ def test_pipeline_injects_conditional_facts_when_compose_flag_on() -> None:
         shadow_observability={"merchant_label": _MERCHANT},
     )
     snap.ensure_snapshot_id()
+    projected = {
+        "schema_version": "1",
+        "surface": "customer_conditional_coupon_answer",
+        "min_orders_condition_state": MIN_ORDERS_STATE_SHORTFALL,
+        "conditional_coupon_evaluation_state": EVALUATION_CONDITION_SHORTFALL,
+        "allow_min_orders_condition_claim": False,
+        "facts_snapshot_id": snap.snapshot_id,
+    }
 
     with patch(
         "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate."
-        "is_customer_conditional_coupon_compose_enabled",
-        return_value=True,
+        "maybe_customer_conditional_coupon_compose_facts",
+        return_value=projected,
     ), patch(
         "modules.ai.brain.truth_surface.trusted_context.current_trusted_context",
         return_value=snap,
@@ -170,6 +187,7 @@ def test_pipeline_injects_conditional_facts_when_compose_flag_on() -> None:
             current_state=_state(),
             suggestion=SuggestionSnapshot(),
             decision=Decision(action="llm_reply", args={}),
+            merchant_context={"ai_settings": _eligible_compose_ai_settings()},
         )
     assert "customer_conditional_coupon_facts" in reply_state.known_facts
     assert "trusted_coupon_offer_facts" not in reply_state.known_facts
@@ -181,10 +199,18 @@ def test_pipeline_injects_conditional_facts_when_compose_flag_on() -> None:
 def test_pipeline_omits_key_when_compose_flag_off() -> None:
     ctx = _minimal_ctx(_MIN_ORDERS_MESSAGE)
     with patch(
-        "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate."
-        "is_customer_conditional_coupon_compose_enabled",
-        return_value=False,
-    ):
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate."
+        "evaluate_customer_conditional_coupon_compose_canary",
+    ) as canary_mock:
+        from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (  # noqa: E402
+            CustomerConditionalCouponComposeCanaryDecision,
+            REASON_COMPOSE_MASTER_DISABLED,
+        )
+
+        canary_mock.return_value = CustomerConditionalCouponComposeCanaryDecision(
+            allowed=False,
+            reason=REASON_COMPOSE_MASTER_DISABLED,
+        )
         reply_state = _build_reply_state(
             ctx=ctx,
             previous_state=_state(),
@@ -211,12 +237,21 @@ async def _run_conditional_compose_turn():
 
     with patch(
         "modules.ai.brain.persona.customer_conditional_coupon_answer."
-        "is_customer_conditional_coupon_compose_enabled",
-        return_value=True,
-    ), patch(
+        "evaluate_customer_conditional_coupon_compose_canary",
+    ) as canary_mock, patch(
         "modules.ai.brain.persona.fact_bound_composer.FactBoundPersonaComposer.compose",
         new_callable=AsyncMock,
     ) as compose_mock:
+        from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (  # noqa: E402
+            CustomerConditionalCouponComposeCanaryDecision,
+            REASON_ALLOWED,
+        )
+
+        canary_mock.return_value = CustomerConditionalCouponComposeCanaryDecision(
+            allowed=True,
+            reason=REASON_ALLOWED,
+            compose_master_enabled=True,
+        )
         from modules.ai.brain.persona.facts_bundle import PersonaComposeResult  # noqa: E402
 
         compose_mock.return_value = PersonaComposeResult(

@@ -17,7 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Mapping
 
-CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v3"
+CONTRACT_VERSION = "coupon_shadow_deployment_artifact_v4"
 ARTIFACT_KIND = "nahla_saas_conditional_coupon_shadow_slice"
 
 # Container layout baked by the shared Dockerfile (WORKDIR /app, COPY . .).
@@ -43,6 +43,7 @@ REQUIRED_COMPOSE_CONSUMER_FILES = frozenset(
     {
         "customer_conditional_coupon_compose_projection.py",
         "customer_conditional_coupon_consumption_gate.py",
+        "customer_conditional_coupon_compose_canary_gate.py",
     }
 )
 
@@ -87,6 +88,10 @@ REQUIRED_IMPORT_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate",
         "maybe_customer_conditional_coupon_compose_facts",
+    ),
+    (
+        "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate",
+        "evaluate_customer_conditional_coupon_compose_canary",
     ),
     (
         "modules.ai.brain.persona.customer_conditional_coupon_answer",

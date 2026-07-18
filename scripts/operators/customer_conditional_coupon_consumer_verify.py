@@ -31,7 +31,10 @@ from scripts.operators.customer_conditional_coupon_consumer_verify_contract impo
     MAX_USAGE_EVIDENCE_QUERIES_PER_SHADOW_TURN,
     MESSAGE_ELIGIBLE,
     PHASE_A1_CAPABILITY,
+    eligible_compose_canary_ai_settings,
     PHASE_ARTIFACT_PREFLIGHT,
+    PHASE_COMPOSE_CANARY_ALLOWED_PREFLIGHT,
+    PHASE_COMPOSE_CANARY_DENIED,
     PHASE_COMPOSE_GENERAL_LLM_SAFE,
     PHASE_COMPOSE_GENERAL_LLM_UNSAFE_GUARD,
     PHASE_COMPOSE_PERSONA_SUCCESS,
@@ -217,6 +220,84 @@ def gate_shadow_observation(db: Any, app_root: Path) -> dict[str, Any]:
     )
 
 
+def gate_compose_canary_denied() -> dict[str, Any]:
+    from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (
+        REASON_TENANT_NOT_ALLOWLISTED,
+        evaluate_customer_conditional_coupon_compose_canary,
+    )
+    from modules.ai.brain.truth_surface.customer_conditional_coupon_loader import (
+        load_customer_conditional_coupon_facts,
+    )
+
+    os.environ[COMPOSE_FLAG_ENV] = "true"
+    try:
+        with patch(
+            "modules.ai.brain.truth_surface.customer_conditional_coupon_loader."
+            "resolve_conditional_coupon_subject_handle",
+        ) as resolve_mock:
+            facts, obs = load_customer_conditional_coupon_facts(
+                db=MagicMock(),
+                tenant_id=FIXTURE_TENANT_ID,
+                message=MESSAGE_ELIGIBLE,
+                customer_phone=FIXTURE_CUSTOMER_PHONE,
+                ai_settings={
+                    "store_ai_mode": "test",
+                    "customer_conditional_coupon_compose_allowlist_tenants": [99999],
+                    "ai_test_allowed_numbers": [FIXTURE_CUSTOMER_PHONE],
+                },
+            )
+        decision = evaluate_customer_conditional_coupon_compose_canary(
+            tenant_id=FIXTURE_TENANT_ID,
+            customer_phone=FIXTURE_CUSTOMER_PHONE,
+            message=MESSAGE_ELIGIBLE,
+            ai_settings={
+                "store_ai_mode": "test",
+                "customer_conditional_coupon_compose_allowlist_tenants": [99999],
+                "ai_test_allowed_numbers": [FIXTURE_CUSTOMER_PHONE],
+            },
+        )
+    finally:
+        os.environ.pop(COMPOSE_FLAG_ENV, None)
+
+    ok = (
+        facts == []
+        and obs.get("gate_skipped_reason") == REASON_TENANT_NOT_ALLOWLISTED
+        and decision.allowed is False
+        and decision.reason == REASON_TENANT_NOT_ALLOWLISTED
+    )
+    return _report(
+        PHASE_COMPOSE_CANARY_DENIED,
+        ok=ok,
+        gate_skipped_reason=obs.get("gate_skipped_reason"),
+        canary_reason=decision.reason,
+    )
+
+
+def gate_compose_canary_allowed_preflight() -> dict[str, Any]:
+    from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (
+        REASON_ALLOWED,
+        evaluate_customer_conditional_coupon_compose_canary,
+    )
+
+    os.environ[COMPOSE_FLAG_ENV] = "true"
+    try:
+        decision = evaluate_customer_conditional_coupon_compose_canary(
+            tenant_id=FIXTURE_TENANT_ID,
+            customer_phone=FIXTURE_CUSTOMER_PHONE,
+            message=MESSAGE_ELIGIBLE,
+            ai_settings=eligible_compose_canary_ai_settings(),
+        )
+    finally:
+        os.environ.pop(COMPOSE_FLAG_ENV, None)
+
+    ok = decision.allowed is True and decision.reason == REASON_ALLOWED
+    return _report(
+        PHASE_COMPOSE_CANARY_ALLOWED_PREFLIGHT,
+        ok=ok,
+        canary_reason=decision.reason,
+    )
+
+
 def gate_projection_ineligible() -> dict[str, Any]:
     from modules.ai.brain.truth_surface.contract import (
         TrustedContextSnapshot,
@@ -269,6 +350,8 @@ def gate_projection_ineligible() -> dict[str, Any]:
             message=MESSAGE_ELIGIBLE,
             snapshot=snap,
             tenant_id=FIXTURE_TENANT_ID,
+            customer_phone=FIXTURE_CUSTOMER_PHONE,
+            ai_settings=eligible_compose_canary_ai_settings(),
         )
     finally:
         os.environ.pop(COMPOSE_FLAG_ENV, None)
@@ -338,6 +421,9 @@ def _run_brain_compose_probe(
     persona_stub: str | None,
     llm_stub: str | None,
 ) -> tuple[dict[str, Any], list[str]]:
+    if _get_fixture_conversation(MagicMock()) is None:
+        raise RuntimeError(CODE_DB_GATE_SKIPPED)
+
     from database.session import SessionLocal
     from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.pipeline import get_brain
@@ -412,6 +498,12 @@ def _run_brain_compose_probe(
     stack.enter_context(patch.object(brain._state_store, "save"))
     stack.enter_context(patch.object(brain._facts_loader, "load", return_value=facts))
     stack.enter_context(patch.object(brain._memory_updater, "update"))
+    stack.enter_context(
+        patch(
+            "core.store_knowledge.build_merchant_context",
+            return_value={"ai_settings": eligible_compose_canary_ai_settings()},
+        )
+    )
 
     if persona_stub is not None:
         from modules.ai.brain.persona.customer_conditional_coupon_answer import (
@@ -473,6 +565,7 @@ def _run_brain_compose_probe(
                 message=MESSAGE_ELIGIBLE,
                 conversation=conversation,
                 conversation_id=int(conversation.id),
+                ai_settings=eligible_compose_canary_ai_settings(),
             )
             with stack:
                 result = asyncio.run(
@@ -717,6 +810,8 @@ def execute_consumer_verify(
                 )
             _run_gate("artifact", gate_artifact_preflight(root, pinned_source_revision=pin))
             _run_gate("default_off", gate_default_off(root))
+            _run_gate("compose_canary_denied", gate_compose_canary_denied())
+            _run_gate("compose_canary_allowed_preflight", gate_compose_canary_allowed_preflight())
             _run_gate("projection_ineligible", gate_projection_ineligible())
             _run_gate("webhook_dedup_snapshot", gate_webhook_dedup_snapshot_persistence())
 

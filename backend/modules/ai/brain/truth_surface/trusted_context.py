@@ -461,6 +461,7 @@ def build_trusted_context_snapshot(
     conversation_id: Optional[int] = None,
     brain_state: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    ai_settings: Optional[Dict[str, Any]] = None,
 ) -> TrustedContextSnapshot:
     """Build the canonical trusted context snapshot for one inbound turn."""
     facts: List[TrustedFact] = []
@@ -597,31 +598,54 @@ def build_trusted_context_snapshot(
         shadow_observability["product_sale_offer_error_class"] = exc.__class__.__name__
 
     try:
+        from .customer_conditional_coupon_compose_canary_gate import (  # noqa: PLC0415
+            compose_canary_gate_telemetry_metadata,
+            evaluate_customer_conditional_coupon_compose_canary,
+            should_load_customer_conditional_coupon_layer0_for_turn,
+        )
         from .customer_conditional_coupon_loader import (  # noqa: PLC0415
             load_customer_conditional_coupon_facts,
-            should_load_customer_conditional_coupon_facts,
         )
-        from .flags import is_customer_conditional_coupon_layer0_enabled  # noqa: PLC0415
 
-        if (
-            is_customer_conditional_coupon_layer0_enabled()
-            and should_load_customer_conditional_coupon_facts(
-                message=message,
-                inbound_metadata=inbound_metadata,
-            )
-        ):
+        should_load_cc, cc_skip_reason = should_load_customer_conditional_coupon_layer0_for_turn(
+            tenant_id=int(tenant_id),
+            customer_phone=customer_phone,
+            message=message,
+            inbound_metadata=inbound_metadata,
+            ai_settings=ai_settings,
+        )
+        if should_load_cc:
             cc_facts, cc_obs = load_customer_conditional_coupon_facts(
                 db=db,
                 tenant_id=tenant_id,
                 message=message,
                 conversation=conversation,
                 inbound_metadata=inbound_metadata,
+                customer_phone=customer_phone,
+                ai_settings=ai_settings,
             )
             if cc_facts:
                 facts.extend(cc_facts)
                 loaded_domains.append(TrustedDomain.CUSTOMER_CONDITIONAL_COUPON.value)
                 sources.append("customer_conditional_coupon_loader")
                 shadow_observability["customer_conditional_coupon"] = dict(cc_obs)
+        else:
+            canary_decision = evaluate_customer_conditional_coupon_compose_canary(
+                tenant_id=int(tenant_id),
+                customer_phone=customer_phone,
+                message=message,
+                inbound_metadata=inbound_metadata,
+                ai_settings=ai_settings,
+                require_relevance=True,
+            )
+            shadow_observability["customer_conditional_coupon_compose_canary"] = (
+                compose_canary_gate_telemetry_metadata(canary_decision)
+            )
+            if cc_skip_reason:
+                shadow_observability.setdefault("customer_conditional_coupon", {})
+                shadow_observability["customer_conditional_coupon"]["gate_skipped_reason"] = (
+                    cc_skip_reason
+                )
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok
         shadow_observability["customer_conditional_coupon_error_class"] = exc.__class__.__name__
 
@@ -746,6 +770,7 @@ def run_trusted_context_shadow(
     conversation_id: Optional[int] = None,
     brain_state: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    ai_settings: Optional[Dict[str, Any]] = None,
 ) -> Optional[TrustedContextSnapshot]:
     """
     Build trusted context snapshot and emit shadow telemetry.
@@ -776,6 +801,7 @@ def run_trusted_context_shadow(
             conversation_id=conversation_id,
             brain_state=brain_state,
             inbound_metadata=inbound_metadata,
+            ai_settings=ai_settings,
         )
     except Exception as exc:  # noqa: BLE001
         _last_build_error_class.set(exc.__class__.__name__)

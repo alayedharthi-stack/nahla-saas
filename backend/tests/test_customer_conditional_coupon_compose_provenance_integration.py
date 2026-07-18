@@ -61,6 +61,22 @@ _DEDUP_SUBSTITUTE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _compose_master_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED",
+        "true",
+    )
+
+
+def _eligible_compose_ai_settings(*, tenant_id: int, phone: str) -> dict:
+    return {
+        "store_ai_mode": "test",
+        "customer_conditional_coupon_compose_allowlist_tenants": [int(tenant_id)],
+        "ai_test_allowed_numbers": [str(phone)],
+    }
+
+
 def _conditional_snapshot() -> TrustedContextSnapshot:
     record = build_sanitized_fact_record(
         identity_status=IDENTITY_STATUS_RESOLVED,
@@ -138,16 +154,34 @@ def _brain_process_patches(brain, snap: TrustedContextSnapshot):
     )
     stack.enter_context(
         patch(
-            "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate."
-            "is_customer_conditional_coupon_compose_enabled",
-            return_value=True,
+            "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate."
+            "evaluate_customer_conditional_coupon_compose_canary",
+            return_value=__import__(
+                "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate",
+                fromlist=["CustomerConditionalCouponComposeCanaryDecision"],
+            ).CustomerConditionalCouponComposeCanaryDecision(
+                allowed=True,
+                reason="allowed",
+                compose_master_enabled=True,
+                relevance_required=True,
+                relevance_satisfied=True,
+            ),
         )
     )
     stack.enter_context(
         patch(
-            "modules.ai.brain.persona.customer_conditional_coupon_answer."
-            "is_customer_conditional_coupon_compose_enabled",
-            return_value=True,
+            "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate."
+            "evaluate_customer_conditional_coupon_compose_canary",
+            return_value=__import__(
+                "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate",
+                fromlist=["CustomerConditionalCouponComposeCanaryDecision"],
+            ).CustomerConditionalCouponComposeCanaryDecision(
+                allowed=True,
+                reason="allowed",
+                compose_master_enabled=True,
+                relevance_required=True,
+                relevance_satisfied=True,
+            ),
         )
     )
     stack.enter_context(
@@ -164,6 +198,17 @@ def _brain_process_patches(brain, snap: TrustedContextSnapshot):
     stack.enter_context(patch.object(brain._state_store, "save"))
     stack.enter_context(patch.object(brain._facts_loader, "load", return_value=_commerce_facts()))
     stack.enter_context(patch.object(brain._memory_updater, "update"))
+    stack.enter_context(
+        patch(
+            "core.store_knowledge.build_merchant_context",
+            return_value={
+                "ai_settings": _eligible_compose_ai_settings(
+                    tenant_id=9001,
+                    phone=_PHONE,
+                )
+            },
+        )
+    )
     compose_mock = stack.enter_context(
         patch(
             "modules.ai.brain.persona.fact_bound_composer.FactBoundPersonaComposer.compose",
