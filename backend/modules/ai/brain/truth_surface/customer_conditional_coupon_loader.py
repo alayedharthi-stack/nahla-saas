@@ -74,7 +74,9 @@ from .customer_conditional_coupon_subject import (
     customer_scope_for_handle,
     resolve_conditional_coupon_subject_handle,
 )
-from .flags import is_customer_conditional_coupon_layer0_enabled
+from .customer_conditional_coupon_compose_canary_gate import (
+    should_load_customer_conditional_coupon_layer0_for_turn,
+)
 
 _CONDITIONAL_COUPON_PATTERNS: Tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE | re.UNICODE)
@@ -194,6 +196,8 @@ def load_customer_conditional_coupon_facts(
     message: str = "",
     conversation: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    customer_phone: str = "",
+    ai_settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[TrustedFact], Dict[str, Any]]:
     """
     Load sanitized conditional-coupon Layer 0 facts.
@@ -210,27 +214,15 @@ def load_customer_conditional_coupon_facts(
       never enters facts or telemetry.
     """
     started = time.perf_counter()
-    gate_skipped_reason: Optional[str] = None
 
-    if not is_customer_conditional_coupon_layer0_enabled():
-        gate_skipped_reason = "layer0_flags_disabled"
-        return [], build_sanitized_telemetry(
-            conditional_target_count=0,
-            order_history_completeness=COMPLETENESS_UNVERIFIED,
-            forward_sync_health=None,
-            source_contract_version=None,
-            order_count_query_count=0,
-            usage_evidence_query_count=0,
-            budget_exceeded=False,
-            loader_duration_ms=int((time.perf_counter() - started) * 1000),
-            gate_skipped_reason=gate_skipped_reason,
-        )
-
-    if not should_load_customer_conditional_coupon_facts(
+    should_load, gate_skipped_reason = should_load_customer_conditional_coupon_layer0_for_turn(
+        tenant_id=int(tenant_id),
+        customer_phone=customer_phone,
         message=message,
         inbound_metadata=inbound_metadata,
-    ):
-        gate_skipped_reason = "not_relevant"
+        ai_settings=ai_settings,
+    )
+    if not should_load:
         return [], build_sanitized_telemetry(
             conditional_target_count=0,
             order_history_completeness=COMPLETENESS_UNVERIFIED,

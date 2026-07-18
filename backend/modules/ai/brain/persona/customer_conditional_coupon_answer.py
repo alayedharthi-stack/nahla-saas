@@ -10,8 +10,8 @@ from .facts_bundle import (
     PersonaFactsBundle,
 )
 from .integration import build_persona_compose_event_metadata
-from modules.ai.brain.truth_surface.flags import (
-    is_customer_conditional_coupon_compose_enabled,
+from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (
+    evaluate_customer_conditional_coupon_compose_canary,
 )
 
 
@@ -109,7 +109,14 @@ async def try_compose_customer_conditional_coupon_answer(
     ai_settings: Optional[dict[str, Any]] = None,
 ) -> tuple[Optional[str], Optional[PersonaComposeResult], Optional[dict[str, Any]]]:
     """Compose conditional-coupon min-orders answer when consumption gate is active."""
-    if not is_customer_conditional_coupon_compose_enabled():
+    canary = evaluate_customer_conditional_coupon_compose_canary(
+        tenant_id=int(tenant_id or 0),
+        customer_phone=str(customer_phone or ""),
+        message=str(inbound_text or ""),
+        ai_settings=ai_settings,
+        require_relevance=True,
+    )
+    if not canary.allowed:
         return None, None, None
     if not customer_conditional_coupon_facts:
         return None, None, None

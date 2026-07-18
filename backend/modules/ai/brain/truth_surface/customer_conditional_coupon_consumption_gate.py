@@ -12,7 +12,10 @@ from .customer_conditional_coupon_compose_projection import (
     CustomerConditionalCouponComposeProjectionError,
     project_customer_conditional_coupon_compose_facts,
 )
-from .customer_conditional_coupon_loader import should_load_customer_conditional_coupon_facts
+from .customer_conditional_coupon_compose_canary_gate import (
+    compose_canary_gate_telemetry_metadata,
+    evaluate_customer_conditional_coupon_compose_canary,
+)
 from .flags import is_customer_conditional_coupon_compose_enabled
 
 
@@ -21,17 +24,24 @@ def maybe_customer_conditional_coupon_compose_facts(
     message: str,
     snapshot: Optional[TrustedContextSnapshot],
     tenant_id: Optional[int] = None,
+    customer_phone: str = "",
+    ai_settings: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Return compose-safe conditional-coupon facts when all activation checks pass.
 
     Fail-closed: returns ``None`` on any gate failure (no customer behavior change).
     """
-    if not is_customer_conditional_coupon_compose_enabled():
+    canary = evaluate_customer_conditional_coupon_compose_canary(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        message=message,
+        ai_settings=ai_settings,
+        require_relevance=True,
+    )
+    if not canary.allowed:
         return None
     if snapshot is None:
-        return None
-    if not should_load_customer_conditional_coupon_facts(message=message):
         return None
     try:
         return project_customer_conditional_coupon_compose_facts(
@@ -40,6 +50,21 @@ def maybe_customer_conditional_coupon_compose_facts(
         )
     except CustomerConditionalCouponComposeProjectionError:
         return None
+
+
+def safe_customer_conditional_coupon_compose_canary_trace_metadata(
+    decision: Any,
+) -> Dict[str, Any]:
+    """Safe compose-canary trace metadata for logs."""
+    if hasattr(decision, "allowed") and hasattr(decision, "reason"):
+        return compose_canary_gate_telemetry_metadata(decision)
+    return {
+        "conditional_coupon_compose_canary_allowed": False,
+        "conditional_coupon_compose_canary_reason": "unknown",
+        "conditional_coupon_compose_master_enabled": is_customer_conditional_coupon_compose_enabled(),
+        "conditional_coupon_compose_relevance_required": True,
+        "conditional_coupon_compose_relevance_satisfied": False,
+    }
 
 
 def safe_customer_conditional_coupon_consumption_trace_metadata(
@@ -79,5 +104,6 @@ def safe_customer_conditional_coupon_consumption_trace_metadata(
 
 __all__ = [
     "maybe_customer_conditional_coupon_compose_facts",
+    "safe_customer_conditional_coupon_compose_canary_trace_metadata",
     "safe_customer_conditional_coupon_consumption_trace_metadata",
 ]

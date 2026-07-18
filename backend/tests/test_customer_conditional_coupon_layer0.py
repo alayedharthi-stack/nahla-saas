@@ -195,6 +195,12 @@ def test_compose_only_flag_loads_facts_without_shadow(
             db=MagicMock(),
             tenant_id=1,
             message="بعد كم طلب؟",
+            customer_phone="966500000001",
+            ai_settings={
+                "store_ai_mode": "test",
+                "customer_conditional_coupon_compose_allowlist_tenants": [1],
+                "ai_test_allowed_numbers": ["966500000001"],
+            },
         )
     assert len(facts) == 1
     assert obs.get("gate_skipped_reason") is None

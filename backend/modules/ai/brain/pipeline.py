@@ -4880,13 +4880,27 @@ def _build_reply_state(
         try:
             from modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate import (  # noqa: PLC0415
                 maybe_customer_conditional_coupon_compose_facts,
+                safe_customer_conditional_coupon_compose_canary_trace_metadata,
                 safe_customer_conditional_coupon_consumption_trace_metadata,
             )
+            from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (  # noqa: PLC0415
+                evaluate_customer_conditional_coupon_compose_canary,
+            )
 
+            _cc_ai_settings = dict(merchant_context or {}).get("ai_settings") or {}
+            _cc_canary = evaluate_customer_conditional_coupon_compose_canary(
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                message=ctx.message or "",
+                ai_settings=_cc_ai_settings,
+                require_relevance=True,
+            )
             _tc_conditional_facts = maybe_customer_conditional_coupon_compose_facts(
                 message=ctx.message or "",
                 snapshot=_tc,
                 tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                ai_settings=_cc_ai_settings,
             )
             if _tc_conditional_facts:
                 known_facts["customer_conditional_coupon_facts"] = _tc_conditional_facts
@@ -4895,6 +4909,11 @@ def _build_reply_state(
                     safe_customer_conditional_coupon_consumption_trace_metadata(
                         _tc_conditional_facts
                     ),
+                )
+            elif _cc_canary.compose_master_enabled:
+                logger.info(
+                    "[CUSTOMER_CONDITIONAL_COUPON_COMPOSE_CANARY] %s",
+                    safe_customer_conditional_coupon_compose_canary_trace_metadata(_cc_canary),
                 )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — CC compose must not block reply
             pass

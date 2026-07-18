@@ -41,6 +41,8 @@ PHASE_DEFAULT_OFF = "default_off"
 PHASE_A1_CAPABILITY = "a1_capability"
 PHASE_SHADOW_OBSERVATION = "shadow_observation"
 PHASE_PROJECTION_INELIGIBLE = "projection_ineligible"
+PHASE_COMPOSE_CANARY_DENIED = "compose_canary_denied"
+PHASE_COMPOSE_CANARY_ALLOWED_PREFLIGHT = "compose_canary_allowed_preflight"
 PHASE_COMPOSE_PERSONA_SUCCESS = "compose_persona_success"
 PHASE_COMPOSE_GENERAL_LLM_SAFE = "compose_general_llm_safe"
 PHASE_COMPOSE_GENERAL_LLM_UNSAFE_GUARD = "compose_general_llm_unsafe_guard"
@@ -56,6 +58,8 @@ GATE_PHASES = frozenset(
         PHASE_A1_CAPABILITY,
         PHASE_SHADOW_OBSERVATION,
         PHASE_PROJECTION_INELIGIBLE,
+        PHASE_COMPOSE_CANARY_DENIED,
+        PHASE_COMPOSE_CANARY_ALLOWED_PREFLIGHT,
         PHASE_COMPOSE_PERSONA_SUCCESS,
         PHASE_COMPOSE_GENERAL_LLM_SAFE,
         PHASE_COMPOSE_GENERAL_LLM_UNSAFE_GUARD,
@@ -80,6 +84,19 @@ SHADOW_FLAG_ENV = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_SHADOW_ENAB
 COMPOSE_FLAG_ENV = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED"
 
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+
+def eligible_compose_canary_ai_settings(
+    *,
+    tenant_id: int = FIXTURE_TENANT_ID,
+    phone: str = FIXTURE_CUSTOMER_PHONE,
+) -> dict[str, Any]:
+    """Closed test-mode canary settings for staging consumer probes."""
+    return {
+        "store_ai_mode": "test",
+        "customer_conditional_coupon_compose_allowlist_tenants": [int(tenant_id)],
+        "ai_test_allowed_numbers": [str(phone)],
+    }
 
 
 def normalize_pinned_revision(raw: str | None) -> str:
@@ -123,6 +140,7 @@ __all__ = [
     "CODE_PROBE_FAILED",
     "CODE_TEARDOWN_FLAGS_STILL_SET",
     "COMPOSE_FLAG_ENV",
+    "eligible_compose_canary_ai_settings",
     "FIXTURE_CUSTOMER_PHONE",
     "FIXTURE_TENANT_ID",
     "GATE_PHASES",
@@ -135,6 +153,8 @@ __all__ = [
     "PHASE_ARTIFACT_PREFLIGHT",
     "PHASE_COMPOSE_GENERAL_LLM_SAFE",
     "PHASE_COMPOSE_GENERAL_LLM_UNSAFE_GUARD",
+    "PHASE_COMPOSE_CANARY_ALLOWED_PREFLIGHT",
+    "PHASE_COMPOSE_CANARY_DENIED",
     "PHASE_COMPOSE_PERSONA_SUCCESS",
     "PHASE_DEFAULT_OFF",
     "PHASE_PROJECTION_INELIGIBLE",

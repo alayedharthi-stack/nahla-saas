@@ -83,7 +83,13 @@ def is_customer_conditional_coupon_compose_enabled() -> bool:
 
 
 def is_customer_conditional_coupon_layer0_enabled() -> bool:
-    """Layer 0 loader gate — shadow or compose flag (relevance applied separately)."""
+    """
+    Coarse env gate — shadow master OR compose master.
+
+    Does **not** imply compose canary eligibility or authorize Layer 0 I/O on its
+    own. Callers with turn context must use
+    ``should_load_customer_conditional_coupon_layer0_for_turn``.
+    """
     return (
         is_customer_conditional_coupon_shadow_enabled()
         or is_customer_conditional_coupon_compose_enabled()

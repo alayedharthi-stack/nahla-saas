@@ -196,6 +196,18 @@ def test_cli_default_off_subset_emits_closed_json(monkeypatch: pytest.MonkeyPatc
     assert f'"report_schema_version":"{REPORT_SCHEMA_VERSION}"' in line.replace(" ", "")
 
 
+def test_compose_canary_denied_gate() -> None:
+    report = consumer_verify.gate_compose_canary_denied()
+    validate_gate_report(report)
+    assert report["ok"] is True
+
+
+def test_compose_canary_allowed_preflight_gate() -> None:
+    report = consumer_verify.gate_compose_canary_allowed_preflight()
+    validate_gate_report(report)
+    assert report["ok"] is True
+
+
 def test_run_brain_compose_probe_raises_when_fixture_missing() -> None:
     with with_app_container_paths(_REPO):
         with patch.object(consumer_verify, "_get_fixture_conversation", return_value=None):
