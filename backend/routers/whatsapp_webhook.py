@@ -8680,6 +8680,25 @@ async def _handle_merchant_message(
                                     "chosen_path": _brain_chosen_path,
                                     "customer_conditional_coupon_compose_active": True,
                                 }
+                        elif (
+                            _brain_chosen_path
+                            == "customer_conditional_coupon_general_llm_fallthrough"
+                            and brain_result.get("customer_conditional_coupon_general_llm_fallthrough")
+                        ):
+                            try:
+                                from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
+                                    extract_constitutional_metadata,
+                                )
+
+                                _brain_persona_compose_event = extract_constitutional_metadata(
+                                    brain_result,
+                                )
+                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
+                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
+                                _brain_persona_compose_event = {
+                                    "chosen_path": _brain_chosen_path,
+                                    "customer_conditional_coupon_general_llm_fallthrough": True,
+                                }
                         elif _brain_chosen_path in (
                             "general_offer_discovery_compose",
                             "product_sale_offer_compose",

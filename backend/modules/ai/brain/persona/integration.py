@@ -148,6 +148,8 @@ def merge_persona_compose_into_extra_metadata(
         "fallback_action_type",
         "trusted_coupon_offer_compose_active",
         "customer_conditional_coupon_compose_active",
+        "customer_conditional_coupon_general_llm_fallthrough",
+        "conditional_coupon_guard_failed_reason",
         "general_offer_discovery_compose_active",
         "product_sale_offer_compose_active",
         "facts_snapshot_id",
