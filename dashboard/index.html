@@ -3,8 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!--
+      Static fallback SEO values for non-JS crawlers only.
+      Runtime route metadata is applied from publicSeo.ts before React mounts.
+      COMPANY_INFO cannot be consumed here, so these values are duplicated intentionally.
+    -->
     <title>Nahlah AI | AI-powered WhatsApp Sales Platform</title>
-    <meta name="description" content="مساعد مبيعات ذكي لمتجرك عبر واتساب — نحلة AI" />
+    <meta
+      name="description"
+      content="Nahlah AI is an AI-powered WhatsApp sales platform that helps merchants automate customer conversations, orders, and support."
+    />
 
     <!-- PWA -->
     <link rel="manifest" href="/manifest.json" />
@@ -22,12 +30,28 @@
     <link rel="icon" type="image/png" href="/logo.png" />
     <link rel="shortcut icon" href="/logo.png" />
 
-    <!-- Open Graph -->
-    <meta property="og:title" content="نحلة — طيار المبيعات الآلي" />
-    <meta property="og:description" content="مساعد مبيعات ذكي يرد على عملائك عبر واتساب" />
-    <meta property="og:image" content="/logo.png" />
+    <!-- Open Graph (static fallback; no canonical — SPA routes are set in JS) -->
+    <meta property="og:title" content="Nahlah AI | AI-powered WhatsApp Sales Platform" />
+    <meta
+      property="og:description"
+      content="Nahlah AI is an AI-powered WhatsApp sales platform that helps merchants automate customer conversations, orders, and support."
+    />
+    <meta property="og:image" content="https://nahlah.ai/logo.png" />
+    <meta property="og:image:alt" content="Nahlah AI logo" />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://app.nahlah.ai" />
+    <meta property="og:url" content="https://nahlah.ai/" />
+    <meta property="og:site_name" content="Nahlah AI" />
+    <meta property="og:locale" content="ar_SA" />
+
+    <!-- Twitter (static fallback) -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Nahlah AI | AI-powered WhatsApp Sales Platform" />
+    <meta
+      name="twitter:description"
+      content="Nahlah AI is an AI-powered WhatsApp sales platform that helps merchants automate customer conversations, orders, and support."
+    />
+    <meta name="twitter:image" content="https://nahlah.ai/logo.png" />
+    <meta name="twitter:image:alt" content="Nahlah AI logo" />
 
     <!-- Fonts: Cairo (Arabic primary) + Inter (English) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

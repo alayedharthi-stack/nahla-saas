@@ -5,6 +5,7 @@ import './index.css'
 import { logNahlaRuntimeBoot } from './lib/logRuntimeBoot'
 import { initSentry } from './lib/sentry'
 import { bootstrapPreferences } from './lib/bootstrapPreferences'
+import { applyPublicSeo } from './seo/publicSeo'
 
 // Apply theme + locale BEFORE React mounts so the first paint matches the
 // merchant's preference — eliminates flash-of-wrong-theme and flash-of-wrong-
@@ -12,6 +13,10 @@ import { bootstrapPreferences } from './lib/bootstrapPreferences'
 // emitted by SallaEntryScreen's "Open Nahla dashboard" CTA, persisting the
 // values to localStorage and stripping them from the URL.
 bootstrapPreferences()
+
+// Apply initial-path SEO before React mounts so crawlers and the first paint
+// receive route-correct metadata immediately.
+applyPublicSeo()
 
 // Initialise Sentry FIRST so any error during app bootstrap (router
 // registration, lazy imports, etc.) is captured. No-op when
