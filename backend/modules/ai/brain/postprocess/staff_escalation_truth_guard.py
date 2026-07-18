@@ -71,6 +71,8 @@ class StaffEscalationTruthGuardResult:
     reason: str = ""
     evidence: Optional[StaffEscalationEvidenceResult] = None
     staff_escalation_claim_blocked: bool = False
+    route_action: str = ""
+    requires_grounded_compose: bool = False
 
 
 def guard_metadata_patch(
@@ -208,7 +210,6 @@ def apply_staff_escalation_truth_guard(
         try:
             from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
                 is_order_tracking_follow_up,
-                resolve_order_tracking_guard_reply,
             )
 
             if is_order_tracking_follow_up(
@@ -216,19 +217,17 @@ def apply_staff_escalation_truth_guard(
                 state=state,
                 history=history,
             ):
-                tracking_reply = resolve_order_tracking_guard_reply(
-                    state=state,
-                    history=history,
-                )
                 return StaffEscalationTruthGuardResult(
-                    reply=tracking_reply,
-                    action="blocked_false_escalation_order_tracking",
+                    reply="",
+                    action="route_track_order_need_identifiers_compose",
                     replaced=True,
-                    reason="order_tracking_guard_stub_replacement",
+                    reason="order_tracking_false_escalation_requires_grounded_compose",
                     evidence=evidence,
                     staff_escalation_claim_blocked=True,
+                    route_action="track_order_need_identifiers",
+                    requires_grounded_compose=True,
                 )
-        except Exception as _otg_exc:  # noqa: BLE001  # noqa: silent-ok — fallback to generic stub
+        except Exception as _otg_exc:  # noqa: BLE001  # noqa: silent-ok — continue to non-tracking recovery
             logger.debug(
                 "[STAFF_ESCALATION_TRUTH_GUARD] order_tracking_guard failed err=%s",
                 _otg_exc,

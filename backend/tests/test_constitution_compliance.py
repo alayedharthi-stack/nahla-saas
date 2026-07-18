@@ -43,6 +43,7 @@ from modules.ai.compose.constitutional_policy import (  # noqa: E402
     scan_compose_source_snippet,
     scan_exact_prose_test_assertions,
     scan_responder_direct_template_returns,
+    scan_tracking_clarification_guard_violations,
     validate_governance_baseline,
     validate_live_violations_against_waivers,
     validate_new_violation_cannot_self_waive,
@@ -339,6 +340,37 @@ if topic == "greeting":
         match = next(f for f in findings if f.path == "synthetic_fixed_arabic")
         assert match.detail == "return fixed Arabic string literal"
 
+    def test_tracking_guard_scanner_detects_retired_prose_owner_call(self) -> None:
+        findings = policy._scan_tracking_clarification_guard_source(
+            '''
+def guard():
+    return T.track_order_need_identifiers()
+''',
+            file_rel="synthetic_tracking_guard.py",
+        )
+        assert any(
+            f.path == "tracking_clarification_guard_boundary"
+            and f.template_call == "track_order_need_identifiers"
+            for f in findings
+        )
+
+    def test_tracking_guard_scanner_detects_fixed_tracking_reply(self) -> None:
+        findings = policy._scan_tracking_clarification_guard_source(
+            '''
+def guard():
+    return StaffEscalationTruthGuardResult(
+        reply="أرسل رقم الطلب",
+        action="blocked_false_escalation_order_tracking",
+    )
+''',
+            file_rel="synthetic_staff_guard.py",
+        )
+        assert any(
+            f.kind == ViolationKind.FIXED_STRING_RETURN
+            and f.path == "tracking_clarification_guard_boundary"
+            for f in findings
+        )
+
 
 class TestRuntimeViolationDetection:
     def test_track_order_not_found_no_longer_direct_template_return(self) -> None:
@@ -350,6 +382,9 @@ class TestRuntimeViolationDetection:
         findings = scan_responder_direct_template_returns()
         paths = {f.path for f in findings}
         assert "track_order_need_order_number" not in paths
+
+    def test_tracking_clarification_guard_boundary_has_no_prose_owner(self) -> None:
+        assert scan_tracking_clarification_guard_violations() == []
 
     def test_live_responder_scan_has_no_tracked_track_order_template_paths(self) -> None:
         findings = scan_responder_direct_template_returns()

@@ -2018,6 +2018,7 @@ class DefaultComposer:
             is_usable_llm_reply,
             record_fallback_metadata,
             record_llm_compose_metadata,
+            unusable_llm_reply_reason,
         )
 
         facts = extract_track_order_need_identifiers_facts(ctx, result)
@@ -2035,7 +2036,10 @@ class DefaultComposer:
             record_llm_compose_metadata(result, llm_candidate=str(reply or ""))
             result.data.pop("compose_facts_overlay", None)
             return str(reply)
-        record_fallback_metadata(result, reason="compose_failed_or_empty")
+        record_fallback_metadata(
+            result,
+            reason=unusable_llm_reply_reason(reply),
+        )
         result.data.pop("compose_facts_overlay", None)
         return T.track_order_need_identifiers_emergency_fallback()
 
