@@ -198,6 +198,8 @@ jobs:
       DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
       A1_PG_INTEGRATION_REQUIRED: "1"
       A1_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+      TENANT_CLONE_PG_SOURCE_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/tenant_clone_source
+      TENANT_CLONE_PG_TARGET_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/tenant_clone_target
       LEGACY_MIG_PG_INTEGRATION_REQUIRED: "1"
 
     steps:
@@ -222,6 +224,28 @@ jobs:
       - name: Apply integration migration path (0089 only)
         working-directory: database
         run: python -m alembic upgrade 0089
+
+      - name: Prepare tenant clone source and target databases
+        run: |
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(
+              "postgresql://nahla:nahla_password@127.0.0.1:5433/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          with engine.connect() as conn:
+              conn.execute(text("CREATE DATABASE tenant_clone_source"))
+              conn.execute(text("CREATE DATABASE tenant_clone_target"))
+          PY
+          for database_name in tenant_clone_source tenant_clone_target; do
+            (
+              cd database
+              export DATABASE_URL="postgresql://nahla:nahla_password@127.0.0.1:5433/${database_name}"
+              python -m alembic upgrade 0088
+              python -m alembic upgrade 0089
+            )
+          done
 
       - name: A1-v3.7 PostgreSQL integration
         run: |
@@ -250,5 +274,6 @@ jobs:
             backend/tests/test_customer_conditional_coupon_shadow_fixture.py \
             backend/tests/test_webhook_dispatcher_a1_connection_resolution.py \
             backend/tests/test_real_channel_acceptance_session_pg.py \
+            backend/tests/test_tenant_merchant_clone_operator.py \
             backend/tests/test_salla_integration_resolver_ambiguity.py \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning

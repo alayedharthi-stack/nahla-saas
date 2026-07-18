@@ -10,13 +10,17 @@ Full DR restore is forbidden for acceptance cloning. See
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 from scripts.operators.bootstrap_migration_contract import REPOSITORY_ALEMBIC_HEADS
 
-MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v1"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v1"
+MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v2"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v2"
+DEFAULT_ACCEPTANCE_TENANT_ID = 33
+PRESERVE_TENANT_IDENTITY_MODE = "preserve_tenant_id_cross_database"
+REMAP_TENANT_IDENTITY_MODE = "remap_tenant_id_cross_database"
+TARGET_BOOTSTRAP_NAME = "tenant-33-acceptance-test"
 
 # ── Environment identity attestation ─────────────────────────────────────────
 SOURCE_PROJECT_ENV = "NAHLA_CLONE_SOURCE_RAILWAY_PROJECT"
@@ -45,7 +49,9 @@ APPLY_CONFIRM_TOKEN = "APPLY_TENANT_33_MERCHANT_CLONE"
 CLEANUP_CONFIRM_ENV = "NAHLA_TENANT_MERCHANT_CLONE_CLEANUP_CONFIRM"
 CLEANUP_CONFIRM_TOKEN = "CLEANUP_TENANT_33_MERCHANT_CLONE"
 PRODUCTION_SOURCE_CONFIRM_ENV = "NAHLA_TENANT_CLONE_PRODUCTION_SOURCE_CONFIRM"
-PRODUCTION_SOURCE_CONFIRM_TOKEN = "CLONE_FROM_PRODUCTION_TENANT_33"
+PRODUCTION_SOURCE_CONFIRM_TOKEN = (
+    "CLONE_PRODUCTION_TENANT_33_TO_STAGING_TENANT_33"
+)
 DRY_RUN_DIGEST_ENV = "NAHLA_TENANT_MERCHANT_CLONE_DRY_RUN_DIGEST"
 
 SOURCE_DATABASE_URL_ENV = "NAHLA_CLONE_SOURCE_DATABASE_URL"
@@ -96,6 +102,7 @@ TARGET_AI_TEST_ALLOWLIST: Tuple[str, ...] = ()
 GLOBAL_STRIP_COLUMNS: FrozenSet[str] = frozenset(
     {
         "external_id",
+        "external_store_id",
         "salla_variant_id",
         "meta_retailer_id",
         "meta_item_id",
@@ -192,6 +199,7 @@ ALLOWED_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
     CloneTableSpec(
         "branch_escalation_steps",
         remap_fk_columns=("branch_id", "contact_id"),
+        scrub_phone_columns=("phone_e164",),
     ),
     CloneTableSpec("branch_arrival_keywords", remap_fk_columns=("branch_id",)),
     CloneTableSpec(
