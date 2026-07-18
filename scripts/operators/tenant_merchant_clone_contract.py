@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v9"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v10"
 
 # Closed clone profiles — ``--profile`` is required; no default (fail closed).
 CLONE_PROFILE_FULL_MERCHANT = "full_merchant_acceptance"
@@ -436,6 +436,24 @@ FORBIDDEN_JSON_KEY_MARKERS: Tuple[str, ...] = (
     "payment_id",
     "stripe",
     "hyperpay",
+)
+
+# Closed registry — provider routing/ownership handles scrubbed in integrations.config.
+PROVIDER_OWNERSHIP_KEYS: FrozenSet[str] = frozenset(
+    {
+        "store_id",
+        "merchant_id",
+        "external_store_id",
+        "authorization_id",
+        "phone_number_id",
+        "waba_id",
+        "whatsapp_business_account_id",
+        "shop_id",
+        "seller_id",
+        "vendor_id",
+        "meta_business_id",
+        "meta_catalog_id",
+    }
 )
 
 SCRUBBED_JSON_KEY_REPLACEMENTS: dict[str, str] = {

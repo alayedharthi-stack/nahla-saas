@@ -33,6 +33,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     PRODUCTION_IDENTITY_CLASS,
     PRODUCTION_SOURCE_CONFIRM_ENV,
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
+    PROVIDER_OWNERSHIP_KEYS,
     allowed_table_names_for_profile,
     resolve_clone_profile,
     table_specs_for_profile,
@@ -375,7 +376,7 @@ def test_integration_row_scrubbed_and_disabled() -> None:
     assert transformed["enabled"] is False
     assert transformed["external_store_id"] is None
     assert transformed["config"]["access_token"] == ""
-    assert transformed["config"]["store_id"] == "123"
+    assert transformed["config"]["store_id"] == ""
     assert any("integrations.disabled_until_staging_credentials" in t for t in transforms)
 
 
@@ -717,7 +718,7 @@ def test_stale_v8_dry_run_digest_rejected_on_apply() -> None:
 def test_scrub_integration_config_strips_tokens() -> None:
     result = scrub_integration_config({"access_token": "secret", "store_id": "123"})
     assert result["access_token"] == ""
-    assert result["store_id"] == "123"
+    assert result["store_id"] == ""
 
 
 def test_scrub_integration_config_strips_provider_email_keys() -> None:
@@ -734,7 +735,7 @@ def test_scrub_integration_config_strips_provider_email_keys() -> None:
     assert "nested@merchant.example" not in serialized
     assert "camel@merchant.example" not in serialized
     assert result["salla_owner_email"] == ""
-    assert result["store_id"] == "123"
+    assert result["store_id"] == ""
     assert result["nested"]["contact_email"] == ""
     assert result["contacts"][0]["ownerEmail"] == ""
 
@@ -742,6 +743,181 @@ def test_scrub_integration_config_strips_provider_email_keys() -> None:
 def test_scrub_integration_config_rejects_unknown_forbidden_keys() -> None:
     with pytest.raises(ValueError, match="integration_config_unhandled_forbidden_key"):
         scrub_integration_config({"customer_id": "cust-123", "store_id": "123"})
+
+
+def test_provider_ownership_keys_registry_is_closed() -> None:
+    assert "store_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "merchant_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "external_store_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "authorization_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "phone_number_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "waba_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "whatsapp_business_account_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "shop_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "seller_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "vendor_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "meta_business_id" in PROVIDER_OWNERSHIP_KEYS
+    assert "meta_catalog_id" in PROVIDER_OWNERSHIP_KEYS
+
+
+def test_scrub_integration_config_strips_ownership_keys_nested_and_camel() -> None:
+    from scripts.operators.tenant_merchant_clone_scrubber import _scrub_integration_value
+
+    config = {
+        "store_id": "store-snake-99",
+        "routing": {"merchantId": "merchant-camel-88"},
+        "providers": [
+            {
+                "externalStoreId": "ext-nested-77",
+                "phoneNumberId": "phone-id-66",
+                "waba_id": "waba-55",
+            }
+        ],
+        "meta": {"whatsappBusinessAccountId": "waba-camel-44"},
+    }
+    result, transforms = _scrub_integration_value(config)
+    assert result["store_id"] == ""
+    assert result["routing"]["merchantId"] == ""
+    assert result["providers"][0]["externalStoreId"] == ""
+    assert result["providers"][0]["phoneNumberId"] == ""
+    assert result["providers"][0]["waba_id"] == ""
+    assert result["meta"]["whatsappBusinessAccountId"] == ""
+    assert any("scrub_integration_ownership_key:store_id" in t for t in transforms)
+    assert any("scrub_integration_ownership_key:routing.merchantId" in t for t in transforms)
+    assert any(
+        "scrub_integration_ownership_key:providers[0].externalStoreId" in t
+        for t in transforms
+    )
+
+
+def test_scrub_integration_ownership_markers_path_only_no_raw_values() -> None:
+    from scripts.operators.tenant_merchant_clone_scrubber import _scrub_integration_value
+
+    sensitive_store_id = "store-sensitive-abc-12345"
+    _, transforms = _scrub_integration_value(
+        {"store_id": sensitive_store_id, "merchant_id": "merchant-sensitive-xyz"}
+    )
+    serialized = json.dumps(transforms)
+    assert "store-sensitive-abc-12345" not in serialized
+    assert "merchant-sensitive-xyz" not in serialized
+    assert all(t.startswith("scrub_integration_ownership_key:") for t in transforms)
+
+
+def test_scrub_integration_config_retains_safe_metadata() -> None:
+    result = scrub_integration_config(
+        {
+            "provider": "generic_commerce",
+            "app_type": "catalog",
+            "store_label": "متجر تجريبي عام",
+            "catalog_enabled": True,
+            "store_id": "must-strip",
+        }
+    )
+    assert result["provider"] == "generic_commerce"
+    assert result["app_type"] == "catalog"
+    assert result["store_label"] == "متجر تجريبي عام"
+    assert result["catalog_enabled"] is True
+    assert result["store_id"] == ""
+
+
+def test_stale_v9_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v9"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v9-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
+
+
+def test_full_merchant_profile_integration_ownership_scrubbed_generic_merchant() -> None:
+    integration_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_FULL_MERCHANT)
+        if spec.name == "integrations"
+    )
+    row = {
+        "id": 7,
+        "tenant_id": 48,
+        "provider": "generic_commerce",
+        "app_type": "catalog",
+        "external_store_id": "ext-generic-7",
+        "enabled": True,
+        "config": {
+            "store_label": "متجر تجريبي عام",
+            "shop_id": "shop-generic-1",
+            "seller_id": "seller-generic-2",
+            "vendor_id": "vendor-generic-3",
+            "meta_business_id": "meta-biz-4",
+            "meta_catalog_id": "meta-cat-5",
+            "authorization_id": "auth-6",
+        },
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=integration_spec.name,
+        spec_json_columns=integration_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=integration_spec.remap_fk_columns,
+        scrub_phone_columns=integration_spec.scrub_phone_columns,
+        deferred_fk_columns=integration_spec.deferred_fk_columns,
+    )
+    assert transformed["enabled"] is False
+    assert transformed["external_store_id"] is None
+    assert transformed["config"]["store_label"] == "متجر تجريبي عام"
+    for ownership_key in (
+        "shop_id",
+        "seller_id",
+        "vendor_id",
+        "meta_business_id",
+        "meta_catalog_id",
+        "authorization_id",
+    ):
+        assert transformed["config"][ownership_key] == ""
+    assert any("integrations.config_stripped" in t for t in transforms)
 
 
 def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
@@ -786,8 +962,8 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v9() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v9"
+def test_dry_run_digest_schema_version_is_v10() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v10"
 
 
 def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() -> None:
@@ -800,7 +976,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     assert "excluded_operational_source_counts" not in binding
     assert "denied_domain_source_counts" not in binding
     digest = clone_op.compute_dry_run_digest(binding)
-    # v6 bound observational telemetry; identical copy state must keep the same v9 digest
+    # v6 bound observational telemetry; identical copy state must keep the same v10 digest
     # even when operator-report counts drift between dry-run and apply.
     report_a = {
         "excluded_operational_source_counts": {
@@ -826,7 +1002,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     }
     assert digest == clone_op.compute_dry_run_digest(binding)
     assert report_a != report_b
-    # v6-style payloads would have diverged; v9 binding ignores report-only telemetry.
+    # v6-style payloads would have diverged; v10 binding ignores report-only telemetry.
     v6_style_a = {**binding, **report_a}
     v6_style_b = {**binding, **report_b}
     assert clone_op.compute_dry_run_digest(v6_style_a) != clone_op.compute_dry_run_digest(
@@ -978,7 +1154,7 @@ def test_integration_transform_scrubs_salla_owner_email() -> None:
         deferred_fk_columns=(),
     )
     assert transformed["config"]["salla_owner_email"] == ""
-    assert transformed["config"]["store_id"] == "123"
+    assert transformed["config"]["store_id"] == ""
     assert pii_email not in json.dumps(transforms)
 
 
@@ -1055,6 +1231,7 @@ def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan()
     assert transformed["config"]["access_token"] == ""
     assert transformed["config"]["refresh_token"] == ""
     assert transformed["config"]["phone_e164"] == "+00000000000"
+    assert transformed["config"]["store_id"] == ""
     assert scan_for_unhandled_forbidden_keys(transformed["config"]) == []
     assert any("integrations.config_stripped" in t for t in transforms)
 
@@ -1152,6 +1329,7 @@ def test_minimal_profile_integration_row_transform_path_succeeds() -> None:
     assert transformed["external_store_id"] is None
     assert transformed["config"]["salla_owner_email"] == ""
     assert transformed["config"]["access_token"] == ""
+    assert transformed["config"]["store_id"] == ""
     assert transformed["tenant_id"] == 48
     assert "id" not in transformed
     assert any("integrations.config_stripped" in t for t in transforms)
