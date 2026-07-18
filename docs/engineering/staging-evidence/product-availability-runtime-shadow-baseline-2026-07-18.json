@@ -2,7 +2,7 @@
   "archive_schema_version": "product_availability_runtime_shadow_staging_v2",
   "archived_at_utc": "2026-07-18T08:43:43+00:00",
   "artifact_kind": "runtime_bound_staging_shadow_baseline",
-  "status": "PASS",
+  "status": "INVALID_FOR_RUNTIME_WINDOW",
   "observation_window": {
     "duration_hours": 48,
     "start_utc": "2026-07-18T08:43:43+00:00",
@@ -78,5 +78,17 @@
     "start_utc": "2026-07-18T06:45:00+00:00",
     "invalidated_poll_id": "2026-07-18T07:00:39+00:00",
     "correction_branch": "evidence/arch001-shadow-window-20260718"
+  },
+  "invalidation": {
+    "invalidated_at_utc": "2026-07-18T14:53:00+00:00",
+    "invalidated_poll_id": "runtime-2026-07-18T08:43:43+00:00",
+    "reason_code": "canonical_main_auto_deploy",
+    "live_source_commit_sha": "02c82157581dd294de77e71fc59eb5de716841c4",
+    "live_deployment_id": "a38e1f88-aefd-48b3-ade1-5c2378f20c34",
+    "teardown_deployment_id": "b72421f5-6149-44a0-9f07-dd023cf4f3c6",
+    "teardown_guard_mode": "off",
+    "default_off_probe_ok": true,
+    "matrix_executed": false,
+    "restart_window": false
   }
 }
