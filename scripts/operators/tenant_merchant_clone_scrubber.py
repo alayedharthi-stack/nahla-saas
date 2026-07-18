@@ -194,15 +194,15 @@ def scrub_row_json_columns(
     transformations: list[str] = []
 
     for column in json_columns:
-        if column not in out or out[column] is None:
-            continue
         if table == "tenant_settings" and column == "ai_settings":
-            out[column] = scrub_ai_settings(out[column])
+            out[column] = scrub_ai_settings(out.get(column))
             transformations.append("transform:tenant_settings.ai_settings_safe_test_mode")
             continue
         if table == "tenant_settings" and column == "whatsapp_settings":
-            out[column] = scrub_whatsapp_settings(out[column])
+            out[column] = scrub_whatsapp_settings(out.get(column))
             transformations.append("transform:tenant_settings.whatsapp_settings_stripped")
+            continue
+        if column not in out or out[column] is None:
             continue
         if table == "integrations" and column == "config":
             out[column] = scrub_integration_config(out[column])

@@ -46,6 +46,7 @@ from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
     scrub_ai_settings,
     scrub_integration_config,
     scrub_json_value,
+    scrub_row_json_columns,
     scan_for_unhandled_forbidden_keys,
 )
 
@@ -505,6 +506,212 @@ def test_scrub_ai_settings_forces_test_mode() -> None:
     result = scrub_ai_settings({"store_ai_mode": "on", "ai_test_allowed_numbers": ["966500000000"]})
     assert result["store_ai_mode"] == "test"
     assert result["ai_test_allowed_numbers"] == []
+    assert result["store_ai_enabled"] is True
+
+
+def _tenant_settings_json_columns() -> tuple[str, ...]:
+    spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    return spec.json_columns
+
+
+def test_tenant_settings_null_ai_settings_materializes_safe_test_posture() -> None:
+    row = {"tenant_id": 48, "ai_settings": None}
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    assert transformed["ai_settings"]["store_ai_mode"] == "test"
+    assert transformed["ai_settings"]["ai_test_allowed_numbers"] == []
+    assert transformed["ai_settings"]["store_ai_enabled"] is True
+    assert any("tenant_settings.ai_settings_safe_test_mode" in t for t in transforms)
+
+
+def test_tenant_settings_missing_ai_settings_materializes_safe_test_posture() -> None:
+    row = {"tenant_id": 48}
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    assert transformed["ai_settings"]["store_ai_mode"] == "test"
+    assert transformed["ai_settings"]["ai_test_allowed_numbers"] == []
+    assert transformed["ai_settings"]["store_ai_enabled"] is True
+    assert any("tenant_settings.ai_settings_safe_test_mode" in t for t in transforms)
+
+
+def test_tenant_settings_null_whatsapp_settings_materializes_empty_object() -> None:
+    row = {"tenant_id": 48, "whatsapp_settings": None}
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    assert transformed["whatsapp_settings"] == {}
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_tenant_settings_missing_whatsapp_settings_materializes_empty_object() -> None:
+    row = {"tenant_id": 48}
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    assert transformed["whatsapp_settings"] == {}
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_tenant_settings_non_null_ai_forced_test_mode_and_empty_allowlist() -> None:
+    row = {
+        "tenant_id": 48,
+        "ai_settings": {
+            "store_ai_mode": "on",
+            "ai_test_allowed_numbers": ["966500000000", "966511111111"],
+            "store_ai_enabled": False,
+            "persona_tone": "friendly",
+        },
+    }
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    assert transformed["ai_settings"]["store_ai_mode"] == "test"
+    assert transformed["ai_settings"]["ai_test_allowed_numbers"] == []
+    assert transformed["ai_settings"]["store_ai_enabled"] is True
+    assert transformed["ai_settings"]["persona_tone"] == "friendly"
+    assert any("tenant_settings.ai_settings_safe_test_mode" in t for t in transforms)
+
+
+def test_tenant_settings_non_null_whatsapp_strips_credentials_retains_safe_metadata() -> None:
+    row = {
+        "tenant_id": 48,
+        "whatsapp_settings": {
+            "access_token": "secret-token",
+            "verify_token": "verify-me",
+            "phone_number": "966500000000",
+            "owner_whatsapp_number": "966511111111",
+            "business_name": "متجر تجريبي عام",
+            "catalog_enabled": True,
+        },
+    }
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    wa = transformed["whatsapp_settings"]
+    assert wa["access_token"] == ""
+    assert wa["verify_token"] == ""
+    assert wa["phone_number"] == ""
+    assert wa["owner_whatsapp_number"] == ""
+    assert wa["business_name"] == "متجر تجريبي عام"
+    assert wa["catalog_enabled"] is True
+    assert scan_for_unhandled_forbidden_keys(wa) == []
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_tenant_settings_whatsapp_unknown_forbidden_key_rejected() -> None:
+    row = {
+        "tenant_id": 48,
+        "whatsapp_settings": {"customer_id": "cust-123", "business_name": "متجر تجريبي عام"},
+    }
+    with pytest.raises(ValueError, match="whatsapp_settings_unhandled_forbidden_key"):
+        scrub_row_json_columns(
+            row,
+            _tenant_settings_json_columns(),
+            table="tenant_settings",
+        )
+
+
+def test_tenant_settings_transform_generic_merchant_fixture() -> None:
+    tenant_settings_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    row = {
+        "tenant_id": 48,
+        "show_nahla_branding": True,
+        "branding_text": "Powered by Nahla",
+        "ai_settings": None,
+        "whatsapp_settings": None,
+        "store_settings": {"currency": "SAR", "catalog_title": "حذاء رياضي أبيض"},
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=tenant_settings_spec.name,
+        spec_json_columns=tenant_settings_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=tenant_settings_spec.remap_fk_columns,
+        scrub_phone_columns=tenant_settings_spec.scrub_phone_columns,
+        deferred_fk_columns=tenant_settings_spec.deferred_fk_columns,
+    )
+    assert transformed["ai_settings"]["store_ai_mode"] == "test"
+    assert transformed["ai_settings"]["ai_test_allowed_numbers"] == []
+    assert transformed["ai_settings"]["store_ai_enabled"] is True
+    assert transformed["whatsapp_settings"] == {}
+    assert transformed["store_settings"]["catalog_title"] == "حذاء رياضي أبيض"
+    assert any("tenant_settings.ai_settings_safe_test_mode" in t for t in transforms)
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_stale_v8_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v8"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v8-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
 
 
 def test_scrub_integration_config_strips_tokens() -> None:
@@ -579,8 +786,8 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v8() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v8"
+def test_dry_run_digest_schema_version_is_v9() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v9"
 
 
 def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() -> None:
@@ -593,7 +800,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     assert "excluded_operational_source_counts" not in binding
     assert "denied_domain_source_counts" not in binding
     digest = clone_op.compute_dry_run_digest(binding)
-    # v6 bound observational telemetry; identical copy state must keep the same v8 digest
+    # v6 bound observational telemetry; identical copy state must keep the same v9 digest
     # even when operator-report counts drift between dry-run and apply.
     report_a = {
         "excluded_operational_source_counts": {
@@ -619,7 +826,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     }
     assert digest == clone_op.compute_dry_run_digest(binding)
     assert report_a != report_b
-    # v6-style payloads would have diverged; v8 binding ignores report-only telemetry.
+    # v6-style payloads would have diverged; v9 binding ignores report-only telemetry.
     v6_style_a = {**binding, **report_a}
     v6_style_b = {**binding, **report_b}
     assert clone_op.compute_dry_run_digest(v6_style_a) != clone_op.compute_dry_run_digest(
