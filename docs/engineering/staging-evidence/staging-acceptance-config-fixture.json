@@ -1,0 +1,35 @@
+{
+  "project_id": "00000000-0000-4000-8000-000000000001",
+  "environment_id": "00000000-0000-4000-8000-000000000002",
+  "canonical": {
+    "service_id": "00000000-0000-4000-8000-000000000003",
+    "service_name": "nahla-saas",
+    "deployment_id": "dep-canonical-staging-example",
+    "source_revision": "abc1234567890",
+    "domains": ["nahla-saas-staging.up.railway.app"],
+    "routes": ["/webhook/whatsapp", "/version", "/health"],
+    "variables": {
+      "BACKEND_URL": "https://nahla-saas-staging.up.railway.app",
+      "NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE": "shadow",
+      "META_WEBHOOK_ENFORCE_SIGNATURE": "true",
+      "META_WEBHOOK_ALLOW_MISSING_SIGNATURE": "false"
+    }
+  },
+  "legacy_source": {
+    "service_id": "00000000-0000-4000-8000-000000000004",
+    "service_name": "nahla-saas-staging",
+    "deployment_id": "dep-legacy-staging-example",
+    "source_revision": "def0987654321",
+    "domains": ["nahla-saas-staging-legacy.up.railway.app"],
+    "routes": ["/webhook/whatsapp"],
+    "variables": {
+      "BACKEND_URL": "https://nahla-saas-staging-legacy.up.railway.app",
+      "D360_API_BASE_URL": "https://waba-v2.360dialog.io",
+      "D360_PARTNER_ID": "partner-staging-example",
+      "META_APP_SECRET": "fixture-secret-meta-app",
+      "WHATSAPP_VERIFY_TOKEN": "fixture-verify-token-staging",
+      "WHATSAPP_TOKEN": "fixture-whatsapp-token-staging",
+      "WHATSAPP_API_URL": "https://graph.facebook.com/v19.0"
+    }
+  }
+}
