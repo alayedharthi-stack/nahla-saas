@@ -212,7 +212,6 @@ class TestMissingOrderNumber:
         assert result.data.get("response_mode") == "llm"
         assert result.data.get("final_customer_text_source") == "llm"
         assert reply == llm_reply
-        assert reply != T.track_order_need_identifiers()
         assert "رقم الطلب" in reply or "order number" in reply.lower()
         for phrase in _PHONE_ASK:
             assert phrase not in reply

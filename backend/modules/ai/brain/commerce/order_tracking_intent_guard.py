@@ -1005,23 +1005,6 @@ def boost_track_order_intent(
     )
 
 
-def resolve_order_tracking_guard_reply(
-    *,
-    state: Any = None,
-    history: Optional[List[Any]] = None,
-) -> str:
-    """
-    Layer 3: honest tracking reply or ask for order number / phone.
-    """
-    from core.order_creation_evidence import resolve_track_order_fallback  # noqa: PLC0415
-    from modules.ai.brain.compose import templates as T  # noqa: PLC0415
-
-    fallback = resolve_track_order_fallback(state=state, history=history)
-    if fallback:
-        return fallback
-    return T.track_order_need_identifiers()
-
-
 __all__ = [
     "boost_track_order_intent",
     "build_order_support_follow_up_args",
@@ -1041,7 +1024,6 @@ __all__ = [
     "is_post_order_shipping_brain_defer",
     "is_pre_order_shipping_inquiry",
     "is_shipping_tracking_non_product_label",
-    "resolve_order_tracking_guard_reply",
     "should_exempt_from_availability_rewrite",
     "try_order_reference_continuity_decision",
 ]

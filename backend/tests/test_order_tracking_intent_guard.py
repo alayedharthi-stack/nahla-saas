@@ -19,11 +19,9 @@ from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: E40
     is_order_tracking_follow_up,
     is_pre_order_shipping_inquiry,
     is_shipping_tracking_non_product_label,
-    resolve_order_tracking_guard_reply,
     should_exempt_from_availability_rewrite,
 )
 from modules.ai.brain.commerce.product_label_hygiene import is_non_product_label  # noqa: E402
-from modules.ai.brain.compose import templates as T  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
 from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: E402
     inbound_exempt_from_availability_rewrite,
@@ -219,7 +217,7 @@ class TestLayer2AvailabilityRewriteGuard:
 
 
 class TestLayer3StaffEscalationStubGuard:
-    def test_tracking_follow_up_gets_identifiers_not_stub(self) -> None:
+    def test_tracking_follow_up_returns_structured_compose_route(self) -> None:
         llm_reply = "تم تحويلك لفريق الدعم، راح يتواصلون معك قريباً 🌷"
         result = apply_staff_escalation_truth_guard(
             reply=llm_reply,
@@ -227,18 +225,17 @@ class TestLayer3StaffEscalationStubGuard:
             conversation_flags={},
         )
         assert result.replaced is True
-        assert result.reply != SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR
-        assert "رقم الطلب" in result.reply or "الجوال" in result.reply
+        assert result.reply == ""
+        assert result.route_action == "track_order_need_identifiers"
+        assert result.requires_grounded_compose is True
+        assert result.action == "route_track_order_need_identifiers_compose"
 
-    def test_non_tracking_still_gets_generic_stub(self) -> None:
+    def test_non_tracking_does_not_use_tracking_route_or_deprecated_stub(self) -> None:
         result = apply_staff_escalation_truth_guard(
             reply="تم تحويلك للدعم",
             inbound_text="أبي عسل طلح",
             conversation_flags={},
         )
-        assert result.replaced is True
-        assert result.reply == SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR
-
-    def test_resolve_guard_reply_asks_identifiers_when_no_evidence(self) -> None:
-        reply = resolve_order_tracking_guard_reply(state=None, history=[])
-        assert reply == T.track_order_need_identifiers()
+        assert result.route_action == ""
+        assert result.requires_grounded_compose is False
+        assert result.reply != SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR

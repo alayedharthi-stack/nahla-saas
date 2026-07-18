@@ -596,10 +596,6 @@ def no_orders(**_: Any) -> str:
     return "لم أجد أي طلبات مسجّلة لرقمك."
 
 
-def track_order_need_identifiers(**_: Any) -> str:
-    return "أرسل رقم الطلب لو سمحت، وأتحقق لك من حالته."
-
-
 def track_order_need_identifiers_emergency_fallback(**_: Any) -> str:
     # Emergency fallback only — short factual clarification, no lookup implication.
     return "أحتاج رقم الطلب للتحقق من حالته."

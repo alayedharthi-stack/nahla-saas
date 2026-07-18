@@ -152,6 +152,8 @@ def merge_persona_compose_into_extra_metadata(
         "conditional_coupon_guard_failed_reason",
         "general_offer_discovery_compose_active",
         "product_sale_offer_compose_active",
+        "track_order_need_identifiers_compose_active",
+        "track_order_need_identifiers",
         "facts_snapshot_id",
     ):
         if event_meta.get(key) is not None:

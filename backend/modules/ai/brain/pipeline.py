@@ -3716,8 +3716,37 @@ class MerchantBrain:
                 state=new_state,
                 history=history,
             )
+            if (
+                _setg.requires_grounded_compose
+                and _setg.route_action == "track_order_need_identifiers"
+            ):
+                if (
+                    result.data.get("track_order_need_identifiers_compose_active")
+                    and result.data.get("llm_candidate_present")
+                ):
+                    from modules.ai.brain.compose import templates as _tracking_templates  # noqa: PLC0415
+                    from modules.ai.brain.compose.track_order_need_identifiers_compose import (  # noqa: PLC0415
+                        record_fallback_metadata_on_data as _record_tracking_fallback_metadata,
+                    )
+
+                    _record_tracking_fallback_metadata(
+                        result.data,
+                        reason="staff_escalation_truth_guard_false_claim",
+                        transformed_by_guard=True,
+                    )
+                    reply = (
+                        _tracking_templates
+                        .track_order_need_identifiers_emergency_fallback()
+                    )
+                else:
+                    # The guard owns routing/evidence, not wording. If this
+                    # anomalous branch did not come from the single tracking
+                    # compose attempt, fail closed instead of adding a second
+                    # model call or deterministic conversational substitute.
+                    reply = ""
             if _setg.replaced:
-                reply = _setg.reply
+                if not _setg.requires_grounded_compose:
+                    reply = _setg.reply
                 _guard_replaced["staff_escalation_truth_guard"] = True
             if _setg.staff_escalation_claim_blocked:
                 result.data["staff_escalation_claim_blocked"] = True

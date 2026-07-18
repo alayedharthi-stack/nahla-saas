@@ -10228,8 +10228,36 @@ async def _handle_merchant_message(
                     conversation_id=getattr(convo, "id", None),
                     state=_setg_bs,
                 )
+                if (
+                    _setg_result.requires_grounded_compose
+                    and _setg_result.route_action == "track_order_need_identifiers"
+                ):
+                    if (
+                        isinstance(_brain_persona_compose_event, dict)
+                        and _brain_persona_compose_event.get(
+                            "track_order_need_identifiers_compose_active"
+                        )
+                        and _brain_persona_compose_event.get("llm_candidate_present")
+                    ):
+                        from modules.ai.brain.compose import templates as _tracking_templates  # noqa: PLC0415
+                        from modules.ai.brain.compose.track_order_need_identifiers_compose import (  # noqa: PLC0415
+                            record_fallback_metadata_on_data as _record_tracking_fallback_metadata,
+                        )
+
+                        _record_tracking_fallback_metadata(
+                            _brain_persona_compose_event,
+                            reason="staff_escalation_truth_guard_false_claim",
+                            transformed_by_guard=True,
+                        )
+                        reply = (
+                            _tracking_templates
+                            .track_order_need_identifiers_emergency_fallback()
+                        )
+                    else:
+                        reply = ""
                 if _setg_result.replaced:
-                    reply = _setg_result.reply
+                    if not _setg_result.requires_grounded_compose:
+                        reply = _setg_result.reply
                 try:
                     from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
                         detect_input_types,

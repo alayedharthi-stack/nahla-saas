@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
+from core.outbound_sanitizer import contains_handoff_promise
+
 from ..decision.actions import ACTION_LLM_REPLY
 from ..types import BrainContext, Decision
 from . import templates as T
@@ -20,6 +22,15 @@ FORBIDDEN_INVENTION_MARKERS = (
     "تم تأكيد الطلب",
     "جاري المعالجة",
     "تم التوصيل",
+    "تم تحويلك",
+    "بيتواصلون معك",
+    "سيتواصلون معك",
+)
+
+FALSE_ESCALATION_MARKERS = (
+    "تم تحويلك",
+    "بيتواصلون معك",
+    "سيتواصلون معك",
 )
 
 
@@ -118,19 +129,32 @@ def record_llm_compose_metadata(result: Any, *, llm_candidate: str) -> None:
     data["fallback_action_type"] = ""
 
 
-def record_fallback_metadata(result: Any, *, reason: str) -> None:
-    data = getattr(result, "data", None)
+def record_fallback_metadata_on_data(
+    data: Any,
+    *,
+    reason: str,
+    transformed_by_guard: bool = False,
+) -> None:
     if not isinstance(data, dict):
         return
     data["track_order_need_identifiers_compose_active"] = True
     data["compose_source"] = "fallback_deterministic"
     data["response_mode"] = "template"
     data["llm_candidate_present"] = True
-    data["final_text_transformed"] = False
-    data["final_transform_reasons"] = []
+    data["final_text_transformed"] = bool(transformed_by_guard)
+    data["final_transform_reasons"] = (
+        ["staff_escalation_truth_guard"] if transformed_by_guard else []
+    )
     data["final_customer_text_source"] = "fallback_deterministic"
     data["fallback_reason"] = str(reason or "compose_failed")
     data["fallback_action_type"] = "track_order_need_identifiers"
+
+
+def record_fallback_metadata(result: Any, *, reason: str) -> None:
+    record_fallback_metadata_on_data(
+        getattr(result, "data", None),
+        reason=reason,
+    )
 
 
 def is_usable_llm_reply(text: Optional[str]) -> bool:
@@ -141,9 +165,29 @@ def is_usable_llm_reply(text: Optional[str]) -> bool:
         return False
     if claims_invented_order_facts(reply):
         return False
+    if claims_false_escalation(reply):
+        return False
     return True
+
+
+def unusable_llm_reply_reason(text: Optional[str]) -> str:
+    reply = str(text or "").strip()
+    if not reply:
+        return "compose_failed_or_empty"
+    if claims_false_escalation(reply):
+        return "compose_false_escalation_claim"
+    if claims_invented_order_facts(reply):
+        return "compose_unsupported_operational_claim"
+    return "compose_unusable"
 
 
 def claims_invented_order_facts(text: str) -> bool:
     lowered = str(text or "")
     return any(marker in lowered for marker in FORBIDDEN_INVENTION_MARKERS)
+
+
+def claims_false_escalation(text: str) -> bool:
+    reply = str(text or "")
+    return contains_handoff_promise(reply) or any(
+        marker in reply for marker in FALSE_ESCALATION_MARKERS
+    )

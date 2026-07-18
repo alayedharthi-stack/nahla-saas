@@ -168,7 +168,6 @@ class TestTrackOrderNeedIdentifiersCompose:
             "lookup_started"
         ) is False
         assert reply == llm_reply
-        assert reply != T.track_order_need_identifiers()
         assert reply != T.track_order_need_identifiers_emergency_fallback()
 
     def test_english_input_allows_natural_llm_wording(self, db, tenant_ctx) -> None:
@@ -203,7 +202,24 @@ class TestTrackOrderNeedIdentifiersCompose:
         assert result.data.get("fallback_action_type") == "track_order_need_identifiers"
         assert result.data.get("final_customer_text_source") == "fallback_deterministic"
         assert reply == T.track_order_need_identifiers_emergency_fallback()
-        assert reply != T.track_order_need_identifiers()
+
+    def test_false_escalation_candidate_fails_closed_after_one_compose(
+        self, db, tenant_ctx,
+    ) -> None:
+        _decision, result, reply, _ctx = asyncio.run(
+            _compose_need_identifiers(
+                db,
+                tenant_ctx,
+                "وين طلبي؟",
+                llm_reply="تم تحويلك لفريق الدعم وبيتواصلون معك.",
+            )
+        )
+        assert result.data.get("compose_source") == "fallback_deterministic"
+        assert result.data.get("fallback_reason") == "compose_false_escalation_claim"
+        assert result.data.get("fallback_action_type") == "track_order_need_identifiers"
+        assert result.data.get("llm_candidate_present") is True
+        assert reply == T.track_order_need_identifiers_emergency_fallback()
+        assert "تم تحويلك" not in reply
 
     def test_sanitizer_does_not_replace_identifier_clarification_llm_reply(self) -> None:
         llm_reply = "أرسل رقم الطلب لو سمحت حتى أتحقق لك."
@@ -303,6 +319,79 @@ class TestTrackOrderNeedIdentifiersWebhookProvenance:
         assert "chat_dedup_substitution" in list(
             saved_metadata.get("final_transform_reasons") or []
         )
+
+    @pytest.mark.parametrize("tenant_id", [77, 88])
+    def test_webhook_guard_routes_false_claim_to_existing_compose_fallback(
+        self,
+        tenant_id: int,
+    ) -> None:
+        pytest.importorskip("observability.event_logger")
+
+        import models as _models  # noqa: PLC0415
+
+        sys.modules.setdefault("database.models", _models)
+
+        from routers.whatsapp_webhook import _handle_merchant_message  # noqa: PLC0415
+
+        convo = _merchant_handler_convo(tenant_id=tenant_id)
+        db = _merchant_handler_db()
+        saved_metadata: dict = {}
+
+        def _capture_save(*_args, **kwargs):
+            meta = kwargs.get("extra_metadata")
+            if isinstance(meta, dict):
+                saved_metadata.update(meta)
+
+        false_claim = "تم تحويلك لفريق الدعم وبيتواصلون معك."
+        brain_return = {
+            "reply": false_claim,
+            "buttons": [],
+            "handoff": False,
+            "chosen_path": "track_order_need_order_number",
+            "track_order_need_identifiers_compose_active": True,
+            "compose_source": "llm",
+            "response_mode": "llm",
+            "llm_candidate_present": True,
+            "final_text_transformed": False,
+            "final_transform_reasons": [],
+            "final_customer_text_source": "llm",
+            "track_order_need_identifiers": {
+                "tracking_intent_recognized": True,
+                "lookup_started": False,
+                "requested_identifier_types": ["order_number"],
+            },
+        }
+
+        with _merchant_handler_patch_ctx(convo=convo) as (mock_brain, _state):
+            with patch(
+                "routers.whatsapp_webhook.StateManager.save_message",
+                side_effect=_capture_save,
+            ):
+                mock_brain.return_value.process = AsyncMock(return_value=dict(brain_return))
+                _run(
+                    _handle_merchant_message(
+                        phone_id="PH1",
+                        to=_PHONE,
+                        text="وين طلبي؟",
+                        tenant_id=tenant_id,
+                        db=db,
+                    )
+                )
+
+        assert saved_metadata.get("compose_source") == "fallback_deterministic"
+        assert saved_metadata.get("fallback_reason") == (
+            "staff_escalation_truth_guard_false_claim"
+        )
+        assert saved_metadata.get("fallback_action_type") == (
+            "track_order_need_identifiers"
+        )
+        assert saved_metadata.get("final_customer_text_source") == (
+            "fallback_deterministic"
+        )
+        assert saved_metadata.get("final_text_transformed") is True
+        assert saved_metadata.get("track_order_need_identifiers", {}).get(
+            "lookup_started"
+        ) is False
 
     def test_compose_uses_single_llm_call_without_trusted_context_load(
         self, db, tenant_ctx,

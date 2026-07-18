@@ -29,6 +29,11 @@ COMPOSE_BOUNDARY_FILES: Tuple[str, ...] = (
     "backend/modules/ai/brain/compose/templates.py",
 )
 
+TRACKING_CLARIFICATION_GUARD_FILES: Tuple[str, ...] = (
+    "backend/modules/ai/brain/commerce/order_tracking_intent_guard.py",
+    "backend/modules/ai/brain/postprocess/staff_escalation_truth_guard.py",
+)
+
 APPROVED_COMPOSE_SOURCES: FrozenSet[str] = frozenset(
     {
         "llm",
@@ -532,6 +537,106 @@ def scan_compose_source_snippet(
     return findings
 
 
+def _call_name(node: ast.AST) -> str:
+    if not isinstance(node, ast.Call):
+        return ""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _scan_tracking_clarification_guard_source(
+    source: str,
+    *,
+    file_rel: str,
+) -> List[ComposeViolationFinding]:
+    """Detect prose ownership leaks in the tracking clarification guard boundary.
+
+    This intentionally scopes to the two routing/guard modules and only flags:
+    direct calls to the retired prose owner, or a tracking guard result whose
+    ``reply`` is non-empty fixed Arabic/call-built text. Other legacy guard
+    families remain outside this narrow ownership rule.
+    """
+    tree = ast.parse(source, filename=file_rel)
+    findings: List[ComposeViolationFinding] = []
+    forbidden_calls = {
+        "track_order_need_identifiers",
+        "resolve_order_tracking_guard_reply",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _call_name(node) in forbidden_calls:
+            findings.append(
+                ComposeViolationFinding(
+                    kind=ViolationKind.DIRECT_TEMPLATE_RETURN,
+                    path="tracking_clarification_guard_boundary",
+                    file=file_rel,
+                    line=node.lineno,
+                    detail=f"guard calls customer prose owner {_call_name(node)}",
+                    template_call=_call_name(node),
+                )
+            )
+            continue
+        if not (
+            isinstance(node, ast.Call)
+            and _call_name(node) == "StaffEscalationTruthGuardResult"
+        ):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        action = keywords.get("action")
+        reply = keywords.get("reply")
+        if not (
+            isinstance(action, ast.Constant)
+            and isinstance(action.value, str)
+            and (
+                "order_tracking" in action.value
+                or "track_order" in action.value
+            )
+        ):
+            continue
+        fixed_reply = (
+            isinstance(reply, ast.Constant)
+            and isinstance(reply.value, str)
+            and bool(reply.value.strip())
+            and _is_arabic_string_constant(reply)
+        )
+        built_reply = isinstance(reply, ast.Call)
+        if fixed_reply or built_reply:
+            findings.append(
+                ComposeViolationFinding(
+                    kind=(
+                        ViolationKind.FIXED_STRING_RETURN
+                        if fixed_reply
+                        else ViolationKind.BUILDER_CALL_RETURN
+                    ),
+                    path="tracking_clarification_guard_boundary",
+                    file=file_rel,
+                    line=node.lineno,
+                    detail="tracking guard result authors customer-facing reply",
+                    template_call=_call_name(reply) if built_reply else "",
+                )
+            )
+    return findings
+
+
+def scan_tracking_clarification_guard_violations(
+    files: Optional[Sequence[str]] = None,
+) -> List[ComposeViolationFinding]:
+    findings: List[ComposeViolationFinding] = []
+    for rel in files or TRACKING_CLARIFICATION_GUARD_FILES:
+        path = REPO_ROOT / rel
+        if path.exists():
+            findings.extend(
+                _scan_tracking_clarification_guard_source(
+                    path.read_text(encoding="utf-8"),
+                    file_rel=rel.replace("\\", "/"),
+                )
+            )
+    return findings
+
+
 def scan_compose_boundary_violations(
   files: Optional[Sequence[str]] = None,
 ) -> List[ComposeViolationFinding]:
@@ -553,6 +658,8 @@ def scan_compose_boundary_violations(
                 findings.extend(
                     _scan_block_for_findings(node.body, file_rel=file_rel)
                 )
+    if files is None:
+        findings.extend(scan_tracking_clarification_guard_violations())
     return findings
 
 
