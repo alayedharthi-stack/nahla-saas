@@ -70,6 +70,7 @@ jobs:
       - name: Conditional coupon consumer verify operator tests
         run: |
           python -m pytest \
+            backend/tests/test_deployment_revision_attestation.py \
             backend/tests/test_customer_conditional_coupon_consumer_verify.py \
             -q --maxfail=1
 
