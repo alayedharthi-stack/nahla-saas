@@ -426,6 +426,76 @@ def test_scrub_integration_config_strips_tokens() -> None:
     assert result["store_id"] == "123"
 
 
+def test_scrub_integration_config_strips_provider_email_keys() -> None:
+    pii_email = "owner@merchant.example"
+    config = {
+        "salla_owner_email": pii_email,
+        "store_id": "123",
+        "nested": {"contact_email": "nested@merchant.example"},
+        "contacts": [{"ownerEmail": "camel@merchant.example"}],
+    }
+    result = scrub_integration_config(config)
+    serialized = json.dumps(result)
+    assert pii_email not in serialized
+    assert "nested@merchant.example" not in serialized
+    assert "camel@merchant.example" not in serialized
+    assert result["salla_owner_email"] == ""
+    assert result["store_id"] == "123"
+    assert result["nested"]["contact_email"] == ""
+    assert result["contacts"][0]["ownerEmail"] == ""
+
+
+def test_scrub_integration_config_rejects_unknown_forbidden_keys() -> None:
+    with pytest.raises(ValueError, match="integration_config_unhandled_forbidden_key"):
+        scrub_integration_config({"customer_id": "cust-123", "store_id": "123"})
+
+
+def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
+    stale_payload = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v4"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-version-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
+
+
+def test_dry_run_digest_schema_version_is_v5() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v5"
+
+
 def test_forbidden_json_customer_id_fails_closed() -> None:
     violations = scan_for_unhandled_forbidden_keys({"customer_id": 42})
     assert violations == ["customer_id"]
