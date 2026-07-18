@@ -25,13 +25,19 @@ shadow on `nahla-saas` during the observation window.
 |-----------|-------------------|
 | Project name | `desirable-growth` |
 | Environment name | `staging` |
-| Project ID | Contract-pinned in `staging_acceptance_config_consolidation_contract.py` — discover via `railway status --json` and bump via PR |
-| Environment ID | Contract-pinned (same discovery) |
-| Canonical service | `nahla-saas` |
-| Legacy source service | `nahla-saas-staging` |
+| Project ID | `f0090862-0a40-4293-bd5d-e94df58762b5` |
+| Environment ID | `b3d51523-7544-4d5c-b510-631b334cd8a7` |
+| Canonical service | `nahla-saas` — `686b36c5-a926-4e58-912a-5e9d13fbc2e7` |
+| Legacy source service | `nahla-saas-staging` — `d0282eea-05fe-49bf-bd58-e663e8585516` |
 
 **Production rejection:** any `production` / `prod` / `live` marker in environment or
-forbidden service names fails closed with exit code 2.
+forbidden service names fails closed with exit code 2. The known production
+environment ID `ede962ce-3042-4dae-94de-623837e83ed9` is explicitly denied.
+
+These non-secret resource identifiers were verified on 2026-07-18 from authenticated,
+read-only `railway list --json` inventory. Both app service IDs are members of the
+staging environment. The canonical `nahla-saas` service also has a production
+instance, so environment-ID matching remains mandatory for every operation.
 
 ## Migratable variable keys (closed allowlist)
 
