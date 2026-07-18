@@ -175,6 +175,15 @@ passed on deploy `599b4297`.
 
 ---
 
+## Staging evidence archive (sign-off bundles)
+
+Sanitized operator JSON from time-boxed shadow sign-off windows is archived under
+`docs/engineering/staging-evidence/` as closed bundles (`coupon_shadow_staging_signoff_v1`).
+Bundles contain operator attestations, sanitized Layer 0 fact/telemetry aggregates, and
+manual checklist encoder output only — no credentials, customer prose, or PII.
+
+---
+
 ## Future shadow-only observation window (separate step)
 
 This harness **prepares data only**. Shadow observation is a **later, separately

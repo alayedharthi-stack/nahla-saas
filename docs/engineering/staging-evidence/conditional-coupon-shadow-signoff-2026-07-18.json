@@ -1,0 +1,84 @@
+{
+  "archive_schema_version": "coupon_shadow_staging_signoff_v1",
+  "archived_at_utc": "2026-07-18T03:32:12.920617+00:00",
+  "artifact_kind": "staging_shadow_signoff_bundle",
+  "manual_shadow_checklist": {
+    "artifact_kind": "manual_shadow_checklist",
+    "canary_or_compose_forbidden": true,
+    "checklist_gates": {
+      "a1_proof_gate_attested": true,
+      "budget_not_exceeded": true,
+      "budget_within_target_cap": true,
+      "checklist_item_attested:a1_capability_validated_attested": true,
+      "checklist_item_attested:ci_bridge_consumer_tests_attested": true,
+      "checklist_item_attested:ci_layer0_unit_tests_attested": true,
+      "checklist_item_attested:ci_pg_e2e_a1_chain_tests_attested": true,
+      "checklist_item_attested:deployment_shadow_flag_default_off_attested": true,
+      "layer0_fact_sanitizer_ok": true,
+      "layer0_fact_schema_valid": true,
+      "manual_checklist_complete": true,
+      "order_count_query_within_turn_budget": true,
+      "shadow_flag_default_off_observed": true,
+      "shadow_loader_not_skipped_for_gate": true,
+      "subject_bridge_outcome_valid": true,
+      "usage_evidence_query_within_turn_budget": true
+    },
+    "independent_verification": "none",
+    "missing_checklist_items": [],
+    "outcome": "manual_shadow_checklist_complete",
+    "readiness_blockers": [],
+    "readiness_schema_version": "coupon_shadow_manual_checklist_v2",
+    "ready_for_manual_shadow_review": true
+  },
+  "observation_sanitized": {
+    "fact_record": {
+      "allow_min_orders_condition_claim": true,
+      "bundle_namespace": "customer_conditional_coupon",
+      "closed_reason_code": null,
+      "completed_orders_count": 2,
+      "conditional_coupon_evaluation_state": "condition_satisfied",
+      "customer_scope": "nahla_internal_customer",
+      "domain": "customer_conditional_coupon",
+      "fact_schema_version": "v8_layer0",
+      "identity_status": "resolved",
+      "min_orders_condition_state": "satisfied",
+      "min_orders_for_eligibility": 2,
+      "order_history_completeness": "verified",
+      "order_history_completeness_source": "order_customer_fk_a1_authoritative",
+      "orders_shortfall": null,
+      "per_customer_usage_policy_state": "verified",
+      "prior_redemption_evidence_state": "not_applicable"
+    },
+    "subject_bridge_outcome": "resolved",
+    "telemetry": {
+      "budget_exceeded": false,
+      "conditional_target_count": 1,
+      "forward_sync_health": "healthy",
+      "gate_skipped_reason": null,
+      "loader_duration_ms": 28,
+      "order_count_query_count": 1,
+      "order_history_completeness": "verified",
+      "source_contract_version": "nahla_internal_order_v1",
+      "usage_evidence_query_count": 1
+    }
+  },
+  "operator_attestations": {
+    "a1_alembic_dual_head": [
+      "0088",
+      "0089"
+    ],
+    "a1_capability_state": "validated",
+    "a1_validation_revision": "0088",
+    "ci_run_url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/29625974239",
+    "deployment_id_shadow_window": "2d1397c3-d0a3-4ed7-8b7f-68b3d4481c4e",
+    "deployment_id_target": "2fa7a620-a539-4bbd-9cf6-66a69f5bbc21",
+    "deployment_id_teardown": "9cf7d1c3-290c-4745-a53b-ea8299bdce15",
+    "fixture_namespace": "cc_shadow_g4_generic_v1",
+    "fixture_tenant_id": 1,
+    "no_compose_or_outbound_provider": true,
+    "pr_pin_bump": "https://github.com/alayedharthi-stack/nahla-saas/pull/626",
+    "pre_window_default_off_observed": true,
+    "target_runtime_revision": "8ea344fc9d786c19d9dbaa00ec6d6bc98e683f1e",
+    "verifier_revision": "06e80482cfc22d069978dfef80e8420aa13a402d"
+  }
+}
