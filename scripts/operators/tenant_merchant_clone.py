@@ -341,6 +341,41 @@ def compute_dry_run_digest(digest_payload: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def build_dry_run_digest_binding_payload(
+    *,
+    profile: str,
+    identity_mode_value: str,
+    source_database_identity_digest: str,
+    target_database_identity_digest: str,
+    source_tenant_id: int,
+    target_tenant_id: int,
+    target_shell_state: str,
+    table_counts: Mapping[str, int],
+    source_checksums: Mapping[str, str],
+    dependency_order: Sequence[str],
+    target_denied_domain_counts: Mapping[str, int],
+    source_alembic_heads: Sequence[str],
+    target_alembic_heads: Sequence[str],
+) -> dict[str, Any]:
+    """Apply-binding digest payload — excludes observational source-only telemetry."""
+    return {
+        "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+        "profile": profile,
+        "identity_mode": identity_mode_value,
+        "source_database_identity_digest": source_database_identity_digest,
+        "target_database_identity_digest": target_database_identity_digest,
+        "source_tenant_id": source_tenant_id,
+        "target_tenant_id": target_tenant_id,
+        "target_shell_state": target_shell_state,
+        "table_counts": dict(table_counts),
+        "source_checksums": dict(source_checksums),
+        "dependency_order": list(dependency_order),
+        "target_denied_domain_counts": dict(target_denied_domain_counts),
+        "source_alembic_heads": list(source_alembic_heads),
+        "target_alembic_heads": list(target_alembic_heads),
+    }
+
+
 def _database_identity_payload(conn: Connection) -> dict[str, str]:
     row = conn.execute(
         text(
@@ -872,24 +907,21 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 request.target_tenant_id,
             )
 
-            digest_payload = {
-                "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
-                "profile": request.profile,
-                "identity_mode": identity_mode(request),
-                "source_database_identity_digest": source_database_digest,
-                "target_database_identity_digest": target_database_digest,
-                "source_tenant_id": request.source_tenant_id,
-                "target_tenant_id": request.target_tenant_id,
-                "target_shell_state": target_shell_state,
-                "table_counts": table_counts,
-                "source_checksums": source_checksums,
-                "dependency_order": dependency_order,
-                "excluded_operational_source_counts": excluded_operational_counts,
-                "denied_domain_source_counts": denied_proof,
-                "target_denied_domain_counts": target_denied_proof,
-                "source_alembic_heads": source_alembic_heads,
-                "target_alembic_heads": target_alembic_heads,
-            }
+            digest_payload = build_dry_run_digest_binding_payload(
+                profile=request.profile,
+                identity_mode_value=identity_mode(request),
+                source_database_identity_digest=source_database_digest,
+                target_database_identity_digest=target_database_digest,
+                source_tenant_id=request.source_tenant_id,
+                target_tenant_id=request.target_tenant_id,
+                target_shell_state=target_shell_state,
+                table_counts=table_counts,
+                source_checksums=source_checksums,
+                dependency_order=dependency_order,
+                target_denied_domain_counts=target_denied_proof,
+                source_alembic_heads=source_alembic_heads,
+                target_alembic_heads=target_alembic_heads,
+            )
             digest = compute_dry_run_digest(digest_payload)
 
             return {

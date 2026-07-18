@@ -98,25 +98,26 @@ def _topology_digest_payload(
     profile: str = CLONE_PROFILE_SALLA_MINIMAL,
     source_heads: list[str],
     target_heads: list[str],
+    table_counts: dict[str, int] | None = None,
+    source_checksums: dict[str, str] | None = None,
+    dependency_order: list[str] | None = None,
+    target_denied_domain_counts: dict[str, int] | None = None,
 ) -> dict[str, object]:
-    return {
-        "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
-        "profile": profile,
-        "identity_mode": PRESERVE_TENANT_IDENTITY_MODE,
-        "source_database_identity_digest": "sha256:source",
-        "target_database_identity_digest": "sha256:target",
-        "source_tenant_id": 48,
-        "target_tenant_id": 48,
-        "target_shell_state": "bootstrap_required",
-        "table_counts": {},
-        "source_checksums": {},
-        "dependency_order": [],
-        "excluded_operational_source_counts": {},
-        "denied_domain_source_counts": {},
-        "target_denied_domain_counts": {},
-        "source_alembic_heads": source_heads,
-        "target_alembic_heads": target_heads,
-    }
+    return clone_op.build_dry_run_digest_binding_payload(
+        profile=profile,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts=table_counts or {},
+        source_checksums=source_checksums or {},
+        dependency_order=dependency_order or [],
+        target_denied_domain_counts=target_denied_domain_counts or {},
+        source_alembic_heads=source_heads,
+        target_alembic_heads=target_heads,
+    )
 
 
 def test_clone_profile_missing_rejected() -> None:
@@ -492,8 +493,123 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v6() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v6"
+def test_dry_run_digest_schema_version_is_v7() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v7"
+
+
+def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() -> None:
+    binding = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+        table_counts={"products": 12},
+    )
+    assert "excluded_operational_source_counts" not in binding
+    assert "denied_domain_source_counts" not in binding
+    digest = clone_op.compute_dry_run_digest(binding)
+    # v6 bound observational telemetry; identical copy state must keep the same v7 digest
+    # even when operator-report counts drift between dry-run and apply.
+    report_a = {
+        "excluded_operational_source_counts": {
+            "coupons": 4413,
+            "whatsapp_templates": 88,
+        },
+        "denied_domain_source_counts": {
+            "integrity_events": 120,
+            "store_sync_jobs": 7,
+            "system_events": 340,
+        },
+    }
+    report_b = {
+        "excluded_operational_source_counts": {
+            "coupons": 9999,
+            "whatsapp_templates": 0,
+        },
+        "denied_domain_source_counts": {
+            "integrity_events": 999,
+            "store_sync_jobs": 999,
+            "system_events": 999,
+        },
+    }
+    assert digest == clone_op.compute_dry_run_digest(binding)
+    assert report_a != report_b
+    # v6-style payloads would have diverged; v7 binding ignores report-only telemetry.
+    v6_style_a = {**binding, **report_a}
+    v6_style_b = {**binding, **report_b}
+    assert clone_op.compute_dry_run_digest(v6_style_a) != clone_op.compute_dry_run_digest(
+        v6_style_b
+    )
+    assert clone_op.compute_dry_run_digest(v6_style_a) != digest
+
+
+def test_dry_run_digest_changes_when_copy_affecting_table_counts_change() -> None:
+    payload_a = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+        table_counts={"products": 10, "integrations": 1},
+    )
+    payload_b = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+        table_counts={"products": 11, "integrations": 1},
+    )
+    assert clone_op.compute_dry_run_digest(payload_a) != clone_op.compute_dry_run_digest(
+        payload_b
+    )
+
+
+def test_stale_v6_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v6"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v6-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
 
 
 def test_integration_transform_scrubs_salla_owner_email() -> None:
