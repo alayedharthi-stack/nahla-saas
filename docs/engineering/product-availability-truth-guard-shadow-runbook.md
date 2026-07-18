@@ -32,6 +32,13 @@ python -m scripts.operators.product_availability_truth_guard_shadow_observation 
 # Synthetic matrix (process-scoped shadow; sets env only inside probe)
 python -m scripts.operators.product_availability_truth_guard_shadow_observation matrix
 
+# Closed hash manifest for the exact target checkout
+python -m scripts.operators.product_availability_truth_guard_shadow_observation artifact-manifest
+
+# Runtime-bound matrix (must run inside deployed /app with persistent shadow)
+python -m scripts.operators.product_availability_truth_guard_shadow_observation \
+  runtime-matrix <PINNED_SHA> <EXPECTED_MANIFEST_DIGEST>
+
 # Full baseline (default-off + matrix + 48h window metadata)
 python -m scripts.operators.product_availability_truth_guard_shadow_observation full-probe <PINNED_SHA>
 
@@ -49,12 +56,25 @@ railway variables --environment staging \
 
 Record deployment ID and pinned SHA in the evidence bundle.
 
-## Recurring poll (parent agent loop)
+## Recurring runtime-bound poll (parent agent loop)
 
 ```bash
-python -m scripts.operators.product_availability_truth_guard_shadow_observation matrix \
-  | tee -a docs/engineering/staging-evidence/product-availability-shadow-poll.jsonl
+# 1. From a clean checkout of the exact pinned target:
+EXPECTED_MANIFEST_DIGEST="$(
+  python -m scripts.operators.product_availability_truth_guard_shadow_observation \
+    artifact-manifest |
+  python -c 'import json,sys; print(json.load(sys.stdin)["manifest_digest"])'
+)"
+
+# 2. Execute the matrix inside the active Railway /app image:
+railway ssh --environment staging --service nahla-saas \
+  python -m scripts.operators.product_availability_truth_guard_shadow_observation \
+  runtime-matrix <PINNED_SHA> "$EXPECTED_MANIFEST_DIGEST"
 ```
+
+Archive only the sanitized runtime report after independently binding it to the
+active Railway deployment ID and image digest. A local `matrix` result is useful
+synthetic contract evidence, but **is not staging runtime evidence**.
 
 **Evidence accumulation:** `docs/engineering/staging-evidence/product-availability-shadow-*.json`
 

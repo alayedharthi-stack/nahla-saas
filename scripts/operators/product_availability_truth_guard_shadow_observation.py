@@ -5,8 +5,10 @@ in operator JSON. Safe for CI and recurring staging polling.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -19,9 +21,12 @@ from scripts.operators.deployment_revision_attestation_contract import (
 )
 from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (
     CODE_COMMAND_INVALID,
+    CODE_ARTIFACT_MANIFEST_MISMATCH,
     CODE_ENFORCE_MODE_ENABLED,
     CODE_PROBE_FAILED,
+    CODE_RUNTIME_EXECUTION_REQUIRED,
     CODE_SHADOW_MODE_NOT_ENABLED,
+    DEPLOYMENT_APP_ROOT,
     ENFORCE_MODE_VALUE,
     FIXTURE_TENANT_A,
     FIXTURE_TENANT_B,
@@ -31,14 +36,19 @@ from scripts.operators.product_availability_truth_guard_shadow_observation_contr
     MAX_ACCEPTABLE_OUTBOUND_PROVIDER_CALLS,
     OBSERVATION_WINDOW_HOURS,
     PHASE_DEFAULT_OFF,
+    PHASE_ARTIFACT_MANIFEST,
+    PHASE_RUNTIME_MATRIX,
     PHASE_RUNTIME_REVISION_ATTESTATION,
     PHASE_SUMMARY,
     PHASE_SYNTHETIC_MATRIX,
     PHASE_TEARDOWN,
     REPORT_SCHEMA_VERSION,
+    RUNTIME_ARTIFACT_PATHS,
     SHADOW_MODE_ENV,
     SHADOW_MODE_VALUE,
 )
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def resolve_app_root(artifact_root: Path | None = None) -> Path:
@@ -83,6 +93,38 @@ def _report(phase: str, **payload: Any) -> dict[str, Any]:
         "report_schema_version": REPORT_SCHEMA_VERSION,
         **payload,
     }
+
+
+def build_runtime_artifact_manifest(*, app_root: Path | None = None) -> dict[str, Any]:
+    """Hash the closed ARCH-001 runtime surface without trusting env metadata."""
+    root = resolve_app_root(app_root)
+    files: dict[str, dict[str, str]] = {}
+    digest_lines: list[str] = []
+    for relative_path in RUNTIME_ARTIFACT_PATHS:
+        path = (root / relative_path).resolve()
+        if not path.is_file() or root not in path.parents:
+            raise ValueError("runtime_artifact_missing")
+        raw = path.read_bytes()
+        byte_sha256 = hashlib.sha256(raw).hexdigest()
+        canonical_sha256 = hashlib.sha256(
+            raw.replace(b"\r\n", b"\n")
+        ).hexdigest()
+        files[relative_path] = {
+            "path": str(path),
+            "byte_sha256": byte_sha256,
+            "canonical_sha256": canonical_sha256,
+        }
+        digest_lines.append(f"{relative_path}\0{canonical_sha256}\n")
+    manifest_digest = hashlib.sha256(
+        "".join(digest_lines).encode("utf-8")
+    ).hexdigest()
+    return _report(
+        PHASE_ARTIFACT_MANIFEST,
+        ok=True,
+        target_app_root=str(root),
+        manifest_digest=manifest_digest,
+        files=files,
+    )
 
 
 def _sku(
@@ -322,6 +364,55 @@ def execute_synthetic_matrix_probe(*, app_root: Path | None = None) -> dict[str,
         )
 
 
+def execute_runtime_matrix_probe(
+    *,
+    pinned_target_revision: str,
+    expected_manifest_digest: str,
+    app_root: Path | None = None,
+    required_runtime_root: Path = Path(DEPLOYMENT_APP_ROOT),
+) -> dict[str, Any]:
+    """Run the matrix only from the deployed app whose closed files match."""
+    root = resolve_app_root(app_root)
+    required_root = required_runtime_root.resolve()
+    if root != required_root:
+        return _report(
+            PHASE_RUNTIME_MATRIX,
+            ok=False,
+            code=CODE_RUNTIME_EXECUTION_REQUIRED,
+            target_app_root=str(root),
+            required_runtime_root=str(required_root),
+        )
+
+    try:
+        pin = normalize_revision_token(pinned_target_revision)
+    except ValueError:
+        pin = None
+    expected_digest = str(expected_manifest_digest or "").strip().lower()
+    if pin is None or not _SHA256_RE.fullmatch(expected_digest):
+        return _report(PHASE_RUNTIME_MATRIX, ok=False, code=CODE_COMMAND_INVALID)
+
+    manifest = build_runtime_artifact_manifest(app_root=root)
+    if manifest["manifest_digest"] != expected_digest:
+        return _report(
+            PHASE_RUNTIME_MATRIX,
+            ok=False,
+            code=CODE_ARTIFACT_MANIFEST_MISMATCH,
+            pinned_target_revision=pin,
+            expected_manifest_digest=expected_digest,
+            artifact_manifest=manifest,
+        )
+
+    matrix = execute_synthetic_matrix_probe(app_root=root)
+    return _report(
+        PHASE_RUNTIME_MATRIX,
+        ok=bool(matrix.get("ok")),
+        pinned_target_revision=pin,
+        execution_mode="in_container",
+        artifact_manifest=manifest,
+        matrix=matrix,
+    )
+
+
 def gate_runtime_revision_attestation(
     *,
     pinned_target_revision: str,
@@ -424,6 +515,16 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 os.environ.pop(SHADOW_MODE_ENV, None)
             return 0
+        if arguments == ["artifact-manifest"]:
+            _emit(build_runtime_artifact_manifest())
+            return 0
+        if arguments[:1] == ["runtime-matrix"] and len(arguments) == 3:
+            runtime_report = execute_runtime_matrix_probe(
+                pinned_target_revision=arguments[1],
+                expected_manifest_digest=arguments[2],
+            )
+            _emit(runtime_report)
+            return 0 if runtime_report.get("ok") is True else 1
         if arguments[:1] == ["full-probe"]:
             pin = arguments[1] if len(arguments) > 1 else None
             _emit(

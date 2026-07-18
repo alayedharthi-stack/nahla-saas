@@ -16,6 +16,8 @@ from scripts.operators import (  # noqa: E402
     product_availability_truth_guard_shadow_observation as probe,
 )
 from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (  # noqa: E402
+    CODE_ARTIFACT_MANIFEST_MISMATCH,
+    CODE_RUNTIME_EXECUTION_REQUIRED,
     CODE_SHADOW_MODE_NOT_ENABLED,
     FIXTURE_TENANT_A,
     FIXTURE_TENANT_B,
@@ -74,6 +76,80 @@ def test_synthetic_matrix_covers_required_cases(monkeypatch: pytest.MonkeyPatch)
     }
 
 
+def test_artifact_manifest_covers_closed_runtime_surface() -> None:
+    result = probe.build_runtime_artifact_manifest(app_root=_REPO)
+
+    assert result["ok"] is True
+    assert len(result["manifest_digest"]) == 64
+    assert set(result["files"]) == {
+        "scripts/operators/product_availability_truth_guard_shadow_observation.py",
+        "scripts/operators/product_availability_truth_guard_shadow_observation_contract.py",
+        "backend/modules/ai/brain/postprocess/product_availability_truth_guard.py",
+        "backend/modules/ai/brain/postprocess/product_availability_shadow_telemetry.py",
+        "backend/modules/ai/brain/pipeline.py",
+        "backend/routers/whatsapp_webhook.py",
+    }
+    assert all(len(row["byte_sha256"]) == 64 for row in result["files"].values())
+    assert all(len(row["canonical_sha256"]) == 64 for row in result["files"].values())
+
+
+def test_runtime_matrix_rejects_external_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SHADOW_MODE_ENV, "shadow")
+    manifest = probe.build_runtime_artifact_manifest(app_root=_REPO)
+
+    result = probe.execute_runtime_matrix_probe(
+        pinned_target_revision="a8487b25",
+        expected_manifest_digest=manifest["manifest_digest"],
+        app_root=_REPO,
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == CODE_RUNTIME_EXECUTION_REQUIRED
+
+
+def test_runtime_matrix_rejects_artifact_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SHADOW_MODE_ENV, "shadow")
+
+    result = probe.execute_runtime_matrix_probe(
+        pinned_target_revision="a8487b25",
+        expected_manifest_digest="0" * 64,
+        app_root=_REPO,
+        required_runtime_root=_REPO,
+    )
+
+    assert result["ok"] is False
+    assert result["code"] == CODE_ARTIFACT_MANIFEST_MISMATCH
+    assert result["artifact_manifest"]["target_app_root"] == str(_REPO.resolve())
+
+
+def test_runtime_matrix_attests_and_runs_inside_required_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SHADOW_MODE_ENV, "shadow")
+    manifest = probe.build_runtime_artifact_manifest(app_root=_REPO)
+
+    result = probe.execute_runtime_matrix_probe(
+        pinned_target_revision="a8487b25",
+        expected_manifest_digest=manifest["manifest_digest"],
+        app_root=_REPO,
+        required_runtime_root=_REPO,
+    )
+
+    assert result["ok"] is True
+    assert result["execution_mode"] == "in_container"
+    assert result["artifact_manifest"]["manifest_digest"] == manifest["manifest_digest"]
+    assert result["matrix"]["guards"] == {
+        "additional_llm_calls": 0,
+        "customer_text_changed_count": 0,
+        "duplicate_invocation_count": 0,
+        "outbound_provider_calls": 0,
+    }
+
+
 def test_full_probe_summary_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(SHADOW_MODE_ENV, raising=False)
     summary = probe.execute_full_probe(app_root=_REPO, include_revision_gate=False)
@@ -93,6 +169,28 @@ def test_cli_default_off() -> None:
     assert proc.returncode == 0
     payload = json.loads(proc.stdout.strip())
     assert payload["phase"] == PHASE_DEFAULT_OFF
+
+
+def test_cli_runtime_matrix_fails_closed_outside_deployed_app() -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.operators.product_availability_truth_guard_shadow_observation",
+            "runtime-matrix",
+            "a8487b25",
+            "0" * 64,
+        ],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout.strip())
+    assert payload["ok"] is False
+    assert payload["code"] == CODE_RUNTIME_EXECUTION_REQUIRED
 
 
 def test_shadow_telemetry_schema() -> None:

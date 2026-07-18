@@ -17,6 +17,8 @@ CODE_SHADOW_MODE_NOT_ENABLED = "shadow_mode_not_enabled"
 CODE_ENFORCE_MODE_ENABLED = "enforce_mode_enabled"
 CODE_COMMAND_INVALID = "command_invalid"
 CODE_PROBE_FAILED = "probe_failed"
+CODE_RUNTIME_EXECUTION_REQUIRED = "runtime_execution_required"
+CODE_ARTIFACT_MANIFEST_MISMATCH = "artifact_manifest_mismatch"
 
 # Generic cross-category synthetic fixtures — never merchant-specific.
 FIXTURE_TENANT_A = 91001
@@ -33,12 +35,27 @@ PHASE_SYNTHETIC_MATRIX = "synthetic_matrix"
 PHASE_RUNTIME_REVISION_ATTESTATION = "runtime_revision_attestation"
 PHASE_SUMMARY = "summary"
 PHASE_TEARDOWN = "teardown_flags"
+PHASE_ARTIFACT_MANIFEST = "artifact_manifest"
+PHASE_RUNTIME_MATRIX = "runtime_synthetic_matrix"
+
+# Closed runtime inventory.  The digest binds both the operator and every
+# production hook/module needed for ARCH-001 shadow observations.
+RUNTIME_ARTIFACT_PATHS = (
+    "scripts/operators/product_availability_truth_guard_shadow_observation.py",
+    "scripts/operators/product_availability_truth_guard_shadow_observation_contract.py",
+    "backend/modules/ai/brain/postprocess/product_availability_truth_guard.py",
+    "backend/modules/ai/brain/postprocess/product_availability_shadow_telemetry.py",
+    "backend/modules/ai/brain/pipeline.py",
+    "backend/routers/whatsapp_webhook.py",
+)
 
 __all__ = [
     "APP_CONTAINER_SYS_PATH",
     "CODE_COMMAND_INVALID",
     "CODE_ENFORCE_MODE_ENABLED",
     "CODE_PROBE_FAILED",
+    "CODE_RUNTIME_EXECUTION_REQUIRED",
+    "CODE_ARTIFACT_MANIFEST_MISMATCH",
     "CODE_SHADOW_MODE_NOT_ENABLED",
     "DEPLOYMENT_APP_ROOT",
     "ENFORCE_MODE_VALUE",
@@ -54,7 +71,10 @@ __all__ = [
     "PHASE_SUMMARY",
     "PHASE_SYNTHETIC_MATRIX",
     "PHASE_TEARDOWN",
+    "PHASE_ARTIFACT_MANIFEST",
+    "PHASE_RUNTIME_MATRIX",
     "REPORT_SCHEMA_VERSION",
+    "RUNTIME_ARTIFACT_PATHS",
     "SHADOW_MODE_ENV",
     "SHADOW_MODE_VALUE",
 ]
