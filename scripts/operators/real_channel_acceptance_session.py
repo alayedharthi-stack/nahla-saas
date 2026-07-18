@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 from sqlalchemy import create_engine, text
 
 from scripts.operators.real_channel_conversational_acceptance import (
+    execute_channel_health_preflight,
     gate_runtime_revision_attestation,
     gate_staging_identity,
 )
@@ -31,6 +32,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_ARCH001_SIGNOFF_MISSING,
+    CODE_CHANNEL_HEALTH_BLOCKED,
     CODE_CONFIG_DRIFT,
     CODE_DEVICE_ATTESTATION_REQUIRED,
     CODE_EVENT_CURSOR_STALE,
@@ -238,6 +240,9 @@ def _required_start_gates(tenant_id: int, app_root: Path | None) -> list[str]:
     )
     if not revision.get("ok"):
         blockers.append(str(revision.get("code") or "runtime_revision_mismatch"))
+    channel = execute_channel_health_preflight(tenant_id=tenant_id)
+    if not channel.get("ok"):
+        blockers.append(str(channel.get("code") or CODE_CHANNEL_HEALTH_BLOCKED))
     if not (os.environ.get(DEPLOYMENT_ID_ENV) or "").strip():
         blockers.append("deployment_id_missing")
     if not (os.environ.get(EVIDENCE_HMAC_KEY_ENV) or "").strip():

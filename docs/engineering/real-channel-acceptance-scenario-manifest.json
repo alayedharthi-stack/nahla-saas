@@ -6117,7 +6117,9 @@
         "body": "استخدم عنواني المحفوظ"
       },
       "expected_state": {
-        "address_from_persisted_state": true
+        "persisted_address_lookup": true,
+        "reuse_only_if_verified_persisted_address_exists": true,
+        "clarify_or_collect_if_address_missing": true
       },
       "allowed_conversational_variability": [
         "greeting_wording",
@@ -6198,7 +6200,14 @@
         "merchant_plane": "salla_minimal_clone",
         "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
         "arch001_shadow_signoff": true,
-        "tenant_1_pass_required": false
+        "tenant_1_pass_required": false,
+        "synthetic_acceptance_order_fixture": {
+          "scope": "tenant_48_private_test_tenant_only",
+          "deterministic_reference": "RRRD1234",
+          "must_exist_before_scenario": true,
+          "shipment_status_requires_persisted_evidence": true,
+          "cleanup_required": true
+        }
       },
       "inbound": {
         "channel": "whatsapp",
@@ -6227,7 +6236,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "cleanup": "remove_tenant_48_synthetic_acceptance_order_fixture_then_restore_scenario_state_and_verify_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_track_order_need_identifiers_compose.py"
       ],
@@ -6561,8 +6570,10 @@
         "body": "أبي أكلم موظف"
       },
       "expected_state": {
-        "handoff_evidence": true,
-        "ai_continuity": true
+        "staff_handoff_evidence_required": true,
+        "ai_continuity": true,
+        "explicit_pause_state_respected": true,
+        "resume_only_after_state_transition": true
       },
       "allowed_conversational_variability": [
         "greeting_wording",
@@ -6571,7 +6582,9 @@
         "concise_vs_verbose"
       ],
       "prohibited_claims": [
-        "handoff_claim_without_evidence"
+        "handoff_claim_without_evidence",
+        "ai_reply_while_explicitly_paused",
+        "resume_without_state_transition"
       ],
       "max_llm_calls": 4,
       "max_tool_calls": 3,
@@ -6994,7 +7007,13 @@
         "merchant_plane": "salla_minimal_clone",
         "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
         "arch001_shadow_signoff": true,
-        "tenant_1_pass_required": false
+        "tenant_1_pass_required": false,
+        "controlled_staging_fault_injection": {
+          "scope": "tenant_48_tool_timeout_only",
+          "operator_enabled": true,
+          "production_fault_injector_added_by_this_pr": false,
+          "cleanup_restore_required": true
+        }
       },
       "inbound": {
         "channel": "whatsapp",
@@ -7023,7 +7042,7 @@
         "compose_provenance_metadata",
         "decision_trace_present"
       ],
-      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "cleanup": "disable_controlled_staging_fault_injection_then_restore_scenario_state_and_verify_session_snapshot",
       "eval_regression_mapping": [
         "backend/tests/test_ai_commerce_scenario_runner.py"
       ],

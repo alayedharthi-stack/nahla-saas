@@ -78,7 +78,7 @@ def _scenario(
             "store_ai_mode": "test",
             "store_ai_enabled": True,
             "phone_env_ref": phone_env_by_tenant[tenant_id],
-            "arch001_shadow_signoff": True,
+            "arch001_shadow_signoff": phase != PHASE_TENANT_1_INTENSIVE,
             "tenant_1_pass_required": phase == PHASE_TENANT_33_LIMITED,
         },
         "inbound": inbound,
@@ -737,7 +737,11 @@ def _t48_scenarios() -> list[dict[str, Any]]:
             "t48_saved_address_fail_closed",
             "identity_profile_address_continuity",
             {"channel": "whatsapp", "type": "text", "body": "استخدم عنواني المحفوظ"},
-            {"address_from_persisted_state": True},
+            {
+                "persisted_address_lookup": True,
+                "reuse_only_if_verified_persisted_address_exists": True,
+                "clarify_or_collect_if_address_missing": True,
+            },
             ["invented_address", "previous_address_claim_without_db_state"],
             "hybrid",
             ["backend/tests/test_ai_commerce_scenario_runner.py"],
@@ -782,8 +786,17 @@ def _t48_scenarios() -> list[dict[str, Any]]:
             "t48_handoff",
             "handoff_escalation",
             {"channel": "whatsapp", "type": "text", "body": "أبي أكلم موظف"},
-            {"handoff_evidence": True, "ai_continuity": True},
-            ["handoff_claim_without_evidence"],
+            {
+                "staff_handoff_evidence_required": True,
+                "ai_continuity": True,
+                "explicit_pause_state_respected": True,
+                "resume_only_after_state_transition": True,
+            },
+            [
+                "handoff_claim_without_evidence",
+                "ai_reply_while_explicitly_paused",
+                "resume_without_state_transition",
+            ],
             "hybrid",
             ["backend/tests/test_store_ai_pause.py"],
         ),
@@ -836,6 +849,31 @@ def _t48_scenarios() -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     for sid, taxonomy, inbound, expected, prohibited, automation, mapping in specs:
+        scenario_preconditions = dict(pre)
+        cleanup = "restore_scenario_state_then_verify_against_session_snapshot"
+        if sid == "t48_tracking_existing":
+            scenario_preconditions["synthetic_acceptance_order_fixture"] = {
+                "scope": "tenant_48_private_test_tenant_only",
+                "deterministic_reference": order_ref,
+                "must_exist_before_scenario": True,
+                "shipment_status_requires_persisted_evidence": True,
+                "cleanup_required": True,
+            }
+            cleanup = (
+                "remove_tenant_48_synthetic_acceptance_order_fixture_then_restore_"
+                "scenario_state_and_verify_session_snapshot"
+            )
+        elif sid == "t48_tool_timeout":
+            scenario_preconditions["controlled_staging_fault_injection"] = {
+                "scope": "tenant_48_tool_timeout_only",
+                "operator_enabled": True,
+                "production_fault_injector_added_by_this_pr": False,
+                "cleanup_restore_required": True,
+            }
+            cleanup = (
+                "disable_controlled_staging_fault_injection_then_restore_scenario_"
+                "state_and_verify_session_snapshot"
+            )
         rows.append(
             _scenario(
                 scenario_id=sid,
@@ -848,7 +886,8 @@ def _t48_scenarios() -> list[dict[str, Any]]:
                 prohibited_claims=prohibited,
                 automation_class=automation,
                 eval_mapping=mapping,
-                preconditions=dict(pre),
+                preconditions=scenario_preconditions,
+                cleanup=cleanup,
             )
         )
     return rows

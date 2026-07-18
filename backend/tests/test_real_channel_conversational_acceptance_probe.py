@@ -118,8 +118,75 @@ def test_tenant_33_requires_tenant_1_pass_in_preconditions() -> None:
     manifest = load_scenario_manifest(_REPO)
     for row in manifest["scenarios"]:
         if row["phase"] == PHASE_TENANT_33_LIMITED:
+            assert row["preconditions"]["store_ai_mode"] == "test"
+            assert row["preconditions"]["store_ai_enabled"] is True
+            assert row["preconditions"]["arch001_shadow_signoff"] is True
             assert row["preconditions"]["tenant_1_pass_required"] is True
             assert row["preconditions"]["real_catalog_data"] is True
+            assert (
+                row["preconditions"]["phone_env_ref"]
+                == "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE"
+            )
+
+
+def test_tenant_1_generated_preconditions_remain_unchanged() -> None:
+    manifest = build_manifest()
+    tenant_1_rows = [
+        row for row in manifest["scenarios"] if row["phase"] == PHASE_TENANT_1_INTENSIVE
+    ]
+    assert len(tenant_1_rows) == 49
+    for row in tenant_1_rows:
+        assert row["preconditions"] == {
+            "store_ai_mode": "test",
+            "store_ai_enabled": True,
+            "store_label": "متجر تجريبي عام",
+            "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+            "arch001_shadow_signoff": True,
+        }
+
+
+def test_tenant_48_evidence_backed_scenario_contracts() -> None:
+    manifest = build_manifest()
+    tenant_48 = {
+        row["scenario_id"]: row
+        for row in manifest["scenarios"]
+        if row["phase"] == PHASE_TENANT_48_SALLA_MINIMAL
+    }
+
+    saved_address = tenant_48["t48_saved_address_fail_closed"]
+    assert saved_address["expected_state"] == {
+        "persisted_address_lookup": True,
+        "reuse_only_if_verified_persisted_address_exists": True,
+        "clarify_or_collect_if_address_missing": True,
+    }
+    assert "previous_address_claim_without_db_state" in saved_address["prohibited_claims"]
+
+    tracking = tenant_48["t48_tracking_existing"]
+    fixture = tracking["preconditions"]["synthetic_acceptance_order_fixture"]
+    assert fixture["deterministic_reference"] == "RRRD1234"
+    assert fixture["scope"] == "tenant_48_private_test_tenant_only"
+    assert fixture["cleanup_required"] is True
+    assert "remove_tenant_48_synthetic_acceptance_order_fixture" in tracking["cleanup"]
+
+    no_reference = tenant_48["t48_delivery_no_reference"]
+    assert "synthetic_acceptance_order_fixture" not in no_reference["preconditions"]
+    assert "delivery_date_without_evidence" in no_reference["prohibited_claims"]
+
+    handoff = tenant_48["t48_handoff"]
+    assert handoff["expected_state"] == {
+        "staff_handoff_evidence_required": True,
+        "ai_continuity": True,
+        "explicit_pause_state_respected": True,
+        "resume_only_after_state_transition": True,
+    }
+
+    timeout = tenant_48["t48_tool_timeout"]
+    fault = timeout["preconditions"]["controlled_staging_fault_injection"]
+    assert fault["scope"] == "tenant_48_tool_timeout_only"
+    assert fault["cleanup_restore_required"] is True
+    assert fault["production_fault_injector_added_by_this_pr"] is False
+    assert "success_claim_after_tool_timeout" in timeout["prohibited_claims"]
+    assert "disable_controlled_staging_fault_injection" in timeout["cleanup"]
 
 
 def test_all_scenarios_require_real_channel_path() -> None:
