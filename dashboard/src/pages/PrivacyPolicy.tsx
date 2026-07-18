@@ -42,6 +42,45 @@ export default function PrivacyPolicy() {
 
           <hr className="border-slate-100" />
 
+          {/* Legal Entity */}
+          <section>
+            <h2 className="text-base font-bold text-slate-900 mb-2">
+              Legal Entity / الكيان القانوني
+            </h2>
+            <div className="grid gap-4 sm:grid-cols-2 sm:gap-6">
+              <div className="space-y-2" dir="ltr">
+                <p>
+                  Nahlah AI is a technology platform owned and operated by Nahlah Ai Establishment,
+                  Saudi Arabia.
+                </p>
+                <p>National Number: 7050202485</p>
+                <p>
+                  National Address:
+                  <br />
+                  Al Halaqa Western 1,
+                  <br />
+                  Al Halqah Al Gharbia District,
+                  <br />
+                  At Taif 26563,
+                  <br />
+                  Kingdom of Saudi Arabia.
+                </p>
+              </div>
+              <div className="space-y-2 text-slate-600" dir="rtl">
+                <p>
+                  نحلة AI منصة تقنية مملوكة ومشغلة من مؤسسة نحلة أي آي، المملكة العربية السعودية.
+                </p>
+                <p>الرقم الوطني الموحد: 7050202485</p>
+                <p>
+                  العنوان الوطني: الحلقة الغربية 1، حي الحلقة الغربية، الطائف 26563، المملكة
+                  العربية السعودية.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <hr className="border-slate-100" />
+
           {/* Data We Collect */}
           <section>
             <h2 className="text-base font-bold text-slate-900 mb-2">1. Data We Collect</h2>
