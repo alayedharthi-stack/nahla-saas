@@ -90,49 +90,29 @@ def test_external_runner_rejects_checkout_drift(
     assert result.attested_revision is not None
 
 
-def test_external_runner_accepts_matching_worktree(
+def test_external_runner_accepts_matching_checkout_revision(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
-    worktree = _REPO / ".audit-target-runtime"
-    if worktree.exists():
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)],
-            cwd=_REPO,
-            check=False,
-            capture_output=True,
-        )
-    subprocess.run(
-        [
-            "git",
-            "worktree",
-            "add",
-            "--detach",
-            str(worktree),
-            PINNED_TARGET_RUNTIME_REVISION,
-        ],
-        cwd=_REPO,
-        check=True,
-        capture_output=True,
+    checkout = tmp_path / "target-checkout"
+    checkout.mkdir()
+    (checkout / ".git").mkdir()
+
+    monkeypatch.setattr(
+        "scripts.operators.deployment_revision_attestation_contract.read_checkout_revision",
+        lambda root: PINNED_TARGET_RUNTIME_REVISION if root == checkout else None,
     )
-    try:
-        result = evaluate_runtime_revision_attestation(
-            pinned_target_revision=PINNED_TARGET_RUNTIME_REVISION,
-            target_app_root=worktree,
-        )
-        assert result.ok is True
-        assert result.execution_mode == ExecutionMode.EXTERNAL_RUNNER
-        assert revisions_equivalent(
-            result.attested_revision,
-            PINNED_TARGET_RUNTIME_REVISION,
-        )
-    finally:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)],
-            cwd=_REPO,
-            check=False,
-            capture_output=True,
-        )
+    result = evaluate_runtime_revision_attestation(
+        pinned_target_revision=PINNED_TARGET_RUNTIME_REVISION,
+        target_app_root=checkout,
+    )
+    assert result.ok is True
+    assert result.execution_mode == ExecutionMode.EXTERNAL_RUNNER
+    assert revisions_equivalent(
+        result.attested_revision,
+        PINNED_TARGET_RUNTIME_REVISION,
+    )
 
 
 def test_in_container_attestation_rejects_newer_deploy(
