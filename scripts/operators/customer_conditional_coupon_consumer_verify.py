@@ -613,7 +613,7 @@ def teardown_process_flags() -> None:
         from modules.ai.brain.truth_surface.trusted_context import clear_trusted_context
 
         clear_trusted_context()
-    except Exception:
+    except ImportError:  # noqa: silent-ok — teardown must remain best-effort if brain slice unavailable
         pass
 
 
