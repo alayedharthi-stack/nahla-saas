@@ -1,6 +1,6 @@
 {
   "manifest_schema_version": "real_channel_acceptance_scenario_manifest_v2",
-  "description": "Post-ARCH-001-shadow real-channel conversational acceptance scenarios. Tenant 1 intensive (synthetic/test-store) then Tenant 33 limited (real catalog, private allowlisted numbers only).",
+  "description": "Post-ARCH-001-shadow real-channel conversational acceptance scenarios. Tenant 1 intensive (synthetic/test-store), Tenant 33 limited (real catalog, private allowlisted numbers only), and Tenant 48 Salla minimal staging clone (bounded subset, no Tenant-1 pass artifact).",
   "phases": [
     {
       "phase": "tenant_1_intensive",
@@ -13,9 +13,22 @@
       "tenant_id": 33,
       "label": "Tenant 33 limited real-store acceptance",
       "requires_tenant_1_pass": true
+    },
+    {
+      "phase": "tenant_48_salla_minimal",
+      "tenant_id": 48,
+      "label": "Tenant 48 Salla minimal staging clone acceptance",
+      "requires_arch001_shadow_signoff": true,
+      "requires_tenant_1_pass": false,
+      "independent_of_tenant_1_pass_artifact": true
     }
   ],
-  "scenario_count": 65,
+  "phase_scenario_counts": {
+    "tenant_1_intensive": 49,
+    "tenant_33_limited": 16,
+    "tenant_48_salla_minimal": 16
+  },
+  "scenario_count": 81,
   "scenarios": [
     {
       "scenario_id": "t1_faq_hours",
@@ -5618,6 +5631,1446 @@
           "channel": "whatsapp",
           "type": "text",
           "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_greeting_inquiry",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "general_inquiry_faq",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم، وش المتوفر؟"
+      },
+      "expected_state": {
+        "routing": "faq_or_kb",
+        "order_created": false
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_without_evidence",
+        "payment_confirmed_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_playground_regression_scenarios.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "السلام عليكم، وش المتوفر؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_catalog_grounding",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "كم سعر حذاء رياضي أبيض؟"
+      },
+      "expected_state": {
+        "catalog_lookup": true,
+        "pricing_grounded": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "price_without_catalog_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "كم سعر حذاء رياضي أبيض؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_written_order",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي قميص قطني أزرق مقاس M"
+      },
+      "expected_state": {
+        "order_flow_active": true,
+        "draft_or_pending": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "order_confirmed_without_customer_confirmation"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي قميص قطني أزرق مقاس M"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_catalog_order_entry",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "multi_turn_order_construction",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "interactive",
+        "body": "catalog_selection",
+        "product": "حذاء رياضي أبيض"
+      },
+      "expected_state": {
+        "catalog_selection_handled": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "checkout_link_without_selection_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "interactive",
+        "input": {
+          "channel": "whatsapp",
+          "type": "interactive",
+          "body": "catalog_selection",
+          "product": "حذاء رياضي أبيض"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_address_collection",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "identity_profile_address_continuity",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "اسمي أحمد سالم والعنوان الرياض حي الملقا"
+      },
+      "expected_state": {
+        "address_captured_or_prompted": true,
+        "profile_update_or_ack": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "address_assumed_without_state",
+        "address_saved_without_confirmation"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "اسمي أحمد سالم والعنوان الرياض حي الملقا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_saved_address_fail_closed",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "identity_profile_address_continuity",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "استخدم عنواني المحفوظ"
+      },
+      "expected_state": {
+        "persisted_address_lookup": true,
+        "reuse_only_if_verified_persisted_address_exists": true,
+        "clarify_or_collect_if_address_missing": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "invented_address",
+        "previous_address_claim_without_db_state"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "استخدم عنواني المحفوظ"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_tracking_existing",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "tracking_with_identifier",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false,
+        "synthetic_acceptance_order_fixture": {
+          "scope": "tenant_48_private_test_tenant_only",
+          "deterministic_reference": "RRRD1234",
+          "must_exist_before_scenario": true,
+          "shipment_status_requires_persisted_evidence": true,
+          "cleanup_required": true
+        }
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "تتبع طلب RRRD1234"
+      },
+      "expected_state": {
+        "tracking_lookup": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "shipped_status_without_shipment_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "remove_tenant_48_synthetic_acceptance_order_fixture_then_restore_scenario_state_and_verify_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "تتبع طلب RRRD1234"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_delivery_no_reference",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "tracking_without_identifier",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "متى يوصل الطلب؟"
+      },
+      "expected_state": {
+        "identifier_prompt": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "tracking_result_without_identifier",
+        "delivery_date_without_evidence"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_track_order_need_identifiers_compose.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "متى يوصل الطلب؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_quantity_cancel",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "interruption_topic_switch",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "غيّر الكمية إلى 2 أو ألغِ الطلب"
+      },
+      "expected_state": {
+        "quantity_or_cancel_handled": true,
+        "prior_order_context_preserved": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "order_cancelled_without_request",
+        "quantity_changed_without_confirmation"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "غيّر الكمية إلى 2 أو ألغِ الطلب"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_resume_conversation",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "resume_after_interruption",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "نكمل الطلب"
+      },
+      "expected_state": {
+        "order_flow_resumed": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "new_order_started_without_intent"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "نكمل الطلب"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_handoff",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "handoff_escalation",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "أبي أكلم موظف"
+      },
+      "expected_state": {
+        "staff_handoff_evidence_required": true,
+        "ai_continuity": true,
+        "explicit_pause_state_respected": true,
+        "resume_only_after_state_transition": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "handoff_claim_without_evidence",
+        "ai_reply_while_explicitly_paused",
+        "resume_without_state_transition"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "أبي أكلم موظف"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_pause_blocklist",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "pause_blocklist",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "مرحبا"
+      },
+      "expected_state": {
+        "pause_or_block_respected": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "ai_reply_while_paused"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_store_ai_pause.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "مرحبا"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": false,
+        "test_device_receipt_attestation": false,
+        "outbound_expected": false,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_kb_miss",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "general_inquiry_faq",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل تدعمون الدفع بالعملة المشفرة؟"
+      },
+      "expected_state": {
+        "kb_miss_honest_response": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "invented_policy_claim"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_playground_regression_scenarios.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل تدعمون الدفع بالعملة المشفرة؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_anti_hallucination",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "هل متوفر منتج غير موجود XYZ-999؟"
+      },
+      "expected_state": {
+        "availability_negative_truth": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "available_claim_for_unknown_sku"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "هل متوفر منتج غير موجود XYZ-999؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_tenant_isolation",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "cross_tenant_isolation",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "عرض منتجات متجر آخر"
+      },
+      "expected_state": {
+        "tenant_boundary": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "foreign_catalog_leak"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_product_availability_truth_guard.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "عرض منتجات متجر آخر"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t48_tool_timeout",
+      "phase": "tenant_48_salla_minimal",
+      "taxonomy": "tool_timeout",
+      "tenant_id": 48,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": true,
+        "tenant_1_pass_required": false,
+        "controlled_staging_fault_injection": {
+          "scope": "tenant_48_tool_timeout_only",
+          "operator_enabled": true,
+          "production_fault_injector_added_by_this_pr": false,
+          "cleanup_restore_required": true
+        }
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "ابحث عن حذاء رياضي أبيض"
+      },
+      "expected_state": {
+        "tool_timeout_handled": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "success_claim_after_tool_timeout"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "disable_controlled_staging_fault_injection_then_restore_scenario_state_and_verify_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_ai_commerce_scenario_runner.py"
+      ],
+      "automation_class": "automated_state_assertions",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": false
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "ابحث عن حذاء رياضي أبيض"
         },
         "automation_policy": "manual_unless_authorized_existing_test_device_integration",
         "raw_input_archival": "hash_or_redact"

@@ -14,9 +14,12 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     MANIFEST_SCHEMA_VERSION,
     PHASE_TENANT_1_INTENSIVE,
     PHASE_TENANT_33_LIMITED,
+    PHASE_TENANT_48_SALLA_MINIMAL,
+    PHASE_EXPECTED_SCENARIO_COUNTS,
     SCENARIO_TAXONOMY,
     TENANT_1_INTENSIVE,
     TENANT_33_LIMITED,
+    TENANT_48_SALLA_MINIMAL,
 )
 
 
@@ -59,6 +62,11 @@ def _scenario(
     cleanup: str = "restore_scenario_state_then_verify_against_session_snapshot",
 ) -> dict[str, Any]:
     expects_outbound = taxonomy not in {"pause_blocklist", "subscription_guard"}
+    phone_env_by_tenant = {
+        TENANT_1_INTENSIVE: "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        TENANT_33_LIMITED: "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE",
+        TENANT_48_SALLA_MINIMAL: "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+    }
     return {
         "scenario_id": scenario_id,
         "phase": phase,
@@ -69,11 +77,7 @@ def _scenario(
         or {
             "store_ai_mode": "test",
             "store_ai_enabled": True,
-            "phone_env_ref": (
-                "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE"
-                if tenant_id == TENANT_1_INTENSIVE
-                else "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_PHONE"
-            ),
+            "phone_env_ref": phone_env_by_tenant[tenant_id],
             "arch001_shadow_signoff": phase != PHASE_TENANT_1_INTENSIVE,
             "tenant_1_pass_required": phase == PHASE_TENANT_33_LIMITED,
         },
@@ -653,8 +657,244 @@ def _t33_scenarios() -> list[dict[str, Any]]:
     return rows
 
 
+def _t48_preconditions() -> dict[str, Any]:
+    return {
+        "store_ai_mode": "test",
+        "store_ai_enabled": True,
+        "store_label": "متجر تجريبي عام",
+        "merchant_plane": "salla_minimal_clone",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_48_PHONE",
+        "arch001_shadow_signoff": True,
+        "tenant_1_pass_required": False,
+    }
+
+
+def _t48_scenarios() -> list[dict[str, Any]]:
+    """Bounded Salla-minimal staging clone acceptance for Tenant 48."""
+    product = "حذاء رياضي أبيض"
+    product_b = "قميص قطني أزرق"
+    customer = "أحمد سالم"
+    city = "الرياض"
+    order_ref = "RRRD1234"
+    pre = _t48_preconditions()
+
+    specs: list[tuple[str, str, dict[str, Any], dict[str, Any], list[str], str, list[str]]] = [
+        (
+            "t48_greeting_inquiry",
+            "general_inquiry_faq",
+            {"channel": "whatsapp", "type": "text", "body": "السلام عليكم، وش المتوفر؟"},
+            {"routing": "faq_or_kb", "order_created": False},
+            ["shipped_without_evidence", "payment_confirmed_without_evidence"],
+            "hybrid",
+            ["backend/tests/test_ai_playground_regression_scenarios.py"],
+        ),
+        (
+            "t48_catalog_grounding",
+            "catalog_search_availability",
+            {"channel": "whatsapp", "type": "text", "body": f"كم سعر {product}؟"},
+            {"catalog_lookup": True, "pricing_grounded": True},
+            ["price_without_catalog_evidence"],
+            "automated_state_assertions",
+            ["backend/tests/test_product_availability_truth_guard.py"],
+        ),
+        (
+            "t48_written_order",
+            "multi_turn_order_construction",
+            {"channel": "whatsapp", "type": "text", "body": f"أبي {product_b} مقاس M"},
+            {"order_flow_active": True, "draft_or_pending": True},
+            ["order_confirmed_without_customer_confirmation"],
+            "hybrid",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_catalog_order_entry",
+            "multi_turn_order_construction",
+            {
+                "channel": "whatsapp",
+                "type": "interactive",
+                "body": "catalog_selection",
+                "product": product,
+            },
+            {"catalog_selection_handled": True},
+            ["checkout_link_without_selection_evidence"],
+            "automated_state_assertions",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_address_collection",
+            "identity_profile_address_continuity",
+            {
+                "channel": "whatsapp",
+                "type": "text",
+                "body": f"اسمي {customer} والعنوان {city} حي الملقا",
+            },
+            {"address_captured_or_prompted": True, "profile_update_or_ack": True},
+            ["address_assumed_without_state", "address_saved_without_confirmation"],
+            "hybrid",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_saved_address_fail_closed",
+            "identity_profile_address_continuity",
+            {"channel": "whatsapp", "type": "text", "body": "استخدم عنواني المحفوظ"},
+            {
+                "persisted_address_lookup": True,
+                "reuse_only_if_verified_persisted_address_exists": True,
+                "clarify_or_collect_if_address_missing": True,
+            },
+            ["invented_address", "previous_address_claim_without_db_state"],
+            "hybrid",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_tracking_existing",
+            "tracking_with_identifier",
+            {"channel": "whatsapp", "type": "text", "body": f"تتبع طلب {order_ref}"},
+            {"tracking_lookup": True},
+            ["shipped_status_without_shipment_evidence"],
+            "automated_state_assertions",
+            ["backend/tests/test_track_order_need_identifiers_compose.py"],
+        ),
+        (
+            "t48_delivery_no_reference",
+            "tracking_without_identifier",
+            {"channel": "whatsapp", "type": "text", "body": "متى يوصل الطلب؟"},
+            {"identifier_prompt": True},
+            ["tracking_result_without_identifier", "delivery_date_without_evidence"],
+            "automated_state_assertions",
+            ["backend/tests/test_track_order_need_identifiers_compose.py"],
+        ),
+        (
+            "t48_quantity_cancel",
+            "interruption_topic_switch",
+            {"channel": "whatsapp", "type": "text", "body": "غيّر الكمية إلى 2 أو ألغِ الطلب"},
+            {"quantity_or_cancel_handled": True, "prior_order_context_preserved": True},
+            ["order_cancelled_without_request", "quantity_changed_without_confirmation"],
+            "hybrid",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_resume_conversation",
+            "resume_after_interruption",
+            {"channel": "whatsapp", "type": "text", "body": "نكمل الطلب"},
+            {"order_flow_resumed": True},
+            ["new_order_started_without_intent"],
+            "hybrid",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+        (
+            "t48_handoff",
+            "handoff_escalation",
+            {"channel": "whatsapp", "type": "text", "body": "أبي أكلم موظف"},
+            {
+                "staff_handoff_evidence_required": True,
+                "ai_continuity": True,
+                "explicit_pause_state_respected": True,
+                "resume_only_after_state_transition": True,
+            },
+            [
+                "handoff_claim_without_evidence",
+                "ai_reply_while_explicitly_paused",
+                "resume_without_state_transition",
+            ],
+            "hybrid",
+            ["backend/tests/test_store_ai_pause.py"],
+        ),
+        (
+            "t48_pause_blocklist",
+            "pause_blocklist",
+            {"channel": "whatsapp", "type": "text", "body": "مرحبا"},
+            {"pause_or_block_respected": True},
+            ["ai_reply_while_paused"],
+            "automated_state_assertions",
+            ["backend/tests/test_store_ai_pause.py"],
+        ),
+        (
+            "t48_kb_miss",
+            "general_inquiry_faq",
+            {"channel": "whatsapp", "type": "text", "body": "هل تدعمون الدفع بالعملة المشفرة؟"},
+            {"kb_miss_honest_response": True},
+            ["invented_policy_claim"],
+            "hybrid",
+            ["backend/tests/test_ai_playground_regression_scenarios.py"],
+        ),
+        (
+            "t48_anti_hallucination",
+            "catalog_search_availability",
+            {"channel": "whatsapp", "type": "text", "body": "هل متوفر منتج غير موجود XYZ-999؟"},
+            {"availability_negative_truth": True},
+            ["available_claim_for_unknown_sku"],
+            "automated_state_assertions",
+            ["backend/tests/test_product_availability_truth_guard.py"],
+        ),
+        (
+            "t48_tenant_isolation",
+            "cross_tenant_isolation",
+            {"channel": "whatsapp", "type": "text", "body": "عرض منتجات متجر آخر"},
+            {"tenant_boundary": True},
+            ["foreign_catalog_leak"],
+            "automated_state_assertions",
+            ["backend/tests/test_product_availability_truth_guard.py"],
+        ),
+        (
+            "t48_tool_timeout",
+            "tool_timeout",
+            {"channel": "whatsapp", "type": "text", "body": f"ابحث عن {product}"},
+            {"tool_timeout_handled": True},
+            ["success_claim_after_tool_timeout"],
+            "automated_state_assertions",
+            ["backend/tests/test_ai_commerce_scenario_runner.py"],
+        ),
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for sid, taxonomy, inbound, expected, prohibited, automation, mapping in specs:
+        scenario_preconditions = dict(pre)
+        cleanup = "restore_scenario_state_then_verify_against_session_snapshot"
+        if sid == "t48_tracking_existing":
+            scenario_preconditions["synthetic_acceptance_order_fixture"] = {
+                "scope": "tenant_48_private_test_tenant_only",
+                "deterministic_reference": order_ref,
+                "must_exist_before_scenario": True,
+                "shipment_status_requires_persisted_evidence": True,
+                "cleanup_required": True,
+            }
+            cleanup = (
+                "remove_tenant_48_synthetic_acceptance_order_fixture_then_restore_"
+                "scenario_state_and_verify_session_snapshot"
+            )
+        elif sid == "t48_tool_timeout":
+            scenario_preconditions["controlled_staging_fault_injection"] = {
+                "scope": "tenant_48_tool_timeout_only",
+                "operator_enabled": True,
+                "production_fault_injector_added_by_this_pr": False,
+                "cleanup_restore_required": True,
+            }
+            cleanup = (
+                "disable_controlled_staging_fault_injection_then_restore_scenario_"
+                "state_and_verify_session_snapshot"
+            )
+        rows.append(
+            _scenario(
+                scenario_id=sid,
+                phase=PHASE_TENANT_48_SALLA_MINIMAL,
+                taxonomy=taxonomy,
+                tenant_id=TENANT_48_SALLA_MINIMAL,
+                execution_path=EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
+                inbound=inbound,
+                expected_state=expected,
+                prohibited_claims=prohibited,
+                automation_class=automation,
+                eval_mapping=mapping,
+                preconditions=scenario_preconditions,
+                cleanup=cleanup,
+            )
+        )
+    return rows
+
+
 def build_manifest() -> dict[str, Any]:
-    scenarios = _t1_scenarios() + _t33_scenarios()
+    scenarios = _t1_scenarios() + _t33_scenarios() + _t48_scenarios()
     taxonomies = {row["taxonomy"] for row in scenarios}
     missing = sorted(set(SCENARIO_TAXONOMY) - taxonomies)
     if missing:
@@ -663,8 +903,9 @@ def build_manifest() -> dict[str, Any]:
         "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
         "description": (
             "Post-ARCH-001-shadow real-channel conversational acceptance scenarios. "
-            "Tenant 1 intensive (synthetic/test-store) then Tenant 33 limited "
-            "(real catalog, private allowlisted numbers only)."
+            "Tenant 1 intensive (synthetic/test-store), Tenant 33 limited "
+            "(real catalog, private allowlisted numbers only), and Tenant 48 "
+            "Salla minimal staging clone (bounded subset, no Tenant-1 pass artifact)."
         ),
         "phases": [
             {
@@ -679,7 +920,16 @@ def build_manifest() -> dict[str, Any]:
                 "label": "Tenant 33 limited real-store acceptance",
                 "requires_tenant_1_pass": True,
             },
+            {
+                "phase": PHASE_TENANT_48_SALLA_MINIMAL,
+                "tenant_id": TENANT_48_SALLA_MINIMAL,
+                "label": "Tenant 48 Salla minimal staging clone acceptance",
+                "requires_arch001_shadow_signoff": True,
+                "requires_tenant_1_pass": False,
+                "independent_of_tenant_1_pass_artifact": True,
+            },
         ],
+        "phase_scenario_counts": dict(PHASE_EXPECTED_SCENARIO_COUNTS),
         "scenario_count": len(scenarios),
         "scenarios": scenarios,
     }
