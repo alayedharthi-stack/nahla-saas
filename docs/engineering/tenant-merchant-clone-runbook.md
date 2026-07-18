@@ -23,9 +23,9 @@ payments, credentials, or operational history.
 |-------|-------------|
 | Target environment | `RAILWAY_PROJECT_NAME=desirable-growth`, `RAILWAY_ENVIRONMENT_NAME=staging` |
 | Target database host | `postgres-staging.railway.internal` only |
-| Target tenant | Pre-created shell with test marker in `name` or `domain` (`-acceptance-test`, `-clone-test`, or `-tenant33-test`) |
+| Target tenant | Tenant ID `33`. An absent shell is bootstrapped transactionally; an existing shell must be empty and test-marked |
 | Schema | Both source and target at Alembic heads `{0088, 0089}` |
-| Source ≠ target | Different tenant IDs and different database URLs |
+| Source ≠ target | Runtime database identity digests must differ; preserving tenant ID `33` across databases is required |
 
 ## Environment variables
 
@@ -35,7 +35,7 @@ export NAHLA_TENANT_MERCHANT_CLONE_ENABLED=1
 
 # Source attestation
 export NAHLA_CLONE_SOURCE_RAILWAY_PROJECT=desirable-growth
-export NAHLA_CLONE_SOURCE_RAILWAY_ENVIRONMENT=staging   # or production (extra gate)
+export NAHLA_CLONE_SOURCE_RAILWAY_ENVIRONMENT=production
 export NAHLA_CLONE_SOURCE_DATABASE_URL='postgresql+psycopg2://...'
 
 # Target attestation (staging only)
@@ -47,7 +47,7 @@ export DATABASE_URL='postgresql+psycopg2://...@postgres-staging.railway.internal
 export NAHLA_TENANT_MERCHANT_CLONE_APPLY_CONFIRM=APPLY_TENANT_33_MERCHANT_CLONE
 
 # Production source only (blocked until owner approval)
-export NAHLA_TENANT_CLONE_PRODUCTION_SOURCE_CONFIRM=CLONE_FROM_PRODUCTION_TENANT_33
+export NAHLA_TENANT_CLONE_PRODUCTION_SOURCE_CONFIRM=CLONE_PRODUCTION_TENANT_33_TO_STAGING_TENANT_33
 ```
 
 ## Commands
@@ -55,12 +55,14 @@ export NAHLA_TENANT_CLONE_PRODUCTION_SOURCE_CONFIRM=CLONE_FROM_PRODUCTION_TENANT
 ### 1. Dry-run (default-safe)
 
 Emits sanitized counts, dependency order, non-PII checksums, transformations list,
-and denied-domain source counts. **No writes.**
+denied-domain source counts, `identity_mode=preserve_tenant_id_cross_database`,
+and source/target runtime database identity SHA-256 digests. DSNs are never emitted.
+**No writes.**
 
 ```bash
 python scripts/operators/tenant_merchant_clone.py dry-run \
   --source-tenant-id 33 \
-  --target-tenant-id 99033
+  --target-tenant-id 33
 ```
 
 Archive the `dry_run_digest` from output.
@@ -76,7 +78,7 @@ export NAHLA_TENANT_MERCHANT_CLONE_DRY_RUN_DIGEST='<digest from dry-run>'
 
 python scripts/operators/tenant_merchant_clone.py apply \
   --source-tenant-id 33 \
-  --target-tenant-id 99033 \
+  --target-tenant-id 33 \
   --dry-run-digest '<digest from dry-run>' \
   --manifest-path ./artifacts/tenant33-clone-manifest.json
 ```
@@ -84,13 +86,17 @@ python scripts/operators/tenant_merchant_clone.py apply \
 ### 3. Cleanup
 
 Deletes **only** rows recorded in the clone manifest for that `clone_id`.
+If apply bootstrapped the Tenant 33 shell, cleanup deletes that shell only after
+all clone-created rows are gone and only when its deterministic acceptance marker
+still matches. Cleanup never deletes a pre-existing Tenant 33 shell.
 
 ```bash
 export NAHLA_TENANT_MERCHANT_CLONE_ENABLED=1
 export NAHLA_TENANT_MERCHANT_CLONE_CLEANUP_CONFIRM=CLEANUP_TENANT_33_MERCHANT_CLONE
 
 python scripts/operators/tenant_merchant_clone.py cleanup \
-  --target-tenant-id 99033 \
+  --source-tenant-id 33 \
+  --target-tenant-id 33 \
   --clone-id '<clone_id from manifest>' \
   --manifest-path ./artifacts/tenant33-clone-manifest.json
 ```

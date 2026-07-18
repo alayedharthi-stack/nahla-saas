@@ -19,9 +19,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from sqlalchemy import MetaData, Table, create_engine, inspect, select, text
+from sqlalchemy import MetaData, Table, create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import ArgumentError, SQLAlchemyError
@@ -40,6 +40,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     APPLY_CONFIRM_TOKEN,
     CLEANUP_CONFIRM_ENV,
     CLEANUP_CONFIRM_TOKEN,
+    DEFAULT_ACCEPTANCE_TENANT_ID,
     DENIED_TABLES,
     DRY_RUN_DIGEST_ENV,
     DRY_RUN_DIGEST_SCHEMA_VERSION,
@@ -48,11 +49,13 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     MANIFEST_SCHEMA_VERSION,
     MASTER_ENABLE_ENV,
     PHONE_SCRUB_PLACEHOLDER,
+    PRESERVE_TENANT_IDENTITY_MODE,
     PRODUCTION_ENVIRONMENT_VALUE,
     PRODUCTION_IDENTITY_CLASS,
     PRODUCTION_SOURCE_CONFIRM_ENV,
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
     RESET_COUNT_COLUMNS,
+    REMAP_TENANT_IDENTITY_MODE,
     SOURCE_DATABASE_URL_ENV,
     SOURCE_ENVIRONMENT_ENV,
     SOURCE_PROJECT_ENV,
@@ -61,18 +64,27 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     STAGING_PROJECT_VALUE,
     TARGET_ALLOWED_ENVIRONMENT_VALUES,
     TARGET_DATABASE_URL_ENV,
+    TARGET_BOOTSTRAP_NAME,
     TARGET_ENVIRONMENT_ENV,
     TARGET_PROJECT_ENV,
     TARGET_TEST_SLUG_MARKERS,
     TENANT_COPY_COLUMNS,
-    TENANT_DENIED_COLUMNS,
 )
 from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
+    scrub_ai_settings,
+    scrub_json_value,
     scrub_row_json_columns,
     scan_for_unhandled_forbidden_keys,
 )
 
 GateFailure = gates.GateFailure
+
+
+def _reflected_table(conn: Connection, name: str) -> Table:
+    cache = conn.info.setdefault("tenant_clone_reflected_tables", {})
+    if name not in cache:
+        cache[name] = Table(name, MetaData(), autoload_with=conn)
+    return cache[name]
 
 
 @dataclass(frozen=True)
@@ -117,17 +129,34 @@ def validate_database_url_scheme(raw_url: str, *, stage: str) -> GateFailure | N
     host = (parsed.host or "").lower()
     if not host:
         return GateFailure("database_binding_rejected", f"{stage}_database_host_missing")
-    if any(marker in host for marker in gates._FORBIDDEN_ENV_MARKERS):
-        return GateFailure("database_binding_rejected", f"{stage}_database_host_production_marker")
     return None
 
 
 def validate_source_target_distinct(request: CloneRequest) -> GateFailure | None:
-    if request.source_tenant_id == request.target_tenant_id:
-        return GateFailure("identity_rejected", "source_equals_target_tenant")
-    if request.source_database_url.strip() == request.target_database_url.strip():
+    """Reject one database, while allowing tenant-id preservation across databases."""
+    source = _parse_database_url(request.source_database_url)
+    target = _parse_database_url(request.target_database_url)
+    source_endpoint = (
+        (source.host or "").lower(),
+        source.port,
+        source.database,
+        tuple(sorted(source.query.items())),
+    )
+    target_endpoint = (
+        (target.host or "").lower(),
+        target.port,
+        target.database,
+        tuple(sorted(target.query.items())),
+    )
+    if source_endpoint == target_endpoint:
         return GateFailure("identity_rejected", "source_equals_target_database")
     return None
+
+
+def identity_mode(request: CloneRequest) -> str:
+    if request.source_tenant_id == request.target_tenant_id:
+        return PRESERVE_TENANT_IDENTITY_MODE
+    return REMAP_TENANT_IDENTITY_MODE
 
 
 def validate_target_staging_identity(env: Mapping[str, str]) -> GateFailure | None:
@@ -215,17 +244,47 @@ def validate_alembic_heads(conn: Connection) -> GateFailure | None:
     return None
 
 
-def validate_target_test_markers(conn: Connection, target_tenant_id: int) -> GateFailure | None:
+def _database_identity_payload(conn: Connection) -> dict[str, str]:
     row = conn.execute(
-        text("SELECT name, domain FROM tenants WHERE id = :tid"),
-        {"tid": target_tenant_id},
-    ).mappings().first()
-    if row is None:
-        return GateFailure("preflight_failed", "target_tenant_missing")
-    haystack = f"{row['name'] or ''} {row['domain'] or ''}".lower()
-    if not any(marker in haystack for marker in TARGET_TEST_SLUG_MARKERS):
-        return GateFailure("preflight_failed", "target_tenant_not_test_marked")
-    return None
+        text(
+            """
+            SELECT
+                current_database() AS database_name,
+                COALESCE(inet_server_addr()::text, 'local') AS server_address,
+                COALESCE(inet_server_port()::text, 'local') AS server_port
+            """
+        )
+    ).mappings().one()
+    return {
+        "database_name": str(row["database_name"]),
+        "server_address": str(row["server_address"]),
+        "server_port": str(row["server_port"]),
+    }
+
+
+def database_identity_digest(conn: Connection) -> str:
+    """Hash runtime connection identity; never expose DSNs or credentials."""
+    encoded = json.dumps(
+        _database_identity_payload(conn),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def validate_runtime_database_distinct(
+    source_conn: Connection,
+    target_conn: Connection,
+) -> tuple[str, str, GateFailure | None]:
+    source_digest = database_identity_digest(source_conn)
+    target_digest = database_identity_digest(target_conn)
+    if source_digest == target_digest:
+        return (
+            source_digest,
+            target_digest,
+            GateFailure("identity_rejected", "source_equals_target_database_runtime"),
+        )
+    return source_digest, target_digest, None
 
 
 def validate_source_tenant_exists(conn: Connection, source_tenant_id: int) -> GateFailure | None:
@@ -239,19 +298,53 @@ def validate_source_tenant_exists(conn: Connection, source_tenant_id: int) -> Ga
 
 
 def connect_engine(url: str, *, read_only: bool = False) -> Engine:
-    engine = create_engine(url, poolclass=NullPool, pool_pre_ping=True)
-    if read_only:
-        with engine.connect() as conn:
-            conn.execute(text("SET default_transaction_read_only = on"))
-            conn.commit()
-    return engine
+    connect_args = {"options": "-c default_transaction_read_only=on"} if read_only else {}
+    return create_engine(
+        url,
+        poolclass=NullPool,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
+
+
+_INDIRECT_TENANT_FILTERS: dict[str, str] = {
+    "product_group_items": (
+        "group_id IN (SELECT id FROM product_groups WHERE tenant_id = :tid)"
+    ),
+    "merchant_knowledge_media": (
+        "section_id IN (SELECT id FROM merchant_knowledge_sections WHERE tenant_id = :tid)"
+    ),
+    "merchant_knowledge_section_products": (
+        "section_id IN (SELECT id FROM merchant_knowledge_sections WHERE tenant_id = :tid)"
+    ),
+    "coupon_rules": "coupon_id IN (SELECT id FROM coupons WHERE tenant_id = :tid)",
+    "branch_contacts": (
+        "branch_id IN (SELECT id FROM merchant_branches WHERE tenant_id = :tid)"
+    ),
+    "branch_escalation_steps": (
+        "branch_id IN (SELECT id FROM merchant_branches WHERE tenant_id = :tid)"
+    ),
+    "branch_arrival_keywords": (
+        "branch_id IN (SELECT id FROM merchant_branches WHERE tenant_id = :tid)"
+    ),
+}
+
+
+def tenant_filter_sql(table: str) -> str:
+    return _INDIRECT_TENANT_FILTERS.get(table, "tenant_id = :tid")
+
+
+def allowed_table_count(conn: Connection, table: str, tenant_id: int) -> int:
+    return int(
+        conn.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {tenant_filter_sql(table)}"),
+            {"tid": tenant_id},
+        ).scalar_one()
+    )
 
 
 def table_count_checksum(conn: Connection, table: str, tenant_id: int) -> str:
-    count = conn.execute(
-        text(f"SELECT COUNT(*) FROM {table} WHERE tenant_id = :tid"),
-        {"tid": tenant_id},
-    ).scalar_one()
+    count = allowed_table_count(conn, table, tenant_id)
     return hashlib.sha256(f"{table}:{tenant_id}:{count}".encode()).hexdigest()[:16]
 
 
@@ -272,23 +365,92 @@ def denied_domain_zero_proof(conn: Connection, tenant_id: int) -> dict[str, int]
     return proof
 
 
-def _reflect_table(conn: Connection, name: str) -> Table:
-    metadata = MetaData()
-    return Table(name, metadata, autoload_with=conn)
+def _target_tenant_row(conn: Connection, tenant_id: int) -> Mapping[str, Any] | None:
+    return conn.execute(
+        text(
+            """
+            SELECT
+                id, name, domain, is_active, is_platform_tenant,
+                ai_blocked_numbers, billing_provider, stripe_customer_id,
+                stripe_subscription_id, stripe_price_id, subscription_status,
+                trial_started_at, trial_ends_at, first_whatsapp_connected_at,
+                current_period_end, hyperpay_payment_id, billing_status,
+                store_address, google_maps_link, apple_maps_link,
+                same_day_delivery_enabled, pickup_enabled, branding,
+                recommendation_controls, coupon_policy
+            FROM tenants
+            WHERE id = :tid
+            """
+        ),
+        {"tid": tenant_id},
+    ).mappings().first()
 
 
-def _allocate_new_id(conn: Connection, table: str) -> int:
-    current_max = conn.execute(text(f"SELECT COALESCE(MAX(id), 0) FROM {table}")).scalar_one()
-    return int(current_max) + 1
+def validate_target_shell(
+    conn: Connection,
+    target_tenant_id: int,
+) -> tuple[str, GateFailure | None]:
+    """Allow absent shell or a strictly empty, acceptance-marked existing shell."""
+    row = _target_tenant_row(conn, target_tenant_id)
+    if row is None:
+        return "bootstrap_required", None
+
+    haystack = f"{row['name'] or ''} {row['domain'] or ''}".lower()
+    if not any(marker in haystack for marker in TARGET_TEST_SLUG_MARKERS):
+        return "", GateFailure("preflight_failed", "target_tenant_not_test_marked")
+    if row["is_platform_tenant"]:
+        return "", GateFailure("preflight_failed", "target_tenant_is_platform")
+    if not row["is_active"]:
+        return "", GateFailure("preflight_failed", "target_tenant_not_active")
+
+    sensitive_columns = (
+        "ai_blocked_numbers",
+        "stripe_customer_id",
+        "stripe_subscription_id",
+        "stripe_price_id",
+        "subscription_status",
+        "trial_started_at",
+        "trial_ends_at",
+        "first_whatsapp_connected_at",
+        "current_period_end",
+        "hyperpay_payment_id",
+        "billing_status",
+    )
+    if any(row[column] not in (None, [], {}, "") for column in sensitive_columns):
+        return "", GateFailure("preflight_failed", "target_tenant_sensitive_state_present")
+    empty_nullable_public = (
+        "store_address",
+        "google_maps_link",
+        "apple_maps_link",
+        "branding",
+        "recommendation_controls",
+        "coupon_policy",
+    )
+    if any(row[column] is not None for column in empty_nullable_public):
+        return "", GateFailure("preflight_failed", "target_tenant_shell_not_empty")
+    if row["same_day_delivery_enabled"] not in (None, False):
+        return "", GateFailure("preflight_failed", "target_tenant_shell_not_empty")
+    if row["pickup_enabled"] not in (None, True):
+        return "", GateFailure("preflight_failed", "target_tenant_shell_not_empty")
+
+    for table in sorted(ALLOWED_TABLE_NAMES):
+        if allowed_table_count(conn, table, target_tenant_id):
+            return "", GateFailure("preflight_failed", f"target_allowed_rows_present:{table}")
+    target_denied = denied_domain_zero_proof(conn, target_tenant_id)
+    occupied = sorted(table for table, count in target_denied.items() if count)
+    if occupied:
+        return "", GateFailure(
+            "preflight_failed",
+            f"target_denied_rows_present:{occupied[0]}",
+        )
+    return "existing_safe_empty", None
 
 
-def _copy_tenant_scalars(
+def _source_tenant_scalars(
     source_conn: Connection,
-    target_conn: Connection,
     *,
     source_tenant_id: int,
-    target_tenant_id: int,
-) -> list[str]:
+) -> dict[str, Any]:
     row = source_conn.execute(
         text(
             "SELECT "
@@ -297,11 +459,81 @@ def _copy_tenant_scalars(
         ),
         {"tid": source_tenant_id},
     ).mappings().one()
-    assignments = ", ".join(f"{col} = :{col}" for col in TENANT_COPY_COLUMNS)
-    params = {col: row[col] for col in TENANT_COPY_COLUMNS}
-    params["tid"] = target_tenant_id
-    target_conn.execute(text(f"UPDATE tenants SET {assignments} WHERE id = :tid"), params)
-    return [f"tenant_scalars:{col}" for col in TENANT_COPY_COLUMNS]
+    values = {column: row[column] for column in TENANT_COPY_COLUMNS}
+    for column in ("branding", "recommendation_controls", "coupon_policy"):
+        if values[column] is None:
+            continue
+        cleaned, transforms = scrub_json_value(values[column], path=f"tenants.{column}")
+        if any(item.startswith("unhandled_forbidden_key:") for item in transforms):
+            raise ValueError(f"forbidden_json_keys:tenants.{column}")
+        values[column] = cleaned
+    return values
+
+
+def _advance_tenant_sequence(conn: Connection) -> None:
+    sequence_name = conn.execute(
+        text("SELECT pg_get_serial_sequence('tenants', 'id')")
+    ).scalar_one_or_none()
+    if not sequence_name:
+        raise ValueError("tenant_id_sequence_missing")
+    conn.execute(
+        text(
+            """
+            SELECT setval(
+                CAST(:sequence_name AS regclass),
+                GREATEST(
+                    nextval(CAST(:sequence_name AS regclass)),
+                    (SELECT COALESCE(MAX(id), 1) FROM tenants)
+                ),
+                true
+            )
+            """
+        ),
+        {"sequence_name": sequence_name},
+    )
+
+
+def _prepare_target_tenant_shell(
+    source_conn: Connection,
+    target_conn: Connection,
+    *,
+    source_tenant_id: int,
+    target_tenant_id: int,
+    shell_state: str,
+) -> tuple[bool, list[str], dict[str, Any] | None]:
+    values = _source_tenant_scalars(source_conn, source_tenant_id=source_tenant_id)
+    if shell_state == "bootstrap_required":
+        params = {
+            "id": target_tenant_id,
+            "name": TARGET_BOOTSTRAP_NAME,
+            "domain": None,
+            "is_active": True,
+            "is_platform_tenant": False,
+            **values,
+        }
+        tenants = _reflected_table(target_conn, "tenants")
+        target_conn.execute(tenants.insert().values(**params))
+        _advance_tenant_sequence(target_conn)
+        return True, ["bootstrap:target_tenant_acceptance_shell"], None
+
+    previous = target_conn.execute(
+        text(
+            "SELECT "
+            + ", ".join(TENANT_COPY_COLUMNS)
+            + " FROM tenants WHERE id = :tid"
+        ),
+        {"tid": target_tenant_id},
+    ).mappings().one()
+    params = dict(values)
+    tenants = _reflected_table(target_conn, "tenants")
+    target_conn.execute(
+        tenants.update().where(tenants.c.id == target_tenant_id).values(**params)
+    )
+    return (
+        False,
+        [f"tenant_scalars:{col}" for col in TENANT_COPY_COLUMNS],
+        {column: previous[column] for column in TENANT_COPY_COLUMNS},
+    )
 
 
 def _transform_row(
@@ -379,22 +611,9 @@ def _transform_row(
 
 
 def _insert_row(conn: Connection, table: str, row: Mapping[str, Any]) -> int:
-    columns = list(row.keys())
-    placeholders = ", ".join(f":{c}" for c in columns)
-    sql = text(
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) RETURNING id"
-    )
-    return int(conn.execute(sql, dict(row)).scalar_one())
-
-
-def _delete_target_scope(conn: Connection, target_tenant_id: int) -> None:
-    for spec in reversed(ALLOWED_TABLE_SPECS):
-        if spec.name == "tenant_settings":
-            continue
-        conn.execute(
-            text(f"DELETE FROM {spec.name} WHERE tenant_id = :tid"),
-            {"tid": target_tenant_id},
-        )
+    reflected = _reflected_table(conn, table)
+    statement = reflected.insert().values(**dict(row)).returning(reflected.c.id)
+    return int(conn.execute(statement).scalar_one())
 
 
 def build_plan(request: CloneRequest) -> dict[str, Any]:
@@ -402,32 +621,44 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
     target_engine = connect_engine(request.target_database_url)
     try:
         with source_engine.connect() as source_conn, target_engine.connect() as target_conn:
+            (
+                source_database_digest,
+                target_database_digest,
+                identity_failure,
+            ) = validate_runtime_database_distinct(source_conn, target_conn)
+            if identity_failure:
+                raise ValueError(identity_failure.stage)
+
             for conn, label in ((source_conn, "source"), (target_conn, "target")):
                 failure = validate_alembic_heads(conn)
                 if failure:
                     raise ValueError(f"{label}:{failure.stage}")
 
-            for validator, args in (
-                (validate_source_tenant_exists, (source_conn, request.source_tenant_id)),
-                (validate_target_test_markers, (target_conn, request.target_tenant_id)),
-            ):
-                failure = validator(*args)
-                if failure:
-                    raise ValueError(failure.stage)
+            failure = validate_source_tenant_exists(source_conn, request.source_tenant_id)
+            if failure:
+                raise ValueError(failure.stage)
+            target_shell_state, failure = validate_target_shell(
+                target_conn,
+                request.target_tenant_id,
+            )
+            if failure:
+                raise ValueError(failure.stage)
 
             table_counts: dict[str, int] = {}
             dependency_order = [spec.name for spec in ALLOWED_TABLE_SPECS]
-            transformations: list[str] = ["tenant_scalars"]
+            transformations: list[str] = [
+                "tenant_scalars",
+                "force:tenant_settings.ai_settings.store_ai_mode=test",
+                "force:tenant_settings.ai_settings.ai_test_allowed_numbers=[]",
+                "strip:channel_credentials_and_bindings",
+            ]
 
             for spec in ALLOWED_TABLE_SPECS:
-                count = source_conn.execute(
-                    text(
-                        f"SELECT COUNT(*) FROM {spec.name} "
-                        f"WHERE {spec.tenant_column} = :tid"
-                    ),
-                    {"tid": request.source_tenant_id},
-                ).scalar_one()
-                table_counts[spec.name] = int(count)
+                table_counts[spec.name] = allowed_table_count(
+                    source_conn,
+                    spec.name,
+                    request.source_tenant_id,
+                )
 
             source_checksums = {
                 table: table_count_checksum(source_conn, table, request.source_tenant_id)
@@ -440,15 +671,24 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 if table != "tenant_settings"
             }
             denied_proof = denied_domain_zero_proof(source_conn, request.source_tenant_id)
+            target_denied_proof = denied_domain_zero_proof(
+                target_conn,
+                request.target_tenant_id,
+            )
 
             digest_payload = {
                 "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+                "identity_mode": identity_mode(request),
+                "source_database_identity_digest": source_database_digest,
+                "target_database_identity_digest": target_database_digest,
                 "source_tenant_id": request.source_tenant_id,
                 "target_tenant_id": request.target_tenant_id,
+                "target_shell_state": target_shell_state,
                 "table_counts": table_counts,
                 "source_checksums": source_checksums,
                 "dependency_order": dependency_order,
                 "denied_domain_source_counts": denied_proof,
+                "target_denied_domain_counts": target_denied_proof,
                 "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
             }
             digest = hashlib.sha256(
@@ -460,13 +700,21 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "mode": request.mode,
                 "clone_id": request.clone_id,
                 "schema_version": DRY_RUN_DIGEST_SCHEMA_VERSION,
+                "identity_mode": identity_mode(request),
+                "source_database_identity_digest": source_database_digest,
+                "target_database_identity_digest": target_database_digest,
+                "database_identities_distinct": True,
                 "source_tenant_id": request.source_tenant_id,
                 "target_tenant_id": request.target_tenant_id,
+                "target_shell_state": target_shell_state,
+                "target_tenant_bootstrap_planned": target_shell_state == "bootstrap_required",
                 "dependency_order": dependency_order,
                 "table_counts": table_counts,
                 "source_checksums": source_checksums,
                 "target_checksums_before": target_before,
                 "denied_domain_source_counts": denied_proof,
+                "target_denied_domain_counts": target_denied_proof,
+                "target_denied_domain_zero": not any(target_denied_proof.values()),
                 "transformations": transformations,
                 "dry_run_digest": digest,
                 "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
@@ -495,6 +743,8 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
     manifest_rows: dict[str, list[int]] = {}
     transformations: list[str] = []
     unrelated_before: dict[str, str] = {}
+    target_tenant_bootstrapped = False
+    existing_shell_scalar_restore: dict[str, Any] | None = None
 
     try:
         with source_engine.connect() as source_conn:
@@ -513,21 +763,32 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                             )
 
             with target_engine.begin() as target_conn:
-                transformations.extend(
-                    _copy_tenant_scalars(
-                        source_conn,
-                        target_conn,
-                        source_tenant_id=request.source_tenant_id,
-                        target_tenant_id=request.target_tenant_id,
-                    )
+                shell_state, shell_failure = validate_target_shell(
+                    target_conn,
+                    request.target_tenant_id,
                 )
-                _delete_target_scope(target_conn, request.target_tenant_id)
+                if shell_failure:
+                    raise ValueError(shell_failure.stage)
+                if shell_state != plan["target_shell_state"]:
+                    raise ValueError("target_shell_state_changed_since_dry_run")
+                (
+                    target_tenant_bootstrapped,
+                    tenant_transforms,
+                    existing_shell_scalar_restore,
+                ) = _prepare_target_tenant_shell(
+                    source_conn,
+                    target_conn,
+                    source_tenant_id=request.source_tenant_id,
+                    target_tenant_id=request.target_tenant_id,
+                    shell_state=shell_state,
+                )
+                transformations.extend(tenant_transforms)
 
                 for spec in ALLOWED_TABLE_SPECS:
                     rows = source_conn.execute(
                         text(
                             f"SELECT * FROM {spec.name} "
-                            f"WHERE {spec.tenant_column} = :tid ORDER BY id"
+                            f"WHERE {tenant_filter_sql(spec.name)} ORDER BY id"
                         ),
                         {"tid": request.source_tenant_id},
                     ).mappings().all()
@@ -553,30 +814,33 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                                 {"tid": request.target_tenant_id},
                             ).scalar()
                             if existing:
-                                set_clause = ", ".join(
-                                    f"{col} = :{col}"
-                                    for col in transformed
-                                    if col not in {"tenant_id"}
+                                raise ValueError(
+                                    f"target_allowed_rows_present:{spec.name}"
                                 )
-                                params = dict(transformed)
-                                params["tid"] = request.target_tenant_id
-                                target_conn.execute(
-                                    text(
-                                        f"UPDATE {spec.name} SET {set_clause} "
-                                        f"WHERE tenant_id = :tid"
-                                    ),
-                                    params,
-                                )
-                                new_id = int(existing)
                             else:
                                 new_id = _insert_row(target_conn, spec.name, transformed)
                         else:
                             old_id = int(row["id"])
-                            new_id = _allocate_new_id(target_conn, spec.name)
-                            transformed["id"] = new_id
-                            _insert_row(target_conn, spec.name, transformed)
+                            new_id = _insert_row(target_conn, spec.name, transformed)
                             id_maps.setdefault(spec.name, {})[old_id] = new_id
                         manifest_rows[spec.name].append(new_id)
+
+                if not manifest_rows["tenant_settings"]:
+                    settings_id = _insert_row(
+                        target_conn,
+                        "tenant_settings",
+                        {
+                            "tenant_id": request.target_tenant_id,
+                            "whatsapp_settings": {},
+                            "ai_settings": scrub_ai_settings({}),
+                            "store_settings": {},
+                            "notification_settings": {},
+                        },
+                    )
+                    manifest_rows["tenant_settings"].append(settings_id)
+                    transformations.append(
+                        "bootstrap:tenant_settings_safe_acceptance_defaults"
+                    )
 
                 # Backfill products.default_variant_id after variants exist.
                 product_rows = source_conn.execute(
@@ -608,11 +872,44 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                         if after != checksum:
                             raise ValueError(f"unrelated_tenant_checksum_changed:{table}")
 
+                post_denied = denied_domain_zero_proof(
+                    target_conn,
+                    request.target_tenant_id,
+                )
+                post_occupied = sorted(
+                    table for table, count in post_denied.items() if count
+                )
+                if post_occupied:
+                    raise ValueError(f"post_clone_denied_rows_present:{post_occupied[0]}")
+
+                settings = target_conn.execute(
+                    text(
+                        "SELECT ai_settings, whatsapp_settings "
+                        "FROM tenant_settings WHERE tenant_id = :tid"
+                    ),
+                    {"tid": request.target_tenant_id},
+                ).mappings().one()
+                ai_settings = settings["ai_settings"] or {}
+                if (
+                    ai_settings.get("store_ai_mode") != "test"
+                    or ai_settings.get("ai_test_allowed_numbers") != []
+                ):
+                    raise ValueError("post_clone_ai_test_safety_failed")
+
         manifest = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "clone_id": request.clone_id,
+            "identity_mode": identity_mode(request),
+            "source_database_identity_digest": plan["source_database_identity_digest"],
+            "target_database_identity_digest": plan["target_database_identity_digest"],
+            "database_identities_distinct": True,
             "source_tenant_id": request.source_tenant_id,
             "target_tenant_id": request.target_tenant_id,
+            "target_tenant_bootstrapped": target_tenant_bootstrapped,
+            "target_bootstrap_name": (
+                TARGET_BOOTSTRAP_NAME if target_tenant_bootstrapped else None
+            ),
+            "existing_shell_scalar_restore": existing_shell_scalar_restore,
             "applied_at": datetime.now(timezone.utc).isoformat(),
             "dry_run_digest": request.dry_run_digest,
             "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
@@ -644,6 +941,22 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
     deleted: dict[str, int] = {}
     try:
         with target_engine.begin() as conn:
+            if (
+                database_identity_digest(conn)
+                != manifest.get("target_database_identity_digest")
+            ):
+                raise ValueError("cleanup_target_database_identity_mismatch")
+            if int(manifest.get("target_tenant_id", -1)) != request.target_tenant_id:
+                raise ValueError("cleanup_target_tenant_mismatch")
+            product_ids = manifest.get("manifest_rows", {}).get("products") or []
+            if product_ids:
+                conn.execute(
+                    text(
+                        "UPDATE products SET default_variant_id = NULL "
+                        "WHERE id = ANY(:ids) AND tenant_id = :tid"
+                    ),
+                    {"ids": product_ids, "tid": request.target_tenant_id},
+                )
             for spec in reversed(ALLOWED_TABLE_SPECS):
                 ids = manifest.get("manifest_rows", {}).get(spec.name) or []
                 if not ids:
@@ -653,10 +966,50 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
                     {"ids": ids},
                 )
                 deleted[spec.name] = int(result.rowcount or 0)
+            shell_deleted = False
+            if manifest.get("target_tenant_bootstrapped") is True:
+                target_denied = denied_domain_zero_proof(
+                    conn,
+                    request.target_tenant_id,
+                )
+                if any(target_denied.values()):
+                    raise ValueError("cleanup_bootstrapped_shell_has_operational_rows")
+                result = conn.execute(
+                    text(
+                        "DELETE FROM tenants "
+                        "WHERE id = :tid AND name = :name AND domain IS NULL"
+                    ),
+                    {
+                        "tid": request.target_tenant_id,
+                        "name": manifest.get("target_bootstrap_name"),
+                    },
+                )
+                if result.rowcount != 1:
+                    raise ValueError("cleanup_bootstrapped_shell_identity_mismatch")
+                shell_deleted = True
+            else:
+                restore = manifest.get("existing_shell_scalar_restore")
+                if not isinstance(restore, dict) or set(restore) != set(TENANT_COPY_COLUMNS):
+                    raise ValueError("cleanup_existing_shell_restore_missing")
+                assignments = ", ".join(
+                    f"{column} = :{column}" for column in TENANT_COPY_COLUMNS
+                )
+                params = dict(restore)
+                params["tid"] = request.target_tenant_id
+                result = conn.execute(
+                    text(
+                        f"UPDATE tenants SET {assignments} "
+                        "WHERE id = :tid"
+                    ),
+                    params,
+                )
+                if result.rowcount != 1:
+                    raise ValueError("cleanup_existing_shell_missing")
         return {
             "outcome": "cleaned",
             "clone_id": request.clone_id,
             "deleted_counts": deleted,
+            "target_tenant_shell_deleted": shell_deleted,
         }
     finally:
         target_engine.dispose()
@@ -664,10 +1017,11 @@ def cleanup_clone(request: CloneRequest) -> dict[str, Any]:
 
 def run_gates(request: CloneRequest) -> GateFailure | None:
     for validator in (
-        lambda: validate_source_target_distinct(request),
+        lambda: validate_database_url_scheme(request.source_database_url, stage="source"),
+        lambda: validate_database_url_scheme(request.target_database_url, stage="target"),
         lambda: validate_target_staging_identity(request.env),
         lambda: validate_target_database_host(request.env, request.target_database_url),
-        lambda: validate_database_url_scheme(request.source_database_url, stage="source"),
+        lambda: validate_source_target_distinct(request),
         lambda: validate_master_enable(request.env, mode=request.mode),
         lambda: validate_apply_confirmation(request.env, mode=request.mode),
         lambda: validate_cleanup_confirmation(request.env, mode=request.mode),
@@ -714,8 +1068,16 @@ def build_request_from_env(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Merchant-plane tenant clone operator")
     parser.add_argument("command", choices=["dry-run", "apply", "cleanup"])
-    parser.add_argument("--source-tenant-id", type=int, required=True)
-    parser.add_argument("--target-tenant-id", type=int, required=True)
+    parser.add_argument(
+        "--source-tenant-id",
+        type=int,
+        default=DEFAULT_ACCEPTANCE_TENANT_ID,
+    )
+    parser.add_argument(
+        "--target-tenant-id",
+        type=int,
+        default=DEFAULT_ACCEPTANCE_TENANT_ID,
+    )
     parser.add_argument("--clone-id", default="")
     parser.add_argument("--dry-run-digest", default="")
     parser.add_argument("--manifest-path", default="")
