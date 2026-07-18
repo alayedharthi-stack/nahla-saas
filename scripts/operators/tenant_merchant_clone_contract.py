@@ -13,10 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
-from scripts.operators.bootstrap_migration_contract import REPOSITORY_ALEMBIC_HEADS
-
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v2"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v2"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v3"
 DEFAULT_ACCEPTANCE_TENANT_ID = 33
 PRESERVE_TENANT_IDENTITY_MODE = "preserve_tenant_id_cross_database"
 REMAP_TENANT_IDENTITY_MODE = "remap_tenant_id_cross_database"
@@ -57,7 +55,9 @@ DRY_RUN_DIGEST_ENV = "NAHLA_TENANT_MERCHANT_CLONE_DRY_RUN_DIGEST"
 SOURCE_DATABASE_URL_ENV = "NAHLA_CLONE_SOURCE_DATABASE_URL"
 TARGET_DATABASE_URL_ENV = "DATABASE_URL"
 
-EXPECTED_ALEMBIC_HEADS = REPOSITORY_ALEMBIC_HEADS
+KNOWN_ALEMBIC_REVISIONS = frozenset({"0088", "0089"})
+EXPECTED_SOURCE_ALEMBIC_HEADS = frozenset({"0089"})
+EXPECTED_TARGET_ALEMBIC_HEADS = frozenset({"0088", "0089"})
 
 # ── Tenant scalar columns (public merchant settings only) ────────────────────
 TENANT_COPY_COLUMNS: Tuple[str, ...] = (

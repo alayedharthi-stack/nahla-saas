@@ -44,8 +44,10 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     DENIED_TABLES,
     DRY_RUN_DIGEST_ENV,
     DRY_RUN_DIGEST_SCHEMA_VERSION,
-    EXPECTED_ALEMBIC_HEADS,
+    EXPECTED_SOURCE_ALEMBIC_HEADS,
+    EXPECTED_TARGET_ALEMBIC_HEADS,
     GLOBAL_STRIP_COLUMNS,
+    KNOWN_ALEMBIC_REVISIONS,
     MANIFEST_SCHEMA_VERSION,
     MASTER_ENABLE_ENV,
     PHONE_SCRUB_PLACEHOLDER,
@@ -235,13 +237,97 @@ def validate_target_database_host(env: Mapping[str, str], target_url: str) -> Ga
     return None
 
 
-def validate_alembic_heads(conn: Connection) -> GateFailure | None:
-    revisions = gates.read_alembic_revisions(conn)
+def _validate_role_alembic_heads(
+    revisions: frozenset[str],
+    *,
+    expected: frozenset[str],
+    role: str,
+) -> GateFailure | None:
     if not revisions:
-        return GateFailure("wrong_revision", "alembic_version_missing")
-    if revisions != EXPECTED_ALEMBIC_HEADS:
-        return GateFailure("wrong_revision", "alembic_heads_mismatch_or_multi_head_drift")
+        return GateFailure("wrong_revision", f"{role}_alembic_version_missing")
+    unknown = revisions - KNOWN_ALEMBIC_REVISIONS
+    if unknown:
+        return GateFailure("wrong_revision", f"{role}_alembic_unknown_revision")
+    if revisions == expected:
+        return None
+    if role == "source":
+        if revisions == frozenset({"0088", "0089"}):
+            return GateFailure("wrong_revision", "source_alembic_multi_head_drift")
+        if revisions == frozenset({"0088"}):
+            return GateFailure("wrong_revision", "source_alembic_revision_mismatch")
+        return GateFailure("wrong_revision", "source_alembic_heads_mismatch")
+    missing = expected - revisions
+    extra = revisions - expected
+    if missing:
+        return GateFailure(
+            "wrong_revision",
+            f"target_alembic_revision_missing:{sorted(missing)[0]}",
+        )
+    if extra:
+        return GateFailure("wrong_revision", "target_alembic_extra_revision")
+    return GateFailure("wrong_revision", "target_alembic_heads_mismatch")
+
+
+def validate_source_alembic_heads(conn: Connection) -> GateFailure | None:
+    revisions = gates.read_alembic_revisions(conn)
+    return _validate_role_alembic_heads(
+        revisions,
+        expected=EXPECTED_SOURCE_ALEMBIC_HEADS,
+        role="source",
+    )
+
+
+def validate_target_alembic_heads(conn: Connection) -> GateFailure | None:
+    revisions = gates.read_alembic_revisions(conn)
+    return _validate_role_alembic_heads(
+        revisions,
+        expected=EXPECTED_TARGET_ALEMBIC_HEADS,
+        role="target",
+    )
+
+
+def validate_schema_compatibility(
+    source_conn: Connection,
+    target_conn: Connection,
+) -> GateFailure | None:
+    """Fail closed before row reads if source lacks target-required columns."""
+    source_inspector = inspect(source_conn)
+    target_inspector = inspect(target_conn)
+
+    if "tenants" not in source_inspector.get_table_names():
+        return GateFailure("preflight_failed", "schema_compat:tenants:source_table_missing")
+    if "tenants" not in target_inspector.get_table_names():
+        return GateFailure("preflight_failed", "schema_compat:tenants:target_table_missing")
+    source_tenant_cols = {c["name"] for c in source_inspector.get_columns("tenants")}
+    missing_tenant = sorted(set(TENANT_COPY_COLUMNS) - source_tenant_cols)
+    if missing_tenant:
+        return GateFailure(
+            "preflight_failed",
+            f"schema_compat:tenants:source_missing_columns:{missing_tenant[0]}",
+        )
+
+    for spec in ALLOWED_TABLE_SPECS:
+        table = spec.name
+        if table not in target_inspector.get_table_names():
+            return GateFailure("preflight_failed", f"schema_compat:{table}:target_table_missing")
+        if table not in source_inspector.get_table_names():
+            return GateFailure("preflight_failed", f"schema_compat:{table}:source_table_missing")
+        target_cols = {c["name"] for c in target_inspector.get_columns(table)}
+        source_cols = {c["name"] for c in source_inspector.get_columns(table)}
+        required = target_cols - spec.skip_columns - frozenset({"id"})
+        missing = sorted(required - source_cols)
+        if missing:
+            return GateFailure(
+                "preflight_failed",
+                f"schema_compat:{table}:source_missing_columns:{missing[0]}",
+            )
     return None
+
+
+def compute_dry_run_digest(digest_payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _database_identity_payload(conn: Connection) -> dict[str, str]:
@@ -629,10 +715,24 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
             if identity_failure:
                 raise ValueError(identity_failure.stage)
 
-            for conn, label in ((source_conn, "source"), (target_conn, "target")):
-                failure = validate_alembic_heads(conn)
+            for conn, label, validator in (
+                (source_conn, "source", validate_source_alembic_heads),
+                (target_conn, "target", validate_target_alembic_heads),
+            ):
+                failure = validator(conn)
                 if failure:
                     raise ValueError(f"{label}:{failure.stage}")
+
+            failure = validate_schema_compatibility(source_conn, target_conn)
+            if failure:
+                raise ValueError(failure.stage)
+
+            source_alembic_heads = sorted(
+                gates.read_alembic_revisions(source_conn)
+            )
+            target_alembic_heads = sorted(
+                gates.read_alembic_revisions(target_conn)
+            )
 
             failure = validate_source_tenant_exists(source_conn, request.source_tenant_id)
             if failure:
@@ -689,11 +789,10 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "dependency_order": dependency_order,
                 "denied_domain_source_counts": denied_proof,
                 "target_denied_domain_counts": target_denied_proof,
-                "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
+                "source_alembic_heads": source_alembic_heads,
+                "target_alembic_heads": target_alembic_heads,
             }
-            digest = hashlib.sha256(
-                json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            digest = compute_dry_run_digest(digest_payload)
 
             return {
                 "outcome": "planned",
@@ -717,7 +816,8 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 "target_denied_domain_zero": not any(target_denied_proof.values()),
                 "transformations": transformations,
                 "dry_run_digest": digest,
-                "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
+                "source_alembic_heads": source_alembic_heads,
+                "target_alembic_heads": target_alembic_heads,
             }
     finally:
         source_engine.dispose()
@@ -914,7 +1014,8 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
             "existing_shell_scalar_restore": existing_shell_scalar_restore,
             "applied_at": datetime.now(timezone.utc).isoformat(),
             "dry_run_digest": request.dry_run_digest,
-            "alembic_heads": sorted(EXPECTED_ALEMBIC_HEADS),
+            "source_alembic_heads": plan["source_alembic_heads"],
+            "target_alembic_heads": plan["target_alembic_heads"],
             "manifest_rows": manifest_rows,
             "transformations": sorted(set(transformations)),
         }
