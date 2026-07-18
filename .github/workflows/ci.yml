@@ -74,6 +74,12 @@ jobs:
             backend/tests/test_customer_conditional_coupon_consumer_verify.py \
             -q --maxfail=1
 
+      - name: Real-channel conversational acceptance probe tests
+        run: |
+          python -m pytest \
+            backend/tests/test_real_channel_conversational_acceptance_probe.py \
+            -q --maxfail=1
+
       - name: Guarded staging migration operator tests
         run: |
           python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1
