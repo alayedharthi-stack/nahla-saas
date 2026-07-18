@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "governance_baseline_version": 3,
-  "governance_pr": "https://github.com/alayedharthi-stack/nahla-saas/pull/TBD",
-  "approved_by": "PR #TBD governance review; NL-V002/NL-T002 removed in track-order-need-identifiers compose fix",
+  "governance_pr": "https://github.com/alayedharthi-stack/nahla-saas/pull/632",
+  "approved_by": "PR #632 governance review; NL-V002/NL-T002 removed in track-order-need-identifiers compose fix",
   "policy_note": "TRACKED_VIOLATIONS are FAILING POLICY WITH TEMPORARY WAIVER — never approved behavior. New violation IDs require governance_baseline_version bump and explicit owner approval in a dedicated governance PR.",
   "allowed_violation_ids": [],
   "violations": []
