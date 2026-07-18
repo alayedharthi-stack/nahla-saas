@@ -57,6 +57,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
     RESET_COUNT_COLUMNS,
     REMAP_TENANT_IDENTITY_MODE,
+    SCRUBBED_JSON_KEY_REPLACEMENTS,
     SOURCE_DATABASE_URL_ENV,
     SOURCE_ENVIRONMENT_ENV,
     SOURCE_PROJECT_ENV,
@@ -76,6 +77,9 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     table_specs_for_profile,
 )
 from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
+    _is_forbidden_key,
+    _is_integration_email_field_key,
+    _normalize_key,
     scrub_ai_settings,
     scrub_json_value,
     scrub_row_json_columns,
@@ -579,6 +583,47 @@ def _source_tenant_scalars(
     return values
 
 
+def _integration_config_post_scrub_violations(
+    value: Any,
+    *,
+    path: str = "",
+) -> list[str]:
+    """Unknown forbidden keys on scrubbed integration config (path-only audit)."""
+    violations: list[str] = []
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else key
+            if _is_integration_email_field_key(key):
+                violations.extend(
+                    _integration_config_post_scrub_violations(child, path=child_path)
+                )
+                continue
+            normalized = _normalize_key(key)
+            if any(
+                marker in normalized
+                for marker in ("token", "secret", "password", "oauth", "api_key")
+            ):
+                violations.extend(
+                    _integration_config_post_scrub_violations(child, path=child_path)
+                )
+                continue
+            if _is_forbidden_key(key):
+                if normalized not in SCRUBBED_JSON_KEY_REPLACEMENTS:
+                    violations.append(child_path)
+            violations.extend(
+                _integration_config_post_scrub_violations(child, path=child_path)
+            )
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            violations.extend(
+                _integration_config_post_scrub_violations(
+                    item,
+                    path=f"{path}[{idx}]",
+                )
+            )
+    return violations
+
+
 def _advance_tenant_sequence(conn: Connection) -> None:
     sequence_name = conn.execute(
         text("SELECT pg_get_serial_sequence('tenants', 'id')")
@@ -715,10 +760,16 @@ def _transform_row(
         transformations.append("force:integrations.disabled_until_staging_credentials")
 
     for column in spec_json_columns:
-        if column in row and row[column] is not None:
-            violations = scan_for_unhandled_forbidden_keys(row[column])
+        if column not in row or row[column] is None:
+            continue
+        if spec_name == "integrations" and column == "config":
+            violations = _integration_config_post_scrub_violations(out[column])
             if violations:
                 raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
+            continue
+        violations = scan_for_unhandled_forbidden_keys(row[column])
+        if violations:
+            raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
 
     return out, transformations
 

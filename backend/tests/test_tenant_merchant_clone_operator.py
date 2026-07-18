@@ -492,8 +492,208 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v5() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v5"
+def test_dry_run_digest_schema_version_is_v6() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v6"
+
+
+def test_integration_transform_scrubs_salla_owner_email() -> None:
+    pii_email = "owner@merchant.example"
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "provider": "salla",
+        "external_store_id": "store-123",
+        "enabled": True,
+        "config": {"salla_owner_email": pii_email, "store_id": "123"},
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name="integrations",
+        spec_json_columns=("config",),
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=(),
+        scrub_phone_columns=(),
+        deferred_fk_columns=(),
+    )
+    assert transformed["config"]["salla_owner_email"] == ""
+    assert transformed["config"]["store_id"] == "123"
+    assert pii_email not in json.dumps(transforms)
+
+
+def test_integration_transform_scrubs_nested_email_variants() -> None:
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "provider": "salla",
+        "enabled": True,
+        "config": {
+            "nested": {"contact_email": "nested@merchant.example"},
+            "contacts": [{"ownerEmail": "camel@merchant.example"}],
+            "store_id": "123",
+        },
+    }
+    transformed, _ = clone_op._transform_row(
+        row,
+        spec_name="integrations",
+        spec_json_columns=("config",),
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=(),
+        scrub_phone_columns=(),
+        deferred_fk_columns=(),
+    )
+    assert transformed["config"]["nested"]["contact_email"] == ""
+    assert transformed["config"]["contacts"][0]["ownerEmail"] == ""
+
+
+def test_integration_transform_rejects_unknown_forbidden_customer_id() -> None:
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "provider": "salla",
+        "enabled": True,
+        "config": {"customer_id": "cust-123", "store_id": "123"},
+    }
+    with pytest.raises(ValueError, match="integration_config_unhandled_forbidden_key"):
+        clone_op._transform_row(
+            row,
+            spec_name="integrations",
+            spec_json_columns=("config",),
+            target_tenant_id=48,
+            id_maps={},
+            remap_fk_columns=(),
+            scrub_phone_columns=(),
+            deferred_fk_columns=(),
+        )
+
+
+def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan() -> None:
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "provider": "salla",
+        "enabled": True,
+        "config": {
+            "access_token": "secret-token",
+            "refresh_token": "refresh",
+            "phone_e164": "+966501234567",
+            "store_id": "123",
+        },
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name="integrations",
+        spec_json_columns=("config",),
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=(),
+        scrub_phone_columns=(),
+        deferred_fk_columns=(),
+    )
+    assert transformed["config"]["access_token"] == ""
+    assert transformed["config"]["refresh_token"] == ""
+    assert transformed["config"]["phone_e164"] == "+00000000000"
+    assert scan_for_unhandled_forbidden_keys(transformed["config"]) == []
+    assert any("integrations.config_stripped" in t for t in transforms)
+
+
+def test_non_integration_json_still_validates_raw_source_fail_closed() -> None:
+    row = {
+        "id": 1,
+        "tenant_id": 48,
+        "metadata": {"customer_id": "cust-123", "title": "generic"},
+    }
+    with pytest.raises(ValueError, match="unhandled_forbidden_json:products.metadata"):
+        clone_op._transform_row(
+            row,
+            spec_name="products",
+            spec_json_columns=("metadata",),
+            target_tenant_id=48,
+            id_maps={},
+            remap_fk_columns=(),
+            scrub_phone_columns=(),
+            deferred_fk_columns=(),
+        )
+
+
+def test_stale_v5_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = _topology_digest_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v5"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v5-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
+
+
+def test_minimal_profile_integration_row_transform_path_succeeds() -> None:
+    integration_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "integrations"
+    )
+    row = {
+        "id": 99,
+        "tenant_id": 48,
+        "provider": "salla",
+        "external_store_id": "ext-99",
+        "enabled": True,
+        "config": {
+            "salla_owner_email": "owner@merchant.example",
+            "access_token": "tok",
+            "store_id": "123",
+        },
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=integration_spec.name,
+        spec_json_columns=integration_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=integration_spec.remap_fk_columns,
+        scrub_phone_columns=integration_spec.scrub_phone_columns,
+        deferred_fk_columns=integration_spec.deferred_fk_columns,
+    )
+    assert transformed["enabled"] is False
+    assert transformed["external_store_id"] is None
+    assert transformed["config"]["salla_owner_email"] == ""
+    assert transformed["config"]["access_token"] == ""
+    assert transformed["tenant_id"] == 48
+    assert "id" not in transformed
+    assert any("integrations.config_stripped" in t for t in transforms)
 
 
 def test_forbidden_json_customer_id_fails_closed() -> None:
