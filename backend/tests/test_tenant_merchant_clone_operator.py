@@ -161,12 +161,98 @@ def test_salla_minimal_profile_dependency_order_has_no_fk_gaps() -> None:
         "merchant_knowledge_sections",
         "delivery_zones",
         "shipping_fees",
-        "store_knowledge_snapshots",
+        "tenant_settings",
     ):
         assert required in names
+    assert "store_knowledge_snapshots" not in names
     assert "coupons" not in names
     assert "whatsapp_templates" not in names
     assert "smart_automations" not in names
+
+
+def test_full_merchant_profile_includes_store_knowledge_snapshots() -> None:
+    full_names = allowed_table_names_for_profile(CLONE_PROFILE_FULL_MERCHANT)
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    assert "store_knowledge_snapshots" in full_names
+    assert "store_knowledge_snapshots" not in minimal_names
+    full_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_FULL_MERCHANT)
+        if spec.name == "store_knowledge_snapshots"
+    )
+    assert full_spec.upsert_on_tenant is True
+    assert "store_profile" in full_spec.json_columns
+    assert "coupon_summary" in full_spec.json_columns
+
+
+def test_minimal_profile_excludes_derived_store_knowledge_snapshots() -> None:
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    assert "store_knowledge_snapshots" not in minimal_names
+    assert "store_knowledge_snapshots" in EXCLUDED_OPERATIONAL_TABLES
+    simulated_plan = {
+        "table_counts": {name: 0 for name in minimal_names},
+        "excluded_operational_source_counts": {
+            "store_knowledge_snapshots": 1,
+            "coupons": 4413,
+        },
+    }
+    assert simulated_plan["table_counts"].get("store_knowledge_snapshots", 0) == 0
+    assert simulated_plan["excluded_operational_source_counts"]["store_knowledge_snapshots"] == 1
+
+
+def test_minimal_profile_excludes_snapshot_pii_and_mixed_domain_cache() -> None:
+    """Derived snapshot cache (PII + coupon/customer/order summaries) stays out of minimal scope."""
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    source_snapshot_row = {
+        "tenant_id": 48,
+        "store_profile": {
+            "contact_email": "owner@merchant.example",
+            "contact_phone": "+966501234567",
+        },
+        "coupon_summary": {"active_coupons": 12},
+        "catalog_summary": {"product_count": 99},
+    }
+    simulated_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "table_counts": {name: 0 for name in minimal_names},
+        "excluded_operational_source_counts": {
+            "store_knowledge_snapshots": 1,
+        },
+    }
+    assert "store_knowledge_snapshots" not in simulated_plan["table_counts"]
+    assert simulated_plan["excluded_operational_source_counts"]["store_knowledge_snapshots"] == 1
+    assert source_snapshot_row["store_profile"]["contact_email"]
+    assert source_snapshot_row["coupon_summary"]["active_coupons"] > 0
+    for denied_table in ("customers", "orders", "coupons"):
+        assert denied_table not in minimal_names
+        assert denied_table in DENIED_TABLES or denied_table in EXCLUDED_OPERATIONAL_TABLES
+
+
+def test_minimal_profile_retains_generic_catalog_settings_and_integrations() -> None:
+    minimal_names = allowed_table_names_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+    generic_product_title = "حذاء رياضي أبيض"
+    simulated_plan = {
+        "table_counts": {
+            "products": 1,
+            "tenant_settings": 1,
+            "integrations": 1,
+            "merchant_knowledge_sections": 2,
+            "delivery_zones": 1,
+            "shipping_fees": 1,
+        },
+        "source_product_titles": [generic_product_title],
+    }
+    for table in (
+        "products",
+        "tenant_settings",
+        "integrations",
+        "merchant_knowledge_sections",
+        "delivery_zones",
+        "shipping_fees",
+    ):
+        assert table in minimal_names
+        assert simulated_plan["table_counts"][table] > 0
+    assert generic_product_title in simulated_plan["source_product_titles"]
 
 
 def test_salla_minimal_excludes_operational_tables_from_contract() -> None:
@@ -493,8 +579,8 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v7() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v7"
+def test_dry_run_digest_schema_version_is_v8() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v8"
 
 
 def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() -> None:
@@ -507,7 +593,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     assert "excluded_operational_source_counts" not in binding
     assert "denied_domain_source_counts" not in binding
     digest = clone_op.compute_dry_run_digest(binding)
-    # v6 bound observational telemetry; identical copy state must keep the same v7 digest
+    # v6 bound observational telemetry; identical copy state must keep the same v8 digest
     # even when operator-report counts drift between dry-run and apply.
     report_a = {
         "excluded_operational_source_counts": {
@@ -533,7 +619,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     }
     assert digest == clone_op.compute_dry_run_digest(binding)
     assert report_a != report_b
-    # v6-style payloads would have diverged; v7 binding ignores report-only telemetry.
+    # v6-style payloads would have diverged; v8 binding ignores report-only telemetry.
     v6_style_a = {**binding, **report_a}
     v6_style_b = {**binding, **report_b}
     assert clone_op.compute_dry_run_digest(v6_style_a) != clone_op.compute_dry_run_digest(
@@ -558,6 +644,58 @@ def test_dry_run_digest_changes_when_copy_affecting_table_counts_change() -> Non
     assert clone_op.compute_dry_run_digest(payload_a) != clone_op.compute_dry_run_digest(
         payload_b
     )
+
+
+def test_stale_v7_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v7"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v7-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
 
 
 def test_stale_v6_dry_run_digest_rejected_on_apply() -> None:

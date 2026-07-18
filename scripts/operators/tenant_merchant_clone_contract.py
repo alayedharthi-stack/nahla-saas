@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v7"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v8"
 
 # Closed clone profiles — ``--profile`` is required; no default (fail closed).
 CLONE_PROFILE_FULL_MERCHANT = "full_merchant_acceptance"
@@ -272,17 +272,6 @@ SALLA_ACCEPTANCE_MINIMAL_TABLE_SPECS: Tuple[CloneTableSpec, ...] = (
         "integrations",
         json_columns=("config",),
     ),
-    CloneTableSpec(
-        "store_knowledge_snapshots",
-        upsert_on_tenant=True,
-        json_columns=(
-            "store_profile",
-            "catalog_summary",
-            "shipping_summary",
-            "policy_summary",
-            "coupon_summary",
-        ),
-    ),
 )
 
 PROFILE_TABLE_SPECS: dict[str, Tuple[CloneTableSpec, ...]] = {
@@ -309,6 +298,8 @@ EXCLUDED_OPERATIONAL_TABLES: FrozenSet[str] = frozenset(
         "merchant_addons",
         "merchant_widgets",
         "widget_settings",
+        # Derived AI cache (store_profile PII, coupon/customer/order summaries) — not authoritative.
+        "store_knowledge_snapshots",
     }
 )
 
