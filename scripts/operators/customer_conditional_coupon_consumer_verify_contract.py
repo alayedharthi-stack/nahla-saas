@@ -5,9 +5,15 @@ from typing import Any, Mapping
 
 REPORT_SCHEMA_VERSION = "coupon_consumer_verify_v1"
 
-# Evidence-backed staging pin from successful consumer E2E (main @ 10848a46).
-PINNED_SOURCE_REVISION = "10848a4633723fa3f4aff7801fc92fd1ac393efb"
-PINNED_SOURCE_REVISION_SHORT = PINNED_SOURCE_REVISION[:8]
+# Evidence-backed **target runtime** pin from successful consumer E2E (main @ 10848a46).
+# The verifier operator may ship in later tooling commits; attestation must prove this
+# exact revision via in-container build injects or an external checkout at the pin.
+PINNED_TARGET_RUNTIME_REVISION = "10848a4633723fa3f4aff7801fc92fd1ac393efb"
+PINNED_TARGET_RUNTIME_REVISION_SHORT = PINNED_TARGET_RUNTIME_REVISION[:8]
+
+# Back-compat aliases (PR #624 naming).
+PINNED_SOURCE_REVISION = PINNED_TARGET_RUNTIME_REVISION
+PINNED_SOURCE_REVISION_SHORT = PINNED_TARGET_RUNTIME_REVISION_SHORT
 
 FIXTURE_TENANT_ID = 1
 FIXTURE_CUSTOMER_PHONE = "966500000099"
@@ -29,6 +35,7 @@ MAX_ORDER_COUNT_QUERIES_PER_SHADOW_TURN = 1
 MAX_USAGE_EVIDENCE_QUERIES_PER_SHADOW_TURN = 1
 
 PHASE_ARTIFACT_PREFLIGHT = "artifact_preflight"
+PHASE_RUNTIME_REVISION_ATTESTATION = "runtime_revision_attestation"
 PHASE_DEFAULT_OFF = "default_off"
 PHASE_A1_CAPABILITY = "a1_capability"
 PHASE_SHADOW_OBSERVATION = "shadow_observation"
@@ -43,6 +50,7 @@ PHASE_SUMMARY = "summary"
 GATE_PHASES = frozenset(
     {
         PHASE_ARTIFACT_PREFLIGHT,
+        PHASE_RUNTIME_REVISION_ATTESTATION,
         PHASE_DEFAULT_OFF,
         PHASE_A1_CAPABILITY,
         PHASE_SHADOW_OBSERVATION,
@@ -60,6 +68,9 @@ REQUIRED_SUMMARY_KEYS = frozenset({"ok", "phase", "report_schema_version", "resu
 CODE_COMMAND_INVALID = "command_invalid"
 CODE_PROBE_FAILED = "probe_failed"
 CODE_PINNED_REVISION_MISMATCH = "pinned_revision_mismatch"
+CODE_RUNTIME_REVISION_MISMATCH = "runtime_revision_mismatch"
+CODE_RUNTIME_REVISION_UNKNOWN = "runtime_revision_unknown"
+CODE_TARGET_APP_ROOT_REQUIRED = "target_app_root_required"
 CODE_TEARDOWN_FLAGS_STILL_SET = "teardown_flags_still_set"
 CODE_OUTBOUND_PROVIDER_CALLED = "outbound_provider_called"
 CODE_DB_GATE_SKIPPED = "db_gate_skipped"
@@ -71,11 +82,11 @@ _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
 
 def normalize_pinned_revision(raw: str | None) -> str:
-    value = str(raw or PINNED_SOURCE_REVISION).strip().lower()
+    value = str(raw or PINNED_TARGET_RUNTIME_REVISION).strip().lower()
     if not value:
         raise ValueError(CODE_PINNED_REVISION_MISMATCH)
-    if value == PINNED_SOURCE_REVISION or value == PINNED_SOURCE_REVISION_SHORT:
-        return PINNED_SOURCE_REVISION
+    if value == PINNED_TARGET_RUNTIME_REVISION or value == PINNED_TARGET_RUNTIME_REVISION_SHORT:
+        return PINNED_TARGET_RUNTIME_REVISION
     raise ValueError(CODE_PINNED_REVISION_MISMATCH)
 
 
@@ -130,8 +141,14 @@ __all__ = [
     "PHASE_SUMMARY",
     "PHASE_TEARDOWN_FLAGS",
     "PHASE_WEBHOOK_DEDUP",
+    "CODE_RUNTIME_REVISION_MISMATCH",
+    "CODE_RUNTIME_REVISION_UNKNOWN",
+    "CODE_TARGET_APP_ROOT_REQUIRED",
     "PINNED_SOURCE_REVISION",
     "PINNED_SOURCE_REVISION_SHORT",
+    "PINNED_TARGET_RUNTIME_REVISION",
+    "PINNED_TARGET_RUNTIME_REVISION_SHORT",
+    "PHASE_RUNTIME_REVISION_ATTESTATION",
     "PROBE_DEDUP_AFTER_STUB",
     "PROBE_DEDUP_BEFORE_STUB",
     "PROBE_DEDUP_SNAPSHOT_ID",

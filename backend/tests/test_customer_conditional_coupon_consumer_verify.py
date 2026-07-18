@@ -21,9 +21,11 @@ from scripts.operators.customer_conditional_coupon_consumer_verify_contract impo
     CODE_COMMAND_INVALID,
     CODE_DB_GATE_SKIPPED,
     CODE_PINNED_REVISION_MISMATCH,
+    CODE_TARGET_APP_ROOT_REQUIRED,
     COMPOSE_FLAG_ENV,
     PINNED_SOURCE_REVISION,
     PINNED_SOURCE_REVISION_SHORT,
+    PINNED_TARGET_RUNTIME_REVISION,
     PROBE_DEDUP_SNAPSHOT_ID,
     REPORT_SCHEMA_VERSION,
     SHADOW_FLAG_ENV,
@@ -72,6 +74,7 @@ def test_execute_consumer_verify_without_db_fails_db_gates(
         app_root=_REPO,
         db=None,
         require_db_gates=True,
+        require_runtime_attestation=False,
     )
     validate_summary_report(summary)
     assert summary["ok"] is False
@@ -89,7 +92,12 @@ def test_teardown_clears_flags_after_exception(monkeypatch: pytest.MonkeyPatch) 
         side_effect=RuntimeError("probe_abort"),
     ):
         with pytest.raises(RuntimeError, match="probe_abort"):
-            consumer_verify.execute_consumer_verify(app_root=_REPO, db=None, require_db_gates=False)
+            consumer_verify.execute_consumer_verify(
+                app_root=_REPO,
+                db=None,
+                require_db_gates=False,
+                require_runtime_attestation=False,
+            )
 
     assert consumer_verify.gate_teardown_flags()["ok"] is True
 
@@ -235,7 +243,45 @@ def test_artifact_preflight_passes_on_repo_root() -> None:
     report = consumer_verify.gate_artifact_preflight(_REPO)
     validate_gate_report(report)
     assert report["ok"] is True
-    assert report["pinned_source_revision"] == PINNED_SOURCE_REVISION
+    assert report["pinned_source_revision"] == PINNED_TARGET_RUNTIME_REVISION
+
+
+def test_execute_consumer_verify_fails_without_runtime_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RAILWAY_GIT_COMMIT_SHA", raising=False)
+    monkeypatch.delenv("NAHLA_CONSUMER_VERIFY_TARGET_APP_ROOT", raising=False)
+    summary = consumer_verify.execute_consumer_verify(
+        db=None,
+        require_db_gates=False,
+        require_runtime_attestation=True,
+    )
+    validate_summary_report(summary)
+    assert summary["ok"] is False
+    assert summary["code"] == CODE_TARGET_APP_ROOT_REQUIRED
+    assert summary["results"]["runtime_revision_attestation"] is False
+
+
+def test_operator_module_present_in_current_verifier_artifact() -> None:
+    operator_path = (
+        _REPO / "scripts" / "operators" / "customer_conditional_coupon_consumer_verify.py"
+    )
+    assert operator_path.is_file()
+
+
+def test_operator_absent_at_pinned_target_runtime_revision() -> None:
+    proc = subprocess.run(
+        [
+            "git",
+            "cat-file",
+            "-e",
+            f"{PINNED_TARGET_RUNTIME_REVISION}:scripts/operators/customer_conditional_coupon_consumer_verify.py",
+        ],
+        cwd=_REPO,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode != 0
 
 
 def test_artifact_preflight_fails_on_wrong_pin() -> None:

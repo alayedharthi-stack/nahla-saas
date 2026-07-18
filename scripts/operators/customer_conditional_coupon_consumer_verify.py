@@ -37,11 +37,13 @@ from scripts.operators.customer_conditional_coupon_consumer_verify_contract impo
     PHASE_COMPOSE_PERSONA_SUCCESS,
     PHASE_DEFAULT_OFF,
     PHASE_PROJECTION_INELIGIBLE,
+    PHASE_RUNTIME_REVISION_ATTESTATION,
     PHASE_SHADOW_OBSERVATION,
     PHASE_SUMMARY,
     PHASE_TEARDOWN_FLAGS,
     PHASE_WEBHOOK_DEDUP,
-    PINNED_SOURCE_REVISION_SHORT,
+    PINNED_TARGET_RUNTIME_REVISION,
+    PINNED_TARGET_RUNTIME_REVISION_SHORT,
     PROBE_DEDUP_AFTER_STUB,
     PROBE_DEDUP_BEFORE_STUB,
     PROBE_DEDUP_SNAPSHOT_ID,
@@ -52,6 +54,9 @@ from scripts.operators.customer_conditional_coupon_consumer_verify_contract impo
     SHADOW_FLAG_ENV,
     env_flag_enabled,
     normalize_pinned_revision,
+)
+from scripts.operators.deployment_revision_attestation_contract import (
+    evaluate_runtime_revision_attestation,
 )
 from scripts.operators.customer_conditional_coupon_shadow_observation import (
     with_app_container_paths,
@@ -69,6 +74,35 @@ def _report(phase: str, **payload: Any) -> dict[str, Any]:
 def emit(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def gate_runtime_revision_attestation(
+    *,
+    target_app_root: Path | None = None,
+    pinned_target_revision: str | None = None,
+) -> dict[str, Any]:
+    try:
+        pin = normalize_pinned_revision(pinned_target_revision)
+    except ValueError as exc:
+        return _report(
+            PHASE_RUNTIME_REVISION_ATTESTATION,
+            ok=False,
+            code=str(exc),
+        )
+
+    attestation = evaluate_runtime_revision_attestation(
+        pinned_target_revision=pin,
+        target_app_root=target_app_root,
+    )
+    payload = attestation.to_dict()
+    for key in ("code", "ok"):
+        payload.pop(key, None)
+    return _report(
+        PHASE_RUNTIME_REVISION_ATTESTATION,
+        ok=attestation.ok,
+        code=attestation.code,
+        **payload,
+    )
 
 
 def gate_artifact_preflight(
@@ -92,7 +126,7 @@ def gate_artifact_preflight(
 
     inv = evaluate_shadow_deployment_artifact(app_root)
     pf = evaluate_observation_window_preflight(
-        pinned_source_revision=PINNED_SOURCE_REVISION_SHORT,
+        pinned_source_revision=PINNED_TARGET_RUNTIME_REVISION_SHORT,
         inventory=inv,
         observation_flag_change_requested=True,
     )
@@ -620,12 +654,50 @@ def teardown_process_flags() -> None:
 def execute_consumer_verify(
     *,
     app_root: Path | None = None,
+    target_app_root: Path | None = None,
     db: Any | None = None,
     pinned_source_revision: str | None = None,
     require_db_gates: bool = True,
+    require_runtime_attestation: bool = True,
 ) -> dict[str, Any]:
     """Run all consumer sign-off gates and return a closed JSON summary."""
-    root = shadow_probe.resolve_app_root(app_root)
+    try:
+        pin = normalize_pinned_revision(pinned_source_revision)
+    except ValueError as exc:
+        revision_report = _report(
+            PHASE_RUNTIME_REVISION_ATTESTATION,
+            ok=False,
+            code=str(exc),
+        )
+        return _report(
+            PHASE_SUMMARY,
+            ok=False,
+            results={"runtime_revision_attestation": False},
+            gate_reports=[revision_report],
+            code=str(exc),
+        )
+
+    attestation = evaluate_runtime_revision_attestation(
+        pinned_target_revision=pin,
+        target_app_root=target_app_root or app_root,
+    )
+    if require_runtime_attestation and not attestation.ok:
+        revision_report = gate_runtime_revision_attestation(
+            target_app_root=target_app_root or app_root,
+            pinned_target_revision=pin,
+        )
+        return _report(
+            PHASE_SUMMARY,
+            ok=False,
+            results={"runtime_revision_attestation": False},
+            gate_reports=[revision_report],
+            code=revision_report.get("code"),
+        )
+
+    if attestation.target_app_root:
+        root = shadow_probe.resolve_app_root(Path(attestation.target_app_root))
+    else:
+        root = shadow_probe.resolve_app_root(target_app_root or app_root)
     results: dict[str, bool] = {}
     reports: list[dict[str, Any]] = []
 
@@ -635,7 +707,15 @@ def execute_consumer_verify(
 
     try:
         with with_app_container_paths(root):
-            _run_gate("artifact", gate_artifact_preflight(root, pinned_source_revision=pinned_source_revision))
+            if require_runtime_attestation:
+                _run_gate(
+                    "runtime_revision_attestation",
+                    gate_runtime_revision_attestation(
+                        target_app_root=root,
+                        pinned_target_revision=pin,
+                    ),
+                )
+            _run_gate("artifact", gate_artifact_preflight(root, pinned_source_revision=pin))
             _run_gate("default_off", gate_default_off(root))
             _run_gate("projection_ineligible", gate_projection_ineligible())
             _run_gate("webhook_dedup_snapshot", gate_webhook_dedup_snapshot_persistence())
@@ -672,18 +752,59 @@ def execute_consumer_verify(
     return summary
 
 
+def _parse_cli_args(argv: list[str]) -> tuple[list[str], Path | None]:
+    """Return ``(command_tokens, target_app_root)``."""
+    tokens = list(argv)
+    target_root: Path | None = None
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx] == "--target-app-root":
+            if idx + 1 >= len(tokens):
+                raise ValueError("target_app_root_missing")
+            target_root = Path(tokens[idx + 1])
+            del tokens[idx : idx + 2]
+            continue
+        idx += 1
+    return tokens, target_root
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    arguments = list(sys.argv[1:] if argv is None else argv)
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        arguments, target_app_root = _parse_cli_args(raw_arguments)
+    except ValueError:
+        emit(_report(PHASE_SUMMARY, ok=False, code=CODE_COMMAND_INVALID))
+        return 2
     if arguments not in ([], ["verify"]):
         emit(_report(PHASE_SUMMARY, ok=False, code=CODE_COMMAND_INVALID))
+        return 2
+
+    preflight = evaluate_runtime_revision_attestation(
+        pinned_target_revision=PINNED_TARGET_RUNTIME_REVISION,
+        target_app_root=target_app_root,
+    )
+    if not preflight.ok:
+        revision_report = gate_runtime_revision_attestation(
+            target_app_root=target_app_root,
+            pinned_target_revision=PINNED_TARGET_RUNTIME_REVISION,
+        )
+        emit(revision_report)
+        emit(
+            _report(
+                PHASE_SUMMARY,
+                ok=False,
+                results={"runtime_revision_attestation": False},
+                code=revision_report.get("code"),
+            )
+        )
         return 2
 
     from database.session import SessionLocal
 
     db = SessionLocal()
     try:
-        summary = execute_consumer_verify(db=db)
+        summary = execute_consumer_verify(db=db, target_app_root=target_app_root)
     except BaseException:
         emit(_report(PHASE_SUMMARY, ok=False, code=CODE_PROBE_FAILED))
         return 2
