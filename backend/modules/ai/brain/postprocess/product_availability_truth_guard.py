@@ -580,15 +580,60 @@ def apply_product_availability_truth_guard(
     catalog_product_ids: Optional[Sequence[Any]] = None,
     checkout_pressure_allowed: Optional[bool] = None,
     surface: str = "",
+    invocation_site: str = "unknown",
+    turn_token: str = "",
 ) -> ProductAvailabilityTruthGuardResult:
+    from modules.ai.brain.postprocess.product_availability_shadow_telemetry import (  # noqa: PLC0415
+        ShadowObservationTimer,
+        build_shadow_observation,
+        emit_shadow_observation,
+    )
+
     mode = product_availability_guard_mode()
     original = str(reply or "")
+    _shadow_timer = ShadowObservationTimer() if mode == "shadow" else None
+
+    def _emit_shadow(
+        *,
+        evidence_state: str,
+        conflict_type: str,
+        guard_action: str,
+        would_rewrite: bool,
+        reason: str,
+        customer_text_changed: bool,
+    ) -> None:
+        if mode != "shadow" or _shadow_timer is None:
+            return
+        emit_shadow_observation(
+            build_shadow_observation(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                invocation_site=invocation_site,
+                guard_mode=mode,
+                evidence_state=evidence_state,
+                conflict_type=conflict_type,
+                guard_action=guard_action,
+                would_rewrite=would_rewrite,
+                reason=reason,
+                customer_text_changed=customer_text_changed,
+                guard_duration_ms=_shadow_timer.elapsed_ms(),
+                turn_token=turn_token,
+            )
+        )
 
     if mode == "off":
         return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
 
     topic = str(decision_topic or "").strip()
     if topic == "product_knowledge_facts":
+        _emit_shadow(
+            evidence_state="-",
+            conflict_type="-",
+            guard_action="allowed_product_knowledge_facts",
+            would_rewrite=False,
+            reason="product_knowledge_facts_bypass",
+            customer_text_changed=False,
+        )
         return ProductAvailabilityTruthGuardResult(
             reply=original,
             action="allowed_product_knowledge_facts",
@@ -602,6 +647,14 @@ def apply_product_availability_truth_guard(
         if topic == TOPIC_PRODUCT_KNOWLEDGE_FACTS or is_product_knowledge_message(
             inbound_text,
         ):
+            _emit_shadow(
+                evidence_state="-",
+                conflict_type="-",
+                guard_action="allowed_product_knowledge_facts",
+                would_rewrite=False,
+                reason="product_knowledge_facts_bypass",
+                customer_text_changed=False,
+            )
             return ProductAvailabilityTruthGuardResult(
                 reply=original,
                 action="allowed_product_knowledge_facts",
@@ -611,10 +664,26 @@ def apply_product_availability_truth_guard(
 
     try:
         if not original.strip():
+            _emit_shadow(
+                evidence_state="-",
+                conflict_type="-",
+                guard_action="allowed",
+                would_rewrite=False,
+                reason="empty_reply",
+                customer_text_changed=False,
+            )
             return ProductAvailabilityTruthGuardResult(reply=original, action="allowed")
 
         path = str(chosen_path or "").strip()
         if path in _DETERMINISTIC_ALLOW_PATHS:
+            _emit_shadow(
+                evidence_state="-",
+                conflict_type="-",
+                guard_action="allowed",
+                would_rewrite=False,
+                reason=f"deterministic_allow_path:{path}",
+                customer_text_changed=False,
+            )
             return ProductAvailabilityTruthGuardResult(reply=original, action="allowed")
 
         catalog_skus = list((availability_context or {}).get("catalog_skus") or [])
@@ -662,6 +731,14 @@ def apply_product_availability_truth_guard(
             )
 
         if _catalog_fact_exempt:
+            _emit_shadow(
+                evidence_state="-",
+                conflict_type="-",
+                guard_action="allowed_catalog_product_fact_answer",
+                would_rewrite=False,
+                reason="catalog_product_fact_answer_exempt",
+                customer_text_changed=False,
+            )
             return ProductAvailabilityTruthGuardResult(
                 reply=working,
                 action="allowed_catalog_product_fact_answer",
@@ -697,6 +774,18 @@ def apply_product_availability_truth_guard(
                     if stripped_inactive
                     else "no_availability_claim_wording"
                 ),
+            )
+            _emit_shadow(
+                evidence_state=evidence.evidence_state,
+                conflict_type=evidence.conflict_type or "-",
+                guard_action="allowed",
+                would_rewrite=stripped_inactive,
+                reason=(
+                    "shadow_would_strip_inactive_catalog_lines"
+                    if stripped_inactive
+                    else "no_availability_claim_wording"
+                ),
+                customer_text_changed=False,
             )
             return ProductAvailabilityTruthGuardResult(
                 reply=original,
@@ -738,6 +827,14 @@ def apply_product_availability_truth_guard(
         )
 
         if mode == "shadow" or not would_rw:
+            _emit_shadow(
+                evidence_state=evidence.evidence_state,
+                conflict_type=evidence.conflict_type or "-",
+                guard_action=guard_action if would_rw else "allowed",
+                would_rewrite=would_rw,
+                reason=evidence.reason,
+                customer_text_changed=False,
+            )
             return ProductAvailabilityTruthGuardResult(
                 reply=original if mode == "shadow" else working,
                 action=guard_action if would_rw else "allowed",
@@ -772,5 +869,13 @@ def apply_product_availability_truth_guard(
             "[PRODUCT_AVAILABILITY_TRUTH_GUARD] guard failed tenant=%s err=%s",
             tenant_id,
             exc,
+        )
+        _emit_shadow(
+            evidence_state="-",
+            conflict_type="-",
+            guard_action="allowed",
+            would_rewrite=False,
+            reason="guard_exception_fail_open",
+            customer_text_changed=False,
         )
         return ProductAvailabilityTruthGuardResult(reply=original, action="allowed")

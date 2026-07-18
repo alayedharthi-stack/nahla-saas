@@ -3794,6 +3794,8 @@ class MerchantBrain:
                     catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
                     checkout_pressure_allowed=result.data.get("checkout_pressure_allowed"),
                     surface=str(_pavg_pc.get("surface") or ""),
+                    invocation_site="pipeline",
+                    turn_token=str(getattr(new_state, "turn", None) or ""),
                 )
                 if _pavg.replaced:
                     reply = _pavg.reply
