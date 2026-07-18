@@ -1,0 +1,79 @@
+{
+  "archive_schema_version": "product_availability_runtime_shadow_staging_v2",
+  "archived_at_utc": "2026-07-18T08:37:04+00:00",
+  "artifact_kind": "runtime_bound_staging_shadow_baseline",
+  "status": "PASS",
+  "observation_window": {
+    "duration_hours": 48,
+    "start_utc": "2026-07-18T08:37:04+00:00",
+    "end_utc": "2026-07-20T08:37:04+00:00",
+    "traffic_claim": "synthetic_probes_only"
+  },
+  "target": {
+    "revision": "ce815bad9d8dcf23b4a370658e78ca2683c43af2",
+    "deployment_id": "4731b986-23f2-4a73-a6d4-19eea37f8ee9",
+    "deployment_status": "SUCCESS",
+    "image_digest": "sha256:b26221a3e14aa53bb2c9cacb81427032f0b58c94a806a2f71682029f08a02b72",
+    "builder": "DOCKERFILE",
+    "artifact_manifest_digest": "4b6086db148bbe4ff2f55d52a1b462e82f2bf55168e362153ae424ac27126b47",
+    "attestation_type": "closed_runtime_manifest",
+    "cli_message_trusted_as_source": false,
+    "build_revision_env_trusted_as_source": false
+  },
+  "runtime_import_inventory": {
+    "target_app_root": "/app",
+    "execution_mode": "in_container",
+    "files": {
+      "scripts/operators/product_availability_truth_guard_shadow_observation.py": {
+        "path": "/app/scripts/operators/product_availability_truth_guard_shadow_observation.py",
+        "canonical_sha256": "0ec7f0bdaf6360daab33a4d3302c3ed4ac0ce583174860a3dca12f1af9804e8a"
+      },
+      "scripts/operators/product_availability_truth_guard_shadow_observation_contract.py": {
+        "path": "/app/scripts/operators/product_availability_truth_guard_shadow_observation_contract.py",
+        "canonical_sha256": "6e8ce13862e5e31d14f47c8fd40fd42a9dff7edaa1e2971a6627c16e7d128f1e"
+      },
+      "backend/modules/ai/brain/postprocess/product_availability_truth_guard.py": {
+        "path": "/app/backend/modules/ai/brain/postprocess/product_availability_truth_guard.py",
+        "canonical_sha256": "eaba55e1b81a7ba7cf1c07d56f7b31a4f023771e16220c4365d248f87a604637"
+      },
+      "backend/modules/ai/brain/postprocess/product_availability_shadow_telemetry.py": {
+        "path": "/app/backend/modules/ai/brain/postprocess/product_availability_shadow_telemetry.py",
+        "canonical_sha256": "6c0e7c43d4c3cb143773b5367367515153fd787789989af369e18f97e30001e5"
+      },
+      "backend/modules/ai/brain/pipeline.py": {
+        "path": "/app/backend/modules/ai/brain/pipeline.py",
+        "canonical_sha256": "96cf70d8e2abb65466602bc41b5d658b9f7e2fb5c1da5509b0ccb2533626c946"
+      },
+      "backend/routers/whatsapp_webhook.py": {
+        "path": "/app/backend/routers/whatsapp_webhook.py",
+        "canonical_sha256": "17579786f2345a0709c69a2b7e09ab5355b0be011317658b62b875b552bcfb4c"
+      }
+    }
+  },
+  "flags": {
+    "product_availability_truth_guard_mode": "shadow",
+    "conditional_coupon_compose_enabled": false,
+    "enforce_mode": false
+  },
+  "baseline_matrix": {
+    "ok": true,
+    "evaluated_turns": 7,
+    "tenant_count": 2,
+    "would_rewrite_count": 2,
+    "would_rewrite_rate": 0.285714,
+    "customer_text_changed_count": 0,
+    "additional_llm_calls": 0,
+    "outbound_provider_calls": 0,
+    "duplicate_invocation_count": 0
+  },
+  "tooling_repair": {
+    "pull_request": "https://github.com/alayedharthi-stack/nahla-saas/pull/634",
+    "merge_commit": "ce815bad9d8dcf23b4a370658e78ca2683c43af2",
+    "ci": "PASS"
+  },
+  "supersedes_invalid_window": {
+    "start_utc": "2026-07-18T06:45:00+00:00",
+    "invalidated_poll_id": "2026-07-18T07:00:39+00:00",
+    "correction_branch": "evidence/arch001-shadow-window-20260718"
+  }
+}
