@@ -182,7 +182,7 @@ async def _send_one(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tenant", type=int, default=33)
+    parser.add_argument("--tenant", type=int, required=True, help="Target tenant id")
     parser.add_argument("--conv", type=int, default=56)
     parser.add_argument("--category", choices=list(SMOKE_MATRIX.keys()), default="social")
     parser.add_argument("--dry-run", action="store_true")

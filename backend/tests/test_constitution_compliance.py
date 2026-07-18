@@ -491,3 +491,23 @@ class TestApprovedEmergencyFallbackSurface:
         )
         assert errors == []
         assert text
+
+
+class TestFixedTenantAcceptancePolicy:
+    def test_production_runtime_has_no_tenant_33_dependency(self) -> None:
+        from modules.platform.fixed_tenant_policy import (  # noqa: PLC0415
+            format_violation_report,
+            scan_fixed_tenant_violations,
+        )
+
+        violations = scan_fixed_tenant_violations(zone="production")
+        assert violations == [], format_violation_report(violations)
+
+    def test_ops_scripts_have_no_implicit_tenant_33_defaults(self) -> None:
+        from modules.platform.fixed_tenant_policy import (  # noqa: PLC0415
+            format_violation_report,
+            scan_fixed_tenant_violations,
+        )
+
+        violations = scan_fixed_tenant_violations(zone="ops")
+        assert violations == [], format_violation_report(violations)

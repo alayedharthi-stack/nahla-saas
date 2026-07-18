@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Seed goal_based_recommendation KB entries for Tenant 33 (honey store).
+Seed goal_based_recommendation KB entries for a merchant tenant.
 
 Admin/API path only — no dashboard UI required.
 
 Usage:
     cd backend
-    python scripts/seed_goal_kb_tenant33.py [--tenant-id 33] [--dry-run]
+    python scripts/seed_goal_kb.py --tenant-id <id> [--dry-run]
+
+Acceptance operators may pass ``--tenant-id 33`` for the real-channel merchant.
 """
 from __future__ import annotations
 
@@ -92,7 +94,7 @@ SEED_ENTRIES = [
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tenant-id", type=int, default=33)
+    parser.add_argument("--tenant-id", type=int, required=True, help="Target tenant id")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
