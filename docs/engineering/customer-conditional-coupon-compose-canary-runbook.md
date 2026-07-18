@@ -94,3 +94,8 @@ This PR adds the gate and verifier phases but **does not** bump
 `PINNED_TARGET_RUNTIME_REVISION` in `customer_conditional_coupon_consumer_verify_contract.py`.
 After merge and deploy, open a dedicated pin PR targeting the deployed SHA before enabling
 compose master in staging.
+
+## Archived staging evidence
+
+- Shadow sign-off: `docs/engineering/staging-evidence/conditional-coupon-shadow-signoff-2026-07-18.json`
+- Compose canary (2026-07-18): `docs/engineering/staging-evidence/conditional-coupon-compose-canary-2026-07-18.json`

@@ -1,0 +1,120 @@
+{
+  "archive_schema_version": "coupon_compose_staging_canary_v1",
+  "archived_at_utc": "2026-07-18T06:02:30.000000+00:00",
+  "artifact_kind": "staging_compose_canary_bundle",
+  "overall_outcome": "PASS",
+  "target_runtime_revision": "f2118de5c6f636bde0f1f00cb6606b81597ab9cd",
+  "verifier_revision": "9f30856321265ccc7a4c36accc9bf4c168f0500f",
+  "attestation_model": "external_runner_archive_deploy",
+  "source_archive_evidence": {
+    "authoritative_target_sha": "f2118de5c6f636bde0f1f00cb6606b81597ab9cd",
+    "deploy_message_tag": "source_sha=f2118de",
+    "artifact_contract": "coupon_shadow_deployment_artifact_v4"
+  },
+  "merged_prs": [
+    {
+      "number": 628,
+      "title": "conditional-coupon compose canary gate slice",
+      "merge_sha": "f2118de5c6f636bde0f1f00cb6606b81597ab9cd"
+    },
+    {
+      "number": 629,
+      "title": "pin consumer-verify target runtime to f2118de",
+      "merge_sha": "9f30856321265ccc7a4c36accc9bf4c168f0500f"
+    }
+  ],
+  "deployment_ids": {
+    "target_runtime_final": "b1c2d742-654e-4e79-8581-b50294dd625e",
+    "target_runtime_prior": [
+      "73c930d0-2a09-43b8-826e-88d29830367b",
+      "0c78ee02-06d3-4557-b549-baf72b2de9a3",
+      "b560dfb0-78dd-47a2-9dce-c30c4cfceece"
+    ],
+    "bad_github_autodeploy_avoided": "1e679a98-8bd5-4a3e-9f0a-6f868e9d6efe"
+  },
+  "preflight_gates": {
+    "artifact_preflight_v4": true,
+    "alembic_heads": ["0088", "0089"],
+    "a1_capability_validated_at_0088": true,
+    "shadow_signoff_evidence": "docs/engineering/staging-evidence/conditional-coupon-shadow-signoff-2026-07-18.json",
+    "default_off_zero_io": true,
+    "compose_canary_denied_zero_io": true,
+    "compose_canary_allowed_preflight": true,
+    "projection_ineligible_no_unsupported_claims": true,
+    "webhook_dedup_facts_snapshot_id_preserved": true,
+    "shadow_observation_subject_bridge_resolved": true,
+    "fixture_namespace": "cc_shadow_g4_generic_v1",
+    "fixture_tenant_id": 1
+  },
+  "compose_window_gates": {
+    "compose_master_process_scoped": true,
+    "compose_persona_success": {
+      "ok": true,
+      "chosen_path": "customer_conditional_coupon_compose",
+      "compose_source": "persona_llm",
+      "final_customer_text_source": "persona_llm",
+      "outbound_calls": []
+    },
+    "compose_general_llm_safe": {
+      "ok": true,
+      "chosen_path": "customer_conditional_coupon_general_llm_fallthrough",
+      "compose_source": "llm",
+      "outbound_calls": []
+    },
+    "compose_general_llm_unsafe_guard": {
+      "ok": true,
+      "final_customer_text_source": "guard_rewrite",
+      "guard_reason": "coupon_issued_claim",
+      "outbound_calls": []
+    }
+  },
+  "scenario_matrix": {
+    "allowlisted_tenant_allowed_phone_relevant_turn": "compose_persona_success_gate",
+    "allowlisted_tenant_non_allowlisted_phone": "compose_canary_denied_gate",
+    "non_allowlisted_tenant": "compose_canary_denied_gate",
+    "non_test_mode": "compose_canary_denied_gate",
+    "irrelevant_turn": "default_off_zero_io",
+    "ineligible_shortfall_facts": "projection_ineligible_gate",
+    "persona_compose_failure_general_llm_fallthrough": "compose_general_llm_safe_gate",
+    "unsafe_general_llm_coupon_claim_guard": "compose_general_llm_unsafe_guard_gate",
+    "dedup_metadata_facts_snapshot_id": "webhook_dedup_gate"
+  },
+  "cost_telemetry_acceptance": {
+    "conditional_domain_load_max_per_eligible_turn": 1,
+    "order_count_queries_max_per_turn": 1,
+    "usage_evidence_queries_max_per_turn": 1,
+    "conditional_target_count_max": 1,
+    "dedicated_llm_calls_max": 1,
+    "shadow_observation_observed": {
+      "order_count_query_count": 1,
+      "usage_evidence_query_count": 1,
+      "conditional_target_count": 1
+    },
+    "no_provider_outbound_calls": true,
+    "no_allowlist_or_phone_pii_in_telemetry": true
+  },
+  "tenant_window": {
+    "original_ai_settings": {},
+    "applied_canary_keys": [
+      "store_ai_mode",
+      "customer_conditional_coupon_compose_allowlist_tenants",
+      "ai_test_allowed_numbers"
+    ],
+    "synthetic_test_phone_normalized": "966500000099",
+    "restored_ai_settings": {}
+  },
+  "teardown_proof": {
+    "compose_env_flag": false,
+    "shadow_env_flag_unset": true,
+    "tenant_ai_settings_restored": true,
+    "post_teardown_default_off_zero_io": true,
+    "post_teardown_preflight_ok": true,
+    "teardown_flags_phase_ok": true,
+    "no_activation_remains": true
+  },
+  "operator_attestations": {
+    "no_real_whatsapp_or_provider_sends": true,
+    "no_production_or_real_customers": true,
+    "bounded_compose_window_only": true
+  }
+}

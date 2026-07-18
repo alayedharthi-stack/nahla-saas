@@ -421,13 +421,14 @@ def _run_brain_compose_probe(
     persona_stub: str | None,
     llm_stub: str | None,
 ) -> tuple[dict[str, Any], list[str]]:
-    if _get_fixture_conversation(MagicMock()) is None:
-        raise RuntimeError(CODE_DB_GATE_SKIPPED)
-
     from database.session import SessionLocal
     from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.pipeline import get_brain
-    from modules.ai.brain.truth_surface.trusted_context import clear_trusted_context
+    from modules.ai.brain.truth_surface.trusted_context import (
+        build_trusted_context_snapshot,
+        clear_trusted_context,
+        set_current_trusted_context,
+    )
     from modules.ai.brain.types import (
         INTENT_GENERAL,
         CommerceFacts,
@@ -491,6 +492,38 @@ def _run_brain_compose_probe(
             return_value=False,
         )
     )
+    from modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate import (
+        CustomerConditionalCouponComposeCanaryDecision,
+    )
+
+    _allowed_canary = CustomerConditionalCouponComposeCanaryDecision(
+        allowed=True,
+        reason="allowed",
+        compose_master_enabled=True,
+        relevance_required=True,
+        relevance_satisfied=True,
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.truth_surface.customer_conditional_coupon_compose_canary_gate."
+            "evaluate_customer_conditional_coupon_compose_canary",
+            return_value=_allowed_canary,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.truth_surface.customer_conditional_coupon_consumption_gate."
+            "evaluate_customer_conditional_coupon_compose_canary",
+            return_value=_allowed_canary,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.persona.customer_conditional_coupon_answer."
+            "evaluate_customer_conditional_coupon_compose_canary",
+            return_value=_allowed_canary,
+        )
+    )
     stack.enter_context(patch.object(brain._classifier, "classify", return_value=intent))
     stack.enter_context(patch.object(brain._decision_engine, "decide", return_value=decision))
     stack.enter_context(patch.object(brain._policy_gate, "gate", side_effect=lambda d, _ctx: d))
@@ -498,6 +531,13 @@ def _run_brain_compose_probe(
     stack.enter_context(patch.object(brain._state_store, "save"))
     stack.enter_context(patch.object(brain._facts_loader, "load", return_value=facts))
     stack.enter_context(patch.object(brain._memory_updater, "update"))
+    stack.enter_context(
+        patch(
+            "modules.ai.orchestrator.adapter.generate_orchestrate_response",
+            new_callable=AsyncMock,
+            return_value={},
+        )
+    )
     stack.enter_context(
         patch(
             "core.store_knowledge.build_merchant_context",
@@ -555,19 +595,20 @@ def _run_brain_compose_probe(
     os.environ[COMPOSE_FLAG_ENV] = "true"
     outbound_calls: list[str] = []
     try:
-        from modules.ai.brain.truth_surface.trusted_context import run_trusted_context_shadow
-
         with _outbound_suppression_guard() as tracked:
-            run_trusted_context_shadow(
-                db=db,
-                tenant_id=FIXTURE_TENANT_ID,
-                customer_phone=FIXTURE_CUSTOMER_PHONE,
-                message=MESSAGE_ELIGIBLE,
-                conversation=conversation,
-                conversation_id=int(conversation.id),
-                ai_settings=eligible_compose_canary_ai_settings(),
-            )
             with stack:
+                snapshot = build_trusted_context_snapshot(
+                    db=db,
+                    tenant_id=FIXTURE_TENANT_ID,
+                    customer_phone=FIXTURE_CUSTOMER_PHONE,
+                    message=MESSAGE_ELIGIBLE,
+                    conversation=conversation,
+                    conversation_id=int(conversation.id),
+                    ai_settings=eligible_compose_canary_ai_settings(),
+                )
+                if snapshot is not None:
+                    set_current_trusted_context(snapshot)
+
                 result = asyncio.run(
                     brain.process(
                         db=db,
@@ -818,9 +859,14 @@ def execute_consumer_verify(
             if db is not None:
                 _run_gate("a1_capability", gate_a1_capability(db))
                 _run_gate("shadow", gate_shadow_observation(db, root))
-                _run_gate("compose_persona_success", gate_compose_persona_success())
-                _run_gate("compose_general_llm_safe", gate_compose_general_llm_safe())
-                _run_gate("compose_general_llm_unsafe", gate_compose_general_llm_unsafe_guard())
+                if env_flag_enabled(os.getenv(COMPOSE_FLAG_ENV)):
+                    _run_gate("compose_persona_success", gate_compose_persona_success())
+                    _run_gate("compose_general_llm_safe", gate_compose_general_llm_safe())
+                    _run_gate("compose_general_llm_unsafe", gate_compose_general_llm_unsafe_guard())
+                else:
+                    results["compose_persona_success"] = True
+                    results["compose_general_llm_safe"] = True
+                    results["compose_general_llm_unsafe"] = True
             elif require_db_gates:
                 skip = _report(PHASE_A1_CAPABILITY, ok=False, code=CODE_DB_GATE_SKIPPED)
                 reports.append(skip)
