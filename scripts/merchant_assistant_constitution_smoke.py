@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Controlled constitution smoke — allowlisted test phones only.
 
-Reads tenant AI settings, optionally sends one message per matrix row via
-internal webhook handler (Railway / local with production DB).
+Reads tenant AI settings, optionally invokes the internal webhook handler.
+This is a ``direct_code_probe`` and MUST NOT be used as actual-channel E2E
+evidence.
 
-ALLOWED_PHONES must match user-approved test numbers exactly.
+Phone values come from secret env references; none are committed or printed.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import sys
@@ -24,17 +27,27 @@ sys.path[:0] = [
     REPO,
 ]
 
-ALLOWED_PHONES = frozenset(
-    {
-        "966542980511",
-        "966537970430",
-        "966507283619",
-        "966549741354",
-        "966549815590",
-    }
-)
+ALLOWED_PHONES_ENV = "NAHLA_CONSTITUTION_SMOKE_ALLOWED_PHONES"
+PHONE_ENV = "NAHLA_CONSTITUTION_SMOKE_PHONE"
+HASH_KEY_ENV = "NAHLA_CONSTITUTION_SMOKE_HASH_KEY"
 
 ALLOWED_TENANTS = frozenset({31, 33})
+
+
+def _allowed_phones() -> frozenset[str]:
+    return frozenset(
+        "".join(ch for ch in token if ch.isdigit())
+        for token in (os.environ.get(ALLOWED_PHONES_ENV) or "").split(",")
+        if "".join(ch for ch in token if ch.isdigit())
+    )
+
+
+def _phone_hash(phone: str) -> str:
+    key = (os.environ.get(HASH_KEY_ENV) or "").strip()
+    if not key:
+        raise SystemExit(f"REFUSE: set {HASH_KEY_ENV}")
+    digest = hmac.new(key.encode("utf-8"), phone.encode("utf-8"), hashlib.sha256).hexdigest()
+    return "hmac-sha256:" + digest[:24]
 
 SMOKE_MATRIX: Dict[str, List[str]] = {
     "social": [
@@ -77,9 +90,9 @@ def _assert_safe_to_run(settings: Dict[str, Any], phone: str) -> None:
         raise SystemExit(f"REFUSE: store_ai_mode={mode!r} (need test)")
     allow = {str(p).strip() for p in (settings.get("allowlist") or []) if p}
     if phone not in allow:
-        raise SystemExit(f"REFUSE: {phone} not in tenant allowlist")
-    if phone not in ALLOWED_PHONES:
-        raise SystemExit(f"REFUSE: {phone} not in script ALLOWED_PHONES")
+        raise SystemExit("REFUSE: test phone not in tenant allowlist")
+    if phone not in _allowed_phones():
+        raise SystemExit(f"REFUSE: test phone not in {ALLOWED_PHONES_ENV}")
 
 
 async def _send_one(
@@ -155,7 +168,8 @@ async def _send_one(
 
     return {
         "tenant_id": tenant_id,
-        "phone": phone,
+        "phone_hash": _phone_hash(phone),
+        "evidence_channel": "direct_code_probe",
         "conversation_id": conv_id,
         "inbound": text,
         "events": out_ev,
@@ -169,7 +183,6 @@ async def _send_one(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tenant", type=int, default=33)
-    parser.add_argument("--phone", default="966542980511")
     parser.add_argument("--conv", type=int, default=56)
     parser.add_argument("--category", choices=list(SMOKE_MATRIX.keys()), default="social")
     parser.add_argument("--dry-run", action="store_true")
@@ -177,8 +190,13 @@ def main() -> int:
 
     if args.tenant not in ALLOWED_TENANTS:
         raise SystemExit(f"REFUSE: tenant {args.tenant} not in ALLOWED_TENANTS")
-    if args.phone not in ALLOWED_PHONES:
-        raise SystemExit(f"REFUSE: phone {args.phone} not allowed")
+    phone = "".join(ch for ch in os.environ.get(PHONE_ENV, "") if ch.isdigit())
+    if not phone or phone not in _allowed_phones():
+        raise SystemExit(
+            f"REFUSE: set {PHONE_ENV} and include it in {ALLOWED_PHONES_ENV}"
+        )
+    if not (os.environ.get(HASH_KEY_ENV) or "").strip():
+        raise SystemExit(f"REFUSE: set {HASH_KEY_ENV}")
 
     from core.database import SessionLocal  # noqa: PLC0415
 
@@ -191,7 +209,7 @@ def main() -> int:
     }
     try:
         report["settings_before"] = _load_settings_snapshot(db, args.tenant)
-        _assert_safe_to_run(report["settings_before"], args.phone)
+        _assert_safe_to_run(report["settings_before"], phone)
 
         messages = SMOKE_MATRIX[args.category]
         if args.dry_run:
@@ -204,7 +222,7 @@ def main() -> int:
                 _send_one(
                     db,
                     tenant_id=args.tenant,
-                    phone=args.phone,
+                    phone=phone,
                     text=msg,
                     conv_id=args.conv,
                 )

@@ -56,8 +56,9 @@ def _scenario(
     max_tool_calls: int = DEFAULT_SCENARIO_MAX_TOOL_CALLS,
     latency_budget_ms: int = DEFAULT_SCENARIO_LATENCY_BUDGET_MS,
     preconditions: dict[str, Any] | None = None,
-    cleanup: str = "reset_conversation_sales_state_dry_run",
+    cleanup: str = "restore_scenario_state_then_verify_against_session_snapshot",
 ) -> dict[str, Any]:
+    expects_outbound = taxonomy not in {"pause_blocklist", "subscription_guard"}
     return {
         "scenario_id": scenario_id,
         "phase": phase,
@@ -101,6 +102,27 @@ def _scenario(
         "pass_fail_rubric": _base_rubric(
             automated=automation_class.startswith("automated")
         ),
+        "device_action": {
+            "sender": "private_allowlisted_test_device",
+            "send_type": str(inbound.get("type") or "text"),
+            "input": inbound,
+            "automation_policy": (
+                "manual_unless_authorized_existing_test_device_integration"
+            ),
+            "raw_input_archival": "hash_or_redact",
+        },
+        "channel_evidence_required": {
+            "evidence_channel": "actual_provider_channel",
+            "inbound_provider_message_id": True,
+            "live_webhook_origin": True,
+            "sender_hmac_match": True,
+            "outbound_provider_message_id": expects_outbound,
+            "test_device_receipt_attestation": expects_outbound,
+            "outbound_expected": expects_outbound,
+            "reject_direct_signed_webhook": True,
+            "reject_direct_code_probe": True,
+            "reject_manual_db_insert": True,
+        },
     }
 
 

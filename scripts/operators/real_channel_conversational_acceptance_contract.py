@@ -12,9 +12,10 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-REPORT_SCHEMA_VERSION = "real_channel_conversational_acceptance_v1"
-MANIFEST_SCHEMA_VERSION = "real_channel_acceptance_scenario_manifest_v1"
-EVIDENCE_SCHEMA_VERSION = "real_channel_acceptance_evidence_v1"
+REPORT_SCHEMA_VERSION = "real_channel_conversational_acceptance_v2"
+MANIFEST_SCHEMA_VERSION = "real_channel_acceptance_scenario_manifest_v2"
+EVIDENCE_SCHEMA_VERSION = "real_channel_acceptance_evidence_v2"
+SESSION_SCHEMA_VERSION = "real_channel_acceptance_session_v1"
 
 # ── Staging identity (fail-closed) ───────────────────────────────────────────
 STAGING_PROJECT_ENV = "RAILWAY_PROJECT_NAME"
@@ -28,6 +29,10 @@ MASTER_ENABLE_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED"
 EXECUTION_CONFIRM_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM"
 ARCH001_SHADOW_SIGNOFF_ENV = "NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM"
 TENANT_1_PASS_CONFIRM_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_CONFIRM"
+EVIDENCE_HMAC_KEY_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_EVIDENCE_HMAC_KEY"
+SESSION_DIR_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_SESSION_DIR"
+TENANT_1_PASS_ARTIFACT_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT"
+REVIEWER_ID_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_REVIEWER_ID"
 
 # ── Secret-backed test identity refs (names only; values never committed) ───
 PINNED_REVISION_ENV = "NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION"
@@ -94,12 +99,36 @@ GATE_PHASES = frozenset(
     }
 )
 
-# ── Execution path taxonomy ──────────────────────────────────────────────────
-EXECUTION_PATH_REAL_CHANNEL_WEBHOOK = "real_channel_webhook"
-EXECUTION_PATH_DIRECT_CODE_PROBE = "direct_code_probe"
-EXECUTION_PATHS = frozenset(
-    {EXECUTION_PATH_REAL_CHANNEL_WEBHOOK, EXECUTION_PATH_DIRECT_CODE_PROBE}
+# ── Evidence channel taxonomy ────────────────────────────────────────────────
+# A signed HTTP POST created by an operator is an ingress integration probe,
+# not provider delivery. Only an event paired with real-device attestation can
+# be classified as ACTUAL_PROVIDER_CHANNEL.
+EVIDENCE_CHANNEL_ACTUAL_PROVIDER = "actual_provider_channel"
+EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK = "direct_signed_webhook_integration_probe"
+EVIDENCE_CHANNEL_DIRECT_CODE_PROBE = "direct_code_probe"
+EVIDENCE_CHANNELS = frozenset(
+    {
+        EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
+        EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK,
+        EVIDENCE_CHANNEL_DIRECT_CODE_PROBE,
+    }
 )
+
+# Backward aliases used by the v1 manifest builder. They intentionally resolve
+# to the corrected evidence vocabulary.
+EXECUTION_PATH_REAL_CHANNEL_WEBHOOK = EVIDENCE_CHANNEL_ACTUAL_PROVIDER
+EXECUTION_PATH_DIRECT_CODE_PROBE = EVIDENCE_CHANNEL_DIRECT_CODE_PROBE
+EXECUTION_PATHS = EVIDENCE_CHANNELS
+
+SESSION_STATE_STARTED = "started"
+SESSION_STATE_AWAITING_DEVICE_SEND = "awaiting_device_send"
+SESSION_STATE_OBSERVED = "observed"
+SESSION_STATE_HUMAN_ASSESSED = "human_assessed"
+SESSION_STATE_SCENARIO_COMPLETED = "scenario_completed"
+SESSION_STATE_COMPLETED = "completed"
+SESSION_STATE_TORN_DOWN = "torn_down"
+
+HUMAN_RUBRIC_VALUES = frozenset({"pass", "fail", "not_applicable"})
 
 # ── Closed scenario taxonomy (minimum required categories) ───────────────────
 SCENARIO_TAXONOMY: tuple[str, ...] = (
@@ -171,11 +200,24 @@ CODE_PROVIDER_SANDBOX_UNAVAILABLE = "provider_sandbox_unavailable"
 CODE_RATE_CAP_EXCEEDED = "rate_cap_exceeded"
 CODE_MANIFEST_INVALID = "manifest_invalid"
 CODE_REAL_CHANNEL_REQUIRED = "real_channel_required"
+CODE_SESSION_NOT_FOUND = "session_not_found"
+CODE_SESSION_STATE_INVALID = "session_state_invalid"
+CODE_EVENT_CURSOR_STALE = "event_cursor_stale"
+CODE_INBOUND_PROVIDER_ID_MISSING = "inbound_provider_id_missing"
+CODE_INBOUND_PROVIDER_ID_REJECTED = "inbound_provider_id_rejected"
+CODE_INBOUND_ORIGIN_REJECTED = "inbound_origin_rejected"
+CODE_DEVICE_ATTESTATION_REQUIRED = "device_attestation_required"
+CODE_OUTBOUND_PROVIDER_ID_MISSING = "outbound_provider_id_missing"
+CODE_PROVENANCE_INCOMPLETE = "provenance_incomplete"
+CODE_HUMAN_ASSESSMENT_REQUIRED = "human_assessment_required"
+CODE_CONFIG_DRIFT = "config_drift"
+CODE_TENANT_1_PASS_ARTIFACT_INVALID = "tenant_1_pass_artifact_invalid"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 MANIFEST_RELATIVE_PATH = Path("docs/engineering/real-channel-acceptance-scenario-manifest.json")
 EVIDENCE_ACCUMULATION_DIR = Path("docs/engineering/staging-evidence")
 DEFECT_BUNDLE_DIR = Path("docs/engineering/staging-evidence/defect-bundles")
+SESSION_DEFAULT_DIR = Path(".nahla-acceptance-sessions")
 
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 _PHONE_DIGITS_RE = re.compile(r"^\d{10,15}$")
@@ -189,6 +231,16 @@ def hash_identifier(value: str, *, salt: str = "nahla-rca-v1") -> str:
     """One-way fingerprint for logs/evidence (never reversible phone/token)."""
     digest = hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
     return f"sha256:{digest[:16]}"
+
+
+def hmac_identifier(value: str, *, key: str) -> str:
+    """Keyed fingerprint for low-entropy identifiers such as phone numbers."""
+    import hmac
+
+    if not key:
+        raise ValueError("evidence_hmac_key_missing")
+    digest = hmac.new(key.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"hmac-sha256:{digest[:24]}"
 
 
 def mask_phone_tail(value: str | None, *, keep: int = 4) -> str:
@@ -268,6 +320,8 @@ def validate_manifest(payload: Mapping[str, Any]) -> None:
             "eval_regression_mapping",
             "automation_class",
             "pass_fail_rubric",
+            "device_action",
+            "channel_evidence_required",
         ):
             if required_key not in row:
                 raise ValueError(CODE_MANIFEST_INVALID)
@@ -321,6 +375,18 @@ __all__ = [
     "CODE_PROVIDER_SANDBOX_UNAVAILABLE",
     "CODE_RATE_CAP_EXCEEDED",
     "CODE_REAL_CHANNEL_REQUIRED",
+    "CODE_SESSION_NOT_FOUND",
+    "CODE_SESSION_STATE_INVALID",
+    "CODE_EVENT_CURSOR_STALE",
+    "CODE_INBOUND_PROVIDER_ID_MISSING",
+    "CODE_INBOUND_PROVIDER_ID_REJECTED",
+    "CODE_INBOUND_ORIGIN_REJECTED",
+    "CODE_DEVICE_ATTESTATION_REQUIRED",
+    "CODE_OUTBOUND_PROVIDER_ID_MISSING",
+    "CODE_PROVENANCE_INCOMPLETE",
+    "CODE_HUMAN_ASSESSMENT_REQUIRED",
+    "CODE_CONFIG_DRIFT",
+    "CODE_TENANT_1_PASS_ARTIFACT_INVALID",
     "CODE_RUNTIME_REVISION_MISMATCH",
     "CODE_RUNTIME_REVISION_UNKNOWN",
     "CODE_STAGING_IDENTITY_REJECTED",
@@ -334,6 +400,24 @@ __all__ = [
     "DEFECT_BUNDLE_DIR",
     "EVIDENCE_ACCUMULATION_DIR",
     "EVIDENCE_SCHEMA_VERSION",
+    "SESSION_SCHEMA_VERSION",
+    "EVIDENCE_HMAC_KEY_ENV",
+    "SESSION_DIR_ENV",
+    "TENANT_1_PASS_ARTIFACT_ENV",
+    "REVIEWER_ID_ENV",
+    "EVIDENCE_CHANNEL_ACTUAL_PROVIDER",
+    "EVIDENCE_CHANNEL_DIRECT_SIGNED_WEBHOOK",
+    "EVIDENCE_CHANNEL_DIRECT_CODE_PROBE",
+    "EVIDENCE_CHANNELS",
+    "SESSION_STATE_STARTED",
+    "SESSION_STATE_AWAITING_DEVICE_SEND",
+    "SESSION_STATE_OBSERVED",
+    "SESSION_STATE_HUMAN_ASSESSED",
+    "SESSION_STATE_SCENARIO_COMPLETED",
+    "SESSION_STATE_COMPLETED",
+    "SESSION_STATE_TORN_DOWN",
+    "HUMAN_RUBRIC_VALUES",
+    "SESSION_DEFAULT_DIR",
     "EXECUTION_CONFIRM_ENV",
     "EXECUTION_PATH_DIRECT_CODE_PROBE",
     "EXECUTION_PATH_REAL_CHANNEL_WEBHOOK",
@@ -377,6 +461,7 @@ __all__ = [
     "count_scenarios_by_phase",
     "env_flag_enabled",
     "hash_identifier",
+    "hmac_identifier",
     "load_scenario_manifest",
     "mask_phone_tail",
     "parse_allowlist_phones",
