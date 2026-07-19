@@ -21,6 +21,9 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from modules.ai.orchestrator.anthropic_exception_diagnostics import (
+    anthropic_exception_diagnostics,
+)
 from modules.ai.orchestrator.llm_cost_audit import (
     emit_llm_cost_audit,
     approx_tokens_from_chars,
@@ -255,8 +258,9 @@ class AnthropicProvider(BaseAIProvider):
                 }
             except _anthropic_sdk.APIConnectionError as exc:
                 logger.warning(
-                    "[engine] Claude SDK: connection error %r — "
-                    "returning empty reply_text (fallback triggered)", exc
+                    "[engine] Claude SDK: connection error diagnostics=%s — "
+                    "returning empty reply_text (fallback triggered)",
+                    anthropic_exception_diagnostics(exc),
                 )
                 return {
                     "provider": "anthropic", "model": model,
@@ -264,8 +268,9 @@ class AnthropicProvider(BaseAIProvider):
                 }
             except Exception as exc:
                 logger.warning(
-                    "[engine] Claude SDK: unexpected error %r — "
-                    "returning empty reply_text (fallback triggered)", exc
+                    "[engine] Claude SDK: unexpected error diagnostics=%s — "
+                    "returning empty reply_text (fallback triggered)",
+                    anthropic_exception_diagnostics(exc),
                 )
                 return {
                     "provider": "anthropic", "model": model,
@@ -337,8 +342,9 @@ class AnthropicProvider(BaseAIProvider):
 
         except Exception as exc:
             logger.warning(
-                "[engine] Claude httpx: error %r — "
-                "returning empty reply_text (fallback triggered)", exc
+                "[engine] Claude httpx: error diagnostics=%s — "
+                "returning empty reply_text (fallback triggered)",
+                anthropic_exception_diagnostics(exc),
             )
             return {
                 "provider": "anthropic", "model": model,

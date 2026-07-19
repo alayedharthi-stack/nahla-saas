@@ -47,6 +47,16 @@ from services.address_resolution import extract_address_signals
 
 logger = logging.getLogger("nahla.brain.slot_extractor")
 
+
+def _resolve_slot_model() -> str:
+    """Slot extractor model: ANTHROPIC_SLOT_MODEL override, else canonical default."""
+    override = os.environ.get("ANTHROPIC_SLOT_MODEL", "").strip()
+    if override:
+        return override
+    from modules.ai.orchestrator.llm_cost_audit import resolve_anthropic_model  # noqa: PLC0415
+
+    return resolve_anthropic_model()
+
 # ── System prompt ─────────────────────────────────────────────────────────────
 # KEY CHANGE: instruct the model to return ONLY non-empty fields (compact mode).
 # This keeps the JSON small even when the customer writes all their info in one
@@ -143,7 +153,7 @@ async def extract_slots(
         else:
             user_content = f"رسالة المستخدم:\n{message}"
 
-        _slot_model = os.environ.get("ANTHROPIC_SLOT_MODEL") or "claude-3-5-haiku-20241022"
+        _slot_model = _resolve_slot_model()
 
         from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
 
@@ -233,9 +243,13 @@ async def extract_slots(
         logger.warning("[SlotExtractor] timeout (%s) — falling back to deterministic", exc)
         return deterministic
     except Exception as exc:
+        from modules.ai.orchestrator.anthropic_exception_diagnostics import (  # noqa: PLC0415
+            anthropic_exception_diagnostics,
+        )
+
         logger.warning(
-            "[SlotExtractor] extraction failed (type=%s): %s",
-            type(exc).__name__, exc,
+            "[SlotExtractor] extraction failed diagnostics=%s",
+            anthropic_exception_diagnostics(exc),
         )
         return deterministic
 
