@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import socketserver
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,9 @@ from ops.internal_e2e_runner.sidecars.connect_proxy import ExactConnectProxy
 from ops.internal_e2e_runner.sidecars.db_relay import ExactDbRelay
 from ops.internal_e2e_runner.scripts.assemble_evidence import (
     validate_negative_control_binding,
+)
+from ops.internal_e2e_runner.scripts.validate_config import (
+    main as validate_config_main,
 )
 
 
@@ -67,6 +71,41 @@ def test_parse_runner_config_accepts_minimal_valid_config() -> None:
     assert config.llm_endpoint.hostname == "api.example-llm.test"
     assert config.db_proxy_endpoint.port == 5432
     assert len(config.negative_probe_targets) == 2
+
+
+def test_validate_config_main_accepts_valid_config_and_writes_output(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config_path = tmp_path / "runner-config.json"
+    database_url_path = tmp_path / "database-url"
+    output_path = tmp_path / "validation.json"
+    config_path.write_text(json.dumps(_base_config()), encoding="utf-8")
+    database_url_path.write_text(
+        "postgresql://user:secret@"
+        "disposable-db-proxy.example.test:5432/sandbox?sslmode=require",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "validate_config.py",
+            "--config",
+            str(config_path),
+            "--database-url-file",
+            str(database_url_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert validate_config_main() == 0
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    printed = json.loads(capsys.readouterr().out)
+    assert written["ok"] is True
+    assert printed == written
+    assert written["config"]["llm_host"] == "api.example-llm.test"
+    assert "secret" not in output_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

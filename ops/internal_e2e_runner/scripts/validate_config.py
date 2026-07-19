@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ops.internal_e2e_runner.lib.config import (
     database_url_fingerprint,
-    load_runner_config,
+    parse_runner_config,
     validate_runner_config_blockers,
 )
 
@@ -33,7 +33,7 @@ def main() -> int:
         print(json.dumps({"ok": False, "blockers": sorted(set(blockers))}, sort_keys=True))
         return 2
 
-    config = load_runner_config(raw)
+    config = parse_runner_config(raw)
     sidecar_expected_dns = {
         config.llm_endpoint.hostname: list(config.llm_endpoint.ips),
         config.db_proxy_endpoint.hostname: list(config.db_proxy_endpoint.ips),
