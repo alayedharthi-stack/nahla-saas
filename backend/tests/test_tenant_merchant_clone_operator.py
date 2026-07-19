@@ -876,6 +876,51 @@ def test_scrub_integration_config_rejects_unknown_forbidden_keys() -> None:
         scrub_integration_config({"customer_id": "cust-123", "store_id": "123"})
 
 
+def test_integration_config_scrubs_onboarding_email_sent_at_generic_merchant() -> None:
+    source_timestamp = "2026-01-15T10:30:00Z"
+    integration_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "integrations"
+    )
+    row = {
+        "id": 11,
+        "tenant_id": 48,
+        "provider": "generic_commerce",
+        "app_type": "catalog",
+        "external_store_id": "ext-generic-11",
+        "enabled": True,
+        "config": {
+            "onboarding_email_sent_at": source_timestamp,
+            "store_label": "متجر تجريبي عام",
+            "catalog_enabled": True,
+            "store_id": "must-strip",
+        },
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=integration_spec.name,
+        spec_json_columns=integration_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=integration_spec.remap_fk_columns,
+        scrub_phone_columns=integration_spec.scrub_phone_columns,
+        deferred_fk_columns=integration_spec.deferred_fk_columns,
+    )
+    assert transformed["enabled"] is False
+    assert transformed["external_store_id"] is None
+    assert transformed["config"]["onboarding_email_sent_at"] == ""
+    assert transformed["config"]["store_label"] == "متجر تجريبي عام"
+    assert transformed["config"]["catalog_enabled"] is True
+    assert transformed["config"]["store_id"] == ""
+    assert source_timestamp not in json.dumps(transforms)
+    assert scan_for_unhandled_forbidden_keys(transformed["config"]) == []
+    with pytest.raises(ValueError, match="integration_config_unhandled_forbidden_key"):
+        scrub_integration_config(
+            {"secondary_email_sent_at": source_timestamp, "store_id": "123"}
+        )
+
+
 def test_provider_ownership_keys_registry_is_closed() -> None:
     assert "store_id" in PROVIDER_OWNERSHIP_KEYS
     assert "merchant_id" in PROVIDER_OWNERSHIP_KEYS
@@ -1093,8 +1138,60 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v11() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v11"
+def test_dry_run_digest_schema_version_is_v12() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v12"
+
+
+def test_stale_v11_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v11"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v11-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
 
 
 def test_stale_v10_dry_run_digest_rejected_on_apply() -> None:
