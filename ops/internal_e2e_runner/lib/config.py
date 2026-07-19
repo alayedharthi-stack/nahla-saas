@@ -13,6 +13,7 @@ RUNNER_CONFIG_SCHEMA_VERSION = "internal_e2e_confined_runner_config_v1"
 EVIDENCE_SCHEMA_VERSION = "internal_e2e_network_evidence_v1"
 
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 _IMAGE_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]{0,127}$", re.IGNORECASE)
 _IPV4_RE = re.compile(
@@ -62,6 +63,7 @@ class RunnerConfig:
     image_label: str
     llm_endpoint: ResolvedEndpoint
     db_proxy_endpoint: ResolvedEndpoint
+    db_tls_spki_sha256: str
     negative_probe_targets: tuple[ResolvedEndpoint, ...]
     tenant_id: int
     provider: str
@@ -87,6 +89,7 @@ class RunnerConfig:
             "db_proxy_host": self.db_proxy_endpoint.hostname,
             "db_proxy_port": self.db_proxy_endpoint.port,
             "db_proxy_ips": list(self.db_proxy_endpoint.ips),
+            "db_tls_spki_sha256": self.db_tls_spki_sha256,
             "negative_probe_targets": [
                 {
                     "host": target.hostname,
@@ -256,6 +259,9 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
         field="db_proxy_host",
         default_port=5432,
     )
+    db_tls_spki_sha256 = str(raw.get("db_tls_spki_sha256") or "").strip()
+    if not _SHA256_FINGERPRINT_RE.fullmatch(db_tls_spki_sha256):
+        raise ValueError("db_tls_spki_sha256_invalid")
 
     negative_raw = raw.get("negative_probe_targets") or []
     if not isinstance(negative_raw, Sequence) or isinstance(negative_raw, (str, bytes)):
@@ -286,6 +292,7 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
         image_label=image_label,
         llm_endpoint=llm,
         db_proxy_endpoint=db_proxy,
+        db_tls_spki_sha256=db_tls_spki_sha256,
         negative_probe_targets=tuple(negative_targets),
         tenant_id=tenant_raw,
         provider=provider,

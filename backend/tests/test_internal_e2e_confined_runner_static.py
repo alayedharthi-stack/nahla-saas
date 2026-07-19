@@ -2,19 +2,26 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
 import socket
 import socketserver
+import ssl
+import struct
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from ops.internal_e2e_runner.lib.config import (
     RUNNER_CONFIG_SCHEMA_VERSION,
@@ -37,6 +44,11 @@ from ops.internal_e2e_runner.sidecars.connect_proxy import ExactConnectProxy
 from ops.internal_e2e_runner.sidecars.db_relay import ExactDbRelay
 from ops.internal_e2e_runner.scripts.assemble_evidence import (
     validate_negative_control_binding,
+    validate_positive_probe_identity,
+)
+from ops.internal_e2e_runner.scripts.probe_connectivity import (
+    positive_probes_ready,
+    postgres_ssl_probe,
 )
 from ops.internal_e2e_runner.scripts.validate_config import (
     main as validate_config_main,
@@ -59,6 +71,7 @@ def _base_config(**overrides):
         "db_proxy_host": "disposable-db-proxy.example.test",
         "db_proxy_port": 5432,
         "db_proxy_ips": ["203.0.113.20"],
+        "db_tls_spki_sha256": "sha256:" + ("a" * 64),
         "connect_proxy_ip": "172.30.0.10",
         "connect_proxy_port": 3128,
         "db_relay_ip": "172.30.0.11",
@@ -76,7 +89,32 @@ def test_parse_runner_config_accepts_minimal_valid_config() -> None:
     config = parse_runner_config(_base_config())
     assert config.llm_endpoint.hostname == "api.example-llm.test"
     assert config.db_proxy_endpoint.port == 5432
+    assert config.db_tls_spki_sha256 == "sha256:" + ("a" * 64)
+    assert config.to_public_mapping()["db_tls_spki_sha256"] == (
+        "sha256:" + ("a" * 64)
+    )
     assert len(config.negative_probe_targets) == 2
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "sha256:" + ("a" * 63),
+        "sha256:" + ("A" * 64),
+        "sha512:" + ("a" * 64),
+        "sha256:not-hex",
+    ],
+)
+def test_db_tls_spki_pin_is_required_and_canonical(value) -> None:
+    config = _base_config()
+    if value is None:
+        config.pop("db_tls_spki_sha256")
+    else:
+        config["db_tls_spki_sha256"] = value
+    with pytest.raises(ValueError, match="db_tls_spki_sha256_invalid"):
+        parse_runner_config(config)
 
 
 def test_validate_config_main_accepts_valid_config_and_writes_output(
@@ -190,6 +228,10 @@ def test_evidence_is_unsigned_and_forbids_self_attestation() -> None:
     assert payload["self_attestation_forbidden"] is True
     assert "signature" not in payload
     assert payload["runtime_verification_status"] == "pending_container_runtime"
+    assert payload["sidecar_acl_targets"]["disposable_db_proxy"]["tls_identity"] == {
+        "mode": "spki_sha256",
+        "expected_spki_sha256": "sha256:" + ("a" * 64),
+    }
 
 
 def test_fail_closed_on_private_ip_allowlist() -> None:
@@ -590,6 +632,217 @@ def test_sidecar_transport_uses_verified_ip_not_hostname(
     assert endpoint.host not in open_connection.await_args.args
     assert all(":" not in str(arg) for arg in open_connection.await_args.args)
     assert dns_calls == 1
+
+
+def _localhost_certificate(
+    *,
+    not_before: datetime,
+    not_after: datetime,
+) -> tuple[bytes, str]:
+    root_key = ec.generate_private_key(ec.SECP256R1())
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "root-ca")])
+    leaf_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(leaf_name)
+        .issuer_name(root_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+    spki = leaf_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return (
+        certificate.public_bytes(serialization.Encoding.DER),
+        "sha256:" + hashlib.sha256(spki).hexdigest(),
+    )
+
+
+def _run_postgres_certificate_probe(
+    peer_der: bytes,
+    expected_pin: str,
+    *,
+    now: datetime,
+    ssl_response: bytes = b"S",
+) -> tuple[dict, MagicMock, MagicMock]:
+    raw_socket = MagicMock()
+    raw_socket.recv.return_value = ssl_response
+    raw_context = MagicMock()
+    raw_context.__enter__.return_value = raw_socket
+
+    tls_socket = MagicMock()
+    tls_socket.version.return_value = "TLSv1.3"
+    tls_socket.getpeercert.return_value = peer_der
+    tls_context_manager = MagicMock()
+    tls_context_manager.__enter__.return_value = tls_socket
+    tls_context = MagicMock()
+    tls_context.wrap_socket.return_value = tls_context_manager
+
+    with patch(
+        "ops.internal_e2e_runner.scripts.probe_connectivity.socket.create_connection",
+        return_value=raw_context,
+    ), patch(
+        "ops.internal_e2e_runner.scripts.probe_connectivity.ssl.SSLContext",
+        return_value=tls_context,
+    ) as context_factory:
+        result = postgres_ssl_probe(
+            relay_host="172.30.0.11",
+            relay_port=5432,
+            tls_hostname="maglev.proxy.rlwy.net",
+            expected_spki_sha256=expected_pin,
+            now=now,
+        )
+
+    if ssl_response == b"S":
+        context_factory.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+        assert tls_context.check_hostname is False
+        assert tls_context.verify_mode == ssl.CERT_NONE
+    else:
+        context_factory.assert_not_called()
+    return result, raw_socket, tls_context
+
+
+def test_railway_localhost_certificate_passes_only_with_explicit_spki() -> None:
+    now = datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc)
+    peer_der, pin = _localhost_certificate(
+        not_before=now - timedelta(hours=1),
+        not_after=now + timedelta(days=1),
+    )
+
+    result, raw_socket, tls_context = _run_postgres_certificate_probe(
+        peer_der,
+        pin,
+        now=now,
+    )
+
+    raw_socket.sendall.assert_called_once_with(struct.pack("!II", 8, 80877103))
+    tls_context.wrap_socket.assert_called_once_with(
+        raw_socket,
+        server_hostname="maglev.proxy.rlwy.net",
+    )
+    assert result["sslrequest_accepted"] is True
+    assert result["tls_ok"] is True
+    assert result["identity_verification_mode"] == "spki_sha256"
+    assert result["certificate_pin_verified"] is True
+    assert result["certificate_validity_verified"] is True
+    assert result["authentication_sent"] is False
+    assert result["query_sent"] is False
+    assert "hostname_verified" not in result
+    encoded = json.dumps(result)
+    assert "BEGIN CERTIFICATE" not in encoded
+    assert peer_der.hex() not in encoded
+
+
+def test_postgres_certificate_wrong_spki_fails_closed() -> None:
+    now = datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc)
+    peer_der, _ = _localhost_certificate(
+        not_before=now - timedelta(hours=1),
+        not_after=now + timedelta(days=1),
+    )
+    result, _, _ = _run_postgres_certificate_probe(
+        peer_der,
+        "sha256:" + ("f" * 64),
+        now=now,
+    )
+    assert result["tls_ok"] is True
+    assert result["certificate_validity_verified"] is True
+    assert result["certificate_pin_verified"] is False
+    assert result["error"] == "certificate_spki_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("not_before", "not_after", "error"),
+    [
+        (
+            datetime(2026, 7, 17, tzinfo=timezone.utc),
+            datetime(2026, 7, 18, tzinfo=timezone.utc),
+            "certificate_expired",
+        ),
+        (
+            datetime(2026, 7, 20, tzinfo=timezone.utc),
+            datetime(2026, 7, 21, tzinfo=timezone.utc),
+            "certificate_not_yet_valid",
+        ),
+    ],
+)
+def test_postgres_certificate_invalid_time_fails_closed(
+    not_before: datetime,
+    not_after: datetime,
+    error: str,
+) -> None:
+    now = datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc)
+    peer_der, pin = _localhost_certificate(
+        not_before=not_before,
+        not_after=not_after,
+    )
+    result, _, _ = _run_postgres_certificate_probe(peer_der, pin, now=now)
+    assert result["tls_ok"] is True
+    assert result["certificate_validity_verified"] is False
+    assert result["certificate_pin_verified"] is False
+    assert result["error"] == error
+
+
+def test_postgres_malformed_certificate_and_no_sslrequest_fail_closed() -> None:
+    now = datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc)
+    malformed, _, _ = _run_postgres_certificate_probe(
+        b"not-a-certificate",
+        "sha256:" + ("a" * 64),
+        now=now,
+    )
+    assert malformed["error"] == "certificate_malformed"
+    assert malformed["certificate_pin_verified"] is False
+
+    rejected, _, tls_context = _run_postgres_certificate_probe(
+        b"",
+        "sha256:" + ("a" * 64),
+        now=now,
+        ssl_response=b"N",
+    )
+    assert rejected["sslrequest_accepted"] is False
+    assert rejected["error"] == "postgres_ssl_not_supported"
+    tls_context.wrap_socket.assert_not_called()
+
+
+def _identity_complete_positive_probes() -> list[dict]:
+    return [
+        {
+            "kind": "https_connect_tls",
+            "tls_ok": True,
+            "hostname_verified": True,
+        },
+        {
+            "kind": "postgres_sslrequest_tls",
+            "sslrequest_accepted": True,
+            "tls_ok": True,
+            "identity_verification_mode": "spki_sha256",
+            "certificate_pin_verified": True,
+            "certificate_validity_verified": True,
+            "authentication_sent": False,
+            "query_sent": False,
+        },
+    ]
+
+
+def test_probe_readiness_requires_database_pin_and_validity_evidence() -> None:
+    complete = _identity_complete_positive_probes()
+    assert positive_probes_ready(complete) is True
+    validate_positive_probe_identity(complete)
+
+    for field in ("certificate_pin_verified", "certificate_validity_verified"):
+        incomplete = json.loads(json.dumps(complete))
+        incomplete[1][field] = False
+        assert positive_probes_ready(incomplete) is False
+        with pytest.raises(ValueError, match="positive_probe_identity_incomplete"):
+            validate_positive_probe_identity(incomplete)
 
 
 def test_negative_control_binding_requires_exact_multiplicity() -> None:

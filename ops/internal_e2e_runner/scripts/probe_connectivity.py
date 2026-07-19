@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import socket
 import ssl
 import struct
+from datetime import datetime, timezone
 from typing import Any
+
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from ops.internal_e2e_runner.lib.config import RunnerConfig, load_runner_config
 
@@ -87,13 +93,22 @@ def connect_rejection_probe(
 
 
 def postgres_ssl_probe(
-    *, relay_host: str, relay_port: int, tls_hostname: str, timeout: float = 5.0
+    *,
+    relay_host: str,
+    relay_port: int,
+    tls_hostname: str,
+    expected_spki_sha256: str,
+    timeout: float = 5.0,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "kind": "postgres_sslrequest_tls",
         "target_hostname": tls_hostname,
         "sslrequest_accepted": False,
         "tls_ok": False,
+        "certificate_pin_verified": False,
+        "certificate_validity_verified": False,
+        "identity_verification_mode": "spki_sha256",
         "authentication_sent": False,
         "query_sent": False,
     }
@@ -104,14 +119,65 @@ def postgres_ssl_probe(
                 result["error"] = "postgres_ssl_not_supported"
                 return result
             result["sslrequest_accepted"] = True
-            context = ssl.create_default_context()
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
             with context.wrap_socket(sock, server_hostname=tls_hostname) as tls_sock:
                 result["tls_ok"] = True
                 result["tls_version"] = tls_sock.version()
-                result["hostname_verified"] = True
+                peer_der = tls_sock.getpeercert(binary_form=True)
+                if not peer_der:
+                    result["error"] = "certificate_missing"
+                    return result
+                try:
+                    certificate = x509.load_der_x509_certificate(peer_der)
+                except ValueError:
+                    result["error"] = "certificate_malformed"
+                    return result
+
+                not_before = certificate.not_valid_before_utc
+                not_after = certificate.not_valid_after_utc
+                observed_at = now or datetime.now(timezone.utc)
+                if observed_at < not_before:
+                    result["error"] = "certificate_not_yet_valid"
+                    return result
+                if observed_at > not_after:
+                    result["error"] = "certificate_expired"
+                    return result
+                result["certificate_validity_verified"] = True
+
+                spki_der = certificate.public_key().public_bytes(
+                    Encoding.DER,
+                    PublicFormat.SubjectPublicKeyInfo,
+                )
+                observed_pin = f"sha256:{hashlib.sha256(spki_der).hexdigest()}"
+                result["certificate_spki_sha256"] = observed_pin
+                if not hmac.compare_digest(observed_pin, expected_spki_sha256):
+                    result["error"] = "certificate_spki_mismatch"
+                    return result
+                result["certificate_pin_verified"] = True
     except (OSError, ssl.SSLError) as exc:
         result["error"] = exc.__class__.__name__
     return result
+
+
+def positive_probes_ready(probes: list[dict[str, Any]]) -> bool:
+    by_kind = {str(probe.get("kind") or ""): probe for probe in probes}
+    if set(by_kind) != {"https_connect_tls", "postgres_sslrequest_tls"}:
+        return False
+    llm = by_kind["https_connect_tls"]
+    database = by_kind["postgres_sslrequest_tls"]
+    return bool(
+        llm.get("tls_ok")
+        and llm.get("hostname_verified")
+        and database.get("sslrequest_accepted")
+        and database.get("tls_ok")
+        and database.get("identity_verification_mode") == "spki_sha256"
+        and database.get("certificate_pin_verified")
+        and database.get("certificate_validity_verified")
+        and database.get("authentication_sent") is False
+        and database.get("query_sent") is False
+    )
 
 
 def run_probes(
@@ -133,6 +199,7 @@ def run_probes(
             relay_host=relay_host,
             relay_port=relay_port,
             tls_hostname=config.db_proxy_endpoint.hostname,
+            expected_spki_sha256=config.db_tls_spki_sha256,
         ),
     ]
     proxy_negative = [
@@ -181,7 +248,7 @@ def main() -> int:
     blocked_ok = all(
         item.get("rejected_ok") for item in results["proxy_negative"]
     ) and all(item.get("blocked_ok") for item in results["direct_negative"])
-    allowed_ok = all(item.get("tls_ok") for item in results["positive"])
+    allowed_ok = positive_probes_ready(results["positive"])
     return 0 if blocked_ok and allowed_ok else 2
 
 

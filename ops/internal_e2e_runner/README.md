@@ -21,8 +21,8 @@ Linux container with kernel firewall rules.
 2. **No runner internet route** — runner attaches only to a unique Docker `--internal` network. Exact-host CONNECT and exact-target DB relay sidecars are dual-homed to internal + egress networks.
 3. **Defense-in-depth OUTPUT drop** — runner allows only loopback, established/related, the exact CONNECT sidecar IP:3128, and DB relay IP:5432. No public LLM/DB IP is accepted by runner firewall.
 4. **Reject** `*.railway.internal`, `postgres-staging`, private/reserved IPs, provider hosts (Meta/Salla/etc.), wildcards/CIDR.
-5. **DB URL** must use `sslmode=require`; evidence stores fingerprint only.
-6. **Probes** — exact LLM CONNECT plus hostname/SNI TLS, Meta/Salla CONNECT rejection, egress-side baseline then runner direct block, and PostgreSQL SSLRequest/TLS only. No LLM API request, DB authentication, query, or write.
+5. **DB URL and identity** — the URL must use `sslmode=require`; the route keeps exact IPv4 DNS pins and requires an explicit SHA-256 SubjectPublicKeyInfo pin for the disposable database certificate.
+6. **Probes** — exact LLM CONNECT plus hostname/SNI TLS, Meta/Salla CONNECT rejection, egress-side baseline then runner direct block, and PostgreSQL SSLRequest/TLS with certificate validity + SPKI identity proof. No LLM API request, DB authentication, query, or write.
 7. **Evidence** — unsigned `network_evidence.json` for external signer review; container must not self-sign attestation.
 8. **Operator** — entrypoint runs only `preflight` (default) or explicit `run`; requires pinned git revision + image label.
 9. **Secrets** — ten required read-only files are mounted under `/run/secrets` (including tenant/phone allowlists); sidecars receive none. Other provider keys are explicitly unset.
@@ -34,6 +34,20 @@ exactly equals the configured expected IP set. DNS/IP evidence is valid only for
 short confinement window. If upstream DNS changes, startup fails or the envelope must
 be re-run. The launcher uses Docker `--add-host` to append the disposable DB hostname
 to the relay IP while preserving base `/etc/hosts`; hostname/SNI semantics remain intact.
+
+## Disposable DB TLS identity
+
+Railway disposable PostgreSQL endpoints may present a private certificate whose public
+PKI hostname cannot match the route hostname. The runner therefore requires
+`db_tls_spki_sha256` in canonical `sha256:<64 lowercase hex>` form. The probe still
+sends PostgreSQL SSLRequest, requires `S`, sends route-host SNI, checks certificate
+validity, and accepts identity only when the peer certificate's SubjectPublicKeyInfo
+hash exactly matches the configured pin.
+
+Obtain the pin out of band from an operator-reviewed certificate diagnostic. Never
+trust or import the presented root dynamically. Certificate key rotation requires a
+new reviewed pin and config update before execution; an unplanned rotation fails
+closed.
 
 ## Layout
 

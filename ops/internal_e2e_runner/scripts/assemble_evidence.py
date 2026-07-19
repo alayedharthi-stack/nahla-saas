@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ops.internal_e2e_runner.lib.config import load_runner_config, normalize_operator_command
 from ops.internal_e2e_runner.lib.evidence import build_network_evidence, write_network_evidence
+from ops.internal_e2e_runner.scripts.probe_connectivity import positive_probes_ready
 
 
 def validate_negative_control_binding(
@@ -21,6 +22,11 @@ def validate_negative_control_binding(
         or Counter(expected) != Counter(runner)
     ):
         raise ValueError("negative_probe_control_binding_mismatch")
+
+
+def validate_positive_probe_identity(probes: list[dict]) -> None:
+    if not positive_probes_ready(probes):
+        raise ValueError("positive_probe_identity_incomplete")
 
 
 def main() -> int:
@@ -52,6 +58,11 @@ def main() -> int:
         probe_results = json.load(handle)
     with open(args.docker_inspect, encoding="utf-8-sig") as handle:
         docker_topology = json.load(handle)
+
+    try:
+        validate_positive_probe_identity(probe_results.get("positive") or [])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     expected_controls = [
         f"{target.hostname}|{ip}|{target.port}"

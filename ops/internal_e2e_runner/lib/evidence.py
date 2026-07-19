@@ -76,6 +76,10 @@ def build_network_evidence(
                 "host": config.db_proxy_endpoint.hostname,
                 "port": config.db_proxy_endpoint.port,
                 "expected_live_dns_ips": list(config.db_proxy_endpoint.ips),
+                "tls_identity": {
+                    "mode": "spki_sha256",
+                    "expected_spki_sha256": config.db_tls_spki_sha256,
+                },
             },
         },
         "hosts_pinning": dict(hosts_pinning),
