@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,8 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     ALLOWED_TABLE_NAMES,
     APPLY_CONFIRM_ENV,
     APPLY_CONFIRM_TOKEN,
+    CLEANUP_CONFIRM_ENV,
+    CLEANUP_CONFIRM_TOKEN,
     CLONE_EXECUTION_PURPOSE_ACCEPTANCE,
     CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
     CLONE_PROFILE_FULL_MERCHANT,
@@ -37,6 +40,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_ENV,
     INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_TOKEN,
     INTERNAL_E2E_DISPOSABLE_MASTER_ENABLE_ENV,
+    INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME,
     INTERNAL_E2E_STAGING_DUAL_HEAD_TOPOLOGY,
     PHONE_SCRUB_PLACEHOLDER,
     PRESERVE_TENANT_IDENTITY_MODE,
@@ -45,6 +49,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
     PROVIDER_OWNERSHIP_KEYS,
     SCRUBBED_JSON_KEY_REPLACEMENTS,
+    TARGET_BOOTSTRAP_NAME,
     allowed_table_names_for_profile,
     resolve_clone_profile,
     table_specs_for_profile,
@@ -76,6 +81,8 @@ _DISPOSABLE_TARGET_URL = (
     "postgres-disposable-e2e.railway.internal:5432/nahla_disposable"
 )
 _DISPOSABLE_ATTESTATION_HMAC_KEY = "test-disposable-attestation-hmac-key"
+_SOURCE_FINGERPRINT = "sha256:" + ("a" * 64)
+_TARGET_FINGERPRINT = "sha256:" + ("b" * 64)
 
 _BASE_ENV = {
     "RAILWAY_PROJECT_NAME": "desirable-growth",
@@ -148,16 +155,21 @@ def _topology_digest_payload(
 def _signed_disposable_attestation(
     *,
     target_hostname: str,
-    target_database_fingerprint: str = "sha256:target",
-    source_canonical_fingerprint: str = "sha256:source",
+    target_database_fingerprint: str = _TARGET_FINGERPRINT,
+    source_canonical_fingerprint: str = _SOURCE_FINGERPRINT,
     attestation_id: str = "attest-disposable-48",
-    expires_at: str = "2099-01-01T00:00:00Z",
+    issued_at: str | None = None,
+    expires_at: str | None = None,
     hmac_key: str = _DISPOSABLE_ATTESTATION_HMAC_KEY,
 ) -> str:
+    now = datetime.now(timezone.utc)
+    issued_at = issued_at or (now - timedelta(minutes=1)).isoformat()
+    expires_at = expires_at or (now + timedelta(hours=1)).isoformat()
     payload = {
         "schema_version": DISPOSABLE_TARGET_ATTESTATION_SCHEMA_VERSION,
         "attestation_id": attestation_id,
         "purpose": CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+        "issued_at": issued_at,
         "expires_at": expires_at,
         "target_hostname": target_hostname,
         "target_database_fingerprint": target_database_fingerprint,
@@ -1340,8 +1352,8 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v13() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v13"
+def test_dry_run_digest_schema_version_is_v14() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v14"
 
 
 def test_stale_v11_dry_run_digest_rejected_on_apply() -> None:
@@ -2331,7 +2343,7 @@ def test_internal_e2e_rejects_attestation_fingerprint_mismatch() -> None:
     target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
     attestation = _signed_disposable_attestation(
         target_hostname=target_host,
-        target_database_fingerprint="sha256:wrong-target",
+        target_database_fingerprint="sha256:" + ("c" * 64),
     )
     parsed, failure = clone_op.parse_disposable_target_attestation(
         {
@@ -2344,8 +2356,8 @@ def test_internal_e2e_rejects_attestation_fingerprint_mismatch() -> None:
     assert failure is None
     live_failure = clone_op.validate_disposable_target_attestation_live(
         parsed,
-        source_database_digest="sha256:source",
-        target_database_digest="sha256:target",
+        source_database_digest=_SOURCE_FINGERPRINT,
+        target_database_digest=_TARGET_FINGERPRINT,
     )
     assert live_failure is not None
     assert live_failure.stage == "disposable_target_attestation_target_fingerprint_mismatch"
@@ -2355,6 +2367,7 @@ def test_internal_e2e_rejects_expired_attestation() -> None:
     target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
     attestation = _signed_disposable_attestation(
         target_hostname=target_host,
+        issued_at="1999-12-31T23:00:00Z",
         expires_at="2000-01-01T00:00:00Z",
     )
     _, failure = clone_op.parse_disposable_target_attestation(
@@ -2416,13 +2429,13 @@ def test_internal_e2e_staging_topology_validator_rejects_production_source_topol
     assert failure.stage == "internal_e2e_staging_topology_mismatch"
 
 
-def test_stale_v12_dry_run_digest_rejected_on_apply() -> None:
+def test_stale_v13_dry_run_digest_rejected_on_apply() -> None:
     stale_payload = _topology_digest_payload(
         profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
         target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
     )
-    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v12"
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v13"
     stale_digest = clone_op.compute_dry_run_digest(stale_payload)
     fresh_plan = {
         "profile": CLONE_PROFILE_SALLA_MINIMAL,
@@ -2442,7 +2455,7 @@ def test_stale_v12_dry_run_digest_rejected_on_apply() -> None:
         profile=CLONE_PROFILE_SALLA_MINIMAL,
         source_tenant_id=48,
         target_tenant_id=48,
-        clone_id="schema-v12-drift-test",
+        clone_id="schema-v13-drift-test",
         dry_run_digest=stale_digest,
         manifest_path=None,
         env=_BASE_ENV,
@@ -2471,8 +2484,7 @@ def test_internal_e2e_plan_report_has_no_sensitive_fields() -> None:
         "profile": CLONE_PROFILE_SALLA_MINIMAL,
         "target_attestation_id": attestation_id,
         "target_attestation_fingerprint": clone_op.target_attestation_binding_fingerprint(
-            attestation_id,
-            "sha256:target",
+            json.loads(attestation),
         ),
         "source_database_identity_digest": "sha256:source",
         "target_database_identity_digest": "sha256:target",
@@ -2498,3 +2510,334 @@ def test_acceptance_mode_parity_unchanged_by_execution_purpose_default() -> None
     assert request.execution_purpose == CLONE_EXECUTION_PURPOSE_ACCEPTANCE
     assert clone_op.run_gates(request) is None
     assert clone_op.validate_target_database_host(_BASE_ENV, request.target_database_url) is None
+
+
+@pytest.mark.parametrize(
+    "tenant_args",
+    [
+        [],
+        ["--source-tenant-id", "48"],
+        ["--target-tenant-id", "48"],
+    ],
+)
+def test_internal_e2e_cli_requires_both_explicit_tenant_ids(
+    capsys: pytest.CaptureFixture[str],
+    tenant_args: list[str],
+) -> None:
+    with patch.dict(os.environ, _internal_e2e_env(), clear=True):
+        rc = clone_op.main(
+            [
+                "dry-run",
+                "--profile",
+                CLONE_PROFILE_SALLA_MINIMAL,
+                "--execution-purpose",
+                CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+                *tenant_args,
+            ]
+        )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "internal_e2e_explicit_tenant_ids_required"
+
+
+@pytest.mark.parametrize("target_environment", ["production", "unknown"])
+def test_internal_e2e_rejects_non_staging_target_environment(
+    target_environment: str,
+) -> None:
+    env = _internal_e2e_env()
+    env["RAILWAY_ENVIRONMENT_NAME"] = target_environment
+    request = clone_op.build_request_from_env(
+        mode="dry-run",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id=None,
+        dry_run_digest=None,
+        manifest_path=None,
+        env=env,
+        execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+    )
+    failure = clone_op.run_gates(request)
+    assert failure is not None
+    assert failure.stage == "target_environment_not_experimental_staging"
+
+
+def test_internal_e2e_cleanup_is_forbidden_before_legacy_cleanup_token() -> None:
+    env = _internal_e2e_env()
+    env[CLEANUP_CONFIRM_ENV] = CLEANUP_CONFIRM_TOKEN
+    request = clone_op.build_request_from_env(
+        mode="cleanup",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="cleanup-forbidden",
+        dry_run_digest=None,
+        manifest_path=Path("unused.json"),
+        env=env,
+        execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+    )
+    failure = clone_op.run_gates(request)
+    assert failure is not None
+    assert failure.stage == "internal_e2e_disposable_cleanup_forbidden"
+
+
+def test_internal_e2e_dry_run_requires_master_enable() -> None:
+    env = _internal_e2e_env()
+    del env[INTERNAL_E2E_DISPOSABLE_MASTER_ENABLE_ENV]
+    request = clone_op.build_request_from_env(
+        mode="dry-run",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id=None,
+        dry_run_digest=None,
+        manifest_path=None,
+        env=env,
+        execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+    )
+    failure = clone_op.run_gates(request)
+    assert failure is not None
+    assert failure.stage == "internal_e2e_disposable_master_enable_missing"
+
+
+def test_internal_e2e_apply_requires_separate_confirmation() -> None:
+    env = _internal_e2e_env()
+    del env[INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_ENV]
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id=None,
+        dry_run_digest="digest",
+        manifest_path=None,
+        env=env,
+        execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+    )
+    failure = clone_op.run_gates(request)
+    assert failure is not None
+    assert failure.stage == "dangerous_action_not_confirmed"
+
+
+def test_bootstrap_identity_is_purpose_specific() -> None:
+    assert (
+        clone_op.target_bootstrap_name_for_purpose(
+            CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE
+        )
+        == INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME
+    )
+    assert (
+        clone_op.target_bootstrap_name_for_purpose(CLONE_EXECUTION_PURPOSE_ACCEPTANCE)
+        == TARGET_BOOTSTRAP_NAME
+    )
+    assert "tenant-33" not in INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME
+
+
+def test_internal_e2e_target_shell_requires_disposable_marker() -> None:
+    def _shell_row(name: str) -> dict[str, object]:
+        return {
+            "id": 48,
+            "name": name,
+            "domain": None,
+            "is_active": True,
+            "is_platform_tenant": False,
+            "ai_blocked_numbers": None,
+            "billing_provider": None,
+            "stripe_customer_id": None,
+            "stripe_subscription_id": None,
+            "stripe_price_id": None,
+            "subscription_status": None,
+            "trial_started_at": None,
+            "trial_ends_at": None,
+            "first_whatsapp_connected_at": None,
+            "current_period_end": None,
+            "hyperpay_payment_id": None,
+            "billing_status": None,
+            "store_address": None,
+            "google_maps_link": None,
+            "apple_maps_link": None,
+            "same_day_delivery_enabled": False,
+            "pickup_enabled": True,
+            "branding": None,
+            "recommendation_controls": None,
+            "coupon_policy": None,
+        }
+
+    with patch.object(clone_op, "_target_tenant_row", return_value=_shell_row(TARGET_BOOTSTRAP_NAME)):
+        _, failure = clone_op.validate_target_shell(
+            MagicMock(),
+            48,
+            profile=CLONE_PROFILE_SALLA_MINIMAL,
+            execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+        )
+    assert failure is not None
+    assert failure.stage == "target_tenant_not_test_marked"
+
+    with (
+        patch.object(
+            clone_op,
+            "_target_tenant_row",
+            return_value=_shell_row(INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME),
+        ),
+        patch.object(clone_op, "allowed_table_count", return_value=0),
+        patch.object(clone_op, "denied_domain_zero_proof", return_value={}),
+    ):
+        state, failure = clone_op.validate_target_shell(
+            MagicMock(),
+            48,
+            profile=CLONE_PROFILE_SALLA_MINIMAL,
+            execution_purpose=CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+        )
+    assert failure is None
+    assert state == "existing_safe_empty"
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_stage"),
+    [
+        (
+            lambda payload: payload.update(attestation_id="../unsafe"),
+            "disposable_target_attestation_id_invalid",
+        ),
+        (
+            lambda payload: payload.update(target_hostname="https://bad.example/path"),
+            "disposable_target_attestation_hostname_invalid",
+        ),
+        (
+            lambda payload: payload.update(target_database_fingerprint="sha256:ABC"),
+            "disposable_target_attestation_target_database_fingerprint_invalid",
+        ),
+    ],
+)
+def test_internal_e2e_rejects_malformed_signed_attestation_fields(
+    mutator: object,
+    expected_stage: str,
+) -> None:
+    target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
+    payload = json.loads(_signed_disposable_attestation(target_hostname=target_host))
+    mutator(payload)  # type: ignore[operator]
+    payload["signature"] = clone_op.compute_disposable_attestation_signature(
+        payload,
+        hmac_key=_DISPOSABLE_ATTESTATION_HMAC_KEY,
+    )
+    _, failure = clone_op.parse_disposable_target_attestation(
+        {
+            DISPOSABLE_TARGET_ATTESTATION_ENV: json.dumps(payload),
+            DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV: _DISPOSABLE_ATTESTATION_HMAC_KEY,
+        },
+        target_hostname=target_host,
+    )
+    assert failure is not None
+    assert failure.stage == expected_stage
+
+
+def test_internal_e2e_rejects_short_hmac_key() -> None:
+    target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
+    _, failure = clone_op.parse_disposable_target_attestation(
+        {
+            DISPOSABLE_TARGET_ATTESTATION_ENV: _signed_disposable_attestation(
+                target_hostname=target_host
+            ),
+            DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV: "too-short",
+        },
+        target_hostname=target_host,
+    )
+    assert failure is not None
+    assert failure.stage == "disposable_target_attestation_hmac_key_too_short"
+
+
+def test_internal_e2e_rejects_long_lived_attestation() -> None:
+    target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
+    now = datetime.now(timezone.utc)
+    attestation = _signed_disposable_attestation(
+        target_hostname=target_host,
+        issued_at=(now - timedelta(minutes=1)).isoformat(),
+        expires_at=(now + timedelta(hours=25)).isoformat(),
+    )
+    _, failure = clone_op.parse_disposable_target_attestation(
+        {
+            DISPOSABLE_TARGET_ATTESTATION_ENV: attestation,
+            DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV: _DISPOSABLE_ATTESTATION_HMAC_KEY,
+        },
+        target_hostname=target_host,
+    )
+    assert failure is not None
+    assert failure.stage == "disposable_target_attestation_lifetime_exceeded"
+
+
+def test_internal_e2e_rejects_future_issued_attestation() -> None:
+    target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
+    now = datetime.now(timezone.utc)
+    attestation = _signed_disposable_attestation(
+        target_hostname=target_host,
+        issued_at=(now + timedelta(minutes=10)).isoformat(),
+        expires_at=(now + timedelta(hours=1)).isoformat(),
+    )
+    _, failure = clone_op.parse_disposable_target_attestation(
+        {
+            DISPOSABLE_TARGET_ATTESTATION_ENV: attestation,
+            DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV: _DISPOSABLE_ATTESTATION_HMAC_KEY,
+        },
+        target_hostname=target_host,
+    )
+    assert failure is not None
+    assert failure.stage == "disposable_target_attestation_issued_in_future"
+
+
+def test_attestation_digest_binding_includes_issued_and_expiry_times() -> None:
+    target_host = clone_op._parse_database_url(_DISPOSABLE_TARGET_URL).host or ""
+    first = json.loads(
+        _signed_disposable_attestation(
+            target_hostname=target_host,
+            issued_at="2026-07-19T10:00:00+00:00",
+            expires_at="2026-07-19T11:00:00+00:00",
+        )
+    )
+    second = dict(first)
+    second["issued_at"] = "2026-07-19T10:01:00+00:00"
+    second["expires_at"] = "2026-07-19T11:01:00+00:00"
+    assert clone_op.target_attestation_binding_fingerprint(
+        first
+    ) != clone_op.target_attestation_binding_fingerprint(second)
+
+
+def test_acceptance_cli_defaults_and_lifecycle_parity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env = dict(_BASE_ENV)
+    env[CLEANUP_CONFIRM_ENV] = CLEANUP_CONFIRM_TOKEN
+    env.pop("NAHLA_TENANT_MERCHANT_CLONE_ENABLED", None)
+    captured: dict[str, clone_op.CloneRequest] = {}
+
+    def _capture_plan(request: clone_op.CloneRequest) -> dict[str, object]:
+        captured["request"] = request
+        return {"outcome": "planned"}
+
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch.object(clone_op, "build_plan", side_effect=_capture_plan),
+    ):
+        assert clone_op.main(["dry-run", "--profile", CLONE_PROFILE_SALLA_MINIMAL]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "planned"
+    request = captured["request"]
+    assert request.source_tenant_id == DEFAULT_ACCEPTANCE_TENANT_ID
+    assert request.target_tenant_id == DEFAULT_ACCEPTANCE_TENANT_ID
+    assert request.execution_purpose == CLONE_EXECUTION_PURPOSE_ACCEPTANCE
+    assert clone_op.run_gates(request) is None
+    assert (
+        clone_op.target_bootstrap_name_for_purpose(request.execution_purpose)
+        == TARGET_BOOTSTRAP_NAME
+    )
+
+    env["NAHLA_TENANT_MERCHANT_CLONE_ENABLED"] = "1"
+    cleanup_request = clone_op.build_request_from_env(
+        mode="cleanup",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=33,
+        target_tenant_id=33,
+        clone_id="acceptance-cleanup",
+        dry_run_digest=None,
+        manifest_path=Path("manifest.json"),
+        env=env,
+    )
+    assert clone_op.run_gates(cleanup_request) is None

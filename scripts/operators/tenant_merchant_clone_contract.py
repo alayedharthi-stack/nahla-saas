@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v13"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v14"
 
 # Closed execution purposes — ``--execution-purpose`` is optional; when omitted the
 # operator uses acceptance_cross_database (existing production→staging behavior).
@@ -37,6 +37,7 @@ DEFAULT_ACCEPTANCE_TENANT_ID = 33
 PRESERVE_TENANT_IDENTITY_MODE = "preserve_tenant_id_cross_database"
 REMAP_TENANT_IDENTITY_MODE = "remap_tenant_id_cross_database"
 TARGET_BOOTSTRAP_NAME = "tenant-33-acceptance-test"
+INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME = "internal-e2e-disposable-clone-test"
 
 # ── Environment identity attestation ─────────────────────────────────────────
 SOURCE_PROJECT_ENV = "NAHLA_CLONE_SOURCE_RAILWAY_PROJECT"
@@ -65,7 +66,10 @@ FORBIDDEN_DISPOSABLE_TARGET_HOST_MARKERS: FrozenSet[str] = frozenset(
     {"production", "prod", "live"}
 )
 
-DISPOSABLE_TARGET_ATTESTATION_SCHEMA_VERSION = "disposable_target_attestation_v1"
+DISPOSABLE_TARGET_ATTESTATION_SCHEMA_VERSION = "disposable_target_attestation_v2"
+DISPOSABLE_TARGET_ATTESTATION_MAX_LIFETIME_SECONDS = 24 * 60 * 60
+DISPOSABLE_TARGET_ATTESTATION_MAX_FUTURE_SKEW_SECONDS = 5 * 60
+DISPOSABLE_TARGET_ATTESTATION_MIN_HMAC_KEY_LENGTH = 32
 DISPOSABLE_TARGET_ATTESTATION_ENV = "NAHLA_CLONE_DISPOSABLE_TARGET_ATTESTATION"
 DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV = (
     "NAHLA_CLONE_DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY"
@@ -83,6 +87,9 @@ INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_TOKEN = (
 # Target must be experimental staging — never production.
 TARGET_ALLOWED_ENVIRONMENT_VALUES = frozenset({STAGING_ENVIRONMENT_VALUE})
 TARGET_TEST_SLUG_MARKERS = frozenset({"-acceptance-test", "-clone-test", "-tenant33-test"})
+INTERNAL_E2E_DISPOSABLE_TARGET_TEST_SLUG_MARKERS = frozenset(
+    {"internal-e2e-disposable"}
+)
 
 # ── Master execution gates (default off) ───────────────────────────────────
 MASTER_ENABLE_ENV = "NAHLA_TENANT_MERCHANT_CLONE_ENABLED"

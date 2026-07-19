@@ -15,10 +15,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -47,6 +48,9 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     DENIED_TABLES,
     DISPOSABLE_TARGET_ATTESTATION_ENV,
     DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV,
+    DISPOSABLE_TARGET_ATTESTATION_MAX_FUTURE_SKEW_SECONDS,
+    DISPOSABLE_TARGET_ATTESTATION_MAX_LIFETIME_SECONDS,
+    DISPOSABLE_TARGET_ATTESTATION_MIN_HMAC_KEY_LENGTH,
     DISPOSABLE_TARGET_ATTESTATION_SCHEMA_VERSION,
     DRY_RUN_DIGEST_ENV,
     DRY_RUN_DIGEST_SCHEMA_VERSION,
@@ -59,6 +63,8 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_ENV,
     INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_TOKEN,
     INTERNAL_E2E_DISPOSABLE_MASTER_ENABLE_ENV,
+    INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME,
+    INTERNAL_E2E_DISPOSABLE_TARGET_TEST_SLUG_MARKERS,
     INTERNAL_E2E_STAGING_DUAL_HEAD_TOPOLOGY,
     KNOWN_ALEMBIC_REVISIONS,
     KNOWN_CLONE_EXECUTION_PURPOSES,
@@ -119,6 +125,7 @@ class DisposableTargetAttestation:
     attestation_id: str
     purpose: str
     schema_version: str
+    issued_at: datetime
     expires_at: datetime
     target_hostname: str
     target_database_fingerprint: str
@@ -280,6 +287,12 @@ def is_internal_e2e_disposable_purpose(purpose: str) -> bool:
     return purpose == CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE
 
 
+def target_bootstrap_name_for_purpose(purpose: str) -> str:
+    if is_internal_e2e_disposable_purpose(purpose):
+        return INTERNAL_E2E_DISPOSABLE_TARGET_BOOTSTRAP_NAME
+    return TARGET_BOOTSTRAP_NAME
+
+
 def validate_internal_e2e_disposable_tenant_policy(request: CloneRequest) -> GateFailure | None:
     if request.source_tenant_id in FORBIDDEN_SOURCE_TENANT_IDS:
         return GateFailure("operator_rejected", "internal_e2e_forbidden_source_tenant")
@@ -338,6 +351,7 @@ def _disposable_attestation_signing_payload(attestation: Mapping[str, Any]) -> d
         "schema_version": attestation["schema_version"],
         "attestation_id": attestation["attestation_id"],
         "purpose": attestation["purpose"],
+        "issued_at": attestation["issued_at"],
         "expires_at": attestation["expires_at"],
         "target_hostname": attestation["target_hostname"],
         "target_database_fingerprint": attestation["target_database_fingerprint"],
@@ -360,19 +374,37 @@ def compute_disposable_attestation_signature(
     return f"hmac-sha256:{digest}"
 
 
-def target_attestation_binding_fingerprint(
-    attestation_id: str,
-    target_database_fingerprint: str,
-) -> str:
+def target_attestation_binding_fingerprint(attestation: Mapping[str, Any]) -> str:
     encoded = json.dumps(
-        {
-            "attestation_id": attestation_id,
-            "target_database_fingerprint": target_database_fingerprint,
-        },
+        _disposable_attestation_signing_payload(attestation),
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _parsed_disposable_attestation_payload(
+    attestation: DisposableTargetAttestation,
+) -> dict[str, Any]:
+    return {
+        "schema_version": attestation.schema_version,
+        "attestation_id": attestation.attestation_id,
+        "purpose": attestation.purpose,
+        "issued_at": attestation.issued_at.isoformat(),
+        "expires_at": attestation.expires_at.isoformat(),
+        "target_hostname": attestation.target_hostname,
+        "target_database_fingerprint": attestation.target_database_fingerprint,
+        "source_canonical_fingerprint": attestation.source_canonical_fingerprint,
+        "disposable_database": attestation.disposable_database,
+    }
+
+
+_ATTESTATION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{7,127}$")
+_SHA256_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}\.?$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$"
+)
 
 
 def parse_disposable_target_attestation(
@@ -386,6 +418,8 @@ def parse_disposable_target_attestation(
         return None, GateFailure("attestation_missing", "disposable_target_attestation_missing")
     if not hmac_key:
         return None, GateFailure("attestation_missing", "disposable_target_attestation_hmac_key_missing")
+    if len(hmac_key) < DISPOSABLE_TARGET_ATTESTATION_MIN_HMAC_KEY_LENGTH:
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_hmac_key_too_short")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -397,6 +431,7 @@ def parse_disposable_target_attestation(
         "schema_version",
         "attestation_id",
         "purpose",
+        "issued_at",
         "expires_at",
         "target_hostname",
         "target_database_fingerprint",
@@ -414,29 +449,54 @@ def parse_disposable_target_attestation(
         return None, GateFailure("attestation_invalid", "disposable_target_attestation_purpose_mismatch")
     if payload["disposable_database"] is not True:
         return None, GateFailure("attestation_invalid", "disposable_target_attestation_not_disposable")
-    if not str(payload["attestation_id"]).strip():
-        return None, GateFailure("attestation_invalid", "disposable_target_attestation_id_missing")
+    attestation_id = str(payload["attestation_id"]).strip()
+    if not _ATTESTATION_ID_RE.fullmatch(attestation_id):
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_id_invalid")
 
     attested_host = str(payload["target_hostname"]).strip().lower()
+    if not _HOSTNAME_RE.fullmatch(attested_host):
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_hostname_invalid")
     if attested_host != target_hostname.lower():
         return None, GateFailure("attestation_invalid", "disposable_target_attestation_hostname_mismatch")
+    for field in ("target_database_fingerprint", "source_canonical_fingerprint"):
+        if not _SHA256_FINGERPRINT_RE.fullmatch(str(payload[field])):
+            return None, GateFailure(
+                "attestation_invalid",
+                f"disposable_target_attestation_{field}_invalid",
+            )
 
     expected_signature = compute_disposable_attestation_signature(payload, hmac_key=hmac_key)
     if not hmac.compare_digest(str(payload["signature"]), expected_signature):
         return None, GateFailure("attestation_invalid", "disposable_target_attestation_signature_mismatch")
 
     try:
+        issued_at = _parse_iso8601_utc(str(payload["issued_at"]))
         expires_at = _parse_iso8601_utc(str(payload["expires_at"]))
     except ValueError:
-        return None, GateFailure("attestation_invalid", "disposable_target_attestation_expiry_malformed")
-    if expires_at <= datetime.now(timezone.utc):
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_time_malformed")
+    now = datetime.now(timezone.utc)
+    if issued_at > now + timedelta(
+        seconds=DISPOSABLE_TARGET_ATTESTATION_MAX_FUTURE_SKEW_SECONDS
+    ):
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_issued_in_future")
+    if expires_at <= issued_at:
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_time_order_invalid")
+    if (
+        expires_at - issued_at
+        > timedelta(seconds=DISPOSABLE_TARGET_ATTESTATION_MAX_LIFETIME_SECONDS)
+    ):
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_lifetime_exceeded")
+    if now < issued_at:
+        return None, GateFailure("attestation_invalid", "disposable_target_attestation_not_yet_valid")
+    if expires_at <= now:
         return None, GateFailure("attestation_invalid", "disposable_target_attestation_expired")
 
     return (
         DisposableTargetAttestation(
-            attestation_id=str(payload["attestation_id"]).strip(),
+            attestation_id=attestation_id,
             purpose=str(payload["purpose"]),
             schema_version=str(payload["schema_version"]),
+            issued_at=issued_at,
             expires_at=expires_at,
             target_hostname=attested_host,
             target_database_fingerprint=str(payload["target_database_fingerprint"]).strip(),
@@ -465,8 +525,6 @@ def validate_internal_e2e_disposable_master_enable(
     *,
     mode: str,
 ) -> GateFailure | None:
-    if mode == "dry-run":
-        return None
     if not truthy_env(env, INTERNAL_E2E_DISPOSABLE_MASTER_ENABLE_ENV):
         return GateFailure("execution_disabled", "internal_e2e_disposable_master_enable_missing")
     return None
@@ -796,6 +854,7 @@ def validate_target_shell(
     target_tenant_id: int,
     *,
     profile: str,
+    execution_purpose: str = CLONE_EXECUTION_PURPOSE_ACCEPTANCE,
 ) -> tuple[str, GateFailure | None]:
     """Allow absent shell or a strictly empty, acceptance-marked existing shell."""
     row = _target_tenant_row(conn, target_tenant_id)
@@ -803,7 +862,12 @@ def validate_target_shell(
         return "bootstrap_required", None
 
     haystack = f"{row['name'] or ''} {row['domain'] or ''}".lower()
-    if not any(marker in haystack for marker in TARGET_TEST_SLUG_MARKERS):
+    markers = (
+        INTERNAL_E2E_DISPOSABLE_TARGET_TEST_SLUG_MARKERS
+        if is_internal_e2e_disposable_purpose(execution_purpose)
+        else TARGET_TEST_SLUG_MARKERS
+    )
+    if not any(marker in haystack for marker in markers):
         return "", GateFailure("preflight_failed", "target_tenant_not_test_marked")
     if row["is_platform_tenant"]:
         return "", GateFailure("preflight_failed", "target_tenant_is_platform")
@@ -953,12 +1017,14 @@ def _prepare_target_tenant_shell(
     source_tenant_id: int,
     target_tenant_id: int,
     shell_state: str,
+    execution_purpose: str = CLONE_EXECUTION_PURPOSE_ACCEPTANCE,
 ) -> tuple[bool, list[str], dict[str, Any] | None]:
     values = _source_tenant_scalars(source_conn, source_tenant_id=source_tenant_id)
     if shell_state == "bootstrap_required":
+        internal_disposable = is_internal_e2e_disposable_purpose(execution_purpose)
         params = {
             "id": target_tenant_id,
-            "name": TARGET_BOOTSTRAP_NAME,
+            "name": target_bootstrap_name_for_purpose(execution_purpose),
             "domain": None,
             "is_active": True,
             "is_platform_tenant": False,
@@ -967,7 +1033,15 @@ def _prepare_target_tenant_shell(
         tenants = _reflected_table(target_conn, "tenants")
         target_conn.execute(tenants.insert().values(**params))
         _advance_tenant_sequence(target_conn)
-        return True, ["bootstrap:target_tenant_acceptance_shell"], None
+        return (
+            True,
+            [
+                "bootstrap:target_tenant_internal_e2e_disposable_shell"
+                if internal_disposable
+                else "bootstrap:target_tenant_acceptance_shell"
+            ],
+            None,
+        )
 
     previous = target_conn.execute(
         text(
@@ -1152,6 +1226,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 target_conn,
                 request.target_tenant_id,
                 profile=request.profile,
+                execution_purpose=request.execution_purpose,
             )
             if failure:
                 raise ValueError(failure.stage)
@@ -1219,8 +1294,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 ),
                 target_attestation_fingerprint=(
                     target_attestation_binding_fingerprint(
-                        disposable_attestation.attestation_id,
-                        disposable_attestation.target_database_fingerprint,
+                        _parsed_disposable_attestation_payload(disposable_attestation)
                     )
                     if disposable_attestation
                     else ""
@@ -1261,8 +1335,7 @@ def build_plan(request: CloneRequest) -> dict[str, Any]:
                 plan_payload["target_attestation_id"] = disposable_attestation.attestation_id
                 plan_payload["target_attestation_fingerprint"] = (
                     target_attestation_binding_fingerprint(
-                        disposable_attestation.attestation_id,
-                        disposable_attestation.target_database_fingerprint,
+                        _parsed_disposable_attestation_payload(disposable_attestation)
                     )
                 )
             return plan_payload
@@ -1321,6 +1394,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                     target_conn,
                     request.target_tenant_id,
                     profile=request.profile,
+                    execution_purpose=request.execution_purpose,
                 )
                 if shell_failure:
                     raise ValueError(shell_failure.stage)
@@ -1336,6 +1410,7 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
                     source_tenant_id=request.source_tenant_id,
                     target_tenant_id=request.target_tenant_id,
                     shell_state=shell_state,
+                    execution_purpose=request.execution_purpose,
                 )
                 transformations.extend(tenant_transforms)
 
@@ -1465,7 +1540,9 @@ def apply_clone(request: CloneRequest) -> dict[str, Any]:
             "target_tenant_id": request.target_tenant_id,
             "target_tenant_bootstrapped": target_tenant_bootstrapped,
             "target_bootstrap_name": (
-                TARGET_BOOTSTRAP_NAME if target_tenant_bootstrapped else None
+                target_bootstrap_name_for_purpose(request.execution_purpose)
+                if target_tenant_bootstrapped
+                else None
             ),
             "existing_shell_scalar_restore": existing_shell_scalar_restore,
             "applied_at": datetime.now(timezone.utc).isoformat(),
@@ -1632,9 +1709,15 @@ def run_internal_e2e_disposable_gates(request: CloneRequest) -> GateFailure | No
     failure = validate_internal_e2e_disposable_tenant_policy(request)
     if failure:
         return failure
+    if request.mode == "cleanup":
+        return GateFailure(
+            "operator_rejected",
+            "internal_e2e_disposable_cleanup_forbidden",
+        )
     for validator in (
         lambda: validate_database_url_scheme(request.source_database_url, stage="source"),
         lambda: validate_database_url_scheme(request.target_database_url, stage="target"),
+        lambda: validate_target_staging_identity(request.env),
         lambda: validate_internal_e2e_source_database_host(request.source_database_url),
         lambda: validate_internal_e2e_disposable_target_host(
             request.source_database_url,
@@ -1643,7 +1726,6 @@ def run_internal_e2e_disposable_gates(request: CloneRequest) -> GateFailure | No
         lambda: validate_source_target_distinct(request),
         lambda: validate_internal_e2e_disposable_master_enable(request.env, mode=request.mode),
         lambda: validate_internal_e2e_disposable_apply_confirmation(request.env, mode=request.mode),
-        lambda: validate_cleanup_confirmation(request.env, mode=request.mode),
     ):
         failure = validator()
         if failure:
@@ -1708,12 +1790,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--source-tenant-id",
         type=int,
-        default=DEFAULT_ACCEPTANCE_TENANT_ID,
+        default=None,
     )
     parser.add_argument(
         "--target-tenant-id",
         type=int,
-        default=DEFAULT_ACCEPTANCE_TENANT_ID,
+        default=None,
     )
     parser.add_argument(
         "--profile",
@@ -1733,15 +1815,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     mode = {"dry-run": "dry-run", "apply": "apply", "cleanup": "cleanup"}[args.command]
+    execution_purpose = resolve_execution_purpose(args.execution_purpose)
+    if is_internal_e2e_disposable_purpose(execution_purpose) and (
+        args.source_tenant_id is None or args.target_tenant_id is None
+    ):
+        return emit_failure(
+            error_class="operator_rejected",
+            stage="internal_e2e_explicit_tenant_ids_required",
+        )
     request = build_request_from_env(
         mode=mode,
         profile=args.profile,
-        source_tenant_id=args.source_tenant_id,
-        target_tenant_id=args.target_tenant_id,
+        source_tenant_id=(
+            args.source_tenant_id
+            if args.source_tenant_id is not None
+            else DEFAULT_ACCEPTANCE_TENANT_ID
+        ),
+        target_tenant_id=(
+            args.target_tenant_id
+            if args.target_tenant_id is not None
+            else DEFAULT_ACCEPTANCE_TENANT_ID
+        ),
         clone_id=args.clone_id or None,
         dry_run_digest=args.dry_run_digest or None,
         manifest_path=Path(args.manifest_path) if args.manifest_path else None,
-        execution_purpose=args.execution_purpose,
+        execution_purpose=execution_purpose,
     )
 
     failure = run_gates(request)
