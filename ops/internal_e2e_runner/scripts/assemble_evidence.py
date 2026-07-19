@@ -13,6 +13,23 @@ from ops.internal_e2e_runner.lib.evidence import build_network_evidence, write_n
 from ops.internal_e2e_runner.scripts.probe_connectivity import positive_probes_ready
 
 
+def parse_operator_command_json(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("operator_command_json_invalid") from exc
+    if not isinstance(value, list):
+        raise SystemExit("operator_command_json_not_list")
+    if not value:
+        raise SystemExit("operator_command_json_empty")
+    if not all(isinstance(item, str) for item in value):
+        raise SystemExit("operator_command_json_not_strings")
+    try:
+        return normalize_operator_command(value)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def validate_negative_control_binding(
     expected: list[str], baseline: list[str], runner: list[str]
 ) -> None:
@@ -41,7 +58,7 @@ def main() -> int:
     parser.add_argument("--probe-results", required=True)
     parser.add_argument("--image-digest-input", required=True)
     parser.add_argument("--database-url-fingerprint", required=True)
-    parser.add_argument("--operator-command", nargs="*", default=[])
+    parser.add_argument("--operator-command-json", required=True)
     parser.add_argument("--runtime-verification-status", default="pending_container_runtime")
     parser.add_argument("--docker-inspect", required=True)
     parser.add_argument("--output", required=True)
@@ -106,7 +123,7 @@ def main() -> int:
         ),
         image_digest_input=args.image_digest_input,
         database_url_fingerprint=args.database_url_fingerprint,
-        operator_command=normalize_operator_command(args.operator_command),
+        operator_command=parse_operator_command_json(args.operator_command_json),
         runtime_verification_status=args.runtime_verification_status,
         docker_topology=docker_topology,
     )

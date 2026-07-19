@@ -9,7 +9,19 @@ EVIDENCE_DIR="${NAHLA_INTERNAL_E2E_EVIDENCE_DIR:-/evidence}"
 CONFIG_PATH="${NAHLA_INTERNAL_E2E_RUNNER_CONFIG:-/run/config/runner_config.json}"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-mkdir -p "${EVIDENCE_DIR}"
+mkdir -p "${EVIDENCE_DIR}" || {
+  echo "evidence_dir_unavailable" >&2
+  exit 1
+}
+export NAHLA_INTERNAL_E2E_SESSION_DIR="${EVIDENCE_DIR}/sessions"
+mkdir -p "${NAHLA_INTERNAL_E2E_SESSION_DIR}" || {
+  echo "session_evidence_dir_unavailable" >&2
+  exit 1
+}
+[[ -d "${NAHLA_INTERNAL_E2E_SESSION_DIR}" && -w "${NAHLA_INTERNAL_E2E_SESSION_DIR}" ]] || {
+  echo "session_evidence_dir_unavailable" >&2
+  exit 1
+}
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "runner_config_missing" >&2
@@ -147,6 +159,7 @@ COMPLETED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 IMAGE_DIGEST_INPUT="${NAHLA_INTERNAL_E2E_IMAGE_DIGEST_INPUT:?image digest required}"
 DATABASE_FINGERPRINT="$(python3 -c 'from pathlib import Path; from ops.internal_e2e_runner.lib.config import database_url_fingerprint; print(database_url_fingerprint(Path("/run/secrets/database_url").read_text().strip()))')"
 FIREWALL_BACKEND="$(cat "${BACKEND_FILE}")"
+OPERATOR_COMMAND_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${NORMALIZED[@]}")"
 
 python3 "${RUNNER_ROOT}/scripts/assemble_evidence.py" \
   --config "${CONFIG_PATH}" \
@@ -162,7 +175,7 @@ python3 "${RUNNER_ROOT}/scripts/assemble_evidence.py" \
   --runtime-verification-status "network_proofs_passed_operator_pending" \
   --docker-inspect "${EVIDENCE_DIR}/docker-topology-verified.json" \
   --output "${EVIDENCE_DIR}/network_evidence.json" \
-  --operator-command "${NORMALIZED[@]}"
+  --operator-command-json "${OPERATOR_COMMAND_JSON}"
 
 TENANT_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "${CONFIG_PATH}")"
 if [[ "${NORMALIZED[0]}" == "preflight" ]]; then

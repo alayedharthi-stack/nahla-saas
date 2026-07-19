@@ -46,6 +46,7 @@ from services.internal_conversational_e2e_contract import (
     NETWORK_FIREWALL_CONFIRM_ENV,
     PHONE_ALLOWLIST_ENV,
     PINNED_REVISION_ENV,
+    SESSION_DIR_ENV,
     TENANT_ALLOWLIST_ENV,
     TEST_PHONE_ENV,
     USER_ROLE_UNVERIFIABLE,
@@ -961,3 +962,51 @@ def test_operator_has_no_row_deletion_cleanup_path() -> None:
     assert "DELETE FROM" not in source.upper()
     assert "cleanup_contract" in source
     assert "dispose_attested_sandbox_database_externally" in source
+
+
+def test_operator_writes_signed_session_under_configured_evidence_dir(
+    tmp_path: Path,
+) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    evidence_dir = tmp_path / "evidence"
+    session_dir = evidence_dir / "sessions"
+    signed = sign_session_evidence(
+        {
+            "session_id": SESSION_ID,
+            "tenant_id": TENANT_ID,
+            "verdict": "pass",
+            "blockers": [],
+        },
+        key=KEY,
+    )
+
+    path = operator._write_session(
+        signed,
+        {SESSION_DIR_ENV: str(session_dir)},
+    )
+
+    assert path == session_dir.resolve() / f"{SESSION_ID}.json"
+    assert path.is_file()
+    assert path.is_relative_to(evidence_dir.resolve())
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert verify_session_evidence(written, key=KEY) is True
+
+
+def test_operator_session_write_fails_closed_when_directory_unwritable(
+    tmp_path: Path,
+) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    session_dir = tmp_path / "evidence" / "sessions"
+    payload = {"session_id": SESSION_ID}
+    with patch.object(
+        Path,
+        "mkdir",
+        side_effect=PermissionError("read-only session evidence directory"),
+    ):
+        with pytest.raises(PermissionError, match="read-only session evidence directory"):
+            operator._write_session(
+                payload,
+                {SESSION_DIR_ENV: str(session_dir)},
+            )
