@@ -3,6 +3,7 @@ import { CheckCircle, XCircle, ExternalLink, RefreshCw, AlertCircle, Plug, Smart
 import { useNavigate } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
 import { apiCall } from '../api/client'
+import { INTEGRATION_MANAGEMENT_PATHS } from '../lib/navigationPolicy'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -57,9 +58,9 @@ interface CardProps {
   syncLabel?: string
   syncValue?: string
   onConnect?: () => void
+  onManage?: () => void
   onReconnect?: () => void
   reconnecting?: boolean
-  onDisconnect?: () => void
   externalHref?: string
   externalLabel?: string
   hideExternal?: boolean
@@ -69,16 +70,9 @@ interface CardProps {
 function IntegrationCard({
   logo, name, description, connected, loading,
   accountLabel, accountValue, syncLabel, syncValue,
-  onConnect, onReconnect, reconnecting, onDisconnect, externalHref, externalLabel, hideExternal,
+  onConnect, onManage, onReconnect, reconnecting, externalHref, externalLabel, hideExternal,
   footerNote,
 }: CardProps) {
-  const [syncing, setSyncing] = useState(false)
-
-  const handleSync = () => {
-    setSyncing(true)
-    setTimeout(() => setSyncing(false), 2000)
-  }
-
   return (
     <div className="card p-5">
       <div className="flex items-start gap-4">
@@ -110,9 +104,7 @@ function IntegrationCard({
               </div>
               <div className="bg-slate-50 rounded-lg px-3 py-2.5">
                 <div className="flex items-center gap-1.5">
-                  {syncing
-                    ? <RefreshCw className="w-3.5 h-3.5 text-brand-500 animate-spin" />
-                    : <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />}
+                  <CheckCircle className="w-3.5 h-3.5 text-emerald-500" />
                   <p className="text-xs text-slate-400">{syncLabel ?? 'آخر مزامنة'}</p>
                 </div>
                 <p className="text-xs font-medium text-slate-800 mt-0.5">{syncValue ?? '—'}</p>
@@ -125,12 +117,15 @@ function IntegrationCard({
       <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-100">
         {!loading && (connected ? (
           <>
-            <button onClick={handleSync} className="btn-secondary text-xs py-1.5" disabled={syncing}>
-              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'جارٍ…' : 'مزامنة'}
-            </button>
+            {onManage && (
+              <button type="button" onClick={onManage} className="btn-secondary text-xs py-1.5">
+                <Plug className="w-3.5 h-3.5" />
+                إدارة الربط
+              </button>
+            )}
             {onReconnect && (
               <button
+                type="button"
                 onClick={onReconnect}
                 disabled={reconnecting}
                 className="btn-secondary text-xs py-1.5 text-amber-600 border-amber-200 hover:bg-amber-50"
@@ -141,14 +136,9 @@ function IntegrationCard({
                 إعادة الربط
               </button>
             )}
-            {onDisconnect && (
-              <button onClick={onDisconnect} className="btn-ghost text-xs py-1.5 text-red-500 hover:bg-red-50">
-                فصل الاتصال
-              </button>
-            )}
           </>
         ) : (
-          <button onClick={onConnect} disabled={reconnecting} className="btn-primary text-xs py-1.5">
+          <button type="button" onClick={onConnect} disabled={reconnecting} className="btn-primary text-xs py-1.5">
             {reconnecting
               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
               : <Plug className="w-3.5 h-3.5" />}
@@ -416,6 +406,7 @@ export default function Integrations() {
           syncLabel="رقم المتجر"
           syncValue={sallaStatus.store_id && sallaStatus.store_id !== 'not_connected' ? sallaStatus.store_id : '—'}
           onConnect={handleReconnectSalla}
+          onManage={() => navigate(INTEGRATION_MANAGEMENT_PATHS.store)}
           onReconnect={handleReconnectSalla}
           reconnecting={reconnecting}
           externalHref="https://salla.sa/dashboard"
@@ -432,7 +423,7 @@ export default function Integrations() {
           accountValue={zidStatus.store_name ?? zidStatus.store_id}
           syncLabel="تاريخ الربط"
           syncValue={timeAgo(zidStatus.connected_at)}
-          onConnect={() => navigate('/store-integration')}
+          onConnect={() => navigate(INTEGRATION_MANAGEMENT_PATHS.store)}
           externalHref="https://web.zid.sa/dashboard"
           externalLabel="فتح في Zid"
         />
@@ -447,8 +438,8 @@ export default function Integrations() {
           accountValue={waStatus.phone_number ? `+${waStatus.phone_number}` : '—'}
           syncLabel="تاريخ الربط"
           syncValue={timeAgo(waStatus.connected_at)}
-          onConnect={() => navigate('/whatsapp-connect')}
-          onDisconnect={() => navigate('/whatsapp-connect')}
+          onConnect={() => navigate(INTEGRATION_MANAGEMENT_PATHS.whatsapp)}
+          onManage={() => navigate(INTEGRATION_MANAGEMENT_PATHS.whatsapp)}
           hideExternal
           footerNote={
             waStatus.connected
