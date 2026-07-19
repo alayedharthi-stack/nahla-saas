@@ -32,12 +32,15 @@ from scripts.operators.deployment_revision_attestation_contract import (  # noqa
 )
 from services.internal_conversational_e2e_contract import (  # noqa: E402
     DATABASE_URL_ENV,
+    EGRESS_DENIAL_KINDS,
     EVIDENCE_CHANNEL,
     EVIDENCE_HMAC_KEY_ENV,
     EVIDENCE_SCHEMA_VERSION,
-    EXPECTED_DENIAL_KINDS,
+    LIVE_TURN_STATUSES,
     LLM_ENABLE_ENV,
     SESSION_DIR_ENV,
+    SAFE_AUDIT_VALUE_RE,
+    SAFE_SCENARIO_ID_RE,
     TENANT_ALLOWLIST_ENV,
     TEST_PHONE_ENV,
     evaluate_preflight,
@@ -179,7 +182,7 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
         scenario_id = str(scenario.get("scenario_id") or "")
         turns = scenario.get("turns")
         if (
-            not scenario_id
+            not SAFE_SCENARIO_ID_RE.fullmatch(scenario_id)
             or scenario_id in seen
             or not isinstance(turns, list)
             or not 0 < len(turns) <= MAX_TURNS_PER_SCENARIO
@@ -191,22 +194,37 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 raise ValueError("scenario_manifest_invalid")
             if "expected_text" in turn or "expected_reply" in turn:
                 raise ValueError("exact_prose_assertion_forbidden")
-            expected_denials = turn.get("expected_denial_kinds", [])
+            expected_status = str(turn.get("expected_status") or "evaluated")
+            if expected_status not in LIVE_TURN_STATUSES:
+                raise ValueError("expected_status_invalid")
+            expected_denials = turn.get("expected_denials", [])
             if (
                 not isinstance(expected_denials, list)
-                or not all(isinstance(kind, str) for kind in expected_denials)
-                or len(set(expected_denials)) != len(expected_denials)
-                or not set(expected_denials).issubset(EXPECTED_DENIAL_KINDS)
             ):
-                raise ValueError("expected_denial_kinds_invalid")
+                raise ValueError("expected_denials_invalid")
+            normalized_denials: list[tuple[str, str]] = []
+            for denial in expected_denials:
+                if (
+                    not isinstance(denial, Mapping)
+                    or set(denial) != {"egress_kind", "operation"}
+                    or denial.get("egress_kind") not in EGRESS_DENIAL_KINDS
+                    or not isinstance(denial.get("operation"), str)
+                    or not SAFE_AUDIT_VALUE_RE.fullmatch(denial["operation"])
+                ):
+                    raise ValueError("expected_denials_invalid")
+                normalized_denials.append(
+                    (str(denial["egress_kind"]), denial["operation"])
+                )
+            if len(set(normalized_denials)) != len(normalized_denials):
+                raise ValueError("expected_denials_invalid")
             checked_turns.append(
                 {
                     "text": str(turn["text"]),
-                    "expected_status": str(turn.get("expected_status") or "evaluated"),
+                    "expected_status": expected_status,
                     "expected_state_delta_keys": sorted(
                         str(v) for v in (turn.get("expected_state_delta_keys") or [])
                     ),
-                    "expected_denial_kinds": tuple(sorted(expected_denials)),
+                    "expected_denials": tuple(sorted(normalized_denials)),
                 }
             )
         seen.add(scenario_id)
@@ -223,10 +241,8 @@ def _conversation(db: Any, *, tenant_id: int, phone: str, session_id: str) -> tu
         )
         .all()
     )
-    if len(rows) > 1:
-        raise ValueError("conversation_identity_ambiguous")
     if rows:
-        return rows[0], False
+        raise ValueError("sandbox_test_phone_not_pristine")
     convo = Conversation(
         tenant_id=tenant_id,
         external_id=phone,
@@ -373,7 +389,7 @@ async def run_session(
                         ),
                         network_attestation_id=str(preflight["attestation_id"]),
                         llm_allowed_hosts=tuple(preflight["llm_allowed_hosts"]),
-                        expected_denial_kinds=turn["expected_denial_kinds"],
+                        expected_denials=turn["expected_denials"],
                         allow_llm_inference=llm_allowed,
                     ),
                     brain_factory=get_brain,
@@ -396,6 +412,12 @@ async def run_session(
                 results.append(evidence)
     except Exception as exc:
         db.rollback()
+        stable_blocker = (
+            str(exc)
+            if isinstance(exc, ValueError)
+            and str(exc) == "sandbox_test_phone_not_pristine"
+            else "runner_exception"
+        )
         results.append(
             {
                 "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -403,7 +425,7 @@ async def run_session(
                 "session_id": session_id,
                 "tenant_id": tenant_id,
                 "verdict": "fail",
-                "blockers": ["runner_exception"],
+                "blockers": [stable_blocker],
                 "exception_class": type(exc).__name__,
                 "provider_observation": {
                     "source": "application_internal_e2e_context",

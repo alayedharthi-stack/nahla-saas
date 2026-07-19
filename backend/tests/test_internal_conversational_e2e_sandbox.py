@@ -68,7 +68,7 @@ KEY = "test-evidence-key-not-a-production-secret"
 ATTESTATION_KEY = "test-attestation-key-not-an-evidence-key"
 
 
-def _identity(name: str = "nahla_e2e_generic_shop") -> dict[str, str]:
+def _identity(name: str = "railway") -> dict[str, str]:
     return {
         "database_name": name,
         "server_address": "127.0.0.1",
@@ -138,7 +138,7 @@ def _preflight(
     )
 
 
-def test_valid_disposable_preflight_is_direct_probe_only() -> None:
+def test_signed_disposable_railway_database_with_distinct_canonical_passes() -> None:
     env, identity, rows = _valid_inputs()
     result = _preflight(env, identity, rows)
     assert result["ok"] is True
@@ -206,11 +206,9 @@ def test_real_cli_help_bootstraps_repo_backend_and_database_paths() -> None:
     assert "run" in completed.stdout
 
 
-def test_canonical_or_shared_database_identity_blocks() -> None:
+def test_same_as_canonical_database_identity_blocks() -> None:
     env, identity, rows = _valid_inputs()
-    shared = {**identity, "database_name": "nahla_staging"}
     payload = json.loads(env[ATTESTATION_JSON_ENV])
-    payload["database_identity_fingerprint"] = database_identity_fingerprint(shared)
     payload["canonical_database_identity_fingerprint"] = payload[
         "database_identity_fingerprint"
     ]
@@ -219,7 +217,7 @@ def test_canonical_or_shared_database_identity_blocks() -> None:
         payload,
         key=ATTESTATION_KEY,
     )
-    result = _preflight(env, shared, rows)
+    result = _preflight(env, identity, rows)
     assert CODE_CANONICAL_DATABASE_REJECTED in result["blockers"]
 
 
@@ -374,7 +372,7 @@ async def _run_turn(
     *,
     turn_index: int,
     attempt_egress: bool = False,
-    expected_denial_kinds: tuple[str, ...] = (),
+    expected_denials: tuple[tuple[str, str], ...] = (),
 ):
     request = SandboxTurnRequest(
         session_id=SESSION_ID,
@@ -390,7 +388,7 @@ async def _run_turn(
         database_identity_fingerprint=database_identity_fingerprint(_identity()),
         network_attestation_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         llm_allowed_hosts=("api.generic-llm.test",),
-        expected_denial_kinds=expected_denial_kinds,
+        expected_denials=expected_denials,
         allow_llm_inference=True,
     )
 
@@ -484,7 +482,10 @@ def test_provider_denial_audit_is_captured_without_fabricated_success() -> None:
             convo,
             turn_index=0,
             attempt_egress=True,
-            expected_denial_kinds=("salla_integration", "whatsapp_provider"),
+            expected_denials=(
+                ("salla_integration", "create_order"),
+                ("whatsapp_provider", "send_message"),
+            ),
         )
     ).evidence
     assert {audit["egress_kind"] for audit in evidence["denial_audits"]} == {
@@ -515,11 +516,28 @@ def test_unexpected_or_missing_denial_cannot_pass() -> None:
         _run_turn(
             convo,
             turn_index=0,
-            expected_denial_kinds=("financial",),
+            expected_denials=(("financial", "generate_payment_link"),),
         )
     ).evidence
     assert missing["verdict"] == "fail"
     assert "expected_egress_denial_missing" in missing["blockers"]
+
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=83, tenant_id=TENANT_ID, extra_metadata={})
+    operation_mismatch = asyncio.run(
+        _run_turn(
+            convo,
+            turn_index=0,
+            attempt_egress=True,
+            expected_denials=(
+                ("salla_integration", "get_product"),
+                ("whatsapp_provider", "send_message"),
+            ),
+        )
+    ).evidence
+    assert operation_mismatch["verdict"] == "fail"
+    assert "unexpected_egress_denial" in operation_mismatch["blockers"]
+    assert "expected_egress_denial_missing" in operation_mismatch["blockers"]
 
 
 def test_provenance_requires_semantically_valid_constitutional_metadata() -> None:
@@ -635,7 +653,25 @@ def test_invalid_scenario_manifest_returns_structured_failure_without_engine(
     create_engine_mock.assert_not_called()
 
 
-def test_scenario_denial_expectations_use_closed_allowlist(tmp_path: Path) -> None:
+def test_stale_test_phone_conversation_blocks_without_mutation() -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    db = MagicMock()
+    stale = SimpleNamespace(id=99, tenant_id=TENANT_ID, external_id=PHONE)
+    db.query.return_value.filter.return_value.all.return_value = [stale]
+    with pytest.raises(ValueError, match="sandbox_test_phone_not_pristine"):
+        operator._conversation(
+            db,
+            tenant_id=TENANT_ID,
+            phone=PHONE,
+            session_id=SESSION_ID,
+        )
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+    db.refresh.assert_not_called()
+
+
+def test_scenario_denial_expectations_require_exact_safe_events(tmp_path: Path) -> None:
     from scripts.operators import internal_conversational_e2e_session as operator
 
     manifest = tmp_path / "scenarios.json"
@@ -649,7 +685,12 @@ def test_scenario_denial_expectations_use_closed_allowlist(tmp_path: Path) -> No
                         "turns": [
                             {
                                 "text": "Generic inquiry",
-                                "expected_denial_kinds": ["unregistered_egress"],
+                                "expected_denials": [
+                                    {
+                                        "egress_kind": "salla_integration",
+                                        "operation": "*",
+                                    }
+                                ],
                             }
                         ],
                     }
@@ -658,8 +699,62 @@ def test_scenario_denial_expectations_use_closed_allowlist(tmp_path: Path) -> No
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="expected_denial_kinds_invalid"):
+    with pytest.raises(ValueError, match="expected_denials_invalid"):
         operator._load_scenarios(manifest)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        {
+            "scenario_id": "../../unsafe",
+            "turns": [{"text": "Generic inquiry"}],
+        },
+        {
+            "scenario_id": "generic_catalog",
+            "turns": [
+                {
+                    "text": "Generic inquiry",
+                    "expected_status": "provider_success",
+                }
+            ],
+        },
+    ],
+)
+def test_unsafe_scenario_identity_or_status_blocks_before_engine(
+    tmp_path: Path,
+    scenario: dict,
+) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    manifest = tmp_path / "unsafe.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scenario_schema_version": operator.SCENARIO_SCHEMA_VERSION,
+                "scenarios": [scenario],
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = {
+        MASTER_ENABLE_ENV: "true",
+        EXECUTION_CONFIRM_ENV: "true",
+        ATTESTATION_HMAC_KEY_ENV: ATTESTATION_KEY,
+        EVIDENCE_HMAC_KEY_ENV: KEY,
+        "NAHLA_INTERNAL_E2E_DATABASE_URL": "postgresql://must-not-connect",
+    }
+    with patch.object(operator, "create_engine") as create_engine_mock:
+        result = asyncio.run(
+            operator.run_session(
+                tenant_id=TENANT_ID,
+                scenario_path=manifest,
+                env=env,
+            )
+        )
+    assert result["ok"] is False
+    assert result["blockers"] == ["scenario_manifest_invalid"]
+    create_engine_mock.assert_not_called()
 
 
 def test_final_session_has_signed_integrity_and_auditable_timestamps(
@@ -712,7 +807,7 @@ def test_final_session_has_signed_integrity_and_auditable_timestamps(
                         "text": "Generic inquiry",
                         "expected_status": "evaluated",
                         "expected_state_delta_keys": [],
-                        "expected_denial_kinds": (),
+                        "expected_denials": (),
                     }
                 ],
             }

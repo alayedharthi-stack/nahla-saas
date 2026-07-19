@@ -1,7 +1,6 @@
 """Disposable-DB harness for the live merchant Brain turn boundary."""
 from __future__ import annotations
 
-import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -13,9 +12,11 @@ from core.acceptance_execution_context import (
 )
 from services.internal_conversational_e2e_contract import (
     CODE_PROVENANCE_INCOMPLETE,
+    EGRESS_DENIAL_KINDS,
     EVIDENCE_CHANNEL,
     EVIDENCE_SCHEMA_VERSION,
-    EXPECTED_DENIAL_KINDS,
+    SAFE_AUDIT_VALUE_RE,
+    SAFE_SCENARIO_ID_RE,
     hmac_identifier,
     validate_explicit_tenant_id,
 )
@@ -24,9 +25,6 @@ from services.merchant_brain_turn import (
     LiveMerchantBrainTurnInput,
     evaluate_live_merchant_brain_turn,
 )
-
-
-_SCENARIO_ID_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,96}$")
 
 
 @dataclass(frozen=True)
@@ -44,7 +42,7 @@ class SandboxTurnRequest:
     database_identity_fingerprint: str
     network_attestation_id: str
     llm_allowed_hosts: tuple[str, ...]
-    expected_denial_kinds: tuple[str, ...] = ()
+    expected_denials: tuple[tuple[str, str], ...] = ()
     allow_llm_inference: bool = False
     profile: Mapping[str, Any] = field(default_factory=dict)
     inbound_metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -61,7 +59,7 @@ def _validate_request(request: SandboxTurnRequest) -> None:
         uuid.UUID(request.session_id)
     except (TypeError, ValueError, AttributeError) as exc:
         raise ValueError("session_id_invalid") from exc
-    if not _SCENARIO_ID_RE.fullmatch(request.scenario_id):
+    if not SAFE_SCENARIO_ID_RE.fullmatch(request.scenario_id):
         raise ValueError("scenario_id_invalid")
     if type(request.turn_index) is not int or request.turn_index < 0:
         raise ValueError("turn_index_invalid")
@@ -77,12 +75,19 @@ def _validate_request(request: SandboxTurnRequest) -> None:
         raise ValueError("turn_input_invalid")
     if not request.evidence_hmac_key:
         raise ValueError("evidence_hmac_key_missing")
-    if (
-        not all(isinstance(kind, str) for kind in request.expected_denial_kinds)
-        or len(set(request.expected_denial_kinds)) != len(request.expected_denial_kinds)
-        or not set(request.expected_denial_kinds).issubset(EXPECTED_DENIAL_KINDS)
-    ):
-        raise ValueError("expected_denial_kinds_invalid")
+    expected_denials: set[tuple[str, str]] = set()
+    for event in request.expected_denials:
+        if (
+            not isinstance(event, tuple)
+            or len(event) != 2
+            or event[0] not in EGRESS_DENIAL_KINDS
+            or not isinstance(event[1], str)
+            or not SAFE_AUDIT_VALUE_RE.fullmatch(event[1])
+        ):
+            raise ValueError("expected_denials_invalid")
+        expected_denials.add((event[0], event[1]))
+    if len(expected_denials) != len(request.expected_denials):
+        raise ValueError("expected_denials_invalid")
     if not request.allow_llm_inference:
         raise ValueError("llm_inference_not_explicitly_enabled")
     if (
@@ -296,13 +301,17 @@ async def run_sandbox_turn(
             ),
         )
     )
-    actual_denial_kinds = {
-        str(audit.get("egress_kind") or "") for audit in denial_audits
+    actual_denials = {
+        (
+            str(audit.get("egress_kind") or ""),
+            str(audit.get("operation") or ""),
+        )
+        for audit in denial_audits
     }
-    expected_denial_kinds = set(request.expected_denial_kinds)
-    if actual_denial_kinds - expected_denial_kinds:
+    expected_denials = set(request.expected_denials)
+    if actual_denials - expected_denials:
         blockers.append("unexpected_egress_denial")
-    if expected_denial_kinds - actual_denial_kinds:
+    if expected_denials - actual_denials:
         blockers.append("expected_egress_denial_missing")
     if result.status == "brain_exception":
         blockers.append("brain_exception")
@@ -326,7 +335,10 @@ async def run_sandbox_turn(
         "provenance": provenance,
         "state_delta": _state_delta(before, after),
         "denial_audits": denial_audits,
-        "expected_denial_kinds": sorted(expected_denial_kinds),
+        "expected_denials": [
+            {"egress_kind": kind, "operation": operation}
+            for kind, operation in sorted(expected_denials)
+        ],
         "llm_calls": max(
             0,
             int(after.get("llm_calls", 0) or 0) - int(before.get("llm_calls", 0) or 0),

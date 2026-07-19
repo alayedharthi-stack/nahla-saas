@@ -73,10 +73,10 @@ _PHONE_RE = re.compile(r"^\d{10,15}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _HOST_RE = re.compile(r"^[a-z0-9.-]{3,253}$")
 _FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_DISPOSABLE_DB_MARKERS = ("e2e", "sandbox", "disposable", "ephemeral")
-_CANONICAL_DB_MARKERS = ("staging", "production", "railway")
+SAFE_AUDIT_VALUE_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,96}$")
+SAFE_SCENARIO_ID_RE = SAFE_AUDIT_VALUE_RE
 _REJECTED_USER_ROLES = frozenset({"admin", "superadmin", "platform", "platform_admin"})
-EXPECTED_DENIAL_KINDS = frozenset(
+EGRESS_DENIAL_KINDS = frozenset(
     {
         "automation",
         "campaign",
@@ -84,6 +84,16 @@ EXPECTED_DENIAL_KINDS = frozenset(
         "financial",
         "salla_integration",
         "whatsapp_provider",
+    }
+)
+LIVE_TURN_STATUSES = frozenset(
+    {
+        "billing_denied",
+        "brain_exception",
+        "evaluated",
+        "legacy_path",
+        "outbound_locked",
+        "suppressed",
     }
 )
 
@@ -298,7 +308,6 @@ def _attestation_blockers(
 
     blockers: list[str] = []
     db_fingerprint = database_identity_fingerprint(identity)
-    db_name = str(identity.get("database_name") or "").lower()
     if (
         attestation.contract_version != CONTRACT_VERSION
         or not attestation.disposable_database
@@ -311,8 +320,6 @@ def _attestation_blockers(
             attestation.canonical_database_identity_fingerprint
         )
         or attestation.canonical_database_identity_fingerprint == db_fingerprint
-        or not any(marker in db_name for marker in _DISPOSABLE_DB_MARKERS)
-        or any(marker in db_name for marker in _CANONICAL_DB_MARKERS)
     ):
         blockers.append(CODE_CANONICAL_DATABASE_REJECTED)
     if (
