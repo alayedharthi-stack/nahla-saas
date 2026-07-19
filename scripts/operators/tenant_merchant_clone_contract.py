@@ -14,7 +14,18 @@ from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v12"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v13"
+
+# Closed execution purposes — ``--execution-purpose`` is optional; when omitted the
+# operator uses acceptance_cross_database (existing production→staging behavior).
+CLONE_EXECUTION_PURPOSE_ACCEPTANCE = "acceptance_cross_database"
+CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE = "internal_e2e_disposable"
+KNOWN_CLONE_EXECUTION_PURPOSES: FrozenSet[str] = frozenset(
+    {
+        CLONE_EXECUTION_PURPOSE_ACCEPTANCE,
+        CLONE_EXECUTION_PURPOSE_INTERNAL_E2E_DISPOSABLE,
+    }
+)
 
 # Closed clone profiles — ``--profile`` is required; no default (fail closed).
 CLONE_PROFILE_FULL_MERCHANT = "full_merchant_acceptance"
@@ -40,8 +51,34 @@ STAGING_IDENTITY_CLASS = "railway_staging_desirable_growth"
 PRODUCTION_IDENTITY_CLASS = "railway_production_desirable_growth"
 
 FORBIDDEN_ENV_MARKERS = frozenset({"production", "prod", "live"})
-_ALLOWED_STAGING_DATABASE_HOST = "postgres-staging.railway.internal"
+CANONICAL_STAGING_DATABASE_HOST = "postgres-staging.railway.internal"
+_ALLOWED_STAGING_DATABASE_HOST = CANONICAL_STAGING_DATABASE_HOST
 _POSTGRES_SCHEMES = frozenset({"postgresql", "postgresql+psycopg2"})
+
+# Internal E2E disposable clone — staging Tenant 48 source topology only.
+FORBIDDEN_SOURCE_TENANT_IDS: FrozenSet[int] = frozenset({1})
+INTERNAL_E2E_STAGING_DUAL_HEAD_TOPOLOGY: FrozenSet[str] = frozenset({"0088", "0089"})
+FORBIDDEN_DISPOSABLE_TARGET_HOSTS: FrozenSet[str] = frozenset(
+    {CANONICAL_STAGING_DATABASE_HOST}
+)
+FORBIDDEN_DISPOSABLE_TARGET_HOST_MARKERS: FrozenSet[str] = frozenset(
+    {"production", "prod", "live"}
+)
+
+DISPOSABLE_TARGET_ATTESTATION_SCHEMA_VERSION = "disposable_target_attestation_v1"
+DISPOSABLE_TARGET_ATTESTATION_ENV = "NAHLA_CLONE_DISPOSABLE_TARGET_ATTESTATION"
+DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY_ENV = (
+    "NAHLA_CLONE_DISPOSABLE_TARGET_ATTESTATION_HMAC_KEY"
+)
+INTERNAL_E2E_DISPOSABLE_MASTER_ENABLE_ENV = (
+    "NAHLA_TENANT_CLONE_INTERNAL_E2E_DISPOSABLE_ENABLED"
+)
+INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_ENV = (
+    "NAHLA_TENANT_CLONE_INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM"
+)
+INTERNAL_E2E_DISPOSABLE_APPLY_CONFIRM_TOKEN = (
+    "APPLY_INTERNAL_E2E_DISPOSABLE_TENANT_CLONE"
+)
 
 # Target must be experimental staging — never production.
 TARGET_ALLOWED_ENVIRONMENT_VALUES = frozenset({STAGING_ENVIRONMENT_VALUE})
@@ -317,6 +354,16 @@ def resolve_clone_profile(profile: str | None) -> str:
         raise ValueError("clone_profile_missing")
     if normalized not in KNOWN_CLONE_PROFILES:
         raise ValueError("clone_profile_unknown")
+    return normalized
+
+
+def resolve_execution_purpose(purpose: str | None) -> str:
+    """Default to acceptance_cross_database when purpose is omitted."""
+    normalized = (purpose or "").strip()
+    if not normalized:
+        return CLONE_EXECUTION_PURPOSE_ACCEPTANCE
+    if normalized not in KNOWN_CLONE_EXECUTION_PURPOSES:
+        raise ValueError("clone_execution_purpose_unknown")
     return normalized
 
 
