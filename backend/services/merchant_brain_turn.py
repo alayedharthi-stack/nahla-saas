@@ -1,12 +1,20 @@
-"""Injectable merchant-turn evaluation boundary for LIVE and internal read-only modes."""
+"""Stateful boundary for the production merchant Brain turn.
+
+This function passes the live SQLAlchemy session through to Brain and its
+post-compose guards. Those transitive calls may write to the database or call
+providers. It is therefore *not* a read-only evaluation API.
+
+Do not use this boundary for internal evaluation unless the caller separately
+enforces both a PostgreSQL read-only transaction and a process-level
+provider/network firewall.
+"""
 
 from __future__ import annotations
 
 import logging
 import re as _re_signal
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,72 +36,8 @@ def require_explicit_tenant_id(tenant_id: int | None) -> int:
     return int(tenant_id)
 
 
-@dataclass(frozen=True)
-class ExecutionCapabilities:
-    allow_llm: bool
-    allow_persistence: bool
-    allow_whatsapp: bool
-    allow_salla: bool
-    allow_webhooks: bool
-    allow_automation: bool
-    allow_financial_actions: bool
-
-
-@dataclass(frozen=True)
-class ExecutionPolicy:
-    name: str
-    capabilities: ExecutionCapabilities
-
-
-LIVE_EXECUTION_POLICY = ExecutionPolicy(
-    "LIVE",
-    ExecutionCapabilities(
-        allow_llm=True,
-        allow_persistence=True,
-        allow_whatsapp=True,
-        allow_salla=True,
-        allow_webhooks=True,
-        allow_automation=True,
-        allow_financial_actions=True,
-    ),
-)
-
-INTERNAL_READ_ONLY_EXECUTION_POLICY = ExecutionPolicy(
-    "INTERNAL_READ_ONLY",
-    ExecutionCapabilities(
-        allow_llm=True,
-        allow_persistence=False,
-        allow_whatsapp=False,
-        allow_salla=False,
-        allow_webhooks=False,
-        allow_automation=False,
-        allow_financial_actions=False,
-    ),
-)
-
-
-class DeferredActionKind(str, Enum):
-    PERSIST_OUTBOUND = "persist_outbound"
-    SEND_WHATSAPP_TEXT = "send_whatsapp_text"
-    SEND_WHATSAPP_MEDIA = "send_whatsapp_media"
-    CREATE_HANDOFF_SESSION = "create_handoff_session"
-    UPDATE_CONVERSATION_HANDOFF = "update_conversation_handoff"
-    COMMIT_SESSION = "commit_session"
-    PROVIDER_DISPATCH = "provider_dispatch"
-    FINANCIAL_ACTION = "financial_action"
-    SALLA_ACTION = "salla_action"
-    WEBHOOK_EMIT = "webhook_emit"
-    AUTOMATION_EMIT = "automation_emit"
-
-
-@dataclass(frozen=True)
-class DeferredAction:
-    kind: DeferredActionKind
-    payload: Dict[str, Any] = field(default_factory=dict)
-
-
 @dataclass
-class MerchantTurnPreconditions:
+class LiveMerchantBrainPreconditions:
     brain_active: bool = True
     skip_ai: bool = False
     skip_reason: Optional[str] = None
@@ -107,14 +51,16 @@ class MerchantTurnPreconditions:
 
 
 @dataclass
-class NormalizedMerchantTurnInput:
+class LiveMerchantBrainTurnInput:
     customer_phone: str
     text: str
     inbound_metadata: Optional[Dict[str, Any]] = None
     wa_msg_id: Optional[str] = None
     conversation_id: Optional[int] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
-    preconditions: MerchantTurnPreconditions = field(default_factory=MerchantTurnPreconditions)
+    preconditions: LiveMerchantBrainPreconditions = field(
+        default_factory=LiveMerchantBrainPreconditions
+    )
     profile: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -133,14 +79,13 @@ class TextProvenance:
 
 
 @dataclass
-class MerchantTurnEvaluationResult:
+class LiveMerchantBrainTurnResult:
     status: str
     reply_text: str = ""
     brain_buttons: List[Any] = field(default_factory=list)
     brain_handoff: bool = False
     brain_result: Optional[Dict[str, Any]] = None
     provenance: TextProvenance = field(default_factory=TextProvenance)
-    deferred_actions: List[DeferredAction] = field(default_factory=list)
     merchant_brain_enabled_fallback: bool = False
     billing_denied: bool = False
     brain_active: bool = True
@@ -159,49 +104,6 @@ class MerchantTurnEvaluationResult:
     brain_exception: Optional[BaseException] = None
     early_return: bool = False
     brain_silent: bool = False
-
-
-@runtime_checkable
-class ProviderSink(Protocol):
-    def record_attempt(self, *, channel: str, action: str, payload: Dict[str, Any]) -> None: ...
-
-
-@runtime_checkable
-class WriteSink(Protocol):
-    def record_attempt(self, *, operation: str, payload: Dict[str, Any]) -> None: ...
-
-
-class RejectingProviderSink:
-    def record_attempt(self, *, channel: str, action: str, payload: Dict[str, Any]) -> None:
-        raise RuntimeError(f"provider dispatch blocked: {channel}:{action}")
-
-
-class RecordingProviderSink:
-    def __init__(self) -> None:
-        self.attempts: List[Dict[str, Any]] = []
-
-    def record_attempt(self, *, channel: str, action: str, payload: Dict[str, Any]) -> None:
-        self.attempts.append({"channel": channel, "action": action, "payload": payload})
-
-
-class RejectingWriteSink:
-    def record_attempt(self, *, operation: str, payload: Dict[str, Any]) -> None:
-        raise RuntimeError(f"write blocked: {operation}")
-
-
-class RecordingWriteSink:
-    def __init__(self) -> None:
-        self.attempts: List[Dict[str, Any]] = []
-
-    def record_attempt(self, *, operation: str, payload: Dict[str, Any]) -> None:
-        self.attempts.append({"operation": operation, "payload": payload})
-
-
-@dataclass
-class MerchantTurnGateways:
-    brain_factory: Callable[[], Any]
-    provider_sink: ProviderSink = field(default_factory=RejectingProviderSink)
-    write_sink: WriteSink = field(default_factory=RejectingWriteSink)
 
 
 def _dedup_tokenise(text: str) -> set:
@@ -423,7 +325,7 @@ def _parse_brain_result(
         )
         state["reply"] = reply
         state["brain_reply_candidate"] = (reply or "").strip()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — native catalog defer is best-effort
         pass
 
     state["brain_handoff"] = bool(brain_result.get("handoff"))
@@ -511,7 +413,7 @@ def _apply_brain_silent_and_welcome_guards(
         )
         if recovery.reply:
             return recovery.reply, brain_silent
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — recovery uses registered emergency fallback
         pass
     return _empty_reply_fallback(), brain_silent
 
@@ -614,6 +516,34 @@ def _apply_outbound_dedup(
                     before=po_reply_before_dedup,
                     after=reply,
                 )
+                if isinstance(brain_persona_compose_event, dict):
+                    try:
+                        from modules.ai.brain.persona.customer_conditional_coupon_provenance import (
+                            note_customer_conditional_coupon_dedup_substitution,
+                        )
+                        from modules.ai.brain.persona.product_sale_offer_provenance import (
+                            note_product_sale_offer_dedup_substitution,
+                        )
+                        from modules.ai.brain.persona.track_order_need_identifiers_provenance import (
+                            note_track_order_need_identifiers_dedup_substitution,
+                        )
+                        from modules.ai.brain.persona.trusted_coupon_offer_provenance import (
+                            note_trusted_coupon_offer_dedup_substitution,
+                        )
+
+                        for note_substitution in (
+                            note_trusted_coupon_offer_dedup_substitution,
+                            note_customer_conditional_coupon_dedup_substitution,
+                            note_product_sale_offer_dedup_substitution,
+                            note_track_order_need_identifiers_dedup_substitution,
+                        ):
+                            note_substitution(
+                                brain_persona_compose_event,
+                                before=po_reply_before_dedup,
+                                after=reply,
+                            )
+                    except Exception:  # noqa: silent-ok — provenance cannot block LIVE delivery
+                        pass
     return reply, outbound_abort_suppressor
 
 
@@ -635,8 +565,20 @@ def _apply_post_compose_truth_guards(
 ) -> str:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
 
-    if not reply or brain_handoff:
+    if not reply:
         return reply
+    if brain_handoff:
+        return _apply_staff_truth_guard_only(
+            db=db,
+            tenant_id=tenant_id,
+            to=to,
+            text=text,
+            reply=reply,
+            convo=convo,
+            inbound_metadata=inbound_metadata,
+            br_action=br_action,
+            brain_persona_compose_event=brain_persona_compose_event,
+        )
 
     po_reply_before_guards = reply
     try:
@@ -663,7 +605,7 @@ def _apply_post_compose_truth_guards(
                 before=po_reply_before_guards,
                 after=reply,
             )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — service closer guard is fail-open
         pass
 
     try:
@@ -679,7 +621,7 @@ def _apply_post_compose_truth_guards(
         )
         if rewritten:
             reply = rewritten
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — payment-context rewrite is fail-open
         pass
 
     try:
@@ -708,7 +650,7 @@ def _apply_post_compose_truth_guards(
         )
         if prg_result.replaced:
             reply = prg_result.reply
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — payment truth guard is fail-open
         pass
 
     try:
@@ -730,7 +672,7 @@ def _apply_post_compose_truth_guards(
         )
         if stg_result.replaced:
             reply = stg_result.reply
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — shipment truth guard is fail-open
         pass
 
     try:
@@ -778,13 +720,78 @@ def _apply_post_compose_truth_guards(
             reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
         elif setg_result.replaced and not setg_result.requires_grounded_compose:
             reply = setg_result.reply
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — staff truth guard is fail-open
         pass
 
     return reply
 
 
-def _record_handoff_side_effects(
+def _apply_staff_truth_guard_only(
+    *,
+    db,
+    tenant_id: int,
+    to: str,
+    text: str,
+    reply: str,
+    convo: Any,
+    inbound_metadata: Optional[Dict[str, Any]],
+    br_action: str,
+    brain_persona_compose_event: Optional[Dict[str, Any]],
+) -> str:
+    """Preserve the live staff-truth guard for Brain handoff candidates."""
+    try:
+        from modules.ai.brain.postprocess.staff_escalation_truth_guard import (
+            apply_staff_escalation_truth_guard,
+        )
+        from core.order_flow import _load_brain_state
+
+        metadata = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
+        chosen_path = str(metadata.get("deterministic_path") or br_action or "")
+        _, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=to)
+        result = apply_staff_escalation_truth_guard(
+            reply=reply,
+            inbound_text=text or "",
+            inbound_metadata=metadata,
+            conversation_flags={
+                "needs_human": bool(getattr(convo, "needs_human", False)),
+                "handoff_active": bool(getattr(convo, "handoff_active", False)),
+                "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
+                "status": str(getattr(convo, "status", "") or ""),
+            },
+            chosen_path=chosen_path,
+            brain_handoff=True,
+            tenant_id=tenant_id,
+            conversation_id=getattr(convo, "id", None),
+            state=brain_state,
+        )
+        if (
+            result.requires_grounded_compose
+            and result.route_action == "track_order_need_identifiers"
+            and isinstance(brain_persona_compose_event, dict)
+            and brain_persona_compose_event.get(
+                "track_order_need_identifiers_compose_active"
+            )
+            and brain_persona_compose_event.get("llm_candidate_present")
+        ):
+            from modules.ai.brain.compose import templates as tracking_templates
+            from modules.ai.brain.compose.track_order_need_identifiers_compose import (
+                record_fallback_metadata_on_data,
+            )
+
+            record_fallback_metadata_on_data(
+                brain_persona_compose_event,
+                reason="staff_escalation_truth_guard_false_claim",
+                transformed_by_guard=True,
+            )
+            return tracking_templates.track_order_need_identifiers_emergency_fallback()
+        if result.replaced and not result.requires_grounded_compose:
+            return result.reply
+    except Exception:  # noqa: silent-ok — staff truth guard is fail-open
+        pass
+    return reply
+
+
+def _persist_live_handoff(
     *,
     db,
     tenant_id: int,
@@ -792,9 +799,6 @@ def _record_handoff_side_effects(
     text: str,
     convo: Any,
     profile: Dict[str, Any],
-    capabilities: ExecutionCapabilities,
-    gateways: MerchantTurnGateways,
-    deferred: List[DeferredAction],
 ) -> None:
     payload = {
         "tenant_id": tenant_id,
@@ -803,24 +807,6 @@ def _record_handoff_side_effects(
         "customer_name": profile.get("name") or to,
         "reason": "customer_request",
     }
-    if not capabilities.allow_persistence:
-        gateways.write_sink.record_attempt(operation="create_handoff_session", payload=payload)
-        deferred.append(DeferredAction(DeferredActionKind.CREATE_HANDOFF_SESSION, payload=payload))
-        deferred.append(
-            DeferredAction(
-                DeferredActionKind.UPDATE_CONVERSATION_HANDOFF,
-                payload={
-                    "tenant_id": tenant_id,
-                    "conversation_id": getattr(convo, "id", None),
-                    "status": "human",
-                    "needs_human": True,
-                    "handoff_active": True,
-                    "is_human_handoff": True,
-                },
-            )
-        )
-        return
-
     from handoff.manager import create_handoff_session
 
     create_handoff_session(
@@ -874,49 +860,49 @@ def _build_provenance(
     return provenance
 
 
-async def evaluate_merchant_turn(
+async def evaluate_live_merchant_brain_turn(
     *,
     db,
     tenant_id: int | None,
     phone_id: str,
-    turn_input: NormalizedMerchantTurnInput,
+    turn_input: LiveMerchantBrainTurnInput,
     convo: Any,
     trace: Any,
     persona_ownership: Any,
-    execution_policy: ExecutionPolicy = LIVE_EXECUTION_POLICY,
-    gateways: Optional[MerchantTurnGateways] = None,
+    brain_factory: Callable[[], Any],
     brain_active: bool = True,
     skip_reason: Optional[str] = None,
-) -> MerchantTurnEvaluationResult:
+) -> LiveMerchantBrainTurnResult:
+    """Run the live, stateful Brain/compose/guard segment.
+
+    The supplied session is passed unchanged to transitive production code.
+    This boundary does not block writes, provider calls, webhooks, automation,
+    Salla operations, or financial actions.
+    """
     explicit_tenant_id = require_explicit_tenant_id(tenant_id)
-    caps = execution_policy.capabilities
-    gw = gateways or MerchantTurnGateways(brain_factory=lambda: None)
-    deferred: List[DeferredAction] = []
     pre = turn_input.preconditions
 
     if pre.ai_disabled or not pre.store_ai_allowed:
-        return MerchantTurnEvaluationResult(status="suppressed", early_return=True)
+        return LiveMerchantBrainTurnResult(status="suppressed", early_return=True)
     if pre.skip_ai:
-        return MerchantTurnEvaluationResult(status="suppressed", early_return=True)
+        return LiveMerchantBrainTurnResult(status="suppressed", early_return=True)
     if not pre.billing_allowed or not pre.conversation_quota_allowed:
-        return MerchantTurnEvaluationResult(
+        return LiveMerchantBrainTurnResult(
             status="billing_denied",
             billing_denied=True,
             early_return=True,
         )
     if not brain_active or not pre.brain_active:
-        return MerchantTurnEvaluationResult(status="legacy_path", brain_active=False)
+        return LiveMerchantBrainTurnResult(status="legacy_path", brain_active=False)
     if not pre.outbound_lock_available:
-        return MerchantTurnEvaluationResult(status="outbound_locked", early_return=True)
-    if not caps.allow_llm:
-        return MerchantTurnEvaluationResult(status="llm_denied", early_return=True)
+        return LiveMerchantBrainTurnResult(status="outbound_locked", early_return=True)
 
     profile = dict(turn_input.profile or {})
     merchant_brain_enabled_fallback = False
     brain_result: Optional[Dict[str, Any]] = None
 
     try:
-        brain = gw.brain_factory()
+        brain = brain_factory()
         trace.brain_called = True
         human_priority_turn = skip_reason == "human_priority" or pre.human_priority
         brain_result = await brain.process(
@@ -950,7 +936,7 @@ async def evaluate_merchant_turn(
                     and float(getattr(rule_intent, "confidence", 0.0) or 0.0) >= 0.85
                 ):
                     brain_handoff = True
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: silent-ok — handoff rule promotion is best-effort
                 pass
 
         reply, brain_silent = _apply_brain_silent_and_welcome_guards(
@@ -965,6 +951,16 @@ async def evaluate_merchant_turn(
             trace=trace,
             persona_ownership=persona_ownership,
         )
+
+        if brain_handoff:
+            _persist_live_handoff(
+                db=db,
+                tenant_id=explicit_tenant_id,
+                to=turn_input.customer_phone,
+                text=turn_input.text,
+                convo=convo,
+                profile=profile,
+            )
 
         br_action = ""
         try:
@@ -1006,19 +1002,6 @@ async def evaluate_merchant_turn(
             persona_ownership=persona_ownership,
         )
 
-        if brain_handoff:
-            _record_handoff_side_effects(
-                db=db,
-                tenant_id=explicit_tenant_id,
-                to=turn_input.customer_phone,
-                text=turn_input.text,
-                convo=convo,
-                profile=profile,
-                capabilities=caps,
-                gateways=gw,
-                deferred=deferred,
-            )
-
         if not billing_denied and not brain_silent and (reply or "").strip():
             from services import turn_trace as TS
 
@@ -1034,14 +1017,13 @@ async def evaluate_merchant_turn(
         )
         trace.handoff_triggered = bool(brain_handoff)
 
-        return MerchantTurnEvaluationResult(
+        return LiveMerchantBrainTurnResult(
             status="evaluated",
             reply_text=reply or "",
             brain_buttons=parsed["brain_buttons"],
             brain_handoff=brain_handoff,
             brain_result=brain_result if isinstance(brain_result, dict) else None,
             provenance=provenance,
-            deferred_actions=deferred,
             merchant_brain_enabled_fallback=merchant_brain_enabled_fallback,
             billing_denied=billing_denied,
             brain_active=True,
@@ -1062,11 +1044,10 @@ async def evaluate_merchant_turn(
     except Exception as exc:  # noqa: BLE001
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: silent-ok — rollback is best-effort after Brain failure
             pass
-        return MerchantTurnEvaluationResult(
+        return LiveMerchantBrainTurnResult(
             status="brain_exception",
             brain_exception=exc,
             brain_active=True,
-            deferred_actions=deferred,
         )

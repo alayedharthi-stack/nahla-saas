@@ -2,41 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from services.merchant_turn_evaluation import (
-    INTERNAL_READ_ONLY_EXECUTION_POLICY,
-    LIVE_EXECUTION_POLICY,
-    DeferredActionKind,
-    MerchantTurnGateways,
-    MerchantTurnPreconditions,
-    NormalizedMerchantTurnInput,
-    RecordingWriteSink,
-    RejectingProviderSink,
-    evaluate_merchant_turn,
-    max_outbound_overlap,
+from services.merchant_brain_turn import (
+    LiveMerchantBrainPreconditions,
+    LiveMerchantBrainTurnInput,
+    evaluate_live_merchant_brain_turn,
     require_explicit_tenant_id,
-    reply_carries_new_signal,
 )
-
-
-def test_require_explicit_tenant_id_rejects_missing() -> None:
-    with pytest.raises(ValueError, match="tenant_id is required"):
-        require_explicit_tenant_id(None)
-
-
-def test_require_explicit_tenant_id_accepts_explicit_value() -> None:
-    assert require_explicit_tenant_id(90210) == 90210
 
 
 def _trace() -> SimpleNamespace:
     return SimpleNamespace(
         brain_called=False,
+        brain_silent=False,
         response_goal="",
+        response_mode="",
         reply_source="",
         fallback_source="",
+        chosen_path="",
         handoff_triggered=False,
     )
 
@@ -52,148 +38,162 @@ def _convo() -> SimpleNamespace:
     )
 
 
-async def _evaluate(**kwargs):
-    pre = kwargs.pop("preconditions", MerchantTurnPreconditions(brain_active=True))
-    text = kwargs.pop("text", "استفسار عام عن المنتج")
-    convo = kwargs["convo"]
-    return await evaluate_merchant_turn(
-        phone_id="PH-GENERIC",
-        turn_input=NormalizedMerchantTurnInput(
-            customer_phone="966500000123",
-            text=text,
-            history=[],
-            preconditions=pre,
-            profile={"id": 9, "name": "أحمد سالم"},
-            conversation_id=convo.id,
-        ),
-        brain_active=True,
-        **kwargs,
-    )
-
-
-def test_internal_read_only_defers_handoff_writes() -> None:
+def _run(
+    brain_result,
+    *,
+    tenant_id: int | None = 55001,
+    preconditions: LiveMerchantBrainPreconditions | None = None,
+    convo: SimpleNamespace | None = None,
+    db: MagicMock | None = None,
+):
     brain = MagicMock()
-    brain.process = AsyncMock(
-        return_value={
-            "reply": "reply-from-brain",
-            "buttons": [],
-            "handoff": True,
-            "chosen_path": "llm",
-        }
-    )
-    write_sink = RecordingWriteSink()
-    convo = _convo()
+    if isinstance(brain_result, BaseException):
+        brain.process = AsyncMock(side_effect=brain_result)
+    else:
+        brain.process = AsyncMock(return_value=brain_result)
+    conversation = convo or _convo()
+    session = db or MagicMock()
     trace = _trace()
     persona = MagicMock()
 
-    result = asyncio.run(
-        _evaluate(
-            db=MagicMock(),
-            tenant_id=90210,
-            gateways=MerchantTurnGateways(brain_factory=lambda: brain, write_sink=write_sink),
-            convo=convo,
+    async def invoke():
+        return await evaluate_live_merchant_brain_turn(
+            db=session,
+            tenant_id=tenant_id,
+            phone_id="PH-GENERIC",
+            turn_input=LiveMerchantBrainTurnInput(
+                customer_phone="966500000123",
+                text="generic product inquiry",
+                conversation_id=conversation.id,
+                history=[],
+                preconditions=preconditions or LiveMerchantBrainPreconditions(),
+                profile={"id": 9, "name": "Generic Customer"},
+            ),
+            convo=conversation,
             trace=trace,
             persona_ownership=persona,
-            execution_policy=INTERNAL_READ_ONLY_EXECUTION_POLICY,
+            brain_factory=lambda: brain,
+            brain_active=True,
         )
-    )
 
-    assert result.status == "evaluated"
-    assert result.brain_handoff is True
-    assert any(action.kind == DeferredActionKind.CREATE_HANDOFF_SESSION for action in result.deferred_actions)
-    assert any(action.kind == DeferredActionKind.UPDATE_CONVERSATION_HANDOFF for action in result.deferred_actions)
-    assert write_sink.attempts
-    assert convo.status == "active"
-    brain.process.assert_awaited_once()
+    result = asyncio.run(invoke())
+    return result, brain, session, trace, persona, conversation
 
 
-def test_internal_read_only_rejects_provider_sink_invocation() -> None:
-    sink = RejectingProviderSink()
-    with pytest.raises(RuntimeError, match="provider dispatch blocked"):
-        sink.record_attempt(channel="whatsapp", action="send_text", payload={"tenant_id": 90210})
+def test_explicit_tenant_id_is_required_without_fallback() -> None:
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        require_explicit_tenant_id(None)
+
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        _run({"reply": "unused"}, tenant_id=None)
 
 
-def test_live_policy_parity_with_injected_brain() -> None:
-    brain = MagicMock()
-    brain.process = AsyncMock(
-        return_value={
-            "reply": "catalog-price-answer",
-            "buttons": [{"id": "buy"}],
+def test_live_normal_reply_buttons_and_provenance_parity() -> None:
+    result, brain, *_ = _run(
+        {
+            "reply": "catalog answer candidate",
+            "buttons": [{"id": "catalog-item"}],
             "handoff": False,
             "chosen_path": "fact_bound_persona_compose",
-            "persona_compose": {"surface": "kb_product_answer", "source": "catalog"},
+            "persona_compose": {
+                "surface": "kb_product_answer",
+                "source": "catalog",
+            },
             "compose_source": "persona_llm",
         }
     )
-    convo = _convo()
-    trace = _trace()
-    persona = MagicMock()
-
-    result = asyncio.run(
-        _evaluate(
-            db=MagicMock(),
-            tenant_id=55001,
-            gateways=MerchantTurnGateways(brain_factory=lambda: brain),
-            convo=convo,
-            trace=trace,
-            persona_ownership=persona,
-            execution_policy=LIVE_EXECUTION_POLICY,
-            text="كم سعر القميص القطني؟",
-        )
-    )
 
     assert result.status == "evaluated"
-    assert result.reply_text == "catalog-price-answer"
-    assert result.brain_buttons
-    assert result.provenance.llm_candidate_present is True
+    assert result.reply_text == "catalog answer candidate"
+    assert result.brain_buttons == [{"id": "catalog-item"}]
+    assert result.provenance.compose_source == "persona_llm"
     assert result.provenance.chosen_path == "fact_bound_persona_compose"
+    assert result.provenance.llm_candidate_present is True
     brain.process.assert_awaited_once()
 
 
-def test_skip_ai_precondition_suppresses_evaluation() -> None:
-    brain = MagicMock()
-    brain.process = AsyncMock(return_value={"reply": "should-not-run", "buttons": []})
-    result = asyncio.run(
-        _evaluate(
-            db=MagicMock(),
-            tenant_id=55002,
-            gateways=MerchantTurnGateways(brain_factory=lambda: brain),
-            convo=SimpleNamespace(id=1, extra_metadata={}),
-            trace=_trace(),
-            persona_ownership=MagicMock(),
-            preconditions=MerchantTurnPreconditions(brain_active=True, skip_ai=True),
-        )
+def test_live_billing_denied_is_silent() -> None:
+    result, *_ = _run(
+        {
+            "skipped": True,
+            "reason": "billing_access_denied",
+            "reply": None,
+        }
     )
-    assert result.status == "suppressed"
-    brain.process.assert_not_called()
+
+    assert result.status == "evaluated"
+    assert result.billing_denied is True
+    assert result.reply_text == ""
+    assert result.provenance.fallback_source == "billing_access_denied"
 
 
-def test_outbound_lock_precondition_blocks_evaluation() -> None:
-    brain = MagicMock()
-    brain.process = AsyncMock(return_value={"reply": "blocked", "buttons": []})
-    result = asyncio.run(
-        _evaluate(
-            db=MagicMock(),
-            tenant_id=55003,
-            gateways=MerchantTurnGateways(brain_factory=lambda: brain),
-            convo=_convo(),
-            trace=_trace(),
-            persona_ownership=MagicMock(),
-            preconditions=MerchantTurnPreconditions(
-                brain_active=True,
-                outbound_lock_available=False,
-            ),
+def test_live_brain_silent_uses_existing_registered_fallback() -> None:
+    with patch(
+        "services.merchant_brain_turn._empty_reply_fallback",
+        return_value="registered-emergency-fallback",
+    ):
+        result, *_ = _run({"reply": "", "buttons": [], "handoff": False})
+
+    assert result.status == "evaluated"
+    assert result.brain_silent is True
+    assert result.reply_text == "registered-emergency-fallback"
+    assert result.provenance.final_text_transformed is False
+
+
+def test_live_handoff_executes_existing_persistence_mutations() -> None:
+    convo = _convo()
+    db = MagicMock()
+    with patch("handoff.manager.create_handoff_session") as create_handoff:
+        result, *_ = _run(
+            {
+                "reply": "brain handoff candidate",
+                "buttons": [],
+                "handoff": True,
+            },
+            convo=convo,
+            db=db,
         )
+
+    assert result.brain_handoff is True
+    create_handoff.assert_called_once()
+    db.flush.assert_called_once()
+    assert convo.status == "human"
+    assert convo.is_human_handoff is True
+    assert convo.needs_human is True
+    assert convo.handoff_active is True
+
+
+def test_live_outbound_lock_blocks_brain_call() -> None:
+    result, brain, *_ = _run(
+        {"reply": "must-not-run"},
+        preconditions=LiveMerchantBrainPreconditions(
+            outbound_lock_available=False,
+        ),
     )
+
     assert result.status == "outbound_locked"
     brain.process.assert_not_called()
 
 
-def test_dedup_helpers_are_signal_aware() -> None:
-    history = [
-        {"direction": "outbound", "body": "نفس الرد السابق للعميل حول المنتج"},
-        {"direction": "inbound", "body": "سؤال"},
-    ]
-    overlap = max_outbound_overlap("نفس الرد السابق للعميل حول المنتج", history)
-    assert overlap >= 0.85
-    assert reply_carries_new_signal("تفضل https://example.test/product") is True
+def test_live_pause_precondition_skips_brain_call() -> None:
+    result, brain, *_ = _run(
+        {"reply": "must-not-run"},
+        preconditions=LiveMerchantBrainPreconditions(
+            skip_ai=True,
+            skip_reason="human_takeover",
+        ),
+    )
+
+    assert result.status == "suppressed"
+    brain.process.assert_not_called()
+
+
+def test_live_brain_exception_rolls_back_for_webhook_fallback() -> None:
+    db = MagicMock()
+    result, brain, *_ = _run(RuntimeError("brain-failed"), db=db)
+
+    assert result.status == "brain_exception"
+    assert isinstance(result.brain_exception, RuntimeError)
+    brain.process.assert_awaited_once()
+    db.rollback.assert_called_once()
+

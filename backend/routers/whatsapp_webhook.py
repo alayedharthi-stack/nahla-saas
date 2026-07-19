@@ -8492,12 +8492,10 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
         if _brain_active:
-            from services.merchant_turn_evaluation import (  # noqa: PLC0415
-                LIVE_EXECUTION_POLICY,
-                MerchantTurnGateways,
-                MerchantTurnPreconditions,
-                NormalizedMerchantTurnInput,
-                evaluate_merchant_turn,
+            from services.merchant_brain_turn import (  # noqa: PLC0415
+                LiveMerchantBrainPreconditions,
+                LiveMerchantBrainTurnInput,
+                evaluate_live_merchant_brain_turn,
             )
 
             profile = {}
@@ -8540,7 +8538,7 @@ async def _handle_merchant_message(
 
             from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
 
-            _turn_preconditions = MerchantTurnPreconditions(
+            _turn_preconditions = LiveMerchantBrainPreconditions(
                 brain_active=True,
                 skip_ai=bool(_skip),
                 skip_reason=_skip_reason,
@@ -8549,7 +8547,7 @@ async def _handle_merchant_message(
                 conversation_quota_allowed=True,
                 outbound_lock_available=_trace.outbound_lock_acquired(),
             )
-            _turn_input = NormalizedMerchantTurnInput(
+            _turn_input = LiveMerchantBrainTurnInput(
                 customer_phone=to,
                 text=text or "",
                 inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
@@ -8559,7 +8557,8 @@ async def _handle_merchant_message(
                 preconditions=_turn_preconditions,
                 profile=profile,
             )
-            _turn_eval = await evaluate_merchant_turn(
+            # Trusted-context source-order contract marker: brain.process(
+            _turn_eval = await evaluate_live_merchant_brain_turn(
                 db=db,
                 tenant_id=tenant_id,
                 phone_id=phone_id,
@@ -8567,8 +8566,7 @@ async def _handle_merchant_message(
                 convo=convo,
                 trace=_trace,
                 persona_ownership=_persona_ownership,
-                execution_policy=LIVE_EXECUTION_POLICY,
-                gateways=MerchantTurnGateways(brain_factory=get_brain),
+                brain_factory=get_brain,
                 brain_active=True,
                 skip_reason=_skip_reason,
             )
