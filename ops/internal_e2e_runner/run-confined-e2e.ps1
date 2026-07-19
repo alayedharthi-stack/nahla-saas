@@ -77,6 +77,21 @@ function Get-DockerUnavailableMessage {
     } | ConvertTo-Json -Compress
 }
 
+function Get-DockerInspectObject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$DockerArgs
+    )
+    $jsonLines = @(& docker @DockerArgs --format "{{json .}}")
+    if ($LASTEXITCODE) { throw "docker_inspect_failed" }
+    if ($jsonLines.Count -ne 1) { throw "docker_inspect_cardinality_invalid" }
+    $parsed = $jsonLines[0] | ConvertFrom-Json
+    if ($null -eq $parsed -or $parsed -isnot [PSCustomObject]) {
+        throw "docker_inspect_object_invalid"
+    }
+    return $parsed
+}
+
 $dockerAvailable = Test-DockerDaemonAvailable
 $dryRun = -not $ConfirmToken -or $PrintPlan
 $operatorArgs = @("preflight")
@@ -266,13 +281,13 @@ try {
     & docker @runArgs
     if ($LASTEXITCODE) { throw "runner_container_create_failed" }
     $inspect = [ordered]@{
-        runner_image = (& docker image inspect $ImageLabel | ConvertFrom-Json)
-        sidecar_image = (& docker image inspect $SidecarImage | ConvertFrom-Json)
-        runner = (& docker inspect $runnerName | ConvertFrom-Json)
-        connect_proxy = (& docker inspect $proxyName | ConvertFrom-Json)
-        db_relay = (& docker inspect $relayName | ConvertFrom-Json)
-        internal_network = (& docker network inspect $internalNetwork | ConvertFrom-Json)
-        egress_network = (& docker network inspect $egressNetwork | ConvertFrom-Json)
+        runner_image = Get-DockerInspectObject -DockerArgs @("image", "inspect", $ImageLabel)
+        sidecar_image = Get-DockerInspectObject -DockerArgs @("image", "inspect", $SidecarImage)
+        runner = Get-DockerInspectObject -DockerArgs @("inspect", $runnerName)
+        connect_proxy = Get-DockerInspectObject -DockerArgs @("inspect", $proxyName)
+        db_relay = Get-DockerInspectObject -DockerArgs @("inspect", $relayName)
+        internal_network = Get-DockerInspectObject -DockerArgs @("network", "inspect", $internalNetwork)
+        egress_network = Get-DockerInspectObject -DockerArgs @("network", "inspect", $egressNetwork)
     }
     $inspect | ConvertTo-Json -Depth 30 | Set-Content -Encoding utf8 -LiteralPath (Join-Path $EvidenceDir "docker-inspect.json")
     & docker start -a $runnerName

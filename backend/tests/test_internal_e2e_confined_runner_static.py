@@ -39,6 +39,9 @@ from ops.internal_e2e_runner.scripts.assemble_evidence import (
 from ops.internal_e2e_runner.scripts.validate_config import (
     main as validate_config_main,
 )
+from ops.internal_e2e_runner.scripts.verify_docker_topology import (
+    main as verify_docker_topology_main,
+)
 
 
 def _base_config(**overrides):
@@ -236,6 +239,138 @@ def test_topology_runner_is_internal_only_and_sidecars_are_dual_homed() -> None:
         internal_network="internal",
         egress_network="egress",
     )
+
+
+def _direct_docker_inspect_fixture(revision: str) -> dict:
+    internal = "nahla-e2e-internal-fixture"
+    egress = "nahla-e2e-egress-fixture"
+
+    def container(*networks: str, runner: bool = False) -> dict:
+        payload = {
+            "NetworkSettings": {
+                "Networks": {network: {} for network in networks},
+            },
+            "HostConfig": {},
+        }
+        if runner:
+            payload["HostConfig"] = {
+                "CapAdd": ["CAP_NET_ADMIN"],
+                "SecurityOpt": ["no-new-privileges:true"],
+                "ReadonlyRootfs": True,
+            }
+        return payload
+
+    def image(image_id: str) -> dict:
+        return {
+            "Id": image_id,
+            "Config": {"Labels": {"nahla.pinned_revision": revision}},
+        }
+
+    return {
+        "runner_image": image("sha256:" + ("a" * 64)),
+        "sidecar_image": image("sha256:" + ("b" * 64)),
+        "runner": container(internal, runner=True),
+        "connect_proxy": container(internal, egress),
+        "db_relay": container(internal, egress),
+        "internal_network": {"Name": internal, "Internal": True},
+        "egress_network": {"Name": egress, "Internal": False},
+    }
+
+
+def test_launcher_produces_direct_single_object_docker_inspect_evidence() -> None:
+    """Regression for Windows PowerShell 5.1 wrapping ConvertFrom-Json arrays."""
+    root = Path(__file__).resolve().parents[2]
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '$jsonLines = @(& docker @DockerArgs --format "{{json .}}")' in launcher
+    assert '$jsonLines.Count -ne 1' in launcher
+    assert "docker_inspect_cardinality_invalid" in launcher
+    assert launcher.count("Get-DockerInspectObject -DockerArgs") == 7
+    assert "runner_image = (& docker image inspect" not in launcher
+    assert "internal_network = (& docker network inspect" not in launcher
+
+
+def test_direct_docker_inspect_fixture_verifies_without_wrapper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    revision = "a" * 40
+    inspect_path = tmp_path / "docker-inspect.json"
+    baseline_path = tmp_path / "egress-control-baseline.json"
+    output_path = tmp_path / "docker-topology-verified.json"
+    inspect_path.write_text(
+        json.dumps(_direct_docker_inspect_fixture(revision)),
+        encoding="utf-8",
+    )
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "reachable": [
+                    {"control_id": "control-a|203.0.113.10|443"},
+                    {"control_id": "control-b|203.0.113.11|443"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_docker_topology.py",
+            "--inspect",
+            str(inspect_path),
+            "--egress-baseline",
+            str(baseline_path),
+            "--expected-revision",
+            revision,
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert verify_docker_topology_main() == 0
+    result = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["verified"] is True
+    assert result["image_revision_label"] == revision
+    assert result["runner_networks"] == ["nahla-e2e-internal-fixture"]
+
+
+def test_powershell_value_count_wrapper_remains_rejected(
+    tmp_path: Path, monkeypatch
+) -> None:
+    revision = "a" * 40
+    inspect = _direct_docker_inspect_fixture(revision)
+    inspect["internal_network"] = {
+        "value": [inspect["internal_network"]],
+        "Count": 1,
+    }
+    inspect_path = tmp_path / "docker-inspect-wrapped.json"
+    baseline_path = tmp_path / "egress-control-baseline.json"
+    inspect_path.write_text(json.dumps(inspect), encoding="utf-8")
+    baseline_path.write_text(
+        json.dumps({"reachable": [{"id": "a"}, {"id": "b"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_docker_topology.py",
+            "--inspect",
+            str(inspect_path),
+            "--egress-baseline",
+            str(baseline_path),
+            "--expected-revision",
+            revision,
+            "--output",
+            str(tmp_path / "should-not-exist.json"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="docker_inspect_wrapper_rejected"):
+        verify_docker_topology_main()
 
 
 def test_full_revision_binding_rejects_short_unknown_and_mismatch() -> None:

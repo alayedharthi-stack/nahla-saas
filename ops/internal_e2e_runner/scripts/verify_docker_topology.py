@@ -11,6 +11,8 @@ from ops.internal_e2e_runner.lib.topology import validate_topology
 
 
 def _one(value):
+    if isinstance(value, dict) and set(value) == {"value", "Count"}:
+        raise ValueError("docker_inspect_wrapper_rejected")
     if isinstance(value, list):
         if len(value) != 1:
             raise ValueError("docker_inspect_cardinality_invalid")
@@ -52,7 +54,7 @@ def main() -> int:
     if blockers:
         raise SystemExit("docker_topology_invalid:" + ",".join(blockers))
     host_config = runner.get("HostConfig") or {}
-    if "NET_ADMIN" not in (host_config.get("CapAdd") or []):
+    if "CAP_NET_ADMIN" not in (host_config.get("CapAdd") or []):
         raise SystemExit("runner_net_admin_capability_missing")
     if "no-new-privileges:true" not in (host_config.get("SecurityOpt") or []):
         raise SystemExit("runner_no_new_privileges_missing")
