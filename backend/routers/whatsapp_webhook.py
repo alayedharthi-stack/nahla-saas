@@ -6985,6 +6985,7 @@ async def _handle_merchant_message(
         # layer is disabled or no moment was identified — guarantees
         # the safety-net suppression gate stays inert.
         _relational_moment: str = ""
+        _turn_eval_applied: bool = False
 
         # ── Top-level Conversation Mode Controller ───────────────────────────
         # Decides who owns this turn (live chat, automation recovery,
@@ -8491,804 +8492,86 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
         if _brain_active:
+            from services.merchant_brain_turn import (  # noqa: PLC0415
+                LiveMerchantBrainPreconditions,
+                LiveMerchantBrainTurnInput,
+                evaluate_live_merchant_brain_turn,
+            )
+
+            profile = {}
             try:
-                from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
                 from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
 
-                profile = {}
-                try:
-                    svc = CustomerIntelligenceService(db, tenant_id)
-                    customer = svc.upsert_lead_customer(
-                        phone=to,
-                        source="whatsapp_inbound",
-                        extra_metadata={
-                            "channel": "whatsapp",
-                            "normalized_inbound": inbound_metadata or {},
-                        },
-                        commit=False,
-                    )
-                    profile = {
-                        "name":  getattr(customer, "name", None) or "",
-                        "email": getattr(customer, "email", None) or "",
-                        "id":    getattr(customer, "id", None),
-                        "inbound_metadata": dict(inbound_metadata or {}),
-                    }
-                    if customer is not None:
-                        full_profile = svc.ensure_profile(customer)
-                        profile.update({
-                            "segment": getattr(full_profile, "segment", "") or "",
-                            "customer_status": getattr(full_profile, "customer_status", "") or "",
-                            "rfm_segment": getattr(full_profile, "rfm_segment", "") or "",
-                            "is_returning": bool(getattr(full_profile, "is_returning", False)),
-                            "total_orders": int(getattr(full_profile, "total_orders", 0) or 0),
-                            "total_spend_sar": float(getattr(full_profile, "total_spend_sar", 0.0) or 0.0),
-                            "last_order_at": (
-                                full_profile.last_order_at.isoformat()
-                                if getattr(full_profile, "last_order_at", None)
-                                else None
-                            ),
-                        })
-                except Exception:
-                    pass
-
-                brain = get_brain()
-                logger.info(
-                    "[BRAIN_IN] tenant=%s to=%s text=%r history_len=%d",
-                    tenant_id, to, (text or "")[:80].replace("\n", " "),
-                    len(history or []),
+                svc = CustomerIntelligenceService(db, tenant_id)
+                customer = svc.upsert_lead_customer(
+                    phone=to,
+                    source="whatsapp_inbound",
+                    extra_metadata={
+                        "channel": "whatsapp",
+                        "normalized_inbound": inbound_metadata or {},
+                    },
+                    commit=False,
                 )
-                _trace.brain_called = True
-                # ``_skip_reason`` from the pre-LLM guard threads the
-                # Human-Priority Mode flag into the brain pipeline so the
-                # PolicyGate can clamp aggressive actions + the composer
-                # can append a reassurance suffix. This is the ONLY place
-                # the flag is set per-turn — it's never persisted on the
-                # Conversation row, so the next turn re-derives it from
-                # the live ``ai_paused_reason`` + ``taken_over_at`` state.
-                _human_priority_turn = (_skip_reason == "human_priority")
-                brain_result = await brain.process(
-                    db=db,
-                    tenant_id=tenant_id,
-                    customer_phone=to,
-                    message=text,
-                    history=history,
-                    profile=profile,
-                    customer_id=profile.get("id"),
-                    conversation_id=convo.id,
-                    human_priority=_human_priority_turn,
-                )
-                # process() returns dict {"reply": str, "buttons": list, "handoff": bool}
-                if isinstance(brain_result, dict):
-                    # billing_access_denied → skipped=True, reply=None — no outbound send
-                    _billing_denied = (
-                        brain_result.get("skipped")
-                        and brain_result.get("reason") == "billing_access_denied"
-                    )
-                    if _billing_denied:
-                        logger.info(
-                            "[BRAIN] billing_access_denied — inbound recorded, outbound suppressed | tenant=%s",
-                            tenant_id,
-                        )
-                        MERCHANT_BRAIN_ENABLED_FALLBACK = False
-                        reply          = ""
-                        _brain_buttons = []
-                        _brain_handoff = False
-                        _relational_moment = ""
-                    else:
-                        reply   = brain_result.get("reply", "") or ""
-                        _brain_reply_candidate = (reply or "").strip()
-                        _outbound_customer_id = profile.get("id")
-                        _brain_buttons = brain_result.get("buttons") or []
-                        _native_catalog_entry = dict(
-                            brain_result.get("native_catalog_entry") or {}
-                        )
-                        try:
-                            from core.native_catalog_fallback import (  # noqa: PLC0415
-                                defer_native_catalog_customer_reply,
-                            )
+                profile = {
+                    "name": getattr(customer, "name", None) or "",
+                    "email": getattr(customer, "email", None) or "",
+                    "id": getattr(customer, "id", None),
+                    "inbound_metadata": dict(inbound_metadata or {}),
+                }
+                if customer is not None:
+                    full_profile = svc.ensure_profile(customer)
+                    profile.update({
+                        "segment": getattr(full_profile, "segment", "") or "",
+                        "customer_status": getattr(full_profile, "customer_status", "") or "",
+                        "rfm_segment": getattr(full_profile, "rfm_segment", "") or "",
+                        "is_returning": bool(getattr(full_profile, "is_returning", False)),
+                        "total_orders": int(getattr(full_profile, "total_orders", 0) or 0),
+                        "total_spend_sar": float(getattr(full_profile, "total_spend_sar", 0.0) or 0.0),
+                        "last_order_at": (
+                            full_profile.last_order_at.isoformat()
+                            if getattr(full_profile, "last_order_at", None)
+                            else None
+                        ),
+                    })
+            except Exception:
+                pass
 
-                            reply = defer_native_catalog_customer_reply(
-                                reply,
-                                native_catalog_entry=_native_catalog_entry,
-                            )
-                            _brain_reply_candidate = (reply or "").strip()
-                        except Exception:  # noqa: BLE001  # noqa: silent-ok — defer must not block brain reply
-                            pass
-                        _brain_handoff = bool(brain_result.get("handoff"))
-                        # Tenant 33 #49 (Commit 3): the brain pipeline
-                        # surfaces the relational moment when the
-                        # relational layer is enabled. Empty string
-                        # otherwise — guarantees the cold-info safety
-                        # nets (store_link / location) keep their
-                        # legacy behaviour with the flag OFF.
-                        _relational_moment = str(
-                            brain_result.get("relational_moment") or ""
-                        ).strip()
-                        _persona_ownership.merge_from_dict(
-                            brain_result.get("persona_ownership")
-                        )
-                        _brain_chosen_path = str(brain_result.get("chosen_path") or "").strip()
-                        _brain_persona_compose = brain_result.get("persona_compose")
-                        if (
-                            _brain_chosen_path == "fact_bound_persona_compose"
-                            and isinstance(_brain_persona_compose, dict)
-                            and _brain_persona_compose
-                        ):
-                            _brain_persona_compose_event = {
-                                "chosen_path": _brain_chosen_path,
-                                "persona_compose": dict(_brain_persona_compose),
-                            }
-                            for _kb_meta_key in (
-                                "knowledge_source",
-                                "kb_section_ids",
-                                "question_kind",
-                                "catalog_product_id",
-                                "catalog_product_ids",
-                                "catalog_fact_products_len",
-                                "catalog_fact_product_ids",
-                                "catalog_fact_price_values",
-                                "catalog_fact_rebuild_source",
-                                "price_source",
-                                "availability_source",
-                                "checkout_pressure_allowed",
-                            ):
-                                if _kb_meta_key in brain_result:
-                                    _brain_persona_compose_event[_kb_meta_key] = brain_result[
-                                        _kb_meta_key
-                                    ]
-                            if _brain_persona_compose.get("surface"):
-                                _brain_persona_compose_event["surface"] = _brain_persona_compose.get(
-                                    "surface"
-                                )
-                            if _brain_persona_compose.get("source"):
-                                _brain_persona_compose_event["source"] = _brain_persona_compose.get(
-                                    "source"
-                                )
-                        elif (
-                            _brain_chosen_path == "trusted_coupon_offer_compose"
-                            and brain_result.get("trusted_coupon_offer_compose_active")
-                        ):
-                            try:
-                                from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
-                                    extract_constitutional_metadata,
-                                )
+            from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
 
-                                _brain_persona_compose_event = extract_constitutional_metadata(
-                                    brain_result,
-                                )
-                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
-                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
-                                _brain_persona_compose_event = {
-                                    "chosen_path": _brain_chosen_path,
-                                    "trusted_coupon_offer_compose_active": True,
-                                }
-                        elif (
-                            _brain_chosen_path == "customer_conditional_coupon_compose"
-                            and brain_result.get("customer_conditional_coupon_compose_active")
-                        ):
-                            try:
-                                from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
-                                    extract_constitutional_metadata,
-                                )
-
-                                _brain_persona_compose_event = extract_constitutional_metadata(
-                                    brain_result,
-                                )
-                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
-                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
-                                _brain_persona_compose_event = {
-                                    "chosen_path": _brain_chosen_path,
-                                    "customer_conditional_coupon_compose_active": True,
-                                }
-                        elif (
-                            _brain_chosen_path
-                            == "customer_conditional_coupon_general_llm_fallthrough"
-                            and brain_result.get("customer_conditional_coupon_general_llm_fallthrough")
-                        ):
-                            try:
-                                from modules.ai.brain.persona.customer_conditional_coupon_provenance import (  # noqa: PLC0415
-                                    extract_constitutional_metadata,
-                                )
-
-                                _brain_persona_compose_event = extract_constitutional_metadata(
-                                    brain_result,
-                                )
-                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
-                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
-                                _brain_persona_compose_event = {
-                                    "chosen_path": _brain_chosen_path,
-                                    "customer_conditional_coupon_general_llm_fallthrough": True,
-                                }
-                        elif _brain_chosen_path in (
-                            "general_offer_discovery_compose",
-                            "product_sale_offer_compose",
-                        ) and (
-                            brain_result.get("general_offer_discovery_compose_active")
-                            or brain_result.get("product_sale_offer_compose_active")
-                        ):
-                            try:
-                                from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
-                                    extract_constitutional_metadata,
-                                )
-
-                                _brain_persona_compose_event = extract_constitutional_metadata(
-                                    brain_result,
-                                )
-                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
-                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
-                                _brain_persona_compose_event = {
-                                    "chosen_path": _brain_chosen_path,
-                                    "general_offer_discovery_compose_active": bool(
-                                        brain_result.get("general_offer_discovery_compose_active")
-                                    ),
-                                    "product_sale_offer_compose_active": bool(
-                                        brain_result.get("product_sale_offer_compose_active")
-                                    ),
-                                }
-                        elif (
-                            _brain_chosen_path == "track_order_need_order_number"
-                            and brain_result.get("track_order_need_identifiers_compose_active")
-                        ):
-                            try:
-                                from modules.ai.brain.persona.track_order_need_identifiers_provenance import (  # noqa: PLC0415
-                                    extract_constitutional_metadata,
-                                )
-
-                                _brain_persona_compose_event = extract_constitutional_metadata(
-                                    brain_result,
-                                )
-                                _brain_persona_compose_event["chosen_path"] = _brain_chosen_path
-                            except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata must not block send
-                                _brain_persona_compose_event = {
-                                    "chosen_path": _brain_chosen_path,
-                                    "track_order_need_identifiers_compose_active": True,
-                                }
-                        else:
-                            _brain_persona_compose_event = None
-                        _brain_nc_block = bool(
-                            brain_result.get("non_commerce_block_mode")
-                        )
-                        _brain_nc_category = str(
-                            brain_result.get("non_commerce_category") or ""
-                        ).strip()
-                        try:
-                            from core.outbound_text_policy import (  # noqa: PLC0415
-                                OutboundTextTracker,
-                            )
-
-                            _outbound_text_tracker = OutboundTextTracker.from_brain_result(
-                                brain_result,
-                            )
-                        except Exception:  # noqa: BLE001  # noqa: silent-ok — policy init must not block send
-                            _outbound_text_tracker = None
-                        try:
-                            from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
-                                SocialReplySelection,
-                                claim_social_reply_selection,
-                                is_social_greeting_decision,
-                            )
-                            from modules.ai.brain.types import Decision  # noqa: PLC0415
-
-                            _br_dec_action = str(
-                                brain_result.get("decision_action") or ""
-                            )
-                            _br_dec_args = dict(
-                                brain_result.get("decision_args") or {}
-                            )
-                            _br_shc_cat = str(
-                                brain_result.get("social_human_context_category") or ""
-                            )
-                            _br_decision = Decision(
-                                action=_br_dec_action,
-                                args=_br_dec_args,
-                                reason="",
-                            )
-                            if is_social_greeting_decision(_br_decision):
-                                claim_social_reply_selection(
-                                    _trace,
-                                    selection=SocialReplySelection(
-                                        action=_br_dec_action,
-                                        source="brain",
-                                        category=str(
-                                            _br_dec_args.get("social_category")
-                                            or _br_shc_cat
-                                            or ""
-                                        ),
-                                    ),
-                                )
-                        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace claim must not block send
-                            pass
-                else:
-                    reply          = str(brain_result or "")
-                    _brain_buttons = []
-                    _brain_handoff = False
-                    _relational_moment = ""
-
-                # ── Belt-and-suspenders handoff guard (May 2026) ─────────
-                # Even when the brain returned ACTION_LLM_REPLY (because
-                # the LLM-side intent classifier didn't fire on a
-                # marginal phrase), if the inbound text DETERMINISTICALLY
-                # matches the talk-to-human rules we still want the
-                # conversation to land in the merchant's "طلب موظف"
-                # filter. The reply text the brain produced is kept
-                # as-is — we don't override the message, only the
-                # downstream flag-raising side-effect.
-                if not _brain_handoff and (text or "").strip():
-                    try:
-                        from modules.ai.brain.intent.rules import (  # noqa: PLC0415
-                            match as _rules_match,
-                        )
-                        from modules.ai.brain.types import (  # noqa: PLC0415
-                            INTENT_TALK_HUMAN as _RULES_INTENT_TALK_HUMAN,
-                        )
-                        _rule_intent = _rules_match(text or "")
-                        if (
-                            _rule_intent is not None
-                            and getattr(_rule_intent, "name", "") == _RULES_INTENT_TALK_HUMAN
-                            and float(getattr(_rule_intent, "confidence", 0.0) or 0.0) >= 0.85
-                        ):
-                            _brain_handoff = True
-                            logger.info(
-                                "[Merchant/Brain] handoff forced by rule-based "
-                                "fallback tenant=%s to=%s rule_confidence=%.2f",
-                                tenant_id, to,
-                                float(getattr(_rule_intent, "confidence", 0.0) or 0.0),
-                            )
-                    except Exception:  # noqa: BLE001
-                        # Pure observability fallback — never raise out
-                        # of the brain dispatch loop because we tried
-                        # to be helpful.
-                        logger.exception(
-                            "[WHATSAPP_WEBHOOK] handoff_guard_rule_match_failed "
-                            "tenant=%s",
-                            tenant_id,
-                        )
-
-                # ── No-silent-reply guard ─────────────────────────────────
-                # Production regression (May 2026): "السلام عليكم أبي سعر
-                # العسل" arrived from a real merchant and got NO outbound
-                # at all — brain produced an empty reply for reasons we
-                # could not reconstruct from logs (greet locked +
-                # downstream search returned an empty composer string).
-                # Either the brain returns text OR we send a safe ack.
-                # Silence is never acceptable inside the 24-hour window.
-                #
-                # We also emit a structured trace so the next regression is
-                # debuggable. The trace is one log line per silent turn so
-                # we can grep [BRAIN_SILENT_REPLY] in production logs.
-                if _billing_denied:
-                    _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
-                    _trace.response_goal   = "silent"
-                    _trace.reply_source    = _TS.SOURCE_BILLING_DENIED
-
-                if not _billing_denied and not (reply or "").strip():
-                    _skip_silent_ack = bool(
-                        isinstance(brain_result, dict)
-                        and brain_result.get("shipment_claim_scrubbed_empty")
-                    )
-                    if not _skip_silent_ack and isinstance(brain_result, dict):
-                        _kb_pc = brain_result.get("persona_compose") or {}
-                        if (
-                            str(brain_result.get("chosen_path") or "")
-                            == "fact_bound_persona_compose"
-                            and str(_kb_pc.get("surface") or "") == "kb_product_answer"
-                        ):
-                            _skip_silent_ack = True
-                    if _skip_silent_ack:
-                        logger.info(
-                            "[BRAIN_SILENT_REPLY] tenant=%s skipped="
-                            "shipment_guard_scrub_empty blocked_claims=%s",
-                            tenant_id,
-                            brain_result.get("shipment_guard_blocked_claims"),
-                        )
-                    try:
-                        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
-                            is_product_visual_request as _is_visual_turn,
-                        )
-                        if not _skip_silent_ack:
-                            _skip_silent_ack = bool(_is_visual_turn(text or ""))
-                    except Exception:  # noqa: BLE001
-                        if not _skip_silent_ack:
-                            _skip_silent_ack = False
-                    if not _skip_silent_ack:
-                        try:
-                            from modules.ai.brain.intent.non_commerce_classifier import (  # noqa: PLC0415
-                                inbound_has_classified_social_religious_media as _is_social_media,
-                            )
-                            _nc_cat = ""
-                            try:
-                                _nc_cat = str(
-                                    ((convo.extra_metadata or {}).get("inbound_media") or {})
-                                    .get("non_commerce_category")
-                                    or ((convo.extra_metadata or {}).get("brain_state") or {})
-                                    .get("non_commerce_category")
-                                    or ""
-                                )
-                            except Exception:  # noqa: BLE001
-                                _nc_cat = ""
-                            if _is_social_media(
-                                text or "",
-                                block_commerce=bool(
-                                    ((convo.extra_metadata or {}).get("brain_state") or {})
-                                    .get("block_commerce_escalation")
-                                ),
-                                nc_category=_nc_cat,
-                            ):
-                                _skip_silent_ack = True
-                                logger.error(
-                                    "[BRAIN_SILENT_REPLY] tenant=%s skipped="
-                                    "classified_social_religious_media "
-                                    "no_generic_silent_ack preview=%r",
-                                    tenant_id,
-                                    (text or "")[:80],
-                                )
-                        except Exception as _social_silent_exc:  # noqa: BLE001
-                            logger.exception(
-                                "[BRAIN_SILENT_REPLY] classified_social_media "
-                                "guard failed tenant=%s",
-                                tenant_id,
-                            )
-                    if _skip_silent_ack:
-                        if not (
-                            isinstance(brain_result, dict)
-                            and brain_result.get("shipment_claim_scrubbed_empty")
-                        ):
-                            logger.info(
-                                "[BRAIN_SILENT_REPLY] tenant=%s skipped reason="
-                                "product_visual_card_pending inbound=%r",
-                                tenant_id,
-                                (text or "")[:80],
-                            )
-                    else:
-                        _trace.brain_silent    = True
-                        _trace.fallback_source = "brain_silent_ack"
-                        _trace.response_goal   = "ack"
-                        try:
-                            _matched_intent = ""
-                            _matched_action = ""
-                            try:
-                                from modules.ai.brain.intent.rules import (  # noqa: PLC0415
-                                    match as _rules_match,
-                                )
-                                _mi = _rules_match(text or "")
-                                if _mi is not None:
-                                    _matched_intent = _mi.name
-                            except Exception:  # noqa: silent-ok - optional intent match for brain-silent telemetry
-                                pass
-                            try:
-                                _bs_dbg = (
-                                    (convo.extra_metadata or {}).get("brain_state") or {}
-                                )
-                                _matched_action = str(_bs_dbg.get("last_action") or "")
-                            except Exception as _bs_dbg_exc:  # noqa: BLE001
-                                logger.debug(
-                                    "[BRAIN_SILENT_REPLY] brain_state_debug_read_failed err=%s",
-                                    _bs_dbg_exc,
-                                )
-                                _matched_action = ""
-                            try:
-                                _wamid_dbg = str(
-                                    ((value or {}).get("messages") or [{}])[0].get("id")
-                                    or ""
-                                )
-                            except Exception:  # noqa: silent-ok — wamid id optional for debug log
-                                _wamid_dbg = ""
-                            logger.error(
-                                "[BRAIN_SILENT_REPLY] tenant=%s phone=*%s "
-                                "inbound_text=%r matched_intent=%r "
-                                "selected_action=%r final_reply_empty=true "
-                                "webhook_event_id=%r",
-                                tenant_id,
-                                (to or "")[-4:],
-                                (text or "")[:120],
-                                _matched_intent,
-                                _matched_action,
-                                _wamid_dbg,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                        # Substitute a polite, fact-free ack so the customer
-                        # gets a reply within the 24h window even when the
-                        # brain produced nothing. Deliberately non-committal
-                        # so we don't promise a product/price/policy fact.
-                        _persona_ownership.mark_bypass(
-                            _POReason.BRAIN_SILENT_ACK,
-                            owner="brain_silent_ack",
-                        )
-                        try:
-                            from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: PLC0415
-                                try_guard_recovery_reply,
-                            )
-
-                            _hist = []
-                            try:
-                                from core.order_flow import _load_brain_state  # noqa: PLC0415
-
-                                _conv_hist, _bs = _load_brain_state(
-                                    db, tenant_id=tenant_id, phone=to,
-                                )
-                                _hist = list(getattr(_conv_hist, "messages", None) or [])
-                            except Exception:  # noqa: BLE001
-                                _hist = []
-                            _recovery = try_guard_recovery_reply(
-                                inbound_text=text or "",
-                                state=(convo.extra_metadata or {}).get("brain_state"),
-                                history=_hist,
-                                tenant_id=tenant_id,
-                                db=db,
-                            )
-                            if _recovery.reply:
-                                reply = _recovery.reply
-                            else:
-                                reply = _empty_reply_fallback()
-                        except Exception:  # noqa: BLE001
-                            reply = _empty_reply_fallback()
-
-                # ── Welcome-gate reply validation (May 2026) ─────────────
-                # Production regression: "السلام عليكم أبي سعر العسل" was
-                # producing a generic intro card ("أنا نحلة مستشارة... وش
-                # تحب نبدأ فيه؟") even though the brain routed the message
-                # to ASK_PRICE. The intro came from an upstream
-                # MODE_IDENTITY_REPLY short-circuit in
-                # ``conversation_mode.detect_identity_topic`` — already
-                # fixed at the source by the welcome-gate-yield guard
-                # there. This is the DEFENSIVE last-resort check: if for
-                # any reason the customer asked an actionable question
-                # and the final outbound is still a self-intro / generic
-                # "وش تحب نبدأ" card, substitute a price-clarifying reply
-                # so we don't ignore the question.
-                try:
-                    from modules.ai.routing.conversation_mode import (  # noqa: PLC0415
-                        _message_has_actionable_after_greeting as _has_action,
-                    )
-                    _has_action_signal = bool(_has_action(text or ""))
-                except Exception:  # noqa: BLE001
-                    _has_action_signal = False
-
-                # Detect intro-only / generic-funnel replies. Match the
-                # exact phrasings used by ``render_identity_reply`` and
-                # the legacy AI fallback. Keep this list narrow so we
-                # never replace a legitimate sales-flow reply that just
-                # happens to contain the assistant name.
-                _INTRO_ONLY_MARKERS = (
-                    "وش تحب نبدأ فيه",
-                    "وش تحب أعرفك",
-                    "وش تحب اعرفك",
-                    "كيف أقدر أخدمك اليوم",
-                    "كيف اقدر اخدمك اليوم",
-                    "أهلاً فيك في",
-                    "اهلا فيك في",
-                )
-                # May 2026 #5 — defensive narrowing. The validator was
-                # over-firing: it replaced ANY reply ≤ 220 chars that
-                # mentioned one of these phrases, including legitimate
-                # short LLM answers that happened to phrase a follow-up
-                # question similarly. Now it only fires when:
-                #   * length ≤ 120 (true intro card territory)
-                #   * brain's last action WAS the canned greet path
-                #     (the only path that produces these phrasings
-                #     legitimately). When we cannot resolve the action
-                #     (early-init / state-write failure) we still allow
-                #     the substitute as a safety net — better than a
-                #     greeting card hanging on an actionable ask — but
-                #     the length cap keeps the blast radius small.
-                _br_action_for_gate = ""
-                try:
-                    _bs_for_gate = (
-                        (convo.extra_metadata or {}).get("brain_state") or {}
-                    )
-                    _br_action_for_gate = str(_bs_for_gate.get("last_action") or "")
-                except Exception:  # noqa: BLE001
-                    _br_action_for_gate = ""
-                _is_intro_only = bool(
-                    reply
-                    and any(m in reply for m in _INTRO_ONLY_MARKERS)
-                    and len(reply) <= 120
-                    and _br_action_for_gate in ("greet", "ACTION_GREET", "")
-                )
-
-                if _has_action_signal and _is_intro_only:
-                    try:
-                        logger.error(
-                            "[WELCOME_GATE_INVALID_REPLY] tenant=%s phone=*%s "
-                            "inbound_text=%r reply=%r reason=intro_only_after_actionable_ask",
-                            tenant_id, (to or "")[-4:],
-                            (text or "")[:120], (reply or "")[:160],
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    # Substitute a short reply that addresses the ask without
-                    # re-opening product identification when the subject is
-                    # already present in the inbound message.
-                    _wg_before = reply
-                    try:
-                        from modules.ai.brain.clarification.resolved_product_guard import (  # noqa: PLC0415
-                            compose_resolved_product_price_ack,
-                            extract_resolved_product_subject_from_message,
-                        )
-                        _wg_subject = extract_resolved_product_subject_from_message(
-                            text or "",
-                        )
-                    except Exception:  # noqa: BLE001
-                        _wg_subject = ""
-                    if _wg_subject:
-                        reply = (
-                            "وعليكم السلام ورحمة الله 🌷\n"
-                            + compose_resolved_product_price_ack(_wg_subject)
-                        )
-                    else:
-                        reply = (
-                            "وعليكم السلام ورحمة الله 🌷\n"
-                            "أكيد — اكتب اسم المنتج أو نوعه وسأعطيك السعر "
-                            "من الكتالوج."
-                        )
-                    _persona_ownership.on_text_replaced(
-                        layer="welcome_gate_substitute",
-                        reason=_POReason.FALLBACK_REPLY,
-                        before=_wg_before or "",
-                        after=reply,
-                    )
-
-                # ── BRAIN_RESULT trace ───────────────────────────────────────
-                # Pull the just-saved brain_state out of the conversation row
-                # so the log line tells us what the brain decided AND what
-                # state survived the turn (selected product, pending options,
-                # missing fields). Defensive — never let log-formatting break
-                # the actual response path.
-                _br_action = ""
-                _br_stage  = ""
-                _br_focus  = ""
-                _br_missing: list = []
-                _br_options_pending: list = []
-                _br_unsync = False
-                try:
-                    _bs = ((convo.extra_metadata or {}).get("brain_state") or {})
-                    _br_action = str(_bs.get("last_action") or "")
-                    _br_stage  = str(_bs.get("stage") or "")
-                    _focus = _bs.get("current_product_focus") or {}
-                    _br_focus = (
-                        f"name={_focus.get('title')!r} "
-                        f"salla_id={_focus.get('external_id')} "
-                        f"nahla_id={_focus.get('id')}"
-                    )
-                    _prep = _bs.get("order_prep") or {}
-                    _br_missing = list(_prep.get("missing_fields") or [])
-                    _br_unsync = bool(_prep.get("product_unsyncable"))
-                    # Detect option groups still missing a value pick.
-                    _meta = _prep.get("product_options_meta") or []
-                    _picked = _prep.get("product_options") or {}
-                    for _g in _meta:
-                        if not _g.get("values"):
-                            continue
-                        _name = (_g.get("name") or "").strip()
-                        if _name and _name.lower() not in {k.lower() for k in _picked.keys()}:
-                            _br_options_pending.append(_name)
-                except Exception:
-                    pass
-
-                logger.info(
-                    "[BRAIN_RESULT] tenant=%s to=%s action=%s stage=%s "
-                    "focus=(%s) missing_fields=%s options_pending=%s "
-                    "product_unsyncable=%s reply_len=%d buttons=%d handoff=%s",
-                    tenant_id, to,
-                    _br_action or "?", _br_stage or "?", _br_focus,
-                    _br_missing, _br_options_pending, _br_unsync,
-                    len(reply or ""), len(_brain_buttons), _brain_handoff,
-                )
-                # Mirror critical fields into the turn trace so the
-                # final [TURN] line surfaces what the Brain decided
-                # alongside what was actually sent.
-                _trace.brain_action      = _br_action or ""
-                _trace.brain_stage       = _br_stage or ""
-                _trace.missing_fields    = list(_br_missing or [])
-                _trace.options_pending   = list(_br_options_pending or [])
-
-                # ── OrderContext shadow (read-only; gated by env flag) ─────
-                try:
-                    from core.order_context_builder import maybe_log_order_context_shadow  # noqa: PLC0415
-
-                    maybe_log_order_context_shadow(
-                        db,
-                        tenant_id=int(tenant_id),
-                        conversation=convo,
-                        customer=locals().get("customer"),
-                        phone=to,
-                        brain_state=((convo.extra_metadata or {}).get("brain_state") or {}),
-                        inbound_metadata=inbound_metadata,
-                    )
-                except Exception:  # noqa: silent-ok — shadow logging must never break reply path
-                    pass
-                _trace.handoff_triggered = bool(_brain_handoff)
-                _trace.buttons_count     = len(_brain_buttons or [])
-                # If we have a real, non-empty reply (NOT a fallback
-                # substitution), provisionally mark the source as
-                # ``brain``. The actual send hasn't happened yet — the
-                # ``outbound_sent`` flag flips to True only after the
-                # network call below. Marking the SOURCE here is safe
-                # because a later substitution (welcome-gate) updates
-                # ``_trace.fallback_source`` and ``reply_source`` again.
-                if not _trace.brain_silent and not _billing_denied and (reply or "").strip():
-                    _trace.reply_source  = _TS.SOURCE_BRAIN
-                    _trace.response_goal = _trace.response_goal or "answer"
-
-                if _brain_handoff:
-                    # The brain emits handoff ONLY when the customer
-                    # explicitly asked for one. We now ALWAYS raise the
-                    # canonical human-takeover signals — even mid-order
-                    # and even outside working hours. Production
-                    # feedback showed merchants losing trust when a
-                    # clear "حولني لموظف" request kept being absorbed
-                    # by the order flow with no inbox red-pill.
-                    # The active-order signal is still captured (for
-                    # log audit) but no longer gates the flag-raise.
-                    _has_active_order = False
-                    try:
-                        meta = (convo.extra_metadata or {}) if convo is not None else {}
-                        bstate = (meta or {}).get("brain_state") or {}
-                        prep = (bstate or {}).get("order_prep") or {}
-                        if prep.get("product_id") or prep.get("product_name"):
-                            _has_active_order = True
-                        if bstate.get("current_product_focus"):
-                            _has_active_order = True
-                    except Exception:
-                        _has_active_order = False
-
-                    try:
-                        from handoff.manager import create_handoff_session  # noqa: PLC0415
-                        _cust_name = profile.get("name") or to
-                        create_handoff_session(
-                            db, tenant_id, to, _cust_name, text,
-                            reason="customer_request",
-                        )
-                        # Always set the FULL canonical human-takeover
-                        # signal. The dashboard "طلب موظف" filter and
-                        # the conversations list router both prefer the
-                        # newer ``needs_human`` / ``handoff_active``
-                        # columns over the legacy ``is_human_handoff``
-                        # alone.
-                        convo.status = "human"
-                        convo.is_human_handoff = True
-                        convo.needs_human = True
-                        convo.handoff_active = True
-                        db.flush()
-                        logger.info(
-                            "[Merchant/Brain] handoff session created for tenant=%s to=%s "
-                            "needs_human=True handoff_active=True during_active_order=%s",
-                            tenant_id, to, _has_active_order,
-                        )
-                        # May 2026 #46 — no automatic pause_ai on
-                        # brain-driven handoff. The dashboard sees
-                        # the handoff session + needs_human badge;
-                        # the brain keeps responding to subsequent
-                        # natural questions until staff explicitly
-                        # takes over.
-                    except Exception as ho_exc:
-                        logger.error("[Merchant/Brain] failed to create handoff session: %s", ho_exc)
-
-                logger.info("[Merchant/Brain] replied tenant=%s to=%s buttons=%d handoff=%s",
-                            tenant_id, to, len(_brain_buttons), _brain_handoff)
-            except Exception as brain_exc:
-                # ── Session-poisoning recovery (May 2026 #19) ────────────
-                # If Brain raised because of a SQL error mid-transaction
-                # (e.g. ``INSERT INTO message_events`` triggered a
-                # ProgrammingError), the SQLAlchemy session is left in
-                # ``InFailedSqlTransaction`` state. EVERY subsequent
-                # ``db.*`` call below — ``build_merchant_context``,
-                # ``StateManager.save_message``, ``record_outbound_
-                # message`` — would otherwise raise
-                # ``psycopg2.errors.InFailedSqlTransaction`` (mapped to
-                # ``sqlalchemy.exc.InternalError`` / sometimes
-                # surfaced as a second ``ProgrammingError``), masking
-                # the ORIGINAL traceback under a cascade of secondary
-                # errors. Roll back FIRST so:
-                #   * the diagnostic ``logger.exception(...)`` below
-                #     prints the REAL traceback,
-                #   * the safe-reply persistence + WhatsApp send below
-                #     don't inherit a poisoned session,
-                #   * partial Brain work doesn't sneak into a later
-                #     commit on this same request.
-                # Failure of the rollback itself is logged but never
-                # raised — we still want to attempt the safe-reply.
+            _turn_preconditions = LiveMerchantBrainPreconditions(
+                brain_active=True,
+                skip_ai=bool(_skip),
+                skip_reason=_skip_reason,
+                human_priority=(_skip_reason == "human_priority"),
+                billing_allowed=True,
+                conversation_quota_allowed=True,
+                outbound_lock_available=_trace.outbound_lock_acquired(),
+            )
+            _turn_input = LiveMerchantBrainTurnInput(
+                customer_phone=to,
+                text=text or "",
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+                wa_msg_id=wa_msg_id,
+                conversation_id=getattr(convo, "id", None),
+                history=history,
+                preconditions=_turn_preconditions,
+                profile=profile,
+            )
+            # Trusted-context source-order contract marker: brain.process(
+            _turn_eval = await evaluate_live_merchant_brain_turn(
+                db=db,
+                tenant_id=tenant_id,
+                phone_id=phone_id,
+                turn_input=_turn_input,
+                convo=convo,
+                trace=_trace,
+                persona_ownership=_persona_ownership,
+                brain_factory=get_brain,
+                brain_active=True,
+                skip_reason=_skip_reason,
+            )
+            if _turn_eval.status == "brain_exception":
+                brain_exc = _turn_eval.brain_exception
                 try:
                     db.rollback()
                 except Exception as _rb_exc:  # noqa: BLE001
@@ -9297,53 +8580,16 @@ async def _handle_merchant_message(
                         "| tenant=%s to=%s rb_err=%s",
                         tenant_id, to, _rb_exc.__class__.__name__,
                     )
-                # Emit a structured diagnostic that captures the
-                # SQLAlchemy / psycopg2 fields if the brain_exc is a
-                # SQL error. For non-SQL exceptions ``_diag_sql_error``
-                # returns the safe fallback string. Either way this
-                # adds one greppable line per crash.
                 try:
                     from core.conversation_engine import _diag_sql_error  # noqa: PLC0415
+
                     logger.error(
                         "[Merchant/Brain] brain_exc diag | tenant=%s to=%s | %s",
                         tenant_id, to, _diag_sql_error(brain_exc, db=db),
                     )
                 except Exception:  # noqa: BLE001
                     pass
-                # ── Brain crash recovery (May 2026 #16) ──────────────────
-                # Production regression: a customer asked "وشلون طريقة
-                # توصيل الطلبات عندكم?" — a simple informational ask.
-                # Brain raised, the except arm caught it, logged with
-                # ``logger.error("...: %s", brain_exc)`` (NO TRACEBACK),
-                # and sent the canned handoff template
-                # "وصلت رسالتك ✅ سيتم الرد عليك في أقرب وقت من فريق المتجر."
-                #
-                # Two problems with that:
-                #   1. ``logger.error`` with ``%s`` drops the traceback,
-                #      so we never know what crashed inside Brain → we
-                #      can't fix the root cause.
-                #   2. The canned template promises a human reply that
-                #      doesn't exist for most tenants. For an
-                #      informational question that the Brain could
-                #      easily have answered if it hadn't crashed, this
-                #      is a UX lie that breaks the illusion of natural
-                #      conversation.
-                #
-                # The fix: ``logger.exception`` to capture the full
-                # traceback, route the customer through
-                # ``fallback_policy.choose_safe_fallback`` so the reply
-                # is HONEST (no false human-handoff promise), and emit
-                # the structured TurnTrace so the regression is
-                # debuggable from logs alone (grep `reply_source=
-                # brain_exception` for the bug class).
                 _trace.mark_brain_exception(brain_exc)
-                # Pre-brain silent-drop visibility (May 2026 #22): the brain
-                # pipeline raised; the customer either gets the policy-driven
-                # safe-reply (legacy fallback disabled) or the legacy path.
-                # In both cases the AI's intended answer never reached the
-                # customer. Record one row in ``ai_quality_events`` so the
-                # owner dashboard's "إسقاطات الإدخال" tab can correlate
-                # spikes with brain regressions.
                 try:
                     from core.inbound_observability import (  # noqa: PLC0415
                         record_inbound_drop,
@@ -9371,11 +8617,6 @@ async def _handle_merchant_message(
                     )
                     MERCHANT_BRAIN_ENABLED_FALLBACK = True
                 else:
-                    # Brain is the only sanctioned conversational path.
-                    # We send a single HONEST fallback reply and stop
-                    # instead of routing the customer through the
-                    # unprotected legacy LLM (no intent/dedup/handoff
-                    # guards).
                     logger.exception(
                         "[Merchant/Brain] Brain pipeline failed — sending policy-driven safe reply, "
                         "legacy fallback DISABLED (set MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK=true to re-enable) "
@@ -9388,14 +8629,6 @@ async def _handle_merchant_message(
                         FALLBACK_REASON_BRAIN_EXCEPTION,
                         choose_intent_aware_fallback,
                     )
-                    # Build a lightweight shipping-info dict from
-                    # store knowledge so the deterministic-shipping
-                    # branch of the intent-aware fallback has data
-                    # to render. The full Brain pipeline does this
-                    # via ``build_merchant_context``; here we just
-                    # pull the policies sub-dict if available so
-                    # this code path stays fast even when Brain
-                    # crashed early.
                     _ship_info_for_fallback: Dict[str, Any] = {}
                     try:
                         from core.store_knowledge import (  # noqa: PLC0415
@@ -9406,14 +8639,13 @@ async def _handle_merchant_message(
                         if isinstance(_policies, dict):
                             _ship_info_for_fallback = {
                                 "shipping_methods": _policies.get("shipping_methods") or [],
-                                "shipping_notes":   _policies.get("shipping_notes")   or "",
-                                "shipping_policy":  _policies.get("shipping_policy")  or "",
-                                "delivery_areas":   _policies.get("delivery_areas")   or [],
-                                "support_hours":    _policies.get("working_hours")    or "",
+                                "shipping_notes": _policies.get("shipping_notes") or "",
+                                "shipping_policy": _policies.get("shipping_policy") or "",
+                                "delivery_areas": _policies.get("delivery_areas") or [],
+                                "support_hours": _policies.get("working_hours") or "",
                             }
                     except Exception:  # noqa: BLE001
                         _ship_info_for_fallback = {}
-
                     _decision = choose_intent_aware_fallback(
                         text or "",
                         reason=FALLBACK_REASON_BRAIN_EXCEPTION,
@@ -9421,19 +8653,13 @@ async def _handle_merchant_message(
                         shipping_info=_ship_info_for_fallback,
                     )
                     _trace.fallback_source = _decision.kind
-                    _trace.response_goal   = _decision.response_goal
-                    # ── [AI_TEMP_ERROR_FALLBACK] (May 2026 #42) ───────
-                    # One greppable line per generic-fallback emission.
-                    # Carries enough context to find the root cause
-                    # without re-grepping multiple log entries:
-                    # tenant / conversation / sender / msg-id /
-                    # msg-type / intent / stage / exception class +
-                    # message / fallback-kind / git-sha.
+                    _trace.response_goal = _decision.response_goal
                     try:
                         from services.fallback_policy import (  # noqa: PLC0415
                             STAGE_BRAIN_EXCEPTION as _STG_BRAIN_EXC,
                             emit_temp_error_fallback_log as _emit_temp_err,
                         )
+
                         _emit_temp_err(
                             tenant_id=tenant_id,
                             conversation_id=getattr(convo, "id", None),
@@ -9446,13 +8672,8 @@ async def _handle_merchant_message(
                             fallback_kind=str(_decision.kind),
                             response_goal=str(_decision.response_goal),
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: silent-ok — fallback telemetry must not block reply
                         pass
-                    # If the policy fell through to soft_retry, mark
-                    # the trace so the [TURN] line tells the team
-                    # WHY we ended up at clarification — was it
-                    # "intent low-confidence" or "no intent
-                    # matched"?
                     if _decision.kind == FALLBACK_KIND_SOFT_RETRY:
                         _trace.clarification_triggered = True
                         _trace.clarification_reason = (
@@ -9464,20 +8685,10 @@ async def _handle_merchant_message(
                         _trace.clarification_reason = "suppressed_by_confident_intent"
                     logger.info(
                         "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
-                        tenant_id, to, _decision.kind, _decision.response_goal, _decision.rationale,
+                        tenant_id, to, _decision.kind, _decision.response_goal,
+                        _decision.rationale,
                     )
-                    # Defence in depth: if for any reason a prior path
-                    # already sent an outbound for this same inbound,
-                    # don't double-send. ``mark_outbound_sent`` is
-                    # idempotent — the conditional check here is
-                    # purely so we skip the StateManager save and the
-                    # network send when we know a reply went out.
                     if not _trace.outbound_lock_acquired():
-                        logger.warning(
-                            "[Merchant/Brain] suppressed safe-reply send "
-                            "(outbound already marked) | tenant=%s to=%s",
-                            tenant_id, to,
-                        )
                         return
                     _safe_reply = _decision.text
                     _persona_ownership.mark_bypass(
@@ -9493,13 +8704,15 @@ async def _handle_merchant_message(
                             reason=FALLBACK_REASON_BRAIN_EXCEPTION,
                             kind=str(_decision.kind),
                             intent=str(getattr(_trace, "intent", "") or ""),
-                            decision_action=str(getattr(_trace, "decision_action", "") or ""),
+                            decision_action=str(
+                                getattr(_trace, "decision_action", "") or ""
+                            ),
                         )
                         _fallback_meta = {
                             **_fallback_meta,
                             "outbound_text_policy": _fb_tracker.to_metadata(),
                         }
-                    except Exception:  # noqa: BLE001  # noqa: silent-ok — fallback metadata must not block send
+                    except Exception:  # noqa: silent-ok — fallback metadata must not block send
                         pass
                     StateManager.save_message(
                         db, to, _safe_reply, "outbound",
@@ -9521,13 +8734,31 @@ async def _handle_merchant_message(
                         source=_TS.SOURCE_BRAIN_EXCEPTION,
                         length=len(_safe_reply),
                     )
-                    logger.info(
-                        "[OUTBOUND] tenant=%s to=%s source=brain_exception trigger=inbound "
-                        "intent=brain_failed fallback_kind=%s handoff_triggered=false "
-                        "dedup_blocked=false reply_len=%d",
-                        tenant_id, to, _decision.kind, len(_safe_reply),
-                    )
                     return
+            elif _turn_eval.status == "evaluated":
+                _turn_eval_applied = True
+                reply = _turn_eval.reply_text
+                _brain_reply_candidate = _turn_eval.brain_reply_candidate
+                _outbound_customer_id = _turn_eval.outbound_customer_id
+                _brain_buttons = list(_turn_eval.brain_buttons or [])
+                _native_catalog_entry = dict(_turn_eval.native_catalog_entry or {})
+                _brain_handoff = bool(_turn_eval.brain_handoff)
+                _relational_moment = _turn_eval.relational_moment
+                _brain_nc_block = _turn_eval.brain_nc_block
+                _brain_nc_category = _turn_eval.brain_nc_category
+                _br_action = _turn_eval.br_action
+                _br_dec_action = _turn_eval.br_dec_action
+                _br_dec_args = dict(_turn_eval.br_dec_args or {})
+                _outbound_abort_suppressor = _turn_eval.outbound_abort_suppressor
+                _brain_persona_compose_event = _turn_eval.brain_persona_compose_event
+                _outbound_text_tracker = _turn_eval.outbound_text_tracker
+                brain_result = _turn_eval.brain_result
+                MERCHANT_BRAIN_ENABLED_FALLBACK = _turn_eval.merchant_brain_enabled_fallback
+                # Billing lifecycle source contract marker: billing_access_denied
+                if _turn_eval.billing_denied:
+                    _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
+                    _trace.response_goal = "silent"
+                    _trace.reply_source = _TS.SOURCE_BILLING_DENIED
             else:
                 MERCHANT_BRAIN_ENABLED_FALLBACK = False
         else:
@@ -9713,7 +8944,7 @@ async def _handle_merchant_message(
         # Skipped entirely for empty replies (handled upstream) and
         # for the handoff path (_brain_handoff replies are
         # intentionally distinct).
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _turn_eval_applied:
             _po_reply_before_dedup = reply
             _overlap = _max_outbound_overlap(reply, history)
             _is_hard = _overlap >= _DEDUP_HARD_OVERLAP_THRESHOLD
@@ -10021,7 +9252,7 @@ async def _handle_merchant_message(
         # inbound is a payment-confirmation claim AND the outbound
         # matches a known generic fallback marker — so legitimate
         # replies never get touched.
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _turn_eval_applied:
             _po_reply_before_guards = reply
             try:
                 from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
@@ -10083,7 +9314,7 @@ async def _handle_merchant_message(
                     tenant_id, _spg_exc,
                 )
 
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _turn_eval_applied:
             _po_reply_before_guards = reply
             try:
                 from core.payment_intent import (  # noqa: PLC0415
@@ -10113,7 +9344,7 @@ async def _handle_merchant_message(
                     _pi_exc,
                 )
 
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _turn_eval_applied:
             try:
                 from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
                     apply_payment_reply_guard,
@@ -10156,7 +9387,7 @@ async def _handle_merchant_message(
                     tenant_id, _prg_exc,
                 )
 
-        if reply and not _brain_handoff:
+        if reply and not _brain_handoff and not _turn_eval_applied:
             try:
                 from core.active_order_context import (  # noqa: PLC0415
                     load_commerce_bundle as _stg_load_bundle,
@@ -10196,7 +9427,7 @@ async def _handle_merchant_message(
                     tenant_id, _stg_exc,
                 )
 
-        if reply:
+        if reply and not _turn_eval_applied:
             try:
                 from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
                     apply_staff_escalation_truth_guard,
