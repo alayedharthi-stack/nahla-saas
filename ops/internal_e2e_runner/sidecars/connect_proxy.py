@@ -29,7 +29,12 @@ class ExactConnectProxy:
         live = sorted(
             {
                 item[4][0]
-                for item in socket.getaddrinfo(self.host, 443, type=socket.SOCK_STREAM)
+                for item in socket.getaddrinfo(
+                    self.host,
+                    443,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                )
             }
         )
         if not live or set(live) != self.expected_ips:

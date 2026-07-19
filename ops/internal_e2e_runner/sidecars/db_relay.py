@@ -33,7 +33,10 @@ class ExactDbRelay:
             {
                 item[4][0]
                 for item in socket.getaddrinfo(
-                    self.host, self.port, type=socket.SOCK_STREAM
+                    self.host,
+                    self.port,
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
                 )
             }
         )

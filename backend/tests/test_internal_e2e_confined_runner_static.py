@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import socketserver
 import sys
 import threading
@@ -282,26 +283,129 @@ def test_required_secret_file_contract_is_complete() -> None:
     }
 
 
-def test_sidecars_fail_closed_when_live_dns_differs(tmp_path: Path) -> None:
-    fake_dns = [
-        (2, 1, 6, "", ("198.51.100.9", 443)),
+@pytest.mark.parametrize(
+    ("endpoint", "expected_ips"),
+    [
+        (
+            ExactConnectProxy(
+                "api.anthropic.com",
+                {"203.0.113.10", "203.0.113.11"},
+                Path("proxy.jsonl"),
+            ),
+            ["203.0.113.10", "203.0.113.11"],
+        ),
+        (
+            ExactDbRelay(
+                "disposable.example.test",
+                5432,
+                {"203.0.113.20", "203.0.113.21"},
+                Path("relay.jsonl"),
+            ),
+            ["203.0.113.20", "203.0.113.21"],
+        ),
+    ],
+)
+def test_sidecars_verify_complete_ipv4_set_and_ignore_aaaa(
+    endpoint, expected_ips: list[str]
+) -> None:
+    dual_stack_answers = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (expected_ips[0], 443)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2607:6bc0::10", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (expected_ips[1], 443)),
     ]
-    connect = ExactConnectProxy(
+
+    def family_filtered_dns(host, port, *, family, type):
+        assert family == socket.AF_INET
+        assert type == socket.SOCK_STREAM
+        return [answer for answer in dual_stack_answers if answer[0] == family]
+
+    with patch("socket.getaddrinfo", side_effect=family_filtered_dns) as resolver:
+        assert endpoint.resolve_verified() == expected_ips
+    resolver.assert_called_once()
+
+
+def test_connect_proxy_accepts_observed_anthropic_dual_stack_dns() -> None:
+    """Regression for Docker resolving api.anthropic.com to A plus AAAA."""
+    endpoint = ExactConnectProxy(
         "api.anthropic.com",
-        {"203.0.113.10"},
-        tmp_path / "proxy.jsonl",
+        {"160.79.104.10"},
+        Path("proxy.jsonl"),
     )
-    relay = ExactDbRelay(
-        "disposable.example.test",
-        5432,
-        {"203.0.113.20"},
-        tmp_path / "relay.jsonl",
-    )
-    with patch("socket.getaddrinfo", return_value=fake_dns):
-        with pytest.raises(RuntimeError, match="llm_live_dns_mismatch"):
-            connect.resolve_verified()
-        with pytest.raises(RuntimeError, match="db_live_dns_mismatch"):
-            relay.resolve_verified()
+    docker_answers = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("160.79.104.10", 443)),
+        (
+            socket.AF_INET6,
+            socket.SOCK_STREAM,
+            6,
+            "",
+            ("2607:6bc0::10", 443, 0, 0),
+        ),
+    ]
+
+    def docker_dns(host, port, *, family, type):
+        assert host == "api.anthropic.com"
+        assert family == socket.AF_INET
+        assert type == socket.SOCK_STREAM
+        return [answer for answer in docker_answers if answer[0] == family]
+
+    with patch("socket.getaddrinfo", side_effect=docker_dns):
+        assert endpoint.resolve_verified() == ["160.79.104.10"]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "live_ips", "error"),
+    [
+        (
+            ExactConnectProxy(
+                "api.anthropic.com",
+                {"203.0.113.10", "203.0.113.11"},
+                Path("proxy.jsonl"),
+            ),
+            ["203.0.113.10"],
+            "llm_live_dns_mismatch",
+        ),
+        (
+            ExactConnectProxy(
+                "api.anthropic.com",
+                {"203.0.113.10"},
+                Path("proxy.jsonl"),
+            ),
+            ["203.0.113.10", "203.0.113.11"],
+            "llm_live_dns_mismatch",
+        ),
+        (
+            ExactDbRelay(
+                "disposable.example.test",
+                5432,
+                {"203.0.113.20", "203.0.113.21"},
+                Path("relay.jsonl"),
+            ),
+            ["203.0.113.20"],
+            "db_live_dns_mismatch",
+        ),
+        (
+            ExactDbRelay(
+                "disposable.example.test",
+                5432,
+                {"203.0.113.20"},
+                Path("relay.jsonl"),
+            ),
+            ["203.0.113.20", "203.0.113.21"],
+            "db_live_dns_mismatch",
+        ),
+    ],
+)
+def test_sidecars_fail_closed_on_ipv4_addition_or_removal(
+    endpoint, live_ips: list[str], error: str
+) -> None:
+    fake_dns = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
+        for ip in live_ips
+    ]
+    with patch("socket.getaddrinfo", return_value=fake_dns) as resolver:
+        with pytest.raises(RuntimeError, match=error):
+            endpoint.resolve_verified()
+    assert resolver.call_args.kwargs["family"] == socket.AF_INET
 
 
 @pytest.mark.parametrize(
@@ -333,8 +437,10 @@ def test_sidecar_transport_uses_verified_ip_not_hostname(
     def changing_dns(*args, **kwargs):
         nonlocal dns_calls
         dns_calls += 1
+        assert kwargs["family"] == socket.AF_INET
+        assert kwargs["type"] == socket.SOCK_STREAM
         ip = expected_ip if dns_calls == 1 else "198.51.100.99"
-        return [(2, 1, 6, "", (ip, expected_port))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, expected_port))]
 
     open_connection = AsyncMock(return_value=(object(), object()))
     with patch("socket.getaddrinfo", side_effect=changing_dns), patch(
@@ -344,6 +450,8 @@ def test_sidecar_transport_uses_verified_ip_not_hostname(
 
     assert selected_ip == expected_ip
     open_connection.assert_awaited_once_with(expected_ip, expected_port)
+    assert endpoint.host not in open_connection.await_args.args
+    assert all(":" not in str(arg) for arg in open_connection.await_args.args)
     assert dns_calls == 1
 
 
