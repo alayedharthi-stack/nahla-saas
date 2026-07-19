@@ -325,20 +325,33 @@ class _MemoryMessages:
 
 
 class _StatefulBrain:
-    def __init__(self, convo, *, attempt_egress: bool = False) -> None:
+    def __init__(
+        self,
+        convo,
+        *,
+        attempt_egress: bool = False,
+        duplicate_provider_send: bool = False,
+    ) -> None:
         self.convo = convo
         self.attempt_egress = attempt_egress
+        self.duplicate_provider_send = duplicate_provider_send
 
     async def process(self, **kwargs):
         assert current_acceptance_context() is not None
         metadata = dict(self.convo.extra_metadata or {})
         metadata["turn_count"] = int(metadata.get("turn_count") or 0) + 1
         self.convo.extra_metadata = metadata
-        if self.attempt_egress:
-            for kind, operation in (
+        if self.attempt_egress or self.duplicate_provider_send:
+            events = (
                 ("whatsapp_provider", "send_message"),
                 ("salla_integration", "create_order"),
-            ):
+            )
+            if self.duplicate_provider_send:
+                events = (
+                    ("whatsapp_provider", "send_message"),
+                    ("whatsapp_provider", "send_message"),
+                )
+            for kind, operation in events:
                 try:
                     deny_external_egress(
                         egress_kind=kind,
@@ -372,6 +385,7 @@ async def _run_turn(
     *,
     turn_index: int,
     attempt_egress: bool = False,
+    duplicate_provider_send: bool = False,
     expected_denials: tuple[tuple[str, str], ...] = (),
 ):
     request = SandboxTurnRequest(
@@ -416,6 +430,7 @@ async def _run_turn(
             brain_factory=lambda: _StatefulBrain(
                 convo,
                 attempt_egress=attempt_egress,
+                duplicate_provider_send=duplicate_provider_send,
             ),
             state_probe=_state_probe,
             message_store=_MemoryMessages,
@@ -538,6 +553,28 @@ def test_unexpected_or_missing_denial_cannot_pass() -> None:
     assert operation_mismatch["verdict"] == "fail"
     assert "unexpected_egress_denial" in operation_mismatch["blockers"]
     assert "expected_egress_denial_missing" in operation_mismatch["blockers"]
+
+
+def test_duplicate_observed_provider_denial_exceeds_single_expectation() -> None:
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=84, tenant_id=TENANT_ID, extra_metadata={})
+    evidence = asyncio.run(
+        _run_turn(
+            convo,
+            turn_index=0,
+            duplicate_provider_send=True,
+            expected_denials=(("whatsapp_provider", "send_message"),),
+        )
+    ).evidence
+    assert evidence["verdict"] == "fail"
+    assert "unexpected_egress_denial" in evidence["blockers"]
+    assert evidence["observed_denial_counts"] == [
+        {
+            "egress_kind": "whatsapp_provider",
+            "operation": "send_message",
+            "count": 2,
+        }
+    ]
 
 
 def test_provenance_requires_semantically_valid_constitutional_metadata() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -301,14 +302,14 @@ async def run_sandbox_turn(
             ),
         )
     )
-    actual_denials = {
+    actual_denials = Counter(
         (
             str(audit.get("egress_kind") or ""),
             str(audit.get("operation") or ""),
         )
         for audit in denial_audits
-    }
-    expected_denials = set(request.expected_denials)
+    )
+    expected_denials = Counter(request.expected_denials)
     if actual_denials - expected_denials:
         blockers.append("unexpected_egress_denial")
     if expected_denials - actual_denials:
@@ -337,7 +338,15 @@ async def run_sandbox_turn(
         "denial_audits": denial_audits,
         "expected_denials": [
             {"egress_kind": kind, "operation": operation}
-            for kind, operation in sorted(expected_denials)
+            for kind, operation in sorted(expected_denials.elements())
+        ],
+        "observed_denial_counts": [
+            {
+                "egress_kind": kind,
+                "operation": operation,
+                "count": count,
+            }
+            for (kind, operation), count in sorted(actual_denials.items())
         ],
         "llm_calls": max(
             0,
