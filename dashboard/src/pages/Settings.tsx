@@ -10,7 +10,8 @@ import {
   AlertTriangle, Wifi, Zap, Package,
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
-import { settingsApi, type AllSettings, type NotificationSettings } from '../api/settings'
+import { settingsApi, type AllSettings, type NotificationSettings, type StoreSettings } from '../api/settings'
+import StoreIdentitySettingsTab from '../components/settings/StoreIdentitySettingsTab'
 import { API_BASE } from '../api/client'
 
 
@@ -207,10 +208,11 @@ function QuickAccess() {
 
 // ── Tab IDs ──────────────────────────────────────────────────────────────────
 
-const TAB_IDS = ['team', 'notifications', 'support', 'security', 'system'] as const
+const TAB_IDS = ['store', 'team', 'notifications', 'support', 'security', 'system'] as const
 type TabId = typeof TAB_IDS[number]
 
 const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
+  store:         Store,
   team:          Users,
   notifications: Bell,
   support:       HeadphonesIcon,
@@ -219,6 +221,7 @@ const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
 }
 
 const TAB_LABELS: Record<TabId, string> = {
+  store:         'هوية المتجر',
   team:          'الفريق',
   notifications: 'الإشعارات',
   support:       'الدعم والصلاحيات',
@@ -1574,7 +1577,7 @@ function SystemInfoTab() {
 // ── Main Settings page ───────────────────────────────────────────────────────
 
 export default function Settings() {
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
   const [searchParams, setSearchParams] = useSearchParams()
   const _isOwner = isPlatformOwner()
 
@@ -1598,8 +1601,9 @@ export default function Settings() {
     })
     .map(id => ({
       id,
-      // Use our own label map for the new 'support' tab, fallback to i18n for others
-      label: TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]), // i18n-static: allow — id is SettingsTabKey
+      label: id === 'store'
+        ? (lang === 'ar' ? 'هوية المتجر' : 'Store Identity')
+        : TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]), // i18n-static: allow — id is SettingsTabKey
       icon: TAB_ICONS[id],
     }))
 
@@ -1620,6 +1624,9 @@ export default function Settings() {
   const patchNotifications = (patch: Partial<NotificationSettings>) =>
     setSettings(s => s ? { ...s, notifications: { ...s.notifications, ...patch } } : s)
 
+  const patchStore = (patch: Partial<StoreSettings>) =>
+    setSettings(s => s ? { ...s, store: { ...s.store, ...patch } } : s)
+
   const handleSave = async (tab: TabId) => {
     if (!settings) return
     setSaving(true)
@@ -1628,6 +1635,13 @@ export default function Settings() {
     try {
       const updated = await settingsApi.update({
         notifications: tab === 'notifications' ? settings.notifications : undefined,
+        store: tab === 'store'
+          ? {
+              ...settings.store,
+              store_name_ar: settings.store.store_name_ar?.trim() ?? '',
+              store_name_en: settings.store.store_name_en?.trim() ?? '',
+            }
+          : undefined,
       })
       setSettings(updated)
       setSavedTab(tab)
@@ -1688,6 +1702,16 @@ export default function Settings() {
       </div>
 
       {/* Tab content */}
+      {activeTab === 'store' && (
+        <StoreIdentitySettingsTab
+          data={settings.store}
+          onChange={patchStore}
+          onSave={() => handleSave('store')}
+          saving={saving}
+          saved={savedTab === 'store'}
+          error={activeTab === 'store' ? saveError : null}
+        />
+      )}
       {activeTab === 'team' && <TeamTab />}
       {activeTab === 'notifications' && (
         <NotificationsTab
