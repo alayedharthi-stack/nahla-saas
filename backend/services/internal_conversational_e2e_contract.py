@@ -49,6 +49,7 @@ CODE_TENANT_MISSING = "tenant_missing"
 CODE_TENANT_AMBIGUOUS = "tenant_ambiguous"
 CODE_TENANT_MISMATCH = "tenant_identity_mismatch"
 CODE_TENANT_ROLE_REJECTED = "tenant_role_rejected"
+CODE_TENANT_ROLE_UNVERIFIABLE = "tenant_user_role_unverifiable"
 CODE_STORE_AI_MODE_INVALID = "store_ai_mode_invalid"
 CODE_PHONE_NOT_ALLOWLISTED = "phone_not_allowlisted"
 CODE_LLM_DEFAULT_OFF = "llm_inference_not_explicitly_enabled"
@@ -76,6 +77,7 @@ _FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SAFE_AUDIT_VALUE_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,96}$")
 SAFE_SCENARIO_ID_RE = SAFE_AUDIT_VALUE_RE
 _REJECTED_USER_ROLES = frozenset({"admin", "superadmin", "platform", "platform_admin"})
+USER_ROLE_UNVERIFIABLE = "__role_unverifiable__"
 EGRESS_DENIAL_KINDS = frozenset(
     {
         "automation",
@@ -379,9 +381,13 @@ def evaluate_preflight(
         row = tenant_rows[0]
         if row.get("id") != tenant_id:
             blockers.append(CODE_TENANT_MISMATCH)
-        rejected_roles = {
-            str(role).strip().lower() for role in (row.get("user_roles") or [])
-        } & _REJECTED_USER_ROLES
+        normalized_roles = {
+            str(role or "").strip().lower()
+            for role in (row.get("user_roles") or [])
+        }
+        rejected_roles = normalized_roles & _REJECTED_USER_ROLES
+        if normalized_roles & {"", USER_ROLE_UNVERIFIABLE}:
+            blockers.append(CODE_TENANT_ROLE_UNVERIFIABLE)
         if row.get("is_platform_tenant") is True or rejected_roles:
             blockers.append(CODE_TENANT_ROLE_REJECTED)
         ai_settings = row.get("ai_settings")

@@ -35,6 +35,7 @@ from services.internal_conversational_e2e_contract import (
     CODE_TENANT_REQUIRED,
     CODE_TENANT_MISMATCH,
     CODE_TENANT_ROLE_REJECTED,
+    CODE_TENANT_ROLE_UNVERIFIABLE,
     CONTRACT_VERSION,
     EVIDENCE_CHANNEL,
     EVIDENCE_HMAC_KEY_ENV,
@@ -47,6 +48,7 @@ from services.internal_conversational_e2e_contract import (
     PINNED_REVISION_ENV,
     TENANT_ALLOWLIST_ENV,
     TEST_PHONE_ENV,
+    USER_ROLE_UNVERIFIABLE,
     database_identity_fingerprint,
     evaluate_preflight,
     sign_session_evidence,
@@ -234,6 +236,66 @@ def test_tenant_must_be_explicit_non_platform_and_allowlisted(tenant_id, code) -
     env, identity, rows = _valid_inputs()
     result = _preflight(env, identity, rows, tenant_id=tenant_id)
     assert code in result["blockers"]
+
+
+def _collect_operator_tenant_rows(
+    user_roles: list[object],
+) -> tuple[list[dict], str, dict]:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    _, _, valid_rows = _valid_inputs()
+    tenant_result = MagicMock()
+    tenant_result.mappings.return_value.all.return_value = [
+        {"id": TENANT_ID, "is_platform_tenant": False}
+    ]
+    settings_result = MagicMock()
+    settings_result.scalar_one_or_none.return_value = valid_rows[0]["ai_settings"]
+    roles_result = MagicMock()
+    roles_result.scalars.return_value.all.return_value = user_roles
+    conn = MagicMock()
+    conn.execute.side_effect = [tenant_result, settings_result, roles_result]
+
+    rows = operator._tenant_rows(conn, TENANT_ID)
+    role_call = conn.execute.call_args_list[2]
+    return rows, str(role_call.args[0]), role_call.args[1]
+
+
+def test_canonical_schema_without_role_and_zero_users_is_valid() -> None:
+    rows, sql, params = _collect_operator_tenant_rows([])
+    assert "to_jsonb(u)->>'role'" in sql
+    assert "SELECT role FROM users" not in sql
+    assert params["unverifiable_role"] == USER_ROLE_UNVERIFIABLE
+    assert rows[0]["user_roles"] == []
+
+    env, identity, _ = _valid_inputs()
+    result = _preflight(env, identity, rows)
+    assert result["ok"] is True
+
+
+@pytest.mark.parametrize("role", [USER_ROLE_UNVERIFIABLE, "", None])
+def test_unverifiable_or_empty_user_role_fails_closed(role: object) -> None:
+    rows, _, _ = _collect_operator_tenant_rows([role])
+    env, identity, _ = _valid_inputs()
+    result = _preflight(env, identity, rows)
+    assert CODE_TENANT_ROLE_UNVERIFIABLE in result["blockers"]
+    assert result["ok"] is False
+
+
+def test_verified_merchant_role_behavior_is_unchanged() -> None:
+    env, identity, rows = _valid_inputs()
+    rows[0]["user_roles"] = ["merchant"]
+    result = _preflight(env, identity, rows)
+    assert result["ok"] is True
+    assert CODE_TENANT_ROLE_UNVERIFIABLE not in result["blockers"]
+    assert CODE_TENANT_ROLE_REJECTED not in result["blockers"]
+
+
+@pytest.mark.parametrize("role", ["admin", "superadmin", "platform", "platform_admin"])
+def test_verified_privileged_roles_remain_rejected(role: str) -> None:
+    env, identity, rows = _valid_inputs()
+    rows[0]["user_roles"] = [role]
+    result = _preflight(env, identity, rows)
+    assert CODE_TENANT_ROLE_REJECTED in result["blockers"]
 
 
 def test_platform_or_admin_tenant_role_blocks() -> None:

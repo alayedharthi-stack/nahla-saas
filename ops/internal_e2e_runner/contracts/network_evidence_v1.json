@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "internal_e2e_network_evidence_v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "network_policy",
+    "attestation_status",
+    "runtime_verification_status",
+    "started_at_utc",
+    "completed_at_utc",
+    "pinned_revision",
+    "image_label",
+    "image_digest_input",
+    "database_url_fingerprint",
+    "capability_proof",
+    "firewall_backend",
+    "rules_hash_sha256",
+    "runner_firewall_destinations",
+    "sidecar_acl_targets",
+    "hosts_pinning",
+    "dns_posture",
+    "probe_results",
+    "operator_command",
+    "docker_topology",
+    "docker_topology_hash_sha256",
+    "self_attestation_forbidden",
+    "evidence_hash_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "internal_e2e_network_evidence_v1"
+    },
+    "network_policy": {
+      "const": "default_deny"
+    },
+    "attestation_status": {
+      "const": "unsigned_pending_external_signer"
+    },
+    "self_attestation_forbidden": {
+      "const": true
+    }
+  },
+  "additionalProperties": true
+}

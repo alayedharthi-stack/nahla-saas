@@ -1,0 +1,30 @@
+{
+  "schema_version": "internal_e2e_confined_runner_config_v1",
+  "pinned_revision": "REPLACE_WITH_FULL_40_CHARACTER_GIT_SHA",
+  "image_label": "nahla-internal-e2e-confined:REPLACE_WITH_FULL_SHA",
+  "tenant_id": 48,
+  "provider": "anthropic",
+  "llm_host": "api.anthropic.com",
+  "llm_port": 443,
+  "llm_host_ips": ["203.0.113.10"],
+  "db_proxy_host": "disposable-db-proxy.example.test",
+  "db_proxy_port": 20736,
+  "db_proxy_ips": ["203.0.113.20"],
+  "db_tls_spki_sha256": "sha256:REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS",
+  "connect_proxy_ip": "172.30.0.10",
+  "connect_proxy_port": 3128,
+  "db_relay_ip": "172.30.0.11",
+  "db_relay_port": 20736,
+  "negative_probe_targets": [
+  {
+    "host": "graph.facebook.com",
+    "port": 443,
+    "ips": ["31.13.64.35"]
+  },
+  {
+    "host": "blocked-probe.example.test",
+    "port": 443,
+    "ips": ["203.0.113.99"]
+  }
+  ]
+}
