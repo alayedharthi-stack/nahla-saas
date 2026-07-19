@@ -43,6 +43,8 @@ from ops.internal_e2e_runner.lib.topology import (
 from ops.internal_e2e_runner.sidecars.connect_proxy import ExactConnectProxy
 from ops.internal_e2e_runner.sidecars.db_relay import ExactDbRelay
 from ops.internal_e2e_runner.scripts.assemble_evidence import (
+    main as assemble_evidence_main,
+    parse_operator_command_json,
     validate_negative_control_binding,
     validate_positive_probe_identity,
 )
@@ -238,6 +240,211 @@ def test_default_operator_command_is_preflight_only() -> None:
 def test_operator_run_requires_scenarios() -> None:
     with pytest.raises(ValueError, match="operator_command_invalid"):
         normalize_operator_command(["run"])
+
+
+def _negative_control_ids() -> list[str]:
+    return [
+        "graph.facebook.com|31.13.64.35|443",
+        "blocked-probe.example.test|203.0.113.99|443",
+    ]
+
+
+def _assemble_evidence_fixture_paths(tmp_path: Path) -> dict[str, Path]:
+    config_path = tmp_path / "runner-config.json"
+    config_path.write_text(json.dumps(_base_config()), encoding="utf-8")
+    capability_path = tmp_path / "capability_proof.json"
+    capability_path.write_text(
+        json.dumps({"cap_net_admin_required": True}), encoding="utf-8"
+    )
+    rules_path = tmp_path / "firewall_rules.sanitized"
+    rules_path.write_text("-P OUTPUT DROP", encoding="utf-8")
+    hosts_path = tmp_path / "hosts_pinning.json"
+    hosts_path.write_text("{}", encoding="utf-8")
+    probe_path = tmp_path / "probe_results.json"
+    probe_path.write_text(
+        json.dumps(
+            {
+                "positive": _identity_complete_positive_probes(),
+                "proxy_negative": [],
+                "direct_negative": [
+                    {"control_id": control_id} for control_id in _negative_control_ids()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    docker_path = tmp_path / "docker-topology-verified.json"
+    docker_path.write_text(
+        json.dumps(
+            {
+                "egress_control_baseline": {
+                    "reachable": [
+                        {"control_id": control_id}
+                        for control_id in _negative_control_ids()
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "network_evidence.json"
+    return {
+        "config": config_path,
+        "capability": capability_path,
+        "rules": rules_path,
+        "hosts": hosts_path,
+        "probes": probe_path,
+        "docker": docker_path,
+        "output": output_path,
+    }
+
+
+def _assemble_evidence_argv(
+  paths: dict[str, Path],
+  *,
+  operator_command_json: str,
+) -> list[str]:
+    return [
+        "assemble_evidence.py",
+        "--config",
+        str(paths["config"]),
+        "--started-at",
+        "2026-07-19T12:00:00+00:00",
+        "--completed-at",
+        "2026-07-19T12:01:00+00:00",
+        "--capability-proof",
+        str(paths["capability"]),
+        "--firewall-backend",
+        "iptables",
+        "--rules-dump",
+        str(paths["rules"]),
+        "--hosts-pinning",
+        str(paths["hosts"]),
+        "--probe-results",
+        str(paths["probes"]),
+        "--image-digest-input",
+        f"nahla-internal-e2e-confined:{'d' * 40}@{'d' * 40}",
+        "--database-url-fingerprint",
+        database_url_fingerprint(
+            "postgresql://u:p@disposable-db-proxy.example.test:5432/sandbox?sslmode=require"
+        ),
+        "--docker-inspect",
+        str(paths["docker"]),
+        "--output",
+        str(paths["output"]),
+        "--operator-command-json",
+        operator_command_json,
+    ]
+
+
+def test_assemble_evidence_run_scenarios_json_bridge(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression for argparse collision on run --scenarios <path>."""
+    paths = _assemble_evidence_fixture_paths(tmp_path)
+    scenario_path = "/run/scenarios/scenarios.json"
+    operator_json = json.dumps(["run", "--scenarios", scenario_path])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _assemble_evidence_argv(
+            paths,
+            operator_command_json=operator_json,
+        ),
+    )
+
+    assert assemble_evidence_main() == 0
+    payload = json.loads(paths["output"].read_text(encoding="utf-8"))
+    assert payload["operator_command"] == [
+        "run",
+        "--scenarios",
+        scenario_path,
+    ]
+    assert "scenarios.json" not in json.dumps(
+        payload.get("probe_results", {})
+    )
+
+
+def test_assemble_evidence_preflight_json_bridge(tmp_path: Path, monkeypatch) -> None:
+    paths = _assemble_evidence_fixture_paths(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _assemble_evidence_argv(
+            paths,
+            operator_command_json=json.dumps(["preflight"]),
+        ),
+    )
+
+    assert assemble_evidence_main() == 0
+    payload = json.loads(paths["output"].read_text(encoding="utf-8"))
+    assert payload["operator_command"] == ["preflight"]
+
+
+@pytest.mark.parametrize(
+    ("operator_json", "expected_error"),
+    [
+        ("not-json", "operator_command_json_invalid"),
+        ("{}", "operator_command_json_not_list"),
+        ("[]", "operator_command_json_empty"),
+        ('["preflight", 1]', "operator_command_json_not_strings"),
+        ('["run"]', "operator_command_invalid"),
+        ('["preflight", "--tenant-id", "99"]', "operator_command_invalid"),
+        ('["run", "--scenarios", ""]', "operator_command_invalid"),
+    ],
+)
+def test_assemble_evidence_operator_command_json_rejects_invalid(
+    operator_json: str,
+    expected_error: str,
+) -> None:
+    with pytest.raises(SystemExit, match=expected_error):
+        parse_operator_command_json(operator_json)
+
+
+def test_entrypoint_forwards_operator_command_as_single_json_argument() -> None:
+    root = Path(__file__).resolve().parents[2]
+    script = (
+        root / "ops/internal_e2e_runner/scripts/entrypoint.sh"
+    ).read_text(encoding="utf-8")
+    assert 'OPERATOR_COMMAND_JSON="$(python3 -c' in script
+    assert 'print(json.dumps(sys.argv[1:]))' in script
+    assert '"${NORMALIZED[@]}"' in script
+    assert '--operator-command-json "${OPERATOR_COMMAND_JSON}"' in script
+    assert '--operator-command "${NORMALIZED[@]}"' not in script
+
+
+def test_assemble_evidence_cli_rejects_unknown_args(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _assemble_evidence_fixture_paths(tmp_path)
+    argv = _assemble_evidence_argv(
+        paths,
+        operator_command_json=json.dumps(["preflight"]),
+    )
+    argv.append("--unknown-flag")
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as excinfo:
+        assemble_evidence_main()
+    assert excinfo.value.code == 2
+
+
+def test_assemble_evidence_cli_requires_operator_command_json(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _assemble_evidence_fixture_paths(tmp_path)
+    argv = [
+        item
+        for item in _assemble_evidence_argv(
+            paths,
+            operator_command_json=json.dumps(["preflight"]),
+        )
+        if item != "--operator-command-json"
+        and not item.startswith("[")
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as excinfo:
+        assemble_evidence_main()
+    assert excinfo.value.code == 2
 
 
 def test_secret_redaction_masks_credentials_and_phones() -> None:
