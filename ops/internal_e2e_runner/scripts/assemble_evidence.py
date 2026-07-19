@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Assemble unsigned network evidence from firewall state and probe results."""
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ops.internal_e2e_runner.lib.config import load_runner_config, normalize_operator_command
+from ops.internal_e2e_runner.lib.evidence import build_network_evidence, write_network_evidence
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--started-at", required=True)
+    parser.add_argument("--completed-at", default="")
+    parser.add_argument("--capability-proof", required=True)
+    parser.add_argument("--firewall-backend", required=True)
+    parser.add_argument("--rules-dump", required=True)
+    parser.add_argument("--hosts-pinning", required=True)
+    parser.add_argument("--probe-results", required=True)
+    parser.add_argument("--image-digest-input", required=True)
+    parser.add_argument("--database-url-fingerprint", required=True)
+    parser.add_argument("--operator-command", nargs="*", default=[])
+    parser.add_argument("--runtime-verification-status", default="pending_container_runtime")
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+
+    config = load_runner_config(args.config)
+    with open(args.capability_proof, encoding="utf-8") as handle:
+        capability_proof = json.load(handle)
+    with open(args.rules_dump, encoding="utf-8") as handle:
+        rules_dump = handle.read()
+    with open(args.hosts_pinning, encoding="utf-8") as handle:
+        hosts_pinning = json.load(handle)
+    with open(args.probe_results, encoding="utf-8") as handle:
+        probe_results = json.load(handle)
+
+    started = datetime.fromisoformat(args.started_at.replace("Z", "+00:00"))
+    completed_raw = args.completed_at or datetime.now(timezone.utc).isoformat()
+    completed = datetime.fromisoformat(completed_raw.replace("Z", "+00:00"))
+
+    payload = build_network_evidence(
+        config=config,
+        started_at_utc=started,
+        completed_at_utc=completed,
+        capability_proof=capability_proof,
+        firewall_backend=args.firewall_backend,
+        rules_dump_sanitized=rules_dump,
+        hosts_pinning=hosts_pinning,
+        positive_probes=probe_results.get("positive") or [],
+        negative_probes=probe_results.get("negative") or [],
+        image_digest_input=args.image_digest_input,
+        database_url_fingerprint=args.database_url_fingerprint,
+        operator_command=normalize_operator_command(args.operator_command),
+        runtime_verification_status=args.runtime_verification_status,
+    )
+    write_network_evidence(args.output, payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
