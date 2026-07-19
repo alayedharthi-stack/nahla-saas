@@ -794,6 +794,107 @@ def test_tenant_settings_transform_generic_merchant_fixture() -> None:
     assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
 
 
+def test_tenant_settings_transform_scrubs_whatsapp_ownership_and_passes_post_scan() -> None:
+    tenant_settings_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    row = {
+        "tenant_id": 48,
+        "show_nahla_branding": True,
+        "branding_text": "Powered by Nahla",
+        "ai_settings": None,
+        "whatsapp_settings": {
+            "phone_number_id": "meta-phone-id-observed",
+            "routing": {"phoneNumberId": "phone-camel-88", "waba_id": "waba-55"},
+            "access_token": "secret-token",
+            "verify_token": "verify-me",
+            "business_name": "متجر تجريبي عام",
+            "catalog_enabled": True,
+        },
+        "store_settings": {"currency": "SAR", "catalog_title": "حذاء رياضي أبيض"},
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=tenant_settings_spec.name,
+        spec_json_columns=tenant_settings_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=tenant_settings_spec.remap_fk_columns,
+        scrub_phone_columns=tenant_settings_spec.scrub_phone_columns,
+        deferred_fk_columns=tenant_settings_spec.deferred_fk_columns,
+    )
+    wa = transformed["whatsapp_settings"]
+    assert wa["phone_number_id"] == ""
+    assert wa["routing"]["phoneNumberId"] == ""
+    assert wa["routing"]["waba_id"] == ""
+    assert wa["access_token"] == ""
+    assert wa["verify_token"] == ""
+    assert wa["business_name"] == "متجر تجريبي عام"
+    assert wa["catalog_enabled"] is True
+    assert clone_op._post_scrub_unmapped_forbidden_violations(wa) == []
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_tenant_settings_transform_rejects_unknown_forbidden_whatsapp_key() -> None:
+    tenant_settings_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    for forbidden_key in ("customer_id", "secondary_email_sent_at"):
+        row = {
+            "tenant_id": 48,
+            "whatsapp_settings": {
+                forbidden_key: "forbidden-value",
+                "business_name": "متجر تجريبي عام",
+            },
+        }
+        with pytest.raises(ValueError, match="whatsapp_settings_unhandled_forbidden_key"):
+            clone_op._transform_row(
+                row,
+                spec_name=tenant_settings_spec.name,
+                spec_json_columns=tenant_settings_spec.json_columns,
+                target_tenant_id=48,
+                id_maps={},
+                remap_fk_columns=tenant_settings_spec.remap_fk_columns,
+                scrub_phone_columns=tenant_settings_spec.scrub_phone_columns,
+                deferred_fk_columns=tenant_settings_spec.deferred_fk_columns,
+            )
+
+
+def test_tenant_settings_transform_store_settings_scrubs_known_secret_post_scan() -> None:
+    tenant_settings_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    row = {
+        "tenant_id": 48,
+        "store_settings": {
+            "currency": "SAR",
+            "catalog_title": "قميص قطني أزرق",
+            "access_token": "must-strip",
+        },
+    }
+    transformed, transforms = clone_op._transform_row(
+        row,
+        spec_name=tenant_settings_spec.name,
+        spec_json_columns=tenant_settings_spec.json_columns,
+        target_tenant_id=48,
+        id_maps={},
+        remap_fk_columns=tenant_settings_spec.remap_fk_columns,
+        scrub_phone_columns=tenant_settings_spec.scrub_phone_columns,
+        deferred_fk_columns=tenant_settings_spec.deferred_fk_columns,
+    )
+    assert transformed["store_settings"]["access_token"] == ""
+    assert transformed["store_settings"]["catalog_title"] == "قميص قطني أزرق"
+    assert clone_op._post_scrub_unmapped_forbidden_violations(
+        transformed["store_settings"]
+    ) == []
+
+
 def test_stale_v8_dry_run_digest_rejected_on_apply() -> None:
     stale_payload = clone_op.build_dry_run_digest_binding_payload(
         profile=CLONE_PROFILE_SALLA_MINIMAL,
@@ -1516,7 +1617,7 @@ def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan()
     assert any("integrations.config_stripped" in t for t in transforms)
 
 
-def test_non_integration_json_still_validates_raw_source_fail_closed() -> None:
+def test_non_integration_json_validates_transformed_output_fail_closed() -> None:
     row = {
         "id": 1,
         "tenant_id": 48,

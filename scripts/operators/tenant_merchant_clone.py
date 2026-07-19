@@ -618,6 +618,39 @@ def _source_tenant_scalars(
     return values
 
 
+def _json_path_value(value: Any, path: str) -> Any:
+    current: Any = value
+    for segment in path.split("."):
+        if not segment:
+            continue
+        while segment:
+            if "[" in segment:
+                name, rest = segment.split("[", 1)
+                if name:
+                    current = current[name]
+                index_text, segment = rest.split("]", 1)
+                current = current[int(index_text)]
+                segment = segment.removeprefix(".")
+            else:
+                current = current[segment]
+                segment = ""
+    return current
+
+
+def _post_scrub_unmapped_forbidden_violations(value: Any) -> list[str]:
+    """Fail-closed scan of transformed JSON after scrub; ignore emptied scrubbed keys."""
+    violations: list[str] = []
+    for path in scan_for_unhandled_forbidden_keys(value):
+        try:
+            leaf_value = _json_path_value(value, path)
+        except (KeyError, IndexError, TypeError):
+            violations.append(path)
+            continue
+        if leaf_value not in ("", None):
+            violations.append(path)
+    return violations
+
+
 def _integration_config_post_scrub_violations(
     value: Any,
     *,
@@ -802,7 +835,7 @@ def _transform_row(
             if violations:
                 raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
             continue
-        violations = scan_for_unhandled_forbidden_keys(row[column])
+        violations = _post_scrub_unmapped_forbidden_violations(out[column])
         if violations:
             raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
 
