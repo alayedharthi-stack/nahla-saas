@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import FrozenSet, Tuple
 
 MANIFEST_SCHEMA_VERSION = "tenant_merchant_clone_v3"
-DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v11"
+DRY_RUN_DIGEST_SCHEMA_VERSION = "tenant_merchant_clone_dry_run_v12"
 
 # Closed clone profiles — ``--profile`` is required; no default (fail closed).
 CLONE_PROFILE_FULL_MERCHANT = "full_merchant_acceptance"
@@ -468,6 +468,7 @@ SCRUBBED_JSON_KEY_REPLACEMENTS: dict[str, str] = {
     "phone_e164": "+00000000000",
     "whatsapp_e164": "",
     "email": "",
+    "onboarding_email_sent_at": "",
     "owner_whatsapp_number": "",
 }
 
