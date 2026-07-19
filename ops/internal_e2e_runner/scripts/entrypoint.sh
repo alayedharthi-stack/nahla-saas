@@ -39,6 +39,7 @@ done
 
 # Export only values required by PR #662. Never print or include values in evidence.
 export NAHLA_INTERNAL_E2E_DATABASE_URL="$(< /run/secrets/database_url)"
+export DATABASE_URL="${NAHLA_INTERNAL_E2E_DATABASE_URL}"
 export NAHLA_INTERNAL_E2E_EVIDENCE_HMAC_KEY="$(< /run/secrets/evidence_hmac_key)"
 export NAHLA_INTERNAL_E2E_ATTESTATION_HMAC_KEY="$(< /run/secrets/attestation_hmac_key)"
 export NAHLA_INTERNAL_E2E_ATTESTATION_JSON="$(< /run/secrets/attestation_json)"
