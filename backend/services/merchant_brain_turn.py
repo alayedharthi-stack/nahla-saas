@@ -462,6 +462,65 @@ def _apply_outbound_dedup(
             skip_substitution = False
 
         if not skip_substitution:
+            try:
+                from modules.ai.brain.commerce.dedup_operational_delta import (
+                    has_operational_delta_since_last_reply,
+                    last_outbound_body,
+                )
+
+                if has_operational_delta_since_last_reply(
+                    text or "",
+                    po_reply_before_dedup,
+                    last_outbound_body(history),
+                    history=history,
+                ):
+                    skip_substitution = True
+            except Exception:  # noqa: silent-ok — operational delta probe is best-effort
+                pass
+
+        if not skip_substitution:
+            try:
+                from modules.ai.brain.commerce.dedup_operational_delta import (
+                    last_outbound_body,
+                    should_bypass_hard_dedup_repeat_availability,
+                )
+
+                if should_bypass_hard_dedup_repeat_availability(
+                    text or "",
+                    last_outbound_body(history),
+                ):
+                    skip_substitution = True
+            except Exception:  # noqa: silent-ok — availability repeat probe is best-effort
+                pass
+
+        if not skip_substitution:
+            try:
+                from modules.ai.brain.relational import (
+                    log_dedup_suppression,
+                    should_suppress_dedup_substitution,
+                )
+
+                relational_decision = should_suppress_dedup_substitution(
+                    inbound_text=text,
+                    relational_moment=relational_moment or None,
+                    overlap=overlap,
+                )
+                log_dedup_suppression(
+                    decision=relational_decision,
+                    tenant_id=tenant_id,
+                    conversation_id=getattr(convo, "id", None),
+                    overlap=overlap,
+                    would_have_replaced=True,
+                )
+                if relational_decision.suppress:
+                    skip_substitution = True
+            except Exception as exc:  # noqa: silent-ok — relational dedup gate is fail-open
+                logger.debug(
+                    "[CX] dedup_suppression gate failed; using operational substitution: %s",
+                    exc,
+                )
+
+        if not skip_substitution:
             meta_for_dedup = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else None
             norm_type = str(
                 (inbound_metadata or {}).get("source_type")
@@ -953,14 +1012,20 @@ async def evaluate_live_merchant_brain_turn(
         )
 
         if brain_handoff:
-            _persist_live_handoff(
-                db=db,
-                tenant_id=explicit_tenant_id,
-                to=turn_input.customer_phone,
-                text=turn_input.text,
-                convo=convo,
-                profile=profile,
-            )
+            try:
+                _persist_live_handoff(
+                    db=db,
+                    tenant_id=explicit_tenant_id,
+                    to=turn_input.customer_phone,
+                    text=turn_input.text,
+                    convo=convo,
+                    profile=profile,
+                )
+            except Exception as handoff_exc:  # noqa: BLE001
+                logger.error(
+                    "[Merchant/Brain] failed to create handoff session: %s",
+                    handoff_exc,
+                )
 
         br_action = ""
         try:
@@ -1042,10 +1107,6 @@ async def evaluate_live_merchant_brain_turn(
             brain_silent=brain_silent,
         )
     except Exception as exc:  # noqa: BLE001
-        try:
-            db.rollback()
-        except Exception:  # noqa: silent-ok — rollback is best-effort after Brain failure
-            pass
         return LiveMerchantBrainTurnResult(
             status="brain_exception",
             brain_exception=exc,

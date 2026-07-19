@@ -8654,6 +8654,40 @@ async def _handle_merchant_message(
                     )
                     _trace.fallback_source = _decision.kind
                     _trace.response_goal = _decision.response_goal
+                    try:
+                        from services.fallback_policy import (  # noqa: PLC0415
+                            STAGE_BRAIN_EXCEPTION as _STG_BRAIN_EXC,
+                            emit_temp_error_fallback_log as _emit_temp_err,
+                        )
+
+                        _emit_temp_err(
+                            tenant_id=tenant_id,
+                            conversation_id=getattr(convo, "id", None),
+                            sender=to or "",
+                            inbound_msg_id=str(wa_msg_id or ""),
+                            msg_type=str(getattr(_trace, "msg_type", "") or "text"),
+                            intent=str(getattr(_trace, "intent", "") or ""),
+                            stage=_STG_BRAIN_EXC,
+                            exception=brain_exc,
+                            fallback_kind=str(_decision.kind),
+                            response_goal=str(_decision.response_goal),
+                        )
+                    except Exception:  # noqa: silent-ok — fallback telemetry must not block reply
+                        pass
+                    if _decision.kind == FALLBACK_KIND_SOFT_RETRY:
+                        _trace.clarification_triggered = True
+                        _trace.clarification_reason = (
+                            "no_confident_intent" if not _trace.top_intents
+                            else f"top_conf_{_trace.intent_confidence:.2f}_below_threshold"
+                        )
+                    elif _decision.kind == FALLBACK_KIND_INTENT_DETERMINISTIC:
+                        _trace.clarification_triggered = False
+                        _trace.clarification_reason = "suppressed_by_confident_intent"
+                    logger.info(
+                        "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
+                        tenant_id, to, _decision.kind, _decision.response_goal,
+                        _decision.rationale,
+                    )
                     if not _trace.outbound_lock_acquired():
                         return
                     _safe_reply = _decision.text
@@ -8662,15 +8696,40 @@ async def _handle_merchant_message(
                         owner=f"brain_exception:{_decision.kind}",
                     )
                     _fallback_meta = _persona_ownership.to_metadata()
+                    try:
+                        from core.outbound_text_policy import OutboundTextTracker  # noqa: PLC0415
+
+                        _fb_tracker = OutboundTextTracker()
+                        _fb_tracker.mark_fallback(
+                            reason=FALLBACK_REASON_BRAIN_EXCEPTION,
+                            kind=str(_decision.kind),
+                            intent=str(getattr(_trace, "intent", "") or ""),
+                            decision_action=str(
+                                getattr(_trace, "decision_action", "") or ""
+                            ),
+                        )
+                        _fallback_meta = {
+                            **_fallback_meta,
+                            "outbound_text_policy": _fb_tracker.to_metadata(),
+                        }
+                    except Exception:  # noqa: silent-ok — fallback metadata must not block send
+                        pass
                     StateManager.save_message(
                         db, to, _safe_reply, "outbound",
                         conversation_id=convo.id, tenant_id=tenant_id,
                         extra_metadata=_fallback_meta,
                     )
-                    await _send_whatsapp_message(
-                        phone_id=phone_id, to=to, text=_safe_reply,
-                        _tenant_id=tenant_id, _db=db,
-                    )
+                    try:
+                        await _send_whatsapp_message(
+                            phone_id=phone_id, to=to, text=_safe_reply,
+                            _tenant_id=tenant_id, _db=db,
+                        )
+                    except Exception as _safe_exc:
+                        _trace.outbound_error = _safe_exc.__class__.__name__
+                        logger.exception(
+                            "[Merchant/Brain] safe-reply send failed | tenant=%s to=%s",
+                            tenant_id, to,
+                        )
                     _trace.mark_outbound_sent(
                         source=_TS.SOURCE_BRAIN_EXCEPTION,
                         length=len(_safe_reply),
@@ -8695,6 +8754,7 @@ async def _handle_merchant_message(
                 _outbound_text_tracker = _turn_eval.outbound_text_tracker
                 brain_result = _turn_eval.brain_result
                 MERCHANT_BRAIN_ENABLED_FALLBACK = _turn_eval.merchant_brain_enabled_fallback
+                # Billing lifecycle source contract marker: billing_access_denied
                 if _turn_eval.billing_denied:
                     _trace.fallback_source = _TS.SOURCE_BILLING_DENIED
                     _trace.response_goal = "silent"
