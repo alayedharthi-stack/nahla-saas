@@ -9,6 +9,7 @@ import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import { useLanguage } from '../i18n/context'
 import { LANDING_COPY } from '../i18n/landingCopy'
 import { landingPricingAr, landingPricingEn } from '../i18n/landingPricingLabels'
+import { COMPANY_INFO } from '../config/companyInfo'
 import {
   MessageCircle,
   ShoppingBag,
@@ -380,6 +381,13 @@ const FEATURE_ICONS = [
   Bot, Zap, ShoppingCart, RefreshCw, Star, CreditCard, Gift, ShoppingBag,
   Send, LayoutTemplate, CalendarHeart, BarChart3,
 ] as const
+
+const OFFICIAL_WHATSAPP_DIGITS = COMPANY_INFO.phone.href.replace(/^tel:\+?/, '')
+
+function officialWhatsAppUrl(text?: string): string {
+  const base = `https://wa.me/${OFFICIAL_WHATSAPP_DIGITS}`
+  return text ? `${base}?text=${encodeURIComponent(text)}` : base
+}
 
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function Landing() {
@@ -1073,7 +1081,7 @@ export default function Landing() {
               <ArrowCta size={18} className="transition-transform group-hover:translate-x-0.5 rtl:group-hover:-translate-x-1" />
             </Link>
             <a
-              href={c.finalCta.whatsappHref}
+              href={officialWhatsAppUrl(c.finalCta.whatsappText)}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 border border-white/15 hover:border-amber-400/30 text-slate-300 hover:text-white font-bold text-base px-8 py-4 rounded-2xl transition-all duration-200 hover:bg-amber-500/5 w-full sm:w-auto justify-center"
@@ -1221,7 +1229,7 @@ export default function Landing() {
                 </li>
                 <li>
                   <a
-                    href="https://wa.me/966500000000"
+                    href={officialWhatsAppUrl()}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-slate-500 hover:text-amber-400 transition-colors text-sm"
