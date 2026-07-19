@@ -50,6 +50,13 @@ async def generate_payment_link(
     Generate a payment link for an order.
     Returns a real Moyasar link, store adapter link, or placeholder — in that priority.
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="financial",
+        operation="generate_payment_link",
+        tenant_id=tenant_id,
+    )
     # ── Priority 1: Moyasar ────────────────────────────────────────────────────
     moyasar_cfg = _get_moyasar_settings(tenant_id)
     if moyasar_cfg.get("enabled") and moyasar_cfg.get("secret_key") and amount > 0:

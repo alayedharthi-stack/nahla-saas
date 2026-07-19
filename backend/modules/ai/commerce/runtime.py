@@ -10,6 +10,11 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from core.acceptance_execution_context import (
+    INTERNAL_E2E_EGRESS_DENIED,
+    InternalE2EEgressDenied,
+    recorded_egress_denials,
+)
 from core.store_knowledge import CatalogContextBuilder, CustomerContextBuilder, StoreKnowledgeLoader
 from modules.ai.commerce.permissions import CommercePermissionSet
 from modules.ai.security import (
@@ -94,8 +99,19 @@ class CommerceToolRuntime:
                 error="tenant_isolation_violation",
                 audit={"tool_name": tool_name, "reason": str(exc)},
             )
+        denial_count_before = len(recorded_egress_denials())
         try:
-            return await handler(safe_payload)
+            result = await handler(safe_payload)
+            denials = recorded_egress_denials()
+            if len(denials) > denial_count_before:
+                denial = InternalE2EEgressDenied(denials[-1])
+                return ToolExecutionResult(
+                    ok=False,
+                    tool_name=tool_name,
+                    error=INTERNAL_E2E_EGRESS_DENIED,
+                    audit=denial.to_audit_dict(),
+                )
+            return result
         except TenantIsolationViolation as exc:
             logger.error(
                 "[CommerceToolRuntime] tool=%s isolation breach: %s",
@@ -106,6 +122,13 @@ class CommerceToolRuntime:
                 tool_name=tool_name,
                 error="tenant_isolation_violation",
                 audit={"tool_name": tool_name, "reason": str(exc)},
+            )
+        except InternalE2EEgressDenied as exc:
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=tool_name,
+                error=INTERNAL_E2E_EGRESS_DENIED,
+                audit=exc.to_audit_dict(),
             )
         except Exception as exc:
             logger.exception("[CommerceToolRuntime] tool=%s failed: %s", tool_name, exc)
@@ -476,8 +499,14 @@ class CommerceToolRuntime:
         )
 
     async def _tool_web_search(self, payload: Dict[str, Any]) -> ToolExecutionResult:
+        from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
         from modules.ai.tools.web_search import search_web
 
+        deny_external_egress(
+            egress_kind="external_tool",
+            operation="web_search",
+            tenant_id=self.tenant_id,
+        )
         query = str(payload.get("query") or "").strip()
         if not query:
             return ToolExecutionResult(False, "web_search", error="missing_query")

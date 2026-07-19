@@ -567,6 +567,13 @@ class SallaAdapter(BaseStoreAdapter):
         Failure escalation: after 3 consecutive failures, sets needs_reauth=True
         and logs [SALLA TOKEN] refresh failed 3 times; needs reauth.
         """
+        from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+        deny_external_egress(
+            egress_kind="salla_integration",
+            operation="refresh_access_token",
+            tenant_id=self._tenant_id,
+        )
         # Pre-condition: refresh_token must be present
         if not self._refresh_token:
             logger.error(
@@ -996,6 +1003,13 @@ class SallaAdapter(BaseStoreAdapter):
             logger.warning("[Salla Token] failed to persist refreshed tokens: %s", exc)
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+        from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+        deny_external_egress(
+            egress_kind="salla_integration",
+            operation="get",
+            tenant_id=self._tenant_id,
+        )
         await self._ensure_token_fresh()
         url = f"{SALLA_API_BASE}{path}"
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -1048,6 +1062,13 @@ class SallaAdapter(BaseStoreAdapter):
             return resp.json()
 
     async def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+        deny_external_egress(
+            egress_kind="salla_integration",
+            operation="post",
+            tenant_id=self._tenant_id,
+        )
         await self._ensure_token_fresh()
         import json as _json
         url = f"{SALLA_API_BASE}{path}"
@@ -1181,6 +1202,13 @@ class SallaAdapter(BaseStoreAdapter):
 
     async def _delete(self, path: str) -> bool:
         """DELETE helper. Returns True on 2xx, False otherwise (never raises)."""
+        from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+        deny_external_egress(
+            egress_kind="salla_integration",
+            operation="delete",
+            tenant_id=self._tenant_id,
+        )
         await self._ensure_token_fresh()
         url = f"{SALLA_API_BASE}{path}"
         try:

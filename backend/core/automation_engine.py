@@ -85,6 +85,13 @@ def emit_automation_event(
     AutomationTrigger value at write time so the engine's exact-match lookup
     resolves correctly even if a caller hasn't been migrated yet.
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="emit_event",
+        tenant_id=tenant_id,
+    )
     from core.automation_triggers import LEGACY_EVENT_ALIASES  # noqa: PLC0415
     from core.obs import EVENTS as _EVENTS, log_event as _log_event  # noqa: PLC0415
     from models import AutomationEvent  # noqa: PLC0415
@@ -170,6 +177,13 @@ async def process_pending_events(
             (for manual retries). Billing/trial guard is ALWAYS enforced.
         event_ids: if provided, only process these specific events
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="process_pending_events",
+        tenant_id=tenant_id,
+    )
     from core.automations_seed import (  # noqa: PLC0415
         ensure_default_promotions_for_tenant,
         ensure_engine_for_tenant,
@@ -910,6 +924,13 @@ async def _execute_action(
 
     Returns (success, info_dict).
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="execute_action",
+        tenant_id=tenant_id,
+    )
     from models import Customer, WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
@@ -2783,6 +2804,13 @@ async def _execute_interactive_step(
     interactive instead — the primary visual is one big "Use the
     discount now" button that opens the cart with the code attached.
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="execute_interactive_step",
+        tenant_id=tenant_id,
+    )
     from services.cart_recovery_buttons import (  # noqa: PLC0415
         ACTION_APPLY_COUPON,
         attach_coupon_to_url,
@@ -3092,6 +3120,13 @@ async def _execute_ai_recovery_step(
     than falling back to a template — sending a generic template here
     would defeat the point of the AI stage.
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="execute_ai_recovery_step",
+        tenant_id=tenant_id,
+    )
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
 
     if not has_open_service_window(db, tenant_id, to_phone):

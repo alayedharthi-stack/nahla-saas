@@ -341,6 +341,26 @@ async def dispatch_campaign(
     Returns a summary dict including the per-status counters surfaced
     to the merchant in the campaign report.
     """
+    from core.acceptance_execution_context import (  # noqa: PLC0415
+        current_acceptance_context,
+        deny_external_egress,
+    )
+
+    if current_acceptance_context() is not None:
+        with db.no_autoflush:
+            acceptance_tenant_id = (
+                db.query(Campaign.tenant_id)
+                .filter(Campaign.id == campaign_id)
+                .scalar()
+            )
+        if acceptance_tenant_id is None:
+            return _empty_result(error="Campaign not found")
+        deny_external_egress(
+            egress_kind="campaign",
+            operation="dispatch_campaign",
+            tenant_id=acceptance_tenant_id,
+        )
+
     campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
     if not campaign:
         return _empty_result(error="Campaign not found")

@@ -45,6 +45,22 @@ class MoyasarClient:
         Returns Moyasar invoice dict including 'url' (the payment link).
         amount_sar: float in SAR (will be converted to halalas internally).
         """
+        from core.acceptance_execution_context import (  # noqa: PLC0415
+            current_acceptance_context,
+            deny_external_egress,
+        )
+
+        requested_tenant_id = 0
+        if current_acceptance_context() is not None and isinstance(metadata, dict):
+            try:
+                requested_tenant_id = int(metadata.get("tenant_id") or 0)
+            except (TypeError, ValueError):
+                requested_tenant_id = 0
+        deny_external_egress(
+            egress_kind="financial",
+            operation="moyasar_create_invoice",
+            tenant_id=requested_tenant_id,
+        )
         amount_halalas = int(round(amount_sar * 100))
         body: Dict[str, Any] = {
             "amount": amount_halalas,
