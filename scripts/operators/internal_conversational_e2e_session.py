@@ -17,14 +17,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-
-
 APP_ROOT = Path(__file__).resolve().parents[2]
-BACKEND_ROOT = APP_ROOT / "backend"
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
+for _entry in (str(APP_ROOT), str(APP_ROOT / "backend"), str(APP_ROOT / "database")):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
+
+from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from models import Conversation  # noqa: E402
 from modules.ai.brain.pipeline import get_brain  # noqa: E402
@@ -36,6 +35,7 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     EVIDENCE_CHANNEL,
     EVIDENCE_HMAC_KEY_ENV,
     EVIDENCE_SCHEMA_VERSION,
+    EXPECTED_DENIAL_KINDS,
     LLM_ENABLE_ENV,
     SESSION_DIR_ENV,
     TENANT_ALLOWLIST_ENV,
@@ -44,6 +44,8 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     hmac_identifier,
     normalize_phone,
     parse_int_allowlist,
+    preliminary_environment_blockers,
+    sign_session_evidence,
 )
 from services.internal_conversational_e2e_harness import (  # noqa: E402
     SandboxTurnRequest,
@@ -128,6 +130,14 @@ def execute_preflight(
     engine: Any | None = None,
 ) -> dict[str, Any]:
     env_map = dict(env or os.environ)
+    preliminary_blockers = preliminary_environment_blockers(env_map)
+    if preliminary_blockers:
+        return {
+            "ok": False,
+            "blockers": sorted(set(preliminary_blockers)),
+            "evidence_channel": EVIDENCE_CHANNEL,
+            "tenant_id": tenant_id,
+        }
     database_url = str(env_map.get(DATABASE_URL_ENV) or "").strip()
     if not database_url:
         return {
@@ -181,6 +191,14 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 raise ValueError("scenario_manifest_invalid")
             if "expected_text" in turn or "expected_reply" in turn:
                 raise ValueError("exact_prose_assertion_forbidden")
+            expected_denials = turn.get("expected_denial_kinds", [])
+            if (
+                not isinstance(expected_denials, list)
+                or not all(isinstance(kind, str) for kind in expected_denials)
+                or len(set(expected_denials)) != len(expected_denials)
+                or not set(expected_denials).issubset(EXPECTED_DENIAL_KINDS)
+            ):
+                raise ValueError("expected_denial_kinds_invalid")
             checked_turns.append(
                 {
                     "text": str(turn["text"]),
@@ -188,6 +206,7 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                     "expected_state_delta_keys": sorted(
                         str(v) for v in (turn.get("expected_state_delta_keys") or [])
                     ),
+                    "expected_denial_kinds": tuple(sorted(expected_denials)),
                 }
             )
         seen.add(scenario_id)
@@ -281,6 +300,25 @@ async def run_session(
     engine: Any | None = None,
 ) -> dict[str, Any]:
     env_map = dict(env or os.environ)
+    started_at_utc = datetime.now(timezone.utc).isoformat()
+    preliminary_blockers = preliminary_environment_blockers(env_map)
+    if preliminary_blockers:
+        return {
+            "ok": False,
+            "blockers": sorted(set(preliminary_blockers)),
+            "evidence_channel": EVIDENCE_CHANNEL,
+            "tenant_id": tenant_id,
+        }
+    try:
+        scenarios = _load_scenarios(scenario_path)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        return {
+            "ok": False,
+            "blockers": ["scenario_manifest_invalid"],
+            "evidence_channel": EVIDENCE_CHANNEL,
+            "tenant_id": tenant_id,
+            "exception_class": type(exc).__name__,
+        }
     database_url = str(env_map.get(DATABASE_URL_ENV) or "").strip()
     if not database_url:
         return {"ok": False, "blockers": ["sandbox_database_url_missing"]}
@@ -292,7 +330,6 @@ async def run_session(
             db_engine.dispose()
         return preflight
 
-    scenarios = _load_scenarios(scenario_path)
     session_id = str(uuid.uuid4())
     phone = normalize_phone(env_map.get(TEST_PHONE_ENV))
     evidence_key = str(env_map[EVIDENCE_HMAC_KEY_ENV])
@@ -336,6 +373,7 @@ async def run_session(
                         ),
                         network_attestation_id=str(preflight["attestation_id"]),
                         llm_allowed_hosts=tuple(preflight["llm_allowed_hosts"]),
+                        expected_denial_kinds=turn["expected_denial_kinds"],
                         allow_llm_inference=llm_allowed,
                     ),
                     brain_factory=get_brain,
@@ -367,7 +405,11 @@ async def run_session(
                 "verdict": "fail",
                 "blockers": ["runner_exception"],
                 "exception_class": type(exc).__name__,
-                "provider_send_success": False,
+                "provider_observation": {
+                    "source": "application_internal_e2e_context",
+                    "network_dispatch_success_observed": False,
+                    "is_actual_provider_telemetry": False,
+                },
                 "actual_provider_acceptance_satisfied": False,
             }
         )
@@ -376,6 +418,7 @@ async def run_session(
         if owned_engine:
             db_engine.dispose()
 
+    completed_at_utc = datetime.now(timezone.utc).isoformat()
     session = {
         "session_schema_version": SESSION_SCHEMA_VERSION,
         "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -388,7 +431,8 @@ async def run_session(
         "test_phone_hmac": hmac_identifier(phone, key=evidence_key),
         "llm_inference_enabled": llm_allowed,
         "llm_allowed_hosts": preflight["llm_allowed_hosts"],
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "started_at_utc": started_at_utc,
+        "completed_at_utc": completed_at_utc,
         "runner_mutations": runner_mutations,
         "turn_results": results,
         "verdict": "pass" if results and all(r.get("verdict") == "pass" for r in results) else "fail",
@@ -400,19 +444,29 @@ async def run_session(
             }
         ),
         "actual_provider_acceptance_satisfied": False,
-        "provider_messages_sent": 0,
+        "provider_observation": {
+            "source": "application_internal_e2e_context",
+            "network_dispatch_success_observed": False,
+            "is_actual_provider_telemetry": False,
+        },
         "cleanup_contract": "dispose_attested_sandbox_database_externally",
     }
-    path = _write_session(session, env_map)
+    signed_session = sign_session_evidence(session, key=evidence_key)
+    path = _write_session(signed_session, env_map)
     return {
-        "ok": session["verdict"] == "pass",
+        "ok": signed_session["verdict"] == "pass",
         "session_id": session_id,
         "tenant_id": tenant_id,
         "evidence_channel": EVIDENCE_CHANNEL,
-        "verdict": session["verdict"],
-        "blockers": session["blockers"],
+        "verdict": signed_session["verdict"],
+        "blockers": signed_session["blockers"],
         "session_path": str(path),
-        "provider_messages_sent": 0,
+        "provider_observation": signed_session["provider_observation"],
+        "integrity": {
+            key: value
+            for key, value in signed_session["integrity"].items()
+            if key != "signature"
+        },
         "actual_provider_acceptance_satisfied": False,
     }
 

@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 CONTRACT_VERSION = "internal_conversational_e2e_v1"
 EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v1"
+EVIDENCE_SIGNATURE_SCHEMA_VERSION = "internal_conversational_e2e_signature_v1"
 EVIDENCE_CHANNEL = "direct_code_probe"
 
 MASTER_ENABLE_ENV = "NAHLA_INTERNAL_E2E_ENABLED"
@@ -23,6 +24,7 @@ TEST_PHONE_ENV = "NAHLA_INTERNAL_E2E_TEST_PHONE"
 PHONE_ALLOWLIST_ENV = "NAHLA_INTERNAL_E2E_PHONE_ALLOWLIST"
 PINNED_REVISION_ENV = "NAHLA_INTERNAL_E2E_PINNED_REVISION"
 EVIDENCE_HMAC_KEY_ENV = "NAHLA_INTERNAL_E2E_EVIDENCE_HMAC_KEY"
+ATTESTATION_HMAC_KEY_ENV = "NAHLA_INTERNAL_E2E_ATTESTATION_HMAC_KEY"
 ATTESTATION_JSON_ENV = "NAHLA_INTERNAL_E2E_ATTESTATION_JSON"
 ATTESTATION_SIGNATURE_ENV = "NAHLA_INTERNAL_E2E_ATTESTATION_SIGNATURE"
 NETWORK_FIREWALL_CONFIRM_ENV = "NAHLA_INTERNAL_E2E_NETWORK_FIREWALL_CONFIRM"
@@ -35,6 +37,7 @@ CODE_EXECUTION_NOT_CONFIRMED = "internal_e2e_execution_not_confirmed"
 CODE_ATTESTATION_MISSING = "sandbox_attestation_missing"
 CODE_ATTESTATION_INVALID = "sandbox_attestation_invalid"
 CODE_ATTESTATION_EXPIRED = "sandbox_attestation_expired"
+CODE_EVIDENCE_KEY_MISSING = "evidence_hmac_key_missing"
 CODE_DATABASE_IDENTITY_MISMATCH = "sandbox_database_identity_mismatch"
 CODE_CANONICAL_DATABASE_REJECTED = "canonical_or_shared_database_rejected"
 CODE_NETWORK_FIREWALL_UNATTESTED = "network_firewall_unattested"
@@ -73,6 +76,16 @@ _FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DISPOSABLE_DB_MARKERS = ("e2e", "sandbox", "disposable", "ephemeral")
 _CANONICAL_DB_MARKERS = ("staging", "production", "railway")
 _REJECTED_USER_ROLES = frozenset({"admin", "superadmin", "platform", "platform_admin"})
+EXPECTED_DENIAL_KINDS = frozenset(
+    {
+        "automation",
+        "campaign",
+        "external_tool",
+        "financial",
+        "salla_integration",
+        "whatsapp_provider",
+    }
+)
 
 
 def _canonical(value: Any) -> str:
@@ -90,6 +103,20 @@ def hmac_identifier(value: str, *, key: str) -> str:
         raise ValueError("evidence_hmac_key_missing")
     digest = hmac.new(key.encode(), str(value).encode(), hashlib.sha256).hexdigest()
     return f"hmac-sha256:{digest[:24]}"
+
+
+def preliminary_environment_blockers(env: Mapping[str, str]) -> list[str]:
+    """Return default-off blockers without performing any external I/O."""
+    blockers: list[str] = []
+    if str(env.get(MASTER_ENABLE_ENV) or "").strip().lower() not in _TRUTHY:
+        blockers.append(CODE_DEFAULT_OFF)
+    if str(env.get(EXECUTION_CONFIRM_ENV) or "").strip().lower() not in _TRUTHY:
+        blockers.append(CODE_EXECUTION_NOT_CONFIRMED)
+    if not str(env.get(ATTESTATION_HMAC_KEY_ENV) or ""):
+        blockers.append(CODE_ATTESTATION_MISSING)
+    if not str(env.get(EVIDENCE_HMAC_KEY_ENV) or ""):
+        blockers.append(CODE_EVIDENCE_KEY_MISSING)
+    return blockers
 
 
 def database_identity_fingerprint(identity: Mapping[str, Any]) -> str:
@@ -192,6 +219,59 @@ def sign_attestation(payload: Mapping[str, Any], *, key: str) -> str:
     return hmac.new(key.encode(), _canonical(payload).encode(), hashlib.sha256).hexdigest()
 
 
+def sign_session_evidence(
+    payload: Mapping[str, Any],
+    *,
+    key: str,
+) -> dict[str, Any]:
+    """Return a copy with a versioned canonical-HMAC integrity envelope."""
+    if not key:
+        raise ValueError(CODE_EVIDENCE_KEY_MISSING)
+    signed = dict(payload)
+    integrity = {
+        "algorithm": "hmac-sha256",
+        "key_purpose": "session_evidence",
+        "schema_version": EVIDENCE_SIGNATURE_SCHEMA_VERSION,
+    }
+    signed["integrity"] = integrity
+    signature = hmac.new(
+        key.encode(),
+        _canonical(signed).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    signed["integrity"] = {**integrity, "signature": signature}
+    return signed
+
+
+def verify_session_evidence(payload: Mapping[str, Any], *, key: str) -> bool:
+    """Verify an artifact without trusting any mutable payload field."""
+    if not key or not isinstance(payload, Mapping):
+        return False
+    integrity = payload.get("integrity")
+    if not isinstance(integrity, Mapping):
+        return False
+    signature = str(integrity.get("signature") or "")
+    if (
+        integrity.get("algorithm") != "hmac-sha256"
+        or integrity.get("key_purpose") != "session_evidence"
+        or integrity.get("schema_version") != EVIDENCE_SIGNATURE_SCHEMA_VERSION
+        or not re.fullmatch(r"[0-9a-f]{64}", signature)
+    ):
+        return False
+    unsigned = dict(payload)
+    unsigned["integrity"] = {
+        key_name: value
+        for key_name, value in integrity.items()
+        if key_name != "signature"
+    }
+    expected = hmac.new(
+        key.encode(),
+        _canonical(unsigned).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
 def _attestation_blockers(
     *,
     env: Mapping[str, str],
@@ -201,7 +281,7 @@ def _attestation_blockers(
 ) -> tuple[SandboxAttestation | None, list[str]]:
     raw_json = str(env.get(ATTESTATION_JSON_ENV) or "")
     signature = str(env.get(ATTESTATION_SIGNATURE_ENV) or "")
-    key = str(env.get(EVIDENCE_HMAC_KEY_ENV) or "")
+    key = str(env.get(ATTESTATION_HMAC_KEY_ENV) or "")
     if not raw_json or not signature or not key:
         return None, [CODE_ATTESTATION_MISSING]
     try:
@@ -269,11 +349,9 @@ def evaluate_preflight(
     attested_revision: str | None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    blockers: list[str] = []
-    if str(env.get(MASTER_ENABLE_ENV) or "").strip().lower() not in _TRUTHY:
-        blockers.append(CODE_DEFAULT_OFF)
-    if str(env.get(EXECUTION_CONFIRM_ENV) or "").strip().lower() not in _TRUTHY:
-        blockers.append(CODE_EXECUTION_NOT_CONFIRMED)
+    blockers = preliminary_environment_blockers(env)
+    if not str(env.get(EVIDENCE_HMAC_KEY_ENV) or ""):
+        blockers.append(CODE_EVIDENCE_KEY_MISSING)
 
     allowed_tenants = parse_int_allowlist(env.get(TENANT_ALLOWLIST_ENV))
     blockers.extend(validate_explicit_tenant_id(tenant_id, allowed_tenants))

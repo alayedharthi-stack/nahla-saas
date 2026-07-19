@@ -15,7 +15,7 @@ from services.internal_conversational_e2e_contract import (
     CODE_PROVENANCE_INCOMPLETE,
     EVIDENCE_CHANNEL,
     EVIDENCE_SCHEMA_VERSION,
-    PROVENANCE_FIELDS,
+    EXPECTED_DENIAL_KINDS,
     hmac_identifier,
     validate_explicit_tenant_id,
 )
@@ -44,6 +44,7 @@ class SandboxTurnRequest:
     database_identity_fingerprint: str
     network_attestation_id: str
     llm_allowed_hosts: tuple[str, ...]
+    expected_denial_kinds: tuple[str, ...] = ()
     allow_llm_inference: bool = False
     profile: Mapping[str, Any] = field(default_factory=dict)
     inbound_metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -76,6 +77,12 @@ def _validate_request(request: SandboxTurnRequest) -> None:
         raise ValueError("turn_input_invalid")
     if not request.evidence_hmac_key:
         raise ValueError("evidence_hmac_key_missing")
+    if (
+        not all(isinstance(kind, str) for kind in request.expected_denial_kinds)
+        or len(set(request.expected_denial_kinds)) != len(request.expected_denial_kinds)
+        or not set(request.expected_denial_kinds).issubset(EXPECTED_DENIAL_KINDS)
+    ):
+        raise ValueError("expected_denial_kinds_invalid")
     if not request.allow_llm_inference:
         raise ValueError("llm_inference_not_explicitly_enabled")
     if (
@@ -102,6 +109,41 @@ def _state_delta(
             else:
                 changed[key] = {"before": left, "after": right}
     return changed
+
+
+def _provenance_blockers(
+    provenance: Mapping[str, Any],
+    *,
+    evaluated_customer_text: bool,
+) -> list[str]:
+    """Validate the semantic constitutional provenance contract."""
+    if not evaluated_customer_text:
+        return []
+    from modules.ai.compose.constitutional_policy import APPROVED_COMPOSE_SOURCES
+
+    blockers: list[str] = []
+    compose_source = str(provenance.get("compose_source") or "").strip()
+    if compose_source not in APPROVED_COMPOSE_SOURCES:
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    if not str(provenance.get("response_mode") or "").strip():
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    if not str(provenance.get("chosen_path") or "").strip():
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    if type(provenance.get("llm_candidate_present")) is not bool:
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    if type(provenance.get("final_text_transformed")) is not bool:
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    reasons = provenance.get("final_transform_reasons")
+    if not isinstance(reasons, (list, tuple)) or not all(
+        isinstance(reason, str) for reason in reasons
+    ):
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    if compose_source == "fallback_deterministic" and (
+        not str(provenance.get("fallback_reason") or "").strip()
+        or not str(provenance.get("fallback_action_type") or "").strip()
+    ):
+        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    return sorted(set(blockers))
 
 
 async def run_sandbox_turn(
@@ -246,9 +288,22 @@ async def run_sandbox_turn(
 
     assert result is not None
     provenance = asdict(result.provenance)
-    missing_provenance = [key for key in PROVENANCE_FIELDS if key not in provenance]
-    if missing_provenance:
-        blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    blockers.extend(
+        _provenance_blockers(
+            provenance,
+            evaluated_customer_text=bool(
+                result.status == "evaluated" and (result.reply_text or "").strip()
+            ),
+        )
+    )
+    actual_denial_kinds = {
+        str(audit.get("egress_kind") or "") for audit in denial_audits
+    }
+    expected_denial_kinds = set(request.expected_denial_kinds)
+    if actual_denial_kinds - expected_denial_kinds:
+        blockers.append("unexpected_egress_denial")
+    if expected_denial_kinds - actual_denial_kinds:
+        blockers.append("expected_egress_denial_missing")
     if result.status == "brain_exception":
         blockers.append("brain_exception")
 
@@ -271,6 +326,7 @@ async def run_sandbox_turn(
         "provenance": provenance,
         "state_delta": _state_delta(before, after),
         "denial_audits": denial_audits,
+        "expected_denial_kinds": sorted(expected_denial_kinds),
         "llm_calls": max(
             0,
             int(after.get("llm_calls", 0) or 0) - int(before.get("llm_calls", 0) or 0),
@@ -283,7 +339,11 @@ async def run_sandbox_turn(
         "mutations": mutations,
         "verdict": "pass" if not blockers else "fail",
         "blockers": sorted(set(blockers)),
-        "provider_send_success": False,
+        "provider_observation": {
+            "source": "application_internal_e2e_context",
+            "network_dispatch_success_observed": False,
+            "is_actual_provider_telemetry": False,
+        },
         "actual_provider_acceptance_satisfied": False,
         "sandbox_disposal_required": True,
     }

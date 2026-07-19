@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17,10 +19,12 @@ from core.acceptance_execution_context import (
 )
 from services.internal_conversational_e2e_contract import (
     ATTESTATION_JSON_ENV,
+    ATTESTATION_HMAC_KEY_ENV,
     ATTESTATION_SIGNATURE_ENV,
     CODE_ATTESTATION_MISSING,
     CODE_CANONICAL_DATABASE_REJECTED,
     CODE_DEFAULT_OFF,
+    CODE_EVIDENCE_KEY_MISSING,
     CODE_EXECUTION_NOT_CONFIRMED,
     CODE_LLM_DEFAULT_OFF,
     CODE_LLM_HOST_ATTESTATION_INVALID,
@@ -45,10 +49,13 @@ from services.internal_conversational_e2e_contract import (
     TEST_PHONE_ENV,
     database_identity_fingerprint,
     evaluate_preflight,
+    sign_session_evidence,
     sign_attestation,
+    verify_session_evidence,
 )
 from services.internal_conversational_e2e_harness import (
     SandboxTurnRequest,
+    _provenance_blockers,
     run_sandbox_turn,
 )
 
@@ -58,6 +65,7 @@ SESSION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 REVISION = "813d27825a32f0ab931a80ed3c854bafc67a9e49"
 PHONE = "966500000048"
 KEY = "test-evidence-key-not-a-production-secret"
+ATTESTATION_KEY = "test-attestation-key-not-an-evidence-key"
 
 
 def _identity(name: str = "nahla_e2e_generic_shop") -> dict[str, str]:
@@ -92,8 +100,9 @@ def _valid_inputs() -> tuple[dict[str, str], dict[str, str], list[dict]]:
         PHONE_ALLOWLIST_ENV: PHONE,
         PINNED_REVISION_ENV: REVISION,
         EVIDENCE_HMAC_KEY_ENV: KEY,
+        ATTESTATION_HMAC_KEY_ENV: ATTESTATION_KEY,
         ATTESTATION_JSON_ENV: json.dumps(payload),
-        ATTESTATION_SIGNATURE_ENV: sign_attestation(payload, key=KEY),
+        ATTESTATION_SIGNATURE_ENV: sign_attestation(payload, key=ATTESTATION_KEY),
         NETWORK_FIREWALL_CONFIRM_ENV: attestation_id,
         LLM_ENABLE_ENV: "true",
         LLM_HOST_ALLOWLIST_ENV: "api.generic-llm.test",
@@ -146,6 +155,57 @@ def test_default_off_missing_confirmation_and_attestation_block() -> None:
     assert CODE_ATTESTATION_MISSING in result["blockers"]
 
 
+def test_attestation_and_evidence_keys_are_separate_and_required() -> None:
+    env, identity, rows = _valid_inputs()
+    env.pop(ATTESTATION_HMAC_KEY_ENV)
+    assert CODE_ATTESTATION_MISSING in _preflight(env, identity, rows)["blockers"]
+
+    env, identity, rows = _valid_inputs()
+    env.pop(EVIDENCE_HMAC_KEY_ENV)
+    assert CODE_EVIDENCE_KEY_MISSING in _preflight(env, identity, rows)["blockers"]
+
+    env, identity, rows = _valid_inputs()
+    env[ATTESTATION_SIGNATURE_ENV] = sign_attestation(
+        json.loads(env[ATTESTATION_JSON_ENV]),
+        key=KEY,
+    )
+    assert "sandbox_attestation_invalid" in _preflight(env, identity, rows)["blockers"]
+
+
+def test_default_off_operator_preflight_performs_zero_database_io() -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    env = {
+        "NAHLA_INTERNAL_E2E_DATABASE_URL": "postgresql://must-not-connect",
+    }
+    with patch.object(operator, "create_engine") as create_engine_mock:
+        result = operator.execute_preflight(tenant_id=TENANT_ID, env=env)
+    assert result["ok"] is False
+    assert CODE_DEFAULT_OFF in result["blockers"]
+    create_engine_mock.assert_not_called()
+
+
+def test_real_cli_help_bootstraps_repo_backend_and_database_paths() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script = (
+        repo_root
+        / "scripts"
+        / "operators"
+        / "internal_conversational_e2e_session.py"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "preflight" in completed.stdout
+    assert "run" in completed.stdout
+
+
 def test_canonical_or_shared_database_identity_blocks() -> None:
     env, identity, rows = _valid_inputs()
     shared = {**identity, "database_name": "nahla_staging"}
@@ -155,7 +215,10 @@ def test_canonical_or_shared_database_identity_blocks() -> None:
         "database_identity_fingerprint"
     ]
     env[ATTESTATION_JSON_ENV] = json.dumps(payload)
-    env[ATTESTATION_SIGNATURE_ENV] = sign_attestation(payload, key=KEY)
+    env[ATTESTATION_SIGNATURE_ENV] = sign_attestation(
+        payload,
+        key=ATTESTATION_KEY,
+    )
     result = _preflight(env, shared, rows)
     assert CODE_CANONICAL_DATABASE_REJECTED in result["blockers"]
 
@@ -306,7 +369,13 @@ def _state_probe(db, tenant_id, convo):
     }
 
 
-async def _run_turn(convo, *, turn_index: int, attempt_egress: bool = False):
+async def _run_turn(
+    convo,
+    *,
+    turn_index: int,
+    attempt_egress: bool = False,
+    expected_denial_kinds: tuple[str, ...] = (),
+):
     request = SandboxTurnRequest(
         session_id=SESSION_ID,
         scenario_id="generic_shoe_catalog",
@@ -321,12 +390,18 @@ async def _run_turn(convo, *, turn_index: int, attempt_egress: bool = False):
         database_identity_fingerprint=database_identity_fingerprint(_identity()),
         network_attestation_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         llm_allowed_hosts=("api.generic-llm.test",),
+        expected_denial_kinds=expected_denial_kinds,
         allow_llm_inference=True,
     )
+
+    def _set_response_mode(**kwargs):
+        kwargs["trace"].response_mode = "persona"
+        return kwargs["reply"], False
+
     with (
         patch(
             "services.merchant_brain_turn._apply_brain_silent_and_welcome_guards",
-            side_effect=lambda **kw: (kw["reply"], False),
+            side_effect=_set_response_mode,
         ),
         patch(
             "services.merchant_brain_turn._apply_outbound_dedup",
@@ -405,15 +480,85 @@ def test_provider_denial_audit_is_captured_without_fabricated_success() -> None:
     _MemoryMessages.reset()
     convo = SimpleNamespace(id=8, tenant_id=TENANT_ID, extra_metadata={})
     evidence = asyncio.run(
-        _run_turn(convo, turn_index=0, attempt_egress=True)
+        _run_turn(
+            convo,
+            turn_index=0,
+            attempt_egress=True,
+            expected_denial_kinds=("salla_integration", "whatsapp_provider"),
+        )
     ).evidence
     assert {audit["egress_kind"] for audit in evidence["denial_audits"]} == {
         "whatsapp_provider",
         "salla_integration",
     }
-    assert evidence["provider_send_success"] is False
+    assert evidence["provider_observation"] == {
+        "source": "application_internal_e2e_context",
+        "network_dispatch_success_observed": False,
+        "is_actual_provider_telemetry": False,
+    }
     assert evidence["actual_provider_acceptance_satisfied"] is False
     assert all("wamid" not in json.dumps(audit) for audit in evidence["denial_audits"])
+
+
+def test_unexpected_or_missing_denial_cannot_pass() -> None:
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=81, tenant_id=TENANT_ID, extra_metadata={})
+    unexpected = asyncio.run(
+        _run_turn(convo, turn_index=0, attempt_egress=True)
+    ).evidence
+    assert unexpected["verdict"] == "fail"
+    assert "unexpected_egress_denial" in unexpected["blockers"]
+
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=82, tenant_id=TENANT_ID, extra_metadata={})
+    missing = asyncio.run(
+        _run_turn(
+            convo,
+            turn_index=0,
+            expected_denial_kinds=("financial",),
+        )
+    ).evidence
+    assert missing["verdict"] == "fail"
+    assert "expected_egress_denial_missing" in missing["blockers"]
+
+
+def test_provenance_requires_semantically_valid_constitutional_metadata() -> None:
+    valid = {
+        "compose_source": "persona_llm",
+        "response_mode": "persona",
+        "chosen_path": "generic_catalog_answer",
+        "llm_candidate_present": True,
+        "final_text_transformed": False,
+        "final_transform_reasons": [],
+        "fallback_reason": "",
+        "fallback_action_type": "",
+    }
+    assert _provenance_blockers(valid, evaluated_customer_text=True) == []
+
+    for mutation in (
+        {"compose_source": "template"},
+        {"response_mode": ""},
+        {"chosen_path": ""},
+        {"llm_candidate_present": 1},
+        {"final_text_transformed": "false"},
+        {"final_transform_reasons": "none"},
+    ):
+        invalid = {**valid, **mutation}
+        assert "provenance_incomplete" in _provenance_blockers(
+            invalid,
+            evaluated_customer_text=True,
+        )
+
+    fallback = {
+        **valid,
+        "compose_source": "fallback_deterministic",
+        "fallback_reason": "",
+        "fallback_action_type": "",
+    }
+    assert "provenance_incomplete" in _provenance_blockers(
+        fallback,
+        evaluated_customer_text=True,
+    )
 
 
 def test_multi_turn_state_and_history_persist_in_writable_sandbox() -> None:
@@ -437,6 +582,179 @@ def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:
     assert "Is the white running shoe available?" not in encoded
     assert "Generic catalog response" not in encoded
     assert evidence["test_phone_hmac"].startswith("hmac-sha256:")
+
+
+def test_session_evidence_signature_detects_tampering() -> None:
+    payload = {
+        "session_schema_version": "internal_conversational_e2e_session_v1",
+        "evidence_schema_version": "internal_conversational_e2e_evidence_v1",
+        "session_id": SESSION_ID,
+        "tenant_id": TENANT_ID,
+        "verdict": "pass",
+    }
+    signed = sign_session_evidence(payload, key=KEY)
+    assert verify_session_evidence(signed, key=KEY) is True
+    assert signed["integrity"]["schema_version"].endswith("_v1")
+    assert signed["integrity"]["key_purpose"] == "session_evidence"
+
+    tampered = json.loads(json.dumps(signed))
+    tampered["verdict"] = "fail"
+    assert verify_session_evidence(tampered, key=KEY) is False
+    assert verify_session_evidence(signed, key=ATTESTATION_KEY) is False
+
+
+def test_invalid_scenario_manifest_returns_structured_failure_without_engine(
+    tmp_path: Path,
+) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{not-json", encoding="utf-8")
+    env = {
+        MASTER_ENABLE_ENV: "true",
+        EXECUTION_CONFIRM_ENV: "true",
+        ATTESTATION_HMAC_KEY_ENV: ATTESTATION_KEY,
+        EVIDENCE_HMAC_KEY_ENV: KEY,
+        "NAHLA_INTERNAL_E2E_DATABASE_URL": "postgresql://must-not-connect",
+    }
+    with patch.object(operator, "create_engine") as create_engine_mock:
+        result = asyncio.run(
+            operator.run_session(
+                tenant_id=TENANT_ID,
+                scenario_path=invalid,
+                env=env,
+            )
+        )
+    assert result == {
+        "ok": False,
+        "blockers": ["scenario_manifest_invalid"],
+        "evidence_channel": EVIDENCE_CHANNEL,
+        "tenant_id": TENANT_ID,
+        "exception_class": "JSONDecodeError",
+    }
+    create_engine_mock.assert_not_called()
+
+
+def test_scenario_denial_expectations_use_closed_allowlist(tmp_path: Path) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+
+    manifest = tmp_path / "scenarios.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "scenario_schema_version": operator.SCENARIO_SCHEMA_VERSION,
+                "scenarios": [
+                    {
+                        "scenario_id": "generic_catalog",
+                        "turns": [
+                            {
+                                "text": "Generic inquiry",
+                                "expected_denial_kinds": ["unregistered_egress"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="expected_denial_kinds_invalid"):
+        operator._load_scenarios(manifest)
+
+
+def test_final_session_has_signed_integrity_and_auditable_timestamps(
+    tmp_path: Path,
+) -> None:
+    from scripts.operators import internal_conversational_e2e_session as operator
+    from services.internal_conversational_e2e_harness import SandboxTurnOutcome
+
+    env = {
+        MASTER_ENABLE_ENV: "true",
+        EXECUTION_CONFIRM_ENV: "true",
+        ATTESTATION_HMAC_KEY_ENV: ATTESTATION_KEY,
+        EVIDENCE_HMAC_KEY_ENV: KEY,
+        "NAHLA_INTERNAL_E2E_DATABASE_URL": "postgresql://unused",
+        TEST_PHONE_ENV: PHONE,
+        TENANT_ALLOWLIST_ENV: str(TENANT_ID),
+    }
+    preflight = {
+        "ok": True,
+        "runtime_revision": REVISION,
+        "database_identity_fingerprint": database_identity_fingerprint(_identity()),
+        "attestation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "llm_allowed_hosts": ["api.generic-llm.test"],
+    }
+    turn_evidence = {
+        "status": "evaluated",
+        "state_delta": {},
+        "blockers": [],
+        "verdict": "pass",
+        "denial_audits": [],
+        "provider_observation": {
+            "source": "application_internal_e2e_context",
+            "network_dispatch_success_observed": False,
+            "is_actual_provider_telemetry": False,
+        },
+    }
+    captured: dict = {}
+
+    def _capture(payload, env_map):
+        captured.update(payload)
+        return tmp_path / "session.json"
+
+    db = MagicMock()
+    with (
+        patch.object(operator, "_load_scenarios", return_value=[
+            {
+                "scenario_id": "generic_catalog",
+                "turns": [
+                    {
+                        "text": "Generic inquiry",
+                        "expected_status": "evaluated",
+                        "expected_state_delta_keys": [],
+                        "expected_denial_kinds": (),
+                    }
+                ],
+            }
+        ]),
+        patch.object(operator, "execute_preflight", return_value=preflight),
+        patch.object(
+            operator,
+            "_conversation",
+            return_value=(
+                SimpleNamespace(id=15, tenant_id=TENANT_ID, extra_metadata={}),
+                True,
+            ),
+        ),
+        patch.object(operator, "sessionmaker", return_value=lambda: db),
+        patch.object(
+            operator,
+            "run_sandbox_turn",
+            new=AsyncMock(
+                return_value=SandboxTurnOutcome(
+                    evidence=turn_evidence,
+                    evaluated_status="evaluated",
+                )
+            ),
+        ),
+        patch.object(operator, "_write_session", side_effect=_capture),
+    ):
+        result = asyncio.run(
+            operator.run_session(
+                tenant_id=TENANT_ID,
+                scenario_path=tmp_path / "ignored.json",
+                env=env,
+                engine=MagicMock(),
+            )
+        )
+
+    assert result["ok"] is True
+    assert verify_session_evidence(captured, key=KEY) is True
+    assert datetime.fromisoformat(captured["started_at_utc"]) <= datetime.fromisoformat(
+        captured["completed_at_utc"]
+    )
+    assert captured["provider_observation"]["is_actual_provider_telemetry"] is False
+    assert captured["actual_provider_acceptance_satisfied"] is False
 
 
 def test_operator_has_no_row_deletion_cleanup_path() -> None:
