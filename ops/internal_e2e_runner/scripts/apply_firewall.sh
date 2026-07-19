@@ -2,6 +2,9 @@
 # Apply OUTPUT default-drop firewall rules for the confined internal E2E runner.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/verify_iptables_output.sh"
+
 CONFIG_JSON="${1:-}"
 RULES_OUT="${2:-}"
 BACKEND_OUT="${3:-}"
@@ -81,23 +84,10 @@ fi
 
 printf '%s\n' "${BACKEND}" > "${BACKEND_OUT}"
 
-# Verification: OUTPUT policy must be DROP and at least one LLM allow rule present.
+# Verify OUTPUT DROP, exact sidecar allows, and strict ACCEPT cardinality.
 if [[ "${BACKEND}" == "iptables" ]]; then
-  if ! iptables -S OUTPUT | grep -q '\-P OUTPUT DROP'; then
-    echo "firewall_verification_failed" >&2
-    exit 1
-  fi
-  EXPECTED_RULES="$(iptables -S OUTPUT)"
-  if [[ "${EXPECTED_RULES}" != *"-d ${PROXY_IP}/32 --dport ${PROXY_PORT} -j ACCEPT"* ]] \
-    || [[ "${EXPECTED_RULES}" != *"-d ${RELAY_IP}/32 --dport ${RELAY_PORT} -j ACCEPT"* ]]; then
-    echo "firewall_verification_failed" >&2
-    exit 1
-  fi
-  ACCEPT_COUNT="$(iptables -S OUTPUT | awk '$1=="-A" && $2=="OUTPUT" && $NF=="ACCEPT"{n++} END{print n+0}')"
-  if [[ "${ACCEPT_COUNT}" -ne 4 ]]; then
-    echo "firewall_unexpected_accept_rule" >&2
-    exit 1
-  fi
+  verify_iptables_output_rules \
+    "${PROXY_IP}" "${PROXY_PORT}" "${RELAY_IP}" "${RELAY_PORT}"
 else
   LIVE_NFT="$(nft list ruleset)"
   if [[ "${LIVE_NFT}" != *"policy drop"* ]] \

@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import socketserver
+import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
@@ -627,6 +629,135 @@ def test_runner_firewall_has_no_public_llm_or_db_accept_rules() -> None:
     assert "db_proxy_ips" not in script
     assert "iptables-save > \"${RULES_OUT}\"" in script
     assert "open(p,\"rb\").read()" in script
+    assert "EXPECTED_RULES=" not in script
+    assert "verify_iptables_output_rules" in script
+    assert '"${LIVE_NFT}" != *"policy drop"*' in script
+    assert '"${NFT_ACCEPT_COUNT}" -ne 4' in script
+
+
+_IPTABLES_POLICY = """\
+-P OUTPUT DROP
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+"""
+_PROXY_RULE = (
+    "-A OUTPUT -d 172.30.0.10/32 -p tcp -m tcp --dport 3128 -j ACCEPT"
+)
+_RELAY_RULE = (
+    "-A OUTPUT -d 172.30.0.11/32 -p tcp -m tcp --dport 5432 -j ACCEPT"
+)
+_PROXY_CHECK = "-p tcp -d 172.30.0.10 --dport 3128 -j ACCEPT"
+_RELAY_CHECK = "-p tcp -d 172.30.0.11 --dport 5432 -j ACCEPT"
+
+
+def _run_iptables_verifier(
+    *,
+    rules: list[str],
+    matching_checks: list[str],
+) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    if os.name == "nt":
+        for candidate in (
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+            Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        ):
+            if candidate.is_file():
+                bash = str(candidate)
+                break
+    if bash is None:
+        pytest.skip("bash unavailable")
+    root = Path(__file__).resolve().parents[2]
+    helper = (
+        root
+        / "ops/internal_e2e_runner/scripts/verify_iptables_output.sh"
+    ).as_posix()
+    command = r"""
+source "$1"
+iptables() {
+  if [[ "$1" == "-S" && "$2" == "OUTPUT" ]]; then
+    printf '%s\n' "${FAKE_RULES}"
+    return 0
+  fi
+  if [[ "$1" == "-C" && "$2" == "OUTPUT" ]]; then
+    shift 2
+    printf '%s\n' "${MATCHING_CHECKS}" | grep -Fxq -- "$*"
+    return
+  fi
+  return 2
+}
+verify_iptables_output_rules 172.30.0.10 3128 172.30.0.11 5432
+"""
+    env = {
+        **os.environ,
+        "FAKE_RULES": _IPTABLES_POLICY + "\n".join(rules),
+        "MATCHING_CHECKS": "\n".join(matching_checks),
+    }
+    return subprocess.run(
+        [bash, "-c", command, "_", helper],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_iptables_semantic_verification_accepts_canonical_rendering() -> None:
+    result = _run_iptables_verifier(
+        rules=[_PROXY_RULE, _RELAY_RULE],
+        matching_checks=[_PROXY_CHECK, _RELAY_CHECK],
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("rules", "matching_checks", "expected_error"),
+    [
+        (
+            [_RELAY_RULE],
+            [_RELAY_CHECK],
+            "firewall_verification_failed",
+        ),
+        (
+            [
+                "-A OUTPUT -p tcp -m tcp --dport 3128 -j ACCEPT",
+                _RELAY_RULE,
+            ],
+            [_RELAY_CHECK],
+            "firewall_verification_failed",
+        ),
+        (
+            [
+                "-A OUTPUT -d 172.30.0.10/32 -p tcp -m tcp "
+                "--dport 3129 -j ACCEPT",
+                _RELAY_RULE,
+            ],
+            [_RELAY_CHECK],
+            "firewall_verification_failed",
+        ),
+        (
+            [
+                _PROXY_RULE,
+                _RELAY_RULE,
+                "-A OUTPUT -d 203.0.113.9/32 -p tcp -m tcp "
+                "--dport 443 -j ACCEPT",
+            ],
+            [_PROXY_CHECK, _RELAY_CHECK],
+            "firewall_unexpected_accept_rule",
+        ),
+    ],
+    ids=["missing", "wider-destination", "wrong-port", "extra-accept"],
+)
+def test_iptables_semantic_verification_fails_closed(
+    rules: list[str],
+    matching_checks: list[str],
+    expected_error: str,
+) -> None:
+    result = _run_iptables_verifier(
+        rules=rules,
+        matching_checks=matching_checks,
+    )
+    assert result.returncode != 0
+    assert expected_error in result.stderr
 
 
 def test_entrypoint_exports_secret_files_and_unsets_other_provider_keys() -> None:
