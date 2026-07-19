@@ -29,13 +29,15 @@ def build_network_evidence(
     capability_proof: Mapping[str, Any],
     firewall_backend: str,
     rules_dump_sanitized: str,
-    hosts_pinning: Mapping[str, Sequence[str]],
+    hosts_pinning: Mapping[str, Any],
     positive_probes: Sequence[Mapping[str, Any]],
     negative_probes: Sequence[Mapping[str, Any]],
     image_digest_input: str,
     database_url_fingerprint: str,
     operator_command: Sequence[str],
     runtime_verification_status: str,
+    docker_topology: Mapping[str, Any] | None = None,
+    operator_exit_status: int | None = None,
 ) -> dict[str, Any]:
     sanitized_rules = redact_secrets(rules_dump_sanitized)
     payload: dict[str, Any] = {
@@ -54,29 +56,32 @@ def build_network_evidence(
         "firewall_backend": firewall_backend,
         "rules_hash_sha256": sha256_text(sanitized_rules),
         "rules_dump_sanitized": sanitized_rules,
-        "allowed_endpoints": {
-            "llm": {
+        "runner_firewall_destinations": {
+            "connect_proxy": {
+                "ip": config.connect_proxy_ip,
+                "port": config.connect_proxy_port,
+            },
+            "db_relay": {
+                "ip": config.db_relay_ip,
+                "port": config.db_relay_port,
+            },
+        },
+        "sidecar_acl_targets": {
+            "llm_connect": {
                 "host": config.llm_endpoint.hostname,
                 "port": config.llm_endpoint.port,
-                "ips": list(config.llm_endpoint.ips),
+                "expected_live_dns_ips": list(config.llm_endpoint.ips),
             },
-            "db_proxy": {
+            "disposable_db_proxy": {
                 "host": config.db_proxy_endpoint.hostname,
                 "port": config.db_proxy_endpoint.port,
-                "ips": list(config.db_proxy_endpoint.ips),
-            },
-            "dns_resolver": {
-                "host": config.dns_resolver.hostname,
-                "port": config.dns_resolver.port,
-                "ips": list(config.dns_resolver.ips),
+                "expected_live_dns_ips": list(config.db_proxy_endpoint.ips),
             },
         },
-        "hosts_pinning": {
-            host: list(ips) for host, ips in hosts_pinning.items()
-        },
+        "hosts_pinning": dict(hosts_pinning),
         "dns_posture": {
-            "strategy": "pre_resolve_then_etc_hosts_pinning",
-            "dns_egress_removed": True,
+            "strategy": "sidecars_resolve_and_verify_then_runner_uses_internal_endpoints",
+            "runner_dns_egress": False,
             "ttl_limitation": (
                 "Pinned /etc/hosts entries do not track upstream TTL changes; "
                 "evidence is valid only for the confinement window captured "
@@ -89,6 +94,11 @@ def build_network_evidence(
         },
         "operator_command": list(operator_command),
         "self_attestation_forbidden": True,
+        "docker_topology": dict(docker_topology or {}),
+        "docker_topology_hash_sha256": sha256_text(
+            _canonical(dict(docker_topology or {}))
+        ),
+        "operator_exit_status": operator_exit_status,
     }
     payload["evidence_hash_sha256"] = sha256_text(_canonical(payload))
     return payload

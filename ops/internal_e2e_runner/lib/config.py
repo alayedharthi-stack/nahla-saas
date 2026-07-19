@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 RUNNER_CONFIG_SCHEMA_VERSION = "internal_e2e_confined_runner_config_v1"
 EVIDENCE_SCHEMA_VERSION = "internal_e2e_network_evidence_v1"
 
-_REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 _IMAGE_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]{0,127}$", re.IGNORECASE)
 _IPV4_RE = re.compile(
@@ -62,9 +62,13 @@ class RunnerConfig:
     image_label: str
     llm_endpoint: ResolvedEndpoint
     db_proxy_endpoint: ResolvedEndpoint
-    dns_resolver: ResolvedEndpoint
     negative_probe_targets: tuple[ResolvedEndpoint, ...]
     tenant_id: int
+    provider: str
+    connect_proxy_ip: str
+    connect_proxy_port: int
+    db_relay_ip: str
+    db_relay_port: int
 
     def to_public_mapping(self) -> dict[str, Any]:
         return {
@@ -72,15 +76,17 @@ class RunnerConfig:
             "pinned_revision": self.pinned_revision,
             "image_label": self.image_label,
             "tenant_id": self.tenant_id,
+            "provider": self.provider,
+            "connect_proxy_ip": self.connect_proxy_ip,
+            "connect_proxy_port": self.connect_proxy_port,
+            "db_relay_ip": self.db_relay_ip,
+            "db_relay_port": self.db_relay_port,
             "llm_host": self.llm_endpoint.hostname,
             "llm_port": self.llm_endpoint.port,
             "llm_ips": list(self.llm_endpoint.ips),
             "db_proxy_host": self.db_proxy_endpoint.hostname,
             "db_proxy_port": self.db_proxy_endpoint.port,
             "db_proxy_ips": list(self.db_proxy_endpoint.ips),
-            "dns_resolver_host": self.dns_resolver.hostname,
-            "dns_resolver_port": self.dns_resolver.port,
-            "dns_resolver_ips": list(self.dns_resolver.ips),
             "negative_probe_targets": [
                 {
                     "host": target.hostname,
@@ -211,6 +217,24 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
     if type(tenant_raw) is not int or tenant_raw <= 0 or tenant_raw == 1:
         raise ValueError("tenant_id_invalid")
 
+    provider = str(raw.get("provider") or "").strip().lower()
+    if provider != "anthropic":
+        raise ValueError("exactly_one_supported_provider_required")
+
+    connect_proxy_ip = str(raw.get("connect_proxy_ip") or "")
+    db_relay_ip = str(raw.get("db_relay_ip") or "")
+    try:
+        proxy_addr = ipaddress.ip_address(connect_proxy_ip)
+        relay_addr = ipaddress.ip_address(db_relay_ip)
+    except ValueError as exc:
+        raise ValueError("sidecar_ip_invalid") from exc
+    if not proxy_addr.is_private or not relay_addr.is_private or proxy_addr == relay_addr:
+        raise ValueError("sidecar_ips_must_be_distinct_private_addresses")
+    connect_proxy_port = int(raw.get("connect_proxy_port") or 3128)
+    db_relay_port = int(raw.get("db_relay_port") or 5432)
+    if connect_proxy_port != 3128 or db_relay_port != 5432:
+        raise ValueError("sidecar_port_invalid")
+
     llm = _endpoint_from_mapping(
         {
             "host": raw.get("llm_host"),
@@ -233,18 +257,6 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
         default_port=5432,
     )
 
-    dns = _endpoint_from_mapping(
-        {
-            "host": raw.get("dns_resolver") or raw.get("dns_resolver_host"),
-            "port": raw.get("dns_resolver_port") or 53,
-            "ips": raw.get("dns_resolver_ips"),
-        },
-        field="dns_resolver",
-        default_port=53,
-    )
-    if dns.port != 53:
-        raise ValueError("dns_resolver_port_must_be_53")
-
     negative_raw = raw.get("negative_probe_targets") or []
     if not isinstance(negative_raw, Sequence) or isinstance(negative_raw, (str, bytes)):
         raise ValueError("negative_probe_targets_invalid")
@@ -263,7 +275,7 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
             )
         )
 
-    allowed_hosts = {llm.hostname, db_proxy.hostname, dns.hostname}
+    allowed_hosts = {llm.hostname, db_proxy.hostname}
     for target in negative_targets:
         if target.hostname in allowed_hosts:
             raise ValueError("negative_probe_target_overlaps_allowlist")
@@ -274,9 +286,13 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
         image_label=image_label,
         llm_endpoint=llm,
         db_proxy_endpoint=db_proxy,
-        dns_resolver=dns,
         negative_probe_targets=tuple(negative_targets),
         tenant_id=tenant_raw,
+        provider=provider,
+        connect_proxy_ip=connect_proxy_ip,
+        connect_proxy_port=connect_proxy_port,
+        db_relay_ip=db_relay_ip,
+        db_relay_port=db_relay_port,
     )
 
 
@@ -318,14 +334,17 @@ def default_operator_command() -> list[str]:
 def normalize_operator_command(argv: Sequence[str] | None) -> list[str]:
     if not argv:
         return default_operator_command()
-    command = [str(token) for token in argv if str(token).strip()]
-    if not command:
-        return default_operator_command()
-    if command[0] not in {"preflight", "run"}:
-        raise ValueError("operator_command_invalid")
-    if command[0] == "run" and len(command) < 3:
-        raise ValueError("operator_run_requires_scenarios")
-    return command
+    command = [str(token) for token in argv]
+    if command == ["preflight"]:
+        return command
+    if (
+        len(command) == 3
+        and command[0] == "run"
+        and command[1] == "--scenarios"
+        and command[2]
+    ):
+        return command
+    raise ValueError("operator_command_invalid")
 
 
 SECRET_REDACTION_PATTERNS = (

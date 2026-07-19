@@ -1,6 +1,11 @@
 # Confined internal E2E runner image (off-Railway network envelope).
 FROM python:3.11-slim
 
+ARG NAHLA_PINNED_REVISION
+LABEL nahla.pinned_revision="${NAHLA_PINNED_REVISION}"
+RUN test -n "${NAHLA_PINNED_REVISION}" \
+    && printf '%s\n' "${NAHLA_PINNED_REVISION}" > /nahla-revision
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \

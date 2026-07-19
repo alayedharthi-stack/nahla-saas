@@ -34,15 +34,14 @@ def main() -> int:
         return 2
 
     config = load_runner_config(raw)
-    hosts_pinning = {
+    sidecar_expected_dns = {
         config.llm_endpoint.hostname: list(config.llm_endpoint.ips),
         config.db_proxy_endpoint.hostname: list(config.db_proxy_endpoint.ips),
-        config.dns_resolver.hostname: list(config.dns_resolver.ips),
     }
     payload = {
         "ok": True,
         "config": config.to_public_mapping(),
-        "hosts_pinning": hosts_pinning,
+        "sidecar_expected_dns": sidecar_expected_dns,
         "database_url_fingerprint": database_url_fingerprint(database_url) if database_url else None,
     }
     encoded = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
