@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY database ./database
 COPY scripts ./scripts
+COPY services/ai-orchestrator ./services/ai-orchestrator
 COPY ops/internal_e2e_runner ./ops/internal_e2e_runner
 
 ENV PYTHONPATH=/app

@@ -64,6 +64,12 @@ ops/internal_e2e_runner/
 └── scripts/
 ```
 
+The confined image also bakes `services/ai-orchestrator/` at
+`/app/services/ai-orchestrator`. That tree is required by
+`backend/modules/ai/orchestrator/adapter.py` (`generate_orchestrate_response`
+legacy imports such as `memory.loader`). The artifact contract is enforced by
+`backend/tests/test_internal_e2e_confined_runner_artifact.py`.
+
 ## Host launcher (dry-run default)
 
 ```powershell
