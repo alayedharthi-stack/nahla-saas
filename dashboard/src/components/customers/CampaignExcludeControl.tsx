@@ -51,7 +51,7 @@ export default function CampaignExcludeControl({
   onOpenRequestHandled,
 }: CampaignExcludeControlProps) {
   const { t, dir } = useLanguage()
-  const cp = t((tr) => tr.conversationsPage)
+  const cp = t(tr => tr.conversationsPage)
 
   const [modal, setModal] = useState<'exclude' | 're-enable' | null>(null)
   const [busy, setBusy] = useState(false)
