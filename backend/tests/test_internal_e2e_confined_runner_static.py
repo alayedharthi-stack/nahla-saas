@@ -413,6 +413,37 @@ def test_entrypoint_forwards_operator_command_as_single_json_argument() -> None:
     assert '--operator-command "${NORMALIZED[@]}"' not in script
 
 
+def test_entrypoint_uses_writable_evidence_session_directory_fail_closed() -> None:
+    root = Path(__file__).resolve().parents[2]
+    entrypoint = (
+        root / "ops/internal_e2e_runner/scripts/entrypoint.sh"
+    ).read_text(encoding="utf-8")
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+
+    export = (
+        'export NAHLA_INTERNAL_E2E_SESSION_DIR="${EVIDENCE_DIR}/sessions"'
+    )
+    assert export in entrypoint
+    assert 'mkdir -p "${NAHLA_INTERNAL_E2E_SESSION_DIR}" || {' in entrypoint
+    assert (
+        '[[ -d "${NAHLA_INTERNAL_E2E_SESSION_DIR}" '
+        '&& -w "${NAHLA_INTERNAL_E2E_SESSION_DIR}" ]] || {'
+    ) in entrypoint
+    assert entrypoint.count("session_evidence_dir_unavailable") == 2
+    assert entrypoint.index(export) < entrypoint.index(
+        'if [[ "$#" -eq 0 ]]; then set -- preflight; fi'
+    )
+    assert entrypoint.index(export) < entrypoint.index(
+        "internal_conversational_e2e_session.py"
+    )
+    assert "/app/.nahla-internal-e2e-sessions" not in entrypoint
+    assert '"--read-only", "--tmpfs", "/tmp", "--tmpfs", "/run"' in launcher
+    assert '-v "${EvidenceDir}:/evidence:rw"' in launcher
+    assert ':/app:rw' not in launcher
+
+
 def test_assemble_evidence_cli_rejects_unknown_args(
     tmp_path: Path, monkeypatch
 ) -> None:

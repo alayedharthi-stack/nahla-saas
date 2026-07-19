@@ -9,7 +9,19 @@ EVIDENCE_DIR="${NAHLA_INTERNAL_E2E_EVIDENCE_DIR:-/evidence}"
 CONFIG_PATH="${NAHLA_INTERNAL_E2E_RUNNER_CONFIG:-/run/config/runner_config.json}"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-mkdir -p "${EVIDENCE_DIR}"
+mkdir -p "${EVIDENCE_DIR}" || {
+  echo "evidence_dir_unavailable" >&2
+  exit 1
+}
+export NAHLA_INTERNAL_E2E_SESSION_DIR="${EVIDENCE_DIR}/sessions"
+mkdir -p "${NAHLA_INTERNAL_E2E_SESSION_DIR}" || {
+  echo "session_evidence_dir_unavailable" >&2
+  exit 1
+}
+[[ -d "${NAHLA_INTERNAL_E2E_SESSION_DIR}" && -w "${NAHLA_INTERNAL_E2E_SESSION_DIR}" ]] || {
+  echo "session_evidence_dir_unavailable" >&2
+  exit 1
+}
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "runner_config_missing" >&2
