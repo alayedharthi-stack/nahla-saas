@@ -43,6 +43,7 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     SAFE_SCENARIO_ID_RE,
     TENANT_ALLOWLIST_ENV,
     TEST_PHONE_ENV,
+    USER_ROLE_UNVERIFIABLE,
     evaluate_preflight,
     hmac_identifier,
     normalize_phone,
@@ -102,9 +103,22 @@ def _tenant_rows(conn: Any, tenant_id: int) -> list[dict[str, Any]]:
             text("SELECT ai_settings FROM tenant_settings WHERE tenant_id=:tenant_id"),
             {"tenant_id": tenant_id},
         ).scalar_one_or_none()
+        # Canonical Alembic schemas may lack users.role; any user must remain explicit.
         roles = conn.execute(
-            text("SELECT role FROM users WHERE tenant_id=:tenant_id"),
-            {"tenant_id": tenant_id},
+            text(
+                """
+                SELECT COALESCE(
+                    to_jsonb(u)->>'role',
+                    :unverifiable_role
+                ) AS role
+                FROM users AS u
+                WHERE u.tenant_id=:tenant_id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "unverifiable_role": USER_ROLE_UNVERIFIABLE,
+            },
         ).scalars().all()
         rows.append(
             {
