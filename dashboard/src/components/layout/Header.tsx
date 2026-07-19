@@ -16,6 +16,7 @@ import {
 } from '../../auth'
 import { API_BASE } from '../../api/client'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
+import { NAVIGATION_PATHS, resolveProfileSettingsPath } from '../../lib/navigationPolicy'
 import type { Lang } from '../../i18n/types'
 
 interface HeaderProps {
@@ -274,6 +275,12 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const tenantId   = getTenantId()
   const impersonating = isImpersonating()
   const impersonInfo  = getImpersonation()
+  const platformOwner = isPlatformOwner()
+  const profileSettingsPath = resolveProfileSettingsPath({
+    platformOwner,
+    impersonating,
+  })
+  const profileSettingsIsSecurity = profileSettingsPath === NAVIGATION_PATHS.securitySettings
 
   // ── Display-name resolution ────────────────────────────────────────────────
   // Platform-admin sessions (admin / owner / super_admin) MUST NOT show a
@@ -637,7 +644,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
                   <span className={`inline-block text-[10px] font-medium px-1.5 py-0.5 rounded-full ${
                     impersonating
                       ? 'bg-amber-100 text-amber-700'
-                      : isPlatformOwner()
+                      : platformOwner
                         ? 'bg-rose-100 text-rose-700'
                         : 'bg-emerald-100 text-emerald-700'
                   }`}>
@@ -652,11 +659,17 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
               </div>
 
               <button
-                onClick={() => { setProfileOpen(false); navigate('/settings') }}
+                onClick={() => { setProfileOpen(false); navigate(profileSettingsPath) }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors"
               >
-                <User className="w-4 h-4 text-slate-400" />
-                الإعدادات
+                {profileSettingsIsSecurity
+                  ? <ShieldCheck className="w-4 h-4 text-slate-400" />
+                  : <User className="w-4 h-4 text-slate-400" />
+                }
+                {profileSettingsIsSecurity
+                  ? t(tr => tr.nav.adminItems.security)
+                  : t(tr => tr.nav.items.settings)
+                }
               </button>
 
               {impersonating && (

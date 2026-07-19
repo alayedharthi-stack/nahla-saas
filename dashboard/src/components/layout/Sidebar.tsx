@@ -41,6 +41,7 @@ import type { Translations } from '../../i18n/types'
 import { isAdmin } from '../../auth'
 import { apiCall } from '../../api/client'
 import type { StoreSettings } from '../../api/settings'
+import { NAVIGATION_PATHS } from '../../lib/navigationPolicy'
 
 const NAHLA_STORE_NAME_KEY = 'nahla_store_name'
 
@@ -91,10 +92,9 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
     groupLabel: tr => tr.nav.groups.adminSettings,
     items: [
-      { to: '/settings',          icon: Settings,     label: tr => tr.nav.adminItems.settings },
       // Phase 2A Sprint 1 — direct entry to the owner's personal 2FA
       // surface. Whitelisted in ProtectedRoute.OWNER_ALLOWED_PREFIXES.
-      { to: '/settings/security', icon: ShieldCheck,  label: tr => tr.nav.adminItems.security },
+      { to: NAVIGATION_PATHS.securitySettings, icon: ShieldCheck, label: tr => tr.nav.adminItems.security },
     ],
   },
 ]
