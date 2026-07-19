@@ -16,26 +16,21 @@ export default function LegalFooter({ variant = 'light' }: LegalFooterProps) {
       ? 'text-slate-500 hover:text-amber-400 transition-colors'
       : 'text-slate-400 hover:text-violet-600 transition-colors'
 
-  const contactLinkClass =
-    variant === 'dark'
-      ? 'text-slate-400 hover:text-amber-400 transition-colors underline-offset-2 hover:underline'
-      : 'text-slate-500 hover:text-violet-600 transition-colors underline-offset-2 hover:underline'
-
   const sepClass = variant === 'dark' ? 'text-slate-700' : 'text-slate-300'
 
-  const entityTextClass = variant === 'dark' ? 'text-slate-400' : 'text-slate-600'
-  const entityHeadingClass = variant === 'dark' ? 'text-slate-500' : 'text-slate-400'
+  const entityTextClass = 'text-slate-400'
+  const entityHeadingClass = 'text-slate-500'
 
-  const cardClass =
-    variant === 'dark'
-      ? 'border border-slate-700/70 bg-slate-800/50'
-      : 'border border-slate-200 bg-slate-50'
+  const cardClass = 'border border-slate-700/70 bg-slate-800/50'
+  const cardFooterClass = 'border-t border-slate-700/70'
+  const tableDividerClass = 'border-slate-700/70'
 
-  const cardFooterClass =
-    variant === 'dark' ? 'border-t border-slate-700/70' : 'border-t border-slate-200'
+  const contactLinkClass =
+    'text-slate-400 hover:text-amber-400 transition-colors underline-offset-2 hover:underline'
 
-  const tableDividerClass =
-    variant === 'dark' ? 'border-slate-700/70' : 'border-slate-200'
+  const cardSepClass = 'text-slate-700'
+
+  const phoneDisplay = COMPANY_INFO.phone.href.replace(/^tel:/i, '')
 
   return (
     <div className="w-full px-4 py-3 space-y-4">
@@ -136,7 +131,7 @@ export default function LegalFooter({ variant = 'light' }: LegalFooterProps) {
 
           <footer className={`px-4 py-3 ${cardFooterClass}`}>
             <div
-              className={`flex flex-wrap justify-center sm:justify-start items-center gap-x-3 gap-y-2 text-xs ${entityTextClass}`}
+              className={`flex flex-wrap justify-center items-center gap-3 text-xs ${entityTextClass}`}
             >
               <a
                 href={COMPANY_INFO.website.url}
@@ -146,17 +141,17 @@ export default function LegalFooter({ variant = 'light' }: LegalFooterProps) {
               >
                 {COMPANY_INFO.website.display}
               </a>
-              <span className={sepClass} aria-hidden="true">
+              <span className={cardSepClass} aria-hidden="true">
                 ·
               </span>
               <a href={`mailto:${COMPANY_INFO.email}`} className={contactLinkClass}>
                 {COMPANY_INFO.email}
               </a>
-              <span className={sepClass} aria-hidden="true">
+              <span className={cardSepClass} aria-hidden="true">
                 ·
               </span>
-              <a href={COMPANY_INFO.phone.href} className={contactLinkClass}>
-                {COMPANY_INFO.phone.display}
+              <a href={COMPANY_INFO.phone.href} className={contactLinkClass} dir="ltr">
+                <bdi className="[unicode-bidi:isolate]">{phoneDisplay}</bdi>
               </a>
             </div>
           </footer>
