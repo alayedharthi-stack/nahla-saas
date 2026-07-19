@@ -4,6 +4,11 @@ export const NAVIGATION_PATHS = {
   securitySettings: '/settings/security',
 } as const
 
+export const INTEGRATION_MANAGEMENT_PATHS = {
+  store: '/store-integration',
+  whatsapp: '/whatsapp-connect',
+} as const
+
 interface ProfileSettingsContext {
   platformOwner: boolean
   impersonating: boolean

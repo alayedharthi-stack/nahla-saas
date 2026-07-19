@@ -1,10 +1,11 @@
 /**
- * Focused regression checks for role-aware settings navigation.
+ * Focused regression checks for trusted dashboard navigation actions.
  *
  * Run: npm run check:navigation-policy (from dashboard/)
  */
 import { readFileSync } from 'node:fs'
 import {
+  INTEGRATION_MANAGEMENT_PATHS,
   NAVIGATION_PATHS,
   resolveProfileSettingsPath,
 } from '../src/lib/navigationPolicy.ts'
@@ -43,6 +44,14 @@ assert(
   resolveProfileSettingsPath({ platformOwner: false, impersonating: false })
     === NAVIGATION_PATHS.merchantSettings,
 )
+assert(
+  'store integrations use the canonical management workspace',
+  INTEGRATION_MANAGEMENT_PATHS.store === '/store-integration',
+)
+assert(
+  'WhatsApp uses its canonical connection workspace',
+  INTEGRATION_MANAGEMENT_PATHS.whatsapp === '/whatsapp-connect',
+)
 
 const bannerSource = source('../src/components/operations/StructuredContactsCutoverBanner.tsx')
 assert(
@@ -73,6 +82,32 @@ assert(
   'header delegates settings routing to the role-aware resolver',
   headerSource.includes('resolveProfileSettingsPath')
     && headerSource.includes('navigate(profileSettingsPath)'),
+)
+
+const integrationsSource = source('../src/pages/Integrations.tsx')
+const zidCardStart = integrationsSource.indexOf('name="Zid"')
+const whatsappCardStart = integrationsSource.indexOf('name="WhatsApp Business API"')
+const zidCardSource = integrationsSource.slice(zidCardStart, whatsappCardStart)
+assert(
+  'connected integration actions open real management workspaces',
+  integrationsSource.includes('onManage={() => navigate(INTEGRATION_MANAGEMENT_PATHS.store)}')
+    && integrationsSource.includes('onManage={() => navigate(INTEGRATION_MANAGEMENT_PATHS.whatsapp)}'),
+)
+assert(
+  'connected Zid management remains an explicit external dashboard link',
+  zidCardStart >= 0
+    && whatsappCardStart > zidCardStart
+    && zidCardSource.includes('externalHref="https://web.zid.sa/dashboard"')
+    && !zidCardSource.includes('onManage='),
+)
+assert(
+  'integration cards do not simulate synchronization with a local timer',
+  !integrationsSource.includes('setSyncing')
+    && !integrationsSource.includes('handleSync'),
+)
+assert(
+  'WhatsApp management is not presented as an immediate disconnect action',
+  !integrationsSource.includes('onDisconnect={() => navigate'),
 )
 
 if (failed > 0) {
