@@ -144,6 +144,32 @@ def test_in_container_attestation_accepts_pinned_deploy(
         assert result.code == CODE_TARGET_APP_ROOT_REQUIRED
 
 
+def test_in_container_attestation_accepts_baked_git_commit_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "RAILWAY_GIT_COMMIT_SHA",
+        "RAILWAY_DEPLOYMENT_COMMIT_SHA",
+        "COMMIT_SHA",
+        "SOURCE_COMMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GIT_COMMIT_SHA", PINNED_TARGET_RUNTIME_REVISION)
+    monkeypatch.setattr(
+        "scripts.operators.deployment_revision_attestation_contract.resolve_container_app_root",
+        lambda: Path("/app"),
+    )
+
+    result = evaluate_runtime_revision_attestation(
+        pinned_target_revision=PINNED_TARGET_RUNTIME_REVISION,
+    )
+
+    assert result.ok is True
+    assert result.execution_mode == ExecutionMode.IN_CONTAINER
+    assert result.attested_revision == PINNED_TARGET_RUNTIME_REVISION
+    assert result.target_app_root == str(Path("/app"))
+
+
 def test_read_build_attested_revision_ignores_spoofable_git_sha(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

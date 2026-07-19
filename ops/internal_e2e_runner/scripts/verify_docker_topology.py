@@ -24,6 +24,20 @@ def _networks(container) -> list[str]:
     return sorted(_one(container)["NetworkSettings"]["Networks"].keys())
 
 
+def _required_image_env(image: dict, name: str) -> str:
+    prefix = f"{name}="
+    values = [
+        item[len(prefix) :]
+        for item in ((image.get("Config") or {}).get("Env") or [])
+        if isinstance(item, str) and item.startswith(prefix)
+    ]
+    if not values:
+        raise SystemExit(f"runner_image_{name.lower()}_missing")
+    if len(values) != 1:
+        raise SystemExit(f"runner_image_{name.lower()}_ambiguous")
+    return values[0]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--inspect", required=True)
@@ -73,6 +87,9 @@ def main() -> int:
         or runner_revision != args.expected_revision
     ):
         raise SystemExit("image_revision_labels_mismatch")
+    build_attested_revision = _required_image_env(runner_image, "GIT_COMMIT_SHA")
+    if build_attested_revision != args.expected_revision:
+        raise SystemExit("runner_image_git_commit_sha_mismatch")
     result = {
         "verified": True,
         "runner_networks": runner_networks,
@@ -85,6 +102,7 @@ def main() -> int:
         "runner_image_id": runner_image["Id"],
         "sidecar_image_id": sidecar_image["Id"],
         "image_revision_label": runner_revision,
+        "runner_build_attested_revision": build_attested_revision,
         "egress_control_baseline": baseline,
     }
     if not result["internal_network_internal_flag"]:

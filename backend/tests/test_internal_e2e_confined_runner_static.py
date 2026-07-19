@@ -353,14 +353,17 @@ def _direct_docker_inspect_fixture(revision: str) -> dict:
             }
         return payload
 
-    def image(image_id: str) -> dict:
+    def image(image_id: str, *, runner: bool = False) -> dict:
+        config = {"Labels": {"nahla.pinned_revision": revision}}
+        if runner:
+            config["Env"] = [f"GIT_COMMIT_SHA={revision}"]
         return {
             "Id": image_id,
-            "Config": {"Labels": {"nahla.pinned_revision": revision}},
+            "Config": config,
         }
 
     return {
-        "runner_image": image("sha256:" + ("a" * 64)),
+        "runner_image": image("sha256:" + ("a" * 64), runner=True),
         "sidecar_image": image("sha256:" + ("b" * 64)),
         "runner": container(internal, runner=True),
         "connect_proxy": container(internal, egress),
@@ -427,7 +430,69 @@ def test_direct_docker_inspect_fixture_verifies_without_wrapper(
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["verified"] is True
     assert result["image_revision_label"] == revision
+    assert result["runner_build_attested_revision"] == revision
     assert result["runner_networks"] == ["nahla-e2e-internal-fixture"]
+
+
+@pytest.mark.parametrize(
+    ("env", "blocker"),
+    [
+        ([], "runner_image_git_commit_sha_missing"),
+        (["GIT_COMMIT_SHA=" + ("b" * 40)], "runner_image_git_commit_sha_mismatch"),
+        (
+            ["GIT_COMMIT_SHA=" + ("a" * 40), "GIT_COMMIT_SHA=" + ("a" * 40)],
+            "runner_image_git_commit_sha_ambiguous",
+        ),
+    ],
+)
+def test_runner_build_attested_revision_env_fails_closed(
+    tmp_path: Path,
+    monkeypatch,
+    env: list[str],
+    blocker: str,
+) -> None:
+    revision = "a" * 40
+    inspect = _direct_docker_inspect_fixture(revision)
+    inspect["runner_image"]["Config"]["Env"] = env
+    inspect_path = tmp_path / "docker-inspect.json"
+    baseline_path = tmp_path / "egress-control-baseline.json"
+    inspect_path.write_text(json.dumps(inspect), encoding="utf-8")
+    baseline_path.write_text(
+        json.dumps({"reachable": [{"id": "a"}, {"id": "b"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_docker_topology.py",
+            "--inspect",
+            str(inspect_path),
+            "--egress-baseline",
+            str(baseline_path),
+            "--expected-revision",
+            revision,
+            "--output",
+            str(tmp_path / "should-not-exist.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match=blocker):
+        verify_docker_topology_main()
+
+
+def test_runner_revision_is_build_baked_and_not_launcher_injected() -> None:
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (
+        root / "ops/internal_e2e_runner/Dockerfile"
+    ).read_text(encoding="utf-8")
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "ARG NAHLA_PINNED_REVISION" in dockerfile
+    assert "ENV GIT_COMMIT_SHA=${NAHLA_PINNED_REVISION}" in dockerfile
+    assert "GIT_COMMIT_SHA" not in launcher
 
 
 def test_powershell_value_count_wrapper_remains_rejected(
