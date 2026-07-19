@@ -120,6 +120,11 @@ DEFAULT_AI: Dict[str, Any] = {
 
 DEFAULT_STORE: Dict[str, Any] = {
     "store_name":           "",
+    "store_name_source":    "",
+    "store_name_ar":        "",
+    "store_name_en":        "",
+    "store_name_ar_source": "",
+    "store_name_en_source": "",
     "store_logo_url":       "",
     "store_url":            "",
     "platform_type":        "salla",

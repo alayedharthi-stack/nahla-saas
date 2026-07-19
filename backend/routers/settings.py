@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from core.auth import require_not_support_impersonation
 from core.database import get_db
 from core.secrets import apply_masks, restore_secrets
+from core.store_identity import merge_merchant_store_name_updates
 from core.tenant import (
     DEFAULT_AI,
     DEFAULT_NOTIFICATIONS,
@@ -33,8 +34,11 @@ from core.tenant import (
     resolve_tenant_id,
     sync_store_ai_enabled_from_mode,
 )
-from utils.phone_utils import normalize_whatsapp_phone_for_ai_allowlist
 from services.whatsapp_platform.token_manager import get_token_context
+from utils.phone_utils import normalize_whatsapp_phone_for_ai_allowlist
+
+_STORE_NAME_MERGE_FIELDS = frozenset({"store_name_ar", "store_name_en"})
+_LEGACY_STORE_NAME_FIELDS = frozenset({"store_name", "store_name_source"})
 
 router = APIRouter()
 
@@ -76,6 +80,8 @@ class AISettingsIn(BaseModel):
 
 class StoreSettingsIn(BaseModel):
     store_name: str = ""
+    store_name_ar: str = ""
+    store_name_en: str = ""
     store_logo_url: str = ""
     store_url: str = ""
     platform_type: str = "salla"
@@ -133,6 +139,22 @@ class StoreAISettingsPatch(BaseModel):
     ai_test_allowed_numbers: Optional[List[str]] = None
 
 
+def _split_store_name_updates(
+    raw_incoming: Dict[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Separate bilingual edits and protect their recomputed legacy mirror."""
+    incoming = dict(raw_incoming)
+    name_updates = {
+        key: incoming.pop(key)
+        for key in list(incoming)
+        if key in _STORE_NAME_MERGE_FIELDS
+    }
+    if name_updates:
+        for legacy_field in _LEGACY_STORE_NAME_FIELDS:
+            incoming.pop(legacy_field, None)
+    return incoming, name_updates
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/settings")
@@ -179,7 +201,12 @@ async def update_settings(
 
     if body.store is not None:
         current  = merge_defaults(settings.store_settings, DEFAULT_STORE)
-        incoming = restore_secrets(body.store.model_dump(), current, "store")
+        raw_incoming, name_updates = _split_store_name_updates(
+            body.store.model_dump(exclude_unset=True)
+        )
+        incoming = restore_secrets(raw_incoming, current, "store")
+        if name_updates:
+            current = merge_merchant_store_name_updates(current, name_updates)
         current.update(incoming)
         settings.store_settings = current
 
