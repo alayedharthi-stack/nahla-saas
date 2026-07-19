@@ -33,7 +33,9 @@ Each sidecar resolves its single public target before serving and verifies that 
 exactly equals the configured expected IP set. DNS/IP evidence is valid only for the
 short confinement window. If upstream DNS changes, startup fails or the envelope must
 be re-run. The launcher uses Docker `--add-host` to append the disposable DB hostname
-to the relay IP while preserving base `/etc/hosts`; hostname/SNI semantics remain intact.
+to the relay IP while preserving base `/etc/hosts`; the relay listens on the original
+public DB port, so the credential-bearing URL remains unchanged and hostname/SNI
+semantics remain intact.
 
 ## Disposable DB TLS identity
 

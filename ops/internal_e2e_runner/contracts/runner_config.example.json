@@ -8,13 +8,13 @@
   "llm_port": 443,
   "llm_host_ips": ["203.0.113.10"],
   "db_proxy_host": "disposable-db-proxy.example.test",
-  "db_proxy_port": 5432,
+  "db_proxy_port": 20736,
   "db_proxy_ips": ["203.0.113.20"],
   "db_tls_spki_sha256": "sha256:REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS",
   "connect_proxy_ip": "172.30.0.10",
   "connect_proxy_port": 3128,
   "db_relay_ip": "172.30.0.11",
-  "db_relay_port": 5432,
+  "db_relay_port": 20736,
   "negative_probe_targets": [
   {
     "host": "graph.facebook.com",

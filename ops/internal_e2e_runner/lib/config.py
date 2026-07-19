@@ -163,6 +163,12 @@ def _endpoint_from_mapping(
     return ResolvedEndpoint(hostname=host, port=port, ips=ips)
 
 
+def _required_port(raw: Any, *, field: str) -> int:
+    if type(raw) is not int or raw <= 0 or raw > 65535:
+        raise ValueError(f"{field}_invalid")
+    return raw
+
+
 def validate_database_url_requirements(database_url: str) -> list[str]:
     """Validate disposable DB URL requirements without returning credentials."""
     blockers: list[str] = []
@@ -234,9 +240,18 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
     if not proxy_addr.is_private or not relay_addr.is_private or proxy_addr == relay_addr:
         raise ValueError("sidecar_ips_must_be_distinct_private_addresses")
     connect_proxy_port = int(raw.get("connect_proxy_port") or 3128)
-    db_relay_port = int(raw.get("db_relay_port") or 5432)
-    if connect_proxy_port != 3128 or db_relay_port != 5432:
-        raise ValueError("sidecar_port_invalid")
+    if connect_proxy_port != 3128:
+        raise ValueError("connect_proxy_port_invalid")
+    db_proxy_port = _required_port(
+        raw.get("db_proxy_port"),
+        field="db_proxy_port",
+    )
+    db_relay_port = _required_port(
+        raw.get("db_relay_port"),
+        field="db_relay_port",
+    )
+    if db_relay_port != db_proxy_port:
+        raise ValueError("db_relay_port_mismatch")
 
     llm = _endpoint_from_mapping(
         {
@@ -253,7 +268,7 @@ def parse_runner_config(raw: Mapping[str, Any]) -> RunnerConfig:
     db_proxy = _endpoint_from_mapping(
         {
             "host": raw.get("db_proxy_host"),
-            "port": raw.get("db_proxy_port") or 5432,
+            "port": db_proxy_port,
             "ips": raw.get("db_proxy_ips"),
         },
         field="db_proxy_host",

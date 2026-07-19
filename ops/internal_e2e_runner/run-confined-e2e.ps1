@@ -214,7 +214,8 @@ try {
     & docker create --name $relayName --network $internalNetwork --ip $config.db_relay_ip `
         --read-only --tmpfs /tmp --security-opt no-new-privileges:true `
         -v "${EvidenceDir}:/evidence:rw" $SidecarImage python db_relay.py `
-        --target-host $config.db_proxy_host --target-port $config.db_proxy_port @dbIpArgs
+        --target-host $config.db_proxy_host --target-port $config.db_proxy_port `
+        --listen-port $config.db_relay_port @dbIpArgs
     if ($LASTEXITCODE) { throw "db_relay_create_failed" }
     $createdContainers.Add($relayName)
     & docker network connect $egressNetwork $relayName

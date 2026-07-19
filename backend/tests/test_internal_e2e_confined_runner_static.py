@@ -117,6 +117,55 @@ def test_db_tls_spki_pin_is_required_and_canonical(value) -> None:
         parse_runner_config(config)
 
 
+def test_high_public_db_port_is_preserved_across_relay_paths() -> None:
+    config = parse_runner_config(
+        _base_config(db_proxy_port=20736, db_relay_port=20736)
+    )
+    assert config.db_proxy_endpoint.port == 20736
+    assert config.db_relay_port == 20736
+
+    root = Path(__file__).resolve().parents[2]
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+    entrypoint = (
+        root / "ops/internal_e2e_runner/scripts/entrypoint.sh"
+    ).read_text(encoding="utf-8")
+    assert "--target-port $config.db_proxy_port" in launcher
+    assert "--listen-port $config.db_relay_port" in launcher
+    assert '"--add-host", "$($config.db_proxy_host):$($config.db_relay_ip)"' in launcher
+    assert '--relay-port "${RELAY_PORT}"' in entrypoint
+    assert (
+        'export NAHLA_INTERNAL_E2E_DATABASE_URL="$(< /run/secrets/database_url)"'
+        in entrypoint
+    )
+
+
+@pytest.mark.parametrize("field", ["db_proxy_port", "db_relay_port"])
+def test_db_proxy_and_relay_ports_are_required(field: str) -> None:
+    raw = _base_config()
+    raw.pop(field)
+    with pytest.raises(ValueError, match=f"{field}_invalid"):
+        parse_runner_config(raw)
+
+
+@pytest.mark.parametrize("field", ["db_proxy_port", "db_relay_port"])
+@pytest.mark.parametrize("value", [0, 65536, "20736", True])
+def test_db_proxy_and_relay_ports_reject_invalid_values(
+    field: str,
+    value,
+) -> None:
+    with pytest.raises(ValueError, match=f"{field}_invalid"):
+        parse_runner_config(_base_config(**{field: value}))
+
+
+def test_db_relay_port_must_match_public_proxy_port() -> None:
+    with pytest.raises(ValueError, match="db_relay_port_mismatch"):
+        parse_runner_config(
+            _base_config(db_proxy_port=20736, db_relay_port=5432)
+        )
+
+
 def test_validate_config_main_accepts_valid_config_and_writes_output(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

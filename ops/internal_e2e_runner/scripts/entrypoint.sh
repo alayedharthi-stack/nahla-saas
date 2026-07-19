@@ -71,17 +71,22 @@ LLM_HOST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["llm
 DB_HOST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["db_proxy_host"])' "${CONFIG_PATH}")"
 PROXY_IP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["connect_proxy_ip"])' "${CONFIG_PATH}")"
 RELAY_IP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["db_relay_ip"])' "${CONFIG_PATH}")"
+RELAY_PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["db_relay_port"])' "${CONFIG_PATH}")"
 export HTTPS_PROXY="http://${PROXY_IP}:3128"
 export https_proxy="${HTTPS_PROXY}"
 export NO_PROXY="localhost,127.0.0.1,${DB_HOST}"
 export NAHLA_INTERNAL_E2E_LLM_ENABLED=true
 export NAHLA_INTERNAL_E2E_LLM_HOST_ALLOWLIST="${LLM_HOST}"
-python3 - <<'PY' "${EVIDENCE_DIR}/hosts_pinning.json" "${LLM_HOST}" "${PROXY_IP}" "${DB_HOST}" "${RELAY_IP}"
+python3 - <<'PY' "${EVIDENCE_DIR}/hosts_pinning.json" "${LLM_HOST}" "${PROXY_IP}" "${DB_HOST}" "${RELAY_IP}" "${RELAY_PORT}"
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump({
         "llm_transport": {"hostname": sys.argv[2], "via_connect_proxy_ip": sys.argv[3]},
-        "db_tls_hostname_mapping": {"hostname": sys.argv[4], "relay_ip": sys.argv[5]},
+        "db_tls_hostname_mapping": {
+            "hostname": sys.argv[4],
+            "relay_ip": sys.argv[5],
+            "port": int(sys.argv[6]),
+        },
         "base_etc_hosts_preserved": True,
     }, handle, sort_keys=True)
     handle.write("\n")
@@ -134,6 +139,7 @@ python3 "${RUNNER_ROOT}/scripts/probe_connectivity.py" \
   --config "${CONFIG_PATH}" \
   --proxy-host "${PROXY_IP}" \
   --relay-host "${RELAY_IP}" \
+  --relay-port "${RELAY_PORT}" \
   "${DIRECT_CONTROL_ARGS[@]}" \
   --output "${PROBE_OUT}"
 
