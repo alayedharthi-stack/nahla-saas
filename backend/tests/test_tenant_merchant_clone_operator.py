@@ -48,6 +48,7 @@ from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
     scrub_integration_config,
     scrub_json_value,
     scrub_row_json_columns,
+    scrub_whatsapp_settings,
     scan_for_unhandled_forbidden_keys,
 )
 
@@ -589,6 +590,136 @@ def test_tenant_settings_non_null_ai_forced_test_mode_and_empty_allowlist() -> N
     assert any("tenant_settings.ai_settings_safe_test_mode" in t for t in transforms)
 
 
+def test_tenant_settings_whatsapp_top_level_phone_number_id_scrubbed() -> None:
+    """Regression: top-level phone_number_id must not trip unhandled_forbidden_key."""
+    row = {
+        "tenant_id": 48,
+        "whatsapp_settings": {
+            "phone_number_id": "meta-phone-id-observed",
+            "business_name": "متجر تجريبي عام",
+        },
+    }
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    wa = transformed["whatsapp_settings"]
+    assert wa["phone_number_id"] == ""
+    assert wa["business_name"] == "متجر تجريبي عام"
+    assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
+
+
+def test_tenant_settings_whatsapp_nested_camel_provider_ownership_scrubbed() -> None:
+    from scripts.operators.tenant_merchant_clone_scrubber import _scrub_integration_value
+
+    row = {
+        "tenant_id": 48,
+        "whatsapp_settings": {
+            "phone_number_id": "phone-snake-99",
+            "routing": {"phoneNumberId": "phone-camel-88"},
+            "providers": [
+                {
+                    "waba_id": "waba-55",
+                    "whatsappBusinessAccountId": "waba-camel-44",
+                }
+            ],
+            "meta": {"metaBusinessId": "meta-biz-33"},
+            "catalog_enabled": True,
+        },
+    }
+    transformed, _ = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    wa = transformed["whatsapp_settings"]
+    assert wa["phone_number_id"] == ""
+    assert wa["routing"]["phoneNumberId"] == ""
+    assert wa["providers"][0]["waba_id"] == ""
+    assert wa["providers"][0]["whatsappBusinessAccountId"] == ""
+    assert wa["meta"]["metaBusinessId"] == ""
+    assert wa["catalog_enabled"] is True
+    _, transforms = _scrub_integration_value(row["whatsapp_settings"])
+    assert any("scrub_integration_ownership_key:phone_number_id" in t for t in transforms)
+    assert any("scrub_integration_ownership_key:routing.phoneNumberId" in t for t in transforms)
+
+
+def test_tenant_settings_whatsapp_recursive_token_phone_email_scrubbed() -> None:
+    pii_email = "owner@merchant.example"
+    row = {
+        "tenant_id": 48,
+        "whatsapp_settings": {
+            "access_token": "secret-token",
+            "verify_token": "verify-me",
+            "phone_number": "966500000000",
+            "owner_whatsapp_number": "966511111111",
+            "nested": {"contact_email": pii_email},
+            "contacts": [{"ownerEmail": "camel@merchant.example"}],
+            "routing": {"display_value": "+966501234567"},
+        },
+    }
+    transformed, transforms = scrub_row_json_columns(
+        row,
+        _tenant_settings_json_columns(),
+        table="tenant_settings",
+    )
+    wa = transformed["whatsapp_settings"]
+    assert wa["access_token"] == ""
+    assert wa["verify_token"] == ""
+    assert wa["phone_number"] == ""
+    assert wa["owner_whatsapp_number"] == "+00000000000"
+    assert wa["nested"]["contact_email"] == ""
+    assert wa["contacts"][0]["ownerEmail"] == ""
+    assert wa["routing"]["display_value"] == "+00000000000"
+    serialized = json.dumps(transforms)
+    assert pii_email not in serialized
+    assert "camel@merchant.example" not in serialized
+
+
+def test_tenant_settings_whatsapp_ownership_markers_path_only_no_raw_values() -> None:
+    from scripts.operators.tenant_merchant_clone_scrubber import _scrub_integration_value
+
+    sensitive_phone_id = "phone-sensitive-abc-12345"
+    _, transforms = _scrub_integration_value(
+        {
+            "phone_number_id": sensitive_phone_id,
+            "routing": {"waba_id": "waba-sensitive-xyz"},
+        }
+    )
+    serialized = json.dumps(transforms)
+    assert sensitive_phone_id not in serialized
+    assert "waba-sensitive-xyz" not in serialized
+    assert all(
+        t.startswith("scrub_integration_ownership_key:")
+        or t.startswith("scrub_integration_secret_key:")
+        or t.startswith("scrub_integration_key:")
+        or t.startswith("scrub_integration_email_key:")
+        or t.startswith("scrub_integration_email_literal:")
+        or t.startswith("scrub_integration_phone_literal:")
+        for t in transforms
+    )
+
+
+def test_scrub_whatsapp_settings_null_materializes_empty_object() -> None:
+    assert scrub_whatsapp_settings(None) == {}
+
+
+def test_scrub_whatsapp_settings_retains_safe_metadata() -> None:
+    result = scrub_whatsapp_settings(
+        {
+            "business_name": "متجر تجريبي عام",
+            "catalog_enabled": True,
+            "provider": "meta",
+            "phone_number_id": "must-strip",
+        }
+    )
+    assert result["business_name"] == "متجر تجريبي عام"
+    assert result["catalog_enabled"] is True
+    assert result["provider"] == "meta"
+    assert result["phone_number_id"] == ""
+
+
 def test_tenant_settings_non_null_whatsapp_strips_credentials_retains_safe_metadata() -> None:
     row = {
         "tenant_id": 48,
@@ -610,7 +741,7 @@ def test_tenant_settings_non_null_whatsapp_strips_credentials_retains_safe_metad
     assert wa["access_token"] == ""
     assert wa["verify_token"] == ""
     assert wa["phone_number"] == ""
-    assert wa["owner_whatsapp_number"] == ""
+    assert wa["owner_whatsapp_number"] == "+00000000000"
     assert wa["business_name"] == "متجر تجريبي عام"
     assert wa["catalog_enabled"] is True
     assert scan_for_unhandled_forbidden_keys(wa) == []
@@ -962,8 +1093,60 @@ def test_old_dry_run_digest_schema_rejected_on_apply() -> None:
             clone_op.apply_clone(request)
 
 
-def test_dry_run_digest_schema_version_is_v10() -> None:
-    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v10"
+def test_dry_run_digest_schema_version_is_v11() -> None:
+    assert DRY_RUN_DIGEST_SCHEMA_VERSION == "tenant_merchant_clone_dry_run_v11"
+
+
+def test_stale_v10_dry_run_digest_rejected_on_apply() -> None:
+    stale_payload = clone_op.build_dry_run_digest_binding_payload(
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        identity_mode_value=PRESERVE_TENANT_IDENTITY_MODE,
+        source_database_identity_digest="sha256:source",
+        target_database_identity_digest="sha256:target",
+        source_tenant_id=48,
+        target_tenant_id=48,
+        target_shell_state="bootstrap_required",
+        table_counts={},
+        source_checksums={},
+        dependency_order=[],
+        target_denied_domain_counts={},
+        source_alembic_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+        target_alembic_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+    )
+    stale_payload["schema_version"] = "tenant_merchant_clone_dry_run_v10"
+    stale_digest = clone_op.compute_dry_run_digest(stale_payload)
+    fresh_plan = {
+        "profile": CLONE_PROFILE_SALLA_MINIMAL,
+        "dry_run_digest": clone_op.compute_dry_run_digest(
+            _topology_digest_payload(
+                profile=CLONE_PROFILE_SALLA_MINIMAL,
+                source_heads=sorted(EXPECTED_SOURCE_ALEMBIC_HEADS),
+                target_heads=sorted(EXPECTED_TARGET_ALEMBIC_HEADS),
+            )
+        ),
+        "target_shell_state": "bootstrap_required",
+        "source_database_identity_digest": "sha256:source",
+        "target_database_identity_digest": "sha256:target",
+    }
+    request = clone_op.build_request_from_env(
+        mode="apply",
+        profile=CLONE_PROFILE_SALLA_MINIMAL,
+        source_tenant_id=48,
+        target_tenant_id=48,
+        clone_id="schema-v10-drift-test",
+        dry_run_digest=stale_digest,
+        manifest_path=None,
+        env=_BASE_ENV,
+    )
+    mock_engine = MagicMock()
+    mock_engine.connect.return_value.__enter__ = MagicMock(return_value=MagicMock())
+    mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(clone_op, "connect_engine", return_value=mock_engine),
+        patch.object(clone_op, "build_plan", return_value=fresh_plan),
+    ):
+        with pytest.raises(ValueError, match="dry_run_digest_mismatch"):
+            clone_op.apply_clone(request)
 
 
 def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() -> None:
@@ -976,7 +1159,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     assert "excluded_operational_source_counts" not in binding
     assert "denied_domain_source_counts" not in binding
     digest = clone_op.compute_dry_run_digest(binding)
-    # v6 bound observational telemetry; identical copy state must keep the same v10 digest
+    # v6 bound observational telemetry; identical copy state must keep the same v11 digest
     # even when operator-report counts drift between dry-run and apply.
     report_a = {
         "excluded_operational_source_counts": {
@@ -1002,7 +1185,7 @@ def test_dry_run_digest_unchanged_when_only_volatile_source_telemetry_differs() 
     }
     assert digest == clone_op.compute_dry_run_digest(binding)
     assert report_a != report_b
-    # v6-style payloads would have diverged; v10 binding ignores report-only telemetry.
+    # v6-style payloads would have diverged; v11 binding ignores report-only telemetry.
     v6_style_a = {**binding, **report_a}
     v6_style_b = {**binding, **report_b}
     assert clone_op.compute_dry_run_digest(v6_style_a) != clone_op.compute_dry_run_digest(

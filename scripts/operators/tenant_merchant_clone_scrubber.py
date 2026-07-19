@@ -100,16 +100,7 @@ def scrub_ai_settings(ai_settings: Mapping[str, Any] | None) -> dict[str, Any]:
 
 def scrub_whatsapp_settings(whatsapp_settings: Mapping[str, Any] | None) -> dict[str, Any]:
     base = dict(copy.deepcopy(whatsapp_settings or {}))
-    for key in (
-        "access_token",
-        "verify_token",
-        "phone_number",
-        "phone_number_id",
-        "owner_whatsapp_number",
-    ):
-        if key in base:
-            base[key] = ""
-    scrubbed, transforms = scrub_json_value(base)
+    scrubbed, transforms = _scrub_integration_value(base)
     if any(t.startswith("unhandled_forbidden_key:") for t in transforms):
         raise ValueError("whatsapp_settings_unhandled_forbidden_key")
     return scrubbed if isinstance(scrubbed, dict) else base
