@@ -640,6 +640,13 @@ async def provider_send_message(
     blocked_path: str = "provider_send_message",
     automation_guard: bool = True,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="whatsapp_provider",
+        operation=operation or "provider_send_message",
+        tenant_id=tenant_id,
+    )
     send_payload = dict(payload or {})
     raw_to = str(send_payload.get("to") or "").strip()
     if raw_to:
