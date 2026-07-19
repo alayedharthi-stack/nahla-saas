@@ -79,6 +79,7 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
 from scripts.operators.tenant_merchant_clone_scrubber import (  # noqa: E402
     _is_forbidden_key,
     _is_integration_email_field_key,
+    _is_provider_ownership_key,
     _normalize_key,
     scrub_ai_settings,
     scrub_json_value,
@@ -618,52 +619,19 @@ def _source_tenant_scalars(
     return values
 
 
-def _json_path_value(value: Any, path: str) -> Any:
-    current: Any = value
-    for segment in path.split("."):
-        if not segment:
-            continue
-        while segment:
-            if "[" in segment:
-                name, rest = segment.split("[", 1)
-                if name:
-                    current = current[name]
-                index_text, segment = rest.split("]", 1)
-                current = current[int(index_text)]
-                segment = segment.removeprefix(".")
-            else:
-                current = current[segment]
-                segment = ""
-    return current
-
-
-def _post_scrub_unmapped_forbidden_violations(value: Any) -> list[str]:
-    """Fail-closed scan of transformed JSON after scrub; ignore emptied scrubbed keys."""
-    violations: list[str] = []
-    for path in scan_for_unhandled_forbidden_keys(value):
-        try:
-            leaf_value = _json_path_value(value, path)
-        except (KeyError, IndexError, TypeError):
-            violations.append(path)
-            continue
-        if leaf_value not in ("", None):
-            violations.append(path)
-    return violations
-
-
-def _integration_config_post_scrub_violations(
+def _provider_config_post_scrub_violations(
     value: Any,
     *,
     path: str = "",
 ) -> list[str]:
-    """Unknown forbidden keys on scrubbed integration config (path-only audit)."""
+    """Validate scrubbed provider config using path-only violations."""
     violations: list[str] = []
     if isinstance(value, Mapping):
         for key, child in value.items():
             child_path = f"{path}.{key}" if path else key
             if _is_integration_email_field_key(key):
                 violations.extend(
-                    _integration_config_post_scrub_violations(child, path=child_path)
+                    _provider_config_post_scrub_violations(child, path=child_path)
                 )
                 continue
             normalized = _normalize_key(key)
@@ -672,19 +640,26 @@ def _integration_config_post_scrub_violations(
                 for marker in ("token", "secret", "password", "oauth", "api_key")
             ):
                 violations.extend(
-                    _integration_config_post_scrub_violations(child, path=child_path)
+                    _provider_config_post_scrub_violations(child, path=child_path)
+                )
+                continue
+            if _is_provider_ownership_key(key):
+                if child not in ("", None):
+                    violations.append(child_path)
+                violations.extend(
+                    _provider_config_post_scrub_violations(child, path=child_path)
                 )
                 continue
             if _is_forbidden_key(key):
                 if normalized not in SCRUBBED_JSON_KEY_REPLACEMENTS:
                     violations.append(child_path)
             violations.extend(
-                _integration_config_post_scrub_violations(child, path=child_path)
+                _provider_config_post_scrub_violations(child, path=child_path)
             )
     elif isinstance(value, list):
         for idx, item in enumerate(value):
             violations.extend(
-                _integration_config_post_scrub_violations(
+                _provider_config_post_scrub_violations(
                     item,
                     path=f"{path}[{idx}]",
                 )
@@ -830,12 +805,15 @@ def _transform_row(
     for column in spec_json_columns:
         if column not in row or row[column] is None:
             continue
-        if spec_name == "integrations" and column == "config":
-            violations = _integration_config_post_scrub_violations(out[column])
+        if (spec_name, column) in {
+            ("integrations", "config"),
+            ("tenant_settings", "whatsapp_settings"),
+        }:
+            violations = _provider_config_post_scrub_violations(out[column])
             if violations:
                 raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
             continue
-        violations = _post_scrub_unmapped_forbidden_violations(out[column])
+        violations = scan_for_unhandled_forbidden_keys(out[column])
         if violations:
             raise ValueError(f"forbidden_json_keys:{spec_name}.{column}")
 

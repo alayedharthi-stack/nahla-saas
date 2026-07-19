@@ -833,7 +833,7 @@ def test_tenant_settings_transform_scrubs_whatsapp_ownership_and_passes_post_sca
     assert wa["verify_token"] == ""
     assert wa["business_name"] == "متجر تجريبي عام"
     assert wa["catalog_enabled"] is True
-    assert clone_op._post_scrub_unmapped_forbidden_violations(wa) == []
+    assert clone_op._provider_config_post_scrub_violations(wa) == []
     assert any("tenant_settings.whatsapp_settings_stripped" in t for t in transforms)
 
 
@@ -890,9 +890,37 @@ def test_tenant_settings_transform_store_settings_scrubs_known_secret_post_scan(
     )
     assert transformed["store_settings"]["access_token"] == ""
     assert transformed["store_settings"]["catalog_title"] == "قميص قطني أزرق"
-    assert clone_op._post_scrub_unmapped_forbidden_violations(
-        transformed["store_settings"]
-    ) == []
+    assert scan_for_unhandled_forbidden_keys(transformed["store_settings"]) == []
+
+
+def test_tenant_settings_ai_unknown_empty_key_cannot_bypass_secret_rejection() -> None:
+    tenant_settings_spec = next(
+        spec
+        for spec in table_specs_for_profile(CLONE_PROFILE_SALLA_MINIMAL)
+        if spec.name == "tenant_settings"
+    )
+    row = {
+        "tenant_id": 48,
+        "ai_settings": {
+            "access_token": "raw-secret-must-not-pass",
+            "customer_id": "",
+            "persona_tone": "friendly",
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match="forbidden_json_keys:tenant_settings.ai_settings",
+    ):
+        clone_op._transform_row(
+            row,
+            spec_name=tenant_settings_spec.name,
+            spec_json_columns=tenant_settings_spec.json_columns,
+            target_tenant_id=48,
+            id_maps={},
+            remap_fk_columns=tenant_settings_spec.remap_fk_columns,
+            scrub_phone_columns=tenant_settings_spec.scrub_phone_columns,
+            deferred_fk_columns=tenant_settings_spec.deferred_fk_columns,
+        )
 
 
 def test_stale_v8_dry_run_digest_rejected_on_apply() -> None:
@@ -1596,6 +1624,7 @@ def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan()
             "access_token": "secret-token",
             "refresh_token": "refresh",
             "phone_e164": "+966501234567",
+            "phone_number_id": "meta-phone-id",
             "store_id": "123",
         },
     }
@@ -1612,9 +1641,22 @@ def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan()
     assert transformed["config"]["access_token"] == ""
     assert transformed["config"]["refresh_token"] == ""
     assert transformed["config"]["phone_e164"] == "+00000000000"
+    assert transformed["config"]["phone_number_id"] == ""
     assert transformed["config"]["store_id"] == ""
-    assert scan_for_unhandled_forbidden_keys(transformed["config"]) == []
+    assert clone_op._provider_config_post_scrub_violations(
+        transformed["config"]
+    ) == []
     assert any("integrations.config_stripped" in t for t in transforms)
+
+
+def test_provider_config_post_scan_rejects_nonempty_ownership_and_empty_unknown() -> None:
+    violations = clone_op._provider_config_post_scrub_violations(
+        {
+            "routing": {"phoneNumberId": "not-scrubbed"},
+            "customer_id": "",
+        }
+    )
+    assert violations == ["routing.phoneNumberId", "customer_id"]
 
 
 def test_non_integration_json_validates_transformed_output_fail_closed() -> None:
