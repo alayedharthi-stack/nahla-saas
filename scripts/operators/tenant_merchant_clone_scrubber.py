@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 from scripts.operators.tenant_merchant_clone_contract import (
     FORBIDDEN_JSON_KEY_MARKERS,
     PHONE_SCRUB_PLACEHOLDER,
+    PROVIDER_OWNERSHIP_KEYS,
     SCRUBBED_JSON_KEY_REPLACEMENTS,
     TARGET_AI_MODE,
     TARGET_AI_TEST_ALLOWLIST,
@@ -19,6 +20,18 @@ _PHONE_RE = re.compile(r"\+?\d{10,15}")
 
 def _normalize_key(key: str) -> str:
     return key.lower().replace("-", "_")
+
+
+def _to_snake_key(key: str) -> str:
+    """Normalize JSON key to snake_case for closed registry lookups."""
+    normalized = key.replace("-", "_")
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+    normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", normalized)
+    return normalized.lower()
+
+
+def _is_provider_ownership_key(key: str) -> bool:
+    return _to_snake_key(key) in PROVIDER_OWNERSHIP_KEYS
 
 
 def _is_forbidden_key(key: str) -> bool:
@@ -121,6 +134,10 @@ def _scrub_integration_value(value: Any, *, path: str = "") -> tuple[Any, list[s
             ):
                 scrubbed[key] = ""
                 transformations.append(f"scrub_integration_secret_key:{child_path}")
+                continue
+            if _is_provider_ownership_key(key):
+                scrubbed[key] = ""
+                transformations.append(f"scrub_integration_ownership_key:{child_path}")
                 continue
             if _is_forbidden_key(key):
                 replacement = SCRUBBED_JSON_KEY_REPLACEMENTS.get(normalized)
