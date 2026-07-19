@@ -630,29 +630,27 @@ def _provider_config_post_scrub_violations(
         for key, child in value.items():
             child_path = f"{path}.{key}" if path else key
             if _is_integration_email_field_key(key):
-                violations.extend(
-                    _provider_config_post_scrub_violations(child, path=child_path)
-                )
+                if child != "":
+                    violations.append(child_path)
                 continue
             normalized = _normalize_key(key)
             if any(
                 marker in normalized
                 for marker in ("token", "secret", "password", "oauth", "api_key")
             ):
-                violations.extend(
-                    _provider_config_post_scrub_violations(child, path=child_path)
-                )
+                if child != "":
+                    violations.append(child_path)
                 continue
             if _is_provider_ownership_key(key):
-                if child not in ("", None):
+                if child != "":
                     violations.append(child_path)
-                violations.extend(
-                    _provider_config_post_scrub_violations(child, path=child_path)
-                )
                 continue
             if _is_forbidden_key(key):
                 if normalized not in SCRUBBED_JSON_KEY_REPLACEMENTS:
                     violations.append(child_path)
+                elif child != SCRUBBED_JSON_KEY_REPLACEMENTS[normalized]:
+                    violations.append(child_path)
+                continue
             violations.extend(
                 _provider_config_post_scrub_violations(child, path=child_path)
             )

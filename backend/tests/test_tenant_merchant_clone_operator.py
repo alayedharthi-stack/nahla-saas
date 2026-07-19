@@ -29,11 +29,13 @@ from scripts.operators.tenant_merchant_clone_contract import (  # noqa: E402
     EXCLUDED_OPERATIONAL_TABLES,
     EXPECTED_SOURCE_ALEMBIC_HEADS,
     EXPECTED_TARGET_ALEMBIC_HEADS,
+    PHONE_SCRUB_PLACEHOLDER,
     PRESERVE_TENANT_IDENTITY_MODE,
     PRODUCTION_IDENTITY_CLASS,
     PRODUCTION_SOURCE_CONFIRM_ENV,
     PRODUCTION_SOURCE_CONFIRM_TOKEN,
     PROVIDER_OWNERSHIP_KEYS,
+    SCRUBBED_JSON_KEY_REPLACEMENTS,
     allowed_table_names_for_profile,
     resolve_clone_profile,
     table_specs_for_profile,
@@ -1649,14 +1651,35 @@ def test_integration_transform_scrubs_known_secrets_and_passes_post_scrub_scan()
     assert any("integrations.config_stripped" in t for t in transforms)
 
 
-def test_provider_config_post_scan_rejects_nonempty_ownership_and_empty_unknown() -> None:
+def test_provider_config_post_scan_rejects_invalid_sensitive_postconditions() -> None:
     violations = clone_op._provider_config_post_scrub_violations(
         {
+            "owner_email": "owner@merchant.example",
+            "access_token": "not-scrubbed",
             "routing": {"phoneNumberId": "not-scrubbed"},
+            "phone_e164": "",
             "customer_id": "",
         }
     )
-    assert violations == ["routing.phoneNumberId", "customer_id"]
+    assert violations == [
+        "owner_email",
+        "access_token",
+        "routing.phoneNumberId",
+        "phone_e164",
+        "customer_id",
+    ]
+
+
+def test_provider_config_post_scan_accepts_exact_sensitive_replacements() -> None:
+    transformed = {
+        "owner_email": "",
+        "access_token": "",
+        "routing": {"phoneNumberId": ""},
+        "phone_e164": PHONE_SCRUB_PLACEHOLDER,
+        "phone_number": SCRUBBED_JSON_KEY_REPLACEMENTS["phone_number"],
+        "catalog_enabled": True,
+    }
+    assert clone_op._provider_config_post_scrub_violations(transformed) == []
 
 
 def test_non_integration_json_validates_transformed_output_fail_closed() -> None:
