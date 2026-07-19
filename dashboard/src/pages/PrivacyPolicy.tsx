@@ -1,4 +1,5 @@
 import LegalFooter from '../components/LegalFooter'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 /**
  * PrivacyPolicy.tsx
@@ -8,7 +9,7 @@ import LegalFooter from '../components/LegalFooter'
  */
 export default function PrivacyPolicy() {
   return (
-    <div className="min-h-screen bg-slate-50 py-12 px-4" dir="ltr">
+    <div className="min-h-screen bg-slate-50 py-12 px-4" lang="en" dir="ltr">
       <div className="max-w-2xl mx-auto">
 
         {/* Header */}
@@ -38,6 +39,36 @@ export default function PrivacyPolicy() {
               Platform. This Privacy Policy explains how we collect, use,
               store, and protect your personal data when you use our services.
             </p>
+          </section>
+
+          <hr className="border-slate-100" />
+
+          {/* Legal Entity */}
+          <section>
+            <h2 className="text-base font-bold text-slate-900 mb-2">
+              Legal Entity / الكيان القانوني
+            </h2>
+            <div className="grid gap-4 sm:grid-cols-2 sm:gap-6">
+              <div className="space-y-2" dir="ltr">
+                <p>{COMPANY_INFO.legalStatement.en}</p>
+                <p>National Number: {COMPANY_INFO.nationalUnifiedNumber}</p>
+                <p>
+                  National Address:
+                  <br />
+                  {COMPANY_INFO.address.enLines.map((line) => (
+                    <span key={line}>
+                      {line}
+                      <br />
+                    </span>
+                  ))}
+                </p>
+              </div>
+              <div className="space-y-2 text-slate-600" dir="rtl">
+                <p>{COMPANY_INFO.legalStatement.ar}</p>
+                <p>الرقم الوطني الموحد: {COMPANY_INFO.nationalUnifiedNumber}</p>
+                <p>العنوان الوطني: {COMPANY_INFO.address.ar}</p>
+              </div>
+            </div>
           </section>
 
           <hr className="border-slate-100" />
@@ -253,10 +284,10 @@ export default function PrivacyPolicy() {
               handle your data, please contact us at:
             </p>
             <a
-              href="mailto:support@nahlah.ai"
+              href={`mailto:${COMPANY_INFO.email}`}
               className="inline-block mt-3 px-4 py-2.5 bg-slate-800 text-white text-sm font-semibold rounded-xl hover:bg-slate-700 transition-colors"
             >
-              support@nahlah.ai
+              {COMPANY_INFO.email}
             </a>
           </section>
 

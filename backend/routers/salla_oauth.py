@@ -588,6 +588,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                     bool(new_cfg.get("refresh_token")),
                 )
 
+        if tenant_id and store_name:
+            from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+            persist_external_store_name(db, tenant_id, store_name, "salla")
         db.commit()
 
     except Exception as exc:
@@ -1465,6 +1469,10 @@ async def salla_activate_from_email(request: Request, db: Session = Depends(get_
                 },
             ))
 
+    if tenant_id and store_name:
+        from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+        persist_external_store_name(db, tenant_id, store_name, "salla")
     db.commit()
 
     # ── Issue JWT ─────────────────────────────────────────────────────────
@@ -2693,6 +2701,10 @@ async def salla_api_oauth_callback(
                 enabled=True,
             ))
 
+        if tenant_id and store_name:
+            from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+            persist_external_store_name(db, tenant_id, store_name, "salla")
         db.commit()
         logger.info(
             "[Salla API OAuth] OK | tenant=%s store_id=%s store=%r api_sync_enabled=True",
@@ -3216,6 +3228,10 @@ async def salla_oauth_callback(
                     config=new_config, enabled=True,
                 ))
 
+        if tenant_id and store_name:
+            from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+            persist_external_store_name(db, tenant_id, store_name, "salla")
         db.commit()
         logger.info(
             "[Salla OAuth] ✅ DB commit SUCCESS | tenant=%s store_id=%s | "
@@ -3625,6 +3641,10 @@ async def salla_test_oauth_callback(
                     config=cfg, enabled=True,
                 ))
 
+        if effective_tenant and store_name:
+            from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+            persist_external_store_name(db, effective_tenant, store_name, "salla")
         db.commit()
         logger.info("[SallaTest] Integration saved | tenant=%s store=%s", tenant_id, salla_store_id)
     except Exception as exc:

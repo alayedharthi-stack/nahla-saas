@@ -48,6 +48,10 @@ export interface AISettings {
 
 export interface StoreSettings {
   store_name: string
+  store_name_ar?: string
+  store_name_en?: string
+  store_name_ar_source?: string
+  store_name_en_source?: string
   store_logo_url: string
   store_url: string
   platform_type: 'salla' | 'zid' | 'shopify' | 'custom'

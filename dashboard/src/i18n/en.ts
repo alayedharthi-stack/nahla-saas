@@ -3,6 +3,7 @@ import { customersPageEn } from './customersPageLabels'
 import { campaignsListEn } from './campaignsListPageLabels'
 import { templatesPageExtraEn } from './templatesPageLabels'
 import { landingPricingEn } from './landingPricingLabels'
+import { COMPANY_INFO } from '../config/companyInfo'
 
 const en: Translations = {
   meta: { code: 'en', label: 'English', dir: 'ltr' },
@@ -921,7 +922,7 @@ const en: Translations = {
       defaultPendingMessage:   'The Nahla team will contact you soon to complete WhatsApp connect.',
       requestTimeLabel:        'Request time:',
       contactInstructions:     'You can also reach us at:',
-      supportEmail:            'support@nahlah.ai',
+      supportEmail:            COMPANY_INFO.email,
       manualSetupLink:         'Read the manual setup guide',
     },
     connLabels: {

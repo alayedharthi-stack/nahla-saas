@@ -137,7 +137,7 @@ export interface LandingCopy {
     note: string
     primary: string
     whatsapp: string
-    whatsappHref: string
+    whatsappText: string
   }
   faq: {
     eyebrow: string
@@ -422,7 +422,7 @@ export const LANDING_COPY: Record<Lang, LandingCopy> = {
       note: 'تجربة 14 يوم مجانية · الإعداد في ساعة واحدة · إلغاء بضغطة واحدة',
       primary: 'أنشئ حسابك الآن مجاناً',
       whatsapp: 'تحدث معنا على واتساب',
-      whatsappHref: 'https://wa.me/966500000000?text=أريد معرفة المزيد عن نحلة',
+      whatsappText: 'أريد معرفة المزيد عن نحلة',
     },
     faq: {
       eyebrow: 'لديك تساؤلات؟',
@@ -742,7 +742,7 @@ export const LANDING_COPY: Record<Lang, LandingCopy> = {
       note: '14-day free trial · Setup in about one hour · Cancel anytime',
       primary: 'Create your free account',
       whatsapp: 'Chat with us on WhatsApp',
-      whatsappHref: 'https://wa.me/966500000000?text=I%20want%20to%20learn%20more%20about%20Nahla',
+      whatsappText: 'I want to learn more about Nahla',
     },
     faq: {
       eyebrow: 'Questions?',

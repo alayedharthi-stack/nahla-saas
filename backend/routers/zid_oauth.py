@@ -157,6 +157,10 @@ def _save_zid_tokens(
             "store_name": store_name,
             "email":      email,
         }
+    if tenant_id and store_name:
+        from core.store_identity import persist_external_store_name  # noqa: PLC0415
+
+        persist_external_store_name(db, tenant_id, store_name, "zid")
     db.flush()
 
 

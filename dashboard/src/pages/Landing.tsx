@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useId } from 'react'
 import { Link } from 'react-router-dom'
 import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
@@ -9,6 +9,7 @@ import SalesIntelligenceSection from '../components/SalesIntelligenceSection'
 import { useLanguage } from '../i18n/context'
 import { LANDING_COPY } from '../i18n/landingCopy'
 import { landingPricingAr, landingPricingEn } from '../i18n/landingPricingLabels'
+import { COMPANY_INFO } from '../config/companyInfo'
 import {
   MessageCircle,
   ShoppingBag,
@@ -90,6 +91,9 @@ function HoneycombBg({ opacity = 'opacity-[0.04]' }: { opacity?: string }) {
 // ── FAQ accordion item ────────────────────────────────────────────────────────
 function FaqItem({ q, a }: { q: string; a: string }) {
   const [open, setOpen] = useState(false)
+  const baseId = useId()
+  const buttonId = `${baseId}-button`
+  const panelId = `${baseId}-panel`
   return (
     <div
       className={`rounded-2xl overflow-hidden transition-all duration-200 ${
@@ -97,16 +101,28 @@ function FaqItem({ q, a }: { q: string; a: string }) {
       }`}
     >
       <button
+        type="button"
+        id={buttonId}
+        aria-expanded={open}
+        aria-controls={panelId}
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between p-5 sm:p-6 text-start gap-4"
       >
         <span className="text-white font-bold text-base sm:text-lg leading-snug">{q}</span>
-        <span className={`shrink-0 transition-colors ${open ? 'text-amber-400' : 'text-slate-500'}`}>
+        <span
+          aria-hidden="true"
+          className={`shrink-0 transition-colors ${open ? 'text-amber-400' : 'text-slate-500'}`}
+        >
           {open ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
         </span>
       </button>
       {open && (
-        <div className="px-5 sm:px-6 pb-5 sm:pb-6 text-slate-300 leading-loose text-sm sm:text-base border-t border-white/6 pt-4">
+        <div
+          id={panelId}
+          role="region"
+          aria-labelledby={buttonId}
+          className="px-5 sm:px-6 pb-5 sm:pb-6 text-slate-300 leading-loose text-sm sm:text-base border-t border-white/6 pt-4"
+        >
           {a}
         </div>
       )}
@@ -381,6 +397,13 @@ const FEATURE_ICONS = [
   Send, LayoutTemplate, CalendarHeart, BarChart3,
 ] as const
 
+const OFFICIAL_WHATSAPP_DIGITS = COMPANY_INFO.phone.href.replace(/^tel:\+?/, '')
+
+function officialWhatsAppUrl(text?: string): string {
+  const base = `https://wa.me/${OFFICIAL_WHATSAPP_DIGITS}`
+  return text ? `${base}?text=${encodeURIComponent(text)}` : base
+}
+
 // ── Main landing page ─────────────────────────────────────────────────────────
 export default function Landing() {
   const { lang, setLang, dir } = useLanguage()
@@ -393,6 +416,7 @@ export default function Landing() {
   const [scrolled, setScrolled]         = useState(false)
   const [mobileMenuOpen, setMobile]     = useState(false)
   const heroRef                          = useRef<HTMLDivElement>(null)
+  const mobileMenuId                     = useId()
 
   useEffect(() => {
     const fn = () => setScrolled(window.scrollY > 50)
@@ -439,13 +463,25 @@ export default function Landing() {
   const langButtonClass =
     'shrink-0 inline-flex items-center justify-center min-h-[36px] px-3 py-2 text-sm font-semibold text-amber-300 hover:text-white transition-colors whitespace-nowrap'
 
+  const navAriaLabel = lang === 'en' ? 'Main navigation' : 'التنقل الرئيسي'
+  const skipToMainLabel = lang === 'en' ? 'Skip to main content' : 'تخطّ إلى المحتوى الرئيسي'
+
   return (
-    <div dir={dir} className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily }}>
+    <div dir={dir} lang={lang} className="landing-page min-h-screen bg-slate-900 overflow-x-hidden" style={{ fontFamily }}>
+
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:start-4 focus:z-[100] focus:rounded-lg focus:bg-amber-500 focus:px-4 focus:py-2 focus:text-slate-900 focus:font-bold focus:outline-none focus:ring-2 focus:ring-amber-300"
+      >
+        {skipToMainLabel}
+      </a>
 
       {/* ══════════════════════════════════════════════════════════
           NAVBAR
       ══════════════════════════════════════════════════════════ */}
-      <nav className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 pt-safe-nav ${
+      <nav
+        aria-label={navAriaLabel}
+        className={`fixed top-0 inset-x-0 z-50 transition-all duration-300 pt-safe-nav ${
         scrolled ? 'bg-slate-900/96 backdrop-blur-xl shadow-lg shadow-black/30 border-b border-white/5' : 'bg-transparent'
       }`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -463,6 +499,7 @@ export default function Landing() {
             <div className="hidden lg:flex flex-1 min-w-0 items-center justify-center gap-0.5 px-2">
               {navLinks.map((l) => (
                 <button
+                  type="button"
                   key={l.id}
                   onClick={() => scrollTo(l.id)}
                   className="text-slate-400 hover:text-white transition-colors px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
@@ -498,6 +535,8 @@ export default function Landing() {
                 type="button"
                 className="md:hidden text-slate-400 flex items-center justify-center min-w-[44px] min-h-[44px] rounded-xl -me-2"
                 onClick={() => setMobile(!mobileMenuOpen)}
+                aria-expanded={mobileMenuOpen}
+                aria-controls={mobileMenuId}
                 aria-label={mobileMenuOpen ? c.menuClose : c.menuOpen}
               >
                 {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
@@ -508,12 +547,16 @@ export default function Landing() {
 
         {/* Mobile dropdown */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-white/8 bg-slate-900/98 backdrop-blur-xl">
+          <div id={mobileMenuId} className="md:hidden border-t border-white/8 bg-slate-900/98 backdrop-blur-xl">
             <div className="px-4 py-3 flex flex-col divide-y divide-white/5">
               <div className="flex flex-col pb-2">
                 {navLinks.map((l) => (
-                  <button key={l.id} onClick={() => scrollTo(l.id)}
-                    className="text-slate-300 text-sm font-medium py-3 text-start hover:text-amber-400 transition-colors">
+                  <button
+                    type="button"
+                    key={l.id}
+                    onClick={() => scrollTo(l.id)}
+                    className="text-slate-300 text-sm font-medium py-3 text-start hover:text-amber-400 transition-colors"
+                  >
                     {l.label}
                   </button>
                 ))}
@@ -538,6 +581,8 @@ export default function Landing() {
           </div>
         )}
       </nav>
+
+      <main id="main-content" tabIndex={-1}>
 
       {/* ══════════════════════════════════════════════════════════
           HERO
@@ -585,6 +630,7 @@ export default function Landing() {
               <ArrowCta size={18} className="pointer-events-none transition-transform motion-safe:group-hover:translate-x-0.5 rtl:motion-safe:group-hover:-translate-x-1" />
             </Link>
             <button
+              type="button"
               onClick={() => scrollTo('how')}
               className="flex items-center gap-2 text-slate-300 hover:text-white border border-white/15 hover:border-amber-400/35 hover:bg-amber-500/5 text-sm sm:text-base px-6 py-4 rounded-2xl transition-all duration-200 w-full sm:w-auto justify-center order-2"
             >
@@ -654,6 +700,7 @@ export default function Landing() {
         </div>
 
         <button
+          type="button"
           onClick={() => scrollTo('how')}
           className="absolute bottom-8 left-1/2 -translate-x-1/2 text-slate-600 hover:text-amber-400 transition-colors animate-bounce"
         >
@@ -824,7 +871,7 @@ export default function Landing() {
                 className="bg-slate-800/40 border border-white/5 rounded-xl p-4 hover:border-white/10 transition-colors"
               >
                 <div className={`w-2 h-2 rounded-full mb-2.5 ${cap.dot}`} />
-                <h4 className="text-white font-bold text-sm mb-1">{cap.title}</h4>
+                <h3 className="text-white font-bold text-sm mb-1">{cap.title}</h3>
                 <p className="text-slate-400 text-xs leading-relaxed">{cap.desc}</p>
               </div>
             ))}
@@ -1073,7 +1120,7 @@ export default function Landing() {
               <ArrowCta size={18} className="transition-transform group-hover:translate-x-0.5 rtl:group-hover:-translate-x-1" />
             </Link>
             <a
-              href={c.finalCta.whatsappHref}
+              href={officialWhatsAppUrl(c.finalCta.whatsappText)}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 border border-white/15 hover:border-amber-400/30 text-slate-300 hover:text-white font-bold text-base px-8 py-4 rounded-2xl transition-all duration-200 hover:bg-amber-500/5 w-full sm:w-auto justify-center"
@@ -1163,6 +1210,8 @@ export default function Landing() {
         </div>
       </section>
 
+      </main>
+
       {/* ══════════════════════════════════════════════════════════
           FOOTER
       ══════════════════════════════════════════════════════════ */}
@@ -1191,11 +1240,12 @@ export default function Landing() {
             </div>
 
             <div>
-              <h4 className="text-white font-bold text-sm mb-5">{c.footer.platformHeading}</h4>
+              <h2 className="text-white font-bold text-sm mb-5">{c.footer.platformHeading}</h2>
               <ul className="space-y-3">
                 {c.footer.platformLinks.map(({ label, id }) => (
                   <li key={id}>
                     <button
+                      type="button"
                       onClick={() => scrollTo(id)}
                       className="text-slate-500 hover:text-amber-400 transition-colors text-sm"
                     >
@@ -1207,7 +1257,7 @@ export default function Landing() {
             </div>
 
             <div>
-              <h4 className="text-white font-bold text-sm mb-5">{c.footer.accountHeading}</h4>
+              <h2 className="text-white font-bold text-sm mb-5">{c.footer.accountHeading}</h2>
               <ul className="space-y-3">
                 <li>
                   <Link to="/register" className="text-slate-500 hover:text-amber-400 transition-colors text-sm">
@@ -1221,7 +1271,7 @@ export default function Landing() {
                 </li>
                 <li>
                   <a
-                    href="https://wa.me/966500000000"
+                    href={officialWhatsAppUrl()}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-slate-500 hover:text-amber-400 transition-colors text-sm"

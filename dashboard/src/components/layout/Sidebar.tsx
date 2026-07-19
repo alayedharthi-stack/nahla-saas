@@ -40,6 +40,22 @@ import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { isAdmin } from '../../auth'
 import { apiCall } from '../../api/client'
+import type { StoreSettings } from '../../api/settings'
+
+const NAHLA_STORE_NAME_KEY = 'nahla_store_name'
+
+function resolveSidebarStoreName(store: StoreSettings, lang: 'ar' | 'en'): string {
+  const primary = lang === 'ar' ? store.store_name_ar : store.store_name_en
+  const secondary = lang === 'ar' ? store.store_name_en : store.store_name_ar
+  const fallback = lang === 'ar' ? 'نحلة' : 'Nahla'
+  const pick = (value?: string) => (value && value.trim()) || ''
+  return (
+    pick(primary)
+    || pick(secondary)
+    || pick(store.store_name)
+    || fallback
+  )
+}
 
 interface NavItem {
   to:    string
@@ -145,8 +161,8 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
-  const { t } = useLanguage()
-  const [storeName, setStoreName] = useState('نحلة')
+  const { t, lang } = useLanguage()
+  const [storeName, setStoreName] = useState(() => lang === 'ar' ? 'نحلة' : 'Nahla')
   // Sidebar-only logo override: use the white-background brand asset here so
   // the bee mark sits cleanly on the dark sidebar. Other surfaces (login,
   // landing, register, …) keep using the regular /logo.png.
@@ -157,13 +173,21 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
 
   useEffect(() => {
     if (adminMode) return  // Admin doesn't need merchant store info
-    apiCall<{ store?: { store_name?: string; store_logo_url?: string } }>('/settings')
+    apiCall<{ store?: StoreSettings }>('/settings')
       .then(data => {
-        if (data?.store?.store_name)     setStoreName(data.store.store_name)
-        if (data?.store?.store_logo_url) setLogoUrl(data.store.store_logo_url)
+        if (data?.store) {
+          const resolved = resolveSidebarStoreName(data.store, lang)
+          setStoreName(resolved)
+          try {
+            localStorage.setItem(NAHLA_STORE_NAME_KEY, resolved)
+          } catch {
+            /* ignore quota / private mode */
+          }
+          if (data.store.store_logo_url) setLogoUrl(data.store.store_logo_url)
+        }
       })
       .catch(() => {/* keep defaults */})
-  }, [adminMode])
+  }, [adminMode, lang])
 
   const navGroups = adminMode ? ADMIN_NAV_GROUPS : MERCHANT_NAV_GROUPS
   const accentColor = adminMode ? 'bg-amber-400' : 'bg-brand-400'
