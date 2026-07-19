@@ -223,8 +223,24 @@ try {
     }
     if (-not $ready) { throw "sidecar_readiness_or_dns_verification_failed" }
 
-    # Establish controls are externally reachable from an egress namespace.
-    $baseline = & docker exec $proxyName python -c "import json,socket; targets=[('1.1.1.1',443),('8.8.8.8',443)]; [(lambda s:s.close())(socket.create_connection(t,5)) for t in targets]; print(json.dumps({'namespace':'connect_proxy_egress','reachable':[f'{h}:{p}' for h,p in targets]}))"
+    # Establish every configured control is reachable from an egress namespace.
+    $negativeControls = @()
+    foreach ($target in $config.negative_probe_targets) {
+        foreach ($ip in @($target.ips | Sort-Object -Unique)) {
+            $negativeControls += [ordered]@{
+                control_id = "$($target.host)|${ip}|$($target.port)"
+                host = $target.host
+                ip = $ip
+                port = [int]$target.port
+            }
+        }
+    }
+    if ($negativeControls.Count -lt 2) { throw "negative_probe_controls_incomplete" }
+    $controlsJson = $negativeControls | ConvertTo-Json -Compress
+    $controlsBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes($controlsJson)
+    )
+    $baseline = & docker exec $proxyName python -c "import base64,json,socket,sys; controls=json.loads(base64.b64decode(sys.argv[1])); [(lambda s:s.close())(socket.create_connection((c['ip'],int(c['port'])),5)) for c in controls]; print(json.dumps({'namespace':'connect_proxy_egress','reachable':controls},sort_keys=True))" $controlsBase64
     if ($LASTEXITCODE) { throw "egress_control_baseline_failed" }
     $baseline | Set-Content -Encoding utf8 -LiteralPath (Join-Path $EvidenceDir "egress-control-baseline.json")
 

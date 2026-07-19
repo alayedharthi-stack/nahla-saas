@@ -113,12 +113,28 @@ print(json.dumps(payload, sort_keys=True))
 PY
 
 PROBE_OUT="${EVIDENCE_DIR}/probe_results.json"
+mapfile -t DIRECT_CONTROLS < <(
+  python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+for target in c["negative_probe_targets"]:
+    for ip in sorted(set(target["ips"])):
+        print("{}|{}|{}".format(target["host"], ip, target["port"]))
+' "${CONFIG_PATH}"
+)
+[[ "${#DIRECT_CONTROLS[@]}" -ge 2 ]] || {
+  echo "negative_probe_controls_incomplete" >&2
+  exit 1
+}
+DIRECT_CONTROL_ARGS=()
+for control in "${DIRECT_CONTROLS[@]}"; do
+  DIRECT_CONTROL_ARGS+=(--direct-control "${control}")
+done
 python3 "${RUNNER_ROOT}/scripts/probe_connectivity.py" \
   --config "${CONFIG_PATH}" \
   --proxy-host "${PROXY_IP}" \
   --relay-host "${RELAY_IP}" \
-  --direct-control 1.1.1.1:443 \
-  --direct-control 8.8.8.8:443 \
+  "${DIRECT_CONTROL_ARGS[@]}" \
   --output "${PROBE_OUT}"
 
 COMPLETED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

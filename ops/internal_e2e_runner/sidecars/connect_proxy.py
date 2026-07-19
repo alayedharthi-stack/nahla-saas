@@ -36,11 +36,20 @@ class ExactConnectProxy:
             raise RuntimeError("llm_live_dns_mismatch")
         return live
 
+    async def open_verified_upstream(
+        self,
+    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        """Resolve once, then connect to the selected numeric address."""
+        selected_ip = self.resolve_verified()[0]
+        reader, writer = await asyncio.open_connection(selected_ip, 443)
+        return selected_ip, reader, writer
+
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         accepted = False
         target = ""
+        selected_upstream_ip = None
         try:
             request = await asyncio.wait_for(reader.readline(), timeout=5)
             parts = request.decode("ascii", "replace").strip().split()
@@ -51,10 +60,11 @@ class ExactConnectProxy:
                 writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
                 await writer.drain()
                 return
-            self.resolve_verified()
-            upstream_reader, upstream_writer = await asyncio.open_connection(
-                self.host, 443
-            )
+            (
+                selected_upstream_ip,
+                upstream_reader,
+                upstream_writer,
+            ) = await self.open_verified_upstream()
             accepted = True
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
@@ -68,6 +78,7 @@ class ExactConnectProxy:
                 "at_utc": datetime.now(timezone.utc).isoformat(),
                 "target": target,
                 "accepted": accepted,
+                "selected_upstream_ip": selected_upstream_ip,
             }
             with self.evidence.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")

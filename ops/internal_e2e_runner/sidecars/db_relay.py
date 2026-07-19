@@ -41,15 +41,25 @@ class ExactDbRelay:
             raise RuntimeError("db_live_dns_mismatch")
         return live
 
+    async def open_verified_upstream(
+        self,
+    ) -> tuple[str, asyncio.StreamReader, asyncio.StreamWriter]:
+        """Resolve once, then connect to the selected numeric address."""
+        selected_ip = self.resolve_verified()[0]
+        reader, writer = await asyncio.open_connection(selected_ip, self.port)
+        return selected_ip, reader, writer
+
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         connected = False
+        selected_upstream_ip = None
         try:
-            self.resolve_verified()
-            upstream_reader, upstream_writer = await asyncio.open_connection(
-                self.host, self.port
-            )
+            (
+                selected_upstream_ip,
+                upstream_reader,
+                upstream_writer,
+            ) = await self.open_verified_upstream()
             connected = True
             await asyncio.gather(
                 _pipe(reader, upstream_writer), _pipe(upstream_reader, writer)
@@ -62,6 +72,7 @@ class ExactDbRelay:
                 "target_host": self.host,
                 "target_port": self.port,
                 "connected": connected,
+                "selected_upstream_ip": selected_upstream_ip,
             }
             with self.evidence.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=True) + "\n")

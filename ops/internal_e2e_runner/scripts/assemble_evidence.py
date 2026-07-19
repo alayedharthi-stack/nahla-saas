@@ -4,11 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ops.internal_e2e_runner.lib.config import load_runner_config, normalize_operator_command
 from ops.internal_e2e_runner.lib.evidence import build_network_evidence, write_network_evidence
+
+
+def validate_negative_control_binding(
+    expected: list[str], baseline: list[str], runner: list[str]
+) -> None:
+    if (
+        not expected
+        or Counter(expected) != Counter(baseline)
+        or Counter(expected) != Counter(runner)
+    ):
+        raise ValueError("negative_probe_control_binding_mismatch")
 
 
 def main() -> int:
@@ -40,6 +52,29 @@ def main() -> int:
         probe_results = json.load(handle)
     with open(args.docker_inspect, encoding="utf-8-sig") as handle:
         docker_topology = json.load(handle)
+
+    expected_controls = [
+        f"{target.hostname}|{ip}|{target.port}"
+        for target in config.negative_probe_targets
+        for ip in target.ips
+    ]
+    baseline_controls = [
+        str(item.get("control_id") or "")
+        for item in (
+            (docker_topology.get("egress_control_baseline") or {}).get("reachable")
+            or []
+        )
+    ]
+    runner_controls = [
+        str(item.get("control_id") or "")
+        for item in (probe_results.get("direct_negative") or [])
+    ]
+    try:
+        validate_negative_control_binding(
+            expected_controls, baseline_controls, runner_controls
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     started = datetime.fromisoformat(args.started_at.replace("Z", "+00:00"))
     completed_raw = args.completed_at or datetime.now(timezone.utc).isoformat()

@@ -143,10 +143,11 @@ def run_probes(
     ]
     direct_negative = []
     for target in direct_controls:
-        host, port_text = target.rsplit(":", 1)
-        outcome = tcp_probe(host, int(port_text))
+        label, ip, port_text = target.split("|", 2)
+        outcome = tcp_probe(ip, int(port_text))
         outcome["kind"] = "runner_direct_network_block"
         outcome["blocked_ok"] = outcome["tcp_ok"] is False
+        outcome["control_id"] = f"{label}|{ip}|{port_text}"
         direct_negative.append(outcome)
     return {
         "positive": positive,

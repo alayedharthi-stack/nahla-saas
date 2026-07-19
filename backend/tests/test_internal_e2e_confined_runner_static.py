@@ -1,13 +1,14 @@
 """Static/unit tests for the off-Railway confined internal E2E runner."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import socketserver
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -30,6 +31,9 @@ from ops.internal_e2e_runner.lib.topology import (
 )
 from ops.internal_e2e_runner.sidecars.connect_proxy import ExactConnectProxy
 from ops.internal_e2e_runner.sidecars.db_relay import ExactDbRelay
+from ops.internal_e2e_runner.scripts.assemble_evidence import (
+    validate_negative_control_binding,
+)
 
 
 def _base_config(**overrides):
@@ -259,6 +263,75 @@ def test_sidecars_fail_closed_when_live_dns_differs(tmp_path: Path) -> None:
             connect.resolve_verified()
         with pytest.raises(RuntimeError, match="db_live_dns_mismatch"):
             relay.resolve_verified()
+
+
+@pytest.mark.parametrize(
+    ("kind", "factory", "expected_port"),
+    [
+        (
+            "llm",
+            lambda path: ExactConnectProxy(
+                "api.anthropic.com", {"203.0.113.10"}, path
+            ),
+            443,
+        ),
+        (
+            "db",
+            lambda path: ExactDbRelay(
+                "disposable.example.test", 5432, {"203.0.113.20"}, path
+            ),
+            5432,
+        ),
+    ],
+)
+def test_sidecar_transport_uses_verified_ip_not_hostname(
+    tmp_path: Path, kind: str, factory, expected_port: int
+) -> None:
+    expected_ip = "203.0.113.10" if kind == "llm" else "203.0.113.20"
+    endpoint = factory(tmp_path / f"{kind}.jsonl")
+    dns_calls = 0
+
+    def changing_dns(*args, **kwargs):
+        nonlocal dns_calls
+        dns_calls += 1
+        ip = expected_ip if dns_calls == 1 else "198.51.100.99"
+        return [(2, 1, 6, "", (ip, expected_port))]
+
+    open_connection = AsyncMock(return_value=(object(), object()))
+    with patch("socket.getaddrinfo", side_effect=changing_dns), patch(
+        "asyncio.open_connection", open_connection
+    ):
+        selected_ip, _, _ = asyncio.run(endpoint.open_verified_upstream())
+
+    assert selected_ip == expected_ip
+    open_connection.assert_awaited_once_with(expected_ip, expected_port)
+    assert dns_calls == 1
+
+
+def test_negative_control_binding_requires_exact_multiplicity() -> None:
+    expected = [
+        "control-a.example|203.0.113.31|443",
+        "control-b.example|203.0.113.32|8443",
+    ]
+    validate_negative_control_binding(expected, list(expected), list(expected))
+    with pytest.raises(ValueError, match="negative_probe_control_binding_mismatch"):
+        validate_negative_control_binding(expected, expected[:1], list(expected))
+    with pytest.raises(ValueError, match="negative_probe_control_binding_mismatch"):
+        validate_negative_control_binding(expected, list(expected), [expected[0]] * 2)
+
+
+def test_negative_controls_come_only_from_config() -> None:
+    root = Path(__file__).resolve().parents[2]
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+    entrypoint = (
+        root / "ops/internal_e2e_runner/scripts/entrypoint.sh"
+    ).read_text(encoding="utf-8")
+    assert "$config.negative_probe_targets" in launcher
+    assert 'c["negative_probe_targets"]' in entrypoint
+    assert "1.1.1.1" not in launcher + entrypoint
+    assert "8.8.8.8" not in launcher + entrypoint
 
 
 def test_runner_firewall_has_no_public_llm_or_db_accept_rules() -> None:
