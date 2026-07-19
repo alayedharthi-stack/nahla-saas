@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Loader2, MapPin, MessageCircle, Save, Store, Type } from 'lucide-react'
+import { Loader2, MapPin, MessageCircle, Save, Store } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type StoreSettings } from '../api/settings'
@@ -53,22 +53,8 @@ function Toggle({
   )
 }
 
-function externalSourceLabel(source: string | undefined, isArabic: boolean): string | null {
-  if (!source?.startsWith('external:')) return null
-  const providerKey = source.slice('external:'.length).toLowerCase()
-  const provider = providerKey === 'salla'
-    ? 'Salla'
-    : providerKey === 'zid'
-      ? 'Zid'
-      : providerKey || 'integration'
-  return isArabic
-    ? `مستورد من ${provider}`
-    : `Imported from ${provider}`
-}
-
 export default function SalesChannelsSettingsTab() {
-  const { t, lang } = useLanguage()
-  const isArabic = lang === 'ar'
+  const { t } = useLanguage()
   const sc = t(tr => tr.pages.salesChannels)
 
   const [loading, setLoading] = useState(true)
@@ -76,8 +62,6 @@ export default function SalesChannelsSettingsTab() {
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
   const [storeSettings, setStoreSettings] = useState<StoreSettingsWithChannels | null>(null)
-  const [storeNameAr, setStoreNameAr] = useState('')
-  const [storeNameEn, setStoreNameEn] = useState('')
   const [storeUrl, setStoreUrl] = useState('')
   const [onlineEnabled, setOnlineEnabled] = useState(true)
   const [mapsLocation, setMapsLocation] = useState('')
@@ -89,8 +73,6 @@ export default function SalesChannelsSettingsTab() {
       const data = await settingsApi.getAll()
       const store = (data.store || {}) as StoreSettingsWithChannels
       setStoreSettings(store)
-      setStoreNameAr(store.store_name_ar || '')
-      setStoreNameEn(store.store_name_en || '')
       setStoreUrl(store.store_url || '')
       setMapsLocation(store.google_maps_location || '')
       setOnlineEnabled(store.sales_channels?.online_store?.enabled ?? true)
@@ -112,8 +94,6 @@ export default function SalesChannelsSettingsTab() {
       const updated = await settingsApi.update({
         store: {
           ...storeSettings,
-          store_name_ar: storeNameAr.trim(),
-          store_name_en: storeNameEn.trim(),
           store_url: storeUrl.trim(),
           sales_channels: {
             ...(storeSettings.sales_channels || {}),
@@ -125,8 +105,6 @@ export default function SalesChannelsSettingsTab() {
       })
       const savedStore = updated.store as StoreSettingsWithChannels
       setStoreSettings(savedStore)
-      setStoreNameAr(savedStore.store_name_ar || '')
-      setStoreNameEn(savedStore.store_name_en || '')
       setSaved(true)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : sc.saveError)
@@ -158,56 +136,6 @@ export default function SalesChannelsSettingsTab() {
           {sc.saved}
         </div>
       )}
-
-      <div className="card">
-        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
-          <Type className="w-4 h-4 text-brand-500" />
-          <h2 className="text-sm font-semibold text-slate-900">
-            {isArabic ? 'هوية المتجر' : 'Store identity'}
-          </h2>
-        </div>
-        <div className="p-5 space-y-4">
-          <p className="text-sm text-slate-600">
-            {isArabic
-              ? 'يمكن أن يملأ اسم المتجر تلقائياً عند ربط منصة خارجية. التعديل اليدوي محمي ولن يُستبدل بالمزامنة. اللغة الناقصة لا تُترجم تلقائياً.'
-              : 'Connecting an external platform may prefill store names. Manual edits are protected from sync overwrites. Missing languages are not auto-translated.'}
-          </p>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">
-              {isArabic ? 'اسم المتجر بالعربية' : 'Store Name in Arabic'}
-            </label>
-            <input
-              type="text"
-              dir="rtl"
-              className="input w-full"
-              value={storeNameAr}
-              onChange={e => setStoreNameAr(e.target.value)}
-            />
-            {externalSourceLabel(storeSettings?.store_name_ar_source, isArabic) && (
-              <p className="text-xs text-slate-500 mt-1">
-                {externalSourceLabel(storeSettings?.store_name_ar_source, isArabic)}
-              </p>
-            )}
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">
-              {isArabic ? 'اسم المتجر بالإنجليزية' : 'Store Name in English'}
-            </label>
-            <input
-              type="text"
-              dir="ltr"
-              className="input w-full"
-              value={storeNameEn}
-              onChange={e => setStoreNameEn(e.target.value)}
-            />
-            {externalSourceLabel(storeSettings?.store_name_en_source, isArabic) && (
-              <p className="text-xs text-slate-500 mt-1">
-                {externalSourceLabel(storeSettings?.store_name_en_source, isArabic)}
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
 
       <div className="card">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
