@@ -84,7 +84,8 @@ def fetch_grounding_data(tenant_id: int, customer_phone: str) -> GroundingData:
         discounted_ids: Set[int] = set()
         for p in products:
             known_ids.add(p.id)
-            meta = p.metadata or {}
+            raw_meta = p.extra_metadata
+            meta = raw_meta if isinstance(raw_meta, dict) else {}
             if meta.get("in_stock") is True:
                 in_stock_ids.add(p.id)
             stock_count = meta.get("stock_count")
