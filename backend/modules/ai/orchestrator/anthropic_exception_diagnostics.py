@@ -8,7 +8,50 @@ messages, URLs, headers, API keys, prompts, or response bodies.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+_LOCAL_PROTOCOL_CATEGORIES = frozenset({
+    "local_protocol_invalid_header_name",
+    "local_protocol_invalid_header_value",
+    "local_protocol_invalid_request_line",
+    "local_protocol_content_length_mismatch",
+    "local_protocol_state_machine",
+    "local_protocol_receive_buffer",
+    "local_protocol_malformed_proxy_response",
+    "local_protocol_other",
+})
+
+# Narrow, case-insensitive substring patterns. Order matters: first match wins.
+_LOCAL_PROTOCOL_PATTERNS: Tuple[Tuple[str, ...], str] = (
+    (("illegal header name",), "local_protocol_invalid_header_name"),
+    (("illegal header value",), "local_protocol_invalid_header_value"),
+    (
+        ("illegal request line", "no request line received", "no response line received"),
+        "local_protocol_invalid_request_line",
+    ),
+    (
+        (
+            "conflicting content-length",
+            "bad content-length",
+            "too much data for declared content-length",
+            "too little data for declared content-length",
+        ),
+        "local_protocol_content_length_mismatch",
+    ),
+    (
+        (
+            "can't handle event type",
+            "not in a reusable state",
+            "can't send data when our state is error",
+        ),
+        "local_protocol_state_machine",
+    ),
+    (("got data when expecting eof",), "local_protocol_receive_buffer"),
+    (
+        ("malformed proxy response", "invalid proxy response"),
+        "local_protocol_malformed_proxy_response",
+    ),
+)
 
 
 def anthropic_exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
@@ -28,6 +71,16 @@ def anthropic_exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
     }
 
 
+def _classify_local_protocol_error(exc: BaseException) -> Optional[str]:
+    if type(exc).__name__ != "LocalProtocolError":
+        return None
+    lowered = str(exc).lower()
+    for needles, category in _LOCAL_PROTOCOL_PATTERNS:
+        if any(needle in lowered for needle in needles):
+            return category
+    return "local_protocol_other"
+
+
 def _safe_category(exc: Optional[BaseException]) -> Optional[str]:
     if exc is None:
         return None
@@ -35,4 +88,4 @@ def _safe_category(exc: Optional[BaseException]) -> Optional[str]:
         errno = getattr(exc, "errno", None)
         if errno is not None:
             return f"errno_{errno}"
-    return None
+    return _classify_local_protocol_error(exc)
