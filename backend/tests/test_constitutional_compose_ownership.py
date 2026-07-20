@@ -12,6 +12,7 @@ from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE, ACTION_SE
 from modules.ai.brain.persona.catalog_product_answer import (
     build_catalog_search_miss_facts_bundle,
     try_compose_catalog_navigation_browse_answer,
+    try_compose_catalog_product_answer,
     try_compose_catalog_search_miss_answer,
 )
 from modules.ai.brain.persona.fact_bound_composer import FactBoundPersonaComposer
@@ -457,13 +458,16 @@ class TestCatalogNavigationTopFallbackOwnership:
                 fallback_action_type="catalog_navigation_browse",
             )
 
-            no_rows_compose = AsyncMock()
+            no_rows_compose = AsyncMock(return_value=_persona_success(
+                surface="catalog_product_answer",
+                text="ما عندنا منتجات قابلة للبيع مؤكدة حالياً.",
+            ))
             with patch.object(
                 FactBoundPersonaComposer,
                 "compose",
                 new=no_rows_compose,
             ):
-                _, no_rows_result, no_rows_event = (
+                text, no_rows_result, no_rows_event = (
                     await try_compose_catalog_navigation_browse_answer(
                         tenant_id=11,
                         customer_phone="966500000001",
@@ -473,14 +477,14 @@ class TestCatalogNavigationTopFallbackOwnership:
                         ai_settings=_disabled_rollout_settings(),
                     )
                 )
-            no_rows_compose.assert_not_awaited()
-            assert no_rows_result.source == "fallback_deterministic"
-            assert no_rows_event["fallback_reason"] == "missing_catalog_fact_rows"
+            no_rows_compose.assert_awaited_once()
+            assert text
+            assert no_rows_result.source == "persona_llm"
+            assert no_rows_event["eligible_product_count"] == 0
             _assert_complete_provenance(
                 no_rows_event,
-                source="fallback_deterministic",
+                source="persona_llm",
                 chosen_path=PATH_TOP_FALLBACK,
-                fallback_action_type="catalog_navigation_browse",
             )
 
         asyncio.run(_run())
@@ -632,6 +636,117 @@ class TestCatalogNavigationTopFallbackOwnership:
             fallback_action_type="catalog_navigation_browse",
         )
         assert result.data["pending_candidates"] == _GENERIC_SHOES
+
+
+class TestCatalogQaPersonaOwnership:
+    _NON_CHECKOUT_PERFUME = [
+        {
+            "id": 410,
+            "title": "عطر ورد 100ml",
+            "category": "عطور",
+            "price": 189,
+            "can_checkout": False,
+        },
+    ]
+
+    def test_non_checkout_price_qa_calls_one_compose(self) -> None:
+        async def _run() -> None:
+            compose = AsyncMock(return_value=_persona_success(
+                surface="catalog_product_answer",
+                text="عطر ورد 100ml سعره 189 ريال، لكنه غير متاح للطلب حالياً.",
+            ))
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                text, result, event = await try_compose_catalog_product_answer(
+                    tenant_id=11,
+                    customer_phone="966500000001",
+                    inbound_text="كم سعر عطر ورد 100ml؟",
+                    products=self._NON_CHECKOUT_PERFUME,
+                    catalog_search_query="عطر ورد 100ml",
+                    question_kind="price",
+                    ai_settings=_disabled_rollout_settings(),
+                )
+            compose.assert_awaited_once()
+            assert text
+            assert result.source == "persona_llm"
+            assert event["eligible_product_count"] == 0
+            assert event["compose_source"] == "persona_llm"
+            assert "catalog_deterministic_fallback" not in str(
+                event.get("persona_compose", {}).get("source")
+            )
+
+        asyncio.run(_run())
+
+    def test_zero_fact_price_qa_still_compose_once(self) -> None:
+        async def _run() -> None:
+            compose = AsyncMock(return_value=_persona_success(
+                surface="catalog_product_answer",
+                text="ما عندي سعر مؤكد لقميص قطني أزرق في الكتالوج حالياً.",
+            ))
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                text, result, event = await try_compose_catalog_product_answer(
+                    tenant_id=11,
+                    customer_phone="966500000001",
+                    inbound_text="كم سعر قميص قطني أزرق؟",
+                    products=[],
+                    catalog_search_query="قميص قطني أزرق",
+                    question_kind="price",
+                    ai_settings=_disabled_rollout_settings(),
+                )
+            compose.assert_awaited_once()
+            assert text
+            assert result.source == "persona_llm"
+            assert event["eligible_product_count"] == 0
+
+        asyncio.run(_run())
+
+    def test_responder_catalog_qa_routes_persona_not_deterministic(self) -> None:
+        composer = DefaultComposer()
+        ctx = _ctx("كم سعر حذاء رياضي أبيض؟", intent_name="ask_price")
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": "حذاء رياضي أبيض"},
+            reason="test",
+        )
+        result = ActionResult(
+            success=True,
+            data={
+                "products": _GENERIC_SHOES,
+                "catalog_fact_products": _GENERIC_SHOES,
+            },
+        )
+
+        async def _run() -> tuple[str, dict]:
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                new=AsyncMock(
+                    return_value=(
+                        "حذاء رياضي أبيض سعره 220 ريال.",
+                        _persona_success(
+                            surface="catalog_product_answer",
+                            text="حذاء رياضي أبيض سعره 220 ريال.",
+                        ),
+                        {
+                            "chosen_path": "fact_bound_persona_compose",
+                            "compose_source": "persona_llm",
+                            "response_mode": "grounded_persona_compose",
+                            "llm_candidate_present": True,
+                            "final_text_transformed": False,
+                            "final_transform_reasons": [],
+                            "final_customer_text_source": "persona_llm",
+                            "persona_compose": {"source": "persona_llm"},
+                        },
+                    ),
+                ),
+            ):
+                text = await composer.compose(decision, result, ctx)
+                return text, dict(result.data or {})
+
+        text, data = asyncio.run(_run())
+        assert data.get("compose_source") == "persona_llm"
+        assert "catalog_deterministic_fallback" not in str(
+            data.get("persona_compose", {}).get("source")
+        )
+        assert text
 
 
 def test_strict_tenant_48_llm_call_caps_remain_present() -> None:

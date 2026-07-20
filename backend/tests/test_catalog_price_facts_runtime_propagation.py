@@ -219,8 +219,8 @@ def _gate_off_search_ctx(*, message: str, tenant_id: int = 1) -> BrainContext:
     )
 
 
-class TestResponderCatalogQaDeterministicBypass:
-    def test_gate_off_price_uses_direct_catalog_not_narrow_choices(self) -> None:
+class TestResponderCatalogQaPersonaCompose:
+    def test_price_qa_uses_persona_compose_not_deterministic_bypass(self) -> None:
         from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
 
         async def _run() -> None:
@@ -242,7 +242,26 @@ class TestResponderCatalogQaDeterministicBypass:
             composer = DefaultComposer()
             with patch(
                 "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
-                AsyncMock(return_value=(None, None, None)),
+                AsyncMock(
+                    return_value=(
+                        "جاكيت سعره 169 ريال.",
+                        PersonaComposeResult(
+                            text="جاكيت سعره 169 ريال.",
+                            source="persona_llm",
+                            surface="catalog_product_answer",
+                            facts_hash="facts",
+                            guard_passed=True,
+                        ),
+                        {
+                            "compose_source": "persona_llm",
+                            "response_mode": "grounded_persona_compose",
+                            "persona_compose": {"source": "persona_llm"},
+                            "question_kind": "price",
+                            "price_source": "catalog",
+                            "catalog_product_ids": [28],
+                        },
+                    ),
+                ),
             ):
                 with patch(
                     "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
@@ -253,14 +272,11 @@ class TestResponderCatalogQaDeterministicBypass:
             assert "169" in text
             assert "جاكيت" in text
             assert "اختر رقم" not in text
-            assert "أكمل معك" not in text
-            assert result.data.get("question_kind") == "price"
-            assert result.data.get("price_source") == "catalog"
-            assert 28 in (result.data.get("catalog_product_ids") or [])
-            assert 169 in (result.data.get("catalog_fact_price_values") or [])
-            pc = result.data.get("persona_compose") or {}
-            assert pc.get("surface") == "catalog_product_answer"
-            assert pc.get("source") == "catalog_deterministic_fallback"
+            assert result.data.get("compose_source") == "persona_llm"
+            assert result.data.get("persona_compose", {}).get("source") == "persona_llm"
+            assert "catalog_deterministic_fallback" not in str(
+                result.data.get("persona_compose", {}).get("source")
+            )
             assert result.data.get("pending_buttons") is None
             assert result.data.get("pending_candidates") is None
 
@@ -302,7 +318,7 @@ class TestResponderCatalogQaDeterministicBypass:
 
         asyncio.run(_run())
 
-    def test_talh_price_gate_off_still_direct_catalog_answer(self) -> None:
+    def test_talh_price_gate_off_uses_persona_compose(self) -> None:
         from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
 
         talh_rows = [_TALH_1KG, _TALH_5KG]
@@ -327,7 +343,25 @@ class TestResponderCatalogQaDeterministicBypass:
             composer = DefaultComposer()
             with patch(
                 "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
-                AsyncMock(return_value=(None, None, None)),
+                AsyncMock(
+                    return_value=(
+                        "عسل الطلح متوفر بسعرين في الكتالوج.",
+                        PersonaComposeResult(
+                            text="عسل الطلح متوفر بسعرين في الكتالوج.",
+                            source="persona_llm",
+                            surface="catalog_product_answer",
+                            facts_hash="facts",
+                            guard_passed=True,
+                        ),
+                        {
+                            "compose_source": "persona_llm",
+                            "question_kind": "price",
+                            "price_source": "catalog",
+                            "catalog_product_ids": [109, 121],
+                            "persona_compose": {"source": "persona_llm"},
+                        },
+                    ),
+                ),
             ):
                 with patch(
                     "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
@@ -335,17 +369,12 @@ class TestResponderCatalogQaDeterministicBypass:
                 ):
                     text = await composer.compose(decision, result, ctx)
 
-            assert "٣٨٧" in text or "387" in text
-            assert "٤٧٥" in text or "1475" in text
-            assert "اختر رقم" not in text
+            assert text
+            assert result.data.get("compose_source") == "persona_llm"
             assert result.data.get("question_kind") == "price"
-            assert result.data.get("price_source") == "catalog"
             ids = set(result.data.get("catalog_product_ids") or [])
             assert 109 in ids
             assert 121 in ids
-            prices = set(result.data.get("catalog_fact_price_values") or [])
-            assert 387 in prices
-            assert 1475 in prices
 
         asyncio.run(_run())
 
