@@ -250,6 +250,7 @@ jobs:
       - name: A1-v3.7 PostgreSQL integration
         run: |
           python -m pytest \
+            backend/tests/test_internal_conversational_e2e_sql_error_audit.py \
             backend/tests/test_order_customer_identity_postgres_integration.py \
             backend/tests/test_order_customer_identity_log_privacy.py \
             backend/tests/test_order_customer_identity_ingest_regression.py \

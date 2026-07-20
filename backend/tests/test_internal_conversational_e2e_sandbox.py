@@ -61,6 +61,10 @@ from services.internal_conversational_e2e_harness import (
     _provenance_blockers,
     run_sandbox_turn,
 )
+from services.internal_conversational_e2e_sql_error_audit import (
+    current_internal_e2e_sql_error_turn,
+    recorded_sql_error_audits,
+)
 
 
 TENANT_ID = 48
@@ -450,6 +454,7 @@ async def _run_turn(
     attempt_egress: bool = False,
     duplicate_provider_send: bool = False,
     expected_denials: tuple[tuple[str, str], ...] = (),
+    state_probe=None,
 ):
     request = SandboxTurnRequest(
         session_id=SESSION_ID,
@@ -494,7 +499,7 @@ async def _run_turn(
                 attempt_egress=attempt_egress,
                 duplicate_provider_send=duplicate_provider_send,
             ),
-            state_probe=_state_probe,
+            state_probe=state_probe or _state_probe,
             message_store=_MemoryMessages,
         )
 
@@ -746,12 +751,36 @@ def test_multi_turn_state_and_history_persist_in_writable_sandbox() -> None:
     assert len(_MemoryMessages.rows) == 4
 
 
+def test_turn_binding_resets_when_state_probe_raises() -> None:
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=91, tenant_id=TENANT_ID, extra_metadata={})
+
+    def _raising_state_probe(*_args):
+        raise RuntimeError("state probe failed")
+
+    with pytest.raises(RuntimeError, match="state probe failed"):
+        asyncio.run(
+            _run_turn(
+                convo,
+                turn_index=0,
+                state_probe=_raising_state_probe,
+            )
+        )
+
+    assert current_internal_e2e_sql_error_turn() is None
+    assert recorded_sql_error_audits() == ()
+
+
 def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:
     _MemoryMessages.reset()
     convo = SimpleNamespace(id=10, tenant_id=TENANT_ID, extra_metadata={})
     evidence = asyncio.run(_run_turn(convo, turn_index=0)).evidence
     encoded = json.dumps(evidence, ensure_ascii=False)
     assert evidence["evidence_channel"] == "direct_code_probe"
+    assert evidence["evidence_schema_version"] == "internal_conversational_e2e_evidence_v2"
+    assert "runtime_error_audit" in evidence
+    assert evidence["runtime_error_audit"]["error_count"] == 0
+    assert evidence["runtime_error_audit"]["primary_missing"] is False
     assert PHONE not in encoded
     assert "Is the white running shoe available?" not in encoded
     assert "Generic catalog response" not in encoded
@@ -761,7 +790,7 @@ def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:
 def test_session_evidence_signature_detects_tampering() -> None:
     payload = {
         "session_schema_version": "internal_conversational_e2e_session_v1",
-        "evidence_schema_version": "internal_conversational_e2e_evidence_v1",
+        "evidence_schema_version": "internal_conversational_e2e_evidence_v2",
         "session_id": SESSION_ID,
         "tenant_id": TENANT_ID,
         "verdict": "pass",
@@ -941,6 +970,12 @@ def test_final_session_has_signed_integrity_and_auditable_timestamps(
         "blockers": [],
         "verdict": "pass",
         "denial_audits": [],
+        "runtime_error_audit": {
+            "errors": [],
+            "error_count": 0,
+            "primary_missing": False,
+            "truncated": False,
+        },
         "provider_observation": {
             "source": "application_internal_e2e_context",
             "network_dispatch_success_observed": False,
@@ -1006,6 +1041,8 @@ def test_final_session_has_signed_integrity_and_auditable_timestamps(
     )
     assert captured["provider_observation"]["is_actual_provider_telemetry"] is False
     assert captured["actual_provider_acceptance_satisfied"] is False
+    assert "runtime_error_audit" in captured
+    assert captured["runtime_error_audit"]["error_count"] == 0
 
 
 def test_operator_has_no_row_deletion_cleanup_path() -> None:
