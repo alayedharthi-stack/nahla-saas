@@ -155,13 +155,13 @@ class CrossMerchantLearningStore:
             )
             try:
                 telemetry_db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — telemetry rollback must not poison caller
                 pass
             return None
         finally:
             try:
                 telemetry_db.close()
-            except Exception:
+            except Exception:  # noqa: silent-ok — telemetry session close must not poison caller
                 pass
 
     # ── Read paths (small built-ins for tests / dashboards) ─────────────

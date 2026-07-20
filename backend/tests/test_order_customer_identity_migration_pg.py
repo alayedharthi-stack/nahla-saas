@@ -251,8 +251,8 @@ def test_migration_chain_0086_seed_0087_target_repository_0089_head(
         os.chdir(prev_cwd)
     heads = set(script.get_heads())
     assert heads == _REPOSITORY_ALEMBIC_HEADS
-    # Ephemeral DB stops at A1-Expand 0087; integration path uses 0089 explicitly.
-    assert "0089" in heads
+    # Ephemeral DB stops at A1-Expand 0087; integration path uses 0091 explicitly.
+    assert "0091" in heads
 
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
