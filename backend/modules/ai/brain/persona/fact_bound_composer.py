@@ -61,12 +61,24 @@ def _clamp_persona_compose_timeout(value: float) -> float:
     )
 
 
+COMPOSE_ATTEMPT_PROVIDER_CALL = "provider_call"
+COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED = "skipped_unconfigured"
+COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE = "skipped_no_route"
+
+
 @dataclass(frozen=True)
 class PersonaComposeModelRoute:
     provider: str
     model: str
     tier: str
     source: str
+
+
+@dataclass(frozen=True)
+class PersonaComposeRouteResolution:
+    route: PersonaComposeModelRoute
+    provider_configured: bool
+    compose_attempt: str
 
 
 def _infer_provider_for_model(model: str) -> str:
@@ -76,21 +88,62 @@ def _infer_provider_for_model(model: str) -> str:
     return "openai_compatible"
 
 
-def resolve_persona_compose_model_route(
+def is_persona_compose_provider_configured(provider: str) -> bool:
+    """Return True when the provider has credentials configured (no network I/O)."""
+    provider_key = str(provider or "").strip().lower()
+    if provider_key == "openai_compatible":
+        from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+            OpenAICompatibleProvider,
+        )
+
+        return OpenAICompatibleProvider().is_configured()
+    if provider_key == "anthropic":
+        from modules.ai.orchestrator.providers.anthropic_provider import (  # noqa: PLC0415
+            AnthropicProvider,
+        )
+
+        return AnthropicProvider().is_configured()
+    return False
+
+
+def _platform_default_persona_candidates() -> list[tuple[str, str]]:
+    """Cost-ordered tiny-tier persona compose candidates for platform default."""
+    tiny = _env_tier_default(TIER_TINY)
+    openai_model = str(tiny.suggested_model or "gpt-4o-mini")
+    from modules.ai.orchestrator.llm_cost_audit import resolve_anthropic_model  # noqa: PLC0415
+
+    anthropic_model = resolve_anthropic_model()
+    return [
+        ("openai_compatible", openai_model),
+        ("anthropic", anthropic_model),
+    ]
+
+
+def resolve_persona_compose_route_resolution(
     bundle: PersonaFactsBundle,
-) -> PersonaComposeModelRoute:
-    """Resolve provider/model for persona compose via env, tenant override, or platform tiny tier."""
+) -> PersonaComposeRouteResolution:
+    """Resolve persona compose route with provider availability semantics."""
     env_model = os.environ.get("NAHLA_PERSONA_COMPOSE_MODEL", "").strip()
     if env_model:
         provider = (
             os.environ.get("NAHLA_PERSONA_COMPOSE_PROVIDER", "").strip()
             or _infer_provider_for_model(env_model)
         )
-        return PersonaComposeModelRoute(
+        route = PersonaComposeModelRoute(
             provider=provider,
             model=env_model,
             tier=TIER_TINY,
             source="env",
+        )
+        configured = is_persona_compose_provider_configured(provider)
+        return PersonaComposeRouteResolution(
+            route=route,
+            provider_configured=configured,
+            compose_attempt=(
+                COMPOSE_ATTEMPT_PROVIDER_CALL
+                if configured
+                else COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED
+            ),
         )
 
     settings = merge_ai_defaults(dict(bundle.merchant_persona or {}))
@@ -100,20 +153,117 @@ def resolve_persona_compose_model_route(
             str(settings.get("persona_composer_provider") or "").strip()
             or _infer_provider_for_model(tenant_model)
         )
-        return PersonaComposeModelRoute(
+        route = PersonaComposeModelRoute(
             provider=provider,
             model=tenant_model,
             tier=TIER_TINY,
             source="tenant_override",
         )
+        configured = is_persona_compose_provider_configured(provider)
+        return PersonaComposeRouteResolution(
+            route=route,
+            provider_configured=configured,
+            compose_attempt=(
+                COMPOSE_ATTEMPT_PROVIDER_CALL
+                if configured
+                else COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED
+            ),
+        )
 
-    tiny = _env_tier_default(TIER_TINY)
-    return PersonaComposeModelRoute(
-        provider=str(tiny.suggested_provider or "openai_compatible"),
-        model=str(tiny.suggested_model or "gpt-4o-mini"),
-        tier=TIER_TINY,
-        source="platform_default",
+    for provider, model in _platform_default_persona_candidates():
+        if is_persona_compose_provider_configured(provider):
+            return PersonaComposeRouteResolution(
+                route=PersonaComposeModelRoute(
+                    provider=provider,
+                    model=model,
+                    tier=TIER_TINY,
+                    source="platform_default",
+                ),
+                provider_configured=True,
+                compose_attempt=COMPOSE_ATTEMPT_PROVIDER_CALL,
+            )
+
+    preferred_provider, preferred_model = _platform_default_persona_candidates()[0]
+    return PersonaComposeRouteResolution(
+        route=PersonaComposeModelRoute(
+            provider=preferred_provider,
+            model=preferred_model,
+            tier=TIER_TINY,
+            source="platform_default",
+        ),
+        provider_configured=False,
+        compose_attempt=COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE,
     )
+
+
+def resolve_persona_compose_model_route(
+    bundle: PersonaFactsBundle,
+) -> PersonaComposeModelRoute:
+    """Resolve provider/model for persona compose via env, tenant override, or platform tiny tier."""
+    return resolve_persona_compose_route_resolution(bundle).route
+
+
+def build_persona_route_metadata(
+    resolution: PersonaComposeRouteResolution,
+    *,
+    llm_candidate: str = "",
+) -> dict[str, Any]:
+    """Bounded route/provenance fields for PersonaComposeResult and event metadata."""
+    return {
+        "route_provider": resolution.route.provider,
+        "route_model": resolution.route.model,
+        "route_tier": resolution.route.tier,
+        "route_source": resolution.route.source,
+        "route_provider_configured": resolution.provider_configured,
+        "compose_attempt": resolution.compose_attempt,
+        "llm_candidate_present": bool(str(llm_candidate or "").strip()),
+    }
+
+
+def call_persona_compose_provider_sync(
+    *,
+    route: PersonaComposeModelRoute,
+    system: str,
+    user: str,
+    audit_context: dict[str, Any],
+) -> tuple[str, str]:
+    """Invoke exactly one configured persona provider; never raises."""
+    provider_key = str(route.provider or "").strip().lower()
+    if provider_key == "openai_compatible":
+        from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+            OpenAICompatibleProvider,
+        )
+
+        provider = OpenAICompatibleProvider()
+        if not provider.is_configured():
+            return "", route.model
+        result = provider.call(
+            user,
+            system,
+            audit_context=audit_context,
+        )
+        return (
+            str(result.get("reply_text") or "").strip(),
+            str(result.get("model") or route.model),
+        )
+    if provider_key == "anthropic":
+        from modules.ai.orchestrator.providers.anthropic_provider import (  # noqa: PLC0415
+            AnthropicProvider,
+        )
+
+        provider = AnthropicProvider()
+        if not provider.is_configured():
+            return "", route.model
+        result = provider.call(
+            user,
+            system,
+            audit_context=audit_context,
+        )
+        return (
+            str(result.get("reply_text") or "").strip(),
+            str(result.get("model") or route.model),
+        )
+    return "", route.model
 
 _CONSTITUTION_STUB_REPLIES: dict[str, tuple[str, ...]] = {
     "social_greeting": (
@@ -252,10 +402,20 @@ class FactBoundPersonaComposer:
         source = "fallback_deterministic"
         model: Optional[str] = None
         fallback_reason = ""
+        route_metadata: dict[str, Any] = {}
 
         try:
-            raw_text, model = await self._invoke_llm(bundle)
-            if (raw_text or "").strip():
+            raw_text, model, resolution = await self._invoke_llm(bundle)
+            route_metadata = build_persona_route_metadata(
+                resolution,
+                llm_candidate=raw_text,
+            )
+            if resolution.compose_attempt in {
+                COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED,
+                COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE,
+            }:
+                fallback_reason = "route_unconfigured"
+            elif (raw_text or "").strip():
                 source = "persona_llm"
             else:
                 fallback_reason = "empty_llm"
@@ -316,6 +476,7 @@ class FactBoundPersonaComposer:
             emoji_count=emoji_count,
             latency_ms=latency_ms,
             model=model,
+            metadata=dict(route_metadata),
         )
         logger.info(
             "[PERSONA_COMPOSE] surface=%s source=%s facts_hash=%s "
@@ -364,7 +525,10 @@ class FactBoundPersonaComposer:
 
         return _stub
 
-    async def _invoke_llm(self, bundle: PersonaFactsBundle) -> tuple[str, Optional[str]]:
+    async def _invoke_llm(
+        self,
+        bundle: PersonaFactsBundle,
+    ) -> tuple[str, Optional[str], PersonaComposeRouteResolution]:
         if self._llm_callable is not None:
             import asyncio  # noqa: PLC0415
 
@@ -374,9 +538,14 @@ class FactBoundPersonaComposer:
                     timeout=self._timeout_seconds,
                 )
             ).strip()
-            return text, None
+            resolution = resolve_persona_compose_route_resolution(bundle)
+            return text, None, resolution
 
-        route = resolve_persona_compose_model_route(bundle)
+        resolution = resolve_persona_compose_route_resolution(bundle)
+        if resolution.compose_attempt != COMPOSE_ATTEMPT_PROVIDER_CALL:
+            return "", resolution.route.model, resolution
+
+        route = resolution.route
         system = build_system_prompt(bundle)
         user = build_user_prompt(bundle)
         audit_context = {
@@ -390,48 +559,18 @@ class FactBoundPersonaComposer:
         import asyncio  # noqa: PLC0415
 
         def _call_provider_sync() -> tuple[str, str]:
-            provider_key = str(route.provider or "").strip().lower()
-            if provider_key == "openai_compatible":
-                from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
-                    OpenAICompatibleProvider,
-                )
-
-                provider = OpenAICompatibleProvider()
-                if not provider.is_configured():
-                    return "", route.model
-                result = provider.call(
-                    user,
-                    system,
-                    audit_context=audit_context,
-                )
-                return (
-                    str(result.get("reply_text") or "").strip(),
-                    str(result.get("model") or route.model),
-                )
-            if provider_key == "anthropic":
-                from modules.ai.orchestrator.providers.anthropic_provider import (  # noqa: PLC0415
-                    AnthropicProvider,
-                )
-
-                provider = AnthropicProvider()
-                if not provider.is_configured():
-                    return "", route.model
-                result = provider.call(
-                    user,
-                    system,
-                    audit_context=audit_context,
-                )
-                return (
-                    str(result.get("reply_text") or "").strip(),
-                    str(result.get("model") or route.model),
-                )
-            return "", route.model
+            return call_persona_compose_provider_sync(
+                route=route,
+                system=system,
+                user=user,
+                audit_context=audit_context,
+            )
 
         text, used_model = await asyncio.wait_for(
             asyncio.to_thread(_call_provider_sync),
             timeout=self._timeout_seconds,
         )
-        return text, used_model or route.model
+        return text, used_model or route.model, resolution
 
     def _result_from_fallback(
         self,

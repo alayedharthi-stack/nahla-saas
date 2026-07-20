@@ -269,13 +269,23 @@ class TestPersonaComposeTimeoutConfig:
 
 class TestPersonaComposeModelRouting:
     def test_platform_default_uses_tiny_tier_openai_model(self, monkeypatch) -> None:
+        from unittest.mock import patch  # noqa: PLC0415
+
         monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_MODEL", raising=False)
         monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_PROVIDER", raising=False)
-        bundle = build_social_facts_bundle(
-            surface="social_checkin",
-            inbound_text="كيف الحال",
-        )
-        route = resolve_persona_compose_model_route(bundle)
+        with patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.is_configured",
+            return_value=True,
+        ):
+            with patch(
+                "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.is_configured",
+                return_value=False,
+            ):
+                bundle = build_social_facts_bundle(
+                    surface="social_checkin",
+                    inbound_text="كيف الحال",
+                )
+                route = resolve_persona_compose_model_route(bundle)
         assert route.source == "platform_default"
         assert route.provider == "openai_compatible"
         assert route.model == "gpt-4o-mini"
@@ -340,7 +350,7 @@ class TestPersonaComposeModelRouting:
 
         asyncio.run(_run())
 
-    def test_configured_model_path_sets_persona_llm_metadata(self) -> None:
+    def test_configured_model_path_sets_persona_llm_metadata(self, monkeypatch) -> None:
         import asyncio  # noqa: PLC0415
         from unittest.mock import patch  # noqa: PLC0415
 
@@ -364,10 +374,14 @@ class TestPersonaComposeModelRouting:
                 return_value=True,
             ):
                 with patch(
-                    "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
-                    side_effect=_good_provider_call,
+                    "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.is_configured",
+                    return_value=False,
                 ):
-                    result = await composer.compose(bundle)
+                    with patch(
+                        "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
+                        side_effect=_good_provider_call,
+                    ):
+                        result = await composer.compose(bundle)
             assert result.source == "persona_llm"
             assert result.guard_passed is True
             assert result.model == "gpt-4o-mini"

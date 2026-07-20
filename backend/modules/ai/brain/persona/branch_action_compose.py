@@ -16,7 +16,6 @@ from .fact_bound_composer import (
     FactBoundPersonaComposer,
     canonical_facts_hash,
     detect_language,
-    resolve_persona_compose_model_route,
 )
 from .facts_bundle import (
     PERSONA_SURFACE_BRANCH_ACTION,
@@ -267,40 +266,10 @@ async def try_compose_branch_action(
         merchant_persona=merchant_persona,
     )
 
-    async def _default_llm(b: PersonaFactsBundle) -> str:
-        route = resolve_persona_compose_model_route(b)
-        system, user = _build_compose_prompts(b)
-        import asyncio  # noqa: PLC0415
-
-        def _sync() -> str:
-            provider_key = str(route.provider or "").strip().lower()
-            if provider_key == "openai_compatible":
-                from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
-                    OpenAICompatibleProvider,
-                )
-
-                provider = OpenAICompatibleProvider()
-                if not provider.is_configured():
-                    return ""
-                result = provider.call(
-                    user,
-                    system,
-                    audit_context={
-                        "reason": "brain.persona.branch_action_compose",
-                        "surface": PERSONA_SURFACE_BRANCH_ACTION,
-                        "tenant_id": b.tenant_id,
-                        "model_override": route.model,
-                    },
-                )
-                if isinstance(result, dict):
-                    return str(result.get("reply_text") or "").strip()
-                return str(result or "").strip()
-            return ""
-
-        return str(await asyncio.wait_for(asyncio.to_thread(_sync), timeout=12.0) or "").strip()
-
-    callable_fn = llm_callable or _default_llm
-    composer = FactBoundPersonaComposer(enforce_gate=False, llm_callable=callable_fn)
+    composer = FactBoundPersonaComposer(
+        enforce_gate=False,
+        llm_callable=llm_callable,
+    )
     try:
         result = await composer.compose(bundle)
     except Exception as exc:  # noqa: BLE001

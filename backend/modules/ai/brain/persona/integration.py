@@ -80,7 +80,7 @@ def should_enforce_persona_compose(ctx: BrainContext, *, surface: str) -> bool:
 
 def persona_compose_metadata(result: PersonaComposeResult) -> dict[str, Any]:
     """Nested persona_compose block for message event persistence."""
-    return {
+    meta = {
         "surface": result.surface,
         "source": result.source,
         "guard_passed": result.guard_passed,
@@ -93,6 +93,20 @@ def persona_compose_metadata(result: PersonaComposeResult) -> dict[str, Any]:
         "model": result.model or "",
         "facts_hash": result.facts_hash,
     }
+    route_fields = (
+        "route_provider",
+        "route_model",
+        "route_tier",
+        "route_source",
+        "route_provider_configured",
+        "compose_attempt",
+        "llm_candidate_present",
+    )
+    extra = dict(result.metadata or {})
+    for key in route_fields:
+        if key in extra:
+            meta[key] = extra[key]
+    return meta
 
 
 def build_persona_compose_event_metadata(
