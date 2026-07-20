@@ -39,17 +39,12 @@ PATH_47 = "generic_perfume_catalog_availability_compose_v2"
 
 
 def _alembic_config(engine: Engine) -> Config:
-    prev_cwd = os.getcwd()
-    try:
-        os.chdir(_DATABASE)
-        cfg = Config("alembic.ini")
-        url = str(engine.url.render_as_string(hide_password=False))
-        cfg.set_main_option("script_location", str(_DATABASE / "migrations"))
-        cfg.set_main_option("sqlalchemy.url", url)
-        os.environ["DATABASE_URL"] = url
-        return cfg
-    finally:
-        os.chdir(prev_cwd)
+    cfg = Config(str(_DATABASE / "alembic.ini"))
+    url = str(engine.url.render_as_string(hide_password=False))
+    cfg.set_main_option("script_location", str(_DATABASE / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    os.environ["DATABASE_URL"] = url
+    return cfg
 
 
 def _upgrade(engine: Engine, revision: str) -> None:
