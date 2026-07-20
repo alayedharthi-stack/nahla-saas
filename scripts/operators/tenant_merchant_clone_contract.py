@@ -58,7 +58,7 @@ _POSTGRES_SCHEMES = frozenset({"postgresql", "postgresql+psycopg2"})
 
 # Internal E2E disposable clone — staging Tenant 48 source topology only.
 FORBIDDEN_SOURCE_TENANT_IDS: FrozenSet[int] = frozenset({1})
-INTERNAL_E2E_STAGING_DUAL_HEAD_TOPOLOGY: FrozenSet[str] = frozenset({"0088", "0089"})
+INTERNAL_E2E_STAGING_DUAL_HEAD_TOPOLOGY: FrozenSet[str] = frozenset({"0088", "0091"})
 FORBIDDEN_DISPOSABLE_TARGET_HOSTS: FrozenSet[str] = frozenset(
     {CANONICAL_STAGING_DATABASE_HOST}
 )
@@ -106,9 +106,9 @@ DRY_RUN_DIGEST_ENV = "NAHLA_TENANT_MERCHANT_CLONE_DRY_RUN_DIGEST"
 SOURCE_DATABASE_URL_ENV = "NAHLA_CLONE_SOURCE_DATABASE_URL"
 TARGET_DATABASE_URL_ENV = "DATABASE_URL"
 
-KNOWN_ALEMBIC_REVISIONS = frozenset({"0088", "0089"})
-EXPECTED_SOURCE_ALEMBIC_HEADS = frozenset({"0089"})
-EXPECTED_TARGET_ALEMBIC_HEADS = frozenset({"0088", "0089"})
+KNOWN_ALEMBIC_REVISIONS = frozenset({"0088", "0089", "0090", "0091"})
+EXPECTED_SOURCE_ALEMBIC_HEADS = frozenset({"0091"})
+EXPECTED_TARGET_ALEMBIC_HEADS = frozenset({"0088", "0091"})
 
 # ── Tenant scalar columns (public merchant settings only) ────────────────────
 TENANT_COPY_COLUMNS: Tuple[str, ...] = (

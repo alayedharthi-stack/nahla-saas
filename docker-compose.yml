@@ -79,7 +79,7 @@ services:
   migrate:
     <<: *python-service
     command: >
-      sh -c "cd /app/database && alembic upgrade 0089"
+      sh -c "cd /app/database && alembic upgrade 0091"
     depends_on:
       postgres:
         condition: service_healthy

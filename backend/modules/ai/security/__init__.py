@@ -35,6 +35,8 @@ from .tenant_isolation import (  # noqa: F401
 from .trace_schema import (  # noqa: F401
     FORBIDDEN_TRACE_KEYS,
     LearningTier,
+    MODEL_PATH_MAX_LENGTH,
+    ModelPathTooLongError,
     OutcomeKind,
     TraceEvent,
     UIMode,

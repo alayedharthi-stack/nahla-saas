@@ -29,6 +29,20 @@ from typing import Any, Dict, FrozenSet, Optional
 
 logger = logging.getLogger("nahla.ai.security.trace")
 
+# Bounded identifier contract shared with ``cross_merchant_signals.model_path``.
+MODEL_PATH_MAX_LENGTH = 128
+
+
+class ModelPathTooLongError(ValueError):
+    """Raised when a structured telemetry path exceeds its storage contract."""
+
+    def __init__(self, *, actual_length: int, max_length: int) -> None:
+        self.actual_length = actual_length
+        self.max_length = max_length
+        super().__init__(
+            f"model_path exceeds maximum length ({max_length})"
+        )
+
 
 # ── Categorical enums (string constants kept simple to JSON-serialise) ──
 
@@ -248,6 +262,17 @@ def sanitize_extra(extra: Any) -> Dict[str, Any]:
     return clean
 
 
+def normalize_model_path(model_path: Any) -> str:
+    """Normalize a structured routing path for cross-merchant telemetry."""
+    normalized = (str(model_path or "rule")).strip().lower() or "rule"
+    if len(normalized) > MODEL_PATH_MAX_LENGTH:
+        raise ModelPathTooLongError(
+            actual_length=len(normalized),
+            max_length=MODEL_PATH_MAX_LENGTH,
+        )
+    return normalized
+
+
 # ── Event dataclass ─────────────────────────────────────────────────────
 
 @dataclass
@@ -327,7 +352,7 @@ def validate_anonymized(event: TraceEvent) -> TraceEvent:
         outcome      = (event.outcome or OutcomeKind.UNKNOWN).strip().lower() or OutcomeKind.UNKNOWN,
         value_bucket = (event.value_bucket or "unknown").strip().lower() or "unknown",
         turn_index   = max(int(event.turn_index or 0), 0),
-        model_path   = (event.model_path or "rule").strip().lower() or "rule",
+        model_path   = normalize_model_path(event.model_path),
         latency_ms   = max(int(event.latency_ms or 0), 0),
         tier         = event.tier,
         extra        = sanitize_extra(event.extra),

@@ -238,11 +238,17 @@ class TestCrossMerchantStore:
 
         monkeypatch.setattr(db_models, "CrossMerchantSignal", CrossMerchantSignal)
 
-        db = MagicMock()
-        store = CrossMerchantLearningStore(db)
+        telemetry_db = MagicMock()
+        operational_db = MagicMock()
+        store = CrossMerchantLearningStore(
+            operational_db,
+            session_factory=lambda: telemetry_db,
+        )
         new_id = store.record(self._good_event())
 
         assert new_id == 123
+        operational_db.add.assert_not_called()
+        telemetry_db.add.assert_called_once()
         # Only safe categorical columns must appear
         assert set(captured.keys()) == {
             "tenant_hash", "industry", "intent", "action", "ui_mode",

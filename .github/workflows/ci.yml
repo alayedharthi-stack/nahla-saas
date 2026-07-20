@@ -219,11 +219,11 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest alembic
 
-      # Parallel heads: 0088 (A1-Validate) and 0089 (bindings). Pin CI to 0089
+      # Parallel heads: 0090 (A1-Validate) and 0091 (bindings). Pin CI to 0091
       # so capability stays expand; never use bare `head` here.
-      - name: Apply integration migration path (0089 only)
+      - name: Apply integration migration path (0091 only)
         working-directory: database
-        run: python -m alembic upgrade 0089
+        run: python -m alembic upgrade 0091
 
       - name: Prepare tenant clone source and target databases
         run: |
@@ -243,7 +243,7 @@ jobs:
               cd database
               export DATABASE_URL="postgresql://nahla:nahla_password@127.0.0.1:5433/${database_name}"
               python -m alembic upgrade 0088
-              python -m alembic upgrade 0089
+              python -m alembic upgrade 0091
             )
           done
 
@@ -256,6 +256,7 @@ jobs:
             backend/tests/test_order_customer_identity_legacy_customer_sync.py \
             backend/tests/test_order_customer_identity_migration_pg.py \
             backend/tests/test_order_customer_identity_migration_validate_pg.py \
+            backend/tests/test_cross_merchant_model_path_hotfix_pg.py \
             backend/tests/test_staging_migration_0087_to_0088_operators.py \
             backend/tests/test_staging_migration_0088_to_0089_attach_pg.py \
             backend/tests/test_conversation_a1_subject_binding_migration_pg.py \

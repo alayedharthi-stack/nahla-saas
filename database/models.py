@@ -2766,7 +2766,7 @@ class CrossMerchantSignal(Base):
     outcome      = Column(String(32), nullable=False, default='unknown')
     value_bucket = Column(String(32), nullable=False, default='unknown')
     turn_index   = Column(Integer, nullable=False, default=0)
-    model_path   = Column(String(32), nullable=False, default='rule')
+    model_path   = Column(String(128), nullable=False, default='rule')
     latency_ms   = Column(Integer, nullable=False, default=0)
     tier         = Column(String(16), nullable=False, default='global')
     extra        = Column(JSONB, nullable=True)

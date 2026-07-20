@@ -97,7 +97,7 @@ def _ensure_a1_schema(engine: Engine) -> None:
         os.environ["DATABASE_URL"] = str(engine.url.render_as_string(hide_password=False))
         # Parallel heads 0088 (Validate) and 0089 (bindings). Integration
         # fixtures pin to 0089 so capability remains expand until Validate.
-        command.upgrade(cfg, "0089")
+        command.upgrade(cfg, "0091")
     finally:
         os.chdir(prev_cwd)
     _ensure_capability_state_row(engine)

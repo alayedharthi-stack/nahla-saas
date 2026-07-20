@@ -76,7 +76,7 @@ def test_repository_parallel_heads_0088_0089_while_expand_runner_stops_at_0087()
         heads = set(ScriptDirectory("migrations").get_heads())
     finally:
         os.chdir(prev_cwd)
-    assert heads == frozenset({"0088", "0089"})
+    assert heads == frozenset({"0090", "0091"})
     assert FINAL_TARGET == "0087"
 
 

@@ -406,8 +406,8 @@ def test_apply_rejects_profile_mismatch() -> None:
     minimal_digest = clone_op.compute_dry_run_digest(
         _topology_digest_payload(
             profile=CLONE_PROFILE_SALLA_MINIMAL,
-            source_heads=["0089"],
-            target_heads=["0088", "0089"],
+            source_heads=["0091"],
+            target_heads=["0088", "0091"],
         )
     )
     fresh_plan = {
@@ -464,9 +464,9 @@ def test_integration_row_scrubbed_and_disabled() -> None:
     assert any("integrations.disabled_until_staging_credentials" in t for t in transforms)
 
 
-def test_revision_topology_source_0089_target_dual_head_accepted() -> None:
-    source_engine = _sqlite_engine_with_revisions(frozenset({"0089"}))
-    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0089"}))
+def test_revision_topology_source_0091_target_dual_head_accepted() -> None:
+    source_engine = _sqlite_engine_with_revisions(frozenset({"0091"}))
+    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0091"}))
     with source_engine.connect() as source_conn, target_engine.connect() as target_conn:
         assert clone_op.validate_source_alembic_heads(source_conn) is None
         assert clone_op.validate_target_alembic_heads(target_conn) is None
@@ -488,8 +488,8 @@ def test_revision_topology_source_0088_only_rejected() -> None:
     assert failure.stage == "source_alembic_revision_mismatch"
 
 
-def test_revision_topology_target_single_0089_rejected() -> None:
-    engine = _sqlite_engine_with_revisions(frozenset({"0089"}))
+def test_revision_topology_target_single_0091_rejected() -> None:
+    engine = _sqlite_engine_with_revisions(frozenset({"0091"}))
     with engine.connect() as conn:
         failure = clone_op.validate_target_alembic_heads(conn)
     assert failure is not None
@@ -497,8 +497,8 @@ def test_revision_topology_target_single_0089_rejected() -> None:
 
 
 def test_revision_topology_unknown_head_rejected_on_either_side() -> None:
-    source_engine = _sqlite_engine_with_revisions(frozenset({"0090"}))
-    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0089", "0090"}))
+    source_engine = _sqlite_engine_with_revisions(frozenset({"0099"}))
+    target_engine = _sqlite_engine_with_revisions(frozenset({"0088", "0091", "0099"}))
     with source_engine.connect() as conn:
         failure = clone_op.validate_source_alembic_heads(conn)
         assert failure is not None
@@ -538,8 +538,8 @@ def test_apply_revalidation_rejects_topology_drift() -> None:
         "dry_run_digest": clone_op.compute_dry_run_digest(
             _topology_digest_payload(
                 profile=CLONE_PROFILE_SALLA_MINIMAL,
-                source_heads=["0089"],
-                target_heads=["0088", "0089"],
+                source_heads=["0091"],
+                target_heads=["0088", "0091"],
             )
         ),
         "target_shell_state": "bootstrap_required",

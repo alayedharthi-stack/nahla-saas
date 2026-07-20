@@ -2350,6 +2350,13 @@ async def admin_debug_run_migrations(
     import subprocess  # noqa: PLC0415
     import sys as _sys  # noqa: PLC0415
 
+    from scripts.operators.bootstrap_migration_contract import (  # noqa: PLC0415
+        INTEGRATION_BOOTSTRAP_TARGET,
+        build_normal_bootstrap_upgrade_argv,
+    )
+
+    upgrade_cmd = build_normal_bootstrap_upgrade_argv(python_executable=_sys.executable)
+
     # Resolve the database/ directory exactly the way main.py does.
     repo_root = "/app"
     if not os.path.isdir(repo_root):
@@ -2365,14 +2372,14 @@ async def admin_debug_run_migrations(
 
     logger.warning(
         "[admin-debug] run-migrations invoked by admin — "
-        "alembic upgrade 0089 (cwd=%s, timeout=%ds)",
-        database_dir, body.timeout_seconds,
+        "alembic upgrade %s (cwd=%s, timeout=%ds)",
+        INTEGRATION_BOOTSTRAP_TARGET, database_dir, body.timeout_seconds,
     )
 
     start = time.monotonic()
     try:
         result = subprocess.run(
-            [_sys.executable, "-m", "alembic", "upgrade", "0089"],
+            upgrade_cmd,
             cwd=database_dir,
             check=False,
             env=os.environ.copy(),
@@ -2392,7 +2399,7 @@ async def admin_debug_run_migrations(
                 "code": "alembic_timeout",
                 "timeout_seconds": body.timeout_seconds,
                 "message": (
-                    "alembic upgrade 0089 did not finish within the "
+                    f"alembic upgrade {INTEGRATION_BOOTSTRAP_TARGET} did not finish within the "
                     "timeout. The migration may be holding a lock — "
                     "inspect Railway logs and consider terminating "
                     "the locking session."

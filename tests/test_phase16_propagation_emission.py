@@ -344,7 +344,7 @@ class TestAnonymousSignalEmission:
         )
         captured: Dict[str, TraceEvent] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["event"] = event
             # Re-validate to surface any silent leak.
             captured["validated"] = validate_anonymized(event)
@@ -383,7 +383,7 @@ class TestAnonymousSignalEmission:
         )
         called = {"n": 0}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             called["n"] += 1
             return 1
 
@@ -403,7 +403,7 @@ class TestAnonymousSignalEmission:
             CrossMerchantLearningStore, "is_enabled", staticmethod(lambda: True)
         )
 
-        def _boom(self, event, *, commit=True):
+        def _boom(self, event):
             raise RuntimeError("simulated DB outage")
 
         monkeypatch.setattr(CrossMerchantLearningStore, "record", _boom)
@@ -425,7 +425,7 @@ class TestAnonymousSignalEmission:
             CrossMerchantLearningStore, "is_enabled", staticmethod(lambda: True)
         )
 
-        def _boom(self, event, *, commit=True):
+        def _boom(self, event):
             raise RuntimeError("simulated DB outage")
 
         monkeypatch.setattr(CrossMerchantLearningStore, "record", _boom)
@@ -454,7 +454,7 @@ class TestAnonymousSignalEmission:
         )
         captured: Dict[str, Any] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["evt"] = event
             return 1
 
@@ -480,7 +480,7 @@ class TestAnonymousSignalEmission:
         )
         captured: Dict[str, Any] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["evt"] = event
             return 1
 
@@ -505,7 +505,7 @@ class TestAnonymousSignalEmission:
         )
         captured: Dict[str, Any] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["evt"] = event
             return 1
 
