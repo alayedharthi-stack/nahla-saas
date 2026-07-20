@@ -128,6 +128,12 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             )
         if not facts.get("has_eligible_products"):
             lines.append("no_confirmed_sellable_products: true")
+        qkind = str(facts.get("question_kind") or "").strip()
+        has_pos_avail = bool(facts.get("has_positive_availability"))
+        allow_avail = bool(facts.get("allow_availability_mention"))
+        lines.append(f"allow_price_mention: {bool(facts.get('allow_price_mention'))}")
+        lines.append(f"allow_availability_mention: {allow_avail}")
+        lines.append(f"has_positive_availability: {has_pos_avail}")
         for product in facts.get("catalog_products") or []:
             if not isinstance(product, dict):
                 continue
@@ -141,24 +147,52 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 catalog_price = _resolve_catalog_visible_price(product)
                 if catalog_price is not None:
                     parts.append(f"price={catalog_price} ريال")
-            if facts.get("allow_availability_mention") and "available" in product:
-                parts.append(f"available={product.get('available')}")
+            if allow_avail:
+                if "available" in product:
+                    parts.append(f"available={product.get('available')}")
+                elif "orderable" in product:
+                    parts.append(f"orderable={product.get('orderable')}")
             lines.append(" | ".join(parts))
         if not facts.get("has_catalog_products"):
             lines.append("catalog_products: none")
-        if not facts.get("has_eligible_products"):
+        if (
+            not facts.get("has_eligible_products")
+            and qkind not in {"price", "availability"}
+        ):
             lines.append(
                 "rules: honestly explain there are no confirmed sellable catalog products; "
                 "do not invent products, prices, availability, or checkout pressure; "
                 "no name/address/payment/quantity prompts"
             )
         else:
-            lines.append(
-                "rules: use only supplied catalog products; brief Saudi merchant tone; "
-                "mention prices only when listed; mention availability only when available flag is set; "
-                "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
-                "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
-            )
+            rule_parts = [
+                "rules: use only supplied catalog products",
+                "brief Saudi merchant tone",
+                "no invented products/prices/availability/discounts",
+                "no الأفضل/superiority claims",
+                "no checkout/name/address/payment/quantity prompts",
+                "no category drift outside scope",
+            ]
+            if qkind == "price":
+                rule_parts.append(
+                    "answer from verified price facts only; "
+                    "do not add availability or stock-status claims"
+                )
+            elif qkind == "availability":
+                if has_pos_avail:
+                    rule_parts.append(
+                        "mention positive availability only for products with available=true in facts"
+                    )
+                else:
+                    rule_parts.append(
+                        "no confirmed positive stock evidence; express uncertainty without "
+                        "claiming متوفر or غير متوفر/نفذ/out-of-stock"
+                    )
+            elif qkind == "browse" or facts.get("navigation_browse"):
+                rule_parts.append("do not mention availability or stock status")
+            else:
+                rule_parts.append("mention prices only when listed in product facts")
+            lines.append("; ".join(rule_parts))
     elif bundle.surface == PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
         for key in (
             "identity_status",

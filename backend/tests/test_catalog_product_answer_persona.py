@@ -853,3 +853,205 @@ class TestCatalogQaPersonaCompose:
 
         asyncio.run(_run())
 
+
+class TestCatalogAvailabilityFactsSemantics:
+    """Platform-wide facts/prompt semantics for price vs availability turns."""
+
+    _GENERIC_PERFUME = {
+        "id": 401,
+        "title": "عطر ورد",
+        "category": "عطور",
+        "price": 185,
+        "can_checkout": False,
+    }
+
+    _GENERIC_CLOTHING = {
+        "id": 402,
+        "title": "قميص قطني أزرق",
+        "category": "ملابس",
+        "price": 129,
+        "can_checkout": True,
+    }
+
+    def test_price_non_orderable_disallows_availability_prose_invitation(self) -> None:
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر حذاء رياضي أبيض؟",
+            tenant_id=12,
+            products=[self._GENERIC_PERFUME],
+            catalog_search_query="حذاء",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        assert facts["allow_price_mention"] is True
+        assert facts["allow_availability_mention"] is False
+        assert facts["has_positive_availability"] is False
+        assert facts["price_source"] == "catalog"
+        assert "availability_source" not in facts
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "has_positive_availability: False" in prompt
+        assert "allow_availability_mention: False" in prompt
+        assert "do not add availability or stock-status claims" in prompt
+        assert "available=" not in prompt
+
+    def test_price_compliant_candidate_passes_without_availability_claim(self) -> None:
+        product = dict(self._GENERIC_PERFUME)
+
+        async def _run() -> None:
+            bundle = build_catalog_product_answer_facts_bundle(
+                inbound_text="كم سعر عطر ورد؟",
+                tenant_id=12,
+                products=[product],
+                question_kind="price",
+            )
+
+            async def _good_llm(_bundle):
+                return "عطر ورد سعره 185 ريال."
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert "185" in result.text
+
+        asyncio.run(_run())
+
+    def test_price_candidate_with_unsupported_mتوفر_still_fails_guard(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد؟",
+            products=[self._GENERIC_PERFUME],
+            question_kind="price",
+        )
+        guard = apply_persona_compose_guards(
+            "عطر ورد سعره 185 ريال وهو متوفر الآن",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason in {
+            "invented_availability",
+            "unsupported_available_claim",
+        }
+
+    def test_navigation_availability_inbound_classifies_availability(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            _build_catalog_navigation_bundle,
+        )
+
+        shoe = dict(self._GENERIC_CLOTHING)
+        shoe["title"] = "حذاء رياضي أبيض"
+        shoe["category"] = "أحذية"
+        bundle, _rows = _build_catalog_navigation_bundle(
+            tenant_id=14,
+            customer_phone="966500000002",
+            inbound_text="عندكم حذاء رياضي أبيض؟",
+            products=[shoe],
+            navigator_no_groups_fallback=True,
+            decision_args={},
+            settings={},
+        )
+        facts = bundle.verified_facts
+        assert facts["question_kind"] == "availability"
+        assert facts["navigation_browse"] is False
+        assert facts["allow_availability_mention"] is True
+        assert facts["has_positive_availability"] is True
+
+    def test_navigation_availability_uncertainty_compose_passes(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            _build_catalog_navigation_bundle,
+        )
+
+        perfume = dict(self._GENERIC_PERFUME)
+
+        async def _run() -> None:
+            bundle, _rows = _build_catalog_navigation_bundle(
+                tenant_id=15,
+                customer_phone="966500000003",
+                inbound_text="عندكم عطر ورد؟",
+                products=[perfume],
+                navigator_no_groups_fallback=True,
+                decision_args={},
+                settings={},
+            )
+            assert bundle.verified_facts["question_kind"] == "availability"
+            assert bundle.verified_facts["has_positive_availability"] is False
+
+            async def _safe_llm(_bundle):
+                return "عطر ورد موجود ضمن تشكيلتنا لكن التوفر حالياً غير مؤكد"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _safe_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert "متوفر" not in result.text
+
+        asyncio.run(_run())
+
+    def test_navigation_true_browse_forbids_availability_claims(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            _build_catalog_navigation_bundle,
+        )
+
+        bundle, _rows = _build_catalog_navigation_bundle(
+            tenant_id=16,
+            customer_phone="966500000004",
+            inbound_text="وش عندكم من أحذية؟",
+            products=[self._GENERIC_CLOTHING],
+            navigator_no_groups_fallback=False,
+            decision_args={},
+            settings={},
+        )
+        facts = bundle.verified_facts
+        assert facts["question_kind"] == "browse"
+        assert facts["navigation_browse"] is True
+        assert facts["allow_availability_mention"] is False
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "do not mention availability or stock status" in prompt
+
+    def test_positive_availability_evidence_allows_grounded_mتوفر(self) -> None:
+        async def _run() -> None:
+            bundle = build_catalog_product_answer_facts_bundle(
+                inbound_text="عندكم قميص قطني؟",
+                tenant_id=17,
+                products=[self._GENERIC_CLOTHING],
+                question_kind="availability",
+            )
+            assert bundle.verified_facts["has_positive_availability"] is True
+
+            async def _good_llm(_bundle):
+                return "نعم القميص القطني الأزرق متوفر للطلب حالياً"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+
+        asyncio.run(_run())
+
+    def test_tenant_isolation_no_fixed_tenant_in_bundle(self) -> None:
+        bundle_a = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد؟",
+            tenant_id=901,
+            products=[self._GENERIC_PERFUME],
+            question_kind="price",
+        )
+        bundle_b = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد؟",
+            tenant_id=902,
+            products=[self._GENERIC_PERFUME],
+            question_kind="price",
+        )
+        assert bundle_a.tenant_id == 901
+        assert bundle_b.tenant_id == 902
+        assert bundle_a.verified_facts["allow_availability_mention"] is False
+        assert bundle_b.verified_facts["allow_availability_mention"] is False
+

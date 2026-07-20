@@ -201,7 +201,10 @@ def build_catalog_product_answer_facts_bundle(
     scope = str(category_scope or args.get("category_scope") or "").strip()
     allowed = str(allowed_category or scope or "").strip()
     include_price = qkind == "price" and any_price
-    include_availability = qkind in {"availability", "price"} and any_availability
+    # Price turns ground on catalog price only; availability prose is reserved for
+    # explicit availability questions so guards are not fighting prompt invitation.
+    include_availability = qkind == "availability"
+    allow_availability_mention = qkind == "availability"
     eligible_product_count = _count_eligible_catalog_products(items)
 
     verified_facts: dict[str, Any] = {
@@ -220,7 +223,7 @@ def build_catalog_product_answer_facts_bundle(
         "eligible_product_count": eligible_product_count,
         "has_eligible_products": eligible_product_count > 0,
         "allow_price_mention": include_price and any_price,
-        "allow_availability_mention": include_availability and any_availability,
+        "allow_availability_mention": allow_availability_mention,
         "has_positive_availability": any_positive,
         "allow_checkout_pressure": False,
         "allow_slot_prompts": False,
@@ -231,6 +234,8 @@ def build_catalog_product_answer_facts_bundle(
         verified_facts["price_source"] = "catalog"
     if include_availability and any_availability:
         verified_facts["availability_source"] = "catalog"
+    elif include_availability:
+        verified_facts["availability_evidence"] = "bounded_per_product"
     return PersonaFactsBundle(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         inbound_text=inbound,
@@ -830,6 +835,11 @@ def _build_catalog_navigation_bundle(
     settings: dict[str, Any],
 ) -> tuple[PersonaFactsBundle, list[dict[str, Any]]]:
     compose_fact_rows = catalog_fact_product_rows(products)
+    args = dict(decision_args or {})
+    qkind = classify_catalog_question_kind(
+        inbound_text,
+        decision_args=args,
+    )
     bundle = build_catalog_product_answer_facts_bundle(
         inbound_text=inbound_text,
         tenant_id=tenant_id,
@@ -837,13 +847,13 @@ def _build_catalog_navigation_bundle(
         products=products,
         catalog_search_query="",
         search_result_count=len(compose_fact_rows),
-        question_kind="browse",
+        question_kind=qkind,
         display_count=len(compose_fact_rows),
-        decision_args=dict(decision_args or {}),
+        decision_args=args,
         merchant_persona=settings,
     )
     verified = dict(bundle.verified_facts)
-    verified["navigation_browse"] = True
+    verified["navigation_browse"] = qkind == "browse"
     verified["navigator_no_groups_fallback"] = bool(navigator_no_groups_fallback)
     eligible_product_count = _count_eligible_catalog_products(compose_fact_rows)
     verified["eligible_product_count"] = eligible_product_count
@@ -892,6 +902,7 @@ def build_catalog_navigation_emergency_outcome(
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
     fallback = _catalog_navigation_emergency_fallback(bundle, reason=reason)
+    nav_qkind = str(bundle.verified_facts.get("question_kind") or "browse").strip()
     event_meta = _persona_event_with_chosen_path(
         fallback,
         tenant_id=int(tenant_id),
@@ -904,7 +915,7 @@ def build_catalog_navigation_emergency_outcome(
         catalog_facts=bundle.verified_facts,
         catalog_fact_products=compose_fact_rows,
         extra={
-            "question_kind": "browse",
+            "question_kind": nav_qkind,
             "fallback_action_type": "catalog_navigation_browse",
         },
     )
@@ -962,6 +973,7 @@ async def try_compose_catalog_navigation_browse_answer(
         and result.guard_passed
         and (result.text or "").strip()
     ):
+        nav_qkind = str(bundle.verified_facts.get("question_kind") or "browse").strip()
         event_meta = _persona_event_with_chosen_path(
             result,
             tenant_id=int(tenant_id),
@@ -969,7 +981,7 @@ async def try_compose_catalog_navigation_browse_answer(
             chosen_path=chosen_path,
             catalog_facts=bundle.verified_facts,
             catalog_fact_products=compose_fact_rows,
-            extra={"question_kind": "browse"},
+            extra={"question_kind": nav_qkind},
         )
         _log_catalog_compose_telemetry(
             surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
@@ -980,7 +992,7 @@ async def try_compose_catalog_navigation_browse_answer(
             search_result_count=int(
                 bundle.verified_facts.get("search_result_count") or 0
             ),
-            question_kind="browse",
+            question_kind=nav_qkind,
         )
         return result.text.strip(), result, event_meta
 
