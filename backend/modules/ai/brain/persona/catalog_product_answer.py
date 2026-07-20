@@ -1,6 +1,7 @@
 """Fact-bound persona compose for catalog search / browse answers (P0)."""
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 
@@ -12,8 +13,9 @@ from .facts_bundle import (
 )
 from .integration import (
     build_persona_compose_event_metadata,
-    should_enforce_persona_compose_for_surface,
 )
+
+logger = logging.getLogger("nahla.brain.persona.catalog_product_answer")
 
 _PRICE_ASK_RE = re.compile(
     r"(?:بكم|كم\s*سعر|سعر|ثمن|تكلفة|how\s*much|price)",
@@ -138,6 +140,34 @@ def _catalog_rows_from_products(
     return rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive_availability
 
 
+def _count_eligible_catalog_products(products: list[dict[str, Any]]) -> int:
+    count = 0
+    for raw in products or []:
+        if not isinstance(raw, dict):
+            continue
+        if bool(raw.get("can_checkout", raw.get("orderable", False))):
+            count += 1
+    return count
+
+
+def _log_catalog_compose_telemetry(
+    *,
+    surface: str,
+    outcome_category: str,
+    eligible_product_count: int = 0,
+    search_result_count: int = 0,
+    question_kind: str = "",
+) -> None:
+    logger.info(
+        "[CATALOG_COMPOSE] surface=%s outcome=%s eligible=%s search=%s qkind=%s",
+        str(surface or "").strip(),
+        str(outcome_category or "").strip(),
+        int(eligible_product_count),
+        int(search_result_count),
+        str(question_kind or "").strip() or "-",
+    )
+
+
 def build_catalog_product_answer_facts_bundle(
     *,
     inbound_text: str,
@@ -172,6 +202,7 @@ def build_catalog_product_answer_facts_bundle(
     allowed = str(allowed_category or scope or "").strip()
     include_price = qkind == "price" and any_price
     include_availability = qkind in {"availability", "price"} and any_availability
+    eligible_product_count = _count_eligible_catalog_products(items)
 
     verified_facts: dict[str, Any] = {
         "surface": PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
@@ -186,6 +217,8 @@ def build_catalog_product_answer_facts_bundle(
         "variant_ids": variant_ids,
         "display_count": int(display_count or len(items)),
         "category_filter_dropped": int(category_filter_dropped or 0),
+        "eligible_product_count": eligible_product_count,
+        "has_eligible_products": eligible_product_count > 0,
         "allow_price_mention": include_price and any_price,
         "allow_availability_mention": include_availability and any_availability,
         "has_positive_availability": any_positive,
@@ -226,6 +259,19 @@ def build_catalog_product_answer_event_metadata(
         tenant_id=int(tenant_id),
         allowlist_result=str(allowlist_result or ""),
     )
+    meta.update({
+        "compose_source": result.source,
+        "response_mode": "grounded_persona_compose",
+        "llm_candidate_present": result.source == "persona_llm",
+        "final_text_transformed": False,
+        "final_transform_reasons": [],
+        "final_customer_text_source": result.source,
+    })
+    if result.source == "fallback_deterministic":
+        meta["fallback_reason"] = str(
+            result.fallback_reason or "compose_unavailable"
+        )
+        meta["fallback_action_type"] = "catalog_product_answer"
     facts = dict(catalog_facts or {})
     meta["question_kind"] = str(facts.get("question_kind") or "").strip()
     meta["catalog_search_query"] = str(facts.get("catalog_search_query") or "").strip()
@@ -243,6 +289,8 @@ def build_catalog_product_answer_event_metadata(
         meta["price_source"] = facts["price_source"]
     if facts.get("availability_source"):
         meta["availability_source"] = facts["availability_source"]
+    if facts.get("eligible_product_count") is not None:
+        meta["eligible_product_count"] = int(facts.get("eligible_product_count") or 0)
     qkind = str(facts.get("question_kind") or meta.get("question_kind") or "").strip()
     if qkind in _CATALOG_QA_KINDS:
         fact_rows = catalog_fact_product_rows(catalog_fact_products)
@@ -317,7 +365,39 @@ def catalog_product_answer_deterministic_fallback(
     return text
 
 
-def try_catalog_qa_deterministic_answer(
+def _catalog_product_answer_emergency_fallback(
+    bundle: PersonaFactsBundle,
+    *,
+    reason: str,
+) -> PersonaComposeResult:
+    from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+
+    facts = bundle.verified_facts or {}
+    qkind = str(facts.get("question_kind") or "").strip()
+    if qkind == "price":
+        text = "لا تتوفر تفاصيل سعر مؤكدة في الكتالوج حالياً."
+    elif qkind == "availability":
+        text = "لا تتوفر حالة توفر مؤكدة في الكتالوج حالياً."
+    elif qkind == "browse":
+        text = "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
+    else:
+        text = "لا تتوفر تفاصيل مؤكدة من الكتالوج حالياً."
+    return PersonaComposeResult(
+        text=text,
+        source="fallback_deterministic",
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        facts_hash=canonical_facts_hash(bundle.verified_facts),
+        guard_passed=False,
+        fallback_reason=str(reason or "compose_unavailable"),
+        language=bundle.language,
+        dialect=bundle.dialect,
+        emoji_count=0,
+        latency_ms=0,
+        model=None,
+    )
+
+
+def build_catalog_product_answer_emergency_outcome(
     *,
     tenant_id: int,
     customer_phone: str,
@@ -331,16 +411,11 @@ def try_catalog_qa_deterministic_answer(
     category_filter_dropped: int = 0,
     display_count: int = 0,
     decision_args: Optional[dict[str, Any]] = None,
-) -> tuple[Optional[str], Optional[dict[str, Any]]]:
-    """Operational catalog price/availability answer without persona enforce gate."""
-    qkind = str(question_kind or "").strip() or classify_catalog_question_kind(
-        inbound_text,
-        query=catalog_search_query,
-        decision_args=dict(decision_args or {}),
-    )
-    if qkind not in _CATALOG_QA_KINDS or not products:
-        return None, None
-
+    ai_settings: Optional[dict[str, Any]] = None,
+    reason: str = "compose_unavailable",
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """Audited one-line fallback for unavailable catalog product compose."""
+    settings = dict(ai_settings or {})
     compose_fact_rows = catalog_fact_product_rows(products)
     bundle = build_catalog_product_answer_facts_bundle(
         inbound_text=inbound_text,
@@ -351,71 +426,38 @@ def try_catalog_qa_deterministic_answer(
         search_result_count=search_result_count,
         category_scope=category_scope,
         allowed_category=allowed_category,
-        question_kind=qkind,
+        question_kind=question_kind,
         category_filter_dropped=category_filter_dropped,
         display_count=display_count,
         decision_args=dict(decision_args or {}),
+        merchant_persona=settings,
     )
-    if not bundle.verified_facts.get("has_catalog_products"):
-        return None, None
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
-    fallback_text = catalog_product_answer_deterministic_fallback(bundle)
-    if not (fallback_text or "").strip():
-        return None, None
-
-    fallback_result = _catalog_deterministic_compose_result(
-        bundle=bundle,
-        text=fallback_text,
-        prior=PersonaComposeResult(
-            text="",
-            source="",
-            surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
-            facts_hash="",
-            guard_passed=False,
-            guard_failed_reason="persona_gate_bypassed",
-        ),
-    )
+    fallback = _catalog_product_answer_emergency_fallback(bundle, reason=reason)
     event_meta = build_catalog_product_answer_event_metadata(
-        fallback_result,
+        fallback,
         tenant_id=int(tenant_id),
-        allowlist_result="persona_gate_bypassed",
+        allowlist_result=persona_composer_allowlist_result(
+            tenant_id=int(tenant_id),
+            customer_phone=str(customer_phone or ""),
+            ai_settings=settings,
+        ),
         catalog_facts=bundle.verified_facts,
         catalog_fact_products=compose_fact_rows,
     )
-    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
-        parse_price_amount,
-    )
-
-    prices: list[int] = []
-    for row in compose_fact_rows:
-        parsed = parse_price_amount(row.get("price"))
-        if parsed is not None:
-            prices.append(parsed)
-    if prices:
-        event_meta["catalog_fact_price_values"] = sorted(set(prices))
-    return fallback_text.strip(), event_meta
-
-
-def _catalog_deterministic_compose_result(
-    *,
-    bundle: PersonaFactsBundle,
-    text: str,
-    prior: PersonaComposeResult,
-) -> PersonaComposeResult:
-    return PersonaComposeResult(
-        text=text.strip(),
-        source="catalog_deterministic_fallback",
+    _log_catalog_compose_telemetry(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
-        facts_hash=prior.facts_hash,
-        guard_passed=False,
-        guard_failed_reason=prior.guard_failed_reason or "llm_or_guard_failed",
-        fallback_reason="catalog_deterministic_fallback",
-        language=prior.language,
-        dialect=prior.dialect,
-        emoji_count=sum(1 for ch in text if ch in {"😊", "🌷", "🤍", "🍯"}),
-        latency_ms=prior.latency_ms,
-        model=prior.model,
+        outcome_category="fallback_deterministic",
+        eligible_product_count=int(
+            bundle.verified_facts.get("eligible_product_count") or 0
+        ),
+        search_result_count=int(
+            bundle.verified_facts.get("search_result_count") or 0
+        ),
+        question_kind=str(bundle.verified_facts.get("question_kind") or ""),
     )
+    return fallback.text.strip(), fallback, event_meta
 
 
 async def try_compose_catalog_product_answer(
@@ -433,22 +475,11 @@ async def try_compose_catalog_product_answer(
     display_count: int = 0,
     decision_args: Optional[dict[str, Any]] = None,
     ai_settings: Optional[dict[str, Any]] = None,
-) -> tuple[Optional[str], Optional[PersonaComposeResult], Optional[dict[str, Any]]]:
-    """Compose catalog-grounded search answer when test-mode gate passes."""
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """Compose catalog-grounded search/Q&A answer with one provider attempt."""
     from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
 
     settings = dict(ai_settings or {})
-    if not should_enforce_persona_compose_for_surface(
-        tenant_id=tenant_id,
-        customer_phone=customer_phone,
-        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
-        ai_settings=settings,
-    ):
-        return None, None, None
-
-    if not products:
-        return None, None, None
-
     compose_fact_rows = catalog_fact_product_rows(products)
     bundle = build_catalog_product_answer_facts_bundle(
         inbound_text=inbound_text,
@@ -465,9 +496,6 @@ async def try_compose_catalog_product_answer(
         decision_args=dict(decision_args or {}),
         merchant_persona=settings,
     )
-    if not bundle.verified_facts.get("has_catalog_products"):
-        return None, None, None
-
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
     allowlist_result = persona_composer_allowlist_result(
@@ -476,7 +504,25 @@ async def try_compose_catalog_product_answer(
         ai_settings=settings,
     )
     composer = FactBoundPersonaComposer(enforce_gate=False)
-    result = await composer.compose(bundle)
+    try:
+        result = await composer.compose(bundle)
+    except Exception as exc:  # noqa: BLE001
+        return build_catalog_product_answer_emergency_outcome(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            inbound_text=inbound_text,
+            products=products,
+            catalog_search_query=catalog_search_query,
+            search_result_count=search_result_count,
+            category_scope=category_scope,
+            allowed_category=allowed_category,
+            question_kind=question_kind,
+            category_filter_dropped=category_filter_dropped,
+            display_count=display_count,
+            decision_args=dict(decision_args or {}),
+            ai_settings=settings,
+            reason=f"compose_exception:{type(exc).__name__}",
+        )
     if (
         result.source == "persona_llm"
         and result.guard_passed
@@ -489,27 +535,39 @@ async def try_compose_catalog_product_answer(
             catalog_facts=bundle.verified_facts,
             catalog_fact_products=compose_fact_rows,
         )
+        _log_catalog_compose_telemetry(
+            surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+            outcome_category="persona_llm",
+            eligible_product_count=int(
+                bundle.verified_facts.get("eligible_product_count") or 0
+            ),
+            search_result_count=int(
+                bundle.verified_facts.get("search_result_count") or 0
+            ),
+            question_kind=str(bundle.verified_facts.get("question_kind") or ""),
+        )
         return result.text.strip(), result, event_meta
 
-    qkind = str(bundle.verified_facts.get("question_kind") or "").strip()
-    if qkind in _CATALOG_QA_KINDS:
-        fallback_text = catalog_product_answer_deterministic_fallback(bundle)
-        if fallback_text.strip():
-            fallback_result = _catalog_deterministic_compose_result(
-                bundle=bundle,
-                text=fallback_text,
-                prior=result,
-            )
-            event_meta = build_catalog_product_answer_event_metadata(
-                fallback_result,
-                tenant_id=int(tenant_id),
-                allowlist_result=allowlist_result,
-                catalog_facts=bundle.verified_facts,
-                catalog_fact_products=compose_fact_rows,
-            )
-            return fallback_text.strip(), fallback_result, event_meta
-
-    return None, None, None
+    return build_catalog_product_answer_emergency_outcome(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        inbound_text=inbound_text,
+        products=products,
+        catalog_search_query=catalog_search_query,
+        search_result_count=search_result_count,
+        category_scope=category_scope,
+        allowed_category=allowed_category,
+        question_kind=question_kind,
+        category_filter_dropped=category_filter_dropped,
+        display_count=display_count,
+        decision_args=dict(decision_args or {}),
+        ai_settings=settings,
+        reason=(
+            result.fallback_reason
+            or result.guard_failed_reason
+            or "compose_empty"
+        ),
+    )
 
 
 def build_catalog_search_miss_facts_bundle(
@@ -536,6 +594,9 @@ def build_catalog_search_miss_facts_bundle(
         "catalog_products": [],
         "catalog_product_ids": [],
         "has_catalog_products": False,
+        "eligible_product_count": 0,
+        "has_eligible_products": False,
+        "confirmed_match_count": 0,
         "allow_price_mention": False,
         "allow_availability_mention": False,
         "allow_checkout_pressure": False,
@@ -711,6 +772,13 @@ async def try_compose_catalog_search_miss_answer(
             catalog_facts=bundle.verified_facts,
             extra={"question_kind": "search_miss"},
         )
+        _log_catalog_compose_telemetry(
+            surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+            outcome_category="persona_llm",
+            eligible_product_count=0,
+            search_result_count=0,
+            question_kind="search_miss",
+        )
         return result.text.strip(), result, event_meta
 
     return build_catalog_search_miss_emergency_outcome(
@@ -777,6 +845,13 @@ def _build_catalog_navigation_bundle(
     verified = dict(bundle.verified_facts)
     verified["navigation_browse"] = True
     verified["navigator_no_groups_fallback"] = bool(navigator_no_groups_fallback)
+    eligible_product_count = _count_eligible_catalog_products(compose_fact_rows)
+    verified["eligible_product_count"] = eligible_product_count
+    verified["has_eligible_products"] = eligible_product_count > 0
+    if not compose_fact_rows:
+        verified["catalog_products"] = []
+        verified["catalog_product_ids"] = []
+        verified["has_catalog_products"] = False
     return PersonaFactsBundle(
         surface=bundle.surface,
         inbound_text=bundle.inbound_text,
@@ -860,19 +935,6 @@ async def try_compose_catalog_navigation_browse_answer(
         decision_args=decision_args,
         settings=settings,
     )
-    if not compose_fact_rows:
-        return build_catalog_navigation_emergency_outcome(
-            tenant_id=tenant_id,
-            customer_phone=customer_phone,
-            inbound_text=inbound_text,
-            products=products,
-            chosen_path=chosen_path,
-            navigator_no_groups_fallback=navigator_no_groups_fallback,
-            decision_args=decision_args,
-            ai_settings=settings,
-            reason="missing_catalog_fact_rows",
-        )
-
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
     allowlist_result = persona_composer_allowlist_result(
@@ -908,6 +970,17 @@ async def try_compose_catalog_navigation_browse_answer(
             catalog_facts=bundle.verified_facts,
             catalog_fact_products=compose_fact_rows,
             extra={"question_kind": "browse"},
+        )
+        _log_catalog_compose_telemetry(
+            surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+            outcome_category="persona_llm",
+            eligible_product_count=int(
+                bundle.verified_facts.get("eligible_product_count") or 0
+            ),
+            search_result_count=int(
+                bundle.verified_facts.get("search_result_count") or 0
+            ),
+            question_kind="browse",
         )
         return result.text.strip(), result, event_meta
 

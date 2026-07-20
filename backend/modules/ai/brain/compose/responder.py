@@ -743,10 +743,7 @@ class DefaultComposer:
                 facts_products = list(safe_products)
                 _facts_category_dropped = _category_filter_dropped
 
-            if _question_kind in _CATALOG_QA_QUESTION_KINDS:
-                if not facts_products:
-                    return T.no_products(variant=self._variant_idx(ctx))
-            elif not safe_products:
+            if _question_kind not in _CATALOG_QA_QUESTION_KINDS and not safe_products:
                 return T.no_products(variant=self._variant_idx(ctx))
 
             from ..commerce.product_breadth_policy import (  # noqa: PLC0415
@@ -784,67 +781,75 @@ class DefaultComposer:
             _catalog_text: str | None = None
             _catalog_event: dict | None = None
             try:
+                from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    build_catalog_product_answer_emergency_outcome,
+                    try_compose_catalog_product_answer,
+                )
                 from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
 
-                _catalog_text, _catalog_result, _catalog_event = (
-                    await try_compose_catalog_product_answer(
-                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
-                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
-                        inbound_text=str(getattr(ctx, "message", "") or ""),
-                        products=list(compose_products),
-                        catalog_search_query=_search_query,
-                        search_result_count=len(facts_products),
-                        category_scope=_category_scope,
-                        allowed_category=_category_scope,
-                        question_kind=_question_kind,
-                        category_filter_dropped=_facts_category_dropped,
-                        display_count=len(candidates),
-                        decision_args=dict(decision.args or {}),
-                        ai_settings=_ai_settings_from_ctx(ctx),
-                    )
-                )
-                if _catalog_result is not None and (_catalog_text or "").strip():
-                    if isinstance(_catalog_event, dict):
-                        result.data.update(_catalog_event)
-                    if _question_kind in _CATALOG_QA_QUESTION_KINDS:
-                        _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
-                            compose_products,
+                _catalog_kwargs = {
+                    "tenant_id": int(getattr(ctx, "tenant_id", 0) or 0),
+                    "customer_phone": str(getattr(ctx, "customer_phone", "") or ""),
+                    "inbound_text": str(getattr(ctx, "message", "") or ""),
+                    "products": list(compose_products),
+                    "catalog_search_query": _search_query,
+                    "search_result_count": len(facts_products),
+                    "category_scope": _category_scope,
+                    "allowed_category": _category_scope,
+                    "question_kind": _question_kind,
+                    "category_filter_dropped": _facts_category_dropped,
+                    "display_count": len(candidates),
+                    "decision_args": dict(decision.args or {}),
+                    "ai_settings": _ai_settings_from_ctx(ctx),
+                }
+                if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                    _catalog_text, _catalog_result, _catalog_event = (
+                        await try_compose_catalog_product_answer(
+                            **_catalog_kwargs,
                         )
-                        if _persist_fact_rows:
-                            result.data["catalog_fact_products"] = _persist_fact_rows
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
+                    )
+                    if not (
+                        (_catalog_text or "").strip()
+                        and isinstance(_catalog_event, dict)
+                        and _catalog_event.get("compose_source")
+                    ):
+                        _catalog_text, _catalog_result, _catalog_event = (
+                            build_catalog_product_answer_emergency_outcome(
+                                **_catalog_kwargs,
+                                reason="invalid_compose_outcome",
+                            )
+                        )
+                else:
+                    _catalog_text, _catalog_result, _catalog_event = (
+                        await try_compose_catalog_product_answer(
+                            **_catalog_kwargs,
+                        )
+                    )
+                    if _catalog_result is not None and (_catalog_text or "").strip():
+                        if isinstance(_catalog_event, dict):
+                            result.data.update(_catalog_event)
+            except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — catalog persona optional
                 logger.exception("[RESPONDER] catalog_product_answer compose failed")
+                if _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                    _catalog_text, _catalog_result, _catalog_event = (
+                        build_catalog_product_answer_emergency_outcome(
+                            **_catalog_kwargs,
+                            reason=f"responder_exception:{type(exc).__name__}",
+                        )
+                    )
 
             if (
                 _question_kind in _CATALOG_QA_QUESTION_KINDS
-                and not (_catalog_text or "").strip()
+                and isinstance(_catalog_event, dict)
+                and (_catalog_text or "").strip()
             ):
-                from ..persona.catalog_product_answer import (  # noqa: PLC0415
-                    try_catalog_qa_deterministic_answer,
+                result.data.update(_catalog_event)
+                _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
+                    compose_products,
                 )
-
-                _qa_text, _qa_event = try_catalog_qa_deterministic_answer(
-                    tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
-                    customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
-                    inbound_text=str(getattr(ctx, "message", "") or ""),
-                    products=list(compose_products),
-                    catalog_search_query=_search_query,
-                    search_result_count=len(facts_products),
-                    category_scope=_category_scope,
-                    allowed_category=_category_scope,
-                    question_kind=_question_kind,
-                    category_filter_dropped=_facts_category_dropped,
-                    display_count=len(candidates),
-                    decision_args=dict(decision.args or {}),
-                )
-                if (_qa_text or "").strip() and isinstance(_qa_event, dict):
-                    result.data.update(_qa_event)
-                    _persist_fact_rows = _catalog_fact_rows or catalog_fact_product_rows(
-                        compose_products,
-                    )
-                    if _persist_fact_rows:
-                        result.data["catalog_fact_products"] = _persist_fact_rows
-                    return (_qa_text or "").strip()
+                if _persist_fact_rows:
+                    result.data["catalog_fact_products"] = _persist_fact_rows
+                return (_catalog_text or "").strip()
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
                 if _question_kind in _CATALOG_QA_QUESTION_KINDS:
@@ -874,7 +879,31 @@ class DefaultComposer:
                 return T.no_products(variant=self._variant_idx(ctx))
 
             if _question_kind in _CATALOG_QA_QUESTION_KINDS:
-                return T.no_products(variant=self._variant_idx(ctx))
+                from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    build_catalog_product_answer_emergency_outcome,
+                )
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                _fallback_text, _fallback_result, _fallback_event = (
+                    build_catalog_product_answer_emergency_outcome(
+                        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                        customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        products=list(compose_products),
+                        catalog_search_query=_search_query,
+                        search_result_count=len(facts_products),
+                        category_scope=_category_scope,
+                        allowed_category=_category_scope,
+                        question_kind=_question_kind,
+                        category_filter_dropped=_facts_category_dropped,
+                        display_count=len(candidates),
+                        decision_args=dict(decision.args or {}),
+                        ai_settings=_ai_settings_from_ctx(ctx),
+                        reason="compose_unavailable",
+                    )
+                )
+                result.data.update(_fallback_event)
+                return (_fallback_text or "").strip()
 
             # INVARIANT: pending_candidates = EXACTLY the products shown in
             # the numbered list.  The customer reads "1. بنطلون" and expects
