@@ -20,6 +20,7 @@ from modules.ai.compose.reply_metadata_export import (
     BRAIN_REPLY_METADATA_EXPORT_KEYS,
     apply_persona_nested_compose_source_to_event,
     approved_compose_source,
+    extract_persona_route_provenance,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,16 @@ class LiveMerchantBrainTurnInput:
     profile: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PersonaRouteProvenance:
+    route_provider: str
+    route_model: str
+    route_tier: str
+    route_source: str
+    route_provider_configured: bool
+    compose_attempt: str
+
+
 @dataclass
 class TextProvenance:
     compose_source: str = ""
@@ -82,6 +93,7 @@ class TextProvenance:
     fallback_source: str = ""
     fallback_reason: str = ""
     fallback_action_type: str = ""
+    persona_route: Optional[PersonaRouteProvenance] = None
 
 
 @dataclass
@@ -1160,6 +1172,11 @@ def _build_provenance(
     if not final_text_transformed:
         transform_reasons = []
 
+    route_payload = extract_persona_route_provenance(brain_persona_compose_event)
+    persona_route = (
+        PersonaRouteProvenance(**route_payload) if route_payload is not None else None
+    )
+
     provenance = TextProvenance(
         compose_source=compose_source,
         chosen_path=chosen_path,
@@ -1170,6 +1187,7 @@ def _build_provenance(
         fallback_source=str(getattr(trace, "fallback_source", "") or ""),
         fallback_reason=str((brain_result or {}).get("fallback_reason") or ""),
         fallback_action_type=str((brain_result or {}).get("fallback_action_type") or ""),
+        persona_route=persona_route,
     )
     if isinstance(brain_persona_compose_event, dict):
         provenance.fallback_reason = str(
