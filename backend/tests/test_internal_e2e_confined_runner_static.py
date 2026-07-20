@@ -1387,7 +1387,7 @@ def test_entrypoint_exports_secret_files_and_unsets_other_provider_keys() -> Non
     assert 'Path("/etc/hosts").write_text' not in script
 
 
-_LLM_SECRET_CORE = b"sk-ant-api03-confined-runner-test-key"
+_LLM_SECRET_CORE = b"confined-runner-llm-key-test-value-0123456789abcdef"
 
 
 @pytest.mark.parametrize(
@@ -1444,7 +1444,7 @@ def test_crlf_secret_does_not_leave_trailing_cr_in_exported_value(
         (_LLM_SECRET_CORE + b"\r\r", "mounted_secret_multiple_terminators"),
         (_LLM_SECRET_CORE[:10] + b"\n" + _LLM_SECRET_CORE[10:], "mounted_secret_control_byte"),
         (_LLM_SECRET_CORE + b"\x7f", "mounted_secret_control_byte"),
-        (b"sk-\xff-test", "mounted_secret_non_ascii"),
+        (b"key-\xff-test", "mounted_secret_non_ascii"),
         (b'"' + _LLM_SECRET_CORE + b'"', "mounted_secret_quote_wrapped"),
         (b"'" + _LLM_SECRET_CORE + b"'", "mounted_secret_quote_wrapped"),
     ],
