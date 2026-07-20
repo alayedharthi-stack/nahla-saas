@@ -61,6 +61,10 @@ from services.internal_conversational_e2e_harness import (
     _provenance_blockers,
     run_sandbox_turn,
 )
+from services.internal_conversational_e2e_sql_error_audit import (
+    current_internal_e2e_sql_error_turn,
+    recorded_sql_error_audits,
+)
 
 
 TENANT_ID = 48
@@ -450,6 +454,7 @@ async def _run_turn(
     attempt_egress: bool = False,
     duplicate_provider_send: bool = False,
     expected_denials: tuple[tuple[str, str], ...] = (),
+    state_probe=None,
 ):
     request = SandboxTurnRequest(
         session_id=SESSION_ID,
@@ -494,7 +499,7 @@ async def _run_turn(
                 attempt_egress=attempt_egress,
                 duplicate_provider_send=duplicate_provider_send,
             ),
-            state_probe=_state_probe,
+            state_probe=state_probe or _state_probe,
             message_store=_MemoryMessages,
         )
 
@@ -744,6 +749,26 @@ def test_multi_turn_state_and_history_persist_in_writable_sandbox() -> None:
     assert first["state_delta"]["turn_count"]["after"] == 1
     assert second["state_delta"]["turn_count"]["before"] == 1
     assert len(_MemoryMessages.rows) == 4
+
+
+def test_turn_binding_resets_when_state_probe_raises() -> None:
+    _MemoryMessages.reset()
+    convo = SimpleNamespace(id=91, tenant_id=TENANT_ID, extra_metadata={})
+
+    def _raising_state_probe(*_args):
+        raise RuntimeError("state probe failed")
+
+    with pytest.raises(RuntimeError, match="state probe failed"):
+        asyncio.run(
+            _run_turn(
+                convo,
+                turn_index=0,
+                state_probe=_raising_state_probe,
+            )
+        )
+
+    assert current_internal_e2e_sql_error_turn() is None
+    assert recorded_sql_error_audits() == ()
 
 
 def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:

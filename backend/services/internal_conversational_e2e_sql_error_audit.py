@@ -7,9 +7,13 @@ captures SQL text, parameters, exception messages, credentials, or tenant PII.
 from __future__ import annotations
 
 import re
+import weakref
+from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Literal, Optional
+
+from sqlalchemy.exc import DBAPIError
 
 from core.acceptance_execution_context import current_acceptance_context
 
@@ -55,13 +59,20 @@ _AUDIT_TABLE_ALLOWLIST = frozenset(
     }
 )
 
-_INSTALLED_ENGINES: set[int] = set()
+_INSTALLED_ENGINES: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
 @dataclass(frozen=True)
 class InternalE2ETurnBinding:
     scenario_id: str
     turn_index: int
+
+
+@dataclass
+class InternalE2ETurnSqlErrorAuditScope:
+    """Retains the bounded turn snapshot after ContextVar token reset."""
+
+    summary: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -104,40 +115,91 @@ _TURN_PRIMARY_SEEN: ContextVar[bool] = ContextVar(
     "nahla_internal_e2e_sql_primary_seen",
     default=False,
 )
+_TURN_SQL_ERROR_DROPPED: ContextVar[bool] = ContextVar(
+    "nahla_internal_e2e_sql_error_dropped",
+    default=False,
+)
 _SESSION_SQL_ERROR_AUDIT: ContextVar[tuple[SqlErrorAuditRecord, ...]] = ContextVar(
     "nahla_internal_e2e_session_sql_error_audit",
     default=(),
 )
+_SESSION_SQL_ERROR_DROPPED: ContextVar[bool] = ContextVar(
+    "nahla_internal_e2e_session_sql_error_dropped",
+    default=False,
+)
+_SESSION_PRIMARY_MISSING_OBSERVED: ContextVar[bool] = ContextVar(
+    "nahla_internal_e2e_session_primary_missing_observed",
+    default=False,
+)
+_LAST_TURN_SQL_ERROR_AUDIT: ContextVar[Optional[dict[str, object]]] = ContextVar(
+    "nahla_internal_e2e_last_turn_sql_error_audit",
+    default=None,
+)
 
 
-def bind_internal_e2e_turn(*, scenario_id: str, turn_index: int) -> None:
-    """Bind the active confined-E2E turn for engine-level error attribution."""
+@contextmanager
+def internal_e2e_sql_error_turn(
+    *,
+    scenario_id: str,
+    turn_index: int,
+) -> Iterator[InternalE2ETurnSqlErrorAuditScope]:
+    """Bind one turn and restore every ContextVar even when execution raises."""
     safe_scenario = str(scenario_id or "").strip()
     if not _SAFE_SCENARIO_ID_RE.fullmatch(safe_scenario):
         safe_scenario = "unknown"
     if type(turn_index) is not int or turn_index < 0:
         turn_index = -1
-    _TURN_BINDING.set(InternalE2ETurnBinding(safe_scenario, turn_index))
-    _SQL_ERROR_AUDIT.set(())
-    _TURN_PRIMARY_SEEN.set(False)
-
-
-def clear_internal_e2e_turn_binding() -> None:
-    _TURN_BINDING.set(None)
-    _SQL_ERROR_AUDIT.set(())
-    _TURN_PRIMARY_SEEN.set(False)
+    binding_token = _TURN_BINDING.set(
+        InternalE2ETurnBinding(safe_scenario, turn_index)
+    )
+    records_token = _SQL_ERROR_AUDIT.set(())
+    primary_token = _TURN_PRIMARY_SEEN.set(False)
+    dropped_token = _TURN_SQL_ERROR_DROPPED.set(False)
+    scope = InternalE2ETurnSqlErrorAuditScope()
+    try:
+        yield scope
+    finally:
+        try:
+            scope.summary = summarize_turn_sql_error_audit(
+                _SQL_ERROR_AUDIT.get(),
+                truncated=_TURN_SQL_ERROR_DROPPED.get(),
+            )
+            _LAST_TURN_SQL_ERROR_AUDIT.set(dict(scope.summary))
+            if scope.summary["primary_missing"] is True:
+                _SESSION_PRIMARY_MISSING_OBSERVED.set(True)
+        finally:
+            _TURN_SQL_ERROR_DROPPED.reset(dropped_token)
+            _TURN_PRIMARY_SEEN.reset(primary_token)
+            _SQL_ERROR_AUDIT.reset(records_token)
+            _TURN_BINDING.reset(binding_token)
 
 
 def reset_session_sql_error_audit() -> None:
     _SESSION_SQL_ERROR_AUDIT.set(())
+    _SESSION_SQL_ERROR_DROPPED.set(False)
+    _SESSION_PRIMARY_MISSING_OBSERVED.set(False)
+    _LAST_TURN_SQL_ERROR_AUDIT.set(None)
 
 
 def recorded_sql_error_audits() -> tuple[SqlErrorAuditRecord, ...]:
     return _SQL_ERROR_AUDIT.get()
 
 
+def current_internal_e2e_sql_error_turn() -> Optional[InternalE2ETurnBinding]:
+    return _TURN_BINDING.get()
+
+
 def recorded_session_sql_error_audits() -> tuple[SqlErrorAuditRecord, ...]:
     return _SESSION_SQL_ERROR_AUDIT.get()
+
+
+def last_turn_sql_error_audit() -> Optional[dict[str, object]]:
+    summary = _LAST_TURN_SQL_ERROR_AUDIT.get()
+    return dict(summary) if summary is not None else None
+
+
+def clear_last_turn_sql_error_audit() -> None:
+    _LAST_TURN_SQL_ERROR_AUDIT.set(None)
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -210,14 +272,46 @@ def _classification(exc: BaseException) -> Literal["primary", "secondary"]:
 def _append_record(record: SqlErrorAuditRecord) -> None:
     turn_records = _SQL_ERROR_AUDIT.get()
     if len(turn_records) >= MAX_SQL_ERRORS_PER_TURN:
+        _TURN_SQL_ERROR_DROPPED.set(True)
+        _SESSION_SQL_ERROR_DROPPED.set(True)
         return
     updated_turn = (*turn_records, record)
     _SQL_ERROR_AUDIT.set(updated_turn)
 
     session_records = _SESSION_SQL_ERROR_AUDIT.get()
     if len(session_records) >= MAX_SQL_ERRORS_PER_SESSION:
+        _SESSION_SQL_ERROR_DROPPED.set(True)
         return
     _SESSION_SQL_ERROR_AUDIT.set((*session_records, record))
+
+
+def _connection_has_active_transaction(exception_context: Any) -> bool:
+    connection = getattr(exception_context, "connection", None)
+    in_transaction = getattr(connection, "in_transaction", None)
+    if not callable(in_transaction):
+        return False
+    try:
+        return bool(in_transaction())
+    except Exception:  # noqa: silent-ok — safe evidence probe must not alter propagation
+        return False
+
+
+def _is_dbapi_or_pg_error(exception_context: Any, exc: BaseException) -> bool:
+    if isinstance(exc, DBAPIError):
+        return True
+    original = getattr(exception_context, "original_exception", None)
+    return (
+        isinstance(original, BaseException)
+        and _sanitize_pgcode(original) != "unknown"
+    )
+
+
+def _transaction_invalidated(exception_context: Any, exc: BaseException) -> bool:
+    """Closed rule: active transaction plus a DBAPI/PG execution error."""
+    return _is_dbapi_or_pg_error(
+        exception_context,
+        exc,
+    ) and _connection_has_active_transaction(exception_context)
 
 
 def record_sql_error_from_context(exception_context: Any) -> None:
@@ -233,26 +327,31 @@ def record_sql_error_from_context(exception_context: Any) -> None:
         exc = getattr(exception_context, "original_exception", None)
     if not isinstance(exc, BaseException):
         return
+    if not _is_dbapi_or_pg_error(exception_context, exc):
+        return
 
     statement = getattr(exception_context, "statement", None)
+    pgcode = _sanitize_pgcode(exc)
     sequence = len(_SQL_ERROR_AUDIT.get()) + 1
     record = SqlErrorAuditRecord(
         scenario_id=binding.scenario_id,
         turn_index=binding.turn_index,
         sequence=sequence,
         exception_class=_safe_exception_class(exc),
-        pgcode=_sanitize_pgcode(exc),
-        pg_category=_pg_category(_sanitize_pgcode(exc)),
+        pgcode=pgcode,
+        pg_category=_pg_category(pgcode),
         operation_category=_operation_category(statement),
         table_name=_table_name(statement, exc),
-        transaction_invalidated=True,
+        transaction_invalidated=_transaction_invalidated(exception_context, exc),
         classification=_classification(exc),
     )
     _append_record(record)
 
 
 def summarize_turn_sql_error_audit(
-    records: tuple[SqlErrorAuditRecord, ...] | tuple[() , ...],
+    records: tuple[SqlErrorAuditRecord, ...],
+    *,
+    truncated: Optional[bool] = None,
 ) -> dict[str, object]:
     errors = [record.to_audit_dict() for record in records]
     has_primary = any(record.classification == "primary" for record in records)
@@ -261,35 +360,45 @@ def summarize_turn_sql_error_audit(
         "errors": errors,
         "error_count": len(records),
         "primary_missing": only_secondary,
-        "truncated": len(records) >= MAX_SQL_ERRORS_PER_TURN,
+        "truncated": (
+            _TURN_SQL_ERROR_DROPPED.get() if truncated is None else truncated
+        ),
     }
 
 
 def summarize_session_sql_error_audit(
-    records: tuple[SqlErrorAuditRecord, ...] | tuple[() , ...],
+    records: tuple[SqlErrorAuditRecord, ...],
+    *,
+    truncated: Optional[bool] = None,
 ) -> dict[str, object]:
     errors = [record.to_audit_dict() for record in records]
-    has_primary = any(record.classification == "primary" for record in records)
-    only_secondary = bool(records) and not has_primary
+    grouped: dict[tuple[str, int], list[SqlErrorAuditRecord]] = {}
+    for record in records:
+        grouped.setdefault((record.scenario_id, record.turn_index), []).append(record)
+    primary_missing = _SESSION_PRIMARY_MISSING_OBSERVED.get() or any(
+        not any(record.classification == "primary" for record in turn_records)
+        for turn_records in grouped.values()
+    )
     return {
         "errors": errors,
         "error_count": len(records),
-        "primary_missing": only_secondary,
-        "truncated": len(records) >= MAX_SQL_ERRORS_PER_SESSION,
+        "primary_missing": primary_missing,
+        "truncated": (
+            _SESSION_SQL_ERROR_DROPPED.get() if truncated is None else truncated
+        ),
     }
 
 
 def install_internal_e2e_sql_error_listener(engine: Any) -> None:
     """Install a one-time ``handle_error`` listener on a disposable E2E engine."""
-    engine_id = id(engine)
-    if engine_id in _INSTALLED_ENGINES:
-        return
     try:
         from sqlalchemy.engine import Engine
         from sqlalchemy import event
     except ImportError:
         return
     if not isinstance(engine, Engine):
+        return
+    if engine in _INSTALLED_ENGINES:
         return
 
     @event.listens_for(engine, "handle_error")
@@ -299,7 +408,7 @@ def install_internal_e2e_sql_error_listener(engine: Any) -> None:
         except Exception:  # noqa: silent-ok — audit capture must never disturb SQL error propagation
             return
 
-    _INSTALLED_ENGINES.add(engine_id)
+    _INSTALLED_ENGINES.add(engine)
 
 
 def evidence_completeness_fields() -> tuple[str, ...]:

@@ -12,9 +12,7 @@ from core.acceptance_execution_context import (
     recorded_egress_denials,
 )
 from services.internal_conversational_e2e_sql_error_audit import (
-    bind_internal_e2e_turn,
-    clear_internal_e2e_turn_binding,
-    recorded_sql_error_audits,
+    internal_e2e_sql_error_turn,
     summarize_turn_sql_error_audit,
 )
 from services.internal_conversational_e2e_contract import (
@@ -196,11 +194,10 @@ async def run_sandbox_turn(
         session_id=request.session_id,
         tenant_id=request.tenant_id,
         allow_llm_inference=request.allow_llm_inference,
-    ):
-        bind_internal_e2e_turn(
-            scenario_id=request.scenario_id,
-            turn_index=request.turn_index,
-        )
+    ), internal_e2e_sql_error_turn(
+        scenario_id=request.scenario_id,
+        turn_index=request.turn_index,
+    ) as sql_error_scope:
         before = dict(state_probe(db, request.tenant_id, request.conversation))
         history_before = message_store.load_history(
             db,
@@ -309,8 +306,7 @@ async def run_sandbox_turn(
             }
             for audit in recorded_egress_denials()
         ]
-        turn_sql_error_audit = summarize_turn_sql_error_audit(recorded_sql_error_audits())
-        clear_internal_e2e_turn_binding()
+    turn_sql_error_audit = sql_error_scope.summary
 
     assert result is not None
     provenance = asdict(result.provenance)

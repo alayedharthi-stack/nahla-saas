@@ -56,7 +56,9 @@ from services.internal_conversational_e2e_harness import (  # noqa: E402
     run_sandbox_turn,
 )
 from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
+    clear_last_turn_sql_error_audit,
     install_internal_e2e_sql_error_listener,
+    last_turn_sql_error_audit,
     recorded_session_sql_error_audits,
     reset_session_sql_error_audit,
     summarize_session_sql_error_audit,
@@ -393,6 +395,7 @@ async def run_session(
             runner_mutations.append("sandbox_conversation_created")
         for scenario in scenarios:
             for turn_index, turn in enumerate(scenario["turns"]):
+                clear_last_turn_sql_error_audit()
                 outcome = await run_sandbox_turn(
                     db=db,
                     request=SandboxTurnRequest(
@@ -417,6 +420,7 @@ async def run_session(
                     brain_factory=get_brain,
                     state_probe=_state_probe,
                 )
+                clear_last_turn_sql_error_audit()
                 evidence = dict(outcome.evidence)
                 assertion_blockers: list[str] = []
                 if evidence["status"] != turn["expected_status"]:
@@ -449,6 +453,13 @@ async def run_session(
                 "verdict": "fail",
                 "blockers": [stable_blocker],
                 "exception_class": type(exc).__name__,
+                "runtime_error_audit": last_turn_sql_error_audit()
+                or {
+                    "errors": [],
+                    "error_count": 0,
+                    "primary_missing": False,
+                    "truncated": False,
+                },
                 "provider_observation": {
                     "source": "application_internal_e2e_context",
                     "network_dispatch_success_observed": False,
