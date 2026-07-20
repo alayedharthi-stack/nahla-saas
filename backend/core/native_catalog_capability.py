@@ -73,7 +73,12 @@ def _open_isolated_read_session(db: Any) -> Any:
 
 
 def load_whatsapp_connection(db: Any, tenant_id: int) -> Any:
-    """Return the tenant's WhatsAppConnection row, or None."""
+    """Read committed WhatsApp configuration on a caller-bound owned session.
+
+    This optional capability probe intentionally does not observe uncommitted
+    changes on the caller session. Its isolation boundary protects the caller's
+    operational transaction from PostgreSQL aborted-transaction cascades.
+    """
     if db is None or not tenant_id:
         return None
 
@@ -91,9 +96,9 @@ def load_whatsapp_connection(db: Any, tenant_id: int) -> Any:
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug(
-            "[NATIVE_CATALOG] connection lookup failed tenant=%s err=%s",
+            "[NATIVE_CATALOG] connection lookup failed tenant=%s error_type=%s",
             tenant_id,
-            exc,
+            type(exc).__name__,
         )
         try:
             read_db.rollback()

@@ -31,6 +31,11 @@ from services.internal_conversational_e2e_sql_error_audit import (
     summarize_turn_sql_error_audit,
 )
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_META
+from whatsapp_connections_provider_helpers import (
+    ProviderSchemaContractError,
+    _normalized_server_default,
+    ensure_whatsapp_connections_provider_column,
+)
 
 GENERIC_TENANT_ID = 991_501
 GENERIC_MERCHANT_NAME = "متجر تجريبي عام"
@@ -63,6 +68,34 @@ class TestProviderOrmContract:
         spec.loader.exec_module(module)
 
         module.downgrade()
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        (
+            (None, None),
+            ("'meta'::character varying", "meta"),
+            ("('meta'::text)", "meta"),
+            ("'dialog360'::character varying", "dialog360"),
+        ),
+    )
+    def test_postgres_default_normalization(self, raw, expected) -> None:
+        assert _normalized_server_default(raw) == expected
+
+    def test_missing_base_table_fails_closed(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "whatsapp_connections_provider_helpers.op.get_bind",
+            lambda: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "whatsapp_connections_provider_helpers.has_table",
+            lambda *_args: False,
+        )
+
+        with pytest.raises(
+            ProviderSchemaContractError,
+            match="required_table_missing:whatsapp_connections",
+        ):
+            ensure_whatsapp_connections_provider_column()
 
 
 class TestLoadWhatsappConnectionIsolation:

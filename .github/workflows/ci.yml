@@ -258,6 +258,7 @@ jobs:
             backend/tests/test_order_customer_identity_migration_pg.py \
             backend/tests/test_order_customer_identity_migration_validate_pg.py \
             backend/tests/test_cross_merchant_model_path_hotfix_pg.py \
+            backend/tests/test_whatsapp_connections_provider_schema_pg.py \
             backend/tests/test_staging_migration_0087_to_0088_operators.py \
             backend/tests/test_staging_migration_0088_to_0089_attach_pg.py \
             backend/tests/test_conversation_a1_subject_binding_migration_pg.py \
