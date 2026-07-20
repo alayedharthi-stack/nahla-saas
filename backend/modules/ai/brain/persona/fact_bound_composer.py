@@ -34,7 +34,8 @@ _LLMCallable = Callable[[PersonaFactsBundle], Awaitable[str]]
 _PERSONA_COMPOSE_CALL_SITE = "brain.persona.fact_bound_composer"
 
 _PERSONA_COMPOSE_TIMEOUT_ENV = "NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS"
-_PERSONA_COMPOSE_TIMEOUT_DEFAULT = 3.0
+# Platform default validated at 8.0s for confined catalog persona compose.
+_PERSONA_COMPOSE_TIMEOUT_DEFAULT = 8.0
 _PERSONA_COMPOSE_TIMEOUT_MIN = 0.5
 _PERSONA_COMPOSE_TIMEOUT_MAX = 10.0
 
