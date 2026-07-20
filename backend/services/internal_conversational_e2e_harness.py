@@ -150,6 +150,13 @@ def _provenance_blockers(
         isinstance(reason, str) for reason in reasons
     ):
         blockers.append(CODE_PROVENANCE_INCOMPLETE)
+    else:
+        transformed = provenance.get("final_text_transformed")
+        normalized_reasons = [str(reason).strip() for reason in reasons if str(reason or "").strip()]
+        if transformed is True and not normalized_reasons:
+            blockers.append(CODE_PROVENANCE_INCOMPLETE)
+        if transformed is False and normalized_reasons:
+            blockers.append(CODE_PROVENANCE_INCOMPLETE)
     if compose_source == "fallback_deterministic" and (
         not str(provenance.get("fallback_reason") or "").strip()
         or not str(provenance.get("fallback_action_type") or "").strip()
