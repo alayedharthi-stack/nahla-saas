@@ -10,6 +10,8 @@ import pytest
 from services.merchant_brain_turn import (
     LiveMerchantBrainPreconditions,
     LiveMerchantBrainTurnInput,
+    _build_provenance,
+    _resolve_response_mode,
     evaluate_live_merchant_brain_turn,
     require_explicit_tenant_id,
 )
@@ -109,7 +111,10 @@ def test_live_normal_reply_buttons_and_provenance_parity() -> None:
     assert result.brain_buttons == [{"id": "catalog-item"}]
     assert result.provenance.compose_source == "persona_llm"
     assert result.provenance.chosen_path == "fact_bound_persona_compose"
+    assert result.provenance.response_mode == "persona"
     assert result.provenance.llm_candidate_present is True
+    assert result.reply_text == result.brain_reply_candidate
+    assert result.provenance.final_text_transformed is False
     brain.process.assert_awaited_once()
 
 
@@ -398,4 +403,109 @@ def test_webhook_safe_fallback_send_failure_is_fail_open_and_traced() -> None:
     assert trace.outbound_error == "RuntimeError"
     assert trace.reply_source == turn_trace_service.SOURCE_BRAIN_EXCEPTION
     assert trace.outbound_sent is True
+
+
+def test_resolve_response_mode_prefers_brain_result_then_persona_event() -> None:
+    trace = _trace()
+    trace.response_goal = "answer"
+    assert _resolve_response_mode(
+        brain_result={"response_mode": "llm"},
+        brain_persona_compose_event={"response_mode": "persona"},
+        trace=trace,
+        compose_source="persona_llm",
+        chosen_path="fact_bound_persona_compose",
+        llm_candidate_present=True,
+    ) == "llm"
+    assert _resolve_response_mode(
+        brain_result={},
+        brain_persona_compose_event={"response_mode": "trusted_coupon_offer_answer"},
+        trace=trace,
+        compose_source="persona_llm",
+        chosen_path="trusted_coupon_offer_compose",
+        llm_candidate_present=True,
+    ) == "trusted_coupon_offer_answer"
+
+
+def test_resolve_response_mode_does_not_alias_response_goal() -> None:
+    trace = _trace()
+    trace.response_goal = "answer"
+    assert _resolve_response_mode(
+        brain_result={},
+        brain_persona_compose_event=None,
+        trace=trace,
+        compose_source="persona_llm",
+        chosen_path="fact_bound_persona_compose",
+        llm_candidate_present=True,
+    ) == "persona"
+
+
+def test_resolve_response_mode_derives_llm_and_persona_defaults() -> None:
+    trace = _trace()
+    assert _resolve_response_mode(
+        brain_result={},
+        brain_persona_compose_event=None,
+        trace=trace,
+        compose_source="llm",
+        chosen_path="llm_general_reply",
+        llm_candidate_present=True,
+    ) == "llm"
+    assert _resolve_response_mode(
+        brain_result={},
+        brain_persona_compose_event=None,
+        trace=trace,
+        compose_source="persona_llm",
+        chosen_path="generic_catalog_answer",
+        llm_candidate_present=True,
+    ) == "persona"
+
+
+def test_build_provenance_preserves_llm_candidate_without_transform() -> None:
+    trace = _trace()
+    trace.response_goal = "answer"
+    provenance = _build_provenance(
+        brain_result={
+            "compose_source": "persona_llm",
+            "chosen_path": "fact_bound_persona_compose",
+            "persona_compose": {"surface": "catalog_product_answer"},
+        },
+        brain_reply_candidate="catalog answer candidate",
+        reply_text="catalog answer candidate",
+        brain_persona_compose_event={
+            "chosen_path": "fact_bound_persona_compose",
+            "compose_source": "persona_llm",
+            "llm_candidate_present": True,
+            "final_text_transformed": False,
+            "final_transform_reasons": [],
+        },
+        trace=trace,
+    )
+    assert provenance.compose_source == "persona_llm"
+    assert provenance.response_mode == "persona"
+    assert provenance.chosen_path == "fact_bound_persona_compose"
+    assert provenance.llm_candidate_present is True
+    assert provenance.final_text_transformed is False
+    assert provenance.final_transform_reasons == []
+
+
+def test_build_provenance_merges_specialized_response_mode_from_brain_result() -> None:
+    provenance = _build_provenance(
+        brain_result={
+            "compose_source": "persona_llm",
+            "response_mode": "customer_conditional_coupon_answer",
+            "chosen_path": "customer_conditional_coupon_compose",
+        },
+        brain_reply_candidate="coupon answer candidate",
+        reply_text="coupon answer candidate",
+        brain_persona_compose_event={
+            "chosen_path": "customer_conditional_coupon_compose",
+            "compose_source": "persona_llm",
+            "response_mode": "customer_conditional_coupon_answer",
+            "llm_candidate_present": True,
+            "final_text_transformed": False,
+            "final_transform_reasons": [],
+        },
+        trace=_trace(),
+    )
+    assert provenance.response_mode == "customer_conditional_coupon_answer"
+    assert provenance.final_text_transformed is False
 
