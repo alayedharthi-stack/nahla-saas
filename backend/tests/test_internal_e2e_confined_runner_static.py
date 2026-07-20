@@ -1377,6 +1377,76 @@ def test_entrypoint_exports_secret_files_and_unsets_other_provider_keys() -> Non
     assert 'Path("/etc/hosts").write_text' not in script
 
 
+def test_entrypoint_binds_database_url_from_secret_before_python_import() -> None:
+    """Legacy DATABASE_URL must mirror the attested secret before any Python import."""
+    root = Path(__file__).resolve().parents[2]
+    entrypoint = (
+        root / "ops/internal_e2e_runner/scripts/entrypoint.sh"
+    ).read_text(encoding="utf-8")
+    namespaced_export = (
+        'export NAHLA_INTERNAL_E2E_DATABASE_URL="$(< /run/secrets/database_url)"'
+    )
+    legacy_export = 'export DATABASE_URL="${NAHLA_INTERNAL_E2E_DATABASE_URL}"'
+    first_python = entrypoint.index("python3")
+
+    assert namespaced_export in entrypoint
+    assert legacy_export in entrypoint
+    assert entrypoint.index(namespaced_export) < entrypoint.index(legacy_export)
+    assert entrypoint.index(legacy_export) < first_python
+    binding_section = entrypoint[
+        entrypoint.index(namespaced_export) : entrypoint.index(legacy_export)
+        + len(legacy_export)
+    ]
+    assert "echo" not in binding_section
+    assert "python" not in binding_section
+    assert entrypoint.count("export DATABASE_URL=") == 1
+    assert 'export DATABASE_URL="$(<' not in entrypoint
+    assert "NAHLA_CLONE_SOURCE_DATABASE_URL" not in entrypoint
+    assert "postgres-staging" not in entrypoint
+
+
+def test_launcher_does_not_introduce_separate_database_url_env() -> None:
+    root = Path(__file__).resolve().parents[2]
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+    assert "DATABASE_URL" not in launcher
+    assert "NAHLA_CLONE_SOURCE_DATABASE_URL" not in launcher
+    assert "postgres-staging" not in launcher
+    assert '"--add-host", "$($config.db_proxy_host):$($config.db_relay_ip)"' in launcher
+    assert "--target-port $config.db_proxy_port" in launcher
+    assert "--listen-port $config.db_relay_port" in launcher
+
+
+def test_legacy_database_session_uses_database_url_binding_not_localhost(
+    monkeypatch,
+) -> None:
+    """Import-time database.session must not fall back to localhost once bound."""
+    bound_url = (
+        "postgresql://confined_user:secret@"
+        "disposable-db-proxy.example.test:5432/sandbox?sslmode=require"
+    )
+    monkeypatch.setenv("NAHLA_INTERNAL_E2E_DATABASE_URL", bound_url)
+    monkeypatch.setenv("DATABASE_URL", bound_url)
+    sys.modules.pop("database.session", None)
+    import database.session as session_module
+
+    assert session_module.DATABASE_URL == bound_url
+    assert "localhost" not in session_module.DATABASE_URL
+    assert session_module.engine.url.host == "disposable-db-proxy.example.test"
+
+
+def test_database_session_defaults_to_localhost_without_database_url_binding(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("NAHLA_INTERNAL_E2E_DATABASE_URL", raising=False)
+    sys.modules.pop("database.session", None)
+    import database.session as session_module
+
+    assert "localhost" in session_module.DATABASE_URL
+
+
 def test_launcher_mounts_all_secrets_and_uses_internal_network() -> None:
     root = Path(__file__).resolve().parents[2]
     script = (
