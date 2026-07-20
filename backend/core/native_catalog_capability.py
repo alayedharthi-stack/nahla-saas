@@ -48,15 +48,44 @@ class _CatalogRetailerInventory:
     sku_only_products: int = 0
 
 
+def _resolve_operational_bind(db: Any) -> Any:
+    """Return the engine/bind backing *db* without using global SessionLocal."""
+    if db is None:
+        return None
+    getter = getattr(db, "get_bind", None)
+    if callable(getter):
+        try:
+            bind = getter()
+            if bind is not None:
+                return bind
+        except Exception:  # noqa: BLE001
+            pass
+    return getattr(db, "bind", None)
+
+
+def _open_isolated_read_session(db: Any) -> Any:
+    bind = _resolve_operational_bind(db)
+    if bind is None:
+        return None
+    from sqlalchemy.orm import sessionmaker  # noqa: PLC0415
+
+    return sessionmaker(bind=bind, autoflush=False, autocommit=False)()
+
+
 def load_whatsapp_connection(db: Any, tenant_id: int) -> Any:
     """Return the tenant's WhatsAppConnection row, or None."""
     if db is None or not tenant_id:
         return None
+
+    read_db = _open_isolated_read_session(db)
+    if read_db is None:
+        return None
+
     try:
         from models import WhatsAppConnection  # noqa: PLC0415
 
         return (
-            db.query(WhatsAppConnection)
+            read_db.query(WhatsAppConnection)
             .filter(WhatsAppConnection.tenant_id == int(tenant_id))
             .first()
         )
@@ -66,7 +95,16 @@ def load_whatsapp_connection(db: Any, tenant_id: int) -> Any:
             tenant_id,
             exc,
         )
+        try:
+            read_db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         return None
+    finally:
+        try:
+            read_db.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _is_trusted_meta_retailer_id(retailer_id: str) -> bool:
