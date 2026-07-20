@@ -45,13 +45,15 @@ export NAHLA_INTERNAL_E2E_ATTESTATION_HMAC_KEY="$(< /run/secrets/attestation_hma
 export NAHLA_INTERNAL_E2E_ATTESTATION_JSON="$(< /run/secrets/attestation_json)"
 export NAHLA_INTERNAL_E2E_ATTESTATION_SIGNATURE="$(< /run/secrets/attestation_signature)"
 export NAHLA_INTERNAL_E2E_NETWORK_FIREWALL_CONFIRM="$(< /run/secrets/network_confirm)"
-export ANTHROPIC_API_KEY="$(< /run/secrets/llm_api_key)"
+ANTHROPIC_API_KEY="$(python3 -c 'import sys; from ops.internal_e2e_runner.lib.mounted_secrets import emit_mounted_secret; emit_mounted_secret(sys.argv[1])' /run/secrets/llm_api_key)"
+export ANTHROPIC_API_KEY
+export CLAUDE_API_KEY="${ANTHROPIC_API_KEY}"
 export NAHLA_INTERNAL_E2E_TENANT_ALLOWLIST="$(< /run/secrets/tenant_allowlist)"
 export NAHLA_INTERNAL_E2E_TEST_PHONE="$(< /run/secrets/test_phone)"
 export NAHLA_INTERNAL_E2E_PHONE_ALLOWLIST="$(< /run/secrets/phone_allowlist)"
 export NAHLA_INTERNAL_E2E_ENABLED=true
 export NAHLA_INTERNAL_E2E_CONFIRM=true
-unset OPENAI_API_KEY CLAUDE_API_KEY GOOGLE_API_KEY GEMINI_API_KEY MISTRAL_API_KEY COHERE_API_KEY GROQ_API_KEY
+unset OPENAI_API_KEY GOOGLE_API_KEY GEMINI_API_KEY MISTRAL_API_KEY COHERE_API_KEY GROQ_API_KEY
 
 CONFIG_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pinned_revision"])' "${CONFIG_PATH}")"
 BAKED_SHA="$(< /nahla-revision)"
