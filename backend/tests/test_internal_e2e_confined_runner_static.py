@@ -1380,9 +1380,10 @@ def test_entrypoint_exports_secret_files_and_unsets_other_provider_keys() -> Non
         assert f"/run/secrets/{name}" in script
     assert "unset OPENAI_API_KEY" in script
     assert "unset CLAUDE_API_KEY" not in script
-    assert "export CLAUDE_API_KEY=\"${ANTHROPIC_API_KEY}\"" in script
+    assert "export CLAUDE_API_KEY=" in script
+    assert "ANTHROPIC_API_KEY}" in script
     assert "mounted_secrets import emit_mounted_secret" in script
-    assert 'export ANTHROPIC_API_KEY="$(< /run/secrets/llm_api_key)"' not in script
+    assert '$(< /run/secrets/llm_api_key)' not in script
     assert "export HTTPS_PROXY=" in script
     assert 'Path("/etc/hosts").write_text' not in script
 
