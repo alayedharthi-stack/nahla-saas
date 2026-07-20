@@ -25,6 +25,15 @@ BRAIN_REPLY_METADATA_EXPORT_KEYS: Tuple[str, ...] = (
     "final_customer_text_source",
 )
 
+PERSONA_ROUTE_PROVENANCE_FIELDS: Tuple[str, ...] = (
+    "route_provider",
+    "route_model",
+    "route_tier",
+    "route_source",
+    "route_provider_configured",
+    "compose_attempt",
+)
+
 PERSONA_INTEGRATION_PASS_THROUGH_KEYS: Tuple[str, ...] = (
     "knowledge_source",
     "kb_section_ids",
@@ -107,6 +116,35 @@ def stamp_general_llm_compose_metadata(
     target["fallback_action_type"] = ""
 
 
+def extract_persona_route_provenance(
+    brain_persona_compose_event: Optional[Mapping[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Export bounded persona route fields from nested ``persona_compose`` only."""
+    if not isinstance(brain_persona_compose_event, Mapping):
+        return None
+    persona_compose = brain_persona_compose_event.get("persona_compose")
+    if not isinstance(persona_compose, Mapping):
+        return None
+    if "compose_attempt" not in persona_compose:
+        return None
+
+    exported: Dict[str, Any] = {}
+    for key in PERSONA_ROUTE_PROVENANCE_FIELDS:
+        if key not in persona_compose:
+            return None
+        value = persona_compose[key]
+        if key == "route_provider_configured":
+            if type(value) is not bool:
+                return None
+            exported[key] = value
+            continue
+        token = str(value or "").strip()
+        if key == "compose_attempt" and not token:
+            return None
+        exported[key] = token
+    return exported
+
+
 def extract_reply_metadata_export(
     result_data: Optional[Mapping[str, Any]],
     *,
@@ -145,8 +183,10 @@ def extract_reply_metadata_export(
 __all__ = [
     "BRAIN_REPLY_METADATA_EXPORT_KEYS",
     "PERSONA_INTEGRATION_PASS_THROUGH_KEYS",
+    "PERSONA_ROUTE_PROVENANCE_FIELDS",
     "apply_persona_nested_compose_source_to_event",
     "approved_compose_source",
+    "extract_persona_route_provenance",
     "extract_reply_metadata_export",
     "map_persona_nested_source_to_compose_source",
     "stamp_general_llm_compose_metadata",
