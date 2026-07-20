@@ -6,6 +6,8 @@ from typing import Any, Optional
 
 from core.tenant import merge_ai_defaults
 
+from modules.ai.compose.reply_metadata_export import PERSONA_INTEGRATION_PASS_THROUGH_KEYS
+
 from ..types import BrainContext
 from .fact_bound_composer import FactBoundPersonaComposer, build_social_facts_bundle
 from .facts_bundle import PersonaComposeResult
@@ -119,43 +121,7 @@ def merge_persona_compose_into_extra_metadata(
     pc = event_meta.get("persona_compose")
     if isinstance(pc, dict) and pc:
         merged["persona_compose"] = dict(pc)
-    for key in (
-        "knowledge_source",
-        "kb_section_ids",
-        "question_kind",
-        "catalog_product_id",
-        "catalog_product_ids",
-        "variant_ids",
-        "price_source",
-        "availability_source",
-        "category_scope",
-        "allowed_category",
-        "catalog_search_query",
-        "search_result_count",
-        "checkout_pressure_allowed",
-        "catalog_fact_products",
-        "catalog_fact_products_len",
-        "catalog_fact_product_ids",
-        "catalog_fact_price_values",
-        "catalog_fact_rebuild_source",
-        "compose_source",
-        "response_mode",
-        "llm_candidate_present",
-        "final_text_transformed",
-        "final_transform_reasons",
-        "final_customer_text_source",
-        "fallback_reason",
-        "fallback_action_type",
-        "trusted_coupon_offer_compose_active",
-        "customer_conditional_coupon_compose_active",
-        "customer_conditional_coupon_general_llm_fallthrough",
-        "conditional_coupon_guard_failed_reason",
-        "general_offer_discovery_compose_active",
-        "product_sale_offer_compose_active",
-        "track_order_need_identifiers_compose_active",
-        "track_order_need_identifiers",
-        "facts_snapshot_id",
-    ):
+    for key in PERSONA_INTEGRATION_PASS_THROUGH_KEYS:
         if event_meta.get(key) is not None:
             merged[key] = event_meta.get(key)
     return merged
