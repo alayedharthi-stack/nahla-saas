@@ -17,14 +17,22 @@ they never need this class.  Writes, however, MUST go through
 The class is intentionally tiny.  It is not the place to compute
 recommendations or apply business logic — it only enforces "anonymized
 in, anonymized out".
+
+Write isolation
+───────────────
+Telemetry inserts use a dedicated short-lived SQLAlchemy session
+(``SessionLocal``) so a failed or oversized write can never poison the
+caller's operational transaction.  The optional ``db`` constructor arg is
+retained for read aggregations only.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .tenant_isolation import TenantIsolationLayer
 from .trace_schema import (
+    MODEL_PATH_MAX_LENGTH,
     LearningTier,
     TraceEvent,
     validate_anonymized,
@@ -36,13 +44,19 @@ logger = logging.getLogger("nahla.ai.security.cross_merchant_store")
 class CrossMerchantLearningStore:
     """Append-only writer for anonymized cross-merchant signals.
 
-    The store wraps a SQLAlchemy ``db`` session but does not own it; the
-    caller is responsible for the surrounding lifecycle (commit / close)
-    when ``commit=False`` is used.
+    ``db`` is used for read aggregations.  Writes open their own isolated
+    session so telemetry remains best-effort and cannot affect operational
+    state on the caller's session.
     """
 
-    def __init__(self, db: Any) -> None:
+    def __init__(
+        self,
+        db: Any,
+        *,
+        session_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
         self.db = db
+        self._session_factory = session_factory
 
     # ── Master switch ───────────────────────────────────────────────────
 
@@ -53,6 +67,13 @@ class CrossMerchantLearningStore:
             return bool(CROSS_MERCHANT_LEARNING_ENABLED)
         except Exception:
             return False
+
+    def _open_telemetry_session(self) -> Any:
+        if self._session_factory is not None:
+            return self._session_factory()
+        from database.session import SessionLocal  # noqa: PLC0415
+
+        return SessionLocal()
 
     # ── Write path ──────────────────────────────────────────────────────
 
@@ -65,15 +86,26 @@ class CrossMerchantLearningStore:
         """Persist ``event`` and return the new row id (or ``None``).
 
         The method is silent on common failure modes (master switch off,
-        importable model missing during a unit test).  It only raises when
-        the event itself fails ``validate_anonymized`` — that is a
-        programming error and must surface immediately.
+        importable model missing during a unit test, oversize model_path,
+        DB errors).  It only raises when the event itself fails
+        ``validate_anonymized`` for reasons other than bounded model_path —
+        that is a programming error and must surface immediately.
         """
         if not self.is_enabled():
             logger.debug("[CrossMerchantStore] disabled by config — skipping write")
             return None
 
-        validated = validate_anonymized(event)
+        try:
+            validated = validate_anonymized(event)
+        except ValueError as exc:
+            if "model_path exceeds maximum length" in str(exc):
+                logger.warning(
+                    "[CrossMerchantStore] model_path_rejected length=%d max=%d",
+                    len(str(event.model_path or "").strip()),
+                    MODEL_PATH_MAX_LENGTH,
+                )
+                return None
+            raise
 
         try:
             from database.models import CrossMerchantSignal
@@ -107,19 +139,30 @@ class CrossMerchantLearningStore:
             tier         = validated.tier,
             extra        = dict(validated.extra or {}),
         )
+
+        telemetry_db = self._open_telemetry_session()
         try:
-            self.db.add(row)
+            telemetry_db.add(row)
             if commit:
-                self.db.commit()
+                telemetry_db.commit()
+            else:
+                telemetry_db.flush()
             return getattr(row, "id", None)
         except Exception as exc:
-            logger.warning("[CrossMerchantStore] write failed: %s", exc)
+            logger.warning(
+                "[CrossMerchantStore] write failed: %s",
+                type(exc).__name__,
+            )
             try:
-                if commit:
-                    self.db.rollback()
+                telemetry_db.rollback()
             except Exception:
                 pass
             return None
+        finally:
+            try:
+                telemetry_db.close()
+            except Exception:
+                pass
 
     # ── Read paths (small built-ins for tests / dashboards) ─────────────
 

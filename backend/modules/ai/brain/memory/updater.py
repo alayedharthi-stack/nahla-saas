@@ -387,15 +387,11 @@ class DefaultMemoryUpdater:
 
         try:
             store = CrossMerchantLearningStore(db)
-            store.record(event, commit=True)
+            store.record(event)
         except Exception as exc:
             # validate_anonymized may raise on a programming bug; we swallow
             # at the emission boundary so the customer turn is never broken.
             logger.debug("[MemoryUpdater] cross-merchant signal write failed: %s", exc)
-            try:
-                db.rollback()
-            except Exception:
-                pass
 
     # ── 4. ConversationHistorySummary ─────────────────────────────────────────
 
