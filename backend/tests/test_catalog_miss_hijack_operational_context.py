@@ -334,6 +334,11 @@ def test_responder_search_miss_uses_persona_compose_for_catalog_like_subject() -
                     {
                         "chosen_path": "catalog_miss_resolved_subject",
                         "persona_compose": {"source": "persona_llm"},
+                        "compose_source": "persona_llm",
+                        "response_mode": "grounded_persona_compose",
+                        "llm_candidate_present": True,
+                        "final_text_transformed": False,
+                        "final_transform_reasons": [],
                     },
                 ),
             ),

@@ -1456,34 +1456,49 @@ class TestKbProductAnswerPersonaCompose:
 
         asyncio.run(_run())
 
-    def test_non_allowlisted_phone_skips_persona_compose_no_metadata(self) -> None:
-        """Gate returns None — responder falls through; no persona_compose metadata."""
+    def test_non_allowlisted_phone_still_uses_mandatory_compose_surface(self) -> None:
+        """Rollout allowlists record telemetry but cannot select deterministic prose."""
         import asyncio  # noqa: PLC0415
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
 
         from modules.ai.brain.persona.kb_product_answer import (
             try_compose_kb_product_answer,
         )
 
         async def _run() -> None:
-            text, result, event = await try_compose_kb_product_answer(
-                tenant_id=33,
-                customer_phone="966500000099",
-                inbound_text="ما هي مميزات عسل السدر القيضي؟",
-                decision_args=_kb_decision_args(
-                    kb_sections=[
-                        {
-                            "section_id": 501,
-                            "title": "عسل السدر القيضي",
-                            "body": "مميزاته: ندرة القطف.",
-                            "kind": "product_info",
-                        }
-                    ]
-                ),
-                ai_settings=_enabled_kb_ai_settings(),
+            composed = PersonaComposeResult(
+                text="تذكر قاعدة المعرفة أن المنتج محدود القطف.",
+                source="persona_llm",
+                surface="kb_product_answer",
+                facts_hash="facts-hash",
+                guard_passed=True,
+                language="ar",
+                dialect="saudi_arabic",
             )
-            assert text is None
-            assert result is None
-            assert event is None
+            compose = AsyncMock(return_value=composed)
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                text, result, event = await try_compose_kb_product_answer(
+                    tenant_id=33,
+                    customer_phone="966500000099",
+                    inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                    decision_args=_kb_decision_args(
+                        kb_sections=[
+                            {
+                                "section_id": 501,
+                                "title": "عسل السدر القيضي",
+                                "body": "مميزاته: ندرة القطف.",
+                                "kind": "product_info",
+                            }
+                        ]
+                    ),
+                    ai_settings=_enabled_kb_ai_settings(),
+                )
+            compose.assert_awaited_once()
+            assert text
+            assert result is not None and result.source == "persona_llm"
+            assert event is not None
+            assert event["persona_compose"]["allowlist_result"] == "phone_not_allowlisted"
+            assert event["compose_source"] == "persona_llm"
 
         asyncio.run(_run())
 
