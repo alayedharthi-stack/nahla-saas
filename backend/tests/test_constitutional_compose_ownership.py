@@ -637,6 +637,62 @@ class TestCatalogNavigationTopFallbackOwnership:
         )
         assert result.data["pending_candidates"] == _GENERIC_SHOES
 
+    def test_availability_shaped_navigation_exports_semantic_question_kind(self) -> None:
+        """question_kind is semantic; fallback_action_type names the compose handler."""
+        perfume = {
+            "id": 410,
+            "title": "عطر ورد",
+            "category": "عطور",
+            "price": 189,
+            "can_checkout": False,
+        }
+
+        async def _run_success() -> None:
+            compose = AsyncMock(return_value=_persona_success(
+                surface="catalog_product_answer",
+                text="عطر ورد موجود ضمن تشكيلتنا لكن التوفر غير مؤكد",
+            ))
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                _text, result, event = await try_compose_catalog_navigation_browse_answer(
+                    tenant_id=11,
+                    customer_phone="966500000001",
+                    inbound_text="عندكم عطر ورد؟",
+                    products=[perfume],
+                    chosen_path=PATH_TOP_FALLBACK,
+                    navigator_no_groups_fallback=True,
+                    ai_settings=_disabled_rollout_settings(),
+                )
+            assert result is not None
+            assert result.source == "persona_llm"
+            assert event["question_kind"] == "availability"
+            assert event["chosen_path"] == PATH_TOP_FALLBACK
+            assert event.get("fallback_action_type") in ("", None)
+
+        async def _run_fallback() -> None:
+            compose = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                _text, result, event = await try_compose_catalog_navigation_browse_answer(
+                    tenant_id=11,
+                    customer_phone="966500000001",
+                    inbound_text="عندكم عطر ورد؟",
+                    products=[perfume],
+                    chosen_path=PATH_TOP_FALLBACK,
+                    navigator_no_groups_fallback=True,
+                    ai_settings=_disabled_rollout_settings(),
+                )
+            assert result.source == "fallback_deterministic"
+            assert event["question_kind"] == "availability"
+            assert event["chosen_path"] == PATH_TOP_FALLBACK
+            _assert_complete_provenance(
+                event,
+                source="fallback_deterministic",
+                chosen_path=PATH_TOP_FALLBACK,
+                fallback_action_type="catalog_navigation_browse",
+            )
+
+        asyncio.run(_run_success())
+        asyncio.run(_run_fallback())
+
 
 class TestCatalogQaPersonaOwnership:
     _NON_CHECKOUT_PERFUME = [
