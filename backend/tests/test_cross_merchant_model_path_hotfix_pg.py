@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Iterator
 
@@ -55,12 +56,44 @@ def _downgrade(engine: Engine, revision: str) -> None:
     command.downgrade(_alembic_config(engine), revision)
 
 
+def _create_ephemeral_database(admin_engine: Engine) -> tuple[str, Engine]:
+    db_name = f"xms_model_path_{uuid.uuid4().hex[:12]}"
+    with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+    engine = create_engine(
+        str(admin_engine.url.set(database=db_name).render_as_string(hide_password=False)),
+        poolclass=NullPool,
+        pool_pre_ping=True,
+    )
+    return db_name, engine
+
+
+def _drop_ephemeral_database(admin_engine: Engine, db_name: str) -> None:
+    with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(
+            text(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = :db_name AND pid <> pg_backend_pid()
+                """
+            ),
+            {"db_name": db_name},
+        )
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+
+
 @pytest.fixture(scope="module")
 def pg_engine() -> Iterator[Engine]:
-    engine = _connect_engine()
-    _upgrade(engine, "0091")
-    yield engine
-    engine.dispose()
+    admin_engine = _connect_engine()
+    db_name, engine = _create_ephemeral_database(admin_engine)
+    try:
+        _upgrade(engine, "0091")
+        yield engine
+    finally:
+        engine.dispose()
+        _drop_ephemeral_database(admin_engine, db_name)
+        admin_engine.dispose()
 
 
 def _event(*, model_path: str) -> TraceEvent:
@@ -154,7 +187,10 @@ def test_legitimate_paths_persist_on_postgres(pg_engine: Engine) -> None:
     try:
         for path in (PATH_40, PATH_47):
             assert len(path) in (40, 47)
-            store = CrossMerchantLearningStore(operational)
+            store = CrossMerchantLearningStore(
+                operational,
+                session_factory=Session,
+            )
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr(
                     CrossMerchantLearningStore,
