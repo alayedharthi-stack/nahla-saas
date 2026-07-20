@@ -15,6 +15,8 @@ from modules.ai.brain.persona.fact_bound_composer import (
     COMPOSE_ATTEMPT_PROVIDER_CALL,
     COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE,
     COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED,
+    INJECTED_CALLABLE_PROVIDER,
+    ROUTE_SOURCE_INJECTED_CALLABLE,
     FactBoundPersonaComposer,
     build_social_facts_bundle,
     resolve_persona_compose_model_route,
@@ -105,6 +107,32 @@ class TestPlatformDefaultRouteAvailability:
         assert resolution.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE
         assert resolution.provider_configured is False
 
+    def test_tiny_tier_anthropic_provider_honors_configured_model(
+        self, monkeypatch
+    ) -> None:
+        _clear_persona_overrides(monkeypatch)
+        monkeypatch.setenv("NAHLA_MODEL_TINY_PROVIDER", "anthropic")
+        monkeypatch.setenv("NAHLA_MODEL_TINY", "claude-haiku-4-5")
+        with _provider_availability(openai=True, anthropic=True):
+            route = resolve_persona_compose_model_route(
+                build_social_facts_bundle(surface="social_checkin", inbound_text="كيف الحال")
+            )
+        assert route.provider == "anthropic"
+        assert route.model == "claude-haiku-4-5"
+        assert route.source == "platform_default"
+
+    def test_tiny_tier_anthropic_provider_anthropic_only(self, monkeypatch) -> None:
+        _clear_persona_overrides(monkeypatch)
+        monkeypatch.setenv("NAHLA_MODEL_TINY_PROVIDER", "anthropic")
+        monkeypatch.setenv("NAHLA_MODEL_TINY", "claude-haiku-4-5")
+        with _provider_availability(openai=False, anthropic=True):
+            route = resolve_persona_compose_model_route(
+                build_social_facts_bundle(surface="thanks", inbound_text="شكراً")
+            )
+        assert route.provider == "anthropic"
+        assert route.model == "claude-haiku-4-5"
+        assert route.source == "platform_default"
+
 
 class TestExplicitOverrideFailClosed:
     def test_env_override_unavailable_fails_closed(self, monkeypatch) -> None:
@@ -116,6 +144,16 @@ class TestExplicitOverrideFailClosed:
             )
         assert resolution.route.source == "env"
         assert resolution.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED
+
+    def test_unknown_provider_env_override_skipped_unconfigured(self, monkeypatch) -> None:
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_MODEL", "gpt-4o-mini")
+        monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_PROVIDER", "luna")
+        with _provider_availability(openai=True, anthropic=True):
+            resolution = resolve_persona_compose_route_resolution(
+                build_social_facts_bundle(surface="social_greeting", inbound_text="مرحبا")
+            )
+        assert resolution.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED
+        assert resolution.provider_configured is False
 
     def test_tenant_override_unavailable_tenant_isolation(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
@@ -298,6 +336,42 @@ class TestComposeProviderBoundary:
             openai_call.assert_called_once()
             anthropic_call.assert_not_called()
             assert result.fallback_reason == "timeout"
+            assert result.metadata["route_provider"] == "openai_compatible"
+            assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
+            assert result.metadata["llm_candidate_present"] is False
+
+        asyncio.run(_run())
+
+    def test_provider_exception_retains_route_metadata(self, monkeypatch) -> None:
+        _clear_persona_overrides(monkeypatch)
+
+        async def _run() -> None:
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            bundle = build_social_facts_bundle(
+                surface="social_checkin",
+                inbound_text="كيف الحال",
+            )
+
+            def _raise(*_args, **_kwargs):
+                raise RuntimeError("provider_down")
+
+            with _provider_availability(openai=True, anthropic=False):
+                with patch(
+                    "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
+                    side_effect=_raise,
+                ) as openai_call:
+                    with patch(
+                        "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    ) as anthropic_call:
+                        result = await composer.compose(bundle)
+
+            openai_call.assert_called_once()
+            anthropic_call.assert_not_called()
+            assert result.fallback_reason == "llm_error:RuntimeError"
+            assert result.metadata["route_provider"] == "openai_compatible"
+            assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
+            assert result.metadata["llm_candidate_present"] is False
+            assert "provider_down" not in result.fallback_reason
 
         asyncio.run(_run())
 
@@ -337,6 +411,93 @@ class TestComposeProviderBoundary:
             assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
 
         asyncio.run(_run())
+
+
+class TestInjectedCallableProvenance:
+    def test_injected_callable_without_provider_credentials(self) -> None:
+        async def _run() -> None:
+            bundle = build_social_facts_bundle(
+                surface="social_checkin",
+                inbound_text="كيف الحال",
+            )
+
+            async def _good_llm(_bundle):
+                return "بخير الله يسعدك"
+
+            with _provider_availability(openai=False, anthropic=False):
+                composer = FactBoundPersonaComposer(
+                    enforce_gate=False,
+                    llm_callable=_good_llm,
+                )
+                result = await composer.compose(bundle)
+
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert result.fallback_reason != "route_unconfigured"
+            assert result.metadata["route_source"] == ROUTE_SOURCE_INJECTED_CALLABLE
+            assert result.metadata["route_provider"] == INJECTED_CALLABLE_PROVIDER
+            assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
+            assert result.metadata["llm_candidate_present"] is True
+            assert result.metadata["route_provider_configured"] is True
+
+        asyncio.run(_run())
+
+    def test_injected_callable_timeout_retains_route_metadata(self) -> None:
+        async def _run() -> None:
+            bundle = build_social_facts_bundle(
+                surface="thanks",
+                inbound_text="شكراً",
+            )
+
+            async def _slow(_bundle):
+                await asyncio.sleep(1.0)
+                return "late"
+
+            composer = FactBoundPersonaComposer(
+                enforce_gate=False,
+                llm_callable=_slow,
+                timeout_seconds=0.01,
+            )
+            result = await composer.compose(bundle)
+
+            assert result.fallback_reason == "timeout"
+            assert result.metadata["route_source"] == ROUTE_SOURCE_INJECTED_CALLABLE
+            assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
+            assert result.metadata["llm_candidate_present"] is False
+
+        asyncio.run(_run())
+
+    def test_injected_callable_error_retains_route_metadata(self) -> None:
+        async def _run() -> None:
+            bundle = build_social_facts_bundle(
+                surface="dua",
+                inbound_text="الله يعافيك",
+            )
+
+            async def _fail(_bundle):
+                raise ValueError("stub_fail")
+
+            composer = FactBoundPersonaComposer(
+                enforce_gate=False,
+                llm_callable=_fail,
+            )
+            result = await composer.compose(bundle)
+
+            assert result.fallback_reason == "llm_error:ValueError"
+            assert result.metadata["route_source"] == ROUTE_SOURCE_INJECTED_CALLABLE
+            assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
+            assert result.metadata["llm_candidate_present"] is False
+            assert "stub_fail" not in result.fallback_reason
+
+        asyncio.run(_run())
+
+    def test_compose_samples_use_injected_provenance(self) -> None:
+        composer = FactBoundPersonaComposer(enforce_gate=False)
+        with _provider_availability(openai=False, anthropic=False):
+            replies = asyncio.run(
+                composer.compose_samples("social_checkin", "كيف الحال", samples=3)
+            )
+        assert len(replies) >= 1
 
 
 class TestPersonaRouteMetadataExport:

@@ -65,6 +65,11 @@ COMPOSE_ATTEMPT_PROVIDER_CALL = "provider_call"
 COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED = "skipped_unconfigured"
 COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE = "skipped_no_route"
 
+ROUTE_SOURCE_INJECTED_CALLABLE = "injected_callable"
+INJECTED_CALLABLE_PROVIDER = "injected_callable"
+
+_SUPPORTED_PERSONA_PROVIDERS = frozenset({"openai_compatible", "anthropic"})
+
 
 @dataclass(frozen=True)
 class PersonaComposeModelRoute:
@@ -109,14 +114,45 @@ def is_persona_compose_provider_configured(provider: str) -> bool:
 def _platform_default_persona_candidates() -> list[tuple[str, str]]:
     """Cost-ordered tiny-tier persona compose candidates for platform default."""
     tiny = _env_tier_default(TIER_TINY)
-    openai_model = str(tiny.suggested_model or "gpt-4o-mini")
+    preferred_provider = str(tiny.suggested_provider or "openai_compatible").strip().lower()
+    preferred_model = str(tiny.suggested_model or "gpt-4o-mini")
     from modules.ai.orchestrator.llm_cost_audit import resolve_anthropic_model  # noqa: PLC0415
 
     anthropic_model = resolve_anthropic_model()
-    return [
-        ("openai_compatible", openai_model),
-        ("anthropic", anthropic_model),
-    ]
+    openai_model = "gpt-4o-mini"
+
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(provider: str, model: str) -> None:
+        key = (str(provider or "").strip().lower(), str(model or "").strip())
+        if key[0] and key[1] and key not in seen:
+            seen.add(key)
+            candidates.append(key)
+
+    _add(preferred_provider, preferred_model)
+    if preferred_provider == "openai_compatible":
+        _add("anthropic", anthropic_model)
+    elif preferred_provider == "anthropic":
+        _add("openai_compatible", openai_model)
+    else:
+        _add("openai_compatible", openai_model)
+        _add("anthropic", anthropic_model)
+    return candidates
+
+
+def resolve_injected_callable_route_resolution() -> PersonaComposeRouteResolution:
+    """Synthetic route for injected/custom LLM callables — no deployment provider lookup."""
+    return PersonaComposeRouteResolution(
+        route=PersonaComposeModelRoute(
+            provider=INJECTED_CALLABLE_PROVIDER,
+            model="",
+            tier=TIER_TINY,
+            source=ROUTE_SOURCE_INJECTED_CALLABLE,
+        ),
+        provider_configured=True,
+        compose_attempt=COMPOSE_ATTEMPT_PROVIDER_CALL,
+    )
 
 
 def resolve_persona_compose_route_resolution(
@@ -129,13 +165,17 @@ def resolve_persona_compose_route_resolution(
             os.environ.get("NAHLA_PERSONA_COMPOSE_PROVIDER", "").strip()
             or _infer_provider_for_model(env_model)
         )
+        provider_key = str(provider or "").strip().lower()
         route = PersonaComposeModelRoute(
             provider=provider,
             model=env_model,
             tier=TIER_TINY,
             source="env",
         )
-        configured = is_persona_compose_provider_configured(provider)
+        configured = (
+            provider_key in _SUPPORTED_PERSONA_PROVIDERS
+            and is_persona_compose_provider_configured(provider_key)
+        )
         return PersonaComposeRouteResolution(
             route=route,
             provider_configured=configured,
@@ -153,13 +193,17 @@ def resolve_persona_compose_route_resolution(
             str(settings.get("persona_composer_provider") or "").strip()
             or _infer_provider_for_model(tenant_model)
         )
+        provider_key = str(provider or "").strip().lower()
         route = PersonaComposeModelRoute(
             provider=provider,
             model=tenant_model,
             tier=TIER_TINY,
             source="tenant_override",
         )
-        configured = is_persona_compose_provider_configured(provider)
+        configured = (
+            provider_key in _SUPPORTED_PERSONA_PROVIDERS
+            and is_persona_compose_provider_configured(provider_key)
+        )
         return PersonaComposeRouteResolution(
             route=route,
             provider_configured=configured,
@@ -170,7 +214,8 @@ def resolve_persona_compose_route_resolution(
             ),
         )
 
-    for provider, model in _platform_default_persona_candidates():
+    platform_candidates = _platform_default_persona_candidates()
+    for provider, model in platform_candidates:
         if is_persona_compose_provider_configured(provider):
             return PersonaComposeRouteResolution(
                 route=PersonaComposeModelRoute(
@@ -183,7 +228,7 @@ def resolve_persona_compose_route_resolution(
                 compose_attempt=COMPOSE_ATTEMPT_PROVIDER_CALL,
             )
 
-    preferred_provider, preferred_model = _platform_default_persona_candidates()[0]
+    preferred_provider, preferred_model = platform_candidates[0]
     return PersonaComposeRouteResolution(
         route=PersonaComposeModelRoute(
             provider=preferred_provider,
@@ -227,7 +272,7 @@ def call_persona_compose_provider_sync(
     user: str,
     audit_context: dict[str, Any],
 ) -> tuple[str, str]:
-    """Invoke exactly one configured persona provider; never raises."""
+    """Invoke exactly one persona provider; provider exceptions propagate."""
     provider_key = str(route.provider or "").strip().lower()
     if provider_key == "openai_compatible":
         from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
@@ -402,38 +447,73 @@ class FactBoundPersonaComposer:
         source = "fallback_deterministic"
         model: Optional[str] = None
         fallback_reason = ""
-        route_metadata: dict[str, Any] = {}
+        if self._llm_callable is not None:
+            resolution = resolve_injected_callable_route_resolution()
+        else:
+            resolution = resolve_persona_compose_route_resolution(bundle)
+        route_metadata = build_persona_route_metadata(resolution, llm_candidate="")
+        model = resolution.route.model or None
 
-        try:
-            raw_text, model, resolution = await self._invoke_llm(bundle)
-            route_metadata = build_persona_route_metadata(
-                resolution,
-                llm_candidate=raw_text,
-            )
-            if resolution.compose_attempt in {
-                COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED,
-                COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE,
-            }:
-                fallback_reason = "route_unconfigured"
-            elif (raw_text or "").strip():
-                source = "persona_llm"
-            else:
-                fallback_reason = "empty_llm"
-        except TimeoutError:
-            fallback_reason = "timeout"
-            logger.warning(
-                "[PERSONA_COMPOSE] timeout surface=%s tenant=%s",
-                surface,
-                bundle.tenant_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            fallback_reason = f"llm_error:{type(exc).__name__}"
-            logger.warning(
-                "[PERSONA_COMPOSE] llm_failed surface=%s tenant=%s err=%s",
-                surface,
-                bundle.tenant_id,
-                exc,
-            )
+        if self._llm_callable is not None:
+            try:
+                raw_text, model = await self._invoke_injected_callable(bundle)
+                route_metadata = build_persona_route_metadata(
+                    resolution,
+                    llm_candidate=raw_text,
+                )
+                if (raw_text or "").strip():
+                    source = "persona_llm"
+                else:
+                    fallback_reason = "empty_llm"
+            except TimeoutError:
+                fallback_reason = "timeout"
+                logger.warning(
+                    "[PERSONA_COMPOSE] timeout surface=%s tenant=%s",
+                    surface,
+                    bundle.tenant_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                fallback_reason = f"llm_error:{type(exc).__name__}"
+                logger.warning(
+                    "[PERSONA_COMPOSE] llm_failed surface=%s tenant=%s err=%s",
+                    surface,
+                    bundle.tenant_id,
+                    exc,
+                )
+        elif resolution.compose_attempt in {
+            COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED,
+            COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE,
+        }:
+            fallback_reason = "route_unconfigured"
+        else:
+            try:
+                raw_text, model = await self._invoke_provider_callable(
+                    bundle,
+                    resolution,
+                )
+                route_metadata = build_persona_route_metadata(
+                    resolution,
+                    llm_candidate=raw_text,
+                )
+                if (raw_text or "").strip():
+                    source = "persona_llm"
+                else:
+                    fallback_reason = "empty_llm"
+            except TimeoutError:
+                fallback_reason = "timeout"
+                logger.warning(
+                    "[PERSONA_COMPOSE] timeout surface=%s tenant=%s",
+                    surface,
+                    bundle.tenant_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                fallback_reason = f"llm_error:{type(exc).__name__}"
+                logger.warning(
+                    "[PERSONA_COMPOSE] llm_failed surface=%s tenant=%s err=%s",
+                    surface,
+                    bundle.tenant_id,
+                    exc,
+                )
 
         if not (raw_text or "").strip():
             if surface not in {
@@ -525,26 +605,27 @@ class FactBoundPersonaComposer:
 
         return _stub
 
-    async def _invoke_llm(
+    async def _invoke_injected_callable(
         self,
         bundle: PersonaFactsBundle,
-    ) -> tuple[str, Optional[str], PersonaComposeRouteResolution]:
-        if self._llm_callable is not None:
-            import asyncio  # noqa: PLC0415
+    ) -> tuple[str, Optional[str]]:
+        import asyncio  # noqa: PLC0415
 
-            text = (
-                await asyncio.wait_for(
-                    self._llm_callable(bundle),
-                    timeout=self._timeout_seconds,
-                )
-            ).strip()
-            resolution = resolve_persona_compose_route_resolution(bundle)
-            return text, None, resolution
+        if self._llm_callable is None:
+            return "", None
+        text = (
+            await asyncio.wait_for(
+                self._llm_callable(bundle),
+                timeout=self._timeout_seconds,
+            )
+        ).strip()
+        return text, None
 
-        resolution = resolve_persona_compose_route_resolution(bundle)
-        if resolution.compose_attempt != COMPOSE_ATTEMPT_PROVIDER_CALL:
-            return "", resolution.route.model, resolution
-
+    async def _invoke_provider_callable(
+        self,
+        bundle: PersonaFactsBundle,
+        resolution: PersonaComposeRouteResolution,
+    ) -> tuple[str, Optional[str]]:
         route = resolution.route
         system = build_system_prompt(bundle)
         user = build_user_prompt(bundle)
@@ -570,7 +651,7 @@ class FactBoundPersonaComposer:
             asyncio.to_thread(_call_provider_sync),
             timeout=self._timeout_seconds,
         )
-        return text, used_model or route.model, resolution
+        return text, used_model or route.model or None
 
     def _result_from_fallback(
         self,
