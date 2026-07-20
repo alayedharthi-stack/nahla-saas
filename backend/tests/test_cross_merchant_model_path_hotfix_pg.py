@@ -44,6 +44,7 @@ def _alembic_config(engine: Engine) -> Config:
         os.chdir(_DATABASE)
         cfg = Config("alembic.ini")
         url = str(engine.url.render_as_string(hide_password=False))
+        cfg.set_main_option("script_location", str(_DATABASE / "migrations"))
         cfg.set_main_option("sqlalchemy.url", url)
         os.environ["DATABASE_URL"] = url
         return cfg
