@@ -1,5 +1,4 @@
 import { NavLink } from 'react-router-dom'
-import { useState, useEffect } from 'react'
 import {
   LayoutDashboard,
   MessageSquare,
@@ -39,24 +38,9 @@ import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
 import type { Translations } from '../../i18n/types'
 import { isAdmin } from '../../auth'
-import { apiCall } from '../../api/client'
-import type { StoreSettings } from '../../api/settings'
+import { useMerchantIdentity } from '../../context/MerchantIdentityContext'
 import { NAVIGATION_PATHS } from '../../lib/navigationPolicy'
-
-const NAHLA_STORE_NAME_KEY = 'nahla_store_name'
-
-function resolveSidebarStoreName(store: StoreSettings, lang: 'ar' | 'en'): string {
-  const primary = lang === 'ar' ? store.store_name_ar : store.store_name_en
-  const secondary = lang === 'ar' ? store.store_name_en : store.store_name_ar
-  const fallback = lang === 'ar' ? 'نحلة' : 'Nahla'
-  const pick = (value?: string) => (value && value.trim()) || ''
-  return (
-    pick(primary)
-    || pick(secondary)
-    || pick(store.store_name)
-    || fallback
-  )
-}
+import { PLATFORM_BRAND } from '../../lib/productIdentity'
 
 interface NavItem {
   to:    string
@@ -162,32 +146,10 @@ interface SidebarProps {
 
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { t, lang } = useLanguage()
-  const [storeName, setStoreName] = useState(() => lang === 'ar' ? 'نحلة' : 'Nahla')
-  // Sidebar-only logo override: use the white-background brand asset here so
-  // the bee mark sits cleanly on the dark sidebar. Other surfaces (login,
-  // landing, register, …) keep using the regular /logo.png.
-  const NAHLA_SIDEBAR_LOGO = '/logo-nahla.png'
-  const [logoUrl,   setLogoUrl]   = useState(NAHLA_SIDEBAR_LOGO)
+  const merchantIdentity = useMerchantIdentity()
   const adminMode = isAdmin()
-  const usingDefaultLogo = logoUrl === NAHLA_SIDEBAR_LOGO
-
-  useEffect(() => {
-    if (adminMode) return  // Admin doesn't need merchant store info
-    apiCall<{ store?: StoreSettings }>('/settings')
-      .then(data => {
-        if (data?.store) {
-          const resolved = resolveSidebarStoreName(data.store, lang)
-          setStoreName(resolved)
-          try {
-            localStorage.setItem(NAHLA_STORE_NAME_KEY, resolved)
-          } catch {
-            /* ignore quota / private mode */
-          }
-          if (data.store.store_logo_url) setLogoUrl(data.store.store_logo_url)
-        }
-      })
-      .catch(() => {/* keep defaults */})
-  }, [adminMode, lang])
+  const platformBrandName = PLATFORM_BRAND.name[lang]
+  const platformAccessibleName = PLATFORM_BRAND.accessibleName[lang]
 
   const navGroups = adminMode ? ADMIN_NAV_GROUPS : MERCHANT_NAV_GROUPS
   const accentColor = adminMode ? 'bg-amber-400' : 'bg-brand-400'
@@ -214,23 +176,17 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
       >
         {/* Logo */}
         <div className="flex items-center gap-2.5 px-5 py-5 border-b border-slate-800">
-          <div className={`w-8 h-8 rounded-lg shrink-0 overflow-hidden flex items-center justify-center ${
-            adminMode
-              ? 'bg-amber-500/20'
-              : usingDefaultLogo
-                ? 'bg-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)]'
-                : 'bg-slate-800'
-          }`}>
-            {adminMode
-              ? <Crown className="w-4 h-4 text-amber-400" />
-              : <img src={logoUrl} alt={storeName} className="w-full h-full object-contain"
-                  onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }} />
-            }
+          <div className="w-8 h-8 rounded-lg shrink-0 overflow-hidden flex items-center justify-center bg-white shadow-[0_0_0_1px_rgba(255,255,255,0.08)]">
+            <img
+              src={PLATFORM_BRAND.logoUrl}
+              alt={platformAccessibleName}
+              className="w-full h-full object-contain"
+            />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5">
               <p className="text-white font-semibold text-sm leading-none truncate">
-                {adminMode ? 'نحلة' : storeName}
+                {platformBrandName}
               </p>
               {/* AI brand badge — always visible */}
               <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/50 shadow-[0_0_8px_rgba(245,158,11,0.3)]">
@@ -297,12 +253,18 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
             <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${adminMode ? 'bg-amber-500/20' : 'bg-brand-500/20'}`}>
               {adminMode
                 ? <Crown className="w-3.5 h-3.5 text-amber-400" />
-                : <img src={logoUrl} alt={storeName} className="w-full h-full object-cover rounded-full" />
+                : merchantIdentity.logoUrl
+                  ? <img
+                      src={merchantIdentity.logoUrl}
+                      alt={merchantIdentity.name}
+                      className="w-full h-full object-cover rounded-full"
+                    />
+                  : <Store className="w-3.5 h-3.5 text-brand-300" />
               }
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-white text-xs font-medium truncate">
-                {adminMode ? 'تركي الحارثي' : storeName}
+                {adminMode ? 'تركي الحارثي' : merchantIdentity.name}
               </p>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <p className={`text-xs truncate ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
