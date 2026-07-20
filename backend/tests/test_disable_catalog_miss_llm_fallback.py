@@ -230,9 +230,31 @@ class TestCatalogMissContentSafety:
             },
         )
 
-        with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-            text = asyncio.run(composer.compose(decision, result, ctx))
-        mock_llm.assert_not_awaited()
+        async def _run() -> str:
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_product_answer",
+                new=AsyncMock(
+                    return_value=(
+                        "عسل طلح سعره 120 ريال.",
+                        None,
+                        {
+                            "compose_source": "persona_llm",
+                            "persona_compose": {"source": "persona_llm"},
+                            "question_kind": "price",
+                        },
+                    ),
+                ),
+            ):
+                with patch.object(
+                    composer,
+                    "_llm_compose",
+                    new_callable=AsyncMock,
+                ) as mock_llm:
+                    text = await composer.compose(decision, result, ctx)
+            mock_llm.assert_not_awaited()
+            return text
+
+        text = asyncio.run(_run())
         assert "طلح" in text or "عسل" in text
 
     def test_variant_pricing_path_unaffected(self) -> None:

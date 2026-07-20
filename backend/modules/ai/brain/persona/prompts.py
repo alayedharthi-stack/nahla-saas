@@ -122,6 +122,12 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             lines.append("navigation_browse: true")
             if facts.get("navigator_no_groups_fallback"):
                 lines.append("navigator_no_groups_fallback: true")
+        if facts.get("eligible_product_count") is not None:
+            lines.append(
+                f"eligible_product_count: {facts.get('eligible_product_count')}"
+            )
+        if not facts.get("has_eligible_products"):
+            lines.append("no_confirmed_sellable_products: true")
         for product in facts.get("catalog_products") or []:
             if not isinstance(product, dict):
                 continue
@@ -138,12 +144,21 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             if facts.get("allow_availability_mention") and "available" in product:
                 parts.append(f"available={product.get('available')}")
             lines.append(" | ".join(parts))
-        lines.append(
-            "rules: use only supplied catalog products; brief Saudi merchant tone; "
-            "mention prices only when listed; mention availability only when available flag is set; "
-            "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
-            "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
-        )
+        if not facts.get("has_catalog_products"):
+            lines.append("catalog_products: none")
+        if not facts.get("has_eligible_products"):
+            lines.append(
+                "rules: honestly explain there are no confirmed sellable catalog products; "
+                "do not invent products, prices, availability, or checkout pressure; "
+                "no name/address/payment/quantity prompts"
+            )
+        else:
+            lines.append(
+                "rules: use only supplied catalog products; brief Saudi merchant tone; "
+                "mention prices only when listed; mention availability only when available flag is set; "
+                "no invented products/prices/availability/discounts; no الأفضل/superiority claims; "
+                "no checkout/name/address/payment/quantity prompts; no category drift outside scope"
+            )
     elif bundle.surface == PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
         for key in (
             "identity_status",

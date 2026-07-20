@@ -17,6 +17,7 @@ from .compose_guards import apply_guards_or_fallback, apply_persona_compose_guar
 from .facts_bundle import (
     PHASE2_SOCIAL_SURFACES,
     PERSONA_COMPOSER_SURFACES,
+    PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
     PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER,
     PERSONA_SURFACE_PAYMENT_MEDIA_INTRO,
     PersonaComposeResult,
@@ -275,7 +276,10 @@ class FactBoundPersonaComposer:
             )
 
         if not (raw_text or "").strip():
-            if surface != PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER:
+            if surface not in {
+                PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER,
+                PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+            }:
                 raw_text = deterministic_fallback(
                     bundle,
                     ctx=ctx,

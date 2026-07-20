@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -233,21 +233,20 @@ class TestCatalogProductAnswerPersonaCompose:
 
         asyncio.run(_run())
 
-    def test_compose_failure_returns_none_for_responder_fallback(self) -> None:
+    def test_compose_failure_returns_audited_emergency_fallback(self) -> None:
         async def _run() -> None:
             with patch.object(
                 FactBoundPersonaComposer,
                 "compose",
-                return_value=type(
-                    "R",
-                    (),
-                    {
-                        "text": "",
-                        "source": "fallback_deterministic",
-                        "guard_passed": False,
-                        "surface": "catalog_product_answer",
-                    },
-                )(),
+                return_value=PersonaComposeResult(
+                    text="",
+                    source="fallback_deterministic",
+                    surface="catalog_product_answer",
+                    facts_hash="abc",
+                    guard_passed=False,
+                    guard_failed_reason="guard_failed",
+                    fallback_reason="guard_failed",
+                ),
             ):
                 text, result, event = await try_compose_catalog_product_answer(
                     tenant_id=33,
@@ -256,24 +255,40 @@ class TestCatalogProductAnswerPersonaCompose:
                     products=_HONEY_PRODUCTS,
                     ai_settings=_enabled_catalog_ai_settings(),
                 )
-            assert text is None
-            assert result is None
-            assert event is None
+            assert text
+            assert result is not None
+            assert result.source == "fallback_deterministic"
+            assert event is not None
+            assert event["compose_source"] == "fallback_deterministic"
 
         asyncio.run(_run())
 
-    def test_blocked_when_not_allowlisted(self) -> None:
+    def test_rollout_disabled_still_compose_once(self) -> None:
         async def _run() -> None:
-            text, result, event = await try_compose_catalog_product_answer(
-                tenant_id=33,
-                customer_phone="966500000099",
-                inbound_text="وش عندكم من عسل؟",
-                products=_HONEY_PRODUCTS,
-                ai_settings=_enabled_catalog_ai_settings(),
+            compose = AsyncMock(
+                return_value=PersonaComposeResult(
+                    text="عندنا خيارات عسل في الكتالوج.",
+                    source="persona_llm",
+                    surface="catalog_product_answer",
+                    facts_hash="facts",
+                    guard_passed=True,
+                )
             )
-            assert text is None
-            assert result is None
-            assert event is None
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                text, result, event = await try_compose_catalog_product_answer(
+                    tenant_id=33,
+                    customer_phone="966500000099",
+                    inbound_text="وش عندكم من عسل؟",
+                    products=_HONEY_PRODUCTS,
+                    ai_settings={
+                        "persona_composer_enabled": False,
+                        "store_ai_mode": "live",
+                    },
+                )
+            compose.assert_awaited_once()
+            assert text
+            assert result is not None
+            assert event is not None
 
         asyncio.run(_run())
 
@@ -461,16 +476,16 @@ class TestCatalogPriceNonOrderableFacts:
 
         asyncio.run(_run())
 
-    def test_price_deterministic_fallback_when_llm_compose_fails(self) -> None:
-        talh = {
-            "id": 501,
-            "title": "عسل الطلح",
-            "category": "عسل",
-            "price": 387,
+    def test_price_emergency_fallback_when_llm_compose_fails(self) -> None:
+        shoe = {
+            "id": 301,
+            "title": "حذاء رياضي أبيض",
+            "category": "أحذية",
+            "price": 220,
             "can_checkout": False,
             "in_stock": False,
         }
-        message = "كم سعر الطلح؟"
+        message = "كم سعر حذاء رياضي أبيض؟"
         failed = PersonaComposeResult(
             text="ياهلا ومرحبا",
             source="fallback_deterministic",
@@ -483,28 +498,25 @@ class TestCatalogPriceNonOrderableFacts:
         async def _run() -> None:
             with patch.object(FactBoundPersonaComposer, "compose", return_value=failed):
                 text, compose_result, event = await try_compose_catalog_product_answer(
-                    tenant_id=33,
-                    customer_phone="966542980511",
+                    tenant_id=11,
+                    customer_phone="966500000001",
                     inbound_text=message,
-                    products=[talh],
-                    catalog_search_query="طلح",
+                    products=[shoe],
+                    catalog_search_query="حذاء رياضي أبيض",
                     question_kind="price",
                     ai_settings=_enabled_catalog_ai_settings(),
                 )
             assert text
-            assert "387" in text
-            assert "غير متاح للطلب" in text
-            assert "اختر رقم" not in text
             assert compose_result is not None
-            assert compose_result.source == "catalog_deterministic_fallback"
+            assert compose_result.source == "fallback_deterministic"
             assert event is not None
             assert event["chosen_path"] == "fact_bound_persona_compose"
-            assert event["persona_compose"]["surface"] == "catalog_product_answer"
-            assert event["persona_compose"]["source"] == "catalog_deterministic_fallback"
-            assert event["question_kind"] == "price"
-            assert event["price_source"] == "catalog"
-            assert event["catalog_product_ids"] == [501]
-            assert event["checkout_pressure_allowed"] is False
+            assert event["compose_source"] == "fallback_deterministic"
+            assert event["fallback_reason"]
+            assert event["eligible_product_count"] == 0
+            assert "catalog_deterministic_fallback" not in str(
+                event.get("persona_compose", {}).get("source")
+            )
 
         asyncio.run(_run())
 
@@ -649,7 +661,7 @@ class TestCatalogPriceNonOrderableFacts:
             "chosen_path": "fact_bound_persona_compose",
             "persona_compose": {
                 "surface": "catalog_product_answer",
-                "source": "catalog_deterministic_fallback",
+                "source": "fallback_deterministic",
                 "guard_passed": False,
             },
             "question_kind": "price",
@@ -803,56 +815,41 @@ _TALH_PRICE_PRODUCTS = [
 ]
 
 
-class TestCatalogQaDeterministicBypass:
-    def test_gate_off_jacket_price_direct(self) -> None:
-        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
-            try_catalog_qa_deterministic_answer,
-        )
+class TestCatalogQaPersonaCompose:
+    def test_non_checkout_shoe_price_uses_one_compose(self) -> None:
+        shoe = {
+            "id": 301,
+            "title": "حذاء رياضي أبيض",
+            "category": "أحذية",
+            "price": 220,
+            "can_checkout": False,
+        }
 
-        text, event = try_catalog_qa_deterministic_answer(
-            tenant_id=1,
-            customer_phone="966500009429",
-            inbound_text="كم سعر جاكيت؟",
-            products=[_JACKET_PRODUCT],
-            catalog_search_query="جاكيت",
-            question_kind="price",
-        )
-        assert text
-        assert "169" in text
-        assert "جاكيت" in text
-        assert "اختر رقم" not in text
-        assert "أكمل معك" not in text
-        assert event is not None
-        assert event["question_kind"] == "price"
-        assert event["price_source"] == "catalog"
-        assert event["catalog_product_ids"] == [28]
-        assert 169 in event["catalog_fact_price_values"]
-        assert event["persona_compose"]["surface"] == "catalog_product_answer"
-        assert event["persona_compose"]["source"] == "catalog_deterministic_fallback"
-        assert event["checkout_pressure_allowed"] is False
+        async def _run() -> None:
+            compose = AsyncMock(
+                return_value=PersonaComposeResult(
+                    text="حذاء رياضي أبيض سعره 220 ريال.",
+                    source="persona_llm",
+                    surface="catalog_product_answer",
+                    facts_hash="facts",
+                    guard_passed=True,
+                )
+            )
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                text, result, event = await try_compose_catalog_product_answer(
+                    tenant_id=11,
+                    customer_phone="966500000001",
+                    inbound_text="كم سعر حذاء رياضي أبيض؟",
+                    products=[shoe],
+                    catalog_search_query="حذاء رياضي أبيض",
+                    question_kind="price",
+                    ai_settings=_enabled_catalog_ai_settings(),
+                )
+            compose.assert_awaited_once()
+            assert text
+            assert result.source == "persona_llm"
+            assert event["eligible_product_count"] == 0
+            assert event["compose_source"] == "persona_llm"
 
-    def test_talh_price_direct_without_persona_gate(self) -> None:
-        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
-            try_catalog_qa_deterministic_answer,
-        )
-
-        text, event = try_catalog_qa_deterministic_answer(
-            tenant_id=33,
-            customer_phone="966500009429",
-            inbound_text="كم سعر الطلح؟",
-            products=_TALH_PRICE_PRODUCTS,
-            catalog_search_query="طلح",
-            question_kind="price",
-        )
-        assert text
-        assert "387" in text
-        assert "1475" in text
-        assert "اختر رقم" not in text
-        assert event is not None
-        assert event["question_kind"] == "price"
-        assert event["price_source"] == "catalog"
-        assert 109 in event["catalog_product_ids"]
-        assert 121 in event["catalog_product_ids"]
-        assert 387 in event["catalog_fact_price_values"]
-        assert 1475 in event["catalog_fact_price_values"]
+        asyncio.run(_run())
 
