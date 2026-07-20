@@ -296,7 +296,7 @@ def install_internal_e2e_sql_error_listener(engine: Any) -> None:
     def _capture_sql_error(exception_context: Any) -> None:
         try:
             record_sql_error_from_context(exception_context)
-        except Exception:
+        except Exception:  # noqa: silent-ok — audit capture must never disturb SQL error propagation
             return
 
     _INSTALLED_ENGINES.add(engine_id)
