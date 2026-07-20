@@ -510,3 +510,419 @@ async def try_compose_catalog_product_answer(
             return fallback_text.strip(), fallback_result, event_meta
 
     return None, None, None
+
+
+def build_catalog_search_miss_facts_bundle(
+    *,
+    inbound_text: str,
+    resolved_subject: str,
+    tenant_id: int = 0,
+    customer_phone: str = "",
+    catalog_search_query: str = "",
+    merchant_persona: Optional[dict[str, Any]] = None,
+) -> PersonaFactsBundle:
+    from .fact_bound_composer import detect_language  # noqa: PLC0415
+
+    inbound = str(inbound_text or "").strip()
+    subject = str(resolved_subject or catalog_search_query or "").strip()
+    language = detect_language(inbound)
+    verified_facts: dict[str, Any] = {
+        "surface": PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        "inbound_text": inbound,
+        "question_kind": "search_miss",
+        "resolved_subject": subject,
+        "catalog_search_query": str(catalog_search_query or "").strip(),
+        "search_result_count": 0,
+        "catalog_products": [],
+        "catalog_product_ids": [],
+        "has_catalog_products": False,
+        "allow_price_mention": False,
+        "allow_availability_mention": False,
+        "allow_checkout_pressure": False,
+        "allow_slot_prompts": False,
+        "allow_superiority_claims": False,
+    }
+    return PersonaFactsBundle(
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        inbound_text=inbound,
+        language=language,
+        dialect="saudi_arabic" if language == "ar" else None,
+        verified_facts=verified_facts,
+        customer_context={},
+        merchant_persona=dict(merchant_persona or {}),
+        constraints=PersonaConstraints(max_chars=320, max_emojis=1),
+        tenant_id=int(tenant_id or 0),
+        customer_phone=str(customer_phone or ""),
+    )
+
+
+def _catalog_search_miss_emergency_fallback(
+    bundle: PersonaFactsBundle,
+    *,
+    reason: str,
+) -> PersonaComposeResult:
+    from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+
+    return PersonaComposeResult(
+        text="لا يوجد تطابق مؤكد في الكتالوج حالياً.",
+        source="fallback_deterministic",
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        facts_hash=canonical_facts_hash(bundle.verified_facts),
+        guard_passed=False,
+        fallback_reason=str(reason or "compose_unavailable"),
+        language=bundle.language,
+        dialect=bundle.dialect,
+        emoji_count=0,
+        latency_ms=0,
+        model=None,
+    )
+
+
+def _persona_event_with_chosen_path(
+    result: PersonaComposeResult,
+    *,
+    tenant_id: int,
+    allowlist_result: str,
+    chosen_path: str,
+    catalog_facts: Optional[dict[str, Any]] = None,
+    catalog_fact_products: Optional[list[dict[str, Any]]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    event_meta = build_catalog_product_answer_event_metadata(
+        result,
+        tenant_id=int(tenant_id),
+        allowlist_result=allowlist_result,
+        catalog_facts=dict(catalog_facts or {}),
+        catalog_fact_products=catalog_fact_products,
+    )
+    event_meta["chosen_path"] = str(chosen_path or "").strip()
+    event_meta.update({
+        "compose_source": result.source,
+        "response_mode": "grounded_persona_compose",
+        "llm_candidate_present": result.source == "persona_llm",
+        "final_text_transformed": False,
+        "final_transform_reasons": [],
+        "final_customer_text_source": result.source,
+    })
+    if result.source == "fallback_deterministic":
+        event_meta["fallback_reason"] = str(
+            result.fallback_reason or "compose_unavailable"
+        )
+    if extra:
+        event_meta.update(extra)
+    return event_meta
+
+
+def build_catalog_search_miss_emergency_outcome(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    resolved_subject: str,
+    catalog_search_query: str = "",
+    chosen_path: str = "catalog_miss_resolved_subject",
+    ai_settings: Optional[dict[str, Any]] = None,
+    reason: str = "compose_unavailable",
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """Audited one-line fallback for an unavailable search-miss compose."""
+    settings = dict(ai_settings or {})
+    bundle = build_catalog_search_miss_facts_bundle(
+        inbound_text=inbound_text,
+        resolved_subject=resolved_subject,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        catalog_search_query=catalog_search_query,
+        merchant_persona=settings,
+    )
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    fallback = _catalog_search_miss_emergency_fallback(bundle, reason=reason)
+    event_meta = _persona_event_with_chosen_path(
+        fallback,
+        tenant_id=int(tenant_id),
+        allowlist_result=persona_composer_allowlist_result(
+            tenant_id=int(tenant_id),
+            customer_phone=str(customer_phone or ""),
+            ai_settings=settings,
+        ),
+        chosen_path=chosen_path,
+        catalog_facts=bundle.verified_facts,
+        extra={
+            "question_kind": "search_miss",
+            "fallback_action_type": "catalog_search_miss",
+        },
+    )
+    return fallback.text.strip(), fallback, event_meta
+
+
+async def try_compose_catalog_search_miss_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    resolved_subject: str,
+    catalog_search_query: str = "",
+    chosen_path: str = "catalog_miss_resolved_subject",
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """LLM-owned prose for resolved-subject catalog search miss."""
+    from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
+
+    settings = dict(ai_settings or {})
+    bundle = build_catalog_search_miss_facts_bundle(
+        inbound_text=inbound_text,
+        resolved_subject=resolved_subject,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        catalog_search_query=catalog_search_query,
+        merchant_persona=settings,
+    )
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    allowlist_result = persona_composer_allowlist_result(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=settings,
+    )
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    try:
+        result = await composer.compose(bundle)
+    except Exception as exc:  # noqa: BLE001
+        return build_catalog_search_miss_emergency_outcome(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            inbound_text=inbound_text,
+            resolved_subject=resolved_subject,
+            catalog_search_query=catalog_search_query,
+            chosen_path=chosen_path,
+            ai_settings=settings,
+            reason=f"compose_exception:{type(exc).__name__}",
+        )
+    if (
+        result.source == "persona_llm"
+        and result.guard_passed
+        and (result.text or "").strip()
+    ):
+        event_meta = _persona_event_with_chosen_path(
+            result,
+            tenant_id=int(tenant_id),
+            allowlist_result=allowlist_result,
+            chosen_path=chosen_path,
+            catalog_facts=bundle.verified_facts,
+            extra={"question_kind": "search_miss"},
+        )
+        return result.text.strip(), result, event_meta
+
+    return build_catalog_search_miss_emergency_outcome(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        inbound_text=inbound_text,
+        resolved_subject=resolved_subject,
+        catalog_search_query=catalog_search_query,
+        chosen_path=chosen_path,
+        ai_settings=settings,
+        reason=(
+            result.fallback_reason
+            or result.guard_failed_reason
+            or "compose_empty"
+        ),
+    )
+
+
+def _catalog_navigation_emergency_fallback(
+    bundle: PersonaFactsBundle,
+    *,
+    reason: str,
+) -> PersonaComposeResult:
+    from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+
+    return PersonaComposeResult(
+        text="تعذر عرض المنتجات حالياً.",
+        source="fallback_deterministic",
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        facts_hash=canonical_facts_hash(bundle.verified_facts),
+        guard_passed=False,
+        fallback_reason=str(reason or "compose_unavailable"),
+        language=bundle.language,
+        dialect=bundle.dialect,
+        emoji_count=0,
+        latency_ms=0,
+        model=None,
+    )
+
+
+def _build_catalog_navigation_bundle(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    navigator_no_groups_fallback: bool,
+    decision_args: Optional[dict[str, Any]],
+    settings: dict[str, Any],
+) -> tuple[PersonaFactsBundle, list[dict[str, Any]]]:
+    compose_fact_rows = catalog_fact_product_rows(products)
+    bundle = build_catalog_product_answer_facts_bundle(
+        inbound_text=inbound_text,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        products=products,
+        catalog_search_query="",
+        search_result_count=len(compose_fact_rows),
+        question_kind="browse",
+        display_count=len(compose_fact_rows),
+        decision_args=dict(decision_args or {}),
+        merchant_persona=settings,
+    )
+    verified = dict(bundle.verified_facts)
+    verified["navigation_browse"] = True
+    verified["navigator_no_groups_fallback"] = bool(navigator_no_groups_fallback)
+    return PersonaFactsBundle(
+        surface=bundle.surface,
+        inbound_text=bundle.inbound_text,
+        language=bundle.language,
+        dialect=bundle.dialect,
+        verified_facts=verified,
+        customer_context=bundle.customer_context,
+        merchant_persona=bundle.merchant_persona,
+        constraints=bundle.constraints,
+        tenant_id=bundle.tenant_id,
+        customer_phone=bundle.customer_phone,
+    ), compose_fact_rows
+
+
+def build_catalog_navigation_emergency_outcome(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    chosen_path: str = "catalog_navigation_top_products_fallback",
+    navigator_no_groups_fallback: bool = False,
+    decision_args: Optional[dict[str, Any]] = None,
+    ai_settings: Optional[dict[str, Any]] = None,
+    reason: str = "compose_unavailable",
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """Audited one-line fallback for unavailable catalog navigation compose."""
+    settings = dict(ai_settings or {})
+    bundle, compose_fact_rows = _build_catalog_navigation_bundle(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        inbound_text=inbound_text,
+        products=products,
+        navigator_no_groups_fallback=navigator_no_groups_fallback,
+        decision_args=decision_args,
+        settings=settings,
+    )
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    fallback = _catalog_navigation_emergency_fallback(bundle, reason=reason)
+    event_meta = _persona_event_with_chosen_path(
+        fallback,
+        tenant_id=int(tenant_id),
+        allowlist_result=persona_composer_allowlist_result(
+            tenant_id=int(tenant_id),
+            customer_phone=str(customer_phone or ""),
+            ai_settings=settings,
+        ),
+        chosen_path=chosen_path,
+        catalog_facts=bundle.verified_facts,
+        catalog_fact_products=compose_fact_rows,
+        extra={
+            "question_kind": "browse",
+            "fallback_action_type": "catalog_navigation_browse",
+        },
+    )
+    return fallback.text.strip(), fallback, event_meta
+
+
+async def try_compose_catalog_navigation_browse_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    chosen_path: str = "catalog_navigation_top_products_fallback",
+    navigator_no_groups_fallback: bool = False,
+    decision_args: Optional[dict[str, Any]] = None,
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
+    """LLM-owned browse prose for catalog navigation top-products fallback."""
+    from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
+
+    settings = dict(ai_settings or {})
+    bundle, compose_fact_rows = _build_catalog_navigation_bundle(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        inbound_text=inbound_text,
+        products=products,
+        navigator_no_groups_fallback=navigator_no_groups_fallback,
+        decision_args=decision_args,
+        settings=settings,
+    )
+    if not compose_fact_rows:
+        return build_catalog_navigation_emergency_outcome(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            inbound_text=inbound_text,
+            products=products,
+            chosen_path=chosen_path,
+            navigator_no_groups_fallback=navigator_no_groups_fallback,
+            decision_args=decision_args,
+            ai_settings=settings,
+            reason="missing_catalog_fact_rows",
+        )
+
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    allowlist_result = persona_composer_allowlist_result(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=settings,
+    )
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    try:
+        result = await composer.compose(bundle)
+    except Exception as exc:  # noqa: BLE001
+        return build_catalog_navigation_emergency_outcome(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            inbound_text=inbound_text,
+            products=products,
+            chosen_path=chosen_path,
+            navigator_no_groups_fallback=navigator_no_groups_fallback,
+            decision_args=decision_args,
+            ai_settings=settings,
+            reason=f"compose_exception:{type(exc).__name__}",
+        )
+    if (
+        result.source == "persona_llm"
+        and result.guard_passed
+        and (result.text or "").strip()
+    ):
+        event_meta = _persona_event_with_chosen_path(
+            result,
+            tenant_id=int(tenant_id),
+            allowlist_result=allowlist_result,
+            chosen_path=chosen_path,
+            catalog_facts=bundle.verified_facts,
+            catalog_fact_products=compose_fact_rows,
+            extra={"question_kind": "browse"},
+        )
+        return result.text.strip(), result, event_meta
+
+    return build_catalog_navigation_emergency_outcome(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        inbound_text=inbound_text,
+        products=products,
+        chosen_path=chosen_path,
+        navigator_no_groups_fallback=navigator_no_groups_fallback,
+        decision_args=decision_args,
+        ai_settings=settings,
+        reason=(
+            result.fallback_reason
+            or result.guard_failed_reason
+            or "compose_empty"
+        ),
+    )

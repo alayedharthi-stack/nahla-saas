@@ -70,23 +70,36 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
         lines.append(f"question_kind: {facts.get('question_kind') or ''}")
         if facts.get("subject_title"):
             lines.append(f"subject_product: {facts.get('subject_title')}")
-        for section in facts.get("kb_sections") or []:
-            if not isinstance(section, dict):
-                continue
-            title = str(section.get("title") or "").strip()
-            body = str(section.get("body") or "").strip()
-            if title or body:
-                lines.append(f"kb_section: {title} — {body}")
+        if facts.get("has_kb_sections"):
+            for section in facts.get("kb_sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                title = str(section.get("title") or "").strip()
+                body = str(section.get("body") or "").strip()
+                if title or body:
+                    lines.append(f"kb_section: {title} — {body}")
+        else:
+            lines.append("kb_status: no_confirmed_kb_sections")
+            missing = facts.get("missing_facts") or []
+            if missing:
+                lines.append(f"missing_facts: {', '.join(str(m) for m in missing)}")
         if facts.get("allow_price_mention") and facts.get("catalog_price") is not None:
             lines.append(f"catalog_price: {facts.get('catalog_price')}")
         if facts.get("allow_availability_mention") and facts.get("availability") is not None:
             lines.append(f"availability: {facts.get('availability')}")
-        lines.append(
-            "rules: answer only from kb_sections and verified catalog facts; "
-            "no invented benefits, price, availability, medical cure claims, "
-            "checkout pressure, name/address/payment/quantity asks; "
-            "no unsupported الأفضل/الأصلي/مضمون unless present in kb_sections"
-        )
+        if facts.get("has_kb_sections"):
+            lines.append(
+                "rules: answer only from kb_sections and verified catalog facts; "
+                "no invented benefits, price, availability, medical cure claims, "
+                "checkout pressure, name/address/payment/quantity asks; "
+                "no unsupported الأفضل/الأصلي/مضمون unless present in kb_sections"
+            )
+        else:
+            lines.append(
+                "rules: honestly explain there are no confirmed KB details for this product; "
+                "do not invent features, benefits, price, availability, or medical claims; "
+                "no checkout pressure, name/address/payment/quantity asks"
+            )
     elif bundle.surface == "catalog_product_answer":
         lines.append(f"question_kind: {facts.get('question_kind') or ''}")
         if facts.get("category_scope"):
@@ -94,6 +107,21 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
         if facts.get("catalog_search_query"):
             lines.append(f"catalog_search_query: {facts.get('catalog_search_query')}")
         lines.append(f"search_result_count: {facts.get('search_result_count')}")
+        if str(facts.get("question_kind") or "").strip() == "search_miss":
+            if facts.get("resolved_subject"):
+                lines.append(f"resolved_subject: {facts.get('resolved_subject')}")
+            lines.append("catalog_miss: true")
+            lines.append(
+                "rules: honestly say there is no clear catalog match for resolved_subject; "
+                "do not invent products, prices, or availability; "
+                "suggest trying the exact store product name or browsing top sellers; "
+                "never re-open product type/SKU identification; brief Saudi merchant tone"
+            )
+            return "\n".join(lines)
+        if facts.get("navigation_browse"):
+            lines.append("navigation_browse: true")
+            if facts.get("navigator_no_groups_fallback"):
+                lines.append("navigator_no_groups_fallback: true")
         for product in facts.get("catalog_products") or []:
             if not isinstance(product, dict):
                 continue

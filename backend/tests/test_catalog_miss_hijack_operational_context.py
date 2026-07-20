@@ -308,7 +308,7 @@ def test_responder_search_miss_uses_deterministic_template_for_weak_subject() ->
     assert "ما ظهر عندي تطابق" in text or "ما لقيت تطابق" in text
 
 
-def test_responder_search_miss_uses_template_for_catalog_like_subject() -> None:
+def test_responder_search_miss_uses_persona_compose_for_catalog_like_subject() -> None:
     ctx = _ctx("بكم سدر الحجاز", intent_name="ask_price")
     composer = DefaultComposer()
     decision = Decision(
@@ -323,7 +323,29 @@ def test_responder_search_miss_uses_template_for_catalog_like_subject() -> None:
     )
 
     async def _run() -> str:
-        return await composer.compose(decision, result, ctx)
+        from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+
+        with patch(
+            "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_search_miss_answer",
+            new=AsyncMock(
+                return_value=(
+                    "ما لقيت تطابقاً واضحاً لسدر الحجاز في الكتالوج حالياً.",
+                    None,
+                    {
+                        "chosen_path": "catalog_miss_resolved_subject",
+                        "persona_compose": {"source": "persona_llm"},
+                        "compose_source": "persona_llm",
+                        "response_mode": "grounded_persona_compose",
+                        "llm_candidate_present": True,
+                        "final_text_transformed": False,
+                        "final_transform_reasons": [],
+                    },
+                ),
+            ),
+        ):
+            return await composer.compose(decision, result, ctx)
 
     text = asyncio.run(_run())
     assert "الكتالوج" in text
+    assert result.data.get("chosen_path") == "catalog_miss_resolved_subject"
+    assert result.data.get("persona_compose", {}).get("source") == "persona_llm"

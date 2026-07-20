@@ -347,13 +347,16 @@ class DefaultComposer:
                 # Customer-facing catalog copy is sent only after Meta accepts
                 # ``catalog_message`` in the webhook wire layer.
                 return ""
-            if discovery_text and chosen_path:
+            if chosen_path and (
+                discovery_text
+                or chosen_path == "catalog_navigation_top_products_fallback"
+            ):
                 result.data["chosen_path"] = chosen_path
                 result.data["turn_owner"] = str(data.get("turn_owner") or "catalog_navigation")
                 result.data["owner_locked"] = bool(data.get("owner_locked"))
                 result.data["owner_replaced"] = False
                 result.data["navigator_owner"] = True
-                from ..catalog.navigation import PATH_GROUP_PRODUCTS, PATH_GROUPS  # noqa: PLC0415
+                from ..catalog.navigation import PATH_GROUP_PRODUCTS, PATH_GROUPS, PATH_TOP_FALLBACK  # noqa: PLC0415
 
                 if discovery_kind == "collections" and chosen_path == PATH_GROUPS:
                     page_collections = list(data.get("collections") or [])
@@ -396,6 +399,57 @@ class DefaultComposer:
                         })
                         if nav_buttons:
                             result.data["pending_buttons"] = nav_buttons[:3]
+                if chosen_path == PATH_TOP_FALLBACK:
+                    from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                        build_catalog_navigation_emergency_outcome,
+                        try_compose_catalog_navigation_browse_answer,
+                    )
+                    from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                    nav_kwargs = {
+                        "tenant_id": int(getattr(ctx, "tenant_id", 0) or 0),
+                        "customer_phone": str(
+                            getattr(ctx, "customer_phone", "") or "",
+                        ),
+                        "inbound_text": str(getattr(ctx, "message", "") or ""),
+                        "products": list(data.get("products") or []),
+                        "chosen_path": PATH_TOP_FALLBACK,
+                        "navigator_no_groups_fallback": bool(
+                            data.get("navigator_no_groups_fallback"),
+                        ),
+                        "decision_args": dict(decision.args or {}),
+                        "ai_settings": _ai_settings_from_ctx(ctx),
+                    }
+                    try:
+                        _nav_text, _nav_result, _nav_event = (
+                            await try_compose_catalog_navigation_browse_answer(
+                                **nav_kwargs,
+                            )
+                        )
+                        if not (
+                            (_nav_text or "").strip()
+                            and isinstance(_nav_event, dict)
+                            and _nav_event.get("compose_source")
+                        ):
+                            _nav_text, _nav_result, _nav_event = (
+                                build_catalog_navigation_emergency_outcome(
+                                    **nav_kwargs,
+                                    reason="invalid_compose_outcome",
+                                )
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception(
+                            "[RESPONDER] catalog_navigation_browse persona compose failed",
+                        )
+                        _nav_text, _nav_result, _nav_event = (
+                            build_catalog_navigation_emergency_outcome(
+                                **nav_kwargs,
+                                reason=f"responder_exception:{type(exc).__name__}",
+                            )
+                        )
+                    result.data.update(_nav_event)
+                    result.data["chosen_path"] = PATH_TOP_FALLBACK
+                    return (_nav_text or "").strip()
                 return discovery_text
             return discovery_text or "ما ظهر عندي أقسام واضحة حالياً."
 
@@ -486,7 +540,6 @@ class DefaultComposer:
                     pass
                 try:
                     from ..clarification.resolved_product_guard import (  # noqa: PLC0415
-                        compose_resolved_product_search_miss,
                         extract_resolved_product_subject,
                         log_clarification_leak,
                     )
@@ -509,10 +562,53 @@ class DefaultComposer:
                             ),
                         )
                         result.data["chosen_path"] = "catalog_miss_resolved_subject"
-                        return compose_resolved_product_search_miss(
-                            subject,
-                            variant=self._variant_idx(ctx),
+                        from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                            build_catalog_search_miss_emergency_outcome,
+                            try_compose_catalog_search_miss_answer,
                         )
+                        from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                        miss_kwargs = {
+                            "tenant_id": int(getattr(ctx, "tenant_id", 0) or 0),
+                            "customer_phone": str(
+                                getattr(ctx, "customer_phone", "") or "",
+                            ),
+                            "inbound_text": str(getattr(ctx, "message", "") or ""),
+                            "resolved_subject": subject,
+                            "catalog_search_query": query,
+                            "chosen_path": "catalog_miss_resolved_subject",
+                            "ai_settings": _ai_settings_from_ctx(ctx),
+                        }
+                        try:
+                            _miss_text, _miss_result, _miss_event = (
+                                await try_compose_catalog_search_miss_answer(
+                                    **miss_kwargs,
+                                )
+                            )
+                            if not (
+                                (_miss_text or "").strip()
+                                and isinstance(_miss_event, dict)
+                                and _miss_event.get("compose_source")
+                            ):
+                                _miss_text, _miss_result, _miss_event = (
+                                    build_catalog_search_miss_emergency_outcome(
+                                        **miss_kwargs,
+                                        reason="invalid_compose_outcome",
+                                    )
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception(
+                                "[RESPONDER] catalog_search_miss persona compose failed",
+                            )
+                            _miss_text, _miss_result, _miss_event = (
+                                build_catalog_search_miss_emergency_outcome(
+                                    **miss_kwargs,
+                                    reason=f"responder_exception:{type(exc).__name__}",
+                                )
+                            )
+                        result.data.update(_miss_event)
+                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                        return (_miss_text or "").strip()
                     from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
                         CATALOG_MISS_CHOSEN_PATH,
                         compose_catalog_miss_deterministic_reply,
@@ -532,10 +628,24 @@ class DefaultComposer:
                         no_synced_products=no_synced,
                         variant=variant,
                     )
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
                     logger.exception(
                         "[RESPONDER] resolved_product_search_miss compose failed",
                     )
+                    if "miss_kwargs" in locals():
+                        from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                            build_catalog_search_miss_emergency_outcome,
+                        )
+
+                        _miss_text, _miss_result, _miss_event = (
+                            build_catalog_search_miss_emergency_outcome(
+                                **miss_kwargs,
+                                reason=f"outer_responder_exception:{type(exc).__name__}",
+                            )
+                        )
+                        result.data.update(_miss_event)
+                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                        return (_miss_text or "").strip()
                 variant = self._variant_idx(ctx)
                 text = T.no_products(variant=variant)
                 if self._is_duplicate(text, ctx):

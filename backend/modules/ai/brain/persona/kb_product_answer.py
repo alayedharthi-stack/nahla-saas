@@ -11,7 +11,6 @@ from .facts_bundle import (
 )
 from .integration import (
     build_persona_compose_event_metadata,
-    should_enforce_persona_compose_for_surface,
 )
 from modules.ai.brain.commerce.product_knowledge_or_comparison import (
     TOPIC_PRODUCT_KNOWLEDGE_FACTS,
@@ -118,6 +117,21 @@ def build_kb_product_answer_event_metadata(
         tenant_id=int(tenant_id),
         allowlist_result=str(allowlist_result or ""),
     )
+    meta.update({
+        "compose_source": result.source,
+        "response_mode": "grounded_persona_compose",
+        "llm_candidate_present": result.source == "persona_llm",
+        "final_text_transformed": False,
+        "final_transform_reasons": [],
+        "final_customer_text_source": result.source,
+    })
+    if result.source == "fallback_deterministic":
+        meta.update({
+            "fallback_reason": str(
+                result.fallback_reason or "compose_unavailable"
+            ),
+            "fallback_action_type": "kb_product_answer",
+        })
     meta["knowledge_source"] = (
         "tenant_knowledge_base" if kb_sections else "missing_kb"
     )
@@ -135,17 +149,23 @@ def build_kb_product_answer_event_metadata(
     return meta
 
 
-def _missing_kb_result(bundle: PersonaFactsBundle) -> PersonaComposeResult:
+def _kb_compose_emergency_fallback(
+    bundle: PersonaFactsBundle,
+    *,
+    reason: str,
+) -> PersonaComposeResult:
     from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+    from .fallback_catalog import deterministic_fallback  # noqa: PLC0415
 
-    text = MISSING_KB_CLARIFICATION_AR
+    resolved_reason = str(reason or "compose_unavailable")
+    text = deterministic_fallback(bundle, reason=resolved_reason)
     return PersonaComposeResult(
         text=text,
         source="fallback_deterministic",
         surface=PERSONA_SURFACE_KB_PRODUCT_ANSWER,
         facts_hash=canonical_facts_hash(bundle.verified_facts),
-        guard_passed=True,
-        fallback_reason="missing_kb_sections",
+        guard_passed=False,
+        fallback_reason=resolved_reason,
         language=bundle.language,
         dialect=bundle.dialect,
         emoji_count=0,
@@ -170,14 +190,6 @@ async def try_compose_kb_product_answer(
     if topic != TOPIC_PRODUCT_KNOWLEDGE_FACTS:
         return None, None, None
 
-    if not should_enforce_persona_compose_for_surface(
-        tenant_id=tenant_id,
-        customer_phone=customer_phone,
-        surface=PERSONA_SURFACE_KB_PRODUCT_ANSWER,
-        ai_settings=settings,
-    ):
-        return None, None, None
-
     bundle = build_kb_product_answer_facts_bundle(
         inbound_text=inbound_text,
         tenant_id=tenant_id,
@@ -196,18 +208,14 @@ async def try_compose_kb_product_answer(
         ai_settings=settings,
     )
 
-    if not bundle.verified_facts.get("has_kb_sections"):
-        result = _missing_kb_result(bundle)
-        event_meta = build_kb_product_answer_event_metadata(
-            result,
-            tenant_id=int(tenant_id),
-            allowlist_result=allowlist_result,
-            decision_args=decision_args,
-        )
-        return result.text.strip(), result, event_meta
-
     composer = FactBoundPersonaComposer(enforce_gate=False)
-    result = await composer.compose(bundle)
+    try:
+        result = await composer.compose(bundle)
+    except Exception as exc:  # noqa: BLE001
+        result = _kb_compose_emergency_fallback(
+            bundle,
+            reason=f"compose_exception:{type(exc).__name__}",
+        )
     event_meta = build_kb_product_answer_event_metadata(
         result,
         tenant_id=int(tenant_id),
@@ -215,13 +223,25 @@ async def try_compose_kb_product_answer(
         decision_args=decision_args,
     )
     text = (result.text or "").strip()
-    if not text:
-        fallback = _missing_kb_result(bundle)
-        event_meta = build_kb_product_answer_event_metadata(
-            fallback,
-            tenant_id=int(tenant_id),
-            allowlist_result=allowlist_result,
-            decision_args=decision_args,
-        )
-        return fallback.text.strip(), fallback, event_meta
-    return text, result, event_meta
+    if (
+        result.source == "persona_llm"
+        and result.guard_passed
+        and text
+    ):
+        return text, result, event_meta
+
+    fallback = _kb_compose_emergency_fallback(
+        bundle,
+        reason=(
+            result.fallback_reason
+            or result.guard_failed_reason
+            or "compose_empty"
+        ),
+    )
+    event_meta = build_kb_product_answer_event_metadata(
+        fallback,
+        tenant_id=int(tenant_id),
+        allowlist_result=allowlist_result,
+        decision_args=decision_args,
+    )
+    return fallback.text.strip(), fallback, event_meta
