@@ -469,14 +469,13 @@ async def _run_turn(
         allow_llm_inference=True,
     )
 
-    def _set_response_mode(**kwargs):
-        kwargs["trace"].response_mode = "persona"
+    def _passthrough_guards(**kwargs):
         return kwargs["reply"], False
 
     with (
         patch(
             "services.merchant_brain_turn._apply_brain_silent_and_welcome_guards",
-            side_effect=_set_response_mode,
+            side_effect=_passthrough_guards,
         ),
         patch(
             "services.merchant_brain_turn._apply_outbound_dedup",
@@ -538,6 +537,7 @@ def test_context_is_installed_and_reset_and_provenance_is_complete() -> None:
     assert current_acceptance_context() is None
     assert outcome.evidence["status"] == "evaluated"
     assert outcome.evidence["verdict"] == "pass"
+    assert outcome.evidence["provenance"]["response_mode"] == "persona"
     assert set(outcome.evidence["provenance"]) >= {
         "compose_source",
         "response_mode",
@@ -550,6 +550,27 @@ def test_context_is_installed_and_reset_and_provenance_is_complete() -> None:
         "fallback_reason",
         "fallback_action_type",
     }
+
+
+def test_harness_provenance_not_incomplete_from_missing_response_mode() -> None:
+    provenance = {
+        "compose_source": "persona_llm",
+        "response_mode": "persona",
+        "chosen_path": "generic_catalog_answer",
+        "llm_candidate_present": True,
+        "final_text_transformed": False,
+        "final_transform_reasons": [],
+        "fallback_reason": "",
+        "fallback_action_type": "",
+    }
+    assert "provenance_incomplete" not in _provenance_blockers(
+        provenance,
+        evaluated_customer_text=True,
+    )
+    assert "provenance_incomplete" in _provenance_blockers(
+        {**provenance, "response_mode": ""},
+        evaluated_customer_text=True,
+    )
 
 
 def test_provider_denial_audit_is_captured_without_fabricated_success() -> None:
