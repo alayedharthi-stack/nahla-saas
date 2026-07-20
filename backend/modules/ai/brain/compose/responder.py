@@ -2178,6 +2178,7 @@ class DefaultComposer:
         record_fallback_metadata(
             result,
             reason=unusable_llm_reply_reason(reply),
+            llm_candidate_present=bool(str(reply or "").strip()),
         )
         result.data.pop("compose_facts_overlay", None)
         return T.track_order_need_identifiers_emergency_fallback()

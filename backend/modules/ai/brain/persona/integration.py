@@ -6,7 +6,11 @@ from typing import Any, Optional
 
 from core.tenant import merge_ai_defaults
 
-from modules.ai.compose.reply_metadata_export import PERSONA_INTEGRATION_PASS_THROUGH_KEYS
+from modules.ai.compose.constitutional_policy import FALLBACK_METADATA_KEYS
+from modules.ai.compose.reply_metadata_export import (
+    PERSONA_INTEGRATION_PASS_THROUGH_KEYS,
+    approved_compose_source,
+)
 
 from ..types import BrainContext
 from .fact_bound_composer import FactBoundPersonaComposer, build_social_facts_bundle
@@ -124,6 +128,10 @@ def merge_persona_compose_into_extra_metadata(
     for key in PERSONA_INTEGRATION_PASS_THROUGH_KEYS:
         if event_meta.get(key) is not None:
             merged[key] = event_meta.get(key)
+    if approved_compose_source(event_meta.get("compose_source")) == "fallback_deterministic":
+        for key in FALLBACK_METADATA_KEYS:
+            if event_meta.get(key) is not None:
+                merged[key] = event_meta.get(key)
     return merged
 
 

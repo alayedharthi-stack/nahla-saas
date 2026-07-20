@@ -122,6 +122,8 @@ def extract_reply_metadata_export(
             exported[key] = result_data[key]
 
     compose_source = approved_compose_source(exported.get("compose_source"))
+    if not compose_source:
+        exported.pop("compose_source", None)
     if compose_source == "fallback_deterministic":
         for key in FALLBACK_METADATA_KEYS:
             if key in result_data and result_data.get(key) is not None:
@@ -134,9 +136,9 @@ def extract_reply_metadata_export(
             if mapped:
                 exported["compose_source"] = mapped
 
-    path = str(chosen_path or exported.get("chosen_path") or "").strip()
-    if path and not str(exported.get("chosen_path") or "").strip():
-        exported["chosen_path"] = path
+    authoritative_path = str(chosen_path or "").strip()
+    if authoritative_path:
+        exported["chosen_path"] = authoritative_path
     return exported
 
 

@@ -847,6 +847,7 @@ def _apply_post_compose_truth_guards(
                 brain_persona_compose_event,
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
+                llm_candidate_present=True,
             )
             fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
             _note_live_text_mutation(
@@ -928,6 +929,7 @@ def _apply_staff_truth_guard_only(
                 brain_persona_compose_event,
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
+                llm_candidate_present=True,
             )
             fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
             _note_live_text_mutation(

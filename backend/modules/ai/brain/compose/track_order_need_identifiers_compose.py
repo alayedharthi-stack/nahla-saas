@@ -134,13 +134,14 @@ def record_fallback_metadata_on_data(
     *,
     reason: str,
     transformed_by_guard: bool = False,
+    llm_candidate_present: bool = False,
 ) -> None:
     if not isinstance(data, dict):
         return
     data["track_order_need_identifiers_compose_active"] = True
     data["compose_source"] = "fallback_deterministic"
     data["response_mode"] = "template"
-    data["llm_candidate_present"] = True
+    data["llm_candidate_present"] = bool(llm_candidate_present)
     data["final_text_transformed"] = bool(transformed_by_guard)
     data["final_transform_reasons"] = (
         ["staff_escalation_truth_guard"] if transformed_by_guard else []
@@ -150,10 +151,16 @@ def record_fallback_metadata_on_data(
     data["fallback_action_type"] = "track_order_need_identifiers"
 
 
-def record_fallback_metadata(result: Any, *, reason: str) -> None:
+def record_fallback_metadata(
+    result: Any,
+    *,
+    reason: str,
+    llm_candidate_present: bool = False,
+) -> None:
     record_fallback_metadata_on_data(
         getattr(result, "data", None),
         reason=reason,
+        llm_candidate_present=llm_candidate_present,
     )
 
 

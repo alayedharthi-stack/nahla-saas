@@ -16,7 +16,12 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.catalog.navigation import PATH_TOP_FALLBACK  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_LLM_REPLY,
+    ACTION_SEARCH_PRODUCTS,
+)
 from modules.ai.brain.truth_surface.contract import (  # noqa: E402
     TrustedContextSnapshot,
     TrustedDomain,
@@ -28,6 +33,7 @@ from modules.ai.brain.truth_surface.trusted_context import (  # noqa: E402
     set_current_trusted_context,
 )
 from modules.ai.brain.types import (  # noqa: E402
+    ActionResult,
     BrainContext,
     CommerceFacts,
     Decision,
@@ -179,6 +185,184 @@ def _provenance_dict_from_turn(result) -> dict:
         "fallback_reason": provenance.fallback_reason,
         "fallback_action_type": provenance.fallback_action_type,
     }
+
+
+_TENANT_48_CASES = (
+    {
+        "case": "search_miss",
+        "message": "كم سعر قميص قطني أزرق؟",
+        "intent": "ask_price",
+        "decision": Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": "قميص قطني أزرق"},
+        ),
+        "action_result": ActionResult(
+            success=False,
+            error="no matching products",
+            data={
+                "message": "no_matching_products",
+                "query": "قميص قطني أزرق",
+            },
+        ),
+        "provider_reply": "ما ظهر تطابق مؤكد لقميص قطني أزرق في الكتالوج حالياً.",
+        "chosen_path": "catalog_miss_resolved_subject",
+    },
+    {
+        "case": "zero_eligible_catalog_qa",
+        "message": "كم سعر عطر ورد 100ml؟",
+        "intent": "ask_price",
+        "decision": Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": "عطر ورد 100ml"},
+        ),
+        "action_result": ActionResult(
+            success=True,
+            data={
+                "query": "عطر ورد 100ml",
+                "products": [
+                    {
+                        "id": 4802,
+                        "title": "عطر ورد 100ml",
+                        "category": "عطور",
+                        "price": 189,
+                        "can_checkout": False,
+                    },
+                ],
+            },
+        ),
+        "provider_reply": "المنتج موجود في بيانات الكتالوج، وهو غير متاح للطلب حالياً.",
+        "chosen_path": "fact_bound_persona_compose",
+    },
+    {
+        "case": "zero_fact_navigation",
+        "message": "وش عندكم؟",
+        "intent": "ask_product",
+        "decision": Decision(
+            action=ACTION_CATALOG_NAVIGATE,
+            args={
+                "chosen_path": PATH_TOP_FALLBACK,
+                "navigator_step": "top_products_fallback",
+            },
+        ),
+        "action_result": ActionResult(
+            success=True,
+            data={
+                "chosen_path": PATH_TOP_FALLBACK,
+                "discovery_output_kind": "products",
+                "products": [],
+                "navigator_no_groups_fallback": True,
+                "turn_owner": "catalog_navigation",
+                "owner_locked": True,
+            },
+        ),
+        "provider_reply": "ما ظهرت منتجات مؤكدة في الكتالوج حالياً.",
+        "chosen_path": PATH_TOP_FALLBACK,
+    },
+)
+
+
+@pytest.mark.parametrize("case", _TENANT_48_CASES, ids=lambda case: case["case"])
+def test_tenant48_pr687_paths_export_live_provenance(
+    db,
+    tenant_ctx,
+    case,
+) -> None:
+    """Exercise #687 ownership through responder, pipeline, live boundary and blockers."""
+    from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+
+    brain = get_brain()
+    state = MerchantConversationState(stage="exploring", greeted=True)
+    stack = _base_brain_stack(
+        brain,
+        intent=Intent(name=case["intent"], confidence=0.95, slots={}),
+        decision=case["decision"],
+        state=state,
+    )
+    stack.enter_context(
+        patch.object(
+            brain._executor,
+            "execute",
+            new=AsyncMock(return_value=case["action_result"]),
+        )
+    )
+    openai_call = stack.enter_context(
+        patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider."
+            "OpenAICompatibleProvider.call",
+            return_value={
+                "reply_text": case["provider_reply"],
+                "model": "tenant48-integration",
+            },
+        )
+    )
+    anthropic_call = stack.enter_context(
+        patch(
+            "modules.ai.orchestrator.providers.anthropic_provider."
+            "AnthropicProvider.call",
+            return_value={
+                "reply_text": case["provider_reply"],
+                "model": "tenant48-integration",
+            },
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider."
+            "OpenAICompatibleProvider.is_configured",
+            return_value=True,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.orchestrator.providers.anthropic_provider."
+            "AnthropicProvider.is_configured",
+            return_value=True,
+        )
+    )
+
+    async def invoke():
+        with stack:
+            return await evaluate_live_merchant_brain_turn(
+                db=db,
+                tenant_id=tenant_ctx.tenant_id,
+                phone_id="PH-TENANT48",
+                turn_input=LiveMerchantBrainTurnInput(
+                    customer_phone=tenant_ctx.phone,
+                    text=case["message"],
+                    conversation_id=tenant_ctx.conversation_id,
+                    history=[],
+                    preconditions=LiveMerchantBrainPreconditions(),
+                    profile={
+                        "id": tenant_ctx.customer_id,
+                        "name": "Generic Customer",
+                        "preferred_language": "ar",
+                    },
+                ),
+                convo=_convo(),
+                trace=_trace(),
+                persona_ownership=MagicMock(),
+                brain_factory=lambda: brain,
+                brain_active=True,
+            )
+
+    turn_result = asyncio.run(invoke())
+    provider_calls = openai_call.call_count + anthropic_call.call_count
+    assert turn_result.status == "evaluated"
+    assert provider_calls == 1
+    assert turn_result.brain_result is not None
+    assert turn_result.brain_result["chosen_path"] == case["chosen_path"]
+    assert turn_result.provenance.chosen_path == case["chosen_path"]
+    assert turn_result.provenance.compose_source == "persona_llm", turn_result.brain_result
+    assert turn_result.provenance.response_mode == "grounded_persona_compose"
+    assert turn_result.provenance.llm_candidate_present is True
+    assert turn_result.provenance.final_text_transformed is False
+    assert turn_result.provenance.final_transform_reasons == []
+    assert turn_result.reply_text == turn_result.brain_reply_candidate
+    assert "catalog_deterministic_fallback" not in str(turn_result.brain_result)
+    assert _provenance_blockers(
+        _provenance_dict_from_turn(turn_result),
+        evaluated_customer_text=True,
+    ) == []
 
 
 def test_general_llm_compose_stamps_metadata_with_provider_only_mock(db, tenant_ctx) -> None:
@@ -399,7 +583,7 @@ def test_track_order_fallback_compose_exports_metadata(db, tenant_ctx) -> None:
     assert exported["compose_source"] == "fallback_deterministic"
     assert exported["fallback_reason"] == "compose_failed_or_empty"
     assert exported["fallback_action_type"] == "track_order_need_identifiers"
-    assert exported["llm_candidate_present"] is True
+    assert exported["llm_candidate_present"] is False
     assert (reply or "").strip()
 
 
@@ -448,7 +632,7 @@ def test_live_turn_audited_fallback_provenance_passes_blockers(db, tenant_ctx) -
     turn_result = asyncio.run(invoke())
     assert turn_result.status == "evaluated"
     assert turn_result.provenance.compose_source == "fallback_deterministic"
-    assert turn_result.provenance.llm_candidate_present is True
+    assert turn_result.provenance.llm_candidate_present is False
     assert turn_result.provenance.fallback_reason == "compose_failed_or_empty"
     assert turn_result.provenance.fallback_action_type == "track_order_need_identifiers"
     assert _provenance_blockers(

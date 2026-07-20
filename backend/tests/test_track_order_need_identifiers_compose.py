@@ -200,6 +200,7 @@ class TestTrackOrderNeedIdentifiersCompose:
         assert result.data.get("compose_source") == "fallback_deterministic"
         assert result.data.get("fallback_reason") == "compose_failed_or_empty"
         assert result.data.get("fallback_action_type") == "track_order_need_identifiers"
+        assert result.data.get("llm_candidate_present") is False
         assert result.data.get("final_customer_text_source") == "fallback_deterministic"
         assert reply == T.track_order_need_identifiers_emergency_fallback()
 
