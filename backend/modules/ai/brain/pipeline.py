@@ -4552,6 +4552,10 @@ class MerchantBrain:
             _ps_offer_constitutional_meta = {}
             _track_need_ids_constitutional_meta = {}
 
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            extract_reply_metadata_export,
+        )
+
         return {
             "reply": reply,
             "buttons": pending_buttons,
@@ -4559,6 +4563,10 @@ class MerchantBrain:
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
             "chosen_path": _chosen_path,
+            **extract_reply_metadata_export(
+                dict(getattr(result, "data", None) or {}),
+                chosen_path=_chosen_path,
+            ),
             "persona_compose": dict(result.data.get("persona_compose") or {}),
             "knowledge_source": result.data.get("knowledge_source"),
             "kb_section_ids": list(result.data.get("kb_section_ids") or []),

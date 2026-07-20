@@ -2178,6 +2178,7 @@ class DefaultComposer:
         record_fallback_metadata(
             result,
             reason=unusable_llm_reply_reason(reply),
+            llm_candidate_present=bool(str(reply or "").strip()),
         )
         result.data.pop("compose_facts_overlay", None)
         return T.track_order_need_identifiers_emergency_fallback()
@@ -2610,6 +2611,15 @@ class DefaultComposer:
                         state_topic_shift=bool(_slim_meta.get("state_topic_shift")),
                         checkout_relevant=bool(_slim_meta.get("checkout_relevant")),
                     )
+                from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+                    stamp_general_llm_compose_metadata,
+                )
+
+                stamp_general_llm_compose_metadata(
+                    result.data,
+                    llm_candidate=reply_text,
+                    chosen_path=str(result.data.get("chosen_path") or "llm"),
+                )
                 return reply_text
 
             logger.warning(
@@ -2757,6 +2767,15 @@ class DefaultComposer:
             result.data["llm_provider"] = payload.provider_used
             result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
             result.data["prompt_mode"] = "merchant_brain_thin_retry"
+            from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+                stamp_general_llm_compose_metadata,
+            )
+
+            stamp_general_llm_compose_metadata(
+                result.data,
+                llm_candidate=reply_text,
+                chosen_path="llm_thin_retry",
+            )
             return reply_text
         result.data["chosen_path"] = "llm_fallback_failed"
         return T.generic_fallback(variant=self._variant_idx(ctx))

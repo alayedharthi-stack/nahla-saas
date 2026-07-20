@@ -16,6 +16,12 @@ import re as _re_signal
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from modules.ai.compose.reply_metadata_export import (
+    BRAIN_REPLY_METADATA_EXPORT_KEYS,
+    apply_persona_nested_compose_source_to_event,
+    approved_compose_source,
+)
+
 logger = logging.getLogger(__name__)
 
 _DEDUP_OVERLAP_THRESHOLD = 0.60
@@ -206,11 +212,7 @@ def _build_persona_compose_event(brain_result: Dict[str, Any]) -> Optional[Dict[
             "price_source",
             "availability_source",
             "checkout_pressure_allowed",
-            "compose_source",
-            "response_mode",
-            "llm_candidate_present",
-            "final_text_transformed",
-            "final_transform_reasons",
+            *BRAIN_REPLY_METADATA_EXPORT_KEYS,
             "fallback_reason",
             "fallback_action_type",
         ):
@@ -220,6 +222,7 @@ def _build_persona_compose_event(brain_result: Dict[str, Any]) -> Optional[Dict[
             event["surface"] = persona_compose.get("surface")
         if persona_compose.get("source"):
             event["source"] = persona_compose.get("source")
+        apply_persona_nested_compose_source_to_event(event, persona_compose)
         return event
 
     provenance_loaders = (
@@ -844,6 +847,7 @@ def _apply_post_compose_truth_guards(
                 brain_persona_compose_event,
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
+                llm_candidate_present=True,
             )
             fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
             _note_live_text_mutation(
@@ -925,6 +929,7 @@ def _apply_staff_truth_guard_only(
                 brain_persona_compose_event,
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
+                llm_candidate_present=True,
             )
             fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
             _note_live_text_mutation(
@@ -1036,7 +1041,7 @@ def _structured_llm_candidate_present(
             return bool(source.get("llm_candidate_present"))
     for source in (brain_persona_compose_event, brain_result):
         if isinstance(source, dict):
-            compose_source = _nonempty_metadata_str(source.get("compose_source"))
+            compose_source = approved_compose_source(source.get("compose_source"))
             if compose_source in _APPROVED_DETERMINISTIC_COMPOSE_SOURCES:
                 return False
             if compose_source in _STRUCTURED_LLM_COMPOSE_SOURCES:
@@ -1048,15 +1053,12 @@ def _structured_compose_source(
     *,
     brain_result: Optional[Dict[str, Any]],
     brain_persona_compose_event: Optional[Dict[str, Any]],
-    llm_candidate_present: bool,
 ) -> str:
     for source in (brain_persona_compose_event, brain_result):
         if isinstance(source, dict):
-            compose_source = _nonempty_metadata_str(source.get("compose_source"))
+            compose_source = approved_compose_source(source.get("compose_source"))
             if compose_source:
                 return compose_source
-    if llm_candidate_present:
-        return "persona_llm"
     return ""
 
 
@@ -1098,7 +1100,7 @@ def _resolve_response_mode(
             return mode
 
     path = _nonempty_metadata_str(chosen_path)
-    src = _nonempty_metadata_str(compose_source)
+    src = approved_compose_source(compose_source)
     if path == "fact_bound_persona_compose":
         return "persona"
     if path.startswith("llm"):
@@ -1134,7 +1136,6 @@ def _build_provenance(
     compose_source = _structured_compose_source(
         brain_result=brain_result,
         brain_persona_compose_event=brain_persona_compose_event,
-        llm_candidate_present=llm_candidate_present,
     )
 
     chosen_path = ""
@@ -1178,8 +1179,6 @@ def _build_provenance(
             brain_persona_compose_event.get("fallback_action_type")
             or provenance.fallback_action_type
         )
-    if provenance.compose_source == "llm" and provenance.llm_candidate_present:
-        provenance.compose_source = "persona_llm"
     provenance.response_mode = _resolve_response_mode(
         brain_result=brain_result,
         brain_persona_compose_event=brain_persona_compose_event,
