@@ -234,8 +234,6 @@ def build_catalog_product_answer_facts_bundle(
         verified_facts["price_source"] = "catalog"
     if include_availability and any_availability:
         verified_facts["availability_source"] = "catalog"
-    elif include_availability:
-        verified_facts["availability_evidence"] = "bounded_per_product"
     return PersonaFactsBundle(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         inbound_text=inbound,
@@ -916,6 +914,7 @@ def build_catalog_navigation_emergency_outcome(
         catalog_fact_products=compose_fact_rows,
         extra={
             "question_kind": nav_qkind,
+            # Names the navigation compose handler entry point, not inbound question_kind.
             "fallback_action_type": "catalog_navigation_browse",
         },
     )

@@ -1055,3 +1055,38 @@ class TestCatalogAvailabilityFactsSemantics:
         assert bundle_a.verified_facts["allow_availability_mention"] is False
         assert bundle_b.verified_facts["allow_availability_mention"] is False
 
+    def test_availability_without_orderable_fields_omits_false_evidence(self) -> None:
+        product = {
+            "id": 501,
+            "title": "قميص قطني أزرق",
+            "category": "ملابس",
+            "price": 129,
+        }
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="عندكم قميص قطني؟",
+            tenant_id=18,
+            products=[product],
+            question_kind="availability",
+        )
+        facts = bundle.verified_facts
+        assert facts["allow_availability_mention"] is True
+        assert facts["has_positive_availability"] is False
+        assert "availability_source" not in facts
+        assert "availability_evidence" not in facts
+        row = facts["catalog_products"][0]
+        assert "orderable" not in row
+        assert "available" not in row
+
+        async def _run() -> None:
+            async def _safe_llm(_bundle):
+                return "القميص ضمن تشكيلتنا لكن التوفر حالياً غير مؤكد"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _safe_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert "متوفر" not in result.text
+
+        asyncio.run(_run())
+
