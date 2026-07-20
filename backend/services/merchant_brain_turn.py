@@ -206,6 +206,13 @@ def _build_persona_compose_event(brain_result: Dict[str, Any]) -> Optional[Dict[
             "price_source",
             "availability_source",
             "checkout_pressure_allowed",
+            "compose_source",
+            "response_mode",
+            "llm_candidate_present",
+            "final_text_transformed",
+            "final_transform_reasons",
+            "fallback_reason",
+            "fallback_action_type",
         ):
             if key in brain_result:
                 event[key] = brain_result[key]
@@ -883,6 +890,59 @@ def _persist_live_handoff(
     db.flush()
 
 
+def _nonempty_metadata_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _resolve_response_mode(
+    *,
+    brain_result: Optional[Dict[str, Any]],
+    brain_persona_compose_event: Optional[Dict[str, Any]],
+    trace: Any,
+    compose_source: str,
+    chosen_path: str,
+    llm_candidate_present: bool,
+) -> str:
+    """Resolve constitutional response_mode from structured runtime metadata.
+
+  Precedence:
+    1. ``brain_result.response_mode`` (compose/pipeline producer)
+    2. ``brain_persona_compose_event.response_mode`` (persona provenance)
+    3. ``trace.response_mode`` (optional dynamic/test hook only)
+
+  ``response_goal`` is intentionally excluded — it records delivery intent
+  (answer/handoff/silent), not constitutional response mode.
+    """
+    for source in (
+        (brain_result or {}).get("response_mode"),
+        (brain_persona_compose_event or {}).get("response_mode"),
+        getattr(trace, "response_mode", None),
+    ):
+        mode = _nonempty_metadata_str(source)
+        if mode:
+            return mode
+
+    path = _nonempty_metadata_str(chosen_path)
+    src = _nonempty_metadata_str(compose_source)
+    if path == "fact_bound_persona_compose":
+        return "persona"
+    if path.startswith("llm"):
+        return "llm"
+    if src == "persona_llm" and llm_candidate_present:
+        return "persona"
+    if src == "llm":
+        return "llm"
+    if src in {
+        "fallback_deterministic",
+        "merchant_template",
+        "meta_template",
+        "legal_exact_text",
+        "security_exact_text",
+    }:
+        return "template"
+    return ""
+
+
 def _build_provenance(
     *,
     brain_result: Optional[Dict[str, Any]],
@@ -893,7 +953,6 @@ def _build_provenance(
 ) -> TextProvenance:
     provenance = TextProvenance(
         compose_source=str((brain_result or {}).get("compose_source") or ""),
-        response_mode=str(getattr(trace, "response_mode", "") or ""),
         chosen_path=str((brain_result or {}).get("chosen_path") or getattr(trace, "chosen_path", "") or ""),
         llm_candidate_present=bool(brain_reply_candidate),
         final_text_transformed=bool(
@@ -901,7 +960,14 @@ def _build_provenance(
         ),
         reply_source=str(getattr(trace, "reply_source", "") or ""),
         fallback_source=str(getattr(trace, "fallback_source", "") or ""),
+        fallback_reason=str((brain_result or {}).get("fallback_reason") or ""),
+        fallback_action_type=str((brain_result or {}).get("fallback_action_type") or ""),
     )
+    brain_transform_reasons = (brain_result or {}).get("final_transform_reasons")
+    if isinstance(brain_transform_reasons, (list, tuple)):
+        provenance.final_transform_reasons = [
+            str(reason) for reason in brain_transform_reasons if str(reason or "").strip()
+        ]
     if isinstance(brain_persona_compose_event, dict):
         provenance.compose_source = str(
             brain_persona_compose_event.get("compose_source")
@@ -911,11 +977,36 @@ def _build_provenance(
         provenance.chosen_path = str(
             brain_persona_compose_event.get("chosen_path") or provenance.chosen_path
         )
-        provenance.llm_candidate_present = bool(
-            brain_persona_compose_event.get("llm_candidate_present", provenance.llm_candidate_present)
+        if "llm_candidate_present" in brain_persona_compose_event:
+            provenance.llm_candidate_present = bool(
+                brain_persona_compose_event.get("llm_candidate_present")
+            )
+        if "final_text_transformed" in brain_persona_compose_event:
+            provenance.final_text_transformed = bool(
+                brain_persona_compose_event.get("final_text_transformed")
+            )
+        event_transform_reasons = brain_persona_compose_event.get("final_transform_reasons")
+        if isinstance(event_transform_reasons, (list, tuple)):
+            provenance.final_transform_reasons = [
+                str(reason) for reason in event_transform_reasons if str(reason or "").strip()
+            ]
+        provenance.fallback_reason = str(
+            brain_persona_compose_event.get("fallback_reason") or provenance.fallback_reason
+        )
+        provenance.fallback_action_type = str(
+            brain_persona_compose_event.get("fallback_action_type")
+            or provenance.fallback_action_type
         )
     if provenance.compose_source in ("", "llm") and provenance.llm_candidate_present:
         provenance.compose_source = "persona_llm"
+    provenance.response_mode = _resolve_response_mode(
+        brain_result=brain_result,
+        brain_persona_compose_event=brain_persona_compose_event,
+        trace=trace,
+        compose_source=provenance.compose_source,
+        chosen_path=provenance.chosen_path,
+        llm_candidate_present=provenance.llm_candidate_present,
+    )
     return provenance
 
 
