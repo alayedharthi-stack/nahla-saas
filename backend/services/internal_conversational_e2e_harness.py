@@ -11,6 +11,12 @@ from core.acceptance_execution_context import (
     internal_conversational_e2e_context,
     recorded_egress_denials,
 )
+from services.internal_conversational_e2e_sql_error_audit import (
+    bind_internal_e2e_turn,
+    clear_internal_e2e_turn_binding,
+    recorded_sql_error_audits,
+    summarize_turn_sql_error_audit,
+)
 from services.internal_conversational_e2e_contract import (
     CODE_PROVENANCE_INCOMPLETE,
     EGRESS_DENIAL_KINDS,
@@ -177,12 +183,17 @@ async def run_sandbox_turn(
     before: Mapping[str, Any] = {}
     after: Mapping[str, Any] = {}
     denial_audits: list[dict[str, Any]] = []
+    turn_sql_error_audit: dict[str, object] = summarize_turn_sql_error_audit(())
 
     with internal_conversational_e2e_context(
         session_id=request.session_id,
         tenant_id=request.tenant_id,
         allow_llm_inference=request.allow_llm_inference,
     ):
+        bind_internal_e2e_turn(
+            scenario_id=request.scenario_id,
+            turn_index=request.turn_index,
+        )
         before = dict(state_probe(db, request.tenant_id, request.conversation))
         history_before = message_store.load_history(
             db,
@@ -291,6 +302,8 @@ async def run_sandbox_turn(
             }
             for audit in recorded_egress_denials()
         ]
+        turn_sql_error_audit = summarize_turn_sql_error_audit(recorded_sql_error_audits())
+        clear_internal_e2e_turn_binding()
 
     assert result is not None
     provenance = asdict(result.provenance)
@@ -336,6 +349,7 @@ async def run_sandbox_turn(
         "provenance": provenance,
         "state_delta": _state_delta(before, after),
         "denial_audits": denial_audits,
+        "runtime_error_audit": turn_sql_error_audit,
         "expected_denials": [
             {"egress_kind": kind, "operation": operation}
             for kind, operation in sorted(expected_denials.elements())

@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 
 CONTRACT_VERSION = "internal_conversational_e2e_v1"
-EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v1"
+EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v2"
 EVIDENCE_SIGNATURE_SCHEMA_VERSION = "internal_conversational_e2e_signature_v1"
 EVIDENCE_CHANNEL = "direct_code_probe"
 

@@ -717,6 +717,10 @@ def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:
     evidence = asyncio.run(_run_turn(convo, turn_index=0)).evidence
     encoded = json.dumps(evidence, ensure_ascii=False)
     assert evidence["evidence_channel"] == "direct_code_probe"
+    assert evidence["evidence_schema_version"] == "internal_conversational_e2e_evidence_v2"
+    assert "runtime_error_audit" in evidence
+    assert evidence["runtime_error_audit"]["error_count"] == 0
+    assert evidence["runtime_error_audit"]["primary_missing"] is False
     assert PHONE not in encoded
     assert "Is the white running shoe available?" not in encoded
     assert "Generic catalog response" not in encoded
@@ -726,7 +730,7 @@ def test_evidence_is_redacted_and_labeled_direct_code_probe() -> None:
 def test_session_evidence_signature_detects_tampering() -> None:
     payload = {
         "session_schema_version": "internal_conversational_e2e_session_v1",
-        "evidence_schema_version": "internal_conversational_e2e_evidence_v1",
+        "evidence_schema_version": "internal_conversational_e2e_evidence_v2",
         "session_id": SESSION_ID,
         "tenant_id": TENANT_ID,
         "verdict": "pass",
@@ -906,6 +910,12 @@ def test_final_session_has_signed_integrity_and_auditable_timestamps(
         "blockers": [],
         "verdict": "pass",
         "denial_audits": [],
+        "runtime_error_audit": {
+            "errors": [],
+            "error_count": 0,
+            "primary_missing": False,
+            "truncated": False,
+        },
         "provider_observation": {
             "source": "application_internal_e2e_context",
             "network_dispatch_success_observed": False,
@@ -971,6 +981,8 @@ def test_final_session_has_signed_integrity_and_auditable_timestamps(
     )
     assert captured["provider_observation"]["is_actual_provider_telemetry"] is False
     assert captured["actual_provider_acceptance_satisfied"] is False
+    assert "runtime_error_audit" in captured
+    assert captured["runtime_error_audit"]["error_count"] == 0
 
 
 def test_operator_has_no_row_deletion_cleanup_path() -> None:

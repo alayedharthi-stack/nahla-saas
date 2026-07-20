@@ -55,6 +55,12 @@ from services.internal_conversational_e2e_harness import (  # noqa: E402
     SandboxTurnRequest,
     run_sandbox_turn,
 )
+from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
+    install_internal_e2e_sql_error_listener,
+    recorded_session_sql_error_audits,
+    reset_session_sql_error_audit,
+    summarize_session_sql_error_audit,
+)
 
 
 SCENARIO_SCHEMA_VERSION = "internal_conversational_e2e_scenarios_v1"
@@ -354,6 +360,8 @@ async def run_session(
         return {"ok": False, "blockers": ["sandbox_database_url_missing"]}
     owned_engine = engine is None
     db_engine = engine or create_engine(database_url, pool_pre_ping=True)
+    install_internal_e2e_sql_error_listener(db_engine)
+    reset_session_sql_error_audit()
     preflight = execute_preflight(tenant_id=tenant_id, env=env_map, engine=db_engine)
     if not preflight.get("ok"):
         if owned_engine:
@@ -471,6 +479,9 @@ async def run_session(
         "completed_at_utc": completed_at_utc,
         "runner_mutations": runner_mutations,
         "turn_results": results,
+        "runtime_error_audit": summarize_session_sql_error_audit(
+            recorded_session_sql_error_audits()
+        ),
         "verdict": "pass" if results and all(r.get("verdict") == "pass" for r in results) else "fail",
         "blockers": sorted(
             {
