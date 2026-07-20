@@ -111,8 +111,13 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             if facts.get("resolved_subject"):
                 lines.append(f"resolved_subject: {facts.get('resolved_subject')}")
             lines.append("catalog_miss: true")
+            lines.append(f"search_result_count: {facts.get('search_result_count', 0)}")
+            lines.append("allow_availability_mention: false")
+            lines.append("has_positive_availability: false")
             lines.append(
-                "rules: honestly say there is no clear catalog match for resolved_subject; "
+                "rules: zero search matches is not proof of stock status; "
+                "explain no matching catalog result naturally without positive or "
+                "negative availability claims or stock markers; "
                 "do not invent products, prices, or availability; "
                 "suggest trying the exact store product name or browsing top sellers; "
                 "never re-open product type/SKU identification; brief Saudi merchant tone"

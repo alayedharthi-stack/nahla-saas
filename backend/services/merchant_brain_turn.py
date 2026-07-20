@@ -202,8 +202,13 @@ def _empty_reply_fallback() -> str:
 def _build_persona_compose_event(brain_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     chosen_path = str(brain_result.get("chosen_path") or "").strip()
     persona_compose = brain_result.get("persona_compose")
+    from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+        CATALOG_GROUNDED_PERSONA_CHOSEN_PATHS,
+    )
+
+    grounded_paths = {"fact_bound_persona_compose", *CATALOG_GROUNDED_PERSONA_CHOSEN_PATHS}
     if (
-        chosen_path == "fact_bound_persona_compose"
+        chosen_path in grounded_paths
         and isinstance(persona_compose, dict)
         and persona_compose
     ):
