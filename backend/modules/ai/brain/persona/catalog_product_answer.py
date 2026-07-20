@@ -510,3 +510,245 @@ async def try_compose_catalog_product_answer(
             return fallback_text.strip(), fallback_result, event_meta
 
     return None, None, None
+
+
+def build_catalog_search_miss_facts_bundle(
+    *,
+    inbound_text: str,
+    resolved_subject: str,
+    tenant_id: int = 0,
+    customer_phone: str = "",
+    catalog_search_query: str = "",
+    merchant_persona: Optional[dict[str, Any]] = None,
+) -> PersonaFactsBundle:
+    from .fact_bound_composer import detect_language  # noqa: PLC0415
+
+    inbound = str(inbound_text or "").strip()
+    subject = str(resolved_subject or catalog_search_query or "").strip()
+    language = detect_language(inbound)
+    verified_facts: dict[str, Any] = {
+        "surface": PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        "inbound_text": inbound,
+        "question_kind": "search_miss",
+        "resolved_subject": subject,
+        "catalog_search_query": str(catalog_search_query or "").strip(),
+        "search_result_count": 0,
+        "catalog_products": [],
+        "catalog_product_ids": [],
+        "has_catalog_products": False,
+        "allow_price_mention": False,
+        "allow_availability_mention": False,
+        "allow_checkout_pressure": False,
+        "allow_slot_prompts": False,
+        "allow_superiority_claims": False,
+    }
+    return PersonaFactsBundle(
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        inbound_text=inbound,
+        language=language,
+        dialect="saudi_arabic" if language == "ar" else None,
+        verified_facts=verified_facts,
+        customer_context={},
+        merchant_persona=dict(merchant_persona or {}),
+        constraints=PersonaConstraints(max_chars=320, max_emojis=1),
+        tenant_id=int(tenant_id or 0),
+        customer_phone=str(customer_phone or ""),
+    )
+
+
+def _catalog_search_miss_emergency_fallback(bundle: PersonaFactsBundle) -> PersonaComposeResult:
+    from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+        compose_resolved_product_search_miss,
+    )
+    from .fact_bound_composer import canonical_facts_hash  # noqa: PLC0415
+
+    subject = str(bundle.verified_facts.get("resolved_subject") or "").strip()
+    text = compose_resolved_product_search_miss(subject)
+    return PersonaComposeResult(
+        text=text,
+        source="fallback_deterministic",
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        facts_hash=canonical_facts_hash(bundle.verified_facts),
+        guard_passed=False,
+        fallback_reason="compose_or_guard_failed",
+        language=bundle.language,
+        dialect=bundle.dialect,
+        emoji_count=0,
+        latency_ms=0,
+        model=None,
+    )
+
+
+def _persona_event_with_chosen_path(
+    result: PersonaComposeResult,
+    *,
+    tenant_id: int,
+    allowlist_result: str,
+    chosen_path: str,
+    catalog_facts: Optional[dict[str, Any]] = None,
+    catalog_fact_products: Optional[list[dict[str, Any]]] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    event_meta = build_catalog_product_answer_event_metadata(
+        result,
+        tenant_id=int(tenant_id),
+        allowlist_result=allowlist_result,
+        catalog_facts=dict(catalog_facts or {}),
+        catalog_fact_products=catalog_fact_products,
+    )
+    event_meta["chosen_path"] = str(chosen_path or "").strip()
+    if extra:
+        event_meta.update(extra)
+    return event_meta
+
+
+async def try_compose_catalog_search_miss_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    resolved_subject: str,
+    catalog_search_query: str = "",
+    chosen_path: str = "catalog_miss_resolved_subject",
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], Optional[PersonaComposeResult], Optional[dict[str, Any]]]:
+    """LLM-owned prose for resolved-subject catalog search miss."""
+    from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
+
+    settings = dict(ai_settings or {})
+    if not should_enforce_persona_compose_for_surface(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        ai_settings=settings,
+    ):
+        return None, None, None
+
+    bundle = build_catalog_search_miss_facts_bundle(
+        inbound_text=inbound_text,
+        resolved_subject=resolved_subject,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        catalog_search_query=catalog_search_query,
+        merchant_persona=settings,
+    )
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    allowlist_result = persona_composer_allowlist_result(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=settings,
+    )
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    result = await composer.compose(bundle)
+    if (
+        result.source == "persona_llm"
+        and result.guard_passed
+        and (result.text or "").strip()
+    ):
+        event_meta = _persona_event_with_chosen_path(
+            result,
+            tenant_id=int(tenant_id),
+            allowlist_result=allowlist_result,
+            chosen_path=chosen_path,
+            catalog_facts=bundle.verified_facts,
+            extra={"question_kind": "search_miss"},
+        )
+        return result.text.strip(), result, event_meta
+
+    fallback = _catalog_search_miss_emergency_fallback(bundle)
+    event_meta = _persona_event_with_chosen_path(
+        fallback,
+        tenant_id=int(tenant_id),
+        allowlist_result=allowlist_result,
+        chosen_path=chosen_path,
+        catalog_facts=bundle.verified_facts,
+        extra={
+            "question_kind": "search_miss",
+            "fallback_action_type": "catalog_search_miss",
+        },
+    )
+    return fallback.text.strip(), fallback, event_meta
+
+
+async def try_compose_catalog_navigation_browse_answer(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: list[dict[str, Any]],
+    chosen_path: str = "catalog_navigation_top_products_fallback",
+    navigator_no_groups_fallback: bool = False,
+    decision_args: Optional[dict[str, Any]] = None,
+    ai_settings: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], Optional[PersonaComposeResult], Optional[dict[str, Any]]]:
+    """LLM-owned browse prose for catalog navigation top-products fallback."""
+    from .fact_bound_composer import FactBoundPersonaComposer  # noqa: PLC0415
+
+    settings = dict(ai_settings or {})
+    if not should_enforce_persona_compose_for_surface(
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
+        ai_settings=settings,
+    ):
+        return None, None, None
+
+    compose_fact_rows = catalog_fact_product_rows(products)
+    if not compose_fact_rows:
+        return None, None, None
+
+    bundle = build_catalog_product_answer_facts_bundle(
+        inbound_text=inbound_text,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        products=products,
+        catalog_search_query="",
+        search_result_count=len(compose_fact_rows),
+        question_kind="browse",
+        display_count=len(compose_fact_rows),
+        decision_args=dict(decision_args or {}),
+        merchant_persona=settings,
+    )
+    verified = dict(bundle.verified_facts)
+    verified["navigation_browse"] = True
+    verified["navigator_no_groups_fallback"] = bool(navigator_no_groups_fallback)
+    bundle = PersonaFactsBundle(
+        surface=bundle.surface,
+        inbound_text=bundle.inbound_text,
+        language=bundle.language,
+        dialect=bundle.dialect,
+        verified_facts=verified,
+        customer_context=bundle.customer_context,
+        merchant_persona=bundle.merchant_persona,
+        constraints=bundle.constraints,
+        tenant_id=bundle.tenant_id,
+        customer_phone=bundle.customer_phone,
+    )
+
+    from .flags import persona_composer_allowlist_result  # noqa: PLC0415
+
+    allowlist_result = persona_composer_allowlist_result(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        ai_settings=settings,
+    )
+    composer = FactBoundPersonaComposer(enforce_gate=False)
+    result = await composer.compose(bundle)
+    if (
+        result.source == "persona_llm"
+        and result.guard_passed
+        and (result.text or "").strip()
+    ):
+        event_meta = _persona_event_with_chosen_path(
+            result,
+            tenant_id=int(tenant_id),
+            allowlist_result=allowlist_result,
+            chosen_path=chosen_path,
+            catalog_facts=bundle.verified_facts,
+            catalog_fact_products=compose_fact_rows,
+            extra={"question_kind": "browse"},
+        )
+        return result.text.strip(), result, event_meta
+
+    return None, None, None

@@ -353,7 +353,7 @@ class DefaultComposer:
                 result.data["owner_locked"] = bool(data.get("owner_locked"))
                 result.data["owner_replaced"] = False
                 result.data["navigator_owner"] = True
-                from ..catalog.navigation import PATH_GROUP_PRODUCTS, PATH_GROUPS  # noqa: PLC0415
+                from ..catalog.navigation import PATH_GROUP_PRODUCTS, PATH_GROUPS, PATH_TOP_FALLBACK  # noqa: PLC0415
 
                 if discovery_kind == "collections" and chosen_path == PATH_GROUPS:
                     page_collections = list(data.get("collections") or [])
@@ -396,7 +396,39 @@ class DefaultComposer:
                         })
                         if nav_buttons:
                             result.data["pending_buttons"] = nav_buttons[:3]
-                return discovery_text
+                outbound_text = discovery_text
+                if chosen_path == PATH_TOP_FALLBACK and discovery_kind == "products":
+                    try:
+                        from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                            try_compose_catalog_navigation_browse_answer,
+                        )
+                        from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                        _nav_text, _nav_result, _nav_event = (
+                            await try_compose_catalog_navigation_browse_answer(
+                                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                                customer_phone=str(
+                                    getattr(ctx, "customer_phone", "") or "",
+                                ),
+                                inbound_text=str(getattr(ctx, "message", "") or ""),
+                                products=list(data.get("products") or []),
+                                chosen_path=PATH_TOP_FALLBACK,
+                                navigator_no_groups_fallback=bool(
+                                    data.get("navigator_no_groups_fallback"),
+                                ),
+                                decision_args=dict(decision.args or {}),
+                                ai_settings=_ai_settings_from_ctx(ctx),
+                            )
+                        )
+                        if (_nav_text or "").strip() and isinstance(_nav_event, dict):
+                            result.data.update(_nav_event)
+                            result.data["chosen_path"] = PATH_TOP_FALLBACK
+                            outbound_text = (_nav_text or "").strip()
+                    except Exception:
+                        logger.exception(
+                            "[RESPONDER] catalog_navigation_browse persona compose failed",
+                        )
+                return outbound_text
             return discovery_text or "ما ظهر عندي أقسام واضحة حالياً."
 
         # ── Search ─────────────────────────────────────────────────────────
@@ -509,6 +541,37 @@ class DefaultComposer:
                             ),
                         )
                         result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                        try:
+                            from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                                try_compose_catalog_search_miss_answer,
+                            )
+                            from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
+                            _miss_text, _miss_result, _miss_event = (
+                                await try_compose_catalog_search_miss_answer(
+                                    tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                                    customer_phone=str(
+                                        getattr(ctx, "customer_phone", "") or "",
+                                    ),
+                                    inbound_text=str(getattr(ctx, "message", "") or ""),
+                                    resolved_subject=subject,
+                                    catalog_search_query=query,
+                                    chosen_path="catalog_miss_resolved_subject",
+                                    ai_settings=_ai_settings_from_ctx(ctx),
+                                )
+                            )
+                            if (_miss_text or "").strip() and isinstance(_miss_event, dict):
+                                result.data.update(_miss_event)
+                                result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                                return (_miss_text or "").strip()
+                        except Exception:
+                            logger.exception(
+                                "[RESPONDER] catalog_search_miss persona compose failed",
+                            )
+                        from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                            compose_resolved_product_search_miss,
+                        )
+
                         return compose_resolved_product_search_miss(
                             subject,
                             variant=self._variant_idx(ctx),
