@@ -570,7 +570,7 @@ def _validate_role_alembic_heads(
     if revisions == expected:
         return None
     if role == "source":
-        if revisions == frozenset({"0088", "0089"}):
+        if revisions in (frozenset({"0088", "0089"}), frozenset({"0088", "0091"})):
             return GateFailure("wrong_revision", "source_alembic_multi_head_drift")
         if revisions == frozenset({"0088"}):
             return GateFailure("wrong_revision", "source_alembic_revision_mismatch")
