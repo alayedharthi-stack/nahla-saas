@@ -7,14 +7,12 @@ import {
   logout,
   getEmail,
   getRole,
-  getStoreName,
-  getTenantId,
   isImpersonating,
-  getImpersonation,
   stopImpersonation,
   isPlatformOwner,
 } from '../../auth'
 import { API_BASE } from '../../api/client'
+import { useMerchantIdentity } from '../../context/MerchantIdentityContext'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
 import { NAVIGATION_PATHS, resolveProfileSettingsPath } from '../../lib/navigationPolicy'
 import type { Lang } from '../../i18n/types'
@@ -29,15 +27,6 @@ interface AccessRequest {
   id:           string
   requested_by: string
   requested_at: string
-}
-
-function _displayName(email: string, storeName: string): string {
-  if (storeName) return storeName
-  if (email) {
-    const local = email.split('@')[0].replace(/[-_.]/g, ' ')
-    return local.charAt(0).toUpperCase() + local.slice(1)
-  }
-  return ''
 }
 
 function _avatarLetter(name: string): string {
@@ -262,6 +251,7 @@ function useMerchantNotifs(role: string) {
 export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const { lang, setLang, t } = useLanguage()
   const { mode: themeMode, setMode: setThemeMode } = useTheme()
+  const merchantIdentity = useMerchantIdentity()
   const navigate = useNavigate()
   const [profileOpen, setProfileOpen] = useState(false)
   const [bellOpen, setBellOpen]       = useState(false)
@@ -271,10 +261,8 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
 
   const email      = getEmail()
   const role       = getRole()
-  const storeName  = getStoreName()
-  const tenantId   = getTenantId()
+  const tenantId   = merchantIdentity.tenantId
   const impersonating = isImpersonating()
-  const impersonInfo  = getImpersonation()
   const platformOwner = isPlatformOwner()
   const profileSettingsPath = resolveProfileSettingsPath({
     platformOwner,
@@ -283,23 +271,12 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
   const profileSettingsIsSecurity = profileSettingsPath === NAVIGATION_PATHS.securitySettings
 
   // ── Display-name resolution ────────────────────────────────────────────────
-  // Platform-admin sessions (admin / owner / super_admin) MUST NOT show a
-  // merchant's store name as the owner's identity. The token issued by the
-  // env-fallback admin login carries `tenant_id=1`, which makes /settings
-  // return that tenant's store_name; if we render it here, the owner header
-  // ends up advertising tenant 1's brand ("آل عايد للعسل البلدي") as the
-  // platform owner's name. Always show a generic Nahla-admin label instead.
-  // For impersonation sessions, the existing impersonation banner already
-  // surfaces the merchant being acted on, so the header stays neutral.
-  const isPlatformAdmin = role === 'admin' || role === 'owner' || role === 'super_admin'
-  const rawName      = isPlatformAdmin
-    ? ''  // force the fallback below — never use storeName for owners
-    : _displayName(email, storeName)
-  const displayName  = rawName || (
-    isPlatformAdmin
-      ? t(tr => tr.roles.nahlaAdmin)
-      : t(tr => tr.roles.defaultMerchant)
-  )
+  // Platform admins keep a neutral Nahla identity. Merchant-scoped sessions,
+  // including support impersonation, use the current tenant's /settings
+  // identity rather than provider or user-account values cached locally.
+  const displayName = platformOwner
+    ? t(tr => tr.roles.nahlaAdmin)
+    : merchantIdentity.name
   const avatarLetter = _avatarLetter(displayName)
   const avatarColor  = _avatarColor(role)
 
@@ -394,7 +371,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
         {impersonating && (
           <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg text-xs font-medium text-amber-700 dark:text-amber-300">
             <Shield className="w-3.5 h-3.5" />
-            دعم فني: {impersonInfo?.storeName || 'متجر'}
+            دعم فني: {merchantIdentity.name}
           </div>
         )}
 

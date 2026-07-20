@@ -6,6 +6,7 @@ import TrialBanner from '../ui/TrialBanner'
 import StoreAIPausedBanner from '../ui/StoreAIPausedBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { MobileChatFullscreenProvider, useMobileChatFullscreen } from '../../context/MobileChatFullscreenContext'
+import { MerchantIdentityProvider } from '../../context/MerchantIdentityContext'
 import { useLanguage } from '../../i18n/context'
 import { getApiBase, getRole, isImpersonating, isPlatformStaffRole } from '../../auth'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
@@ -158,9 +159,11 @@ function SupportAccessWarningBanner() {
 
 export default function Layout() {
   return (
-    <MobileChatFullscreenProvider>
-      <LayoutShell />
-    </MobileChatFullscreenProvider>
+    <MerchantIdentityProvider>
+      <MobileChatFullscreenProvider>
+        <LayoutShell />
+      </MobileChatFullscreenProvider>
+    </MerchantIdentityProvider>
   )
 }
 
