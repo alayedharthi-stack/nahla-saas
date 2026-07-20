@@ -1,0 +1,101 @@
+{
+  "archive_schema_version": "product_availability_isolated_runtime_shadow_staging_v1",
+  "archived_at_utc": "2026-07-20T18:58:21+00:00",
+  "artifact_kind": "isolated_runtime_bound_staging_shadow_baseline",
+  "status": "PASS",
+  "observation_window": {
+    "duration_hours": 48,
+    "start_utc": "2026-07-20T18:58:21+00:00",
+    "end_utc": "2026-07-22T18:58:21+00:00",
+    "traffic_claim": "synthetic_probes_only"
+  },
+  "isolated_service": {
+    "project": "desirable-growth",
+    "environment": "staging",
+    "service_name": "nahla-arch001-shadow",
+    "service_id": "20868b65-710d-4c23-ae4a-9d50456ed312",
+    "deployment_id": "0031c123-4646-4974-bac8-e976b5984c60",
+    "deployment_status": "SUCCESS",
+    "image_digest": "sha256:c520d7358404987490996dbecff77047a73b3698fcea26730a3d42e64d2eff1c",
+    "public_domains": 0,
+    "start_command": "/bin/bash -c 'sleep infinity'",
+    "deploy_mode": "cli_upload_from_pinned_checkout",
+    "source_repo": "alayedharthi-stack/nahla-saas",
+    "source_branch": "detached",
+    "source_commit_sha": "95c4b9841edfe4ea0d64bbb910b02b51c3e4322b",
+    "pr_merge": "https://github.com/alayedharthi-stack/nahla-saas/commit/95c4b9841edfe4ea0d64bbb910b02b51c3e4322b"
+  },
+  "canonical_control": {
+    "service_name": "nahla-saas",
+    "service_id": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+    "guard_mode": "off",
+    "enforce_mode": false
+  },
+  "target": {
+    "revision": "95c4b9841edfe4ea0d64bbb910b02b51c3e4322b",
+    "artifact_manifest_digest": "f4ca22229b253fb890a0201368e395d35e7c180ba4786b911e898716a077fea4",
+    "attestation_type": "closed_runtime_manifest_and_pinned_git_sha",
+    "target_app_root": "/app",
+    "execution_mode": "in_container"
+  },
+  "runtime_import_inventory": {
+    "files": {
+      "scripts/operators/product_availability_truth_guard_shadow_observation.py": {
+        "canonical_sha256": "0ec7f0bdaf6360daab33a4d3302c3ed4ac0ce583174860a3dca12f1af9804e8a"
+      },
+      "scripts/operators/product_availability_truth_guard_shadow_observation_contract.py": {
+        "canonical_sha256": "6e8ce13862e5e31d14f47c8fd40fd42a9dff7edaa1e2971a6627c16e7d128f1e"
+      },
+      "backend/modules/ai/brain/postprocess/product_availability_truth_guard.py": {
+        "canonical_sha256": "eaba55e1b81a7ba7cf1c07d56f7b31a4f023771e16220c4365d248f87a604637"
+      },
+      "backend/modules/ai/brain/postprocess/product_availability_shadow_telemetry.py": {
+        "canonical_sha256": "6c0e7c43d4c3cb143773b5367367515153fd787789989af369e18f97e30001e5"
+      },
+      "backend/modules/ai/brain/pipeline.py": {
+        "canonical_sha256": "b25020c376eb0b9e9605eef4ad3c2067a0fc2c7bd164ac195453c5b6a4ea6263"
+      },
+      "backend/routers/whatsapp_webhook.py": {
+        "canonical_sha256": "f54136d89896d36801f70fd9d3e65acc14c7b67d36f44e4abbfaa7c455ead86c"
+      }
+    }
+  },
+  "flags": {
+    "product_availability_truth_guard_mode": "shadow",
+    "conditional_coupon_compose_enabled": false,
+    "enforce_mode": false,
+    "nahla_skip_db_bootstrap": true
+  },
+  "bindings": {
+    "database_url": "${{nahla-saas.DATABASE_URL}}",
+    "redis_url": "${{nahla-saas.REDIS_URL}}",
+    "whatsapp_credentials": false,
+    "public_domain": false,
+    "workers_or_campaigns": false
+  },
+  "observation_safety": {
+    "migrations_on_startup": false,
+    "outbound_provider_capability": false,
+    "side_effect_isolation": "sleep_infinity_start_command"
+  },
+  "baseline_matrix": {
+    "ok": true,
+    "evaluated_turns": 7,
+    "tenant_count": 2,
+    "would_rewrite_count": 2,
+    "would_rewrite_rate": 0.285714,
+    "customer_text_changed_count": 0,
+    "additional_llm_calls": 0,
+    "outbound_provider_calls": 0,
+    "duplicate_invocation_count": 0
+  },
+  "supersedes_invalid_windows": [
+    {
+      "branch": "evidence/arch001-isolated-runtime-window-20260718",
+      "reason_code": "poll_continuity_missing"
+    }
+  ],
+  "polling_command": "EXPECTED_MANIFEST_DIGEST=$(python -m scripts.operators.product_availability_truth_guard_shadow_observation artifact-manifest | python -c 'import json,sys; print(json.load(sys.stdin)[\"manifest_digest\"])') && railway ssh --environment staging --service nahla-arch001-shadow python -m scripts.operators.product_availability_truth_guard_shadow_observation runtime-matrix 95c4b9841edfe4ea0d64bbb910b02b51c3e4322b \"$EXPECTED_MANIFEST_DIGEST\"",
+  "teardown_command": "railway variable set --environment staging --service nahla-arch001-shadow NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE=off && railway down --environment staging --service nahla-arch001-shadow -y",
+  "evidence_accumulation_path": "docs/engineering/staging-evidence/product-availability-isolated-runtime-shadow-poll.jsonl"
+}
