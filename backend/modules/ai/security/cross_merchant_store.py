@@ -32,8 +32,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .tenant_isolation import TenantIsolationLayer
 from .trace_schema import (
-    MODEL_PATH_MAX_LENGTH,
     LearningTier,
+    ModelPathTooLongError,
     TraceEvent,
     validate_anonymized,
 )
@@ -44,9 +44,11 @@ logger = logging.getLogger("nahla.ai.security.cross_merchant_store")
 class CrossMerchantLearningStore:
     """Append-only writer for anonymized cross-merchant signals.
 
-    ``db`` is used for read aggregations.  Writes open their own isolated
-    session so telemetry remains best-effort and cannot affect operational
-    state on the caller's session.
+    ``db`` is used for read aggregations.  ``record`` always commits through
+    its own isolated session so telemetry remains best-effort and cannot
+    affect operational state on the caller's session.  The former
+    ``commit=False`` mode had no production callers and was removed because a
+    short-lived session cannot truthfully return a pending row to its caller.
     """
 
     def __init__(
@@ -80,8 +82,6 @@ class CrossMerchantLearningStore:
     def record(
         self,
         event: TraceEvent,
-        *,
-        commit: bool = True,
     ) -> Optional[int]:
         """Persist ``event`` and return the new row id (or ``None``).
 
@@ -97,15 +97,13 @@ class CrossMerchantLearningStore:
 
         try:
             validated = validate_anonymized(event)
-        except ValueError as exc:
-            if "model_path exceeds maximum length" in str(exc):
-                logger.warning(
-                    "[CrossMerchantStore] model_path_rejected length=%d max=%d",
-                    len(str(event.model_path or "").strip()),
-                    MODEL_PATH_MAX_LENGTH,
-                )
-                return None
-            raise
+        except ModelPathTooLongError as exc:
+            logger.warning(
+                "[CrossMerchantStore] model_path_rejected length=%d max=%d",
+                exc.actual_length,
+                exc.max_length,
+            )
+            return None
 
         try:
             from database.models import CrossMerchantSignal
@@ -143,10 +141,7 @@ class CrossMerchantLearningStore:
         telemetry_db = self._open_telemetry_session()
         try:
             telemetry_db.add(row)
-            if commit:
-                telemetry_db.commit()
-            else:
-                telemetry_db.flush()
+            telemetry_db.commit()
             return getattr(row, "id", None)
         except Exception as exc:
             logger.warning(

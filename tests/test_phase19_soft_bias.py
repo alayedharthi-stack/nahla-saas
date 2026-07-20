@@ -565,7 +565,7 @@ class TestTraceIntegration:
         from modules.ai.security import CrossMerchantLearningStore, validate_anonymized
         captured: Dict[str, Any] = {}
 
-        def _fake(self, event, *, commit=True):
+        def _fake(self, event):
             captured["event"]     = event
             captured["validated"] = validate_anonymized(event)
             return 1

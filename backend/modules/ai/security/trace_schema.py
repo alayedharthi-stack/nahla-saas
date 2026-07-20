@@ -33,6 +33,17 @@ logger = logging.getLogger("nahla.ai.security.trace")
 MODEL_PATH_MAX_LENGTH = 128
 
 
+class ModelPathTooLongError(ValueError):
+    """Raised when a structured telemetry path exceeds its storage contract."""
+
+    def __init__(self, *, actual_length: int, max_length: int) -> None:
+        self.actual_length = actual_length
+        self.max_length = max_length
+        super().__init__(
+            f"model_path exceeds maximum length ({max_length})"
+        )
+
+
 # ── Categorical enums (string constants kept simple to JSON-serialise) ──
 
 class OutcomeKind:
@@ -255,8 +266,9 @@ def normalize_model_path(model_path: Any) -> str:
     """Normalize a structured routing path for cross-merchant telemetry."""
     normalized = (str(model_path or "rule")).strip().lower() or "rule"
     if len(normalized) > MODEL_PATH_MAX_LENGTH:
-        raise ValueError(
-            f"model_path exceeds maximum length ({MODEL_PATH_MAX_LENGTH})"
+        raise ModelPathTooLongError(
+            actual_length=len(normalized),
+            max_length=MODEL_PATH_MAX_LENGTH,
         )
     return normalized
 

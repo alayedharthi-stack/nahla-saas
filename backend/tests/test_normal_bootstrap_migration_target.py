@@ -12,13 +12,21 @@ for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
 from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
     FORBIDDEN_BOOTSTRAP_LITERALS,
     INTEGRATION_BOOTSTRAP_TARGET,
+    NORMAL_BOOTSTRAP_REVISIONS,
     REPOSITORY_ALEMBIC_HEADS,
     STAGING_VALIDATED_ATTACH_REVISIONS,
+    VALIDATED_STAGING_BOOTSTRAP_REVISIONS,
     build_normal_bootstrap_upgrade_argv,
 )
 
 
 def test_repository_parallel_heads_0090_and_0091() -> None:
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0090", "0091"})
+
+
+def test_supported_deployment_revision_states_are_explicit() -> None:
+    assert NORMAL_BOOTSTRAP_REVISIONS == frozenset({"0091"})
+    assert VALIDATED_STAGING_BOOTSTRAP_REVISIONS == frozenset({"0088", "0091"})
     assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0090", "0091"})
 
 
@@ -42,7 +50,10 @@ def test_normal_bootstrap_pins_0091_not_head() -> None:
 
 
 def test_staging_post_attach_multi_head_contract() -> None:
+    # Historical guarded attach state remains explicit and is not confused
+    # with the post-bootstrap validated staging state.
     assert STAGING_VALIDATED_ATTACH_REVISIONS == frozenset({"0088", "0089"})
+    assert VALIDATED_STAGING_BOOTSTRAP_REVISIONS == frozenset({"0088", "0091"})
 
 
 def test_admin_migration_endpoint_pins_0091_not_head() -> None:

@@ -9,14 +9,19 @@ both sibling heads and advance capability to ``validated`` unintentionally.
 Integration and local bootstrap pin to ``0091`` explicitly so capability remains
 ``expand`` until the guarded staging Validate operator runs.
 
-After staging attaches ``0089`` onto validated ``0088``, ``alembic_version`` holds
-**two rows** (``0088`` + ``0089``). Bootstrap upgrade to ``0091`` is idempotent and
-must not downgrade or re-run ``0088`` / ``0090``.
+After staging attaches historical ``0089`` onto validated ``0088``,
+``alembic_version`` holds **two rows** (``0088`` + ``0089``). Bootstrap upgrade
+to ``0091`` advances only the integration branch and yields the supported
+validated-staging state ``{0088, 0091}``; it must not select ``0090``.
 """
 from __future__ import annotations
 
 REPOSITORY_ALEMBIC_HEADS = frozenset({"0090", "0091"})
 INTEGRATION_BOOTSTRAP_TARGET = "0091"
+NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0091"})
+VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0091"})
+# Historical state produced by the guarded 0088→0089 attach operator before
+# normal bootstrap advances the integration branch to 0091.
 STAGING_VALIDATED_ATTACH_REVISIONS = frozenset({"0088", "0089"})
 FORBIDDEN_BOOTSTRAP_LITERALS = frozenset({"head"})
 

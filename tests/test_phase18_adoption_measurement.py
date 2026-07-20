@@ -149,7 +149,7 @@ class TestTraceHintMetadata:
 
         captured: Dict[str, Any] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["event"]     = event
             captured["validated"] = validate_anonymized(event)
             return 1
@@ -517,7 +517,7 @@ class TestNoBreakGuarantee:
             CrossMerchantLearningStore, "is_enabled", staticmethod(lambda: True)
         )
 
-        def _boom(self, event, *, commit=True):
+        def _boom(self, event):
             raise RuntimeError("simulated DB outage")
 
         monkeypatch.setattr(CrossMerchantLearningStore, "record", _boom)
@@ -551,7 +551,7 @@ class TestNoBreakGuarantee:
 
         captured: Dict[str, Any] = {}
 
-        def _fake_record(self, event, *, commit=True):
+        def _fake_record(self, event):
             captured["event"] = validate_anonymized(event)
             return 1
 

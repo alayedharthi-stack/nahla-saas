@@ -3,7 +3,15 @@
 Sibling to ``0090`` on the ``0088`` A1-Validate branch. Normal bootstrap pins to
 this revision so integration environments pick up the widen without ``head``.
 
-Does not rewrite historical ``0033`` — forward-only column widen.
+Does not rewrite historical ``0033`` — forward-only column widen. Downgrade is
+intentionally a schema no-op because sibling ``0090`` owns the same physical
+column contract and may remain applied. Narrowing either sibling could violate
+the other revision or destroy legitimate values longer than 32 characters.
+
+Old application builds remain compatible with the wider column: their ORM still
+writes paths bounded to 32 characters, PostgreSQL accepts those values in
+VARCHAR(128), and SQLAlchemy does not truncate strings merely because an older
+``String(32)`` mapper reads a longer value.
 """
 from __future__ import annotations
 
@@ -53,19 +61,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if not has_table(bind, _TABLE):
-        return
-
-    current = _varchar_length(bind, _TABLE, _COLUMN)
-    if current is not None and current <= 32:
-        return
-
-    op.alter_column(
-        _TABLE,
-        _COLUMN,
-        existing_type=sa.String(length=current or _TARGET_LENGTH),
-        type_=sa.String(length=32),
-        existing_nullable=False,
-        existing_server_default="rule",
-    )
+    # Forward-only shared schema contract. Never narrow or delete telemetry:
+    # sibling 0090 may still be present and rows may legitimately exceed 32.
+    pass

@@ -55,6 +55,10 @@ def _upgrade(engine: Engine, revision: str) -> None:
     command.upgrade(_alembic_config(engine), revision)
 
 
+def _downgrade(engine: Engine, revision: str) -> None:
+    command.downgrade(_alembic_config(engine), revision)
+
+
 @pytest.fixture(scope="module")
 def pg_engine() -> Iterator[Engine]:
     engine = _connect_engine()
@@ -98,6 +102,54 @@ def test_migration_0090_sibling_branch_widens_model_path(pg_engine: Engine) -> N
     insp = inspect(pg_engine)
     cols = {c["name"]: c for c in insp.get_columns("cross_merchant_signals")}
     assert cols["model_path"].get("type").length == MODEL_PATH_MAX_LENGTH
+
+
+def test_downgrading_one_sibling_keeps_shared_widen_and_data(pg_engine: Engine) -> None:
+    long_path = PATH_47
+    with pg_engine.begin() as conn:
+        row_id = conn.execute(
+            text(
+                """
+                INSERT INTO cross_merchant_signals (
+                    tenant_hash, industry, intent, action, ui_mode, outcome,
+                    value_bucket, turn_index, model_path, latency_ms, tier
+                ) VALUES (
+                    'forwardonlytest', 'apparel', 'ask_product',
+                    'search_products', 'list', 'product_presented', 'unknown',
+                    0, :model_path, 0, 'global'
+                )
+                RETURNING id
+                """
+            ),
+            {"model_path": long_path},
+        ).scalar_one()
+
+    # Resolve -1 relative to the 0090 head only. 0091 remains applied.
+    _downgrade(pg_engine, "0090-1")
+
+    with pg_engine.connect() as conn:
+        revisions = {
+            row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))
+        }
+        column_length = conn.execute(
+            text(
+                """
+                SELECT character_maximum_length
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'cross_merchant_signals'
+                  AND column_name = 'model_path'
+                """
+            )
+        ).scalar_one()
+        persisted_path = conn.execute(
+            text("SELECT model_path FROM cross_merchant_signals WHERE id = :id"),
+            {"id": row_id},
+        ).scalar_one()
+
+    assert revisions == {"0088", "0091"}
+    assert int(column_length) == MODEL_PATH_MAX_LENGTH
+    assert persisted_path == long_path
 
 
 def test_legitimate_paths_persist_on_postgres(pg_engine: Engine) -> None:
