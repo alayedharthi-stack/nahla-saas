@@ -365,6 +365,7 @@ def _apply_brain_silent_and_welcome_guards(
     billing_denied: bool,
     trace: Any,
     persona_ownership: Any,
+    live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, bool]:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
     from services import turn_trace as TS
@@ -419,10 +420,23 @@ def _apply_brain_silent_and_welcome_guards(
             db=db,
         )
         if recovery.reply:
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="brain_silent_recovery_reply",
+                before=reply,
+                after=recovery.reply,
+            )
             return recovery.reply, brain_silent
     except Exception:  # noqa: silent-ok — recovery uses registered emergency fallback
         pass
-    return _empty_reply_fallback(), brain_silent
+    fallback_reply = _empty_reply_fallback()
+    _note_live_text_mutation(
+        live_provenance_tracker,
+        reason_token="brain_silent_empty_fallback",
+        before=reply,
+        after=fallback_reply,
+    )
+    return fallback_reply, brain_silent
 
 
 def _apply_outbound_dedup(
@@ -440,6 +454,7 @@ def _apply_outbound_dedup(
     convo: Any,
     persona_ownership: Any,
     brain_persona_compose_event: Optional[Dict[str, Any]],
+    live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, str]:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
 
@@ -564,6 +579,12 @@ def _apply_outbound_dedup(
                     if order_status_alt:
                         reply = order_status_alt
                         outbound_abort_suppressor = ""
+                        _note_live_text_mutation(
+                            live_provenance_tracker,
+                            reason_token="dedup_order_status_reply",
+                            before=po_reply_before_dedup,
+                            after=reply,
+                        )
                     elif should_restore_brain_reply_after_dedup_silence(
                         current_inbound=text or "",
                         candidate_reply=po_reply_before_dedup,
@@ -573,12 +594,24 @@ def _apply_outbound_dedup(
                         outbound_abort_suppressor = ""
                     else:
                         reply = ""
+                        _note_live_text_mutation(
+                            live_provenance_tracker,
+                            reason_token="dedup_silence_suppression",
+                            before=po_reply_before_dedup,
+                            after=reply,
+                        )
                 except Exception:  # noqa: BLE001
                     reply = ""
             else:
                 persona_ownership.on_text_replaced(
                     layer="dedup_substitution",
                     reason=POReason.DEDUP_REPLY,
+                    before=po_reply_before_dedup,
+                    after=reply,
+                )
+                _note_live_text_mutation(
+                    live_provenance_tracker,
+                    reason_token="dedup_substitution",
                     before=po_reply_before_dedup,
                     after=reply,
                 )
@@ -628,6 +661,7 @@ def _apply_post_compose_truth_guards(
     br_action: str,
     brain_persona_compose_event: Optional[Dict[str, Any]],
     persona_ownership: Any,
+    live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> str:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
 
@@ -644,6 +678,7 @@ def _apply_post_compose_truth_guards(
             inbound_metadata=inbound_metadata,
             br_action=br_action,
             brain_persona_compose_event=brain_persona_compose_event,
+            live_provenance_tracker=live_provenance_tracker,
         )
 
     po_reply_before_guards = reply
@@ -671,6 +706,12 @@ def _apply_post_compose_truth_guards(
                 before=po_reply_before_guards,
                 after=reply,
             )
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="service_closer_guard",
+                before=po_reply_before_guards,
+                after=reply,
+            )
     except Exception:  # noqa: silent-ok — service closer guard is fail-open
         pass
 
@@ -686,7 +727,14 @@ def _apply_post_compose_truth_guards(
             state_summary=summary,
         )
         if rewritten:
+            before_rewrite = reply
             reply = rewritten
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="payment_context_rewrite",
+                before=before_rewrite,
+                after=reply,
+            )
     except Exception:  # noqa: silent-ok — payment-context rewrite is fail-open
         pass
 
@@ -715,7 +763,14 @@ def _apply_post_compose_truth_guards(
             conversation_id=getattr(convo, "id", None),
         )
         if prg_result.replaced:
+            before_guard = reply
             reply = prg_result.reply
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="payment_reply_guard",
+                before=before_guard,
+                after=reply,
+            )
     except Exception:  # noqa: silent-ok — payment truth guard is fail-open
         pass
 
@@ -737,7 +792,14 @@ def _apply_post_compose_truth_guards(
             conversation_id=getattr(convo, "id", None),
         )
         if stg_result.replaced:
+            before_guard = reply
             reply = stg_result.reply
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="shipment_truth_guard",
+                before=before_guard,
+                after=reply,
+            )
     except Exception:  # noqa: silent-ok — shipment truth guard is fail-open
         pass
 
@@ -783,9 +845,23 @@ def _apply_post_compose_truth_guards(
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
             )
-            reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
+            fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="staff_escalation_truth_guard",
+                before=reply,
+                after=fallback_reply,
+            )
+            reply = fallback_reply
         elif setg_result.replaced and not setg_result.requires_grounded_compose:
+            before_guard = reply
             reply = setg_result.reply
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="staff_escalation_truth_guard",
+                before=before_guard,
+                after=reply,
+            )
     except Exception:  # noqa: silent-ok — staff truth guard is fail-open
         pass
 
@@ -803,6 +879,7 @@ def _apply_staff_truth_guard_only(
     inbound_metadata: Optional[Dict[str, Any]],
     br_action: str,
     brain_persona_compose_event: Optional[Dict[str, Any]],
+    live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Preserve the live staff-truth guard for Brain handoff candidates."""
     try:
@@ -849,8 +926,21 @@ def _apply_staff_truth_guard_only(
                 reason="staff_escalation_truth_guard_false_claim",
                 transformed_by_guard=True,
             )
-            return tracking_templates.track_order_need_identifiers_emergency_fallback()
+            fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="staff_escalation_truth_guard",
+                before=reply,
+                after=fallback_reply,
+            )
+            return fallback_reply
         if result.replaced and not result.requires_grounded_compose:
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token="staff_escalation_truth_guard",
+                before=reply,
+                after=result.reply,
+            )
             return result.reply
     except Exception:  # noqa: silent-ok — staff truth guard is fail-open
         pass
@@ -892,6 +982,91 @@ def _persist_live_handoff(
 
 def _nonempty_metadata_str(value: Any) -> str:
     return str(value or "").strip()
+
+
+_APPROVED_DETERMINISTIC_COMPOSE_SOURCES = frozenset(
+    {
+        "fallback_deterministic",
+        "merchant_template",
+        "meta_template",
+        "legal_exact_text",
+        "security_exact_text",
+    }
+)
+_STRUCTURED_LLM_COMPOSE_SOURCES = frozenset({"llm", "persona_llm"})
+
+
+def _normalize_transform_reasons(value: Any) -> List[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(reason).strip() for reason in value if str(reason or "").strip()]
+
+
+def _new_live_provenance_tracker() -> Dict[str, Any]:
+    return {"final_transform_reasons": []}
+
+
+def _note_live_text_mutation(
+    tracker: Optional[Dict[str, Any]],
+    *,
+    reason_token: str,
+    before: str,
+    after: str,
+) -> None:
+    if not isinstance(tracker, dict):
+        return
+    if (before or "").strip() == (after or "").strip():
+        return
+    token = str(reason_token or "").strip()
+    if not token:
+        return
+    reasons = _normalize_transform_reasons(tracker.get("final_transform_reasons"))
+    if token not in reasons:
+        reasons.append(token)
+    tracker["final_transform_reasons"] = reasons
+
+
+def _structured_llm_candidate_present(
+    *,
+    brain_result: Optional[Dict[str, Any]],
+    brain_persona_compose_event: Optional[Dict[str, Any]],
+) -> bool:
+    for source in (brain_persona_compose_event, brain_result):
+        if isinstance(source, dict) and type(source.get("llm_candidate_present")) is bool:
+            return bool(source.get("llm_candidate_present"))
+    for source in (brain_persona_compose_event, brain_result):
+        if isinstance(source, dict):
+            compose_source = _nonempty_metadata_str(source.get("compose_source"))
+            if compose_source in _APPROVED_DETERMINISTIC_COMPOSE_SOURCES:
+                return False
+            if compose_source in _STRUCTURED_LLM_COMPOSE_SOURCES:
+                return True
+    return False
+
+
+def _structured_compose_source(
+    *,
+    brain_result: Optional[Dict[str, Any]],
+    brain_persona_compose_event: Optional[Dict[str, Any]],
+    llm_candidate_present: bool,
+) -> str:
+    for source in (brain_persona_compose_event, brain_result):
+        if isinstance(source, dict):
+            compose_source = _nonempty_metadata_str(source.get("compose_source"))
+            if compose_source:
+                return compose_source
+    if llm_candidate_present:
+        return "persona_llm"
+    return ""
+
+
+def _merge_transform_reasons(*sources: Any) -> List[str]:
+    merged: List[str] = []
+    for source in sources:
+        for reason in _normalize_transform_reasons(source):
+            if reason not in merged:
+                merged.append(reason)
+    return merged
 
 
 def _resolve_response_mode(
@@ -950,46 +1125,52 @@ def _build_provenance(
     reply_text: str,
     brain_persona_compose_event: Optional[Dict[str, Any]],
     trace: Any,
+    live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> TextProvenance:
+    llm_candidate_present = _structured_llm_candidate_present(
+        brain_result=brain_result,
+        brain_persona_compose_event=brain_persona_compose_event,
+    )
+    compose_source = _structured_compose_source(
+        brain_result=brain_result,
+        brain_persona_compose_event=brain_persona_compose_event,
+        llm_candidate_present=llm_candidate_present,
+    )
+
+    chosen_path = ""
+    for source in (brain_persona_compose_event, brain_result):
+        if isinstance(source, dict):
+            path = _nonempty_metadata_str(source.get("chosen_path"))
+            if path:
+                chosen_path = path
+                break
+    if not chosen_path:
+        chosen_path = _nonempty_metadata_str(getattr(trace, "chosen_path", ""))
+
+    candidate_text = (brain_reply_candidate or "").strip()
+    final_text = (reply_text or "").strip()
+    final_text_transformed = bool(candidate_text and final_text != candidate_text)
+
+    transform_reasons = _merge_transform_reasons(
+        (brain_result or {}).get("final_transform_reasons"),
+        (brain_persona_compose_event or {}).get("final_transform_reasons"),
+        (live_provenance_tracker or {}).get("final_transform_reasons"),
+    )
+    if not final_text_transformed:
+        transform_reasons = []
+
     provenance = TextProvenance(
-        compose_source=str((brain_result or {}).get("compose_source") or ""),
-        chosen_path=str((brain_result or {}).get("chosen_path") or getattr(trace, "chosen_path", "") or ""),
-        llm_candidate_present=bool(brain_reply_candidate),
-        final_text_transformed=bool(
-            brain_reply_candidate and (reply_text or "").strip() != brain_reply_candidate
-        ),
+        compose_source=compose_source,
+        chosen_path=chosen_path,
+        llm_candidate_present=llm_candidate_present,
+        final_text_transformed=final_text_transformed,
+        final_transform_reasons=transform_reasons,
         reply_source=str(getattr(trace, "reply_source", "") or ""),
         fallback_source=str(getattr(trace, "fallback_source", "") or ""),
         fallback_reason=str((brain_result or {}).get("fallback_reason") or ""),
         fallback_action_type=str((brain_result or {}).get("fallback_action_type") or ""),
     )
-    brain_transform_reasons = (brain_result or {}).get("final_transform_reasons")
-    if isinstance(brain_transform_reasons, (list, tuple)):
-        provenance.final_transform_reasons = [
-            str(reason) for reason in brain_transform_reasons if str(reason or "").strip()
-        ]
     if isinstance(brain_persona_compose_event, dict):
-        provenance.compose_source = str(
-            brain_persona_compose_event.get("compose_source")
-            or provenance.compose_source
-            or "persona_llm"
-        )
-        provenance.chosen_path = str(
-            brain_persona_compose_event.get("chosen_path") or provenance.chosen_path
-        )
-        if "llm_candidate_present" in brain_persona_compose_event:
-            provenance.llm_candidate_present = bool(
-                brain_persona_compose_event.get("llm_candidate_present")
-            )
-        if "final_text_transformed" in brain_persona_compose_event:
-            provenance.final_text_transformed = bool(
-                brain_persona_compose_event.get("final_text_transformed")
-            )
-        event_transform_reasons = brain_persona_compose_event.get("final_transform_reasons")
-        if isinstance(event_transform_reasons, (list, tuple)):
-            provenance.final_transform_reasons = [
-                str(reason) for reason in event_transform_reasons if str(reason or "").strip()
-            ]
         provenance.fallback_reason = str(
             brain_persona_compose_event.get("fallback_reason") or provenance.fallback_reason
         )
@@ -997,7 +1178,7 @@ def _build_provenance(
             brain_persona_compose_event.get("fallback_action_type")
             or provenance.fallback_action_type
         )
-    if provenance.compose_source in ("", "llm") and provenance.llm_candidate_present:
+    if provenance.compose_source == "llm" and provenance.llm_candidate_present:
         provenance.compose_source = "persona_llm"
     provenance.response_mode = _resolve_response_mode(
         brain_result=brain_result,
@@ -1071,6 +1252,7 @@ async def evaluate_live_merchant_brain_turn(
             profile=profile,
             persona_ownership=persona_ownership,
         )
+        live_provenance_tracker = _new_live_provenance_tracker()
         reply = parsed["reply"]
         brain_handoff = parsed["brain_handoff"]
         billing_denied = parsed["billing_denied"]
@@ -1100,6 +1282,7 @@ async def evaluate_live_merchant_brain_turn(
             billing_denied=billing_denied,
             trace=trace,
             persona_ownership=persona_ownership,
+            live_provenance_tracker=live_provenance_tracker,
         )
 
         if brain_handoff:
@@ -1140,6 +1323,7 @@ async def evaluate_live_merchant_brain_turn(
             convo=convo,
             persona_ownership=persona_ownership,
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
+            live_provenance_tracker=live_provenance_tracker,
         )
 
         reply = _apply_post_compose_truth_guards(
@@ -1156,6 +1340,7 @@ async def evaluate_live_merchant_brain_turn(
             br_action=br_action,
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
             persona_ownership=persona_ownership,
+            live_provenance_tracker=live_provenance_tracker,
         )
 
         if not billing_denied and not brain_silent and (reply or "").strip():
@@ -1170,6 +1355,7 @@ async def evaluate_live_merchant_brain_turn(
             reply_text=reply,
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
             trace=trace,
+            live_provenance_tracker=live_provenance_tracker,
         )
         trace.handoff_triggered = bool(brain_handoff)
 

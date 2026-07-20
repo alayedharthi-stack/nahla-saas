@@ -509,3 +509,68 @@ def test_build_provenance_merges_specialized_response_mode_from_brain_result() -
     assert provenance.response_mode == "customer_conditional_coupon_answer"
     assert provenance.final_text_transformed is False
 
+
+def test_build_provenance_does_not_infer_llm_candidate_from_reply_text_alone() -> None:
+    provenance = _build_provenance(
+        brain_result={},
+        brain_reply_candidate="generic outbound candidate",
+        reply_text="generic outbound candidate",
+        brain_persona_compose_event=None,
+        trace=_trace(),
+    )
+    assert provenance.llm_candidate_present is False
+    assert provenance.compose_source == ""
+    assert provenance.final_text_transformed is False
+    assert provenance.final_transform_reasons == []
+
+
+def test_build_provenance_preserves_deterministic_emergency_fallback() -> None:
+    provenance = _build_provenance(
+        brain_result={
+            "compose_source": "fallback_deterministic",
+            "chosen_path": "track_order_need_identifiers_emergency",
+            "fallback_reason": "compose_failure",
+            "fallback_action_type": "track_order_need_identifiers",
+            "llm_candidate_present": False,
+        },
+        brain_reply_candidate="deterministic fallback line",
+        reply_text="deterministic fallback line",
+        brain_persona_compose_event={
+            "compose_source": "fallback_deterministic",
+            "chosen_path": "track_order_need_identifiers_emergency",
+            "llm_candidate_present": False,
+            "fallback_reason": "compose_failure",
+            "fallback_action_type": "track_order_need_identifiers",
+        },
+        trace=_trace(),
+    )
+    assert provenance.compose_source == "fallback_deterministic"
+    assert provenance.llm_candidate_present is False
+    assert provenance.fallback_reason == "compose_failure"
+    assert provenance.fallback_action_type == "track_order_need_identifiers"
+
+
+def test_build_provenance_merges_guard_transform_reasons_from_live_tracker() -> None:
+    provenance = _build_provenance(
+        brain_result={
+            "compose_source": "persona_llm",
+            "chosen_path": "fact_bound_persona_compose",
+            "llm_candidate_present": True,
+        },
+        brain_reply_candidate="compose candidate unchanged",
+        reply_text="guard adjusted candidate",
+        brain_persona_compose_event={
+            "compose_source": "persona_llm",
+            "chosen_path": "fact_bound_persona_compose",
+            "llm_candidate_present": True,
+        },
+        trace=_trace(),
+        live_provenance_tracker={
+            "final_transform_reasons": ["payment_reply_guard"],
+        },
+    )
+    assert provenance.final_text_transformed is True
+    assert provenance.final_transform_reasons == ["payment_reply_guard"]
+    assert provenance.llm_candidate_present is True
+    assert provenance.compose_source == "persona_llm"
+

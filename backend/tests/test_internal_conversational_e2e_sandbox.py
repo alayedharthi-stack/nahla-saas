@@ -700,6 +700,41 @@ def test_provenance_requires_semantically_valid_constitutional_metadata() -> Non
     )
 
 
+def test_provenance_blockers_reject_transform_semantic_contradictions() -> None:
+    base = {
+        "compose_source": "persona_llm",
+        "response_mode": "persona",
+        "chosen_path": "generic_catalog_answer",
+        "llm_candidate_present": True,
+        "fallback_reason": "",
+        "fallback_action_type": "",
+    }
+    assert _provenance_blockers(
+        {
+            **base,
+            "final_text_transformed": True,
+            "final_transform_reasons": ["payment_reply_guard"],
+        },
+        evaluated_customer_text=True,
+    ) == []
+    assert "provenance_incomplete" in _provenance_blockers(
+        {
+            **base,
+            "final_text_transformed": True,
+            "final_transform_reasons": [],
+        },
+        evaluated_customer_text=True,
+    )
+    assert "provenance_incomplete" in _provenance_blockers(
+        {
+            **base,
+            "final_text_transformed": False,
+            "final_transform_reasons": ["payment_reply_guard"],
+        },
+        evaluated_customer_text=True,
+    )
+
+
 def test_multi_turn_state_and_history_persist_in_writable_sandbox() -> None:
     _MemoryMessages.reset()
     convo = SimpleNamespace(id=9, tenant_id=TENANT_ID, extra_metadata={})
