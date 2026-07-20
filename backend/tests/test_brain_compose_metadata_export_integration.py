@@ -359,6 +359,9 @@ def test_tenant48_pr687_paths_export_live_provenance(
     assert turn_result.provenance.final_transform_reasons == []
     assert turn_result.reply_text == turn_result.brain_reply_candidate
     assert "catalog_deterministic_fallback" not in str(turn_result.brain_result)
+    if case["case"] in {"search_miss", "zero_fact_navigation"}:
+        assert turn_result.provenance.persona_route is not None
+        assert turn_result.provenance.persona_route.compose_attempt == "provider_call"
     assert _provenance_blockers(
         _provenance_dict_from_turn(turn_result),
         evaluated_customer_text=True,

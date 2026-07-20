@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from typing import Any, Optional
 
 from .facts_bundle import (
@@ -16,6 +17,52 @@ from .integration import (
 )
 
 logger = logging.getLogger("nahla.brain.persona.catalog_product_answer")
+
+CATALOG_GROUNDED_PERSONA_CHOSEN_PATHS = frozenset({
+    "catalog_miss_resolved_subject",
+    "catalog_navigation_top_products_fallback",
+})
+
+_ROUTE_METADATA_KEYS = (
+    "route_provider",
+    "route_model",
+    "route_tier",
+    "route_source",
+    "route_provider_configured",
+    "compose_attempt",
+)
+
+
+def _attempted_provider_call_route_metadata(
+    attempted: Optional[PersonaComposeResult],
+) -> dict[str, Any]:
+    """Bounded route fields from an attempted provider call (never inferred afterward)."""
+    if attempted is None:
+        return {}
+    from .fact_bound_composer import COMPOSE_ATTEMPT_PROVIDER_CALL  # noqa: PLC0415
+
+    meta = dict(attempted.metadata or {})
+    if str(meta.get("compose_attempt") or "").strip() != COMPOSE_ATTEMPT_PROVIDER_CALL:
+        return {}
+    preserved: dict[str, Any] = {}
+    for key in _ROUTE_METADATA_KEYS:
+        if key in meta:
+            preserved[key] = meta[key]
+    if preserved:
+        preserved["llm_candidate_present"] = False
+    return preserved
+
+
+def _with_attempted_route_metadata(
+    fallback: PersonaComposeResult,
+    attempted: Optional[PersonaComposeResult],
+) -> PersonaComposeResult:
+    preserved = _attempted_provider_call_route_metadata(attempted)
+    if not preserved:
+        return fallback
+    merged = {**dict(fallback.metadata or {}), **preserved}
+    model = attempted.model if attempted and attempted.model else fallback.model
+    return replace(fallback, metadata=merged, model=model)
 
 _PRICE_ASK_RE = re.compile(
     r"(?:بكم|كم\s*سعر|سعر|ثمن|تكلفة|how\s*much|price)",
@@ -416,6 +463,7 @@ def build_catalog_product_answer_emergency_outcome(
     decision_args: Optional[dict[str, Any]] = None,
     ai_settings: Optional[dict[str, Any]] = None,
     reason: str = "compose_unavailable",
+    attempted_result: Optional[PersonaComposeResult] = None,
 ) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
     """Audited one-line fallback for unavailable catalog product compose."""
     settings = dict(ai_settings or {})
@@ -437,7 +485,10 @@ def build_catalog_product_answer_emergency_outcome(
     )
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
-    fallback = _catalog_product_answer_emergency_fallback(bundle, reason=reason)
+    fallback = _with_attempted_route_metadata(
+        _catalog_product_answer_emergency_fallback(bundle, reason=reason),
+        attempted_result,
+    )
     event_meta = build_catalog_product_answer_event_metadata(
         fallback,
         tenant_id=int(tenant_id),
@@ -449,6 +500,7 @@ def build_catalog_product_answer_emergency_outcome(
         catalog_facts=bundle.verified_facts,
         catalog_fact_products=compose_fact_rows,
     )
+    event_meta["llm_candidate_present"] = False
     _log_catalog_compose_telemetry(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         outcome_category="fallback_deterministic",
@@ -570,6 +622,7 @@ async def try_compose_catalog_product_answer(
             or result.guard_failed_reason
             or "compose_empty"
         ),
+        attempted_result=result,
     )
 
 
@@ -602,6 +655,7 @@ def build_catalog_search_miss_facts_bundle(
         "confirmed_match_count": 0,
         "allow_price_mention": False,
         "allow_availability_mention": False,
+        "has_positive_availability": False,
         "allow_checkout_pressure": False,
         "allow_slot_prompts": False,
         "allow_superiority_claims": False,
@@ -687,6 +741,7 @@ def build_catalog_search_miss_emergency_outcome(
     chosen_path: str = "catalog_miss_resolved_subject",
     ai_settings: Optional[dict[str, Any]] = None,
     reason: str = "compose_unavailable",
+    attempted_result: Optional[PersonaComposeResult] = None,
 ) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
     """Audited one-line fallback for an unavailable search-miss compose."""
     settings = dict(ai_settings or {})
@@ -700,7 +755,10 @@ def build_catalog_search_miss_emergency_outcome(
     )
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
-    fallback = _catalog_search_miss_emergency_fallback(bundle, reason=reason)
+    fallback = _with_attempted_route_metadata(
+        _catalog_search_miss_emergency_fallback(bundle, reason=reason),
+        attempted_result,
+    )
     event_meta = _persona_event_with_chosen_path(
         fallback,
         tenant_id=int(tenant_id),
@@ -797,6 +855,7 @@ async def try_compose_catalog_search_miss_answer(
             or result.guard_failed_reason
             or "compose_empty"
         ),
+        attempted_result=result,
     )
 
 
@@ -885,6 +944,7 @@ def build_catalog_navigation_emergency_outcome(
     decision_args: Optional[dict[str, Any]] = None,
     ai_settings: Optional[dict[str, Any]] = None,
     reason: str = "compose_unavailable",
+    attempted_result: Optional[PersonaComposeResult] = None,
 ) -> tuple[str, PersonaComposeResult, dict[str, Any]]:
     """Audited one-line fallback for unavailable catalog navigation compose."""
     settings = dict(ai_settings or {})
@@ -899,7 +959,10 @@ def build_catalog_navigation_emergency_outcome(
     )
     from .flags import persona_composer_allowlist_result  # noqa: PLC0415
 
-    fallback = _catalog_navigation_emergency_fallback(bundle, reason=reason)
+    fallback = _with_attempted_route_metadata(
+        _catalog_navigation_emergency_fallback(bundle, reason=reason),
+        attempted_result,
+    )
     nav_qkind = str(bundle.verified_facts.get("question_kind") or "browse").strip()
     event_meta = _persona_event_with_chosen_path(
         fallback,
@@ -1009,4 +1072,5 @@ async def try_compose_catalog_navigation_browse_answer(
             or result.guard_failed_reason
             or "compose_empty"
         ),
+        attempted_result=result,
     )
