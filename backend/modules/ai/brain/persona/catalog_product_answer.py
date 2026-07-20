@@ -23,33 +23,38 @@ CATALOG_GROUNDED_PERSONA_CHOSEN_PATHS = frozenset({
     "catalog_navigation_top_products_fallback",
 })
 
-_ROUTE_METADATA_KEYS = (
-    "route_provider",
-    "route_model",
-    "route_tier",
-    "route_source",
-    "route_provider_configured",
-    "compose_attempt",
-)
 
-
-def _attempted_provider_call_route_metadata(
+def _attempted_route_metadata(
     attempted: Optional[PersonaComposeResult],
 ) -> dict[str, Any]:
-    """Bounded route fields from an attempted provider call (never inferred afterward)."""
+    """Bounded route fields from attempted compose metadata (never inferred afterward)."""
     if attempted is None:
         return {}
-    from .fact_bound_composer import COMPOSE_ATTEMPT_PROVIDER_CALL  # noqa: PLC0415
+    from .fact_bound_composer import CLOSED_PERSONA_COMPOSE_ATTEMPTS  # noqa: PLC0415
+    from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+        PERSONA_ROUTE_PROVENANCE_FIELDS,
+    )
 
     meta = dict(attempted.metadata or {})
-    if str(meta.get("compose_attempt") or "").strip() != COMPOSE_ATTEMPT_PROVIDER_CALL:
+    compose_attempt = str(meta.get("compose_attempt") or "").strip()
+    if compose_attempt not in CLOSED_PERSONA_COMPOSE_ATTEMPTS:
         return {}
+
     preserved: dict[str, Any] = {}
-    for key in _ROUTE_METADATA_KEYS:
-        if key in meta:
-            preserved[key] = meta[key]
-    if preserved:
-        preserved["llm_candidate_present"] = False
+    for key in PERSONA_ROUTE_PROVENANCE_FIELDS:
+        if key not in meta:
+            return {}
+        value = meta[key]
+        if key == "route_provider_configured":
+            if type(value) is not bool:
+                return {}
+            preserved[key] = value
+            continue
+        token = str(value or "").strip()
+        if key == "compose_attempt" and not token:
+            return {}
+        preserved[key] = token
+    preserved["llm_candidate_present"] = False
     return preserved
 
 
@@ -57,7 +62,7 @@ def _with_attempted_route_metadata(
     fallback: PersonaComposeResult,
     attempted: Optional[PersonaComposeResult],
 ) -> PersonaComposeResult:
-    preserved = _attempted_provider_call_route_metadata(attempted)
+    preserved = _attempted_route_metadata(attempted)
     if not preserved:
         return fallback
     merged = {**dict(fallback.metadata or {}), **preserved}
