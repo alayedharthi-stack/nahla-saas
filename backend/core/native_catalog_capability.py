@@ -58,7 +58,7 @@ def _resolve_operational_bind(db: Any) -> Any:
             bind = getter()
             if bind is not None:
                 return bind
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — bind resolution is best-effort
             pass
     return getattr(db, "bind", None)
 
@@ -97,13 +97,13 @@ def load_whatsapp_connection(db: Any, tenant_id: int) -> Any:
         )
         try:
             read_db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — isolated rollback must not poison caller
             pass
         return None
     finally:
         try:
             read_db.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — isolated close must not poison caller
             pass
 
 
