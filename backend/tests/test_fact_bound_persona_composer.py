@@ -240,11 +240,11 @@ class TestFactBoundPersonaComposer:
 
 
 class TestPersonaComposeTimeoutConfig:
-    def test_default_timeout_is_three_seconds(self, monkeypatch) -> None:
+    def test_default_timeout_is_eight_seconds(self, monkeypatch) -> None:
         monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
-        assert resolve_persona_compose_timeout_seconds() == 3.0
+        assert resolve_persona_compose_timeout_seconds() == 8.0
         composer = FactBoundPersonaComposer(enforce_gate=False)
-        assert composer._timeout_seconds == 3.0  # noqa: SLF001
+        assert composer._timeout_seconds == 8.0  # noqa: SLF001
 
     def test_env_override_respected(self, monkeypatch) -> None:
         monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "5")
@@ -254,7 +254,7 @@ class TestPersonaComposeTimeoutConfig:
 
     def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
         monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "not-a-number")
-        assert resolve_persona_compose_timeout_seconds() == 3.0
+        assert resolve_persona_compose_timeout_seconds() == 8.0
 
     def test_timeout_clamped_to_bounds(self, monkeypatch) -> None:
         monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
@@ -265,6 +265,78 @@ class TestPersonaComposeTimeoutConfig:
         monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", "8")
         composer = FactBoundPersonaComposer(enforce_gate=False, timeout_seconds=2.0)
         assert composer._timeout_seconds == 2.0  # noqa: SLF001
+
+    def test_compose_makes_single_injected_callable_attempt(self, monkeypatch) -> None:
+        import asyncio  # noqa: PLC0415
+
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
+        assert resolve_persona_compose_timeout_seconds() == 8.0
+
+        async def _run() -> None:
+            call_count = 0
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            bundle = build_social_facts_bundle(
+                surface="social_checkin",
+                inbound_text="كيف الحال",
+            )
+
+            async def _good_llm(_bundle):
+                nonlocal call_count
+                call_count += 1
+                return "بخير الله يسعدك، وش تحتاج؟"
+
+            composer._llm_callable = _good_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert call_count == 1
+            assert result.source == "persona_llm"
+
+        asyncio.run(_run())
+
+    def test_compose_makes_single_provider_call_with_default_timeout(
+        self,
+        monkeypatch,
+    ) -> None:
+        import asyncio  # noqa: PLC0415
+        from unittest.mock import patch  # noqa: PLC0415
+
+        monkeypatch.delenv("NAHLA_PERSONA_COMPOSE_TIMEOUT_SECONDS", raising=False)
+        assert resolve_persona_compose_timeout_seconds() == 8.0
+
+        async def _run() -> None:
+            call_count = 0
+            bundle = build_social_facts_bundle(
+                surface="social_checkin",
+                inbound_text="السلام عليكم",
+            )
+
+            def _good_provider_call(*_args, **_kwargs):
+                nonlocal call_count
+                call_count += 1
+                return {
+                    "provider": "openai_compatible",
+                    "model": "gpt-4o-mini",
+                    "reply_text": "وعليكم السلام ورحمة الله 😊",
+                    "status": "ok",
+                }
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            with patch(
+                "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.is_configured",
+                return_value=True,
+            ):
+                with patch(
+                    "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.is_configured",
+                    return_value=False,
+                ):
+                    with patch(
+                        "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
+                        side_effect=_good_provider_call,
+                    ):
+                        result = await composer.compose(bundle)
+            assert call_count == 1
+            assert result.source == "persona_llm"
+
+        asyncio.run(_run())
 
 
 class TestPersonaComposeModelRouting:
