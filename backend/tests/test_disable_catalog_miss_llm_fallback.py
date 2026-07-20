@@ -1,4 +1,4 @@
-"""Catalog miss must never fall back to LLM compose — deterministic templates only."""
+"""Catalog miss: weak queries stay deterministic; resolved-subject miss is LLM-owned."""
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +19,7 @@ from modules.ai.brain.commerce.catalog_search_evidence import (  # noqa: E402
     compose_catalog_miss_deterministic_reply,
 )
 from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
+from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES  # noqa: E402
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_SEARCH_PRODUCTS,
     ACTION_SOCIAL_REPLY,
@@ -98,7 +99,7 @@ class TestCatalogMissNeverCallsLlm:
         mock_llm.assert_not_awaited()
         assert "الكتالوج" in text
 
-    def test_catalog_like_miss_does_not_call_llm_compose(self) -> None:
+    def test_catalog_like_miss_calls_persona_compose_when_subject_resolved(self) -> None:
         composer = DefaultComposer()
         ctx = _ctx("بكم سدر الحجاز", intent_name="ask_price")
         decision = Decision(
@@ -108,9 +109,36 @@ class TestCatalogMissNeverCallsLlm:
         )
         result = _search_miss_result()
 
-        with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-            text = asyncio.run(composer.compose(decision, result, ctx))
-        mock_llm.assert_not_awaited()
+        async def _stub_llm(_bundle):
+            return "ما لقيت تطابقاً واضحاً لسدر الحجاز في الكتالوج حالياً."
+
+        async def _run() -> str:
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_search_miss_answer",
+                new=AsyncMock(
+                    return_value=(
+                        "ما لقيت تطابقاً واضحاً لسدر الحجاز في الكتالوج حالياً.",
+                        None,
+                        {
+                            "chosen_path": "catalog_miss_resolved_subject",
+                            "persona_compose": {"source": "persona_llm"},
+                        },
+                    ),
+                ),
+            ):
+                ctx.merchant_context = {
+                    "ai_settings": {
+                        "persona_composer_enabled": True,
+                        "store_ai_mode": "test",
+                        "ai_test_allowed_numbers": ["966500000001"],
+                        "persona_composer_surfaces": list(PERSONA_COMPOSER_SURFACES),
+                    },
+                }
+                return await composer.compose(decision, result, ctx)
+
+        text = asyncio.run(_run())
+        assert result.data.get("chosen_path") == "catalog_miss_resolved_subject"
+        assert result.data.get("persona_compose", {}).get("source") == "persona_llm"
         assert "الكتالوج" in text
 
     def test_no_synced_products_does_not_call_llm_compose(self) -> None:
@@ -227,9 +255,7 @@ class TestCatalogMissContentSafety:
         )
         result = ActionResult(success=True, data={})
 
-        with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-            text = asyncio.run(composer.compose(decision, result, ctx))
-        mock_llm.assert_not_awaited()
+        text = asyncio.run(composer.compose(decision, result, ctx))
         assert text.strip()
         assert result.data.get("chosen_path") != CATALOG_MISS_CHOSEN_PATH
 

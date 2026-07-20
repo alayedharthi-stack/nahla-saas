@@ -1221,6 +1221,7 @@ def _enabled_kb_ai_settings() -> dict:
         "persona_composer_enabled": True,
         "store_ai_mode": STORE_AI_MODE_TEST,
         "ai_test_allowed_numbers": ["966542980511"],
+        "persona_composer_allowlist_tenants": [33],
         "persona_composer_surfaces": [
             "social_greeting",
             "social_checkin",
@@ -1325,32 +1326,62 @@ class TestKbProductAnswerPersonaCompose:
 
         asyncio.run(_run())
 
-    def test_missing_kb_returns_safe_clarification(self) -> None:
+    def test_missing_kb_attempts_llm_compose_first(self) -> None:
         import asyncio  # noqa: PLC0415
 
         from modules.ai.brain.persona.kb_product_answer import (
-            MISSING_KB_CLARIFICATION_AR,
+            build_kb_product_answer_facts_bundle,
             try_compose_kb_product_answer,
         )
 
         async def _run() -> None:
-            text, result, event = await try_compose_kb_product_answer(
-                tenant_id=33,
-                customer_phone="966542980511",
-                inbound_text="ما هي مميزات عسل السدر القيضي؟",
-                decision_args=_kb_decision_args(
-                    kb_sections=[],
-                    missing_facts=["kb_product_facts"],
-                ),
-                ai_settings=_enabled_kb_ai_settings(),
+            from unittest.mock import AsyncMock, patch  # noqa: PLC0415
+            from modules.ai.brain.persona.fact_bound_composer import (  # noqa: PLC0415
+                FactBoundPersonaComposer,
             )
-            assert text == MISSING_KB_CLARIFICATION_AR
+
+            bundle = build_kb_product_answer_facts_bundle(
+                inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                question_kind="features",
+                allowed_facts={
+                    "product_title": "عسل السدر القيضي",
+                    "kb_sections": [],
+                },
+                missing_facts=["kb_product_facts"],
+            )
+
+            async def _stub_llm(_bundle):
+                facts = _bundle.verified_facts or {}
+                title = str(facts.get("subject_title") or "المنتج").strip()
+                return f"ما عندي تفاصيل مؤكدة عن {title} في قاعدة المعرفة حالياً."
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _stub_llm  # noqa: SLF001
+            composed = await composer.compose(bundle)
+            assert composed.source == "persona_llm"
+
+            with patch.object(
+                FactBoundPersonaComposer,
+                "compose",
+                new=AsyncMock(return_value=composed),
+            ):
+                text, result, event = await try_compose_kb_product_answer(
+                    tenant_id=33,
+                    customer_phone="966542980511",
+                    inbound_text="ما هي مميزات عسل السدر القيضي؟",
+                    decision_args=_kb_decision_args(
+                        kb_sections=[],
+                        missing_facts=["kb_product_facts"],
+                    ),
+                    ai_settings=_enabled_kb_ai_settings(),
+                )
+            assert text
             assert result is not None
-            assert result.source == "fallback_deterministic"
-            assert result.fallback_reason == "missing_kb_sections"
+            assert result.source == "persona_llm"
             assert event is not None
             assert event["knowledge_source"] == "missing_kb"
             assert event["kb_section_ids"] == []
+            assert event["persona_compose"]["source"] == "persona_llm"
 
         asyncio.run(_run())
 
