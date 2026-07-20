@@ -23,6 +23,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from ops.internal_e2e_runner.lib.mounted_secrets import (
+    MountedSecretError,
+    emit_mounted_secret,
+    load_mounted_secret_bytes,
+    load_mounted_secret_file,
+)
 from ops.internal_e2e_runner.lib.config import (
     RUNNER_CONFIG_SCHEMA_VERSION,
     database_url_fingerprint,
@@ -1373,9 +1379,132 @@ def test_entrypoint_exports_secret_files_and_unsets_other_provider_keys() -> Non
     for name in REQUIRED_SECRET_FILES:
         assert f"/run/secrets/{name}" in script
     assert "unset OPENAI_API_KEY" in script
+    assert "unset CLAUDE_API_KEY" not in script
+    assert "export CLAUDE_API_KEY=\"${ANTHROPIC_API_KEY}\"" in script
+    assert "mounted_secrets import emit_mounted_secret" in script
+    assert 'export ANTHROPIC_API_KEY="$(< /run/secrets/llm_api_key)"' not in script
     assert "export HTTPS_PROXY=" in script
     assert 'Path("/etc/hosts").write_text' not in script
 
+
+_LLM_SECRET_CORE = b"test-llm-key-core"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_LLM_SECRET_CORE, _LLM_SECRET_CORE),
+        (_LLM_SECRET_CORE + b"\n", _LLM_SECRET_CORE),
+        (_LLM_SECRET_CORE + b"\r\n", _LLM_SECRET_CORE),
+        (_LLM_SECRET_CORE + b"\r", _LLM_SECRET_CORE),
+    ],
+)
+def test_load_mounted_secret_accepts_raw_and_single_terminators(
+    tmp_path: Path,
+    payload: bytes,
+    expected: bytes,
+) -> None:
+    secret_path = tmp_path / "llm_api_key"
+    secret_path.write_bytes(payload)
+    assert load_mounted_secret_file(secret_path) == expected
+
+
+def test_crlf_secret_does_not_leave_trailing_cr_in_exported_value(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    secret_path = tmp_path / "llm_api_key"
+    secret_path.write_bytes(_LLM_SECRET_CORE + b"\r\n")
+
+    loaded = load_mounted_secret_file(secret_path)
+    assert loaded == _LLM_SECRET_CORE
+    assert b"\r" not in loaded
+
+    bash_substitution_artifact = secret_path.read_bytes().decode("latin-1").rstrip("\n")
+    assert bash_substitution_artifact.endswith("\r")
+
+    emit_mounted_secret(secret_path)
+    exported = capsys.readouterr().out
+    assert exported == _LLM_SECRET_CORE.decode("ascii")
+    assert "\r" not in exported
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        (b"", "mounted_secret_empty"),
+        (b"\n", "mounted_secret_empty"),
+        (b"\r\n", "mounted_secret_empty"),
+        (b" \n", "mounted_secret_whitespace_padding"),
+        (b"\t\n", "mounted_secret_whitespace_padding"),
+        (_LLM_SECRET_CORE + b" \n", "mounted_secret_whitespace_padding"),
+        (_LLM_SECRET_CORE + b"\t\r", "mounted_secret_whitespace_padding"),
+        (_LLM_SECRET_CORE + b"\n\n", "mounted_secret_multiple_terminators"),
+        (_LLM_SECRET_CORE + b"\r\n\n", "mounted_secret_multiple_terminators"),
+        (_LLM_SECRET_CORE + b"\r\r", "mounted_secret_multiple_terminators"),
+        (_LLM_SECRET_CORE[:10] + b"\n" + _LLM_SECRET_CORE[10:], "mounted_secret_control_byte"),
+        (_LLM_SECRET_CORE + b"\x7f", "mounted_secret_control_byte"),
+        (b"key-\xff-test", "mounted_secret_non_ascii"),
+        (b'"' + _LLM_SECRET_CORE + b'"', "mounted_secret_quote_wrapped"),
+        (b"'" + _LLM_SECRET_CORE + b"'", "mounted_secret_quote_wrapped"),
+    ],
+)
+def test_load_mounted_secret_rejects_invalid_bytes(
+    payload: bytes,
+    error: str,
+) -> None:
+    with pytest.raises(MountedSecretError, match=error):
+        load_mounted_secret_bytes(payload)
+
+
+def test_emit_mounted_secret_never_logs_secret_metadata(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    secret_path = tmp_path / "llm_api_key"
+    secret_path.write_bytes(_LLM_SECRET_CORE + b"\n")
+    emit_mounted_secret(secret_path)
+    captured = capsys.readouterr()
+    assert captured.out == _LLM_SECRET_CORE.decode("ascii")
+    assert captured.err == ""
+    assert str(len(_LLM_SECRET_CORE)) not in captured.out + captured.err
+    assert _LLM_SECRET_CORE[:4].decode("ascii") not in captured.err
+
+
+def test_launcher_mounts_secrets_without_writing_newline_terminated_files() -> None:
+    root = Path(__file__).resolve().parents[2]
+    launcher = (
+        root / "ops/internal_e2e_runner/run-confined-e2e.ps1"
+    ).read_text(encoding="utf-8")
+    assert "/run/secrets/${name}:ro" in launcher
+    assert "Set-Content" not in launcher.split("$secretFiles")[0]
+    for name in REQUIRED_SECRET_FILES:
+        assert f"${name}" not in launcher or f"/run/secrets/{name}" in launcher
+    assert "WriteAllBytes" not in launcher
+
+
+def test_powershell_write_all_bytes_writes_secret_files_without_eol(
+    tmp_path: Path,
+) -> None:
+    secret_path = tmp_path / "llm_api_key"
+    command = (
+        f'$path = "{secret_path.as_posix()}"; '
+        f'$value = "{_LLM_SECRET_CORE.decode("ascii")}"; '
+        "[System.IO.File]::WriteAllBytes($path, "
+        "[Text.Encoding]::ASCII.GetBytes($value))"
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    written = secret_path.read_bytes()
+    assert written == _LLM_SECRET_CORE
+    assert not written.endswith(b"\n")
+    assert not written.endswith(b"\r")
+    assert load_mounted_secret_file(secret_path) == _LLM_SECRET_CORE
 
 def test_entrypoint_binds_database_url_from_secret_before_python_import() -> None:
     """Legacy DATABASE_URL must mirror the attested secret before any Python import."""
