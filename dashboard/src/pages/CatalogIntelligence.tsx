@@ -65,6 +65,11 @@ export default function CatalogIntelligence() {
   const [allProducts, setAllProducts] = useState<Array<{ id: number; title: string }>>([])
   const [groupedProductIds, setGroupedProductIds] = useState<Set<number>>(new Set())
   const [bestSellerByProduct, setBestSellerByProduct] = useState<Map<number, boolean>>(new Map())
+  const tabLabels: Record<TabKey, string> = {
+    groups: t(tr => tr.pages.catalogIntelligence.tabs.groups),
+    settings: t(tr => tr.pages.catalogIntelligence.tabs.settings),
+    uncategorized: t(tr => tr.pages.catalogIntelligence.tabs.uncategorized),
+  }
 
   const selectedItems = useMemo(
     () => selectedGroup?.items ?? [],
@@ -371,7 +376,7 @@ export default function CatalogIntelligence() {
             className={tab === key ? 'btn-primary text-sm' : 'btn-secondary text-sm'}
             onClick={() => setTab(key)}
           >
-            {t(tr => tr.pages.catalogIntelligence.tabs[key])}
+            {tabLabels[key]}
           </button>
         ))}
       </div>

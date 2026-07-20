@@ -7,9 +7,9 @@ import StoreAIPausedBanner from '../ui/StoreAIPausedBanner'
 import ImpersonationBanner from '../ui/ImpersonationBanner'
 import { MobileChatFullscreenProvider, useMobileChatFullscreen } from '../../context/MobileChatFullscreenContext'
 import { useLanguage } from '../../i18n/context'
-import type { Translations } from '../../i18n/types'
 import { getApiBase, getRole, isImpersonating, isPlatformStaffRole } from '../../auth'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
+import { resolvePageMetaSelector } from '../../lib/pageMetadata'
 import { X } from 'lucide-react'
 
 // ── Countdown hook ────────────────────────────────────────────────────────────
@@ -156,46 +156,6 @@ function SupportAccessWarningBanner() {
   )
 }
 
-type MetaSelector = (tr: Translations) => { title: string; subtitle: string }
-
-const PAGE_META: Record<string, MetaSelector> = {
-  '/overview':                  tr => tr.pages.overview,
-  '/conversations':             tr => tr.pages.conversations,
-  '/orders':                    tr => tr.pages.orders,
-  '/customers':                 tr => tr.pages.customers,
-  '/coupons':                   tr => tr.pages.coupons,
-  '/promotions':                tr => tr.pages.promotions,
-  '/campaigns':                 tr => tr.pages.campaigns,
-  '/templates':                 tr => tr.pages.templates,
-  '/integrations':              tr => tr.pages.integrations,
-  '/analytics':                 tr => tr.pages.analytics,
-  '/settings':                  tr => tr.pages.settings,
-  '/smart-automations':         tr => tr.pages.smartAutomations,
-  '/billing':                   tr => tr.pages.billing,
-  '/widgets':                   tr => tr.pages.widgets,
-  '/system-status':             tr => tr.pages.systemStatus,
-  '/store-integration':         tr => tr.pages.storeIntegration,
-  '/whatsapp-connect':          tr => tr.pages.whatsappConnect,
-  '/help/whatsapp-manual-setup': tr => ({ title: tr.nav.items.manualSetup, subtitle: '' }),
-  '/knowledge-base':            tr => tr.pages.knowledgeBase,
-  '/sales-channels':            tr => tr.pages.salesChannels,
-  '/operations-center':         tr => tr.pages.operationsCenter,
-  '/ai-sales-logs':             tr => ({ title: tr.nav.items.salesAgent,   subtitle: '' }),
-  '/handoff-queue':             tr => ({ title: tr.nav.items.handoffQueue, subtitle: '' }),
-  '/admin':                     tr => tr.adminPages.dashboard,
-  '/admin/tenants':             tr => tr.adminPages.tenants,
-  '/admin/merchants':           tr => tr.adminPages.merchants,
-  '/admin/revenue':             tr => tr.adminPages.revenue,
-  '/admin/ai-usage':            tr => tr.adminPages.aiUsage,
-  '/admin/features':            tr => tr.adminPages.features,
-  '/admin/troubleshooting':     tr => tr.adminPages.troubleshooting,
-  '/admin/team':                tr => tr.adminPages.team,
-  '/admin/system':              tr => tr.adminPages.system,
-  '/admin/coexistence':         tr => tr.adminPages.coexistence,
-  '/admin/tools':               tr => tr.adminPages.tools,
-  '/admin/ai-quality':          tr => tr.adminPages.aiQuality,
-}
-
 export default function Layout() {
   return (
     <MobileChatFullscreenProvider>
@@ -211,12 +171,8 @@ function LayoutShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const metaSelector =
-    PAGE_META[pathname]
-    ?? (pathname.startsWith('/sales-channels')
-      ? (tr: Translations) => tr.pages.salesChannels
-      : pathname.startsWith('/operations-center/branches/')
-      ? (tr: Translations) => tr.pages.operationsCenter
-      : (_tr: Translations) => ({ title: 'Nahlah AI', subtitle: '' }))
+    resolvePageMetaSelector(pathname)
+    ?? (() => ({ title: 'Nahlah AI', subtitle: '' }))
   const meta = t(metaSelector)
 
   const showMerchantBanners = !(
