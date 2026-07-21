@@ -1,45 +1,242 @@
-"""Test helper — build/install valid ARCH-001 preprod signoff v2 artifacts."""
+"""Test helpers for ARCH-001 preprod signoff v2 production-class fixtures."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from scripts.operators import product_availability_preprod_synthetic_signoff_v2 as signoff_v2
+from scripts.operators import product_availability_truth_guard_shadow_observation as shadow_probe
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contract import (
+    DEPLOYMENT_APP_ROOT,
+    EVIDENCE_CLASS_PRODUCTION_SIGNOFF,
+    EXECUTION_MODE_IN_CONTAINER,
+    EXPECTED_MANIFEST_DIGEST_ENV,
+    ISOLATED_DEPLOYMENT_ID_ENV,
+    ISOLATED_SERVICE_ID_ENV,
+    ISOLATED_SERVICE_NAME_ENV,
+    LIFECYCLE_PHASES,
+    NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION,
+    NEGATIVE_CONTROL_EXPECTED_CODES,
+    NEGATIVE_CONTROL_IDS,
+    PHASE_ARTIFACT_SCHEMA_VERSION,
+    PHASE_BASELINE,
+    PHASE_CONTAINER_RESTART,
+    PHASE_FRESH_PINNED_REDEPLOY,
+    PINNED_REVISION_ENV,
+    SERVICE_ROLE_CANONICAL_CONTROL,
+    SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
     SIGNOFF_ARTIFACT_ENV,
     SIGNOFF_HMAC_KEY_ENV,
+    TEARDOWN_PROOF_SCHEMA_VERSION,
+    extract_stable_counters,
+)
+from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (
+    SHADOW_MODE_ENV,
+    SHADOW_MODE_VALUE,
 )
 
 _REPO = Path(__file__).resolve().parents[2]
-_DEFAULT_HMAC_KEY = "test-arch001-preprod-signoff-v2-hmac"
+_PROD_HMAC_KEY = "production-test-arch001-preprod-signoff-v2-key-32b"
+_BASELINE_DEPLOY = "cbe93c7b-5891-49de-8bd0-5588acad14b5"
+_REDEPLOY_DEPLOY = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+_ISOLATED_SERVICE = "nahla-arch001-shadow"
+_ISOLATED_SERVICE_ID = "22222222-2222-4222-8222-222222222222"
+_PINNED_REVISION = "a8487b25"
 
 
-def write_valid_v2_bundle(tmp_path: Path, *, hmac_key: str = _DEFAULT_HMAC_KEY) -> Path:
-    result = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=hmac_key)
-    if result.get("ok") is not True:
-        raise AssertionError(result)
-    artifact = tmp_path / "arch001-preprod-signoff-v2.json"
-    artifact.write_text(json.dumps(result["bundle"], indent=2), encoding="utf-8")
-    return artifact
+def _matrix(app_root: Path) -> dict[str, Any]:
+    import os
+
+    os.environ[SHADOW_MODE_ENV] = SHADOW_MODE_VALUE
+    try:
+        return shadow_probe.execute_synthetic_matrix_probe(app_root=app_root)
+    finally:
+        os.environ.pop(SHADOW_MODE_ENV, None)
 
 
-def install_valid_v2_artifact(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
-    hmac_key: str = _DEFAULT_HMAC_KEY,
-) -> Path:
-    artifact = write_valid_v2_bundle(tmp_path, hmac_key=hmac_key)
-    monkeypatch.setenv(SIGNOFF_ARTIFACT_ENV, str(artifact))
-    monkeypatch.setenv(SIGNOFF_HMAC_KEY_ENV, hmac_key)
-    return artifact
-
-
-def v2_env_overlay(tmp_path: Path, *, hmac_key: str = _DEFAULT_HMAC_KEY) -> dict[str, str]:
-    artifact = write_valid_v2_bundle(tmp_path, hmac_key=hmac_key)
+def _identity(*, manifest_digest: str, deployment_id: str = _REDEPLOY_DEPLOY) -> dict[str, str]:
     return {
-        SIGNOFF_ARTIFACT_ENV: str(artifact),
-        SIGNOFF_HMAC_KEY_ENV: hmac_key,
+        "pinned_target_revision": _PINNED_REVISION,
+        "manifest_digest": manifest_digest,
+        "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
+        "service_name": _ISOLATED_SERVICE,
+        "service_id": _ISOLATED_SERVICE_ID,
+        "deployment_id": deployment_id,
+        "image_digest": "absent",
+    }
+
+
+def _phase_artifact(
+    *,
+    phase: str,
+    start: datetime,
+    offset_minutes: int,
+    identity: dict[str, str],
+    matrix: dict[str, Any],
+    baseline_deployment_id: str,
+    redeploy_deployment_id: str,
+) -> dict[str, Any]:
+    executed_at = (start + timedelta(minutes=offset_minutes)).replace(microsecond=0).isoformat()
+    binding = dict(identity)
+    if phase == PHASE_BASELINE:
+        binding["deployment_id"] = baseline_deployment_id
+        attestation = {"phase": phase, "action": "initial_deploy"}
+    elif phase == PHASE_CONTAINER_RESTART:
+        binding["deployment_id"] = baseline_deployment_id
+        attestation = {
+            "phase": phase,
+            "action": "container_restart",
+            "restart_evidence": {
+                "prior_container_id": "prior-container-1",
+                "new_container_id": "new-container-1",
+                "restart_completed_at_utc": executed_at,
+            },
+        }
+    elif phase == PHASE_FRESH_PINNED_REDEPLOY:
+        binding["deployment_id"] = redeploy_deployment_id
+        attestation = {
+            "phase": phase,
+            "action": "fresh_pinned_redeploy",
+            "prior_deployment_id": baseline_deployment_id,
+            "new_deployment_id": redeploy_deployment_id,
+        }
+    else:
+        binding["deployment_id"] = redeploy_deployment_id
+        seq = int(phase.rsplit("_", 1)[-1])
+        attestation = {
+            "phase": phase,
+            "action": "repeat_matrix",
+            "sequence": seq,
+            "deployment_id": redeploy_deployment_id,
+        }
+    return {
+        "phase_artifact_schema_version": PHASE_ARTIFACT_SCHEMA_VERSION,
+        "phase": phase,
+        "execution_mode": EXECUTION_MODE_IN_CONTAINER,
+        "target_app_root": DEPLOYMENT_APP_ROOT,
+        "executed_at_utc": executed_at,
+        "identity_binding": binding,
+        "matrix": matrix,
+        "stable_counters": extract_stable_counters(matrix),
+        "lifecycle_attestation": attestation,
+        "isolated_service_constraints": {
+            "no_domains": True,
+            "no_provider_credentials": True,
+        },
+    }
+
+
+def write_production_fixture_tree(tmp_path: Path, *, app_root: Path = _REPO) -> dict[str, Any]:
+    manifest = shadow_probe.build_runtime_artifact_manifest(app_root=app_root)
+    matrix = _matrix(app_root)
+    identity = _identity(manifest_digest=manifest["manifest_digest"])
+    start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    offsets = [0, 5, 10, 30, 45, 60]
+
+    phase_dir = tmp_path / "phases"
+    phase_dir.mkdir()
+    for phase, offset in zip(LIFECYCLE_PHASES, offsets):
+        artifact = _phase_artifact(
+            phase=phase,
+            start=start,
+            offset_minutes=offset,
+            identity=identity,
+            matrix=matrix,
+            baseline_deployment_id=_BASELINE_DEPLOY,
+            redeploy_deployment_id=_REDEPLOY_DEPLOY,
+        )
+        (phase_dir / f"{phase}.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+
+    negative_dir = tmp_path / "negative_controls"
+    negative_dir.mkdir()
+    for control_id in sorted(NEGATIVE_CONTROL_IDS):
+        (negative_dir / f"{control_id}.json").write_text(
+            json.dumps(
+                {
+                    "negative_control_schema_version": NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION,
+                    "control_id": control_id,
+                    "blocked": True,
+                    "code": NEGATIVE_CONTROL_EXPECTED_CODES[control_id],
+                    "identity_binding": identity,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    teardown = {
+        "teardown_proof_schema_version": TEARDOWN_PROOF_SCHEMA_VERSION,
+        "isolated_service": {
+            "guard_mode": "off",
+            "service_state": "stopped",
+            "verified_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
+            "service_name": _ISOLATED_SERVICE,
+            "deployment_id": _REDEPLOY_DEPLOY,
+        },
+        "canonical_control": {
+            "guard_mode": "off",
+            "service_role": SERVICE_ROLE_CANONICAL_CONTROL,
+            "service_name": "nahla-saas",
+            "verified_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        },
+    }
+    teardown_path = tmp_path / "teardown.json"
+    teardown_path.write_text(json.dumps(teardown, indent=2), encoding="utf-8")
+
+    assembled = signoff_v2.assemble_bundle_from_artifacts(
+        phase_dir=phase_dir,
+        teardown_path=teardown_path,
+        negative_controls_dir=negative_dir,
+        expected_identity=identity,
+        superseded_invalid_windows=[
+            {
+                "window_id": "arch001-48h-zero-traffic-v1",
+                "reason": "superseded_by_preprod_synthetic_signoff_v2",
+                "active": False,
+                "superseded_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }
+        ],
+        hmac_key=_PROD_HMAC_KEY,
+    )
+    if assembled.get("ok") is not True:
+        raise AssertionError(assembled)
+    artifact_path = tmp_path / "arch001-preprod-signoff-v2.json"
+    artifact_path.write_text(json.dumps(assembled["bundle"], indent=2), encoding="utf-8")
+    return {
+        "artifact_path": artifact_path,
+        "identity": identity,
+        "manifest_digest": manifest["manifest_digest"],
+        "hmac_key": _PROD_HMAC_KEY,
+        "bundle": assembled["bundle"],
+    }
+
+
+def install_production_v2_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+    fixture = write_production_fixture_tree(tmp_path)
+    monkeypatch.setenv(SIGNOFF_ARTIFACT_ENV, str(fixture["artifact_path"]))
+    monkeypatch.setenv(SIGNOFF_HMAC_KEY_ENV, fixture["hmac_key"])
+    monkeypatch.setenv(PINNED_REVISION_ENV, fixture["identity"]["pinned_target_revision"])
+    monkeypatch.setenv(EXPECTED_MANIFEST_DIGEST_ENV, fixture["manifest_digest"])
+    monkeypatch.setenv(ISOLATED_SERVICE_NAME_ENV, fixture["identity"]["service_name"])
+    monkeypatch.setenv(ISOLATED_SERVICE_ID_ENV, fixture["identity"]["service_id"])
+    monkeypatch.setenv(ISOLATED_DEPLOYMENT_ID_ENV, fixture["identity"]["deployment_id"])
+    monkeypatch.setenv("NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION", fixture["identity"]["pinned_target_revision"])
+    return fixture
+
+
+def v2_env_overlay(tmp_path: Path) -> dict[str, str]:
+    fixture = write_production_fixture_tree(tmp_path)
+    return {
+        SIGNOFF_ARTIFACT_ENV: str(fixture["artifact_path"]),
+        SIGNOFF_HMAC_KEY_ENV: fixture["hmac_key"],
+        PINNED_REVISION_ENV: fixture["identity"]["pinned_target_revision"],
+        EXPECTED_MANIFEST_DIGEST_ENV: fixture["manifest_digest"],
+        ISOLATED_SERVICE_NAME_ENV: fixture["identity"]["service_name"],
+        ISOLATED_SERVICE_ID_ENV: fixture["identity"]["service_id"],
+        ISOLATED_DEPLOYMENT_ID_ENV: fixture["identity"]["deployment_id"],
     }

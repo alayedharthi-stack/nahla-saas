@@ -15,7 +15,7 @@ if str(_REPO) not in sys.path:
 from scripts.operators import (  # noqa: E402
     real_channel_conversational_acceptance as operator,
 )
-from backend.tests._arch001_signoff_v2_fixture import install_valid_v2_artifact
+from backend.tests._arch001_signoff_v2_fixture import install_production_v2_artifact
 from scripts.operators.real_channel_conversational_acceptance_contract import (  # noqa: E402
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
@@ -217,7 +217,7 @@ def test_tenant_33_blocked_without_tenant_1_pass(
 ) -> None:
     monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
     monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
-    install_valid_v2_artifact(monkeypatch, tmp_path)
+    install_production_v2_artifact(monkeypatch, tmp_path)
     monkeypatch.delenv(TENANT_1_PASS_CONFIRM_ENV, raising=False)
     result = operator.execute_scenario_plan(
         phase=PHASE_TENANT_33_LIMITED, app_root=_REPO, dry_run=False

@@ -22,7 +22,7 @@ from scripts.operators.deployment_revision_attestation_contract import (
     normalize_revision_token,
 )
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
-    load_and_verify_artifact_from_env,
+    verify_arch001_preprod_signoff_for_gate,
 )
 from scripts.operators.staging_acceptance_config_consolidation_contract import (
     APPLY_CONFIRM_ENV,
@@ -275,11 +275,7 @@ def gate_arch001_shadow_block(observation: RailwayObservation) -> dict[str, Any]
 def gate_arch001_teardown_proof(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     env = env or os.environ
     proof = (env.get(ARCH001_TEARDOWN_PROOF_ENV) or "").strip()
-    signoff = load_and_verify_artifact_from_env(
-        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
-        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
-        env=env,
-    )
+    signoff = verify_arch001_preprod_signoff_for_gate(env=env)
     if not proof:
         return _report(
             PHASE_ARCH001_TEARDOWN_PROOF,

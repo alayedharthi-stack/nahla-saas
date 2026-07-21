@@ -28,7 +28,7 @@ from scripts.operators.real_channel_conversational_acceptance import (
     gate_staging_identity,
 )
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
-    load_and_verify_artifact_from_env,
+    verify_arch001_preprod_signoff_for_gate,
 )
 from scripts.operators.real_channel_conversational_acceptance_contract import (
     ALLOWLIST_PHONES_ENV,
@@ -234,10 +234,7 @@ def _required_start_gates(tenant_id: int, app_root: Path | None) -> list[str]:
         blockers.append(CODE_ACCEPTANCE_NOT_ENABLED)
     if not env_flag_enabled(os.environ.get(EXECUTION_CONFIRM_ENV)):
         blockers.append(CODE_EXECUTION_NOT_CONFIRMED)
-    signoff = load_and_verify_artifact_from_env(
-        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
-        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
-    )
+    signoff = verify_arch001_preprod_signoff_for_gate()
     if signoff.get("ok") is not True:
         blockers.append(str(signoff.get("code") or CODE_ARCH001_SIGNOFF_MISSING))
     identity = gate_staging_identity()

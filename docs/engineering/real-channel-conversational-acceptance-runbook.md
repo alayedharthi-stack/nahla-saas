@@ -76,7 +76,12 @@ markers can never be upgraded.
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED` | Master execution gate (default off) |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM` | Human execution confirmation |
 | `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT` | Signed preprod v2 bundle path |
-| `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY` | HMAC key for v2 bundle verification |
+| `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY` | HMAC key for v2 bundle verification (min 32 bytes) |
+| `NAHLA_ARCH001_PREPROD_PINNED_REVISION` | Pinned SHA bound at verification |
+| `NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST` | Runtime manifest digest bound at verification |
+| `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME` | Isolated shadow service name |
+| `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID` | Isolated shadow service UUID |
+| `NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID` | Post-redeploy deployment UUID |
 | `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM` | **Deprecated alone** — not sufficient without v2 artifact |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` | Signed Tenant 1 PASS artifact path |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION` | Deploy revision pin |

@@ -1,35 +1,55 @@
-"""Closed contract for ARCH-001 preprod synthetic signoff v2.
-
-Replaces the zero-traffic 48h observation-window prerequisite with a
-phase/lifecycle-based synthetic matrix signoff. Organic traffic is **not**
-claimed; post-approval canonical shadow during limited allowlisted canary and
-enforce eligibility remain separate pending gates.
-"""
+"""Closed contract for ARCH-001 preprod synthetic signoff v2."""
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 INITIATIVE_ID = "ARCH-001-PREPROD-SYNTHETIC-SIGNOFF-v2"
 BUNDLE_SCHEMA_VERSION = "product_availability_preprod_synthetic_signoff_v2"
+PHASE_ARTIFACT_SCHEMA_VERSION = "arch001_preprod_phase_artifact_v1"
+NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION = "arch001_preprod_negative_control_v1"
+TEARDOWN_PROOF_SCHEMA_VERSION = "arch001_preprod_teardown_v1"
 LEGACY_V1_SCHEMA_VERSION = "product_availability_shadow_staging_signoff_v1"
 MATRIX_REPORT_SCHEMA_VERSION = "product_availability_shadow_observation_v1"
 
 TRAFFIC_CLAIM = "synthetic_probes_only"
 POST_APPROVAL_PENDING = "pending"
 
+EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST = "ci_contract_self_test"
+EVIDENCE_CLASS_PRODUCTION_SIGNOFF = "production_signoff"
+ELIGIBLE_EVIDENCE_CLASSES = frozenset(
+    {EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST, EVIDENCE_CLASS_PRODUCTION_SIGNOFF}
+)
+
 SHADOW_MODE_ENV = "NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"
 SHADOW_MODE_VALUE = "shadow"
 ENFORCE_MODE_VALUE = "enforce"
 DEPLOYMENT_APP_ROOT = "/app"
+EXECUTION_MODE_IN_CONTAINER = "in_container"
 
 SIGNOFF_ARTIFACT_ENV = "NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT"
 SIGNOFF_HMAC_KEY_ENV = "NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY"
+ISOLATED_SERVICE_NAME_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME"
+ISOLATED_SERVICE_ID_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID"
+ISOLATED_DEPLOYMENT_ID_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID"
+EXPECTED_MANIFEST_DIGEST_ENV = "NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST"
+PINNED_REVISION_ENV = "NAHLA_ARCH001_PREPROD_PINNED_REVISION"
 
-CANONICAL_SERVICE_NAME = "nahla-saas"
-CANONICAL_SERVICE_ID = "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
+SERVICE_ROLE_ISOLATED_PREPROD_SHADOW = "isolated_preprod_shadow"
+SERVICE_ROLE_CANONICAL_CONTROL = "canonical_control"
 
-# ── Lifecycle phases (6 total) ───────────────────────────────────────────────
+HMAC_DOMAIN_PREFIX = "ARCH001_PREPROD_V2\0"
+MIN_HMAC_KEY_BYTES = 32
+KNOWN_REJECTED_HMAC_KEYS = frozenset(
+    {
+        "test-hmac-key-for-ci-only",
+        "test-arch001-preprod-signoff-v2-hmac",
+        "changeme",
+        "password",
+    }
+)
+
 PHASE_BASELINE = "baseline"
 PHASE_CONTAINER_RESTART = "container_restart"
 PHASE_FRESH_PINNED_REDEPLOY = "fresh_pinned_redeploy"
@@ -50,8 +70,8 @@ PHASE_NEGATIVE_CONTROLS = "negative_controls"
 PHASE_BUNDLE = "bundle"
 PHASE_VERIFY = "verify"
 PHASE_LEGACY_V1_READ = "legacy_v1_read"
+PHASE_CONTRACT_SELF_TEST = "contract_self_test"
 
-# ── Required 7/7 synthetic case matrix ───────────────────────────────────────
 REQUIRED_CASE_IDS: frozenset[str] = frozenset(
     {
         "catalog_available_positive_claim",
@@ -64,13 +84,27 @@ REQUIRED_CASE_IDS: frozenset[str] = frozenset(
     }
 )
 
-# ── Safety invariants (zero tolerance) ───────────────────────────────────────
-MAX_ACCEPTABLE_CUSTOMER_TEXT_CHANGES = 0
-MAX_ACCEPTABLE_ADDITIONAL_LLM_CALLS = 0
-MAX_ACCEPTABLE_DUPLICATE_INVOCATIONS = 0
-MAX_ACCEPTABLE_OUTBOUND_PROVIDER_CALLS = 0
+CASE_EXPECT_WOULD_REWRITE: dict[str, bool] = {
+    "catalog_available_positive_claim": False,
+    "catalog_unavailable_negative_claim": False,
+    "irrelevant_turn_no_claim": False,
+    "kb_catalog_conflict": True,
+    "tenant_b_isolation": False,
+    "unknown_entity_positive_claim": True,
+    "variant_specific_conflict": False,
+}
 
-# ── Negative control IDs (must BLOCK) ─────────────────────────────────────────
+EXPECTED_STABLE_COUNTERS: dict[str, int] = {
+    "evaluated_turns": 7,
+    "would_rewrite_count": 2,
+    "customer_text_changed_count": 0,
+    "additional_llm_calls": 0,
+    "duplicate_invocation_count": 0,
+    "outbound_provider_calls": 0,
+}
+
+REPEAT_MATRIX_MIN_SPACING_SECONDS = 15 * 60
+
 NEGATIVE_WRONG_MANIFEST = "wrong_manifest"
 NEGATIVE_WRONG_REVISION = "wrong_revision"
 NEGATIVE_OUTSIDE_APP = "outside_app"
@@ -92,10 +126,12 @@ NEGATIVE_CONTROL_EXPECTED_CODES: dict[str, str] = {
     NEGATIVE_ENFORCE_ENABLED: "enforce_mode_enabled",
 }
 
-# ── Dependency fault taxonomy ─────────────────────────────────────────────────
 DEPENDENCY_FAULT_SKIPPED = "skipped_not_supported"
 
-# ── Failure codes ─────────────────────────────────────────────────────────────
+SERVICE_STATE_STOPPED = "stopped"
+SERVICE_STATE_DOWN = "down"
+ALLOWED_ISOLATED_SERVICE_STATES = frozenset({SERVICE_STATE_STOPPED, SERVICE_STATE_DOWN})
+
 CODE_COMMAND_INVALID = "command_invalid"
 CODE_PROBE_FAILED = "probe_failed"
 CODE_BUNDLE_INVALID = "bundle_invalid"
@@ -112,7 +148,18 @@ CODE_STABLE_COUNTERS_DRIFT = "stable_counters_drift"
 CODE_TRAFFIC_CLAIM_INVALID = "traffic_claim_invalid"
 CODE_POST_APPROVAL_NOT_PENDING = "post_approval_not_pending"
 CODE_TEARDOWN_PROOF_MISSING = "teardown_proof_missing"
+CODE_TEARDOWN_PROOF_UNVERIFIED = "teardown_proof_unverified"
 CODE_SUPERSEDED_WINDOW_ACTIVE = "superseded_window_active"
+CODE_SUPERSEDED_WINDOWS_MISSING = "superseded_windows_missing"
+CODE_EVIDENCE_CLASS_INELIGIBLE = "evidence_class_ineligible"
+CODE_HMAC_KEY_WEAK = "hmac_key_weak"
+CODE_PHASE_ARTIFACT_INVALID = "phase_artifact_invalid"
+CODE_PHASE_TIMESTAMP_ORDER_INVALID = "phase_timestamp_order_invalid"
+CODE_PHASE_DEPLOYMENT_ID_INVALID = "phase_deployment_id_invalid"
+CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID = "phase_lifecycle_attestation_invalid"
+CODE_EXPECTED_IDENTITY_MISSING = "expected_identity_missing"
+CODE_ARCH001_SIGNOFF_MISSING = "arch001_shadow_signoff_missing"
+CODE_ARTIFACT_UNREADABLE = "artifact_unreadable"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -120,31 +167,20 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 
-BUNDLE_REQUIRED_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {
-        "bundle_schema_version",
-        "initiative_id",
-        "traffic_claim",
-        "identity_binding",
-        "lifecycle_phases",
-        "negative_controls",
-        "stable_counter_reference",
-        "post_approval",
-        "superseded_invalid_windows",
-        "teardown_proof",
-        "signed_at_utc",
-    }
-)
-
 IDENTITY_BINDING_KEYS: frozenset[str] = frozenset(
     {
         "pinned_target_revision",
         "manifest_digest",
+        "service_role",
         "service_name",
         "service_id",
         "deployment_id",
         "image_digest",
     }
+)
+
+ISOLATED_SERVICE_CONSTRAINT_KEYS: frozenset[str] = frozenset(
+    {"no_domains", "no_provider_credentials"}
 )
 
 
@@ -153,7 +189,28 @@ def is_legacy_v1_bundle(payload: Mapping[str, Any]) -> bool:
     return version == LEGACY_V1_SCHEMA_VERSION
 
 
-def validate_identity_binding(binding: Mapping[str, Any]) -> list[str]:
+def is_strong_hmac_key(key: str, *, allow_fixture_keys: bool = False) -> bool:
+    if not key or len(key.encode("utf-8")) < MIN_HMAC_KEY_BYTES:
+        return False
+    if not allow_fixture_keys and key in KNOWN_REJECTED_HMAC_KEYS:
+        return False
+    return True
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def validate_identity_binding_shape(binding: Mapping[str, Any]) -> list[str]:
     blockers: list[str] = []
     if not isinstance(binding, Mapping):
         return [CODE_IDENTITY_BINDING_MISMATCH]
@@ -166,12 +223,14 @@ def validate_identity_binding(binding: Mapping[str, Any]) -> list[str]:
     digest = str(binding.get("manifest_digest") or "").strip().lower()
     if not _SHA256_RE.fullmatch(digest):
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
-    if binding.get("service_name") != CANONICAL_SERVICE_NAME:
+    role = str(binding.get("service_role") or "")
+    if role not in {SERVICE_ROLE_ISOLATED_PREPROD_SHADOW, SERVICE_ROLE_CANONICAL_CONTROL}:
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
-    if binding.get("service_id") != CANONICAL_SERVICE_ID:
+    if not str(binding.get("service_name") or "").strip():
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
-    deployment_id = str(binding.get("deployment_id") or "").strip()
-    if not _UUID_RE.fullmatch(deployment_id):
+    if not _UUID_RE.fullmatch(str(binding.get("service_id") or "").strip()):
+        blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    if not _UUID_RE.fullmatch(str(binding.get("deployment_id") or "").strip()):
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     image_digest = str(binding.get("image_digest") or "").strip().lower()
     if image_digest and image_digest != "absent" and not _SHA256_RE.fullmatch(image_digest):
@@ -179,45 +238,54 @@ def validate_identity_binding(binding: Mapping[str, Any]) -> list[str]:
     return blockers
 
 
-def validate_lifecycle_phase_row(row: Mapping[str, Any]) -> list[str]:
+def identity_binding_matches_expected(
+    binding: Mapping[str, Any],
+    expected: Mapping[str, str],
+) -> list[str]:
+    blockers = validate_identity_binding_shape(binding)
+    for key, value in expected.items():
+        if str(binding.get(key) or "") != str(value):
+            blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    return blockers
+
+
+def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
     blockers: list[str] = []
-    phase = str(row.get("phase") or "")
-    if phase not in LIFECYCLE_PHASES:
-        blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
-        return blockers
-    if row.get("ok") is not True:
-        blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
-    matrix = row.get("matrix")
-    if not isinstance(matrix, Mapping) or matrix.get("ok") is not True:
+    if matrix.get("ok") is not True:
         blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-        return blockers
     case_results = matrix.get("case_results")
     if not isinstance(case_results, list):
         blockers.append(CODE_MATRIX_CASE_MISSING)
         return blockers
-    case_ids = {str(item.get("case_id") or "") for item in case_results if isinstance(item, Mapping)}
-    if case_ids != REQUIRED_CASE_IDS:
+    by_id: dict[str, Mapping[str, Any]] = {}
+    for item in case_results:
+        if not isinstance(item, Mapping):
+            blockers.append(CODE_MATRIX_CASE_MISSING)
+            continue
+        case_id = str(item.get("case_id") or "")
+        by_id[case_id] = item
+    if set(by_id) != REQUIRED_CASE_IDS:
         blockers.append(CODE_MATRIX_CASE_MISSING)
+    for case_id, expected_rewrite in CASE_EXPECT_WOULD_REWRITE.items():
+        row = by_id.get(case_id)
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("would_rewrite") is not expected_rewrite:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+        if row.get("byte_identical") is not True:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     guards = matrix.get("guards")
     if not isinstance(guards, Mapping):
         blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-        return blockers
-    if guards.get("customer_text_changed_count", 1) != 0:
-        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-    if guards.get("additional_llm_calls", 1) != 0:
-        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-    if guards.get("duplicate_invocation_count", 1) != 0:
-        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-    if guards.get("outbound_provider_calls", 1) != 0:
-        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-    dependency_fault = row.get("dependency_fault")
-    if dependency_fault is not None:
-        if not isinstance(dependency_fault, Mapping):
-            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
-        elif dependency_fault.get("status") != DEPENDENCY_FAULT_SKIPPED:
-            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
-        elif not str(dependency_fault.get("residual_risk") or "").strip():
-            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+    else:
+        for key in (
+            "customer_text_changed_count",
+            "additional_llm_calls",
+            "duplicate_invocation_count",
+            "outbound_provider_calls",
+        ):
+            if guards.get(key, 1) != 0:
+                blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     return blockers
 
 
@@ -234,14 +302,294 @@ def extract_stable_counters(matrix: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def validate_stable_counters(counters: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if not isinstance(counters, Mapping):
+        return [CODE_STABLE_COUNTERS_DRIFT]
+    for key, expected_value in EXPECTED_STABLE_COUNTERS.items():
+        if key not in counters:
+            blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+        elif int(counters.get(key)) != expected_value:
+            blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+    return blockers
+
+
+def validate_isolated_service_constraints(constraints: Any) -> list[str]:
+    if not isinstance(constraints, Mapping):
+        return [CODE_PHASE_ARTIFACT_INVALID]
+    blockers: list[str] = []
+    if constraints.get("no_domains") is not True:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    if constraints.get("no_provider_credentials") is not True:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    return blockers
+
+
+def validate_lifecycle_attestation(
+    *,
+    phase: str,
+    attestation: Any,
+    baseline_deployment_id: str | None = None,
+    redeploy_deployment_id: str | None = None,
+) -> list[str]:
+    blockers: list[str] = []
+    if not isinstance(attestation, Mapping):
+        return [CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID]
+    if str(attestation.get("phase") or "") != phase:
+        blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+    action = str(attestation.get("action") or "")
+    if phase == PHASE_BASELINE:
+        if action != "initial_deploy":
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+    elif phase == PHASE_CONTAINER_RESTART:
+        if action != "container_restart":
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+        restart = attestation.get("restart_evidence")
+        if not isinstance(restart, Mapping):
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+        else:
+            for key in ("prior_container_id", "new_container_id", "restart_completed_at_utc"):
+                if not str(restart.get(key) or "").strip():
+                    blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+    elif phase == PHASE_FRESH_PINNED_REDEPLOY:
+        if action != "fresh_pinned_redeploy":
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+        prior = str(attestation.get("prior_deployment_id") or "")
+        new = str(attestation.get("new_deployment_id") or "")
+        if not _UUID_RE.fullmatch(prior) or not _UUID_RE.fullmatch(new):
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+        if baseline_deployment_id and prior != baseline_deployment_id:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+        if prior == new:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+        if redeploy_deployment_id and new != redeploy_deployment_id:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+    elif phase in {PHASE_REPEAT_MATRIX_1, PHASE_REPEAT_MATRIX_2, PHASE_REPEAT_MATRIX_3}:
+        if action != "repeat_matrix":
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+        seq = int(attestation.get("sequence") or 0)
+        expected = int(phase.rsplit("_", 1)[-1])
+        if seq != expected:
+            blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+        if redeploy_deployment_id and str(attestation.get("deployment_id") or "") != redeploy_deployment_id:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+    else:
+        blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+    return blockers
+
+
+def validate_phase_artifact(
+    artifact: Mapping[str, Any],
+    *,
+    expected_identity: Mapping[str, str] | None = None,
+    baseline_deployment_id: str | None = None,
+    redeploy_deployment_id: str | None = None,
+) -> list[str]:
+    blockers: list[str] = []
+    if artifact.get("phase_artifact_schema_version") != PHASE_ARTIFACT_SCHEMA_VERSION:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    phase = str(artifact.get("phase") or "")
+    if phase not in LIFECYCLE_PHASES:
+        blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
+    if artifact.get("execution_mode") != EXECUTION_MODE_IN_CONTAINER:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    if str(artifact.get("target_app_root") or "") != DEPLOYMENT_APP_ROOT:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    if _parse_utc(artifact.get("executed_at_utc")) is None:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    identity = artifact.get("identity_binding")
+    if isinstance(identity, Mapping):
+        blockers.extend(validate_identity_binding_shape(identity))
+        if expected_identity:
+            blockers.extend(identity_binding_matches_expected(identity, expected_identity))
+        if identity.get("service_role") != SERVICE_ROLE_ISOLATED_PREPROD_SHADOW:
+            blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    else:
+        blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    matrix = artifact.get("matrix")
+    if isinstance(matrix, Mapping):
+        blockers.extend(validate_matrix_payload(matrix))
+        blockers.extend(validate_stable_counters(extract_stable_counters(matrix)))
+    else:
+        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+    counters = artifact.get("stable_counters")
+    if isinstance(counters, Mapping):
+        blockers.extend(validate_stable_counters(counters))
+    blockers.extend(
+        validate_isolated_service_constraints(artifact.get("isolated_service_constraints"))
+    )
+    blockers.extend(
+        validate_lifecycle_attestation(
+            phase=phase,
+            attestation=artifact.get("lifecycle_attestation"),
+            baseline_deployment_id=baseline_deployment_id,
+            redeploy_deployment_id=redeploy_deployment_id,
+        )
+    )
+    dependency_fault = artifact.get("dependency_fault")
+    if dependency_fault is not None:
+        if not isinstance(dependency_fault, Mapping):
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+        elif dependency_fault.get("status") != DEPENDENCY_FAULT_SKIPPED:
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+        elif not str(dependency_fault.get("residual_risk") or "").strip():
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+    return blockers
+
+
+def validate_phase_timestamp_order(phases: list[Mapping[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    timestamps: list[datetime] = []
+    for row in phases:
+        ts = _parse_utc(row.get("executed_at_utc"))
+        if ts is None:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+            continue
+        timestamps.append(ts)
+    for left, right in zip(timestamps, timestamps[1:]):
+        if right <= left:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+    repeat_rows = [
+        row for row in phases if str(row.get("phase") or "").startswith("repeat_matrix_")
+    ]
+    for left, right in zip(repeat_rows, repeat_rows[1:]):
+        lts = _parse_utc(left.get("executed_at_utc"))
+        rts = _parse_utc(right.get("executed_at_utc"))
+        if lts is None or rts is None:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+            continue
+        if (rts - lts).total_seconds() < REPEAT_MATRIX_MIN_SPACING_SECONDS:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+    return blockers
+
+
+def validate_negative_control_artifact(
+    artifact: Mapping[str, Any],
+    *,
+    expected_identity: Mapping[str, str],
+) -> list[str]:
+    blockers: list[str] = []
+    if artifact.get("negative_control_schema_version") != NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION:
+        blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
+    control_id = str(artifact.get("control_id") or "")
+    if control_id not in NEGATIVE_CONTROL_IDS:
+        blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
+    identity = artifact.get("identity_binding")
+    if isinstance(identity, Mapping):
+        blockers.extend(identity_binding_matches_expected(identity, expected_identity))
+    else:
+        blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    expected_code = NEGATIVE_CONTROL_EXPECTED_CODES.get(control_id)
+    if artifact.get("blocked") is not True or artifact.get("code") != expected_code:
+        blockers.append(CODE_NEGATIVE_CONTROL_UNEXPECTED_PASS)
+    return blockers
+
+
+def validate_teardown_proof(proof: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if proof.get("teardown_proof_schema_version") != TEARDOWN_PROOF_SCHEMA_VERSION:
+        blockers.append(CODE_TEARDOWN_PROOF_MISSING)
+    isolated = proof.get("isolated_service")
+    canonical = proof.get("canonical_control")
+    if not isinstance(isolated, Mapping) or not isinstance(canonical, Mapping):
+        blockers.append(CODE_TEARDOWN_PROOF_MISSING)
+        return blockers
+    if isolated.get("guard_mode") != "off":
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if canonical.get("guard_mode") != "off":
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if isolated.get("service_state") not in ALLOWED_ISOLATED_SERVICE_STATES:
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if _parse_utc(isolated.get("verified_at_utc")) is None:
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if _parse_utc(canonical.get("verified_at_utc")) is None:
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if isolated.get("service_role") != SERVICE_ROLE_ISOLATED_PREPROD_SHADOW:
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if canonical.get("service_role") != SERVICE_ROLE_CANONICAL_CONTROL:
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not str(isolated.get("service_name") or "").strip():
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not str(canonical.get("service_name") or "").strip():
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not _UUID_RE.fullmatch(str(isolated.get("deployment_id") or "").strip()):
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    return blockers
+
+
+def validate_superseded_windows(rows: Any) -> list[str]:
+    if not isinstance(rows, list) or not rows:
+        return [CODE_SUPERSEDED_WINDOWS_MISSING]
+    blockers: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
+            continue
+        if not str(row.get("window_id") or "").strip():
+            blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
+        if not str(row.get("reason") or "").strip():
+            blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
+        if _parse_utc(row.get("superseded_at_utc")) is None:
+            blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
+        if row.get("active") is True:
+            blockers.append(CODE_SUPERSEDED_WINDOW_ACTIVE)
+    return blockers
+
+
+def validate_lifecycle_phase_row(row: Mapping[str, Any]) -> list[str]:
+    """Accumulate all lifecycle phase blockers without early return."""
+    blockers: list[str] = []
+    phase = str(row.get("phase") or "")
+    if phase not in LIFECYCLE_PHASES:
+        blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
+    if row.get("ok") is not True:
+        blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+    matrix = row.get("matrix")
+    if not isinstance(matrix, Mapping):
+        blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+    else:
+        blockers.extend(validate_matrix_payload(matrix))
+        blockers.extend(validate_stable_counters(extract_stable_counters(matrix)))
+    counters = row.get("stable_counters")
+    if isinstance(counters, Mapping):
+        blockers.extend(validate_stable_counters(counters))
+    else:
+        blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+    if row.get("execution_mode") != EXECUTION_MODE_IN_CONTAINER:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    if str(row.get("target_app_root") or "") != DEPLOYMENT_APP_ROOT:
+        blockers.append(CODE_PHASE_ARTIFACT_INVALID)
+    identity = row.get("identity_binding")
+    if isinstance(identity, Mapping):
+        blockers.extend(validate_identity_binding_shape(identity))
+    else:
+        blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    blockers.extend(
+        validate_isolated_service_constraints(row.get("isolated_service_constraints"))
+    )
+    dependency_fault = row.get("dependency_fault")
+    if dependency_fault is not None:
+        if not isinstance(dependency_fault, Mapping):
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+        elif dependency_fault.get("status") != DEPENDENCY_FAULT_SKIPPED:
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+        elif not str(dependency_fault.get("residual_risk") or "").strip():
+            blockers.append(CODE_LIFECYCLE_PHASE_FAILED)
+    return blockers
+
+
 __all__ = [
-    "BUNDLE_REQUIRED_TOP_LEVEL_KEYS",
+    "ALLOWED_ISOLATED_SERVICE_STATES",
     "BUNDLE_SCHEMA_VERSION",
-    "CANONICAL_SERVICE_ID",
-    "CANONICAL_SERVICE_NAME",
+    "CASE_EXPECT_WOULD_REWRITE",
+    "CODE_ARCH001_SIGNOFF_MISSING",
+    "CODE_ARTIFACT_UNREADABLE",
     "CODE_BUNDLE_INVALID",
     "CODE_BUNDLE_SIGNATURE_INVALID",
     "CODE_COMMAND_INVALID",
+    "CODE_EVIDENCE_CLASS_INELIGIBLE",
+    "CODE_EXPECTED_IDENTITY_MISSING",
+    "CODE_HMAC_KEY_WEAK",
     "CODE_IDENTITY_BINDING_MISMATCH",
     "CODE_LEGACY_V1_NOT_SUFFICIENT",
     "CODE_LIFECYCLE_PHASE_FAILED",
@@ -250,33 +598,47 @@ __all__ = [
     "CODE_MATRIX_INVARIANT_VIOLATION",
     "CODE_NEGATIVE_CONTROL_MISSING",
     "CODE_NEGATIVE_CONTROL_UNEXPECTED_PASS",
+    "CODE_PHASE_ARTIFACT_INVALID",
+    "CODE_PHASE_DEPLOYMENT_ID_INVALID",
+    "CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID",
+    "CODE_PHASE_TIMESTAMP_ORDER_INVALID",
     "CODE_POST_APPROVAL_NOT_PENDING",
     "CODE_PROBE_FAILED",
     "CODE_STABLE_COUNTERS_DRIFT",
     "CODE_SUPERSEDED_WINDOW_ACTIVE",
+    "CODE_SUPERSEDED_WINDOWS_MISSING",
     "CODE_TEARDOWN_PROOF_MISSING",
+    "CODE_TEARDOWN_PROOF_UNVERIFIED",
     "CODE_TRAFFIC_CLAIM_INVALID",
     "DEPENDENCY_FAULT_SKIPPED",
     "DEPLOYMENT_APP_ROOT",
+    "ELIGIBLE_EVIDENCE_CLASSES",
     "ENFORCE_MODE_VALUE",
+    "EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST",
+    "EVIDENCE_CLASS_PRODUCTION_SIGNOFF",
+    "EXECUTION_MODE_IN_CONTAINER",
+    "EXPECTED_MANIFEST_DIGEST_ENV",
+    "EXPECTED_STABLE_COUNTERS",
+    "HMAC_DOMAIN_PREFIX",
     "IDENTITY_BINDING_KEYS",
     "INITIATIVE_ID",
+    "ISOLATED_DEPLOYMENT_ID_ENV",
+    "ISOLATED_SERVICE_CONSTRAINT_KEYS",
+    "ISOLATED_SERVICE_ID_ENV",
+    "ISOLATED_SERVICE_NAME_ENV",
+    "KNOWN_REJECTED_HMAC_KEYS",
     "LEGACY_V1_SCHEMA_VERSION",
     "LIFECYCLE_PHASES",
     "MATRIX_REPORT_SCHEMA_VERSION",
-    "MAX_ACCEPTABLE_ADDITIONAL_LLM_CALLS",
-    "MAX_ACCEPTABLE_CUSTOMER_TEXT_CHANGES",
-    "MAX_ACCEPTABLE_DUPLICATE_INVOCATIONS",
-    "MAX_ACCEPTABLE_OUTBOUND_PROVIDER_CALLS",
+    "MIN_HMAC_KEY_BYTES",
+    "NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION",
     "NEGATIVE_CONTROL_EXPECTED_CODES",
     "NEGATIVE_CONTROL_IDS",
-    "NEGATIVE_ENFORCE_ENABLED",
-    "NEGATIVE_OUTSIDE_APP",
-    "NEGATIVE_WRONG_MANIFEST",
-    "NEGATIVE_WRONG_REVISION",
+    "PHASE_ARTIFACT_SCHEMA_VERSION",
     "PHASE_BASELINE",
     "PHASE_BUNDLE",
     "PHASE_CONTAINER_RESTART",
+    "PHASE_CONTRACT_SELF_TEST",
     "PHASE_FRESH_PINNED_REDEPLOY",
     "PHASE_LEGACY_V1_READ",
     "PHASE_NEGATIVE_CONTROLS",
@@ -284,15 +646,30 @@ __all__ = [
     "PHASE_REPEAT_MATRIX_2",
     "PHASE_REPEAT_MATRIX_3",
     "PHASE_VERIFY",
+    "PINNED_REVISION_ENV",
     "POST_APPROVAL_PENDING",
+    "REPEAT_MATRIX_MIN_SPACING_SECONDS",
     "REQUIRED_CASE_IDS",
+    "SERVICE_ROLE_CANONICAL_CONTROL",
+    "SERVICE_ROLE_ISOLATED_PREPROD_SHADOW",
     "SHADOW_MODE_ENV",
     "SHADOW_MODE_VALUE",
     "SIGNOFF_ARTIFACT_ENV",
     "SIGNOFF_HMAC_KEY_ENV",
+    "TEARDOWN_PROOF_SCHEMA_VERSION",
     "TRAFFIC_CLAIM",
     "extract_stable_counters",
+    "identity_binding_matches_expected",
     "is_legacy_v1_bundle",
-    "validate_identity_binding",
+    "is_strong_hmac_key",
+    "validate_identity_binding_shape",
+    "validate_lifecycle_attestation",
     "validate_lifecycle_phase_row",
+    "validate_matrix_payload",
+    "validate_negative_control_artifact",
+    "validate_phase_artifact",
+    "validate_phase_timestamp_order",
+    "validate_stable_counters",
+    "validate_superseded_windows",
+    "validate_teardown_proof",
 ]

@@ -1,9 +1,11 @@
 """Regression tests for ARCH-001 preprod synthetic signoff v2 operator/gates."""
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,167 +14,267 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from backend.tests._arch001_signoff_v2_fixture import (  # noqa: E402
+    _PROD_HMAC_KEY,
+    _REDEPLOY_DEPLOY,
+    install_production_v2_artifact,
+    write_production_fixture_tree,
+)
 from scripts.operators import (  # noqa: E402
     product_availability_preprod_synthetic_signoff_v2 as signoff_v2,
 )
 from scripts.operators import real_channel_conversational_acceptance as rca_operator
+from scripts.operators import staging_acceptance_config_consolidation as consolidation
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contract import (  # noqa: E402
     BUNDLE_SCHEMA_VERSION,
+    CODE_ARTIFACT_UNREADABLE,
     CODE_BUNDLE_SIGNATURE_INVALID,
+    CODE_EVIDENCE_CLASS_INELIGIBLE,
+    CODE_EXPECTED_IDENTITY_MISSING,
+    CODE_HMAC_KEY_WEAK,
     CODE_IDENTITY_BINDING_MISMATCH,
     CODE_LEGACY_V1_NOT_SUFFICIENT,
+    CODE_LIFECYCLE_PHASE_FAILED,
     CODE_LIFECYCLE_PHASE_MISSING,
+    CODE_MATRIX_CASE_MISSING,
+    CODE_MATRIX_INVARIANT_VIOLATION,
+    CODE_PHASE_DEPLOYMENT_ID_INVALID,
+    CODE_PHASE_TIMESTAMP_ORDER_INVALID,
     CODE_STABLE_COUNTERS_DRIFT,
+    CODE_TEARDOWN_PROOF_UNVERIFIED,
+    EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST,
+    EVIDENCE_CLASS_PRODUCTION_SIGNOFF,
+    EXPECTED_MANIFEST_DIGEST_ENV,
+    EXPECTED_STABLE_COUNTERS,
     INITIATIVE_ID,
+    ISOLATED_DEPLOYMENT_ID_ENV,
+    ISOLATED_SERVICE_ID_ENV,
+    ISOLATED_SERVICE_NAME_ENV,
     LIFECYCLE_PHASES,
-    NEGATIVE_CONTROL_EXPECTED_CODES,
     PHASE_BASELINE,
-    PHASE_NEGATIVE_CONTROLS,
-    REQUIRED_CASE_IDS,
+    PINNED_REVISION_ENV,
     SIGNOFF_ARTIFACT_ENV,
     SIGNOFF_HMAC_KEY_ENV,
     TRAFFIC_CLAIM,
+    validate_lifecycle_phase_row,
+    validate_phase_artifact,
+    validate_stable_counters,
 )
-from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (  # noqa: E402
-    SHADOW_MODE_ENV,
-)
-
-_HMAC_KEY = "test-arch001-preprod-signoff-v2-hmac"
-_DEPLOYMENT_ID = "cbe93c7b-5891-49de-8bd0-5588acad14b5"
 
 
-def _write_valid_bundle(tmp_path: Path, *, hmac_key: str = _HMAC_KEY) -> Path:
-    result = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=hmac_key)
-    assert result["ok"] is True, result
-    artifact = tmp_path / "arch001-preprod-signoff-v2.json"
-    artifact.write_text(json.dumps(result["bundle"], indent=2), encoding="utf-8")
-    return artifact
+def test_validate_lifecycle_phase_row_accumulates_all_blockers() -> None:
+    row = {
+        "phase": PHASE_BASELINE,
+        "ok": False,
+        "execution_mode": "external_runner",
+        "target_app_root": "/tmp",
+        "matrix": {"ok": False, "case_results": [], "guards": {}},
+        "stable_counters": {"evaluated_turns": 0},
+        "identity_binding": {},
+        "isolated_service_constraints": {"no_domains": False, "no_provider_credentials": False},
+        "dependency_fault": {"status": "broken"},
+    }
+    blockers = validate_lifecycle_phase_row(row)
+    assert CODE_LIFECYCLE_PHASE_FAILED in blockers
+    assert CODE_MATRIX_INVARIANT_VIOLATION in blockers
+    assert CODE_STABLE_COUNTERS_DRIFT in blockers
+    assert CODE_IDENTITY_BINDING_MISMATCH in blockers
 
 
-def _install_valid_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    artifact = _write_valid_bundle(tmp_path)
-    monkeypatch.setenv(SIGNOFF_ARTIFACT_ENV, str(artifact))
-    monkeypatch.setenv(SIGNOFF_HMAC_KEY_ENV, _HMAC_KEY)
-    return artifact
+def test_validate_phase_artifact_requires_runtime_binding(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    artifact = json.loads((tmp_path / "phases" / f"{PHASE_BASELINE}.json").read_text(encoding="utf-8"))
+    artifact["execution_mode"] = "external_runner"
+    blockers = validate_phase_artifact(artifact, expected_identity=fixture["identity"])
+    assert CODE_MATRIX_INVARIANT_VIOLATION in blockers or "phase_artifact_invalid" in blockers
 
 
-def test_lifecycle_phase_runs_seven_case_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(SHADOW_MODE_ENV, "shadow")
-    result = signoff_v2.execute_lifecycle_matrix_phase(phase=PHASE_BASELINE, app_root=_REPO)
+def test_contract_self_test_produces_ineligible_bundle() -> None:
+    result = signoff_v2.execute_contract_self_test(app_root=_REPO)
     assert result["ok"] is True
-    case_ids = {row["case_id"] for row in result["matrix"]["case_results"]}
-    assert case_ids == REQUIRED_CASE_IDS
-    assert result["matrix"]["guards"]["customer_text_changed_count"] == 0
-    assert result["matrix"]["guards"]["additional_llm_calls"] == 0
-    assert result["matrix"]["guards"]["outbound_provider_calls"] == 0
-    assert result["matrix"]["guards"]["duplicate_invocation_count"] == 0
-
-
-def test_full_probe_includes_all_lifecycle_phases_and_signature(tmp_path: Path) -> None:
-    result = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=_HMAC_KEY)
-    assert result["ok"] is True
-    assert result["traffic_claim"] == TRAFFIC_CLAIM
-    assert result["post_approval_shadow_canary"] == "pending"
-    assert result["enforce_eligibility"] == "pending"
     bundle = result["bundle"]
-    assert bundle["bundle_schema_version"] == BUNDLE_SCHEMA_VERSION
-    assert bundle["initiative_id"] == INITIATIVE_ID
-    assert bundle["traffic_claim"] == TRAFFIC_CLAIM
-    assert bundle["signature"].startswith("hmac-sha256:")
-    phases = [row["phase"] for row in bundle["lifecycle_phases"]]
-    assert phases == list(LIFECYCLE_PHASES)
-    verify = signoff_v2.verify_preprod_signoff_v2_bundle(bundle, hmac_key=_HMAC_KEY)
+    assert bundle["evidence_class"] == EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST
+    assert bundle["eligible_for_signoff"] is False
+    gate_reject = result["gate_reject"]
+    assert gate_reject["ok"] is False
+    assert CODE_EVIDENCE_CLASS_INELIGIBLE in gate_reject["blockers"]
+
+
+def test_production_bundle_assembly_and_verification(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = fixture["bundle"]
+    assert bundle["evidence_class"] == EVIDENCE_CLASS_PRODUCTION_SIGNOFF
+    assert bundle["eligible_for_signoff"] is True
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        bundle,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        require_production_class=True,
+    )
     assert verify["ok"] is True
 
 
-def test_missing_lifecycle_phase_fails_closed(tmp_path: Path) -> None:
-    bundle = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=_HMAC_KEY)["bundle"]
-    bundle["lifecycle_phases"] = bundle["lifecycle_phases"][:-1]
-    bundle = signoff_v2.sign_bundle(bundle, hmac_key=_HMAC_KEY)
-    verify = signoff_v2.verify_preprod_signoff_v2_bundle(bundle, hmac_key=_HMAC_KEY)
-    assert verify["ok"] is False
-    assert CODE_LIFECYCLE_PHASE_MISSING in verify["blockers"]
-
-
-def test_signature_tamper_fails_closed(tmp_path: Path) -> None:
-    bundle = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=_HMAC_KEY)["bundle"]
-    bundle["traffic_claim"] = "organic_traffic_observed"
-    verify = signoff_v2.verify_preprod_signoff_v2_bundle(bundle, hmac_key=_HMAC_KEY)
-    assert verify["ok"] is False
-    assert CODE_BUNDLE_SIGNATURE_INVALID in verify["blockers"]
-
-
-def test_identity_binding_mismatch_fails_closed(tmp_path: Path) -> None:
-    bundle = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=_HMAC_KEY)["bundle"]
-    bundle["identity_binding"]["deployment_id"] = "00000000-0000-4000-8000-000000000000"
-    bundle = signoff_v2.sign_bundle(bundle, hmac_key=_HMAC_KEY)
+def test_absolute_stable_counters_enforced(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    bundle["lifecycle_phases"][0]["stable_counters"]["would_rewrite_count"] = 99
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
     verify = signoff_v2.verify_preprod_signoff_v2_bundle(
-        bundle,
-        hmac_key=_HMAC_KEY,
-        expected_identity={"deployment_id": _DEPLOYMENT_ID},
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
     )
-    assert verify["ok"] is False
-    assert CODE_IDENTITY_BINDING_MISMATCH in verify["blockers"]
-
-
-def test_stable_counter_drift_fails_closed(tmp_path: Path) -> None:
-    bundle = signoff_v2.execute_full_probe(app_root=_REPO, hmac_key=_HMAC_KEY)["bundle"]
-    bundle["lifecycle_phases"][1]["stable_counters"]["would_rewrite_count"] = 999
-    bundle = signoff_v2.sign_bundle(bundle, hmac_key=_HMAC_KEY)
-    verify = signoff_v2.verify_preprod_signoff_v2_bundle(bundle, hmac_key=_HMAC_KEY)
     assert verify["ok"] is False
     assert CODE_STABLE_COUNTERS_DRIFT in verify["blockers"]
 
 
-def test_negative_controls_block_expected_codes() -> None:
-    result = signoff_v2.execute_negative_controls(app_root=_REPO)
-    assert result["ok"] is True
-    by_id = {row["control_id"]: row for row in result["controls"]}
-    for control_id, expected in NEGATIVE_CONTROL_EXPECTED_CODES.items():
-        assert by_id[control_id]["blocked"] is True
-        assert by_id[control_id]["code"] == expected
+def test_missing_matrix_case_blocks(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    bundle["lifecycle_phases"][0]["matrix"]["case_results"] = bundle["lifecycle_phases"][0]["matrix"]["case_results"][:-1]
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+    )
+    assert CODE_MATRIX_CASE_MISSING in verify["blockers"]
 
 
-def test_legacy_v1_readable_but_not_sufficient(tmp_path: Path) -> None:
+def test_fresh_redeploy_requires_new_deployment_id(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == "fresh_pinned_redeploy":
+            row["lifecycle_attestation"]["new_deployment_id"] = row["lifecycle_attestation"]["prior_deployment_id"]
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+    )
+    assert CODE_PHASE_DEPLOYMENT_ID_INVALID in verify["blockers"]
+
+
+def test_repeat_matrix_spacing_enforced(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    repeat = [row for row in bundle["lifecycle_phases"] if str(row.get("phase", "")).startswith("repeat_matrix_")]
+    repeat[1]["executed_at_utc"] = repeat[0]["executed_at_utc"]
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+    )
+    assert CODE_PHASE_TIMESTAMP_ORDER_INVALID in verify["blockers"]
+
+
+def test_weak_hmac_key_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    with pytest.raises(ValueError, match=CODE_HMAC_KEY_WEAK):
+        signoff_v2.sign_bundle(fixture["bundle"], hmac_key="short")
+
+
+def test_stale_revision_rejected_by_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fixture = install_production_v2_artifact(monkeypatch, tmp_path)
+    monkeypatch.setenv(PINNED_REVISION_ENV, "deadbeef")
+    result = signoff_v2.verify_arch001_preprod_signoff_for_gate()
+    assert result["ok"] is False
+    assert CODE_IDENTITY_BINDING_MISMATCH in result["blockers"]
+
+
+def test_wrong_service_role_rejected_by_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fixture = install_production_v2_artifact(monkeypatch, tmp_path)
+    monkeypatch.setenv(ISOLATED_SERVICE_NAME_ENV, "nahla-saas")
+    result = signoff_v2.verify_arch001_preprod_signoff_for_gate()
+    assert result["ok"] is False
+
+
+def test_missing_expected_identity_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    monkeypatch.setenv(SIGNOFF_ARTIFACT_ENV, str(fixture["artifact_path"]))
+    monkeypatch.setenv(SIGNOFF_HMAC_KEY_ENV, fixture["hmac_key"])
+    monkeypatch.delenv(EXPECTED_MANIFEST_DIGEST_ENV, raising=False)
+    result = signoff_v2.verify_arch001_preprod_signoff_for_gate()
+    assert result["ok"] is False
+    assert CODE_EXPECTED_IDENTITY_MISSING in result["code"] or "manifest_digest_missing" in result["blockers"]
+
+
+def test_malformed_json_fail_closed(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not-json", encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv(SIGNOFF_ARTIFACT_ENV, str(bad))
+    monkeypatch.setenv(SIGNOFF_HMAC_KEY_ENV, _PROD_HMAC_KEY)
+    monkeypatch.setenv(PINNED_REVISION_ENV, "a8487b25")
+    monkeypatch.setenv(EXPECTED_MANIFEST_DIGEST_ENV, "0" * 64)
+    monkeypatch.setenv(ISOLATED_SERVICE_NAME_ENV, "nahla-arch001-shadow")
+    monkeypatch.setenv(ISOLATED_SERVICE_ID_ENV, "22222222-2222-4222-8222-222222222222")
+    monkeypatch.setenv(ISOLATED_DEPLOYMENT_ID_ENV, _REDEPLOY_DEPLOY)
+    result = signoff_v2.verify_arch001_preprod_signoff_for_gate()
+    monkeypatch.undo()
+    assert result["ok"] is False
+    assert CODE_ARTIFACT_UNREADABLE in result["blockers"]
+
+
+def test_real_channel_gate_binds_identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    install_production_v2_artifact(monkeypatch, tmp_path)
+    assert rca_operator.gate_arch001_shadow_signoff()["ok"] is True
+    monkeypatch.setenv(ISOLATED_DEPLOYMENT_ID_ENV, "00000000-0000-4000-8000-000000000000")
+    assert rca_operator.gate_arch001_shadow_signoff()["ok"] is False
+
+
+def test_staging_teardown_gate_binds_identity(tmp_path: Path) -> None:
+    env = write_production_fixture_tree(tmp_path)
+    env_map = {
+        SIGNOFF_ARTIFACT_ENV: str(env["artifact_path"]),
+        SIGNOFF_HMAC_KEY_ENV: env["hmac_key"],
+        PINNED_REVISION_ENV: env["identity"]["pinned_target_revision"],
+        EXPECTED_MANIFEST_DIGEST_ENV: env["manifest_digest"],
+        ISOLATED_SERVICE_NAME_ENV: env["identity"]["service_name"],
+        ISOLATED_SERVICE_ID_ENV: env["identity"]["service_id"],
+        ISOLATED_DEPLOYMENT_ID_ENV: env["identity"]["deployment_id"],
+        "NAHLA_ARCH001_SHADOW_TEARDOWN_PROOF": "teardown-ref",
+    }
+    assert consolidation.gate_arch001_teardown_proof(env=env_map)["ok"] is True
+    env_map[ISOLATED_SERVICE_ID_ENV] = "00000000-0000-4000-8000-000000000000"
+    assert consolidation.gate_arch001_teardown_proof(env=env_map)["ok"] is False
+
+
+def test_teardown_placeholder_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    bundle["teardown_proof"]["isolated_service"]["verified_at_utc"] = None
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+    )
+    assert CODE_TEARDOWN_PROOF_UNVERIFIED in verify["blockers"]
+
+
+def test_legacy_v1_readable_but_ineligible(tmp_path: Path) -> None:
     legacy = _REPO / "docs/engineering/staging-evidence/product-availability-shadow-baseline-2026-07-18.json"
     if not legacy.is_file():
-        pytest.skip("legacy v1 fixture not present in workspace")
-    read = signoff_v2.read_legacy_v1_bundle(legacy)
-    assert read["ok"] is True
-    assert read["sufficient_for_preprod"] is False
+        pytest.skip("legacy v1 fixture not present")
+    assert signoff_v2.read_legacy_v1_bundle(legacy)["sufficient_for_preprod"] is False
     payload = json.loads(legacy.read_text(encoding="utf-8"))
-    verify = signoff_v2.verify_preprod_signoff_v2_bundle(payload, hmac_key=_HMAC_KEY)
-    assert verify["ok"] is False
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(payload, hmac_key=_PROD_HMAC_KEY)
     assert CODE_LEGACY_V1_NOT_SUFFICIENT in verify["blockers"]
 
 
-def test_real_channel_gate_requires_v2_artifact(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.delenv(SIGNOFF_ARTIFACT_ENV, raising=False)
-    result = rca_operator.gate_arch001_shadow_signoff()
-    assert result["ok"] is False
-    assert result["code"] is not None
-
-    _install_valid_artifact(monkeypatch, tmp_path)
-    result = rca_operator.gate_arch001_shadow_signoff()
-    assert result["ok"] is True
-    assert result["arch001_preprod_signoff_v2_valid"] is True
+def test_expected_stable_counter_constants_match_matrix(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    counters = fixture["bundle"]["lifecycle_phases"][0]["stable_counters"]
+    assert validate_stable_counters(counters) == []
+    assert counters == EXPECTED_STABLE_COUNTERS
 
 
-def test_env_only_signoff_flag_not_sufficient(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM", "true")
-    monkeypatch.delenv(SIGNOFF_ARTIFACT_ENV, raising=False)
-    result = rca_operator.gate_arch001_shadow_signoff()
-    assert result["ok"] is False
-
-
-def test_cli_full_probe_exit_zero() -> None:
+def test_cli_contract_self_test_exit_zero() -> None:
     proc = subprocess.run(
-        [sys.executable, "-m", "scripts.operators.product_availability_preprod_synthetic_signoff_v2", "full-probe"],
+        [sys.executable, "-m", "scripts.operators.product_availability_preprod_synthetic_signoff_v2", "contract-self-test"],
         cwd=_REPO,
         capture_output=True,
         text=True,
@@ -180,4 +282,16 @@ def test_cli_full_probe_exit_zero() -> None:
     )
     assert proc.returncode == 0
     payload = json.loads(proc.stdout.strip())
-    assert payload["ok"] is True
+    assert payload["evidence_class"] == EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST
+
+
+def test_signature_tamper_fails_closed(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path)
+    bundle = copy.deepcopy(fixture["bundle"])
+    bundle["traffic_claim"] = "organic_traffic_observed"
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        bundle,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+    )
+    assert CODE_BUNDLE_SIGNATURE_INVALID in verify["blockers"]

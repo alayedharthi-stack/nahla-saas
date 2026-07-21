@@ -72,7 +72,7 @@ Names only — **never log values**.
 |------|---------|-------------|
 | Master enable | `NAHLA_STAGING_ACCEPTANCE_CONFIG_CONSOLIDATION_ENABLED` | Unset or not truthy (default-off) |
 | Apply confirm | `NAHLA_STAGING_ACCEPTANCE_CONFIG_CONSOLIDATION_CONFIRM` | Exact token `consolidate-staging-acceptance-config` |
-| ARCH-001 preprod signoff | `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT` + HMAC key | Valid v2 signed bundle |
+| ARCH-001 preprod signoff | `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT` + HMAC key + identity binding env | Valid v2 production bundle bound to current revision/manifest/isolated service |
 | ARCH-001 teardown proof | `NAHLA_ARCH001_SHADOW_TEARDOWN_PROOF` | Reference to approved teardown evidence artifact |
 | Snapshot encryption | `NAHLA_STAGING_ACCEPTANCE_CONFIG_SNAPSHOT_KEY` | Operator-held key for reversible snapshot |
 | Revision pin | `NAHLA_STAGING_ACCEPTANCE_CONFIG_PINNED_REVISION` | Git SHA for post-apply attestation |

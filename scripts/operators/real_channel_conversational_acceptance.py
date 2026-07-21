@@ -20,13 +20,12 @@ from scripts.operators.deployment_revision_attestation_contract import (
     normalize_revision_token,
 )
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
-    load_and_verify_artifact_from_env,
+    verify_arch001_preprod_signoff_for_gate,
 )
 from scripts.operators.real_channel_conversational_acceptance_contract import (
     ALLOWLIST_PHONES_ENV,
     ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
     ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
-    ARCH001_SHADOW_SIGNOFF_ENV,
     CHANNEL_PREFLIGHT_ENV_NAMES,
     CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_ARCH001_SIGNOFF_MISSING,
@@ -157,10 +156,7 @@ def gate_staging_identity(env: Mapping[str, str] | None = None) -> dict[str, Any
 
 
 def gate_arch001_shadow_signoff() -> dict[str, Any]:
-    verified = load_and_verify_artifact_from_env(
-        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
-        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
-    )
+    verified = verify_arch001_preprod_signoff_for_gate()
     ok = verified.get("ok") is True
     return _report(
         PHASE_ARCH001_SHADOW_SIGNOFF_GATE,
@@ -169,8 +165,8 @@ def gate_arch001_shadow_signoff() -> dict[str, Any]:
         arch001_preprod_signoff_v2_valid=ok,
         blockers=verified.get("blockers") or [],
         note=(
-            "Requires HMAC-signed product_availability_preprod_synthetic_signoff_v2 artifact; "
-            "legacy v1 / env-only signoff is not sufficient"
+            "Requires HMAC-signed production product_availability_preprod_synthetic_signoff_v2 "
+            "artifact bound to current pinned revision, manifest digest, and isolated service identity"
         ),
     )
 
@@ -318,10 +314,7 @@ def _execution_gates(*, phase: str, tenant_id: int) -> dict[str, Any] | None:
         return _report(PHASE_SUMMARY, ok=False, code=CODE_ACCEPTANCE_NOT_ENABLED)
     if not env_flag_enabled(os.environ.get(EXECUTION_CONFIRM_ENV)):
         return _report(PHASE_SUMMARY, ok=False, code=CODE_EXECUTION_NOT_CONFIRMED)
-    signoff = load_and_verify_artifact_from_env(
-        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
-        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
-    )
+    signoff = verify_arch001_preprod_signoff_for_gate()
     if signoff.get("ok") is not True:
         return _report(
             PHASE_SUMMARY,

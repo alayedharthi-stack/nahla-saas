@@ -12,7 +12,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from backend.tests._arch001_signoff_v2_fixture import install_valid_v2_artifact
+from backend.tests._arch001_signoff_v2_fixture import install_production_v2_artifact
 from scripts.operators.real_channel_acceptance_session import (  # noqa: E402
     classify_inbound_candidate,
     complete_scenario,
@@ -250,7 +250,7 @@ def test_tenant_48_start_blocks_on_staging_and_channel_prerequisites(
 ) -> None:
     monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
     monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
-    install_valid_v2_artifact(monkeypatch, tmp_path)
+    install_production_v2_artifact(monkeypatch, tmp_path)
     monkeypatch.delenv(STAGING_PROJECT_ENV, raising=False)
     monkeypatch.delenv(STAGING_ENVIRONMENT_ENV, raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)

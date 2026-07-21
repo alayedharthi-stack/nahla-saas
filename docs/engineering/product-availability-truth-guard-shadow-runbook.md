@@ -57,21 +57,36 @@ python -m scripts.operators.product_availability_truth_guard_shadow_observation 
 
 ## Operator commands — preprod synthetic signoff v2
 
+Production signoff ingests **externally generated** runtime-bound phase artifacts.
+CI `contract-self-test` validates contract logic only and produces ineligible bundles.
+
 ```bash
-# Lifecycle phase matrix (repeat for all six phases)
-python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 \
-  lifecycle-phase baseline
+# After each real lifecycle action inside isolated nahla-arch001-shadow /app:
+#   save phase artifact JSON (baseline.json, container_restart.json, ...)
 
-# Negative controls (must BLOCK)
-python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 \
-  negative-controls
+# Assemble production bundle from phase artifacts + teardown + negative controls
+export NAHLA_ARCH001_PREPROD_PINNED_REVISION=<SHA>
+export NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST=<digest>
+export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME=nahla-arch001-shadow
+export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID=<uuid>
+export NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID=<post-redeploy-uuid>
+export NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY=<min-32-byte-secret>
 
-# Build/sign/verify bundle (CI-safe synthetic path)
-python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 full-probe
+python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 \
+  assemble-bundle \
+  --phase-dir ./phase-artifacts \
+  --teardown ./teardown-proof.json \
+  --negative-controls-dir ./negative-controls \
+  --output docs/engineering/staging-evidence/arch001-preprod-synthetic-signoff-v2-<date>.json
+
+# CI contract self-test only (eligible_for_signoff=false)
+python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 contract-self-test
 ```
 
-Archive signed output to
+Archive signed production output to
 `docs/engineering/staging-evidence/arch001-preprod-synthetic-signoff-v2-<date>.json`.
+
+**Do not use** removed `full-probe` / in-process multi-phase labeling for production signoff.
 
 ## Enable shadow on staging (post-approval only)
 
