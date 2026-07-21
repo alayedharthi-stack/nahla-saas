@@ -1,7 +1,7 @@
 # Staging acceptance config consolidation runbook
 
-**Status:** Preparation only (default-off). Do **not** execute until ARCH-001 48h shadow
-window completes, shadow mode is torn down, and signoff artifact is approved.
+**Status:** Preparation only (default-off). Do **not** execute until ARCH-001 preprod
+synthetic signoff v2 bundle is approved, shadow mode is torn down, and teardown proof is recorded.
 
 ## Problem
 
@@ -72,8 +72,8 @@ Names only — **never log values**.
 |------|---------|-------------|
 | Master enable | `NAHLA_STAGING_ACCEPTANCE_CONFIG_CONSOLIDATION_ENABLED` | Unset or not truthy (default-off) |
 | Apply confirm | `NAHLA_STAGING_ACCEPTANCE_CONFIG_CONSOLIDATION_CONFIRM` | Exact token `consolidate-staging-acceptance-config` |
+| ARCH-001 preprod signoff | `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT` + HMAC key + identity binding env | Valid v2 production bundle bound to current revision/manifest/isolated service |
 | ARCH-001 teardown proof | `NAHLA_ARCH001_SHADOW_TEARDOWN_PROOF` | Reference to approved teardown evidence artifact |
-| ARCH-001 signoff | `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM` | `true` after 48h shadow signoff |
 | Snapshot encryption | `NAHLA_STAGING_ACCEPTANCE_CONFIG_SNAPSHOT_KEY` | Operator-held key for reversible snapshot |
 | Revision pin | `NAHLA_STAGING_ACCEPTANCE_CONFIG_PINNED_REVISION` | Git SHA for post-apply attestation |
 | Staging identity | `RAILWAY_PROJECT_NAME=desirable-growth` | Fail-closed |

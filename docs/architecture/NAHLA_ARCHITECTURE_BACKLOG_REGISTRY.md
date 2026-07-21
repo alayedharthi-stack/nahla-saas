@@ -5,7 +5,7 @@
 > **Constitution:** Evidence first. Architecture first. Root cause first. Fix later.
 > We do not fix conversations. We do not fix merchants. We fix systems.
 >
-> **Last updated:** 2026-07-18
+> **Last updated:** 2026-07-21
 
 ---
 
@@ -30,7 +30,7 @@
 
 | ID | Title | Category | Status | Priority | Owner | Dependencies | Blocking items | Next action | Approval state | Est. effort |
 |----|-------|----------|--------|----------|-------|--------------|----------------|-------------|----------------|-------------|
-| **ARCH-001** | Product Availability Truth Guard | Operational Guard | **Shadow** | P0 | AI Brain / Postprocess | ARCH-002, ARCH-003, ARCH-008 (partial) | No production shadow evidence; guard default `off` | Enable `NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE=shadow` on staging; collect `[PRODUCT_AVAILABILITY_TRUTH_GUARD]` logs for 48h | Approved for shadow; **enforce not approved** | Shadow rollout: **2–3d** · Enforce: **5–8d** |
+| **ARCH-001** | Product Availability Truth Guard | Operational Guard | **Shadow** | P0 | AI Brain / Postprocess | ARCH-002, ARCH-003, ARCH-008 (partial) | No production shadow evidence; guard default `off` | Complete `ARCH-001-PREPROD-SYNTHETIC-SIGNOFF-v2` lifecycle bundle; then limited allowlisted canary shadow | Approved for shadow; **enforce not approved** | Preprod v2 signoff: **1–2d** · Post-approval shadow: **2–3d** · Enforce: **5–8d** |
 | **ARCH-002** | Knowledge Truth Resolution Audit | Investigation | **Completed** | P0 | Architecture / AI Brain | — | — | Archive findings; use as dependency gate for all truth work | Approved & closed (Phase A + B read-only) | **Done** |
 | **ARCH-003** | Hidden Truth Conflict Audit | Investigation | **Completed** | P0 | Architecture / AI Brain | ARCH-002 | — | Reference `knowledge_truth_phase_b_output.json` → `hidden_conflict_report` | Approved & closed (Phase B) | **Done** |
 | **ARCH-004** | Catalog Divergence Detection | Operational Scanner | **Designed** | P0 | AI Brain / Knowledge | ARCH-002, ARCH-003 | No runtime scanner; detection exists only in audit script | Design read-only shadow scanner reusing Phase B rules (`scripts/knowledge_truth_phase_b_audit.py`) | Design approved; **runtime not approved** | Scanner shadow: **5–7d** · Dashboard surfacing: **+3d** |
@@ -146,7 +146,7 @@ KTR, Versioning, Superseding, and History Sanitization are **explicitly not star
 
 | ID | Blocked by | Unblock condition |
 |----|------------|-------------------|
-| **ARCH-001** enforce | No shadow production/staging evidence | ≥48h shadow logs showing conflict detection accuracy |
+| **ARCH-001** enforce | No real conflict telemetry / accuracy review | Preprod v2 signoff + post-approval canonical shadow with organic observation |
 | **ARCH-004** runtime | ARCH-008 incomplete; no approved scanner design doc | Entity resolution v2 + scanner ADR sign-off |
 | **ARCH-005** B2 enforce | ARCH-006 B0 baseline missing | Staging metrics: contract compliance ≥95% on persona turns |
 | **ARCH-007** persona enforce | ARCH-005 B0 + constitution check (personality non-deterministic) | B0 review + explicit B2 approval |
@@ -162,7 +162,7 @@ These have **approved design + implemented code behind flags** and can start sta
 
 | ID / slice | Ready action | Flag / entrypoint |
 |------------|--------------|-------------------|
-| **ARCH-001** shadow | Staging shadow rollout | `NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE=shadow` |
+| **ARCH-001** shadow | Preprod v2 synthetic signoff operator | `scripts/operators/product_availability_preprod_synthetic_signoff_v2.py` |
 | **ARCH-006** B0 | Enable slim telemetry | `NAHLA_SLIM_GENERAL_BRAIN_STATE_ENABLED=true` + `[BRAIN_STATE_SLIM]` |
 | **ARCH-005** B0 | Contract metrics (no prompt change) | `persona_json_contract.py` via slim log path |
 | UTS Phase 1 | Inventory shadow | `NAHLA_TRUTH_SURFACE_SHADOW_ENABLED=true` |

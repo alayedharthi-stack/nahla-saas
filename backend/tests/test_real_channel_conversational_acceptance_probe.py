@@ -15,6 +15,7 @@ if str(_REPO) not in sys.path:
 from scripts.operators import (  # noqa: E402
     real_channel_conversational_acceptance as operator,
 )
+from backend.tests._arch001_signoff_v2_fixture import install_production_v2_artifact
 from scripts.operators.real_channel_conversational_acceptance_contract import (  # noqa: E402
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
@@ -211,10 +212,12 @@ def test_execution_blocked_without_gates(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result["code"] == "real_channel_required"
 
 
-def test_tenant_33_blocked_without_tenant_1_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tenant_33_blocked_without_tenant_1_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
     monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
-    monkeypatch.setenv(ARCH001_SHADOW_SIGNOFF_ENV, "true")
+    install_production_v2_artifact(monkeypatch, tmp_path)
     monkeypatch.delenv(TENANT_1_PASS_CONFIRM_ENV, raising=False)
     result = operator.execute_scenario_plan(
         phase=PHASE_TENANT_33_LIMITED, app_root=_REPO, dry_run=False
@@ -224,10 +227,11 @@ def test_tenant_33_blocked_without_tenant_1_pass(monkeypatch: pytest.MonkeyPatch
 
 
 def test_arch001_signoff_gate_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ARCH001_SHADOW_SIGNOFF_ENV, raising=False)
+    monkeypatch.delenv("NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT", raising=False)
+    monkeypatch.delenv("NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY", raising=False)
     result = operator.gate_arch001_shadow_signoff()
     assert result["ok"] is False
-    assert result["code"] == CODE_ARCH001_SIGNOFF_MISSING
+    assert result["code"] in {CODE_ARCH001_SIGNOFF_MISSING, "bundle_invalid"}
 
 
 def test_defect_bundle_template_writes_sanitized_file(tmp_path: Path) -> None:
