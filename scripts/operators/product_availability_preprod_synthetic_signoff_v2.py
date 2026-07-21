@@ -39,6 +39,8 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     CODE_POST_APPROVAL_NOT_PENDING,
     CODE_PROBE_FAILED,
     CODE_PRODUCTION_SYNTHETIC_MARKER,
+    CODE_REVISION_FORMAT_INVALID,
+    CODE_IMAGE_DIGEST_INVALID,
     CODE_RUNTIME_BINDING_MISMATCH,
     CODE_STABLE_COUNTERS_DRIFT,
     CODE_SUPERSEDED_WINDOWS_MISSING,
@@ -97,6 +99,8 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     validate_teardown_proof,
     validate_bundle_timestamps,
     validate_image_digest_value,
+    validate_production_image_digest,
+    validate_revision_token,
 )
 from scripts.operators.deployment_revision_attestation_contract import (
     evaluate_runtime_revision_attestation,
@@ -140,6 +144,8 @@ def _load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
 
 def build_expected_identity_from_env(
     env: Mapping[str, str] | None = None,
+    *,
+    require_production_class: bool = True,
 ) -> tuple[dict[str, str] | None, list[str]]:
     source = env if env is not None else os.environ
     blockers: list[str] = []
@@ -151,9 +157,14 @@ def build_expected_identity_from_env(
     deployment_id = (source.get(ISOLATED_DEPLOYMENT_ID_ENV) or "").strip()
     if not revision:
         blockers.append("pinned_revision_missing")
+    elif require_production_class and not validate_revision_token(revision, require_full=True):
+        blockers.append(CODE_REVISION_FORMAT_INVALID)
     if not manifest:
         blockers.append("manifest_digest_missing")
-    if not image_digest or not validate_image_digest_value(image_digest):
+    if require_production_class:
+        if not validate_production_image_digest(image_digest):
+            blockers.append(CODE_IMAGE_DIGEST_INVALID)
+    elif not image_digest or not validate_image_digest_value(image_digest, allow_absent=True):
         blockers.append("image_digest_missing")
     if not service_name:
         blockers.append("isolated_service_name_missing")
@@ -202,14 +213,19 @@ def resolve_baseline_image_digest_from_env(
     env: Mapping[str, str] | None = None,
     *,
     expected_identity: Mapping[str, str] | None = None,
+    require_production_class: bool = True,
 ) -> str | None:
     source = env if env is not None else os.environ
     raw = (source.get(BASELINE_IMAGE_DIGEST_ENV) or "").strip().lower()
-    if raw and validate_image_digest_value(raw):
+    if require_production_class:
+        if validate_production_image_digest(raw):
+            return raw
+        return None
+    if raw and validate_image_digest_value(raw, allow_absent=True):
         return raw
     if expected_identity:
         fallback = str(expected_identity.get("image_digest") or "").strip().lower()
-        if validate_image_digest_value(fallback):
+        if validate_image_digest_value(fallback, allow_absent=True):
             return fallback
     return None
 
@@ -371,6 +387,7 @@ def verify_preprod_signoff_v2_bundle(
     expected_canonical: Mapping[str, str] | None = None,
     require_production_class: bool = True,
     allow_fixture_keys: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
 
@@ -408,7 +425,12 @@ def verify_preprod_signoff_v2_bundle(
 
     identity = bundle.get("identity_binding")
     if isinstance(identity, Mapping):
-        blockers.extend(validate_identity_binding_shape(identity))
+        blockers.extend(
+            validate_identity_binding_shape(
+                identity,
+                require_production=require_production_class,
+            )
+        )
         if expected_identity:
             for key, value in expected_identity.items():
                 if str(identity.get(key) or "") != str(value):
@@ -431,7 +453,11 @@ def verify_preprod_signoff_v2_bundle(
         if expected_identity
         else None
     )
-    baseline_image_digest = resolve_baseline_image_digest_from_env(expected_identity=expected_identity)
+    baseline_image_digest = resolve_baseline_image_digest_from_env(
+        env,
+        expected_identity=expected_identity,
+        require_production_class=require_production_class,
+    )
     redeploy_image_digest = str(expected_identity.get("image_digest") or "") if expected_identity else None
     production_provenance = require_production_class and evidence_class == EVIDENCE_CLASS_PRODUCTION_SIGNOFF
     for row in lifecycle_rows:
@@ -441,10 +467,24 @@ def verify_preprod_signoff_v2_bundle(
             binding = row.get("identity_binding")
             if isinstance(binding, Mapping):
                 baseline_deployment_id = str(binding.get("deployment_id") or "") or None
+                if not baseline_image_digest:
+                    candidate = str(binding.get("image_digest") or "").strip().lower()
+                    if validate_production_image_digest(candidate):
+                        baseline_image_digest = candidate
         if str(row.get("phase") or "") == PHASE_FRESH_PINNED_REDEPLOY:
             attestation = row.get("lifecycle_attestation")
             if isinstance(attestation, Mapping):
                 redeploy_deployment_id = str(attestation.get("new_deployment_id") or "") or redeploy_deployment_id
+    if require_production_class:
+        if not baseline_image_digest:
+            blockers.append(CODE_IMAGE_DIGEST_INVALID)
+        if not validate_production_image_digest(redeploy_image_digest):
+            blockers.append(CODE_IMAGE_DIGEST_INVALID)
+        if expected_identity and not validate_revision_token(
+            expected_identity.get("pinned_target_revision"),
+            require_full=True,
+        ):
+            blockers.append(CODE_REVISION_FORMAT_INVALID)
     for row in lifecycle_rows:
         if not isinstance(row, Mapping):
             blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
@@ -473,14 +513,6 @@ def verify_preprod_signoff_v2_bundle(
     blockers.extend(validate_lifecycle_phase_identities(parsed_rows))
 
     teardown = bundle.get("teardown_proof")
-    blockers.extend(
-        validate_bundle_timestamps(
-            phases=parsed_rows,
-            signed_at_utc=bundle.get("signed_at_utc"),
-            teardown_proof=teardown if isinstance(teardown, Mapping) else None,
-        )
-    )
-
     negative = bundle.get("negative_controls")
     if not isinstance(negative, Mapping) or negative.get("ok") is not True:
         blockers.append(CODE_NEGATIVE_CONTROL_UNEXPECTED_PASS)
@@ -504,6 +536,15 @@ def verify_preprod_signoff_v2_bundle(
                                 require_production_provenance=production_provenance,
                             )
                         )
+
+    blockers.extend(
+        validate_bundle_timestamps(
+            phases=parsed_rows,
+            signed_at_utc=bundle.get("signed_at_utc"),
+            teardown_proof=teardown if isinstance(teardown, Mapping) else None,
+            negative_controls=negative if isinstance(negative, Mapping) else None,
+        )
+    )
 
     post_approval = bundle.get("post_approval")
     if not isinstance(post_approval, Mapping):
@@ -560,7 +601,10 @@ def verify_arch001_preprod_signoff_for_gate(
             code=CODE_ARCH001_SIGNOFF_MISSING,
             blockers=[CODE_ARCH001_SIGNOFF_MISSING],
         )
-    expected_identity, identity_blockers = build_expected_identity_from_env(source)
+    expected_identity, identity_blockers = build_expected_identity_from_env(
+        source,
+        require_production_class=True,
+    )
     if identity_blockers:
         return _report(
             PHASE_VERIFY,
@@ -601,6 +645,7 @@ def verify_arch001_preprod_signoff_for_gate(
         expected_identity=expected_identity,
         expected_canonical=expected_canonical,
         require_production_class=True,
+        env=source,
     )
 
 
@@ -659,6 +704,7 @@ def load_and_verify_artifact_from_env(
         expected_identity=expected_identity,
         expected_canonical=expected_canonical,
         require_production_class=require_production_class,
+        env=source,
     )
 
 
@@ -676,6 +722,11 @@ def assemble_bundle_from_artifacts(
     if not is_strong_hmac_key(hmac_key):
         return _report(PHASE_BUNDLE, ok=False, code=CODE_HMAC_KEY_WEAK)
 
+    if not validate_revision_token(expected_identity.get("pinned_target_revision"), require_full=True):
+        return _report(PHASE_BUNDLE, ok=False, code=CODE_REVISION_FORMAT_INVALID)
+    if not validate_production_image_digest(expected_identity.get("image_digest")):
+        return _report(PHASE_BUNDLE, ok=False, code=CODE_IMAGE_DIGEST_INVALID)
+
     superseded_payload, superseded_error = _load_json(superseded_windows_path)
     if superseded_payload is None:
         return _report(PHASE_BUNDLE, ok=False, code=superseded_error)
@@ -691,8 +742,14 @@ def assemble_bundle_from_artifacts(
         for key, value in expected_identity.items()
         if key not in {"deployment_id", "image_digest"}
     }
-    baseline_image_digest = resolve_baseline_image_digest_from_env(env, expected_identity=expected_identity)
+    baseline_image_digest = resolve_baseline_image_digest_from_env(
+        env,
+        expected_identity=expected_identity,
+        require_production_class=True,
+    )
     redeploy_image_digest = str(expected_identity.get("image_digest") or "")
+    if not baseline_image_digest:
+        return _report(PHASE_BUNDLE, ok=False, code=CODE_IMAGE_DIGEST_INVALID)
     for phase in LIFECYCLE_PHASES:
         artifact_path = phase_dir / f"{phase}.json"
         payload, error = _load_json(artifact_path)
@@ -788,6 +845,7 @@ def assemble_bundle_from_artifacts(
         expected_identity=expected_identity,
         expected_canonical=expected_canonical,
         require_production_class=True,
+        env=env,
     )
     return _report(
         PHASE_BUNDLE,
@@ -884,7 +942,7 @@ def execute_contract_self_test(*, app_root: Path | None = None) -> dict[str, Any
     baseline_id = "cbe93c7b-5891-49de-8bd0-5588acad14b5"
     redeploy_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
     checkout = read_checkout_revision(root)
-    pinned_revision = checkout[:40].lower() if checkout else "a8487b25"
+    pinned_revision = checkout[:40].lower() if checkout else "a8487b25" + ("0" * 32)
     identity = {
         "pinned_target_revision": pinned_revision,
         "manifest_digest": manifest["manifest_digest"],
@@ -1114,6 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
                 expected_identity=expected,
                 expected_canonical=expected_canonical,
                 require_production_class=True,
+                env=os.environ,
             )
             _emit(result)
             return 0 if result.get("ok") else 1

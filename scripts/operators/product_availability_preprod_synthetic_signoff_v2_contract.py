@@ -190,9 +190,12 @@ CODE_TIMESTAMP_STALE = "artifact_timestamp_stale"
 CODE_PRODUCTION_SYNTHETIC_MARKER = "production_synthetic_marker_present"
 CODE_PHASE_IDENTITY_INCONSISTENT = "phase_identity_inconsistent"
 CODE_IMAGE_DIGEST_INCONSISTENT = "image_digest_inconsistent"
+CODE_REVISION_FORMAT_INVALID = "revision_format_invalid"
+CODE_IMAGE_DIGEST_INVALID = "image_digest_invalid"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_FULL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
@@ -240,7 +243,38 @@ def _parse_utc(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def validate_identity_binding_shape(binding: Mapping[str, Any]) -> list[str]:
+def _safe_positive_int(value: Any) -> int | None:
+    parsed = _safe_counter_int(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
+def validate_revision_token(value: Any, *, require_full: bool = False) -> bool:
+    revision = str(value or "").strip().lower()
+    if require_full:
+        return bool(_FULL_REVISION_RE.fullmatch(revision))
+    return bool(_REVISION_RE.fullmatch(revision))
+
+
+def validate_image_digest_value(value: Any, *, allow_absent: bool = False) -> bool:
+    image_digest = str(value or "").strip().lower()
+    if not image_digest:
+        return False
+    if image_digest == "absent":
+        return allow_absent
+    return bool(_SHA256_RE.fullmatch(image_digest))
+
+
+def validate_production_image_digest(value: Any) -> bool:
+    return validate_image_digest_value(value, allow_absent=False)
+
+
+def validate_identity_binding_shape(
+    binding: Mapping[str, Any],
+    *,
+    require_production: bool = False,
+) -> list[str]:
     blockers: list[str] = []
     if not isinstance(binding, Mapping):
         return [CODE_IDENTITY_BINDING_MISMATCH]
@@ -248,8 +282,8 @@ def validate_identity_binding_shape(binding: Mapping[str, Any]) -> list[str]:
     if missing:
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     revision = str(binding.get("pinned_target_revision") or "").strip().lower()
-    if not _REVISION_RE.fullmatch(revision):
-        blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    if not validate_revision_token(revision, require_full=require_production):
+        blockers.append(CODE_REVISION_FORMAT_INVALID if require_production else CODE_IDENTITY_BINDING_MISMATCH)
     digest = str(binding.get("manifest_digest") or "").strip().lower()
     if not _SHA256_RE.fullmatch(digest):
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
@@ -263,7 +297,10 @@ def validate_identity_binding_shape(binding: Mapping[str, Any]) -> list[str]:
     if not _UUID_RE.fullmatch(str(binding.get("deployment_id") or "").strip()):
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     image_digest = str(binding.get("image_digest") or "").strip().lower()
-    if image_digest and image_digest != "absent" and not _SHA256_RE.fullmatch(image_digest):
+    if require_production:
+        if not validate_production_image_digest(image_digest):
+            blockers.append(CODE_IMAGE_DIGEST_INVALID)
+    elif image_digest and image_digest != "absent" and not _SHA256_RE.fullmatch(image_digest):
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     return blockers
 
@@ -271,8 +308,10 @@ def validate_identity_binding_shape(binding: Mapping[str, Any]) -> list[str]:
 def identity_binding_matches_expected(
     binding: Mapping[str, Any],
     expected: Mapping[str, str],
+    *,
+    require_production: bool = False,
 ) -> list[str]:
-    blockers = validate_identity_binding_shape(binding)
+    blockers = validate_identity_binding_shape(binding, require_production=require_production)
     for key, value in expected.items():
         if str(binding.get(key) or "") != str(value):
             blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
@@ -291,13 +330,57 @@ def _safe_counter_int(value: Any) -> int | None:
     return None
 
 
-def validate_image_digest_value(value: Any) -> bool:
-    image_digest = str(value or "").strip().lower()
-    if not image_digest:
-        return False
-    if image_digest == "absent":
-        return True
-    return bool(_SHA256_RE.fullmatch(image_digest))
+def safe_extract_stable_counters(matrix: Mapping[str, Any]) -> tuple[dict[str, int] | None, list[str]]:
+    blockers: list[str] = []
+    if not isinstance(matrix, Mapping):
+        return None, [CODE_STABLE_COUNTERS_DRIFT]
+    metrics = matrix.get("metrics")
+    guards = matrix.get("guards")
+    if not isinstance(metrics, Mapping) or not isinstance(guards, Mapping):
+        return None, [CODE_STABLE_COUNTERS_DRIFT]
+    spec = (
+        ("would_rewrite_count", metrics, "would_rewrite_count"),
+        ("evaluated_turns", metrics, "evaluated_turns"),
+        ("customer_text_changed_count", guards, "customer_text_changed_count"),
+        ("additional_llm_calls", guards, "additional_llm_calls"),
+        ("duplicate_invocation_count", guards, "duplicate_invocation_count"),
+        ("outbound_provider_calls", guards, "outbound_provider_calls"),
+    )
+    extracted: dict[str, int] = {}
+    for key, source, source_key in spec:
+        parsed = _safe_counter_int(source.get(source_key))
+        if parsed is None:
+            blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+        else:
+            extracted[key] = parsed
+    if blockers:
+        return None, blockers
+    return extracted, []
+
+
+def extract_stable_counters(matrix: Mapping[str, Any]) -> dict[str, int]:
+    extracted, blockers = safe_extract_stable_counters(matrix)
+    if blockers or extracted is None:
+        return {key: -1 for key in EXPECTED_STABLE_COUNTERS}
+    return extracted
+
+
+def validate_artifact_stable_counters_consistency(
+    *,
+    matrix: Mapping[str, Any],
+    counters: Any,
+) -> list[str]:
+    extracted, extract_blockers = safe_extract_stable_counters(matrix)
+    blockers = list(extract_blockers)
+    if not isinstance(counters, Mapping):
+        return blockers + [CODE_STABLE_COUNTERS_DRIFT]
+    if extracted is None:
+        return blockers + [CODE_STABLE_COUNTERS_DRIFT]
+    for key, value in extracted.items():
+        parsed = _safe_counter_int(counters.get(key))
+        if parsed != value:
+            blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+    return blockers
 
 
 def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
@@ -354,19 +437,6 @@ def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
             if _safe_counter_int(guards.get(key)) != 0:
                 blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     return blockers
-
-
-def extract_stable_counters(matrix: Mapping[str, Any]) -> dict[str, int]:
-    metrics = matrix.get("metrics") if isinstance(matrix.get("metrics"), Mapping) else {}
-    guards = matrix.get("guards") if isinstance(matrix.get("guards"), Mapping) else {}
-    return {
-        "would_rewrite_count": int(metrics.get("would_rewrite_count") or 0),
-        "evaluated_turns": int(metrics.get("evaluated_turns") or 0),
-        "customer_text_changed_count": int(guards.get("customer_text_changed_count") or 0),
-        "additional_llm_calls": int(guards.get("additional_llm_calls") or 0),
-        "duplicate_invocation_count": int(guards.get("duplicate_invocation_count") or 0),
-        "outbound_provider_calls": int(guards.get("outbound_provider_calls") or 0),
-    }
 
 
 def validate_stable_counters(counters: Mapping[str, Any]) -> list[str]:
@@ -440,9 +510,9 @@ def validate_lifecycle_attestation(
     elif phase in {PHASE_REPEAT_MATRIX_1, PHASE_REPEAT_MATRIX_2, PHASE_REPEAT_MATRIX_3}:
         if action != "repeat_matrix":
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
-        seq = int(attestation.get("sequence") or 0)
+        seq = _safe_positive_int(attestation.get("sequence"))
         expected = int(phase.rsplit("_", 1)[-1])
-        if seq != expected:
+        if seq is None or seq != expected:
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
         if redeploy_deployment_id and str(attestation.get("deployment_id") or "") != redeploy_deployment_id:
             blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
@@ -477,18 +547,28 @@ def validate_phase_artifact(
         blockers.append(CODE_PHASE_ARTIFACT_INVALID)
     identity = artifact.get("identity_binding")
     if isinstance(identity, Mapping):
-        blockers.extend(validate_identity_binding_shape(identity))
+        blockers.extend(
+            validate_identity_binding_shape(identity, require_production=require_production_provenance)
+        )
         if expected_identity:
             phase_expected = {
                 key: value
                 for key, value in expected_identity.items()
                 if key not in {"deployment_id", "image_digest"}
             }
-            blockers.extend(identity_binding_matches_expected(identity, phase_expected))
+            blockers.extend(
+                identity_binding_matches_expected(
+                    identity,
+                    phase_expected,
+                    require_production=require_production_provenance,
+                )
+            )
         if identity.get("service_role") != SERVICE_ROLE_ISOLATED_PREPROD_SHADOW:
             blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
         deployment_id = str(identity.get("deployment_id") or "")
         image_digest = str(identity.get("image_digest") or "").strip().lower()
+        if require_production_provenance and not validate_production_image_digest(image_digest):
+            blockers.append(CODE_IMAGE_DIGEST_INVALID)
         if phase in {PHASE_BASELINE, PHASE_CONTAINER_RESTART}:
             if baseline_deployment_id and deployment_id != baseline_deployment_id:
                 blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
@@ -513,12 +593,18 @@ def validate_phase_artifact(
     matrix = artifact.get("matrix")
     if isinstance(matrix, Mapping):
         blockers.extend(validate_matrix_payload(matrix))
-        blockers.extend(validate_stable_counters(extract_stable_counters(matrix)))
+        extracted, extract_blockers = safe_extract_stable_counters(matrix)
+        blockers.extend(extract_blockers)
+        if extracted is not None:
+            blockers.extend(validate_stable_counters(extracted))
+        blockers.extend(
+            validate_artifact_stable_counters_consistency(
+                matrix=matrix,
+                counters=artifact.get("stable_counters"),
+            )
+        )
     else:
         blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
-    counters = artifact.get("stable_counters")
-    if isinstance(counters, Mapping):
-        blockers.extend(validate_stable_counters(counters))
     blockers.extend(
         validate_isolated_service_constraints(artifact.get("isolated_service_constraints"))
     )
@@ -661,6 +747,7 @@ def validate_bundle_timestamps(
     phases: list[Mapping[str, Any]],
     signed_at_utc: Any,
     teardown_proof: Mapping[str, Any] | None,
+    negative_controls: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> list[str]:
     blockers: list[str] = []
@@ -701,6 +788,22 @@ def validate_bundle_timestamps(
                     blockers.append(CODE_TIMESTAMP_INVALID)
                 elif verified > reference + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_SECONDS):
                     blockers.append(CODE_TIMESTAMP_INVALID)
+
+    if isinstance(negative_controls, Mapping):
+        controls = negative_controls.get("controls")
+        if isinstance(controls, list):
+            for row in controls:
+                if not isinstance(row, Mapping):
+                    blockers.append(CODE_TIMESTAMP_INVALID)
+                    continue
+                executed = _parse_utc(row.get("executed_at_utc"))
+                if executed is None:
+                    blockers.append(CODE_TIMESTAMP_INVALID)
+                    continue
+                if executed > reference + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_SECONDS):
+                    blockers.append(CODE_TIMESTAMP_INVALID)
+                if executed < latest_phase or executed > signed_at:
+                    blockers.append(CODE_TIMESTAMP_INVALID)
     return blockers
 
 
@@ -726,7 +829,13 @@ def validate_negative_control_artifact(
         blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
     identity = artifact.get("identity_binding")
     if isinstance(identity, Mapping):
-        blockers.extend(identity_binding_matches_expected(identity, expected_identity))
+        blockers.extend(
+            identity_binding_matches_expected(
+                identity,
+                expected_identity,
+                require_production=require_production_provenance,
+            )
+        )
     else:
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     expected_code = NEGATIVE_CONTROL_EXPECTED_CODES.get(control_id)
@@ -834,12 +943,16 @@ def validate_lifecycle_phase_row(row: Mapping[str, Any]) -> list[str]:
         blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     else:
         blockers.extend(validate_matrix_payload(matrix))
-        blockers.extend(validate_stable_counters(extract_stable_counters(matrix)))
-    counters = row.get("stable_counters")
-    if isinstance(counters, Mapping):
-        blockers.extend(validate_stable_counters(counters))
-    else:
-        blockers.append(CODE_STABLE_COUNTERS_DRIFT)
+        extracted, extract_blockers = safe_extract_stable_counters(matrix)
+        blockers.extend(extract_blockers)
+        if extracted is not None:
+            blockers.extend(validate_stable_counters(extracted))
+        blockers.extend(
+            validate_artifact_stable_counters_consistency(
+                matrix=matrix,
+                counters=row.get("stable_counters"),
+            )
+        )
     if row.get("execution_mode") != EXECUTION_MODE_IN_CONTAINER:
         blockers.append(CODE_PHASE_ARTIFACT_INVALID)
     if str(row.get("target_app_root") or "") != DEPLOYMENT_APP_ROOT:
@@ -901,6 +1014,8 @@ __all__ = [
     "CODE_TIMESTAMP_STALE",
     "CODE_PHASE_IDENTITY_INCONSISTENT",
     "CODE_IMAGE_DIGEST_INCONSISTENT",
+    "CODE_IMAGE_DIGEST_INVALID",
+    "CODE_REVISION_FORMAT_INVALID",
     "CODE_STABLE_COUNTERS_DRIFT",
     "CODE_SUPERSEDED_WINDOW_ACTIVE",
     "CODE_SUPERSEDED_WINDOWS_MISSING",
@@ -961,15 +1076,20 @@ __all__ = [
     "identity_binding_matches_expected",
     "is_legacy_v1_bundle",
     "is_strong_hmac_key",
+    "safe_extract_stable_counters",
+    "validate_artifact_stable_counters_consistency",
     "validate_identity_binding_shape",
     "validate_bundle_timestamps",
     "validate_image_digest_value",
+    "validate_lifecycle_attestation",
     "validate_lifecycle_phase_identities",
     "validate_lifecycle_phase_row",
     "validate_matrix_payload",
     "validate_negative_control_artifact",
     "validate_phase_artifact",
     "validate_phase_timestamp_order",
+    "validate_production_image_digest",
+    "validate_revision_token",
     "validate_stable_counters",
     "validate_superseded_windows",
     "validate_teardown_proof",

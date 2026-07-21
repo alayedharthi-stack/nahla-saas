@@ -55,14 +55,14 @@ _ISOLATED_SERVICE_ID = "22222222-2222-4222-8222-222222222222"
 _CANONICAL_SERVICE = "nahla-saas"
 _CANONICAL_SERVICE_ID = "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
 _CANONICAL_DEPLOYMENT_ID = "33333333-3333-4333-8333-333333333333"
-_BASELINE_IMAGE = "absent"
-_REDEPLOY_IMAGE = "absent"
+_BASELINE_IMAGE = "a" * 64
+_REDEPLOY_IMAGE = "b" * 64
 
 
 def _pinned_revision(app_root: Path) -> str:
     checkout = read_checkout_revision(app_root)
     if not checkout:
-        return "a8487b25"
+        return "a8487b25" + ("0" * 32)
     return checkout[:40].lower()
 
 
@@ -259,6 +259,7 @@ def write_production_fixture_tree(tmp_path: Path, *, app_root: Path = _REPO) -> 
             "deployment_id": _CANONICAL_DEPLOYMENT_ID,
         },
         hmac_key=_PROD_HMAC_KEY,
+        env={BASELINE_IMAGE_DIGEST_ENV: _BASELINE_IMAGE},
     )
     if assembled.get("ok") is not True:
         raise AssertionError(assembled)

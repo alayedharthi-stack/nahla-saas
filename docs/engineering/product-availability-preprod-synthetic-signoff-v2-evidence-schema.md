@@ -48,8 +48,8 @@ any expected identity field is absent or mismatched.
 |---------|---------|
 | `NAHLA_ARCH001_PREPROD_PINNED_REVISION` | Pinned git SHA (also accepts `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION`) |
 | `NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST` | 64-char SHA-256 over closed runtime artifact manifest (must match current runtime manifest at gate time) |
-| `NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST` | Post-redeploy image digest (`sha256` or `absent`) |
-| `NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST` | Baseline/restart image digest (`sha256` or `absent`; defaults to expected image digest) |
+| `NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST` | Post-redeploy 64-char SHA-256 image digest (required for production) |
+| `NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST` | Baseline/restart 64-char SHA-256 image digest (required for production assembly) |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME` | Isolated shadow service name (e.g. `nahla-arch001-shadow`) |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID` | Isolated shadow service UUID |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID` | Post-redeploy deployment UUID (repeat matrices bind here) |
@@ -61,13 +61,13 @@ any expected identity field is absent or mismatched.
 
 | Key | Requirement |
 |-----|-------------|
-| `pinned_target_revision` | 7–40 char git SHA |
+| `pinned_target_revision` | Full 40-char lowercase git SHA (production) |
 | `manifest_digest` | 64-char SHA-256 over closed runtime artifact manifest |
 | `service_role` | `isolated_preprod_shadow` for preprod bundle |
 | `service_name` | Operator-supplied isolated service name |
 | `service_id` | Operator-supplied UUID |
 | `deployment_id` | Post-redeploy deployment UUID |
-| `image_digest` | 64-char SHA-256 or `absent` |
+| `image_digest` | 64-char SHA-256 image digest (required for production signoff) |
 
 **No environment-specific service UUID is hardcoded in source.** Canonical control
 (`nahla-saas`, guard=off) is proven separately in the teardown artifact.
@@ -134,10 +134,10 @@ Required fields (placeholder/unverified values **BLOCK**):
 4. Assemble and sign the production bundle:
 
 ```bash
-export NAHLA_ARCH001_PREPROD_PINNED_REVISION=<SHA>
+export NAHLA_ARCH001_PREPROD_PINNED_REVISION=<40-char-sha>
 export NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST=<64-char-digest>
-export NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST=absent
-export NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST=absent
+export NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST=<64-char-post-redeploy-image-digest>
+export NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST=<64-char-baseline-image-digest>
 export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME=nahla-arch001-shadow
 export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID=<uuid>
 export NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID=<post-redeploy-uuid>
