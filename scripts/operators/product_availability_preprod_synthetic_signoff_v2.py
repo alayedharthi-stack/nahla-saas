@@ -16,7 +16,11 @@ from typing import Any, Mapping
 
 from scripts.operators import product_availability_truth_guard_shadow_observation as shadow_probe
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contract import (
+    BASELINE_IMAGE_DIGEST_ENV,
     BUNDLE_SCHEMA_VERSION,
+    CANONICAL_DEPLOYMENT_ID_ENV,
+    CANONICAL_SERVICE_ID_ENV,
+    CANONICAL_SERVICE_NAME_ENV,
     CODE_ARTIFACT_UNREADABLE,
     CODE_ARCH001_SIGNOFF_MISSING,
     CODE_BUNDLE_INVALID,
@@ -34,6 +38,8 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     CODE_PHASE_ARTIFACT_INVALID,
     CODE_POST_APPROVAL_NOT_PENDING,
     CODE_PROBE_FAILED,
+    CODE_PRODUCTION_SYNTHETIC_MARKER,
+    CODE_RUNTIME_BINDING_MISMATCH,
     CODE_STABLE_COUNTERS_DRIFT,
     CODE_SUPERSEDED_WINDOWS_MISSING,
     CODE_TEARDOWN_PROOF_MISSING,
@@ -42,6 +48,7 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST,
     EVIDENCE_CLASS_PRODUCTION_SIGNOFF,
     EXECUTION_MODE_IN_CONTAINER,
+    EXPECTED_IMAGE_DIGEST_ENV,
     EXPECTED_MANIFEST_DIGEST_ENV,
     HMAC_DOMAIN_PREFIX,
     INITIATIVE_ID,
@@ -79,6 +86,7 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     is_legacy_v1_bundle,
     is_strong_hmac_key,
     validate_identity_binding_shape,
+    validate_lifecycle_phase_identities,
     validate_lifecycle_phase_row,
     validate_matrix_payload,
     validate_negative_control_artifact,
@@ -87,6 +95,12 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     validate_stable_counters,
     validate_superseded_windows,
     validate_teardown_proof,
+    validate_bundle_timestamps,
+    validate_image_digest_value,
+)
+from scripts.operators.deployment_revision_attestation_contract import (
+    evaluate_runtime_revision_attestation,
+    read_checkout_revision,
 )
 from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (
     SHADOW_MODE_ENV as SHADOW_PROBE_MODE_ENV,
@@ -131,6 +145,7 @@ def build_expected_identity_from_env(
     blockers: list[str] = []
     revision = (source.get(PINNED_REVISION_ENV) or source.get("NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION") or "").strip().lower()
     manifest = (source.get(EXPECTED_MANIFEST_DIGEST_ENV) or "").strip().lower()
+    image_digest = (source.get(EXPECTED_IMAGE_DIGEST_ENV) or "").strip().lower()
     service_name = (source.get(ISOLATED_SERVICE_NAME_ENV) or "").strip()
     service_id = (source.get(ISOLATED_SERVICE_ID_ENV) or "").strip()
     deployment_id = (source.get(ISOLATED_DEPLOYMENT_ID_ENV) or "").strip()
@@ -138,6 +153,8 @@ def build_expected_identity_from_env(
         blockers.append("pinned_revision_missing")
     if not manifest:
         blockers.append("manifest_digest_missing")
+    if not image_digest or not validate_image_digest_value(image_digest):
+        blockers.append("image_digest_missing")
     if not service_name:
         blockers.append("isolated_service_name_missing")
     if not service_id:
@@ -153,7 +170,68 @@ def build_expected_identity_from_env(
         "service_name": service_name,
         "service_id": service_id,
         "deployment_id": deployment_id,
+        "image_digest": image_digest,
     }, []
+
+
+def build_expected_canonical_identity_from_env(
+    env: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str] | None, list[str]]:
+    source = env if env is not None else os.environ
+    blockers: list[str] = []
+    service_name = (source.get(CANONICAL_SERVICE_NAME_ENV) or "").strip()
+    service_id = (source.get(CANONICAL_SERVICE_ID_ENV) or "").strip()
+    deployment_id = (source.get(CANONICAL_DEPLOYMENT_ID_ENV) or "").strip()
+    if not service_name:
+        blockers.append("canonical_service_name_missing")
+    if not service_id:
+        blockers.append("canonical_service_id_missing")
+    if not deployment_id:
+        blockers.append("canonical_deployment_id_missing")
+    if blockers:
+        return None, blockers
+    return {
+        "service_role": SERVICE_ROLE_CANONICAL_CONTROL,
+        "service_name": service_name,
+        "service_id": service_id,
+        "deployment_id": deployment_id,
+    }, []
+
+
+def resolve_baseline_image_digest_from_env(
+    env: Mapping[str, str] | None = None,
+    *,
+    expected_identity: Mapping[str, str] | None = None,
+) -> str | None:
+    source = env if env is not None else os.environ
+    raw = (source.get(BASELINE_IMAGE_DIGEST_ENV) or "").strip().lower()
+    if raw and validate_image_digest_value(raw):
+        return raw
+    if expected_identity:
+        fallback = str(expected_identity.get("image_digest") or "").strip().lower()
+        if validate_image_digest_value(fallback):
+            return fallback
+    return None
+
+
+def verify_runtime_binding_for_gate(
+    *,
+    expected_identity: Mapping[str, str],
+    app_root: Path | None = None,
+) -> list[str]:
+    blockers: list[str] = []
+    root = shadow_probe.resolve_app_root(app_root or _REPO)
+    manifest = shadow_probe.build_runtime_artifact_manifest(app_root=root)
+    runtime_digest = str(manifest.get("manifest_digest") or "").strip().lower()
+    if runtime_digest != str(expected_identity.get("manifest_digest") or "").strip().lower():
+        blockers.append(CODE_RUNTIME_BINDING_MISMATCH)
+    attestation = evaluate_runtime_revision_attestation(
+        pinned_target_revision=str(expected_identity.get("pinned_target_revision") or ""),
+        target_app_root=root,
+    )
+    if attestation.ok is not True:
+        blockers.append(CODE_RUNTIME_BINDING_MISMATCH)
+    return blockers
 
 
 def ingest_phase_artifact_payload(
@@ -162,6 +240,9 @@ def ingest_phase_artifact_payload(
     expected_identity: Mapping[str, str] | None = None,
     baseline_deployment_id: str | None = None,
     redeploy_deployment_id: str | None = None,
+    baseline_image_digest: str | None = None,
+    redeploy_image_digest: str | None = None,
+    require_production_provenance: bool = False,
     source_artifact_path: str | None = None,
 ) -> dict[str, Any]:
     blockers = validate_phase_artifact(
@@ -169,6 +250,9 @@ def ingest_phase_artifact_payload(
         expected_identity=expected_identity,
         baseline_deployment_id=baseline_deployment_id,
         redeploy_deployment_id=redeploy_deployment_id,
+        baseline_image_digest=baseline_image_digest,
+        redeploy_image_digest=redeploy_image_digest,
+        require_production_provenance=require_production_provenance,
     )
     row = dict(payload)
     row["ok"] = not blockers
@@ -284,10 +368,14 @@ def verify_preprod_signoff_v2_bundle(
     *,
     hmac_key: str,
     expected_identity: Mapping[str, str] | None = None,
+    expected_canonical: Mapping[str, str] | None = None,
     require_production_class: bool = True,
     allow_fixture_keys: bool = False,
 ) -> dict[str, Any]:
     blockers: list[str] = []
+
+    if require_production_class and not expected_identity:
+        blockers.append(CODE_EXPECTED_IDENTITY_MISSING)
 
     if is_legacy_v1_bundle(bundle):
         return _report(
@@ -339,10 +427,13 @@ def verify_preprod_signoff_v2_bundle(
     if isinstance(identity, Mapping):
         redeploy_deployment_id = str(identity.get("deployment_id") or "") or None
     phase_expected = (
-        {k: v for k, v in expected_identity.items() if k != "deployment_id"}
+        {k: v for k, v in expected_identity.items() if k not in {"deployment_id", "image_digest"}}
         if expected_identity
         else None
     )
+    baseline_image_digest = resolve_baseline_image_digest_from_env(expected_identity=expected_identity)
+    redeploy_image_digest = str(expected_identity.get("image_digest") or "") if expected_identity else None
+    production_provenance = require_production_class and evidence_class == EVIDENCE_CLASS_PRODUCTION_SIGNOFF
     for row in lifecycle_rows:
         if not isinstance(row, Mapping):
             continue
@@ -360,12 +451,17 @@ def verify_preprod_signoff_v2_bundle(
             continue
         phase = str(row.get("phase") or "")
         seen_phases.add(phase)
+        if production_provenance and row.get("fixture_synthetic") is True:
+            blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
         blockers.extend(
             validate_phase_artifact(
                 row,
                 expected_identity=phase_expected,
                 baseline_deployment_id=baseline_deployment_id,
                 redeploy_deployment_id=redeploy_deployment_id,
+                baseline_image_digest=baseline_image_digest,
+                redeploy_image_digest=redeploy_image_digest,
+                require_production_provenance=production_provenance,
             )
         )
         if row.get("ok") is not True:
@@ -374,6 +470,16 @@ def verify_preprod_signoff_v2_bundle(
     if seen_phases != set(LIFECYCLE_PHASES):
         blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
     blockers.extend(validate_phase_timestamp_order(parsed_rows))
+    blockers.extend(validate_lifecycle_phase_identities(parsed_rows))
+
+    teardown = bundle.get("teardown_proof")
+    blockers.extend(
+        validate_bundle_timestamps(
+            phases=parsed_rows,
+            signed_at_utc=bundle.get("signed_at_utc"),
+            teardown_proof=teardown if isinstance(teardown, Mapping) else None,
+        )
+    )
 
     negative = bundle.get("negative_controls")
     if not isinstance(negative, Mapping) or negative.get("ok") is not True:
@@ -389,8 +495,14 @@ def verify_preprod_signoff_v2_bundle(
             if expected_identity:
                 for row in controls:
                     if isinstance(row, Mapping):
+                        if production_provenance and row.get("fixture_synthetic") is True:
+                            blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
                         blockers.extend(
-                            validate_negative_control_artifact(row, expected_identity=expected_identity)
+                            validate_negative_control_artifact(
+                                row,
+                                expected_identity=expected_identity,
+                                require_production_provenance=production_provenance,
+                            )
                         )
 
     post_approval = bundle.get("post_approval")
@@ -402,10 +514,22 @@ def verify_preprod_signoff_v2_bundle(
         if post_approval.get("enforce_eligibility") != POST_APPROVAL_PENDING:
             blockers.append(CODE_POST_APPROVAL_NOT_PENDING)
 
-    blockers.extend(validate_superseded_windows(bundle.get("superseded_invalid_windows")))
-    teardown = bundle.get("teardown_proof")
+    blockers.extend(
+        validate_superseded_windows(
+            bundle.get("superseded_invalid_windows"),
+            require_migration_windows=production_provenance,
+            require_production_provenance=production_provenance,
+        )
+    )
     if isinstance(teardown, Mapping):
-        blockers.extend(validate_teardown_proof(teardown))
+        blockers.extend(
+            validate_teardown_proof(
+                teardown,
+                expected_isolated=expected_identity,
+                expected_canonical=expected_canonical,
+                require_production_provenance=production_provenance,
+            )
+        )
     else:
         blockers.append(CODE_TEARDOWN_PROOF_MISSING)
 
@@ -424,6 +548,7 @@ def verify_preprod_signoff_v2_bundle(
 def verify_arch001_preprod_signoff_for_gate(
     *,
     env: Mapping[str, str] | None = None,
+    app_root: Path | None = None,
 ) -> dict[str, Any]:
     source = env if env is not None else os.environ
     artifact_path = (source.get(SIGNOFF_ARTIFACT_ENV) or "").strip()
@@ -443,6 +568,25 @@ def verify_arch001_preprod_signoff_for_gate(
             code=CODE_EXPECTED_IDENTITY_MISSING,
             blockers=identity_blockers,
         )
+    expected_canonical, canonical_blockers = build_expected_canonical_identity_from_env(source)
+    if canonical_blockers:
+        return _report(
+            PHASE_VERIFY,
+            ok=False,
+            code=CODE_EXPECTED_IDENTITY_MISSING,
+            blockers=canonical_blockers,
+        )
+    runtime_blockers = verify_runtime_binding_for_gate(
+        expected_identity=expected_identity,
+        app_root=app_root,
+    )
+    if runtime_blockers:
+        return _report(
+            PHASE_VERIFY,
+            ok=False,
+            code=CODE_RUNTIME_BINDING_MISMATCH,
+            blockers=runtime_blockers,
+        )
     payload, error = _load_json(Path(artifact_path))
     if payload is None:
         return _report(
@@ -455,6 +599,7 @@ def verify_arch001_preprod_signoff_for_gate(
         payload,
         hmac_key=hmac_key,
         expected_identity=expected_identity,
+        expected_canonical=expected_canonical,
         require_production_class=True,
     )
 
@@ -464,11 +609,20 @@ def load_and_verify_artifact_from_env(
     artifact_env: str = SIGNOFF_ARTIFACT_ENV,
     hmac_key_env: str = SIGNOFF_HMAC_KEY_ENV,
     expected_identity: Mapping[str, str] | None = None,
+    expected_canonical: Mapping[str, str] | None = None,
     env: Mapping[str, str] | None = None,
     require_production_class: bool = True,
+    app_root: Path | None = None,
 ) -> dict[str, Any]:
     if expected_identity is None:
-        return verify_arch001_preprod_signoff_for_gate(env=env)
+        return verify_arch001_preprod_signoff_for_gate(env=env, app_root=app_root)
+    if require_production_class and not expected_identity:
+        return _report(
+            PHASE_VERIFY,
+            ok=False,
+            code=CODE_EXPECTED_IDENTITY_MISSING,
+            blockers=[CODE_EXPECTED_IDENTITY_MISSING],
+        )
     source = env if env is not None else os.environ
     artifact_path = (source.get(artifact_env) or "").strip()
     hmac_key = (source.get(hmac_key_env) or "").strip()
@@ -479,6 +633,18 @@ def load_and_verify_artifact_from_env(
             code=CODE_BUNDLE_INVALID,
             blockers=[CODE_BUNDLE_INVALID],
         )
+    if require_production_class:
+        runtime_blockers = verify_runtime_binding_for_gate(
+            expected_identity=expected_identity,
+            app_root=app_root,
+        )
+        if runtime_blockers:
+            return _report(
+                PHASE_VERIFY,
+                ok=False,
+                code=CODE_RUNTIME_BINDING_MISMATCH,
+                blockers=runtime_blockers,
+            )
     payload, error = _load_json(Path(artifact_path))
     if payload is None:
         return _report(
@@ -491,6 +657,7 @@ def load_and_verify_artifact_from_env(
         payload,
         hmac_key=hmac_key,
         expected_identity=expected_identity,
+        expected_canonical=expected_canonical,
         require_production_class=require_production_class,
     )
 
@@ -500,12 +667,21 @@ def assemble_bundle_from_artifacts(
     phase_dir: Path,
     teardown_path: Path,
     negative_controls_dir: Path,
+    superseded_windows_path: Path,
     expected_identity: Mapping[str, str],
-    superseded_invalid_windows: list[Mapping[str, Any]],
+    expected_canonical: Mapping[str, str],
     hmac_key: str,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if not is_strong_hmac_key(hmac_key):
         return _report(PHASE_BUNDLE, ok=False, code=CODE_HMAC_KEY_WEAK)
+
+    superseded_payload, superseded_error = _load_json(superseded_windows_path)
+    if superseded_payload is None:
+        return _report(PHASE_BUNDLE, ok=False, code=superseded_error)
+    superseded_rows = superseded_payload.get("windows") if isinstance(superseded_payload, Mapping) else superseded_payload
+    if not isinstance(superseded_rows, list):
+        return _report(PHASE_BUNDLE, ok=False, code=CODE_SUPERSEDED_WINDOWS_MISSING)
 
     lifecycle_rows: list[dict[str, Any]] = []
     baseline_deployment_id: str | None = None
@@ -513,8 +689,10 @@ def assemble_bundle_from_artifacts(
     phase_expected = {
         key: value
         for key, value in expected_identity.items()
-        if key != "deployment_id"
+        if key not in {"deployment_id", "image_digest"}
     }
+    baseline_image_digest = resolve_baseline_image_digest_from_env(env, expected_identity=expected_identity)
+    redeploy_image_digest = str(expected_identity.get("image_digest") or "")
     for phase in LIFECYCLE_PHASES:
         artifact_path = phase_dir / f"{phase}.json"
         payload, error = _load_json(artifact_path)
@@ -525,6 +703,9 @@ def assemble_bundle_from_artifacts(
             expected_identity=phase_expected,
             baseline_deployment_id=baseline_deployment_id,
             redeploy_deployment_id=str(redeploy_deployment_id or ""),
+            baseline_image_digest=baseline_image_digest,
+            redeploy_image_digest=redeploy_image_digest,
+            require_production_provenance=True,
             source_artifact_path=str(artifact_path),
         )
         if row.get("ok") is not True:
@@ -544,16 +725,34 @@ def assemble_bundle_from_artifacts(
     teardown_payload, teardown_error = _load_json(teardown_path)
     if teardown_payload is None:
         return _report(PHASE_BUNDLE, ok=False, code=teardown_error)
-    teardown_blockers = validate_teardown_proof(teardown_payload)
+    teardown_blockers = validate_teardown_proof(
+        teardown_payload,
+        expected_isolated=expected_identity,
+        expected_canonical=expected_canonical,
+        require_production_provenance=True,
+    )
     if teardown_blockers:
         return _report(PHASE_BUNDLE, ok=False, code=teardown_blockers[0], blockers=teardown_blockers)
 
     controls: list[dict[str, Any]] = []
     for control_id in sorted(NEGATIVE_CONTROL_IDS):
         control_path = negative_controls_dir / f"{control_id}.json"
-        ingested = ingest_negative_control_artifact(control_path, expected_identity=expected_identity)
+        ingested = ingest_negative_control_artifact(
+            control_path,
+            expected_identity=expected_identity,
+        )
         if ingested.get("ok") is not True:
             return _report(PHASE_BUNDLE, ok=False, code=ingested.get("code"), control_id=control_id)
+        control_payload, _ = _load_json(control_path)
+        if control_payload is None:
+            return _report(PHASE_BUNDLE, ok=False, code=CODE_NEGATIVE_CONTROL_MISSING, control_id=control_id)
+        control_blockers = validate_negative_control_artifact(
+            control_payload,
+            expected_identity=expected_identity,
+            require_production_provenance=True,
+        )
+        if control_blockers:
+            return _report(PHASE_BUNDLE, ok=False, code=control_blockers[0], control_id=control_id)
         controls.append(
             {
                 "negative_control_schema_version": NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION,
@@ -562,6 +761,9 @@ def assemble_bundle_from_artifacts(
                 "code": ingested.get("code_observed"),
                 "expected_code": NEGATIVE_CONTROL_EXPECTED_CODES[control_id],
                 "identity_binding": ingested.get("identity_binding"),
+                "executed_at_utc": control_payload.get("executed_at_utc"),
+                "execution_mode": control_payload.get("execution_mode"),
+                "target_app_root": control_payload.get("target_app_root"),
                 "source_artifact_path": ingested.get("source_artifact_path"),
             }
         )
@@ -575,7 +777,7 @@ def assemble_bundle_from_artifacts(
         lifecycle_phases=lifecycle_rows,
         negative_controls=negative_controls,
         teardown_proof=teardown_payload,
-        superseded_invalid_windows=superseded_invalid_windows,
+        superseded_invalid_windows=superseded_rows,
         evidence_class=EVIDENCE_CLASS_PRODUCTION_SIGNOFF,
         eligible_for_signoff=True,
     )
@@ -584,6 +786,7 @@ def assemble_bundle_from_artifacts(
         signed,
         hmac_key=hmac_key,
         expected_identity=expected_identity,
+        expected_canonical=expected_canonical,
         require_production_class=True,
     )
     return _report(
@@ -680,8 +883,10 @@ def execute_contract_self_test(*, app_root: Path | None = None) -> dict[str, Any
 
     baseline_id = "cbe93c7b-5891-49de-8bd0-5588acad14b5"
     redeploy_id = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    checkout = read_checkout_revision(root)
+    pinned_revision = checkout[:40].lower() if checkout else "a8487b25"
     identity = {
-        "pinned_target_revision": "a8487b25",
+        "pinned_target_revision": pinned_revision,
         "manifest_digest": manifest["manifest_digest"],
         "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
         "service_name": "nahla-arch001-shadow",
@@ -710,12 +915,16 @@ def execute_contract_self_test(*, app_root: Path | None = None) -> dict[str, Any
         )
         lifecycle_rows.append(row)
 
+    control_executed_at = _utc_now()
     controls = [
         {
             "negative_control_schema_version": NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION,
             "control_id": control_id,
             "blocked": True,
             "code": NEGATIVE_CONTROL_EXPECTED_CODES[control_id],
+            "executed_at_utc": control_executed_at,
+            "execution_mode": EXECUTION_MODE_IN_CONTAINER,
+            "target_app_root": DEPLOYMENT_APP_ROOT,
             "identity_binding": identity,
             "fixture_synthetic": True,
         }
@@ -730,12 +939,15 @@ def execute_contract_self_test(*, app_root: Path | None = None) -> dict[str, Any
             "verified_at_utc": _utc_now(),
             "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
             "service_name": identity["service_name"],
+            "service_id": identity["service_id"],
             "deployment_id": redeploy_id,
         },
         "canonical_control": {
             "guard_mode": "off",
             "service_role": SERVICE_ROLE_CANONICAL_CONTROL,
             "service_name": "nahla-saas",
+            "service_id": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+            "deployment_id": "33333333-3333-4333-8333-333333333333",
             "verified_at_utc": _utc_now(),
         },
         "fixture_synthetic": True,
@@ -803,6 +1015,7 @@ def _parse_assemble_bundle_flags(arguments: list[str]) -> dict[str, str] | None:
         "phase_dir": None,
         "teardown": None,
         "negative_controls_dir": None,
+        "superseded_windows": None,
         "output": None,
     }
     index = 0
@@ -820,12 +1033,16 @@ def _parse_assemble_bundle_flags(arguments: list[str]) -> dict[str, str] | None:
             flags["negative_controls_dir"] = arguments[index + 1]
             index += 2
             continue
+        if token == "--superseded-windows" and index + 1 < len(arguments):
+            flags["superseded_windows"] = arguments[index + 1]
+            index += 2
+            continue
         if token == "--output" and index + 1 < len(arguments):
             flags["output"] = arguments[index + 1]
             index += 2
             continue
         return None
-    if not flags["phase_dir"] or not flags["teardown"] or not flags["negative_controls_dir"]:
+    if not flags["phase_dir"] or not flags["teardown"] or not flags["negative_controls_dir"] or not flags["superseded_windows"]:
         return None
     return {key: str(value) for key, value in flags.items() if value is not None}
 
@@ -841,24 +1058,21 @@ def main(argv: list[str] | None = None) -> int:
             if blockers:
                 _emit(_report(PHASE_BUNDLE, ok=False, code=CODE_EXPECTED_IDENTITY_MISSING, blockers=blockers))
                 return 1
+            expected_canonical, canonical_blockers = build_expected_canonical_identity_from_env()
+            if canonical_blockers:
+                _emit(_report(PHASE_BUNDLE, ok=False, code=CODE_EXPECTED_IDENTITY_MISSING, blockers=canonical_blockers))
+                return 1
             hmac_key = (os.environ.get(SIGNOFF_HMAC_KEY_ENV) or "").strip()
             if not hmac_key:
                 _emit(_report(PHASE_BUNDLE, ok=False, code=CODE_ARCH001_SIGNOFF_MISSING, blockers=[CODE_ARCH001_SIGNOFF_MISSING]))
                 return 1
-            superseded = [
-                {
-                    "window_id": "arch001-48h-zero-traffic-v1",
-                    "reason": "superseded_by_preprod_synthetic_signoff_v2",
-                    "active": False,
-                    "superseded_at_utc": _utc_now(),
-                }
-            ]
             result = assemble_bundle_from_artifacts(
                 phase_dir=Path(flags["phase_dir"]),
                 teardown_path=Path(flags["teardown"]),
                 negative_controls_dir=Path(flags["negative_controls_dir"]),
+                superseded_windows_path=Path(flags["superseded_windows"]),
                 expected_identity=expected,
-                superseded_invalid_windows=superseded,
+                expected_canonical=expected_canonical,
                 hmac_key=hmac_key,
             )
             if result.get("ok") and flags.get("output"):
@@ -887,10 +1101,18 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(_report(PHASE_VERIFY, ok=False, code=error))
                 return 1
             expected, blockers = build_expected_identity_from_env()
+            if blockers:
+                _emit(_report(PHASE_VERIFY, ok=False, code=CODE_EXPECTED_IDENTITY_MISSING, blockers=blockers))
+                return 1
+            expected_canonical, canonical_blockers = build_expected_canonical_identity_from_env()
+            if canonical_blockers:
+                _emit(_report(PHASE_VERIFY, ok=False, code=CODE_EXPECTED_IDENTITY_MISSING, blockers=canonical_blockers))
+                return 1
             result = verify_preprod_signoff_v2_bundle(
                 payload,
                 hmac_key=hmac_key,
                 expected_identity=expected,
+                expected_canonical=expected_canonical,
                 require_production_class=True,
             )
             _emit(result)

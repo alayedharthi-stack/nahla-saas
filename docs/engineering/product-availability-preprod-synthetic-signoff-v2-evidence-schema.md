@@ -47,10 +47,15 @@ any expected identity field is absent or mismatched.
 | Env var | Purpose |
 |---------|---------|
 | `NAHLA_ARCH001_PREPROD_PINNED_REVISION` | Pinned git SHA (also accepts `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION`) |
-| `NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST` | 64-char SHA-256 over closed runtime artifact manifest |
+| `NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST` | 64-char SHA-256 over closed runtime artifact manifest (must match current runtime manifest at gate time) |
+| `NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST` | Post-redeploy image digest (`sha256` or `absent`) |
+| `NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST` | Baseline/restart image digest (`sha256` or `absent`; defaults to expected image digest) |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME` | Isolated shadow service name (e.g. `nahla-arch001-shadow`) |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID` | Isolated shadow service UUID |
 | `NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID` | Post-redeploy deployment UUID (repeat matrices bind here) |
+| `NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_NAME` | Canonical control service name (e.g. `nahla-saas`) |
+| `NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_ID` | Canonical control service UUID |
+| `NAHLA_ARCH001_PREPROD_CANONICAL_DEPLOYMENT_ID` | Canonical control deployment UUID |
 
 ### `identity_binding` object
 
@@ -131,9 +136,14 @@ Required fields (placeholder/unverified values **BLOCK**):
 ```bash
 export NAHLA_ARCH001_PREPROD_PINNED_REVISION=<SHA>
 export NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST=<64-char-digest>
+export NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST=absent
+export NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST=absent
 export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME=nahla-arch001-shadow
 export NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID=<uuid>
 export NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID=<post-redeploy-uuid>
+export NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_NAME=nahla-saas
+export NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_ID=<uuid>
+export NAHLA_ARCH001_PREPROD_CANONICAL_DEPLOYMENT_ID=<uuid>
 export NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY=<min-32-byte-secret>
 
 python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 \
@@ -141,8 +151,12 @@ python -m scripts.operators.product_availability_preprod_synthetic_signoff_v2 \
   --phase-dir ./phase-artifacts \
   --teardown ./teardown-proof.json \
   --negative-controls-dir ./negative-controls \
+  --superseded-windows ./superseded-windows.json \
   --output docs/engineering/staging-evidence/arch001-preprod-synthetic-signoff-v2.json
 ```
+
+`superseded-windows.json` must list both migration windows:
+`arch001-48h-zero-traffic-20260718` and `arch001-48h-zero-traffic-20260720`.
 
 5. Point gate env vars at the signed bundle and verify:
 

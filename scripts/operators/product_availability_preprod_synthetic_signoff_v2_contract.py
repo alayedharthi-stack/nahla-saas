@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 INITIATIVE_ID = "ARCH-001-PREPROD-SYNTHETIC-SIGNOFF-v2"
@@ -34,7 +34,12 @@ ISOLATED_SERVICE_NAME_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_NAME"
 ISOLATED_SERVICE_ID_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_SERVICE_ID"
 ISOLATED_DEPLOYMENT_ID_ENV = "NAHLA_ARCH001_PREPROD_ISOLATED_DEPLOYMENT_ID"
 EXPECTED_MANIFEST_DIGEST_ENV = "NAHLA_ARCH001_PREPROD_EXPECTED_MANIFEST_DIGEST"
+EXPECTED_IMAGE_DIGEST_ENV = "NAHLA_ARCH001_PREPROD_EXPECTED_IMAGE_DIGEST"
+BASELINE_IMAGE_DIGEST_ENV = "NAHLA_ARCH001_PREPROD_BASELINE_IMAGE_DIGEST"
 PINNED_REVISION_ENV = "NAHLA_ARCH001_PREPROD_PINNED_REVISION"
+CANONICAL_SERVICE_NAME_ENV = "NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_NAME"
+CANONICAL_SERVICE_ID_ENV = "NAHLA_ARCH001_PREPROD_CANONICAL_SERVICE_ID"
+CANONICAL_DEPLOYMENT_ID_ENV = "NAHLA_ARCH001_PREPROD_CANONICAL_DEPLOYMENT_ID"
 
 SERVICE_ROLE_ISOLATED_PREPROD_SHADOW = "isolated_preprod_shadow"
 SERVICE_ROLE_CANONICAL_CONTROL = "canonical_control"
@@ -104,6 +109,25 @@ EXPECTED_STABLE_COUNTERS: dict[str, int] = {
 }
 
 REPEAT_MATRIX_MIN_SPACING_SECONDS = 15 * 60
+CLOCK_SKEW_ALLOWANCE_SECONDS = 5 * 60
+ARTIFACT_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
+
+REQUIRED_SUPERSEDED_WINDOW_IDS: frozenset[str] = frozenset(
+    {
+        "arch001-48h-zero-traffic-20260718",
+        "arch001-48h-zero-traffic-20260720",
+    }
+)
+
+CASE_EXPECT_GUARD_ACTION: dict[str, str] = {
+    "catalog_available_positive_claim": "allowed",
+    "catalog_unavailable_negative_claim": "allowed",
+    "irrelevant_turn_no_claim": "allowed",
+    "kb_catalog_conflict": "rewrite_conflict",
+    "tenant_b_isolation": "allowed",
+    "unknown_entity_positive_claim": "rewrite_unknown",
+    "variant_specific_conflict": "allowed",
+}
 
 NEGATIVE_WRONG_MANIFEST = "wrong_manifest"
 NEGATIVE_WRONG_REVISION = "wrong_revision"
@@ -160,6 +184,12 @@ CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID = "phase_lifecycle_attestation_invalid"
 CODE_EXPECTED_IDENTITY_MISSING = "expected_identity_missing"
 CODE_ARCH001_SIGNOFF_MISSING = "arch001_shadow_signoff_missing"
 CODE_ARTIFACT_UNREADABLE = "artifact_unreadable"
+CODE_RUNTIME_BINDING_MISMATCH = "runtime_binding_mismatch"
+CODE_TIMESTAMP_INVALID = "timestamp_invalid"
+CODE_TIMESTAMP_STALE = "artifact_timestamp_stale"
+CODE_PRODUCTION_SYNTHETIC_MARKER = "production_synthetic_marker_present"
+CODE_PHASE_IDENTITY_INCONSISTENT = "phase_identity_inconsistent"
+CODE_IMAGE_DIGEST_INCONSISTENT = "image_digest_inconsistent"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -249,6 +279,27 @@ def identity_binding_matches_expected(
     return blockers
 
 
+def _safe_counter_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.lstrip("-").isdigit():
+            return int(raw)
+    return None
+
+
+def validate_image_digest_value(value: Any) -> bool:
+    image_digest = str(value or "").strip().lower()
+    if not image_digest:
+        return False
+    if image_digest == "absent":
+        return True
+    return bool(_SHA256_RE.fullmatch(image_digest))
+
+
 def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
     blockers: list[str] = []
     if matrix.get("ok") is not True:
@@ -257,12 +308,19 @@ def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
     if not isinstance(case_results, list):
         blockers.append(CODE_MATRIX_CASE_MISSING)
         return blockers
+    if len(case_results) != len(REQUIRED_CASE_IDS):
+        blockers.append(CODE_MATRIX_CASE_MISSING)
     by_id: dict[str, Mapping[str, Any]] = {}
     for item in case_results:
         if not isinstance(item, Mapping):
             blockers.append(CODE_MATRIX_CASE_MISSING)
             continue
         case_id = str(item.get("case_id") or "")
+        if not case_id:
+            blockers.append(CODE_MATRIX_CASE_MISSING)
+            continue
+        if case_id in by_id:
+            blockers.append(CODE_MATRIX_CASE_MISSING)
         by_id[case_id] = item
     if set(by_id) != REQUIRED_CASE_IDS:
         blockers.append(CODE_MATRIX_CASE_MISSING)
@@ -270,9 +328,18 @@ def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
         row = by_id.get(case_id)
         if not isinstance(row, Mapping):
             continue
+        if row.get("ok") is not True:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
         if row.get("would_rewrite") is not expected_rewrite:
             blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
         if row.get("byte_identical") is not True:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+        expected_action = CASE_EXPECT_GUARD_ACTION.get(case_id)
+        if expected_action and row.get("guard_action") != expected_action:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+        if row.get("replaced") is True:
+            blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
+        if row.get("customer_text_changed") is True:
             blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     guards = matrix.get("guards")
     if not isinstance(guards, Mapping):
@@ -284,7 +351,7 @@ def validate_matrix_payload(matrix: Mapping[str, Any]) -> list[str]:
             "duplicate_invocation_count",
             "outbound_provider_calls",
         ):
-            if guards.get(key, 1) != 0:
+            if _safe_counter_int(guards.get(key)) != 0:
                 blockers.append(CODE_MATRIX_INVARIANT_VIOLATION)
     return blockers
 
@@ -309,7 +376,9 @@ def validate_stable_counters(counters: Mapping[str, Any]) -> list[str]:
     for key, expected_value in EXPECTED_STABLE_COUNTERS.items():
         if key not in counters:
             blockers.append(CODE_STABLE_COUNTERS_DRIFT)
-        elif int(counters.get(key)) != expected_value:
+            continue
+        parsed = _safe_counter_int(counters.get(key))
+        if parsed is None or parsed != expected_value:
             blockers.append(CODE_STABLE_COUNTERS_DRIFT)
     return blockers
 
@@ -351,6 +420,10 @@ def validate_lifecycle_attestation(
             for key in ("prior_container_id", "new_container_id", "restart_completed_at_utc"):
                 if not str(restart.get(key) or "").strip():
                     blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
+            prior_cid = str(restart.get("prior_container_id") or "")
+            new_cid = str(restart.get("new_container_id") or "")
+            if prior_cid and new_cid and prior_cid == new_cid:
+                blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
     elif phase == PHASE_FRESH_PINNED_REDEPLOY:
         if action != "fresh_pinned_redeploy":
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
@@ -384,8 +457,13 @@ def validate_phase_artifact(
     expected_identity: Mapping[str, str] | None = None,
     baseline_deployment_id: str | None = None,
     redeploy_deployment_id: str | None = None,
+    baseline_image_digest: str | None = None,
+    redeploy_image_digest: str | None = None,
+    require_production_provenance: bool = False,
 ) -> list[str]:
     blockers: list[str] = []
+    if require_production_provenance and artifact.get("fixture_synthetic") is True:
+        blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
     if artifact.get("phase_artifact_schema_version") != PHASE_ARTIFACT_SCHEMA_VERSION:
         blockers.append(CODE_PHASE_ARTIFACT_INVALID)
     phase = str(artifact.get("phase") or "")
@@ -401,9 +479,35 @@ def validate_phase_artifact(
     if isinstance(identity, Mapping):
         blockers.extend(validate_identity_binding_shape(identity))
         if expected_identity:
-            blockers.extend(identity_binding_matches_expected(identity, expected_identity))
+            phase_expected = {
+                key: value
+                for key, value in expected_identity.items()
+                if key not in {"deployment_id", "image_digest"}
+            }
+            blockers.extend(identity_binding_matches_expected(identity, phase_expected))
         if identity.get("service_role") != SERVICE_ROLE_ISOLATED_PREPROD_SHADOW:
             blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+        deployment_id = str(identity.get("deployment_id") or "")
+        image_digest = str(identity.get("image_digest") or "").strip().lower()
+        if phase in {PHASE_BASELINE, PHASE_CONTAINER_RESTART}:
+            if baseline_deployment_id and deployment_id != baseline_deployment_id:
+                blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+            if baseline_image_digest and image_digest != baseline_image_digest:
+                blockers.append(CODE_IMAGE_DIGEST_INCONSISTENT)
+        elif phase == PHASE_FRESH_PINNED_REDEPLOY:
+            attestation = artifact.get("lifecycle_attestation")
+            new_id = str(attestation.get("new_deployment_id") or "") if isinstance(attestation, Mapping) else ""
+            if redeploy_deployment_id and deployment_id != redeploy_deployment_id:
+                blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+            if new_id and deployment_id != new_id:
+                blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+            if redeploy_image_digest and image_digest != redeploy_image_digest:
+                blockers.append(CODE_IMAGE_DIGEST_INCONSISTENT)
+        elif phase in {PHASE_REPEAT_MATRIX_1, PHASE_REPEAT_MATRIX_2, PHASE_REPEAT_MATRIX_3}:
+            if redeploy_deployment_id and deployment_id != redeploy_deployment_id:
+                blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+            if redeploy_image_digest and image_digest != redeploy_image_digest:
+                blockers.append(CODE_IMAGE_DIGEST_INCONSISTENT)
     else:
         blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     matrix = artifact.get("matrix")
@@ -440,7 +544,10 @@ def validate_phase_artifact(
 def validate_phase_timestamp_order(phases: list[Mapping[str, Any]]) -> list[str]:
     blockers: list[str] = []
     timestamps: list[datetime] = []
+    by_phase: dict[str, Mapping[str, Any]] = {}
     for row in phases:
+        phase = str(row.get("phase") or "")
+        by_phase[phase] = row
         ts = _parse_utc(row.get("executed_at_utc"))
         if ts is None:
             blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
@@ -449,9 +556,35 @@ def validate_phase_timestamp_order(phases: list[Mapping[str, Any]]) -> list[str]
     for left, right in zip(timestamps, timestamps[1:]):
         if right <= left:
             blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+
+    baseline = by_phase.get(PHASE_BASELINE)
+    restart = by_phase.get(PHASE_CONTAINER_RESTART)
+    if isinstance(baseline, Mapping) and isinstance(restart, Mapping):
+        baseline_ts = _parse_utc(baseline.get("executed_at_utc"))
+        restart_ts = _parse_utc(restart.get("executed_at_utc"))
+        attestation = restart.get("lifecycle_attestation")
+        restart_completed = None
+        if isinstance(attestation, Mapping):
+            restart_evidence = attestation.get("restart_evidence")
+            if isinstance(restart_evidence, Mapping):
+                restart_completed = _parse_utc(restart_evidence.get("restart_completed_at_utc"))
+        if baseline_ts and restart_completed and restart_completed <= baseline_ts:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+        if restart_completed and restart_ts and restart_completed > restart_ts:
+            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+
+    fresh = by_phase.get(PHASE_FRESH_PINNED_REDEPLOY)
     repeat_rows = [
-        row for row in phases if str(row.get("phase") or "").startswith("repeat_matrix_")
+        by_phase[phase]
+        for phase in (PHASE_REPEAT_MATRIX_1, PHASE_REPEAT_MATRIX_2, PHASE_REPEAT_MATRIX_3)
+        if phase in by_phase
     ]
+    if isinstance(fresh, Mapping) and repeat_rows:
+        fresh_ts = _parse_utc(fresh.get("executed_at_utc"))
+        first_repeat_ts = _parse_utc(repeat_rows[0].get("executed_at_utc"))
+        if fresh_ts and first_repeat_ts:
+            if (first_repeat_ts - fresh_ts).total_seconds() < REPEAT_MATRIX_MIN_SPACING_SECONDS:
+                blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
     for left, right in zip(repeat_rows, repeat_rows[1:]):
         lts = _parse_utc(left.get("executed_at_utc"))
         rts = _parse_utc(right.get("executed_at_utc"))
@@ -463,16 +596,133 @@ def validate_phase_timestamp_order(phases: list[Mapping[str, Any]]) -> list[str]
     return blockers
 
 
+def validate_lifecycle_phase_identities(phases: list[Mapping[str, Any]]) -> list[str]:
+    blockers: list[str] = []
+    by_phase: dict[str, Mapping[str, Any]] = {}
+    for row in phases:
+        if isinstance(row, Mapping):
+            by_phase[str(row.get("phase") or "")] = row
+    if set(by_phase) != set(LIFECYCLE_PHASES):
+        blockers.append(CODE_LIFECYCLE_PHASE_MISSING)
+        return blockers
+
+    baseline_row = by_phase[PHASE_BASELINE]
+    baseline_identity = baseline_row.get("identity_binding")
+    if not isinstance(baseline_identity, Mapping):
+        return blockers + [CODE_IDENTITY_BINDING_MISMATCH]
+    baseline_deployment = str(baseline_identity.get("deployment_id") or "")
+    baseline_image = str(baseline_identity.get("image_digest") or "").strip().lower()
+    shared_keys = ("pinned_target_revision", "manifest_digest", "service_role", "service_name", "service_id")
+
+    for phase in LIFECYCLE_PHASES:
+        row = by_phase[phase]
+        identity = row.get("identity_binding")
+        if not isinstance(identity, Mapping):
+            blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+            continue
+        for key in shared_keys:
+            if str(identity.get(key) or "") != str(baseline_identity.get(key) or ""):
+                blockers.append(CODE_PHASE_IDENTITY_INCONSISTENT)
+
+    restart_identity = by_phase[PHASE_CONTAINER_RESTART].get("identity_binding")
+    if isinstance(restart_identity, Mapping):
+        if str(restart_identity.get("deployment_id") or "") != baseline_deployment:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+        if str(restart_identity.get("image_digest") or "").strip().lower() != baseline_image:
+            blockers.append(CODE_IMAGE_DIGEST_INCONSISTENT)
+
+    fresh_row = by_phase[PHASE_FRESH_PINNED_REDEPLOY]
+    fresh_identity = fresh_row.get("identity_binding")
+    fresh_attestation = fresh_row.get("lifecycle_attestation")
+    redeploy_deployment = ""
+    redeploy_image = ""
+    if isinstance(fresh_identity, Mapping):
+        redeploy_deployment = str(fresh_identity.get("deployment_id") or "")
+        redeploy_image = str(fresh_identity.get("image_digest") or "").strip().lower()
+    if isinstance(fresh_attestation, Mapping):
+        new_id = str(fresh_attestation.get("new_deployment_id") or "")
+        if redeploy_deployment and new_id and redeploy_deployment != new_id:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+        if baseline_deployment and new_id and new_id == baseline_deployment:
+            blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+
+    for phase in (PHASE_REPEAT_MATRIX_1, PHASE_REPEAT_MATRIX_2, PHASE_REPEAT_MATRIX_3):
+        identity = by_phase[phase].get("identity_binding")
+        if isinstance(identity, Mapping):
+            if redeploy_deployment and str(identity.get("deployment_id") or "") != redeploy_deployment:
+                blockers.append(CODE_PHASE_DEPLOYMENT_ID_INVALID)
+            if redeploy_image and str(identity.get("image_digest") or "").strip().lower() != redeploy_image:
+                blockers.append(CODE_IMAGE_DIGEST_INCONSISTENT)
+    return blockers
+
+
+def validate_bundle_timestamps(
+    *,
+    phases: list[Mapping[str, Any]],
+    signed_at_utc: Any,
+    teardown_proof: Mapping[str, Any] | None,
+    now: datetime | None = None,
+) -> list[str]:
+    blockers: list[str] = []
+    reference = now or datetime.now(timezone.utc)
+    signed_at = _parse_utc(signed_at_utc)
+    if signed_at is None:
+        blockers.append(CODE_TIMESTAMP_INVALID)
+        return blockers
+    if signed_at > reference + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_SECONDS):
+        blockers.append(CODE_TIMESTAMP_INVALID)
+
+    phase_times: list[datetime] = []
+    for row in phases:
+        ts = _parse_utc(row.get("executed_at_utc")) if isinstance(row, Mapping) else None
+        if ts is None:
+            blockers.append(CODE_TIMESTAMP_INVALID)
+            continue
+        if ts > reference + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_SECONDS):
+            blockers.append(CODE_TIMESTAMP_INVALID)
+        phase_times.append(ts)
+    if not phase_times:
+        return blockers
+    latest_phase = max(phase_times)
+    if signed_at < latest_phase:
+        blockers.append(CODE_TIMESTAMP_INVALID)
+    if (reference - latest_phase).total_seconds() > ARTIFACT_MAX_AGE_SECONDS:
+        blockers.append(CODE_TIMESTAMP_STALE)
+
+    if isinstance(teardown_proof, Mapping):
+        isolated = teardown_proof.get("isolated_service")
+        canonical = teardown_proof.get("canonical_control")
+        for section in (isolated, canonical):
+            if isinstance(section, Mapping):
+                verified = _parse_utc(section.get("verified_at_utc"))
+                if verified is None:
+                    blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+                elif verified < latest_phase or verified > signed_at:
+                    blockers.append(CODE_TIMESTAMP_INVALID)
+                elif verified > reference + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_SECONDS):
+                    blockers.append(CODE_TIMESTAMP_INVALID)
+    return blockers
+
+
 def validate_negative_control_artifact(
     artifact: Mapping[str, Any],
     *,
     expected_identity: Mapping[str, str],
+    require_production_provenance: bool = False,
 ) -> list[str]:
     blockers: list[str] = []
+    if require_production_provenance and artifact.get("fixture_synthetic") is True:
+        blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
     if artifact.get("negative_control_schema_version") != NEGATIVE_CONTROL_ARTIFACT_SCHEMA_VERSION:
         blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
     control_id = str(artifact.get("control_id") or "")
     if control_id not in NEGATIVE_CONTROL_IDS:
+        blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
+    if _parse_utc(artifact.get("executed_at_utc")) is None:
+        blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
+    if artifact.get("execution_mode") != EXECUTION_MODE_IN_CONTAINER:
+        blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
+    if str(artifact.get("target_app_root") or "") != DEPLOYMENT_APP_ROOT:
         blockers.append(CODE_NEGATIVE_CONTROL_MISSING)
     identity = artifact.get("identity_binding")
     if isinstance(identity, Mapping):
@@ -485,8 +735,16 @@ def validate_negative_control_artifact(
     return blockers
 
 
-def validate_teardown_proof(proof: Mapping[str, Any]) -> list[str]:
+def validate_teardown_proof(
+    proof: Mapping[str, Any],
+    *,
+    expected_isolated: Mapping[str, str] | None = None,
+    expected_canonical: Mapping[str, str] | None = None,
+    require_production_provenance: bool = False,
+) -> list[str]:
     blockers: list[str] = []
+    if require_production_provenance and proof.get("fixture_synthetic") is True:
+        blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
     if proof.get("teardown_proof_schema_version") != TEARDOWN_PROOF_SCHEMA_VERSION:
         blockers.append(CODE_TEARDOWN_PROOF_MISSING)
     isolated = proof.get("isolated_service")
@@ -512,27 +770,54 @@ def validate_teardown_proof(proof: Mapping[str, Any]) -> list[str]:
         blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
     if not str(canonical.get("service_name") or "").strip():
         blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not _UUID_RE.fullmatch(str(isolated.get("service_id") or "").strip()):
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not _UUID_RE.fullmatch(str(canonical.get("service_id") or "").strip()):
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
     if not _UUID_RE.fullmatch(str(isolated.get("deployment_id") or "").strip()):
         blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if not _UUID_RE.fullmatch(str(canonical.get("deployment_id") or "").strip()):
+        blockers.append(CODE_TEARDOWN_PROOF_UNVERIFIED)
+    if expected_isolated:
+        for key in ("service_role", "service_name", "service_id", "deployment_id"):
+            if str(isolated.get(key) or "") != str(expected_isolated.get(key) or ""):
+                blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
+    if expected_canonical:
+        for key in ("service_role", "service_name", "service_id", "deployment_id"):
+            if str(canonical.get(key) or "") != str(expected_canonical.get(key) or ""):
+                blockers.append(CODE_IDENTITY_BINDING_MISMATCH)
     return blockers
 
 
-def validate_superseded_windows(rows: Any) -> list[str]:
+def validate_superseded_windows(
+    rows: Any,
+    *,
+    require_migration_windows: bool = False,
+    require_production_provenance: bool = False,
+) -> list[str]:
     if not isinstance(rows, list) or not rows:
         return [CODE_SUPERSEDED_WINDOWS_MISSING]
     blockers: list[str] = []
+    seen_ids: set[str] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
             continue
-        if not str(row.get("window_id") or "").strip():
+        if require_production_provenance and row.get("fixture_synthetic") is True:
+            blockers.append(CODE_PRODUCTION_SYNTHETIC_MARKER)
+        window_id = str(row.get("window_id") or "").strip()
+        if not window_id:
             blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
+        else:
+            seen_ids.add(window_id)
         if not str(row.get("reason") or "").strip():
             blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
         if _parse_utc(row.get("superseded_at_utc")) is None:
             blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
         if row.get("active") is True:
             blockers.append(CODE_SUPERSEDED_WINDOW_ACTIVE)
+    if require_migration_windows and not REQUIRED_SUPERSEDED_WINDOW_IDS <= seen_ids:
+        blockers.append(CODE_SUPERSEDED_WINDOWS_MISSING)
     return blockers
 
 
@@ -581,7 +866,14 @@ def validate_lifecycle_phase_row(row: Mapping[str, Any]) -> list[str]:
 __all__ = [
     "ALLOWED_ISOLATED_SERVICE_STATES",
     "BUNDLE_SCHEMA_VERSION",
+    "BASELINE_IMAGE_DIGEST_ENV",
+    "CANONICAL_DEPLOYMENT_ID_ENV",
+    "CANONICAL_SERVICE_ID_ENV",
+    "CANONICAL_SERVICE_NAME_ENV",
+    "CASE_EXPECT_GUARD_ACTION",
     "CASE_EXPECT_WOULD_REWRITE",
+    "CLOCK_SKEW_ALLOWANCE_SECONDS",
+    "ARTIFACT_MAX_AGE_SECONDS",
     "CODE_ARCH001_SIGNOFF_MISSING",
     "CODE_ARTIFACT_UNREADABLE",
     "CODE_BUNDLE_INVALID",
@@ -603,7 +895,12 @@ __all__ = [
     "CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID",
     "CODE_PHASE_TIMESTAMP_ORDER_INVALID",
     "CODE_POST_APPROVAL_NOT_PENDING",
-    "CODE_PROBE_FAILED",
+    "CODE_PRODUCTION_SYNTHETIC_MARKER",
+    "CODE_RUNTIME_BINDING_MISMATCH",
+    "CODE_TIMESTAMP_INVALID",
+    "CODE_TIMESTAMP_STALE",
+    "CODE_PHASE_IDENTITY_INCONSISTENT",
+    "CODE_IMAGE_DIGEST_INCONSISTENT",
     "CODE_STABLE_COUNTERS_DRIFT",
     "CODE_SUPERSEDED_WINDOW_ACTIVE",
     "CODE_SUPERSEDED_WINDOWS_MISSING",
@@ -617,6 +914,7 @@ __all__ = [
     "EVIDENCE_CLASS_CI_CONTRACT_SELF_TEST",
     "EVIDENCE_CLASS_PRODUCTION_SIGNOFF",
     "EXECUTION_MODE_IN_CONTAINER",
+    "EXPECTED_IMAGE_DIGEST_ENV",
     "EXPECTED_MANIFEST_DIGEST_ENV",
     "EXPECTED_STABLE_COUNTERS",
     "HMAC_DOMAIN_PREFIX",
@@ -648,6 +946,7 @@ __all__ = [
     "PHASE_VERIFY",
     "PINNED_REVISION_ENV",
     "POST_APPROVAL_PENDING",
+    "REQUIRED_SUPERSEDED_WINDOW_IDS",
     "REPEAT_MATRIX_MIN_SPACING_SECONDS",
     "REQUIRED_CASE_IDS",
     "SERVICE_ROLE_CANONICAL_CONTROL",
@@ -663,7 +962,9 @@ __all__ = [
     "is_legacy_v1_bundle",
     "is_strong_hmac_key",
     "validate_identity_binding_shape",
-    "validate_lifecycle_attestation",
+    "validate_bundle_timestamps",
+    "validate_image_digest_value",
+    "validate_lifecycle_phase_identities",
     "validate_lifecycle_phase_row",
     "validate_matrix_payload",
     "validate_negative_control_artifact",
