@@ -12,6 +12,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from backend.tests._arch001_signoff_v2_fixture import install_valid_v2_artifact
 from scripts.operators.real_channel_acceptance_session import (  # noqa: E402
     classify_inbound_candidate,
     complete_scenario,
@@ -232,22 +233,24 @@ def test_tenant_48_start_blocked_without_gates_not_tenant_1_artifact(
 
 def test_tenant_48_start_blocked_without_arch_signoff(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
     monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
-    monkeypatch.delenv(ARCH001_SHADOW_SIGNOFF_ENV, raising=False)
+    monkeypatch.delenv("NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT", raising=False)
     result = start_session(tenant_id=TENANT_48_SALLA_MINIMAL, app_root=_REPO)
     assert result["ok"] is False
-    assert CODE_ARCH001_SIGNOFF_MISSING in result["blockers"]
+    assert "arch001_shadow_signoff_missing" in result["blockers"] or "bundle_invalid" in result["blockers"]
     assert CODE_TENANT_1_PASS_ARTIFACT_INVALID not in result["blockers"]
 
 
 def test_tenant_48_start_blocks_on_staging_and_channel_prerequisites(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
     monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
-    monkeypatch.setenv(ARCH001_SHADOW_SIGNOFF_ENV, "true")
+    install_valid_v2_artifact(monkeypatch, tmp_path)
     monkeypatch.delenv(STAGING_PROJECT_ENV, raising=False)
     monkeypatch.delenv(STAGING_ENVIRONMENT_ENV, raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)

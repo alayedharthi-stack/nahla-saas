@@ -21,9 +21,14 @@ from scripts.operators.deployment_revision_attestation_contract import (
     evaluate_runtime_revision_attestation,
     normalize_revision_token,
 )
+from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
+    load_and_verify_artifact_from_env,
+)
 from scripts.operators.staging_acceptance_config_consolidation_contract import (
     APPLY_CONFIRM_ENV,
     APPLY_CONFIRM_TOKEN,
+    ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
+    ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
     ARCH001_SAFE_VALUES,
     ARCH001_SHADOW_ACTIVE_VALUE,
     ARCH001_SHADOW_MODE_ENV,
@@ -270,26 +275,31 @@ def gate_arch001_shadow_block(observation: RailwayObservation) -> dict[str, Any]
 def gate_arch001_teardown_proof(env: Mapping[str, str] | None = None) -> dict[str, Any]:
     env = env or os.environ
     proof = (env.get(ARCH001_TEARDOWN_PROOF_ENV) or "").strip()
-    signoff = env_flag_enabled(env.get(ARCH001_SHADOW_SIGNOFF_ENV))
+    signoff = load_and_verify_artifact_from_env(
+        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
+        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
+        env=env,
+    )
     if not proof:
         return _report(
             PHASE_ARCH001_TEARDOWN_PROOF,
             ok=False,
             code=CODE_ARCH001_TEARDOWN_PROOF_MISSING,
-            arch001_shadow_signoff_confirmed=signoff,
+            arch001_preprod_signoff_v2_valid=signoff.get("ok") is True,
         )
-    if not signoff:
+    if signoff.get("ok") is not True:
         return _report(
             PHASE_ARCH001_TEARDOWN_PROOF,
             ok=False,
             code=CODE_ARCH001_SIGNOFF_MISSING,
-            arch001_shadow_signoff_confirmed=False,
+            arch001_preprod_signoff_v2_valid=False,
+            blockers=signoff.get("blockers") or [],
         )
     return _report(
         PHASE_ARCH001_TEARDOWN_PROOF,
         ok=True,
         arch001_teardown_proof_ref=proof,
-        arch001_shadow_signoff_confirmed=True,
+        arch001_preprod_signoff_v2_valid=True,
     )
 
 

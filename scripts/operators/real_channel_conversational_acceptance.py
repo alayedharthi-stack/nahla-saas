@@ -19,8 +19,13 @@ from scripts.operators.deployment_revision_attestation_contract import (
     evaluate_runtime_revision_attestation,
     normalize_revision_token,
 )
+from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
+    load_and_verify_artifact_from_env,
+)
 from scripts.operators.real_channel_conversational_acceptance_contract import (
     ALLOWLIST_PHONES_ENV,
+    ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
+    ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
     ARCH001_SHADOW_SIGNOFF_ENV,
     CHANNEL_PREFLIGHT_ENV_NAMES,
     CODE_ACCEPTANCE_NOT_ENABLED,
@@ -152,13 +157,21 @@ def gate_staging_identity(env: Mapping[str, str] | None = None) -> dict[str, Any
 
 
 def gate_arch001_shadow_signoff() -> dict[str, Any]:
-    confirmed = env_flag_enabled(os.environ.get(ARCH001_SHADOW_SIGNOFF_ENV))
+    verified = load_and_verify_artifact_from_env(
+        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
+        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
+    )
+    ok = verified.get("ok") is True
     return _report(
         PHASE_ARCH001_SHADOW_SIGNOFF_GATE,
-        ok=confirmed,
-        code=None if confirmed else CODE_ARCH001_SIGNOFF_MISSING,
-        arch001_shadow_signoff_confirmed=confirmed,
-        note="Set after ARCH-001 48h synthetic shadow signoff artifact is approved",
+        ok=ok,
+        code=None if ok else (verified.get("code") or CODE_ARCH001_SIGNOFF_MISSING),
+        arch001_preprod_signoff_v2_valid=ok,
+        blockers=verified.get("blockers") or [],
+        note=(
+            "Requires HMAC-signed product_availability_preprod_synthetic_signoff_v2 artifact; "
+            "legacy v1 / env-only signoff is not sufficient"
+        ),
     )
 
 
@@ -305,8 +318,16 @@ def _execution_gates(*, phase: str, tenant_id: int) -> dict[str, Any] | None:
         return _report(PHASE_SUMMARY, ok=False, code=CODE_ACCEPTANCE_NOT_ENABLED)
     if not env_flag_enabled(os.environ.get(EXECUTION_CONFIRM_ENV)):
         return _report(PHASE_SUMMARY, ok=False, code=CODE_EXECUTION_NOT_CONFIRMED)
-    if not env_flag_enabled(os.environ.get(ARCH001_SHADOW_SIGNOFF_ENV)):
-        return _report(PHASE_SUMMARY, ok=False, code=CODE_ARCH001_SIGNOFF_MISSING)
+    signoff = load_and_verify_artifact_from_env(
+        artifact_env=ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV,
+        hmac_key_env=ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
+    )
+    if signoff.get("ok") is not True:
+        return _report(
+            PHASE_SUMMARY,
+            ok=False,
+            code=signoff.get("code") or CODE_ARCH001_SIGNOFF_MISSING,
+        )
     if phase == PHASE_TENANT_33_LIMITED and not env_flag_enabled(
         os.environ.get(TENANT_1_PASS_CONFIRM_ENV)
     ):
@@ -450,7 +471,8 @@ def teardown_instructions() -> dict[str, Any]:
         steps=[
             f"unset {MASTER_ENABLE_ENV}",
             f"unset {EXECUTION_CONFIRM_ENV}",
-            f"unset {ARCH001_SHADOW_SIGNOFF_ENV}",
+            f"unset {ARCH001_PREPROD_SIGNOFF_ARTIFACT_ENV}",
+            f"unset {ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV}",
             f"unset {TENANT_1_PASS_CONFIRM_ENV}",
             "restore tenant ai_settings from config snapshot",
             "verify store_ai_mode=test and allowlist unchanged or reverted per runbook",

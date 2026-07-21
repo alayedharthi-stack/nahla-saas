@@ -1,7 +1,8 @@
 # Real-channel conversational acceptance runbook (post-ARCH-001)
 
-**Status:** Preparation only (default-off). Do not execute until ARCH-001 48h shadow
-window completes and receives signoff.
+**Status:** Preparation only (default-off). Do not execute until ARCH-001 preprod
+synthetic signoff v2 (`ARCH-001-PREPROD-SYNTHETIC-SIGNOFF-v2`) HMAC bundle is approved.
+Post-approval canonical shadow during limited allowlisted canary remains a separate gate.
 
 ## Scope
 
@@ -56,7 +57,7 @@ markers can never be upgraded.
 
 | Gate | Requirement |
 |------|-------------|
-| ARCH-001 shadow | 48h synthetic signoff artifact approved |
+| ARCH-001 preprod signoff | HMAC-signed `product_availability_preprod_synthetic_signoff_v2` artifact (`traffic_claim=synthetic_probes_only`) |
 | Staging identity | `RAILWAY_PROJECT_NAME=desirable-growth`, `RAILWAY_ENVIRONMENT_NAME=staging` |
 | Deploy pin | `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION=<SHA>` |
 | Store AI mode | `store_ai_mode=test` on target tenant |
@@ -74,7 +75,9 @@ markers can never be upgraded.
 |---------|---------|
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_ENABLED` | Master execution gate (default off) |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_CONFIRM` | Human execution confirmation |
-| `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM` | ARCH-001 shadow signoff attestation |
+| `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_ARTIFACT` | Signed preprod v2 bundle path |
+| `NAHLA_ARCH001_PREPROD_SYNTHETIC_SIGNOFF_V2_HMAC_KEY` | HMAC key for v2 bundle verification |
+| `NAHLA_ARCH001_SHADOW_SIGNOFF_CONFIRM` | **Deprecated alone** — not sufficient without v2 artifact |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` | Signed Tenant 1 PASS artifact path |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION` | Deploy revision pin |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_EVIDENCE_HMAC_KEY` | Evidence signing/keyed-hash secret |

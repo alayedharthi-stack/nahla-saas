@@ -12,6 +12,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from backend.tests._arch001_signoff_v2_fixture import v2_env_overlay
 from scripts.operators import staging_acceptance_config_consolidation as operator  # noqa: E402
 from scripts.operators import staging_acceptance_config_consolidation_contract as contract  # noqa: E402
 from scripts.operators.staging_acceptance_config_consolidation_contract import (  # noqa: E402
@@ -331,7 +332,7 @@ def test_apply_blocked_when_master_disabled(monkeypatch: pytest.MonkeyPatch) -> 
     assert client.deploy_count == 0
 
 
-def test_apply_blocked_when_arch001_shadow_active() -> None:
+def test_apply_blocked_when_arch001_shadow_active(tmp_path: Path) -> None:
     obs = _observation()
     client = InMemoryRailwayClient(obs)
     result = execute_apply(
@@ -342,14 +343,14 @@ def test_apply_blocked_when_arch001_shadow_active() -> None:
             MASTER_ENABLE_ENV: "true",
             APPLY_CONFIRM_ENV: APPLY_CONFIRM_TOKEN,
             ARCH001_TEARDOWN_PROOF_ENV: "artifact-ref",
-            ARCH001_SHADOW_SIGNOFF_ENV: "true",
+            **v2_env_overlay(tmp_path),
         },
     )
     assert result["ok"] is False
     assert result["code"] == CODE_ARCH001_SHADOW_ACTIVE
 
 
-def test_apply_succeeds_after_shadow_off(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_succeeds_after_shadow_off(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     obs = _observation()
     obs.canonical.variables[ARCH001_SHADOW_MODE_ENV] = "off"
     obs.canonical.variables.pop("BACKEND_URL", None)
@@ -362,7 +363,7 @@ def test_apply_succeeds_after_shadow_off(monkeypatch: pytest.MonkeyPatch) -> Non
             MASTER_ENABLE_ENV: "true",
             APPLY_CONFIRM_ENV: APPLY_CONFIRM_TOKEN,
             ARCH001_TEARDOWN_PROOF_ENV: "artifact-ref",
-            ARCH001_SHADOW_SIGNOFF_ENV: "true",
+            **v2_env_overlay(tmp_path),
         },
     )
     assert result["ok"] is True
