@@ -694,15 +694,38 @@ _PRICE_SUFFIX_RE = re.compile(
 )
 
 _INLINE_PRICE_SUBJECT_RE = re.compile(
-    r"(?:كم\s*سعر|بكم(?:\s+ال)?|سعر\s*(?:ال)?|"
-    r"how\s*much\s+(?:is\s+)?(?:the\s+)?)"
+    r"(?:كم\s*(?:سعر|ثمن)|بكم(?:\s+ال)?|سعر\s*(?:ال)?|"
+    r"(?:what\s+is\s+the\s+)?price\s+of\s+(?:the\s+)?|"
+    r"how\s*much\s+(?:(?:is\s+)?(?:it\s+)?for\s+)?"
+    r"(?:is\s+)?(?:the\s+)?)"
     r"(?P<subject>.+?)"
     r"(?="
-    r"\s+(?:وهل|هل)\s+|"
-    r"\s+and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
-    r"(?:available|in\s+stock)\b|"
+    r"\s*[,،]?\s+(?:وهل|هل)\s+|"
+    r"\s*[,،]?\s+and\s+(?:(?:is|are)\s+(?:it|this|the\s+product)?\s*)?"
+    r"(?:available|availability|in\s+stock)\b|"
     r"[?؟!]|$"
     r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SUBJECT_FIRST_PRICE_RE = re.compile(
+    r"^(?P<subject>.{2,80}?)\s+"
+    r"(?:كم\s+سعر(?:ه|ها|هم)?|بكم|price|how\s+much(?:\s+is\s+it)?)"
+    r"(?=\s*(?:[,،]?\s*(?:وهل|هل|و?متوفر(?:ة|ه)?|و?موجود(?:ة|ه)?|and\b))|[?؟!]|$)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_AVAILABILITY_FIRST_PRICE_RE = re.compile(
+    r"^(?P<subject>.{2,80}?)\s+"
+    r"(?:متوفر(?:ة|ه)?|موجود(?:ة|ه)?|available|in\s+stock)"
+    r"(?:\s+عندكم)?\s*[?؟!]?\s*(?:(?:و|and)\s*)?"
+    r"(?:كم\s+سعر(?:ه|ها|هم)?|بكم|how\s+much(?:\s+is\s+it)?)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SUBJECT_BEFORE_PRICE_PRONOUN_RE = re.compile(
+    r"^(?:هل\s+)?عندكم\s+(?P<subject>.{2,80}?)\s+"
+    r"(?:و\s*)?كم\s+سعر(?:ه|ها|هم)",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -839,16 +862,24 @@ def _clean_price_subject_candidate(candidate: str) -> str:
     """Trim availability tails and fluff from a price-subject candidate."""
     core = (candidate or "").strip(" ؟?!.")
     core = re.sub(
-        r"^(?:is\s+)?(?:the\s+)?",
+        r"^(?:(?:السلام\s+عليكم|سلام\s+عليكم|هلا|اهلا|أهلا|مرحبا)"
+        r"[,،]?\s+|"
+        r"(?:لو\s+سمحت|من\s+فضلك|ممكن|فضلا|فضلاً)\s+|"
+        r"(?:hi|hello|hey)[,!]?\s+|"
+        r"(?:هل\s+)?عندكم\s+|هل\s+|"
+        r"(?:is\s+)?(?:of\s+|for\s+)?(?:the\s+)?)",
         "",
         core,
-        flags=re.IGNORECASE,
+        flags=re.UNICODE | re.IGNORECASE,
     ).strip()
     core = re.sub(r"^ال(?=\S{2})", "", core, flags=re.UNICODE).strip()
     core = re.sub(
         r"\s+(?:"
         r"(?:وهل|هل)\s+.*|"
-        r"and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
+        r"(?:و?التوفر|و?متوفر(?:ة|ه)?|و?موجود(?:ة|ه)?)(?:\s+عندكم)?\s*|"
+        r"and\s+(?:(?:is|are)\s+(?:it|this|the\s+product)?\s*)?"
+        r"(?:available|availability|in\s+stock).*|"
+        r"(?:is|are)\s+(?:it|this|the\s+product)?\s*"
         r"(?:available|in\s+stock).*)$",
         "",
         core,
@@ -886,6 +917,27 @@ def _extract_price_subject_from_probe(message: str) -> str:
     m = _PRICE_SUFFIX_RE.match(raw.strip(" ؟?!."))
     if m:
         candidate = _clean_price_subject_candidate(m.group(1) or "")
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    subject_first = _SUBJECT_FIRST_PRICE_RE.search(raw)
+    if subject_first:
+        candidate = _clean_price_subject_candidate(
+            subject_first.group("subject") or "",
+        )
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    availability_first = _AVAILABILITY_FIRST_PRICE_RE.search(raw)
+    if availability_first:
+        candidate = _clean_price_subject_candidate(
+            availability_first.group("subject") or "",
+        )
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    before_pronoun = _SUBJECT_BEFORE_PRICE_PRONOUN_RE.search(raw)
+    if before_pronoun:
+        candidate = _clean_price_subject_candidate(
+            before_pronoun.group("subject") or "",
+        )
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     inline = _INLINE_PRICE_SUBJECT_RE.search(raw)
