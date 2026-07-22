@@ -4222,7 +4222,9 @@ class MerchantBrain:
                                 extract_resolved_product_subject,
                             )
                             from .persona.catalog_product_answer import (  # noqa: PLC0415
+                                build_catalog_product_answer_emergency_outcome,
                                 build_catalog_search_miss_emergency_outcome,
+                                classify_catalog_question_kind,
                             )
                             from .persona.integration import (  # noqa: PLC0415
                                 _ai_settings_from_ctx,
@@ -4231,24 +4233,49 @@ class MerchantBrain:
                             search_query = str(
                                 (decision.args or {}).get("query") or ""
                             ).strip()
-                            fallback_text, _, fallback_event = (
-                                build_catalog_search_miss_emergency_outcome(
-                                    tenant_id=int(tenant_id),
-                                    customer_phone=str(customer_phone or ""),
-                                    inbound_text=str(message or ""),
-                                    resolved_subject=(
-                                        extract_resolved_product_subject(
-                                            ctx,
-                                            query=search_query,
-                                        )
-                                        or search_query
-                                    ),
-                                    catalog_search_query=search_query,
-                                    chosen_path="catalog_miss_resolved_subject",
-                                    ai_settings=_ai_settings_from_ctx(ctx),
-                                    reason="quality_guard_recompose_invalid",
-                                )
+                            fallback_products = list(
+                                result.data.get("catalog_fact_products")
+                                or result.data.get("products")
+                                or []
                             )
+                            if fallback_products:
+                                fallback_text, _, fallback_event = (
+                                    build_catalog_product_answer_emergency_outcome(
+                                        tenant_id=int(tenant_id),
+                                        customer_phone=str(customer_phone or ""),
+                                        inbound_text=str(message or ""),
+                                        products=fallback_products,
+                                        catalog_search_query=search_query,
+                                        search_result_count=len(fallback_products),
+                                        question_kind=classify_catalog_question_kind(
+                                            str(message or ""),
+                                            query=search_query,
+                                            decision_args=dict(decision.args or {}),
+                                        ),
+                                        decision_args=dict(decision.args or {}),
+                                        ai_settings=_ai_settings_from_ctx(ctx),
+                                        reason="quality_guard_recompose_invalid",
+                                    )
+                                )
+                            else:
+                                fallback_text, _, fallback_event = (
+                                    build_catalog_search_miss_emergency_outcome(
+                                        tenant_id=int(tenant_id),
+                                        customer_phone=str(customer_phone or ""),
+                                        inbound_text=str(message or ""),
+                                        resolved_subject=(
+                                            extract_resolved_product_subject(
+                                                ctx,
+                                                query=search_query,
+                                            )
+                                            or search_query
+                                        ),
+                                        catalog_search_query=search_query,
+                                        chosen_path="catalog_miss_resolved_subject",
+                                        ai_settings=_ai_settings_from_ctx(ctx),
+                                        reason="quality_guard_recompose_invalid",
+                                    )
+                                )
                             result.data.update(fallback_event)
                             result.data["quality_guard_recompose_attempted"] = True
                             result.data["compose_route_attempted"] = True
