@@ -151,7 +151,9 @@ python scripts/probe_d360_forwarding.py --tenant 33
    test device, observe DB/provider evidence, and record device + human review.
 5. Complete all scenarios and teardown. Teardown requires exact config
    fingerprint equality and emits a signed Tenant 1 PASS artifact only when all
-   50 scenarios passed.
+   50 scenarios passed in a full `phase_acceptance` session. A
+   `single_scenario_retest` session emits only bounded per-scenario evidence and
+   never unlocks Tenant 33.
 6. Point `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` at that signed
    artifact, then start Tenant 33.
 
@@ -160,6 +162,11 @@ python scripts/probe_d360_forwarding.py --tenant 33
 ```bash
 # STARTED: snapshots exact config fingerprint and DB/event/AI-usage cursors.
 python -m scripts.operators.real_channel_acceptance_session start-session --tenant 1
+
+# Single-scenario retest (fail-closed): arms only the named closed manifest scenario.
+# Does not mint Tenant 1 PASS or unlock Tenant 33.
+python -m scripts.operators.real_channel_acceptance_session start-session --tenant 1 \
+  --scenario-id t1_catalog_dress_ambiguous
 
 # STARTED → AWAITING_DEVICE_SEND: prints the test input and manual/device boundary.
 python -m scripts.operators.real_channel_acceptance_session next-scenario --session-id <SESSION_ID>

@@ -22,6 +22,7 @@ from scripts.operators.real_channel_acceptance_session import (  # noqa: E402
     observe,
     record_device_attestation,
     start_session,
+    teardown,
 )
 from scripts.operators.real_channel_acceptance_order_side_effect_signatures import (  # noqa: E402
     build_order_side_effect_snapshot,
@@ -38,6 +39,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     CODE_HUMAN_ASSESSMENT_REQUIRED,
     CODE_ORDER_SIDE_EFFECT_DETECTED,
     CODE_OUTBOUND_PROVIDER_ID_MISSING,
+    CODE_SCENARIO_NOT_IN_MANIFEST,
+    CODE_SCENARIO_PHASE_MISMATCH,
     CODE_STAGING_IDENTITY_REJECTED,
     CODE_TENANT_1_PASS_ARTIFACT_INVALID,
     CODE_TENANT_NOT_ALLOWED,
@@ -47,19 +50,28 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     EVIDENCE_HMAC_KEY_ENV,
     EXECUTION_CONFIRM_ENV,
     MASTER_ENABLE_ENV,
+    PHASE_TENANT_1_INTENSIVE,
     PHASE_TENANT_48_SALLA_MINIMAL,
     REVIEWER_ID_ENV,
     SESSION_DIR_ENV,
     SESSION_SCHEMA_VERSION,
+    SESSION_SCOPE_PHASE_ACCEPTANCE,
+    SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
     SESSION_STATE_AWAITING_DEVICE_SEND,
+    SESSION_STATE_COMPLETED,
     SESSION_STATE_HUMAN_ASSESSED,
     SESSION_STATE_OBSERVED,
+    SESSION_STATE_SCENARIO_COMPLETED,
     SESSION_STATE_STARTED,
     STAGING_ENVIRONMENT_ENV,
     STAGING_PROJECT_ENV,
+    TENANT_1_INTENSIVE,
+    TENANT_1_PHONE_ENV,
     TENANT_48_SALLA_MINIMAL,
     hmac_identifier,
+    load_scenario_manifest,
     resolve_acceptance_phase,
+    resolve_session_scenario_scope,
 )
 
 
@@ -535,3 +547,207 @@ def test_observe_appends_order_side_effect_blocker_alongside_outbound_missing(
 
     assert CODE_OUTBOUND_PROVIDER_ID_MISSING in result["blockers"]
     assert CODE_ORDER_SIDE_EFFECT_DETECTED in result["blockers"]
+
+
+def test_resolve_session_scenario_scope_full_phase_loads_all_tenant_1_scenarios() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    scenario_ids, scope = resolve_session_scenario_scope(
+        manifest,
+        phase=PHASE_TENANT_1_INTENSIVE,
+        tenant_id=TENANT_1_INTENSIVE,
+    )
+    assert scope == SESSION_SCOPE_PHASE_ACCEPTANCE
+    assert len(scenario_ids) == 50
+    assert scenario_ids[0] == "t1_faq_hours"
+
+
+def test_resolve_session_scenario_scope_single_retest() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    scenario_ids, scope = resolve_session_scenario_scope(
+        manifest,
+        phase=PHASE_TENANT_1_INTENSIVE,
+        tenant_id=TENANT_1_INTENSIVE,
+        scenario_id="t1_catalog_dress_ambiguous",
+    )
+    assert scope == SESSION_SCOPE_SINGLE_SCENARIO_RETEST
+    assert scenario_ids == ["t1_catalog_dress_ambiguous"]
+
+
+def test_resolve_session_scenario_scope_rejects_unknown_id() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    with pytest.raises(ValueError, match=CODE_SCENARIO_NOT_IN_MANIFEST):
+        resolve_session_scenario_scope(
+            manifest,
+            phase=PHASE_TENANT_1_INTENSIVE,
+            tenant_id=TENANT_1_INTENSIVE,
+            scenario_id="t1_unknown_scenario",
+        )
+
+
+def test_resolve_session_scenario_scope_rejects_cross_phase_id() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    with pytest.raises(ValueError, match=CODE_SCENARIO_PHASE_MISMATCH):
+        resolve_session_scenario_scope(
+            manifest,
+            phase=PHASE_TENANT_1_INTENSIVE,
+            tenant_id=TENANT_1_INTENSIVE,
+            scenario_id="t33_catalog_search_availability_2",
+        )
+
+
+def test_start_session_rejects_unknown_scenario_before_db(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(MASTER_ENABLE_ENV, "true")
+    monkeypatch.setenv(EXECUTION_CONFIRM_ENV, "true")
+    install_production_v2_artifact(monkeypatch, tmp_path)
+    monkeypatch.setenv(STAGING_PROJECT_ENV, "desirable-growth")
+    monkeypatch.setenv(STAGING_ENVIRONMENT_ENV, "staging")
+    monkeypatch.setenv("RAILWAY_DEPLOYMENT_ID", "deploy-test")
+    monkeypatch.setenv(EVIDENCE_HMAC_KEY_ENV, "unit-test-evidence-key")
+    monkeypatch.setenv(TENANT_1_PHONE_ENV, "15550001111")
+    monkeypatch.setenv("NAHLA_REAL_CHANNEL_ACCEPTANCE_ALLOWLIST_PHONES", "15550001111")
+    with patch(
+        "scripts.operators.real_channel_acceptance_session._required_start_gates",
+        return_value=[],
+    ):
+        result = start_session(
+            tenant_id=TENANT_1_INTENSIVE,
+            scenario_id="t1_unknown_scenario",
+            app_root=_REPO,
+        )
+    assert result["ok"] is False
+    assert CODE_SCENARIO_NOT_IN_MANIFEST in result["blockers"]
+
+
+def test_single_scenario_session_next_scenario_arms_only_requested_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    session = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "session_id": session_id,
+        "state": SESSION_STATE_STARTED,
+        "tenant_id": 1,
+        "event_cursor": 10,
+        "usage_cursor": 0,
+        "order_cursor": 0,
+        "session_scope": SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
+        "retest_scenario_id": "t1_catalog_dress_ambiguous",
+        "tenant_1_pass_eligible": False,
+        "scenario_ids": ["t1_catalog_dress_ambiguous"],
+        "scenario_index": 0,
+        "scenario_results": [],
+        "totals": {"inbound": 0, "outbound_provider": 0, "llm_calls": 0, "cost_usd": 0.0},
+        "active_scenario": None,
+    }
+    (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
+
+    with patch("scripts.operators.real_channel_acceptance_session._engine") as engine_mock:
+        connection = MagicMock()
+        engine_mock.return_value.connect.return_value.__enter__.return_value = connection
+        engine_mock.return_value.connect.return_value.__exit__.return_value = False
+        with patch(
+            "scripts.operators.real_channel_acceptance_session.capture_order_side_effect_arm",
+            return_value={"snapshot": {}, "volatile_metadata_by_row": {}, "metadata_keys_by_row": {}},
+        ):
+            result = next_scenario(session_id, app_root=_REPO)
+
+    assert result["ok"] is True
+    assert result["scenario_id"] == "t1_catalog_dress_ambiguous"
+    assert result["scenario_id"] != "t1_faq_hours"
+
+
+def test_single_scenario_session_has_no_follow_on_scenario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    session_id = "12345678-1234-1234-1234-123456789abd"
+    session = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "session_id": session_id,
+        "state": SESSION_STATE_SCENARIO_COMPLETED,
+        "tenant_id": 1,
+        "session_scope": SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
+        "retest_scenario_id": "t1_catalog_dress_ambiguous",
+        "tenant_1_pass_eligible": False,
+        "scenario_ids": ["t1_catalog_dress_ambiguous"],
+        "scenario_index": 1,
+        "scenario_results": [
+            {
+                "scenario_id": "t1_catalog_dress_ambiguous",
+                "verdict": "pass",
+                "evidence_channel": EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
+                "machine_verdict": "candidate_pass",
+                "blockers": [],
+            }
+        ],
+        "active_scenario": None,
+    }
+    (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
+
+    result = next_scenario(session_id, app_root=_REPO)
+
+    assert result["ok"] is True
+    assert result["state"] == SESSION_STATE_COMPLETED
+    assert result["remaining"] == 0
+
+
+@patch("scripts.operators.real_channel_acceptance_session.hmac.compare_digest", return_value=True)
+@patch("scripts.operators.real_channel_acceptance_session._engine")
+def test_single_scenario_teardown_does_not_mint_tenant_1_pass(
+    mock_engine: MagicMock,
+    _compare_digest: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    monkeypatch.delenv(MASTER_ENABLE_ENV, raising=False)
+    monkeypatch.delenv(EXECUTION_CONFIRM_ENV, raising=False)
+    monkeypatch.setenv(EVIDENCE_HMAC_KEY_ENV, "unit-test-evidence-key")
+    monkeypatch.setenv(TENANT_1_PHONE_ENV, "15550001111")
+    session_id = "12345678-1234-1234-1234-123456789abe"
+    session = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "session_id": session_id,
+        "state": SESSION_STATE_SCENARIO_COMPLETED,
+        "tenant_id": 1,
+        "session_scope": SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
+        "retest_scenario_id": "t1_catalog_dress_ambiguous",
+        "tenant_1_pass_eligible": False,
+        "deployment": {"revision": "abc123", "deployment_id_hmac": "hmac:test"},
+        "config_snapshot": {"fingerprint": "hmac-sha256:test"},
+        "scenario_ids": ["t1_catalog_dress_ambiguous"],
+        "scenario_results": [
+            {
+                "scenario_id": "t1_catalog_dress_ambiguous",
+                "verdict": "pass",
+                "evidence_channel": EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
+                "machine_verdict": "candidate_pass",
+                "blockers": [],
+            }
+        ],
+        "test_phone_hmac": hmac_identifier("15550001111", key="unit-test-evidence-key"),
+    }
+    (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
+    connection = MagicMock()
+    mock_engine.return_value.connect.return_value.__enter__.return_value = connection
+    mock_engine.return_value.connect.return_value.__exit__.return_value = False
+    connection.execute.return_value.scalar_one_or_none.return_value = {}
+    connection.execute.return_value.mappings.return_value.one.return_value = {
+        "subscription_status": "active",
+        "ai_blocked_numbers": [],
+    }
+    connection.execute.return_value.mappings.return_value.first.return_value = None
+
+    result = teardown(session_id, app_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["session_scope"] == SESSION_SCOPE_SINGLE_SCENARIO_RETEST
+    assert result["tenant_1_pass_eligible"] is False
+    assert result["unlocks_tenant_33"] is False
+    assert result["tenant_1_pass_artifact"] is None
+    assert result["scenario_retest_artifact"] is not None
+    assert "t1_catalog_dress_ambiguous" in result["scenario_retest_artifact"]

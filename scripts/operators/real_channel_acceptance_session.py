@@ -57,6 +57,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     CODE_PROVENANCE_INCOMPLETE,
     CODE_RATE_CAP_EXCEEDED,
     CODE_REAL_CHANNEL_REQUIRED,
+    CODE_SCENARIO_NOT_IN_MANIFEST,
+    CODE_SCENARIO_PHASE_MISMATCH,
     CODE_SESSION_NOT_FOUND,
     CODE_SESSION_STATE_INVALID,
     CODE_STORE_AI_MODE_INVALID,
@@ -83,6 +85,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     SESSION_DEFAULT_DIR,
     SESSION_DIR_ENV,
     SESSION_SCHEMA_VERSION,
+    SESSION_SCOPE_PHASE_ACCEPTANCE,
+    SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
     SESSION_STATE_AWAITING_DEVICE_SEND,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_HUMAN_ASSESSED,
@@ -102,6 +106,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     load_scenario_manifest,
     parse_allowlist_phones,
     resolve_acceptance_phase,
+    resolve_session_scenario_scope,
 )
 
 DEPLOYMENT_ID_ENV = "RAILWAY_DEPLOYMENT_ID"
@@ -284,23 +289,36 @@ def verify_tenant_1_pass_artifact() -> dict[str, Any]:
     return payload
 
 
-def start_session(*, tenant_id: int, app_root: Path | None = None) -> dict[str, Any]:
+def start_session(
+    *,
+    tenant_id: int,
+    scenario_id: str | None = None,
+    app_root: Path | None = None,
+) -> dict[str, Any]:
     phase = _phase_for_tenant(tenant_id)
     root = (app_root or Path(__file__).resolve().parents[2]).resolve()
     blockers = _required_start_gates(tenant_id, root)
     if blockers:
         return {"ok": False, "state": "blocked", "blockers": sorted(set(blockers))}
 
+    manifest = load_scenario_manifest(root)
+    try:
+        scenarios, session_scope = resolve_session_scenario_scope(
+            manifest,
+            phase=phase,
+            tenant_id=tenant_id,
+            scenario_id=scenario_id,
+        )
+    except ValueError as exc:
+        return {"ok": False, "state": "blocked", "blockers": [str(exc)]}
+    if not scenarios or len(scenarios) > MAX_SCENARIOS_PER_SESSION:
+        return {"ok": False, "state": "blocked", "blockers": [CODE_RATE_CAP_EXCEEDED]}
+
     key = os.environ[EVIDENCE_HMAC_KEY_ENV]
     phone = re.sub(r"\D", "", os.environ.get(_phone_env_for_tenant(tenant_id), ""))
     allowlist = parse_allowlist_phones(os.environ.get(ALLOWLIST_PHONES_ENV))
     if not phone or phone not in allowlist:
         return {"ok": False, "state": "blocked", "blockers": [CODE_PHONE_NOT_ALLOWLISTED]}
-
-    manifest = load_scenario_manifest(root)
-    scenarios = [row["scenario_id"] for row in manifest["scenarios"] if row["phase"] == phase]
-    if not scenarios or len(scenarios) > MAX_SCENARIOS_PER_SESSION:
-        return {"ok": False, "state": "blocked", "blockers": [CODE_RATE_CAP_EXCEEDED]}
 
     engine = _engine()
     with engine.connect() as conn:
@@ -363,6 +381,9 @@ def start_session(*, tenant_id: int, app_root: Path | None = None) -> dict[str, 
         "state": SESSION_STATE_STARTED,
         "tenant_id": tenant_id,
         "phase": phase,
+        "session_scope": session_scope,
+        "retest_scenario_id": scenario_id if session_scope == SESSION_SCOPE_SINGLE_SCENARIO_RETEST else None,
+        "tenant_1_pass_eligible": session_scope == SESSION_SCOPE_PHASE_ACCEPTANCE,
         "started_at_utc": _utc_now(),
         "deployment": {
             "revision": os.environ.get(PINNED_REVISION_ENV),
@@ -397,6 +418,9 @@ def start_session(*, tenant_id: int, app_root: Path | None = None) -> dict[str, 
         "state": SESSION_STATE_STARTED,
         "tenant_id": tenant_id,
         "test_phone_hmac": session["test_phone_hmac"],
+        "session_scope": session_scope,
+        "retest_scenario_id": session.get("retest_scenario_id"),
+        "tenant_1_pass_eligible": session["tenant_1_pass_eligible"],
         "event_cursor": session["event_cursor"],
         "scenario_count": len(scenarios),
         "session_path": str(path),
@@ -1008,11 +1032,17 @@ def complete_scenario(session_id: str, *, app_root: Path | None = None) -> dict[
 
 def session_status(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]:
     session = load_session(session_id, app_root)
+    session_scope = session.get("session_scope") or SESSION_SCOPE_PHASE_ACCEPTANCE
     return {
         "ok": True,
         "session_id": session_id,
         "state": session["state"],
         "tenant_id": session["tenant_id"],
+        "session_scope": session_scope,
+        "retest_scenario_id": session.get("retest_scenario_id"),
+        "tenant_1_pass_eligible": bool(
+            session.get("tenant_1_pass_eligible", session_scope == SESSION_SCOPE_PHASE_ACCEPTANCE)
+        ),
         "test_phone_hmac": session["test_phone_hmac"],
         "scenario_index": session["scenario_index"],
         "scenario_count": len(session["scenario_ids"]),
@@ -1110,6 +1140,10 @@ def teardown(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]
         len(session["scenario_results"]) == len(session["scenario_ids"])
         and all(result["verdict"] == "pass" for result in session["scenario_results"])
     )
+    session_scope = session.get("session_scope") or SESSION_SCOPE_PHASE_ACCEPTANCE
+    tenant_1_pass_eligible = bool(
+        session.get("tenant_1_pass_eligible", session_scope == SESSION_SCOPE_PHASE_ACCEPTANCE)
+    )
     teardown_ok = unchanged and not flags_lingering
     session["state"] = SESSION_STATE_TORN_DOWN if teardown_ok else session["state"]
     session["teardown"] = {
@@ -1117,6 +1151,9 @@ def teardown(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]
         "config_exact_match": unchanged,
         "runner_flags_lingering": flags_lingering,
         "runner_mutations": False,
+        "session_scope": session_scope,
+        "tenant_1_pass_eligible": tenant_1_pass_eligible,
+        "unlocks_tenant_33": False,
         "blockers": blockers,
     }
     _write_session(session, app_root)
@@ -1125,10 +1162,17 @@ def teardown(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]
         root / "docs/engineering/staging-evidence"
         / f"real-channel-acceptance-{session_id}.json"
     )
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     pass_artifact = None
-    if teardown_ok and all_passed and session["tenant_id"] == TENANT_1_INTENSIVE:
+    scenario_retest_artifact = None
+    if (
+        teardown_ok
+        and all_passed
+        and tenant_1_pass_eligible
+        and session["tenant_id"] == TENANT_1_INTENSIVE
+    ):
         artifact_payload = {
             "schema_version": "tenant_1_actual_channel_pass_v1",
             "tenant_id": TENANT_1_INTENSIVE,
@@ -1141,14 +1185,50 @@ def teardown(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]
         }
         artifact_payload["signature"] = _hmac_value(artifact_payload, key=key)
         artifact = root / "docs/engineering/staging-evidence" / f"tenant-1-pass-{session_id}.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(json.dumps(artifact_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         pass_artifact = str(artifact)
+        session["teardown"]["unlocks_tenant_33"] = True
+    elif (
+        teardown_ok
+        and session_scope == SESSION_SCOPE_SINGLE_SCENARIO_RETEST
+        and len(session["scenario_results"]) == 1
+    ):
+        scenario_result = session["scenario_results"][0]
+        retest_payload = {
+            "schema_version": "single_scenario_retest_v1",
+            "session_scope": SESSION_SCOPE_SINGLE_SCENARIO_RETEST,
+            "tenant_id": session["tenant_id"],
+            "session_id": session_id,
+            "scenario_id": scenario_result["scenario_id"],
+            "verdict": scenario_result["verdict"],
+            "tenant_1_pass_eligible": False,
+            "unlocks_tenant_33": False,
+            "deployment": session["deployment"],
+            "teardown_verified": True,
+            "issued_at_utc": _utc_now(),
+        }
+        retest_payload["signature"] = _hmac_value(retest_payload, key=key)
+        retest_path = (
+            root / "docs/engineering/staging-evidence"
+            / f"scenario-retest-{scenario_result['scenario_id']}-{session_id}.json"
+        )
+        retest_path.parent.mkdir(parents=True, exist_ok=True)
+        retest_path.write_text(
+            json.dumps(retest_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        scenario_retest_artifact = str(retest_path)
     return {
         "ok": teardown_ok,
         "state": session["state"],
         "config_exact_match": unchanged,
         "blockers": blockers,
+        "session_scope": session_scope,
+        "tenant_1_pass_eligible": tenant_1_pass_eligible,
+        "unlocks_tenant_33": bool(session["teardown"].get("unlocks_tenant_33")),
         "tenant_1_pass_artifact": pass_artifact,
+        "scenario_retest_artifact": scenario_retest_artifact,
         "evidence_archive": str(archive),
     }
 
@@ -1166,6 +1246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     start = sub.add_parser("start-session")
     start.add_argument("--tenant", type=int, choices=[1, 33, 48], required=True)
+    start.add_argument("--scenario-id", dest="scenario_id", default=None)
     for command in (
         "next-scenario",
         "observe",
@@ -1190,7 +1271,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "start-session":
-            result = start_session(tenant_id=args.tenant)
+            result = start_session(
+                tenant_id=args.tenant,
+                scenario_id=args.scenario_id,
+            )
         elif args.command == "next-scenario":
             result = next_scenario(args.session_id)
         elif args.command in {"observe", "poll"}:
