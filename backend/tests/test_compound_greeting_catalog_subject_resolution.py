@@ -257,6 +257,7 @@ class TestCompoundGreetingSubjectResolution:
             "كم سعره؟",
             "كم سعره وهل متوفر؟",
             "كم سعره وهل هو متوفر؟",
+            "شكراً، كم سعره وهل متوفر؟",
             "كم سعر هذا؟",
         ],
     )
@@ -270,6 +271,25 @@ class TestCompoundGreetingSubjectResolution:
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action != ACTION_SEARCH_PRODUCTS
         assert decision.args.get("product") == focus
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("كم سعر هذا الفستان وهل هو متوفر؟", "فستان"),
+            ("How much is this white running shoe?", "white running shoe"),
+        ],
+    )
+    def test_demonstrative_with_explicit_product_beats_previous_focus(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        old_focus = {"title": "عطر ورد قديم", "external_id": "old-sku"}
+        ctx = _ctx(message, slots={"product_query": "قديم"}, focus=old_focus)
+        assert _resolved_product_query(ctx) == expected
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == expected
 
     def test_identity_guard_yields_to_explicit_catalog_price_evidence(self) -> None:
         mixed = _ctx(

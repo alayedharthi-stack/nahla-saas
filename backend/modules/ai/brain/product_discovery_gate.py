@@ -743,10 +743,12 @@ _WEAK_PRONOUN_SLOT_TOKENS = frozenset({
 })
 
 _WEAK_REFERENCE_PRICE_MESSAGE_RE = re.compile(
-    r"^\s*(?:"
+    r"^\s*(?:(?:شكرا|شكراً|مشكور(?:ه)?|thanks|thank\s+you)\s*[,،!]?\s*)?(?:"
     r"(?:كم\s+)?سعر(?:ه|ها|هم)\b|"
-    r"(?:كم\s+)?سعر\s+(?:هذا|هذه|هذي|ذا)\b|"
+    r"(?:كم\s+)?سعر\s+(?:هذا|هذه|هذي|ذا)\b"
+    r"(?=\s*(?:[?؟!.,،]|$|(?:وهل|هل|و?متوفر(?:ة|ه)?|و?موجود(?:ة|ه)?)\b))|"
     r"how\s+much\s+(?:is\s+)?(?:it|this|that)\b"
+    r"(?=\s*(?:[?!.]|$|(?:and\s+)?(?:available|in\s+stock)\b))"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -866,6 +868,8 @@ def _subject_has_product_substance(candidate: str) -> bool:
         return False
     if norm in _WEAK_PRONOUN_SLOT_TOKENS:
         return False
+    if _is_greeting_or_social_slot_token(candidate):
+        return False
     tokens = [t for t in norm.split() if t]
     if not tokens:
         return False
@@ -879,9 +883,11 @@ def _clean_price_subject_candidate(candidate: str) -> str:
     core = re.sub(
         r"^(?:(?:السلام\s+عليكم|سلام\s+عليكم|هلا|اهلا|أهلا|مرحبا)"
         r"[,،]?\s+|"
+        r"(?:شكرا|شكراً|مشكور(?:ه)?)\s*[,،]?\s+|"
         r"(?:لو\s+سمحت|من\s+فضلك|ممكن|فضلا|فضلاً)\s+|"
         r"(?:hi|hello|hey)[,!]?\s+|"
         r"(?:هل\s+)?عندكم\s+|هل\s+|"
+        r"(?:هذا|هذه|هذي|ذا)\s+|(?:is\s+)?(?:this|that)\s+|"
         r"(?:is\s+)?(?:of\s+|for\s+)?(?:the\s+)?)",
         "",
         core,
@@ -900,7 +906,10 @@ def _clean_price_subject_candidate(candidate: str) -> str:
         core,
         flags=re.UNICODE | re.IGNORECASE,
     ).strip(" ,،؟?!.")
-    if _normalize_ar(core) in _WEAK_PRONOUN_SLOT_TOKENS:
+    if (
+        _normalize_ar(core) in _WEAK_PRONOUN_SLOT_TOKENS
+        or _is_greeting_or_social_slot_token(core)
+    ):
         return ""
     return core
 
