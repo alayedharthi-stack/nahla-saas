@@ -49,6 +49,9 @@ _TALH_5KG = {
 def _catalog_compose_event_without_fact_rows() -> Dict[str, Any]:
     return {
         "chosen_path": "fact_bound_persona_compose",
+        "compose_source": "persona_llm",
+        "response_mode": "grounded_persona_compose",
+        "llm_candidate_present": True,
         "persona_compose": {
             "surface": "catalog_product_answer",
             "source": "persona_llm",

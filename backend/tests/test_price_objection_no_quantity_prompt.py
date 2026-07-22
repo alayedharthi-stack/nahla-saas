@@ -138,6 +138,17 @@ def test_bulk_price_condition_does_not_enter_checkout_without_buy_intent() -> No
     assert facts.get("competitor_price_claim") == 200.0
 
 
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "لو سمحت سعر عطر ورد 100ml والتوفر؟",
+        "لو تكرمت سعر حذاء رياضي مقاس 42 وهل موجود؟",
+    ],
+)
+def test_polite_product_measurements_are_not_price_objections(msg: str) -> None:
+    assert detect_price_objection_topic_shift(msg) is False
+
+
 def test_price_objection_preserves_catalog_price_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -14,12 +14,16 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
         sys.path.insert(0, p)
 
 from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
+from modules.ai.brain.commerce.identity_collaboration_guard import (  # noqa: E402
+    try_identity_collaboration_decision,
+)
 from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES  # noqa: E402
 from modules.ai.brain.product_discovery_gate import (  # noqa: E402
     _extract_price_subject,
     _is_greeting_or_social_slot_token,
+    _normalize_ar,
     _resolved_product_query,
 )
 from modules.ai.brain.types import (  # noqa: E402
@@ -32,6 +36,21 @@ from modules.ai.brain.types import (  # noqa: E402
 )
 _PRODUCTION_MESSAGE = "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
 _GENERIC_MESSAGE = "أهلًا، كم سعر العطر وهل هو متوفر؟"
+_GENERIC_PRODUCTS = (
+    "فستان سهرة اسود",
+    "عطر ورد 100ml",
+    "قميص قطني ازرق",
+    "سماعات لاسلكية",
+    "حقيبة جلد بنية",
+)
+_PRICE_AVAILABILITY_TEMPLATES = (
+    "كم سعر {product} وهل هو متوفر؟",
+    "هلا، بكم {product} وهل موجود؟",
+    "لو سمحت سعر {product} والتوفر؟",
+    "{product} كم سعره وهل متوفر؟",
+    "هل {product} متوفر وكم سعره؟",
+    "بكم عندكم {product} وهل متوفر؟",
+)
 
 
 def _ctx(
@@ -129,6 +148,184 @@ class TestCompoundGreetingSubjectResolution:
         expected: str,
     ) -> None:
         assert _extract_price_subject(message) == expected
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("الفستان كم سعره وهل هو متوفر؟", "فستان"),
+            ("السلام عليكم، الفستان كم سعره وهل هو متوفر؟", "فستان"),
+            ("لو سمحت الفستان كم سعره وهل موجود؟", "فستان"),
+            ("عطر ورد 100ml بكم وهل موجود؟", "عطر ورد 100ml"),
+            ("هلا، عطر ورد 100ml بكم وهل موجود؟", "عطر ورد 100ml"),
+            ("الفستان متوفر؟ وكم سعره؟", "فستان"),
+            ("هل الفستان متوفر وكم سعره؟", "فستان"),
+            ("هل عندكم الفستان وكم سعره؟", "فستان"),
+            ("الفستان موجود عندكم؟ كم سعره؟", "فستان"),
+            ("بكم عندكم الفستان وهل متوفر؟", "فستان"),
+            ("عندكم الفستان بكم وهل متوفر؟", "فستان"),
+            ("كم ثمن سماعات لاسلكية؟ وهل هي متوفرة", "سماعات لاسلكية"),
+            ("ممكن سعر الفستان والتوفر؟", "فستان"),
+            ("لو سمحت سعر حذاء رياضي أبيض وهل موجود", "حذاء رياضي أبيض"),
+            (
+                "Hi! Price of the rose perfume 100ml and availability?",
+                "rose perfume 100ml",
+            ),
+            (
+                "What is the price of the white running shoe, and is it in stock?",
+                "white running shoe",
+            ),
+            (
+                "Is rose perfume 100ml available? How much is it?",
+                "rose perfume 100ml",
+            ),
+            (
+                "Hi, rose perfume 100ml how much and is it available?",
+                "rose perfume 100ml",
+            ),
+            (
+                "white running shoe price and availability?",
+                "white running shoe",
+            ),
+            (
+                "How much for the rose perfume 100ml? Is it available?",
+                "rose perfume 100ml",
+            ),
+            ("العطر هل متوفر؟ وكم سعره؟", "عطر"),
+        ],
+    )
+    def test_realistic_price_availability_word_orders(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        assert _extract_price_subject(message) == expected
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("السلام عليكم، الفستان كم سعره وهل هو متوفر؟", "فستان"),
+            ("شكراً، كم سعر العطر؟", "عطر"),
+            ("لو سمحت سعر حذاء رياضي أبيض وهل موجود", "حذاء رياضي ابيض"),
+            ("هلا، عطر ورد 100ml بكم وهل موجود؟", "عطر ورد 100ml"),
+            (
+                "What is the price of the white running shoe, and is it in stock?",
+                "white running shoe",
+            ),
+        ],
+    )
+    def test_realistic_message_evidence_drives_search_decision(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        ctx = _ctx(message, slots={"product_query": "سلام"})
+        assert _resolved_product_query(ctx) == expected
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == expected
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "السلام عليكم",
+            "سعره؟",
+            "كم عندكم؟",
+            "كم الكمية؟",
+            "هل عندكم فرع؟",
+            "price and availability?",
+            "أنا معلم وأرغب في التعاون معكم",
+            "I am a teacher and would like to collaborate",
+        ],
+    )
+    def test_non_product_messages_do_not_invent_catalog_subject(
+        self,
+        message: str,
+    ) -> None:
+        assert _extract_price_subject(message) == ""
+
+    def test_malformed_english_availability_does_not_search_catalog(self) -> None:
+        ctx = _ctx(
+            "price and availability?",
+            slots={"product_query": "availability"},
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "كم سعره؟",
+            "كم سعره وهل متوفر؟",
+            "كم سعره وهل هو متوفر؟",
+            "شكراً، كم سعره وهل متوفر؟",
+            "كم سعر هذا؟",
+        ],
+    )
+    def test_weak_reference_price_turn_preserves_product_focus(
+        self,
+        message: str,
+    ) -> None:
+        focus = {"title": "حذاء رياضي أبيض", "external_id": "sku-1"}
+        ctx = _ctx(message, slots={"product_query": "عطر"}, focus=focus)
+        assert _resolved_product_query(ctx) == ""
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("product") == focus
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("كم سعر هذا الفستان وهل هو متوفر؟", "فستان"),
+            ("How much is this white running shoe?", "white running shoe"),
+        ],
+    )
+    def test_demonstrative_with_explicit_product_beats_previous_focus(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        old_focus = {"title": "عطر ورد قديم", "external_id": "old-sku"}
+        ctx = _ctx(message, slots={"product_query": "قديم"}, focus=old_focus)
+        assert _resolved_product_query(ctx) == expected
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == expected
+
+    def test_identity_guard_yields_to_explicit_catalog_price_evidence(self) -> None:
+        mixed = _ctx(
+            "أنا معلم، وكم سعر الفستان وهل هو متوفر؟",
+            slots={"product_query": "فستان"},
+        )
+        assert try_identity_collaboration_decision(mixed) is None
+
+        pure = _ctx(
+            "أنا معلم وأرغب في التعاون معكم",
+            intent_name="general",
+        )
+        decision = try_identity_collaboration_decision(pure)
+        assert decision is not None
+        assert decision.args.get("topic") == "identity_collaboration"
+
+    @pytest.mark.parametrize(
+        ("product", "template"),
+        [
+            (product, template)
+            for product in _GENERIC_PRODUCTS
+            for template in _PRICE_AVAILABILITY_TEMPLATES
+        ],
+    )
+    def test_generic_catalog_categories_route_end_to_end(
+        self,
+        product: str,
+        template: str,
+    ) -> None:
+        message = template.format(product=product)
+        ctx = _ctx(message, slots={"product_query": "هلا"})
+        assert _normalize_ar(_extract_price_subject(message)) == _normalize_ar(product)
+        assert _normalize_ar(_resolved_product_query(ctx)) == _normalize_ar(product)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert _normalize_ar(str(decision.args.get("query") or "")) == _normalize_ar(product)
 
     def test_decision_engine_search_query_uses_resolved_subject(self) -> None:
         ctx = _ctx(

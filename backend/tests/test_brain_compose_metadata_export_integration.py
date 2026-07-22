@@ -377,7 +377,7 @@ def test_live_catalog_quality_guard_preserves_llm_answer_and_exports_provenance(
 
     brain = get_brain()
     message = "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
-    llm_candidate = "سعر الفستان 164 ريال."
+    llm_candidate = "الفستان متوفر وسعره 164 ريال حسب بيانات الكتالوج."
     decision = Decision(
         action=ACTION_SEARCH_PRODUCTS,
         args={"query": "فستان"},
@@ -475,6 +475,8 @@ def test_live_catalog_quality_guard_preserves_llm_answer_and_exports_provenance(
     assert turn_result.status == "evaluated"
     assert turn_result.reply_text.endswith(llm_candidate), turn_result.brain_result
     assert turn_result.brain_reply_candidate == llm_candidate
+    assert "164" in turn_result.reply_text
+    assert "متوفر" in turn_result.reply_text
     assert "حدّد المنتج أو المقاس المطلوب" not in turn_result.reply_text
     assert turn_result.provenance.compose_source == "persona_llm"
     assert turn_result.provenance.llm_candidate_present is True
