@@ -64,12 +64,12 @@ def test_manifest_scenario_counts() -> None:
     t1 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_1_INTENSIVE]
     t33 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_33_LIMITED]
     t48 = [s for s in manifest["scenarios"] if s["phase"] == PHASE_TENANT_48_SALLA_MINIMAL]
-    assert len(t1) == 49
+    assert len(t1) == 50
     assert len(t33) == 16
     assert len(t48) == 16
-    assert manifest["scenario_count"] == 81
+    assert manifest["scenario_count"] == 82
     assert manifest["phase_scenario_counts"] == {
-        PHASE_TENANT_1_INTENSIVE: 49,
+        PHASE_TENANT_1_INTENSIVE: 50,
         PHASE_TENANT_33_LIMITED: 16,
         PHASE_TENANT_48_SALLA_MINIMAL: 16,
     }
@@ -135,15 +135,27 @@ def test_tenant_1_generated_preconditions_remain_unchanged() -> None:
     tenant_1_rows = [
         row for row in manifest["scenarios"] if row["phase"] == PHASE_TENANT_1_INTENSIVE
     ]
-    assert len(tenant_1_rows) == 49
+    assert len(tenant_1_rows) == 50
+    base_preconditions = {
+        "store_ai_mode": "test",
+        "store_ai_enabled": True,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": True,
+    }
     for row in tenant_1_rows:
-        assert row["preconditions"] == {
-            "store_ai_mode": "test",
-            "store_ai_enabled": True,
-            "store_label": "متجر تجريبي عام",
-            "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
-            "arch001_shadow_signoff": True,
-        }
+        if row["scenario_id"] == "t1_catalog_dress_ambiguous":
+            assert row["preconditions"] == {
+                **base_preconditions,
+                "trusted_catalog_fixture": {
+                    "scope": "tenant_1_private_test_store_only",
+                    "query_subject": "فستان",
+                    "multiple_exact_title_matches": True,
+                    "candidate_count_min": 2,
+                },
+            }
+            continue
+        assert row["preconditions"] == base_preconditions
 
 
 def test_tenant_48_evidence_backed_scenario_contracts() -> None:
@@ -262,6 +274,53 @@ def test_cli_default_off_exit_zero() -> None:
     assert proc.returncode == 0
     payload = json.loads(proc.stdout.strip())
     assert payload["ok"] is True
+
+
+def test_tenant_1_catalog_dress_ambiguous_acceptance_contract() -> None:
+    manifest = load_scenario_manifest(_REPO)
+    scenario = next(
+        row
+        for row in manifest["scenarios"]
+        if row["scenario_id"] == "t1_catalog_dress_ambiguous"
+    )
+    assert scenario["phase"] == PHASE_TENANT_1_INTENSIVE
+    assert scenario["tenant_id"] == 1
+    assert scenario["taxonomy"] == "catalog_search_availability"
+    assert scenario["inbound"] == {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟",
+    }
+    assert scenario["preconditions"] == {
+        "store_ai_mode": "test",
+        "store_ai_enabled": True,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": True,
+        "trusted_catalog_fixture": {
+            "scope": "tenant_1_private_test_store_only",
+            "query_subject": "فستان",
+            "multiple_exact_title_matches": True,
+            "candidate_count_min": 2,
+        },
+    }
+    assert scenario["expected_state"] == {
+        "catalog_lookup": True,
+        "catalog_ambiguity_detected": True,
+        "multiple_exact_title_matches": True,
+        "llm_owned_clarification": True,
+        "order_created": False,
+        "compose_provenance_consistent": True,
+    }
+    assert "single_price_without_disambiguation" in scenario["prohibited_claims"]
+    assert "generalized_availability_without_disambiguation" in scenario["prohibited_claims"]
+    assert "fallback_deterministic_without_compose_failure" in scenario["prohibited_claims"]
+    assert "foreign_catalog_leak" in scenario["prohibited_claims"]
+    assert "cross_tenant_data_leak" in scenario["prohibited_claims"]
+    assert scenario["automation_class"] == "hybrid"
+    assert scenario["device_action"]["send_type"] == "text"
+    assert scenario["channel_evidence_required"]["evidence_channel"] == "actual_provider_channel"
+    assert "compose_provenance_metadata" in scenario["outbound_evidence"]
 
 
 def test_cli_manifest_validate_exit_zero() -> None:

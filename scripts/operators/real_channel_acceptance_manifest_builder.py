@@ -193,6 +193,38 @@ def _t1_scenarios() -> list[dict[str, Any]]:
             ["backend/tests/test_product_availability_truth_guard.py"],
         ),
         (
+            "t1_catalog_dress_ambiguous",
+            "catalog_search_availability",
+            {
+                "channel": "whatsapp",
+                "type": "text",
+                "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟",
+            },
+            {
+                "catalog_lookup": True,
+                "catalog_ambiguity_detected": True,
+                "multiple_exact_title_matches": True,
+                "llm_owned_clarification": True,
+                "order_created": False,
+                "compose_provenance_consistent": True,
+            },
+            [
+                "single_price_without_disambiguation",
+                "generalized_availability_without_disambiguation",
+                "price_without_catalog_evidence",
+                "in_stock_without_catalog_evidence",
+                "fallback_deterministic_without_compose_failure",
+                "order_created_without_confirmation",
+                "foreign_catalog_leak",
+                "cross_tenant_data_leak",
+            ],
+            "hybrid",
+            [
+                "backend/tests/test_catalog_product_answer_persona.py",
+                "backend/tests/test_compound_greeting_catalog_subject_resolution.py",
+            ],
+        ),
+        (
             "t1_order_multi_1",
             "multi_turn_order_construction",
             {"channel": "whatsapp", "type": "text", "body": f"أبي {product_b} مقاس M"},
@@ -582,6 +614,20 @@ def _t1_scenarios() -> list[dict[str, Any]]:
     ]
 
     for sid, taxonomy, inbound, expected, prohibited, automation, mapping in specs:
+        preconditions = {
+            "store_ai_mode": "test",
+            "store_ai_enabled": True,
+            "store_label": generic_store,
+            "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+            "arch001_shadow_signoff": True,
+        }
+        if sid == "t1_catalog_dress_ambiguous":
+            preconditions["trusted_catalog_fixture"] = {
+                "scope": "tenant_1_private_test_store_only",
+                "query_subject": "فستان",
+                "multiple_exact_title_matches": True,
+                "candidate_count_min": 2,
+            }
         rows.append(
             _scenario(
                 scenario_id=sid,
@@ -594,13 +640,7 @@ def _t1_scenarios() -> list[dict[str, Any]]:
                 prohibited_claims=prohibited,
                 automation_class=automation,
                 eval_mapping=mapping,
-                preconditions={
-                    "store_ai_mode": "test",
-                    "store_ai_enabled": True,
-                    "store_label": generic_store,
-                    "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
-                    "arch001_shadow_signoff": True,
-                },
+                preconditions=preconditions,
             )
         )
     return rows

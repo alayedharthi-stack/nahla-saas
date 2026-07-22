@@ -8,7 +8,7 @@ Post-approval canonical shadow during limited allowlisted canary remains a separ
 
 Mandatory post-shadow real-channel conversational acceptance program:
 
-1. **Tenant 1** — intensive synthetic/test-store acceptance (49 scenarios)
+1. **Tenant 1** — intensive synthetic/test-store acceptance (50 scenarios)
 2. **Tenant 33** — limited real-store acceptance on private allowlisted numbers only
    (16 scenarios), **only after Tenant 1 passes**
 
@@ -151,7 +151,7 @@ python scripts/probe_d360_forwarding.py --tenant 33
    test device, observe DB/provider evidence, and record device + human review.
 5. Complete all scenarios and teardown. Teardown requires exact config
    fingerprint equality and emits a signed Tenant 1 PASS artifact only when all
-   49 scenarios passed.
+   50 scenarios passed.
 6. Point `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PASS_ARTIFACT` at that signed
    artifact, then start Tenant 33.
 
