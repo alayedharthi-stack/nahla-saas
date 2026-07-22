@@ -51,6 +51,7 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID,
     CODE_PHASE_TIMESTAMP_ORDER_INVALID,
     CODE_PRODUCTION_SYNTHETIC_MARKER,
+    CODE_RESTART_EVIDENCE_INVALID,
     CODE_REVISION_FORMAT_INVALID,
     CODE_IMAGE_DIGEST_INVALID,
     CODE_RUNTIME_BINDING_MISMATCH,
@@ -78,7 +79,20 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     validate_stable_counters,
     safe_extract_stable_counters,
     validate_lifecycle_attestation,
+    validate_restart_evidence,
+    validate_phase_timestamp_order,
     PHASE_REPEAT_MATRIX_1,
+    PHASE_CONTAINER_RESTART,
+)
+from scripts.operators.arch001_container_restart_evidence import (
+    RESTART_COLLECTION_METHOD_PROC1_STAT_FIELD22,
+    RESTART_PROOF_CONTAINER_ID_CHANGE,
+    RESTART_PROOF_PID1_STARTTIME_CHANGE,
+    build_container_id_restart_evidence,
+    build_pid1_restart_evidence,
+    collect_pid1_restart_snapshot,
+    parse_proc_stat_starttime_ticks,
+    read_proc1_starttime_ticks,
 )
 
 
@@ -615,3 +629,233 @@ def test_cli_assembly_rejects_malformed_matrix_counter(tmp_path: Path, monkeypat
     )
     assert proc.returncode != 0
     assert CODE_STABLE_COUNTERS_DRIFT in proc.stdout + proc.stderr
+
+
+def test_parse_proc_stat_starttime_ticks_robust() -> None:
+    line = "1 (python) S 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 9876543210 0 0"
+    assert parse_proc_stat_starttime_ticks(line) == 9876543210
+    assert parse_proc_stat_starttime_ticks("bad") is None
+    assert parse_proc_stat_starttime_ticks("1 (weird) name) S 0") is None
+
+
+def test_collect_pid1_restart_snapshot_reads_proc_files(tmp_path: Path) -> None:
+    stat_path = tmp_path / "stat"
+    cmdline_path = tmp_path / "cmdline"
+    stat_path.write_text(
+        "1 (python) S 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 424242 0 0\n",
+        encoding="utf-8",
+    )
+    cmdline_path.write_bytes(b"python\x00/app/main.py\x00")
+    binding = {
+        "pinned_target_revision": "a" * 40,
+        "manifest_digest": "b" * 64,
+        "service_role": "isolated_preprod_shadow",
+        "service_name": "nahla-arch001-shadow",
+        "service_id": "22222222-2222-4222-8222-222222222222",
+        "deployment_id": "cbe93c7b-5891-49de-8bd0-5588acad14b5",
+        "image_digest": "d" * 64,
+    }
+    snapshot = collect_pid1_restart_snapshot(
+        identity_binding=binding,
+        collected_at_utc="2026-07-21T12:05:00+00:00",
+        stat_path=stat_path,
+        cmdline_path=cmdline_path,
+    )
+    assert snapshot["pid1_starttime_ticks"] == 424242
+    assert "python /app/main.py" in snapshot["pid1_cmdline"]
+    assert snapshot["identity_binding"] == binding
+    assert read_proc1_starttime_ticks(stat_path=stat_path) == 424242
+
+
+def test_railway_v2_pid1_restart_evidence_passes_verification(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        fixture["bundle"],
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+        require_production_class=True,
+        env={BASELINE_IMAGE_DIGEST_ENV: _BASELINE_IMAGE},
+    )
+    assert verify["ok"] is True
+    restart_row = next(
+        row for row in fixture["bundle"]["lifecycle_phases"] if row.get("phase") == PHASE_CONTAINER_RESTART
+    )
+    restart_evidence = restart_row["lifecycle_attestation"]["restart_evidence"]
+    assert restart_evidence["proof_mode"] == RESTART_PROOF_PID1_STARTTIME_CHANGE
+    assert restart_evidence["collection_method"] == RESTART_COLLECTION_METHOD_PROC1_STAT_FIELD22
+    assert (
+        restart_evidence["pre_restart"]["pid1_starttime_ticks"]
+        < restart_evidence["post_restart"]["pid1_starttime_ticks"]
+    )
+
+
+def test_legacy_container_id_restart_evidence_still_passes(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="container_id_change")
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        fixture["bundle"],
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+        require_production_class=True,
+        env={BASELINE_IMAGE_DIGEST_ENV: _BASELINE_IMAGE},
+    )
+    assert verify["ok"] is True
+    restart_evidence = next(
+        row for row in fixture["bundle"]["lifecycle_phases"] if row.get("phase") == PHASE_CONTAINER_RESTART
+    )["lifecycle_attestation"]["restart_evidence"]
+    assert restart_evidence.get("proof_mode") == RESTART_PROOF_CONTAINER_ID_CHANGE
+
+
+def test_pid1_restart_equal_ticks_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            evidence = row["lifecycle_attestation"]["restart_evidence"]
+            evidence["post_restart"]["pid1_starttime_ticks"] = evidence["pre_restart"]["pid1_starttime_ticks"]
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"]
+
+
+def test_pid1_restart_backwards_ticks_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            evidence = row["lifecycle_attestation"]["restart_evidence"]
+            evidence["post_restart"]["pid1_starttime_ticks"] = evidence["pre_restart"]["pid1_starttime_ticks"] - 1
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"]
+
+
+def test_pid1_restart_changed_cmdline_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            row["lifecycle_attestation"]["restart_evidence"]["post_restart"]["pid1_cmdline"] = "bash -lc evil"
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"]
+
+
+def test_pid1_restart_identity_binding_mismatch_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            row["lifecycle_attestation"]["restart_evidence"]["post_restart"]["identity_binding"]["deployment_id"] = (
+                "00000000-0000-4000-8000-000000000000"
+            )
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"]
+
+
+def test_pid1_restart_self_assertion_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            row["lifecycle_attestation"]["restart_evidence"]["restart_confirmed"] = True
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"]
+
+
+def test_pid1_restart_collection_timestamp_order_rejected(tmp_path: Path) -> None:
+    fixture = write_production_fixture_tree(tmp_path, restart_proof_mode="pid1_starttime_change")
+    bundle = copy.deepcopy(fixture["bundle"])
+    for row in bundle["lifecycle_phases"]:
+        if row.get("phase") == PHASE_CONTAINER_RESTART:
+            evidence = row["lifecycle_attestation"]["restart_evidence"]
+            evidence["pre_restart"]["collected_at_utc"] = evidence["post_restart"]["collected_at_utc"]
+    signed = signoff_v2.sign_bundle(bundle, hmac_key=fixture["hmac_key"])
+    verify = signoff_v2.verify_preprod_signoff_v2_bundle(
+        signed,
+        hmac_key=fixture["hmac_key"],
+        expected_identity=fixture["identity"],
+        expected_canonical=fixture["canonical_identity"],
+    )
+    assert verify["ok"] is False
+    assert CODE_RESTART_EVIDENCE_INVALID in verify["blockers"] or CODE_PHASE_TIMESTAMP_ORDER_INVALID in verify["blockers"]
+
+
+def test_container_id_restart_equal_ids_rejected() -> None:
+    binding = {
+        "pinned_target_revision": "a" * 40,
+        "manifest_digest": "b" * 64,
+        "service_role": "isolated_preprod_shadow",
+        "service_name": "nahla-arch001-shadow",
+        "service_id": "22222222-2222-4222-8222-222222222222",
+        "deployment_id": "cbe93c7b-5891-49de-8bd0-5588acad14b5",
+        "image_digest": "d" * 64,
+    }
+    evidence = build_container_id_restart_evidence(
+        prior_container_id="same-host",
+        new_container_id="same-host",
+        restart_completed_at_utc="2026-07-21T12:05:00+00:00",
+    )
+    blockers = validate_restart_evidence(evidence, expected_identity=binding)
+    assert CODE_RESTART_EVIDENCE_INVALID in blockers
+
+
+def test_validate_restart_evidence_contract_unit() -> None:
+    binding = {
+        "pinned_target_revision": "a" * 40,
+        "manifest_digest": "b" * 64,
+        "service_role": "isolated_preprod_shadow",
+        "service_name": "nahla-arch001-shadow",
+        "service_id": "22222222-2222-4222-8222-222222222222",
+        "deployment_id": "cbe93c7b-5891-49de-8bd0-5588acad14b5",
+        "image_digest": "d" * 64,
+    }
+    valid = build_pid1_restart_evidence(
+        pre_restart={
+            "collected_at_utc": "2026-07-21T12:04:00+00:00",
+            "pid1_starttime_ticks": 100,
+            "pid1_cmdline": "python /app/main.py",
+            "identity_binding": binding,
+        },
+        post_restart={
+            "collected_at_utc": "2026-07-21T12:04:30+00:00",
+            "pid1_starttime_ticks": 200,
+            "pid1_cmdline": "python /app/main.py",
+            "identity_binding": binding,
+        },
+        restart_completed_at_utc="2026-07-21T12:05:00+00:00",
+    )
+    assert validate_restart_evidence(valid, expected_identity=binding) == []

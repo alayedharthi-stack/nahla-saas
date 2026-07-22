@@ -102,6 +102,7 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     validate_production_image_digest,
     validate_revision_token,
 )
+from scripts.operators.arch001_container_restart_evidence import build_container_id_restart_evidence
 from scripts.operators.deployment_revision_attestation_contract import (
     evaluate_runtime_revision_attestation,
     read_checkout_revision,
@@ -887,11 +888,11 @@ def _build_ci_phase_artifact(
         attestation = {
             "phase": phase,
             "action": "container_restart",
-            "restart_evidence": {
-                "prior_container_id": "ci-prior-container",
-                "new_container_id": "ci-new-container",
-                "restart_completed_at_utc": executed_at,
-            },
+            "restart_evidence": build_container_id_restart_evidence(
+                prior_container_id="ci-prior-container",
+                new_container_id="ci-new-container",
+                restart_completed_at_utc=executed_at,
+            ),
         }
     elif phase == PHASE_FRESH_PINNED_REDEPLOY:
         prior = baseline_deployment_id or binding["deployment_id"]

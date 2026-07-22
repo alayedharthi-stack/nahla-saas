@@ -40,6 +40,10 @@ from scripts.operators.product_availability_preprod_synthetic_signoff_v2_contrac
     TEARDOWN_PROOF_SCHEMA_VERSION,
     extract_stable_counters,
 )
+from scripts.operators.arch001_container_restart_evidence import (
+    build_container_id_restart_evidence,
+    build_pid1_restart_evidence,
+)
 from scripts.operators.deployment_revision_attestation_contract import read_checkout_revision
 from scripts.operators.product_availability_truth_guard_shadow_observation_contract import (
     SHADOW_MODE_ENV,
@@ -88,6 +92,41 @@ def _identity(*, manifest_digest: str, pinned_revision: str, deployment_id: str 
     }
 
 
+def _restart_evidence_container_id(*, executed_at: str) -> dict[str, Any]:
+    return build_container_id_restart_evidence(
+        prior_container_id="prior-container-1",
+        new_container_id="new-container-1",
+        restart_completed_at_utc=executed_at,
+    )
+
+
+def _restart_evidence_pid1_railway_v2(
+    *,
+    binding: dict[str, str],
+    pre_collected_at: str,
+    post_collected_at: str,
+    restart_completed_at: str,
+    pre_ticks: int = 1_234_567,
+    post_ticks: int = 1_234_890,
+    cmdline: str = "python /app/main.py",
+) -> dict[str, Any]:
+    return build_pid1_restart_evidence(
+        pre_restart={
+            "collected_at_utc": pre_collected_at,
+            "pid1_starttime_ticks": pre_ticks,
+            "pid1_cmdline": cmdline,
+            "identity_binding": dict(binding),
+        },
+        post_restart={
+            "collected_at_utc": post_collected_at,
+            "pid1_starttime_ticks": post_ticks,
+            "pid1_cmdline": cmdline,
+            "identity_binding": dict(binding),
+        },
+        restart_completed_at_utc=restart_completed_at,
+    )
+
+
 def _phase_artifact(
     *,
     phase: str,
@@ -99,6 +138,7 @@ def _phase_artifact(
     redeploy_deployment_id: str,
     baseline_image_digest: str,
     redeploy_image_digest: str,
+    restart_proof_mode: str = "container_id_change",
 ) -> dict[str, Any]:
     executed_at = (start + timedelta(minutes=offset_minutes)).replace(microsecond=0).isoformat()
     binding = dict(identity)
@@ -109,14 +149,23 @@ def _phase_artifact(
     elif phase == PHASE_CONTAINER_RESTART:
         binding["deployment_id"] = baseline_deployment_id
         binding["image_digest"] = baseline_image_digest
+        pre_collected = (start + timedelta(minutes=offset_minutes - 1)).replace(microsecond=0).isoformat()
+        post_collected = (start + timedelta(minutes=offset_minutes)).replace(microsecond=0).isoformat()
+        restart_completed = (start + timedelta(minutes=offset_minutes, seconds=30)).replace(microsecond=0).isoformat()
+        executed_at = (start + timedelta(minutes=offset_minutes + 1)).replace(microsecond=0).isoformat()
+        if restart_proof_mode == "pid1_starttime_change":
+            restart_evidence = _restart_evidence_pid1_railway_v2(
+                binding=binding,
+                pre_collected_at=pre_collected,
+                post_collected_at=post_collected,
+                restart_completed_at=restart_completed,
+            )
+        else:
+            restart_evidence = _restart_evidence_container_id(executed_at=restart_completed)
         attestation = {
             "phase": phase,
             "action": "container_restart",
-            "restart_evidence": {
-                "prior_container_id": "prior-container-1",
-                "new_container_id": "new-container-1",
-                "restart_completed_at_utc": executed_at,
-            },
+            "restart_evidence": restart_evidence,
         }
     elif phase == PHASE_FRESH_PINNED_REDEPLOY:
         binding["deployment_id"] = redeploy_deployment_id
@@ -174,7 +223,12 @@ def _superseded_windows_payload() -> dict[str, Any]:
     }
 
 
-def write_production_fixture_tree(tmp_path: Path, *, app_root: Path = _REPO) -> dict[str, Any]:
+def write_production_fixture_tree(
+    tmp_path: Path,
+    *,
+    app_root: Path = _REPO,
+    restart_proof_mode: str = "container_id_change",
+) -> dict[str, Any]:
     manifest = shadow_probe.build_runtime_artifact_manifest(app_root=app_root)
     pinned_revision = _pinned_revision(app_root)
     matrix = _matrix(app_root)
@@ -195,6 +249,7 @@ def write_production_fixture_tree(tmp_path: Path, *, app_root: Path = _REPO) -> 
             redeploy_deployment_id=_REDEPLOY_DEPLOY,
             baseline_image_digest=_BASELINE_IMAGE,
             redeploy_image_digest=_REDEPLOY_IMAGE,
+            restart_proof_mode=restart_proof_mode,
         )
         (phase_dir / f"{phase}.json").write_text(json.dumps(artifact, indent=2), encoding="utf-8")
 
