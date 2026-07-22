@@ -3478,6 +3478,7 @@ class MerchantBrain:
             and str(result.data.get("turn_owner") or "") == "catalog_navigation"
         )
         _owned_reply_snapshot = reply or ""
+        result.data["compose_reply_candidate"] = str(_owned_reply_snapshot or "").strip()
         _owned_path_snapshot = _chosen_path
         _owned_kind_snapshot = str(result.data.get("discovery_output_kind") or "")
         _owned_hash_snapshot = str(result.data.get("owner_reply_hash") or "")
@@ -4554,6 +4555,13 @@ class MerchantBrain:
 
         from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
             extract_reply_metadata_export,
+            finalize_post_guard_compose_provenance,
+        )
+
+        finalize_post_guard_compose_provenance(
+            result.data,
+            final_text=reply or "",
+            guard_replaced=_guard_replaced,
         )
 
         return {
@@ -4563,6 +4571,9 @@ class MerchantBrain:
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
             "chosen_path": _chosen_path,
+            "compose_reply_candidate": str(
+                result.data.get("compose_reply_candidate") or _owned_reply_snapshot or "",
+            ).strip(),
             **extract_reply_metadata_export(
                 dict(getattr(result, "data", None) or {}),
                 chosen_path=_chosen_path,

@@ -340,7 +340,10 @@ def _parse_brain_result(
 
     reply = brain_result.get("reply", "") or ""
     state["reply"] = reply
-    state["brain_reply_candidate"] = (reply or "").strip()
+    compose_candidate = str(
+        brain_result.get("compose_reply_candidate") or reply or "",
+    ).strip()
+    state["brain_reply_candidate"] = compose_candidate
     state["brain_buttons"] = brain_result.get("buttons") or []
     state["native_catalog_entry"] = dict(brain_result.get("native_catalog_entry") or {})
     try:
@@ -351,7 +354,8 @@ def _parse_brain_result(
             native_catalog_entry=state["native_catalog_entry"],
         )
         state["reply"] = reply
-        state["brain_reply_candidate"] = (reply or "").strip()
+        if not str(brain_result.get("compose_reply_candidate") or "").strip():
+            state["brain_reply_candidate"] = (reply or "").strip()
     except Exception:  # noqa: silent-ok — native catalog defer is best-effort
         pass
 
@@ -1174,8 +1178,13 @@ def _build_provenance(
         (brain_persona_compose_event or {}).get("final_transform_reasons"),
         (live_provenance_tracker or {}).get("final_transform_reasons"),
     )
+    brain_transformed = (brain_result or {}).get("final_text_transformed")
+    if type(brain_transformed) is bool and brain_transformed:
+        final_text_transformed = True
     if not final_text_transformed:
         transform_reasons = []
+    elif not transform_reasons and final_text_transformed:
+        transform_reasons = ["post_compose_text_mutation"]
 
     route_payload = extract_persona_route_provenance(brain_persona_compose_event)
     persona_route = (

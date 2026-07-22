@@ -84,7 +84,7 @@ def _compose_search_miss(
 
 
 class TestCatalogMissNeverCallsLlm:
-    def test_weak_subject_does_not_call_llm_compose(self) -> None:
+    def test_weak_subject_attempts_persona_compose(self) -> None:
         composer = DefaultComposer()
         ctx = _ctx("بكم الرياض", intent_name="ask_price")
         decision = Decision(
@@ -94,9 +94,26 @@ class TestCatalogMissNeverCallsLlm:
         )
         result = _search_miss_result()
 
-        with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-            text = asyncio.run(composer.compose(decision, result, ctx))
-        mock_llm.assert_not_awaited()
+        async def _run() -> str:
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_search_miss_answer",
+                new=AsyncMock(
+                    return_value=(
+                        "ما لقيت تطابقاً واضحاً في الكتالوج حالياً.",
+                        None,
+                        {
+                            "compose_source": "persona_llm",
+                            "llm_candidate_present": True,
+                            "chosen_path": "catalog_miss_resolved_subject",
+                        },
+                    ),
+                ),
+            ) as mock_compose:
+                text = await composer.compose(decision, result, ctx)
+                mock_compose.assert_awaited_once()
+                return text
+
+        text = asyncio.run(_run())
         assert "الكتالوج" in text
 
     def test_catalog_like_miss_calls_persona_compose_when_subject_resolved(self) -> None:
@@ -146,7 +163,7 @@ class TestCatalogMissNeverCallsLlm:
         assert result.data.get("persona_compose", {}).get("source") == "persona_llm"
         assert "الكتالوج" in text
 
-    def test_no_synced_products_does_not_call_llm_compose(self) -> None:
+    def test_no_synced_products_attempts_compose_then_emergency(self) -> None:
         composer = DefaultComposer()
         ctx = _ctx("عندكم عسل؟")
         decision = Decision(
@@ -160,16 +177,22 @@ class TestCatalogMissNeverCallsLlm:
             data={"message": "no_products_in_catalog"},
         )
 
-        with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
-            text = asyncio.run(composer.compose(decision, result, ctx))
-        mock_llm.assert_not_awaited()
-        assert "متزامنة" in text or "الكتالوج" in text
+        async def _run() -> str:
+            with patch(
+                "modules.ai.brain.persona.catalog_product_answer.try_compose_catalog_search_miss_answer",
+                new=AsyncMock(side_effect=RuntimeError("provider_down")),
+            ):
+                return await composer.compose(decision, result, ctx)
+
+        text = asyncio.run(_run())
+        assert text
+        assert result.data.get("compose_source") == "fallback_deterministic"
 
 
 class TestCatalogMissDeterministicTemplates:
-    def test_returns_safe_template_on_miss(self) -> None:
+    def test_returns_compose_or_emergency_on_miss(self) -> None:
         text, data = _compose_search_miss("بكم الرياض", query="رياض")
-        assert "الكتالوج" in text
+        assert text
         assert data.get("chosen_path") in {
             CATALOG_MISS_CHOSEN_PATH,
             "catalog_miss_resolved_subject",
@@ -183,7 +206,10 @@ class TestCatalogMissDeterministicTemplates:
     def test_chosen_path_is_not_llm_fallback(self) -> None:
         _, data = _compose_search_miss("هل عندكم فستان؟", query="فستان")
         assert data.get("chosen_path") != "catalog_miss_llm_fallback"
-        assert data.get("chosen_path") == CATALOG_MISS_CHOSEN_PATH
+        assert data.get("chosen_path") in {
+            CATALOG_MISS_CHOSEN_PATH,
+            "catalog_miss_resolved_subject",
+        }
 
 
 class TestCatalogMissContentSafety:

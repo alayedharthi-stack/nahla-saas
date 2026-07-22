@@ -114,6 +114,47 @@ def stamp_general_llm_compose_metadata(
     target["final_customer_text_source"] = "llm"
     target["fallback_reason"] = ""
     target["fallback_action_type"] = ""
+    target["compose_reply_candidate"] = candidate.strip()
+
+
+def finalize_post_guard_compose_provenance(
+    result_data: MutableMapping[str, Any],
+    *,
+    final_text: str,
+    guard_replaced: Optional[Mapping[str, bool]] = None,
+) -> None:
+    """Record post-compose guard mutations on the Brain export metadata."""
+    candidate = str(result_data.get("compose_reply_candidate") or "").strip()
+    final = str(final_text or "").strip()
+    reasons = [
+        str(r)
+        for r in (result_data.get("final_transform_reasons") or [])
+        if str(r or "").strip()
+    ]
+    for name, fired in (guard_replaced or {}).items():
+        guard_name = str(name or "").strip()
+        if fired and guard_name and guard_name not in reasons:
+            reasons.append(guard_name)
+
+    transformed = bool(reasons) or (bool(candidate) and candidate != final)
+    if not transformed:
+        return
+
+    result_data["final_text_transformed"] = True
+    result_data["final_transform_reasons"] = reasons
+
+    compose_source = approved_compose_source(result_data.get("compose_source"))
+    guard_names = [
+        str(name or "").strip()
+        for name, fired in (guard_replaced or {}).items()
+        if fired and str(name or "").strip()
+    ]
+    if compose_source == "fallback_deterministic":
+        result_data["final_customer_text_source"] = "fallback_deterministic"
+    elif guard_names and candidate and candidate != final:
+        result_data["final_customer_text_source"] = "guard_rewrite"
+    elif result_data.get("llm_candidate_present"):
+        result_data["final_customer_text_source"] = "persona_llm_postprocess"
 
 
 def extract_persona_route_provenance(
@@ -188,6 +229,7 @@ __all__ = [
     "approved_compose_source",
     "extract_persona_route_provenance",
     "extract_reply_metadata_export",
+    "finalize_post_guard_compose_provenance",
     "map_persona_nested_source_to_compose_source",
     "stamp_general_llm_compose_metadata",
 ]
