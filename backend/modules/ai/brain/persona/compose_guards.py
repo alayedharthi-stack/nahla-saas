@@ -46,8 +46,46 @@ def _ambiguous_allowed_amounts(facts: dict[str, Any]) -> set[Any]:
     return amounts
 
 
+def _split_bounded_clauses(text: str) -> list[str]:
+    """Split reply into clause/sentence spans on language-agnostic boundaries."""
+    working = str(text or "").strip()
+    if not working:
+        return []
+    parts = re.split(r"([.!?؟\n]+)", working)
+    clauses: list[str] = []
+    current = ""
+    for part in parts:
+        if part and re.fullmatch(r"[.!?؟\n]+", part):
+            current += part
+            if current.strip():
+                clauses.append(current.strip())
+            current = ""
+        else:
+            current += part
+    if current.strip():
+        clauses.append(current.strip())
+    return clauses if clauses else [working]
+
+
+def _clause_is_interrogative(clause: str) -> bool:
+    return "?" in str(clause or "") or "؟" in str(clause or "")
+
+
+def _claimed_amounts_in_non_interrogative_clauses(text: str) -> list[Any]:
+    """Return grounded price amounts that appear only in declarative clauses."""
+    disallowed: list[Any] = []
+    clauses = _split_bounded_clauses(text)
+    if not clauses:
+        clauses = [str(text or "")]
+    for clause in clauses:
+        if _clause_is_interrogative(clause):
+            continue
+        disallowed.extend(_ambiguous_claimed_amounts(clause))
+    return disallowed
+
+
 def _is_clarification_question_context(text: str) -> bool:
-    return "?" in str(text or "") or "؟" in str(text or "")
+    return any(_clause_is_interrogative(clause) for clause in _split_bounded_clauses(text))
 
 
 def _ambiguous_claimed_amounts(text: str) -> list[Any]:
@@ -91,6 +129,9 @@ def _build_rejected_candidate_observability(
             "require_clarification": bool(facts.get("require_clarification")),
             "claimed_amounts": claimed,
             "allowed_amounts": sorted(_ambiguous_allowed_amounts(facts)),
+            "non_interrogative_claimed_amounts": _claimed_amounts_in_non_interrogative_clauses(
+                raw
+            ),
             "is_question_context": _is_clarification_question_context(raw),
         },
     }
@@ -144,7 +185,7 @@ def _classify_ambiguous_catalog_reply_violation(
         if claimed not in allowed_amounts:
             return "invented_price_amount"
 
-    if claimed_amounts and not _is_clarification_question_context(working):
+    if _claimed_amounts_in_non_interrogative_clauses(working):
         return "ambiguous_premature_price_selection"
 
     if facts.get("allow_price_differentiator"):

@@ -1449,3 +1449,113 @@ class TestCatalogAmbiguityGuardGrounding:
         rejected = event.get("rejected_compose_observability") or {}
         assert rejected.get("candidate_hash") == obs["candidate_hash"]
         assert candidate not in str(rejected)
+
+    def test_availability_only_duplicate_ambiguity_disallows_price_differentiator(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="هل عطر ورد كلاسيك متوفر؟",
+            tenant_id=32,
+            products=self._DUPLICATE_PERFUME_PRODUCTS,
+            catalog_search_query="عطر ورد كلاسيك",
+        )
+        facts = bundle.verified_facts
+        assert facts["require_clarification"] is True
+        assert facts["allow_price_differentiator"] is False
+        assert facts["allow_price_mention"] is False
+        assert "availability" in list(facts.get("requested_facets") or [])
+
+        prompt = build_user_prompt(bundle)
+        assert "allow_price_differentiator: False" in prompt
+
+        concept_guard = apply_persona_compose_guards(
+            "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟",
+            bundle,
+        )
+        assert concept_guard.passed is False
+        assert concept_guard.failed_reason == "invented_price"
+
+        amount_guard = apply_persona_compose_guards(
+            "هل تقصد بسعر 185 ريال؟",
+            bundle,
+        )
+        assert amount_guard.passed is False
+        assert amount_guard.failed_reason == "invented_price"
+
+    def test_declarative_price_then_unrelated_question_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عطر ورد كلاسيك سعره 185 ريال. هل تريد المساعدة؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "ambiguous_premature_price_selection"
+
+    def test_trusted_price_in_same_clarifying_clause_passes(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "بسعر 185 ريال، هل هذا المقصود؟",
+            bundle,
+        )
+        assert guard.passed is True
+
+    @pytest.mark.parametrize(
+        ("candidate", "should_pass", "failed_reason"),
+        [
+            (
+                "Classic Rose Perfume costs 185 SAR. Do you need help?",
+                False,
+                "ambiguous_premature_price_selection",
+            ),
+            (
+                "At 185 SAR, is that the one you mean?",
+                True,
+                "",
+            ),
+        ],
+    )
+    def test_english_clause_local_amount_behavior(
+        self,
+        candidate: str,
+        should_pass: bool,
+        failed_reason: str,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 811,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 812,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 210,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="What is the price of Classic Rose Perfume?",
+            tenant_id=33,
+            products=products,
+            catalog_search_query="Classic Rose Perfume",
+        )
+        assert bundle.verified_facts["allow_price_differentiator"] is True
+
+        guard = apply_persona_compose_guards(candidate, bundle)
+        assert guard.passed is should_pass
+        if should_pass:
+            assert guard.failed_reason == ""
+        else:
+            assert guard.failed_reason == failed_reason

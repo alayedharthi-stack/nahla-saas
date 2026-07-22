@@ -455,7 +455,7 @@ def build_catalog_product_answer_facts_bundle(
             for candidate in candidates
         )
         verified_facts["allow_price_differentiator"] = bool(
-            wants_price or has_candidate_prices
+            wants_price and has_candidate_prices
         )
     if include_price and any_price:
         verified_facts["price_source"] = "catalog"
