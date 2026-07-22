@@ -1182,6 +1182,40 @@ class TestCompoundCatalogFacetsSemantics:
         assert guard.passed is False
         assert guard.failed_reason == "invented_price"
 
+    def test_identical_exact_duplicates_still_require_clarification(self) -> None:
+        products = [
+            {
+                "id": 611,
+                "title": "عطر ورد 100ml",
+                "category": "عطور",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 612,
+                "title": "عطر ورد 100ml",
+                "category": "عطور",
+                "price": 185,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد 100ml وهل هو متوفر؟",
+            tenant_id=21,
+            products=products,
+            catalog_search_query="عطر ورد 100ml",
+        )
+        facts = bundle.verified_facts
+        assert facts["catalog_ambiguity"] is True
+        assert facts["require_clarification"] is True
+        assert facts["catalog_ambiguity_reason"] == "multiple_exact_title_candidates"
+        assert len(facts["ambiguous_catalog_candidates"]) == 2
+        assert facts["allow_price_mention"] is False
+        assert facts["allow_availability_mention"] is False
+        assert facts["allow_checkout_pressure"] is False
+        assert facts["allow_slot_prompts"] is False
+        assert catalog_product_answer_deterministic_fallback(bundle) == ""
+
     def test_mixed_availability_duplicates_do_not_generalize_stock(self) -> None:
         products = [
             {
@@ -1215,6 +1249,37 @@ class TestCompoundCatalogFacetsSemantics:
         }
         assert availability_values == {True, False}
         assert facts["allow_availability_mention"] is False
+
+    def test_unique_compound_fallback_is_one_line_for_one_product(self) -> None:
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر حذاء رياضي أبيض وهل هو متوفر؟",
+            tenant_id=22,
+            products=[self._WHITE_SHOE],
+            catalog_search_query="حذاء رياضي أبيض",
+        )
+        text = catalog_product_answer_deterministic_fallback(bundle)
+        assert text
+        assert "\n" not in text
+        assert "220" in text
+        assert "متوفر" in text
+        assert text.count("حذاء رياضي أبيض") == 1
+        assert "اسمك" not in text
+        assert "عنوانك" not in text
+        assert "طريقة الدفع" not in text
+
+    def test_ambiguous_compound_has_no_deterministic_clarification(self) -> None:
+        products = [
+            {**self._WHITE_SHOE, "id": 721},
+            {**self._WHITE_SHOE, "id": 722},
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر حذاء رياضي أبيض وهل هو متوفر؟",
+            tenant_id=22,
+            products=products,
+            catalog_search_query="حذاء رياضي أبيض",
+        )
+        assert bundle.verified_facts["require_clarification"] is True
+        assert catalog_product_answer_deterministic_fallback(bundle) == ""
 
     def test_compound_compose_metadata_stays_llm_owned(self) -> None:
         async def _run() -> None:

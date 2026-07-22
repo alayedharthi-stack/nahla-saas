@@ -208,30 +208,6 @@ def _row_availability_value(raw: dict[str, Any]) -> Optional[bool]:
     return None
 
 
-def _row_price_compare_value(raw: dict[str, Any]) -> Optional[float]:
-    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
-        parse_price_amount,
-    )
-
-    return parse_price_amount(resolve_catalog_visible_price(raw))
-
-
-def _material_conflict_in_rows(rows: list[dict[str, Any]]) -> bool:
-    prices = {
-        amt
-        for amt in (_row_price_compare_value(row) for row in rows)
-        if amt is not None
-    }
-    if len(prices) > 1:
-        return True
-    availability = {
-        val
-        for val in (_row_availability_value(row) for row in rows)
-        if val is not None
-    }
-    return len(availability) > 1
-
-
 def _ambiguous_candidate_fact(row: dict[str, Any]) -> dict[str, Any]:
     fact: dict[str, Any] = {
         "id": row.get("id"),
@@ -297,14 +273,10 @@ def _resolve_catalog_compose_rows(
     if len(candidate_pool) == 1:
         return candidate_pool, meta
 
-    if (
-        exact_rows
-        and len(exact_rows) > 1
-        and _material_conflict_in_rows(exact_rows)
-    ):
+    if exact_rows and len(exact_rows) > 1:
         meta["catalog_ambiguity"] = True
         meta["require_clarification"] = True
-        meta["catalog_ambiguity_reason"] = "conflicting_exact_title_candidates"
+        meta["catalog_ambiguity_reason"] = "multiple_exact_title_candidates"
         meta["ambiguous_catalog_candidates"] = [
             _ambiguous_candidate_fact(row) for row in exact_rows
         ]
@@ -580,23 +552,28 @@ def catalog_product_answer_deterministic_fallback(
     if qkind == "compound" or (
         _CATALOG_FACET_PRICE in facets and _CATALOG_FACET_AVAILABILITY in facets
     ):
-        if facts.get("allow_price_mention"):
-            for row in rows[:3]:
-                title = str(row.get("title") or "").strip()
-                price = row.get("price")
-                if title and price is not None and str(price).strip():
-                    lines.append(f"{title} سعره {str(price).strip()}")
-        if facts.get("allow_availability_mention"):
-            for row in rows[:3]:
-                title = str(row.get("title") or "").strip()
-                if not title:
-                    continue
-                if row.get("orderable") is True:
-                    lines.append(f"{title} متوفر للطلب حالياً")
-                else:
-                    lines.append(
-                        f"{title} موجود في الكتالوج لكن غير متاح للطلب حالياً"
-                    )
+        if facts.get("catalog_ambiguity") or facts.get("require_clarification"):
+            return ""
+        if len(rows) != 1:
+            return ""
+        row = rows[0]
+        title = str(row.get("title") or "").strip()
+        price = row.get("price")
+        if (
+            not title
+            or price is None
+            or not str(price).strip()
+            or not facts.get("allow_price_mention")
+            or not facts.get("allow_availability_mention")
+            or row.get("orderable") is None
+        ):
+            return ""
+        availability = (
+            "متوفر للطلب حالياً"
+            if row.get("orderable") is True
+            else "غير متاح للطلب حالياً"
+        )
+        lines.append(f"{title} سعره {str(price).strip()}، وهو {availability}")
     elif qkind == "price" or _CATALOG_FACET_PRICE in facets:
         if not facts.get("allow_price_mention"):
             return ""

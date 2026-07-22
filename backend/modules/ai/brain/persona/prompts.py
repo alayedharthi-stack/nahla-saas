@@ -204,7 +204,7 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             ]
             if ambiguous or facts.get("require_clarification"):
                 rule_parts.append(
-                    "multiple exact-title catalog matches conflict; ask a concise natural "
+                    "multiple exact-title catalog products are non-unique; ask a concise natural "
                     "clarification using distinguishing candidate facts only; "
                     "do not pick one price, do not generalize availability, "
                     "do not invent distinguishing details"
