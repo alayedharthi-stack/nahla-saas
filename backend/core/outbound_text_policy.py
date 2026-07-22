@@ -288,6 +288,10 @@ _LLM_OWNED_FINAL_SOURCES = frozenset({
     "llm_postprocess",
     "persona_llm_postprocess",
 })
+_NON_LLM_FINAL_SOURCES = frozenset({
+    "guard_rewrite",
+    "dedup_substitution",
+})
 _GROUNDED_PERSONA_CHOSEN_PATHS = frozenset({
     "fact_bound_persona_compose",
     "catalog_miss_resolved_subject",
@@ -333,6 +337,19 @@ def is_producer_llm_chosen_path(
     return False
 
 
+def _final_text_is_llm_derived(candidate: str, final_text: str) -> bool:
+    candidate_norm = " ".join(str(candidate or "").split())
+    final_norm = " ".join(str(final_text or "").split())
+    return bool(
+        candidate_norm
+        and final_norm
+        and (
+            final_norm in candidate_norm
+            or candidate_norm in final_norm
+        )
+    )
+
+
 def _infer_from_producer_metadata(
     *,
     decision_action: str,
@@ -343,6 +360,22 @@ def _infer_from_producer_metadata(
 ) -> Optional[tuple[OutboundTextSource, str, bool]]:
     """Classify from closed producer metadata; return None when metadata is inconclusive."""
     action = str(decision_action or "").strip().lower()
+    final_src = str(final_customer_text_source or "").strip()
+
+    if final_src in _NON_LLM_FINAL_SOURCES:
+        return (
+            OutboundTextSource.DETERMINISTIC,
+            f"brain.compose.final.{final_src}",
+            True,
+        )
+
+    if final_src in _LLM_OWNED_FINAL_SOURCES:
+        return (
+            OutboundTextSource.LLM,
+            f"brain.compose.final.{final_src}",
+            False,
+        )
+
     if compose_source in _LLM_COMPOSE_SOURCES:
         if not llm_candidate_present:
             return None
@@ -473,6 +506,65 @@ def attach_compose_provenance(
     return policy
 
 
+def reconcile_outbound_compose_provenance(
+    result_data: Dict[str, Any],
+    *,
+    decision_action: str,
+    intent: str = "",
+    final_text: str,
+) -> Dict[str, Any]:
+    """Reconcile outbound policy at the final post-guard boundary."""
+    existing = dict(result_data.get("outbound_text_policy") or {})
+    hybrid_layers = list(existing.get("compose_hybrid_layers") or [])
+
+    compose_source = _approved_compose_source(result_data.get("compose_source"))
+    llm_candidate_present = _is_llm_candidate_flag(result_data.get("llm_candidate_present"))
+    raw_final = str(result_data.get("final_customer_text_source") or "").strip()
+    chosen_path = str(result_data.get("chosen_path") or "").strip()
+    transformed = (
+        type(result_data.get("final_text_transformed")) is bool
+        and bool(result_data.get("final_text_transformed"))
+    )
+    candidate = str(result_data.get("compose_reply_candidate") or "").strip()
+    final = str(final_text or "").strip()
+
+    if raw_final in _NON_LLM_FINAL_SOURCES:
+        compose_source = ""
+        llm_candidate_present = False
+    elif (
+        transformed
+        and compose_source in _LLM_COMPOSE_SOURCES
+        and raw_final not in _LLM_OWNED_FINAL_SOURCES
+        and candidate
+        and final
+        and not _final_text_is_llm_derived(candidate, final)
+    ):
+        compose_source = ""
+        llm_candidate_present = False
+
+    source, policy_path, debt = infer_compose_provenance(
+        decision_action=decision_action,
+        used_llm=False,
+        used_template=compose_source in _DETERMINISTIC_COMPOSE_SOURCES,
+        compose_source=compose_source,
+        chosen_path=chosen_path,
+        llm_candidate_present=llm_candidate_present,
+        final_customer_text_source=raw_final,
+    )
+
+    policy = {
+        "text_source": source.value,
+        "policy_path": policy_path,
+        "customer_facing_text_debt": debt,
+        "deterministic_text_detected": debt or source == OutboundTextSource.DETERMINISTIC,
+        "intent": str(intent or existing.get("intent") or ""),
+        "decision_action": str(decision_action or existing.get("decision_action") or ""),
+        "compose_hybrid_layers": hybrid_layers,
+    }
+    result_data["outbound_text_policy"] = policy
+    return policy
+
+
 def mark_compose_llm(result: Any) -> None:
     data = getattr(result, "data", None)
     if isinstance(data, dict):
@@ -541,4 +633,5 @@ __all__ = [
     "mark_compose_metadata",
     "mark_compose_template",
     "merge_policy_into_extra_metadata",
+    "reconcile_outbound_compose_provenance",
 ]

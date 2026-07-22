@@ -9,6 +9,8 @@ from modules.ai.brain.persona_ownership import (
     build_brain_persona_ownership,
     sync_persona_to_turn_trace,
 )
+from modules.ai.compose.reply_metadata_export import finalize_post_guard_compose_provenance
+from core.outbound_text_policy import reconcile_outbound_compose_provenance
 from services.turn_trace import TurnTrace
 
 
@@ -123,6 +125,107 @@ def test_build_brain_unapproved_source_cannot_claim_llm_ownership():
     )
     assert rec.bypass_reason == PersonaBypassReason.TEMPLATE_PATH.value
     assert "search_products" in rec.expression_owner
+
+
+def test_final_boundary_service_closer_persona_ownership_stays_llm():
+    result_data = {
+        "compose_source": "persona_llm",
+        "chosen_path": "fact_bound_persona_compose",
+        "llm_candidate_present": True,
+        "question_kind": "compound",
+        "compose_reply_candidate": (
+            "حذاء رياضي أبيض سعره 220 ريال وهو متوفر. كيف أقدر أساعدك اليوم؟"
+        ),
+    }
+    final_reply = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر."
+    finalize_post_guard_compose_provenance(
+        result_data,
+        final_text=final_reply,
+        guard_replaced={"service_closer_guard": True},
+    )
+    reconcile_outbound_compose_provenance(
+        result_data,
+        decision_action="search_products",
+        intent="ask_price",
+        final_text=final_reply,
+    )
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={"query": "حذاء رياضي أبيض"},
+        reply_state=None,
+        chosen_path="fact_bound_persona_compose",
+        guard_replaced={"service_closer_guard": True},
+        compose_source=result_data.get("compose_source"),
+        llm_candidate_present=result_data.get("llm_candidate_present"),
+        persona_topic_hint=str(result_data.get("question_kind") or ""),
+        final_customer_text_source=result_data.get("final_customer_text_source"),
+        final_text_transformed=result_data.get("final_text_transformed"),
+        compose_reply_candidate=result_data.get("compose_reply_candidate"),
+        final_reply=final_reply,
+    )
+    payload = rec.to_dict()
+    assert payload["persona_stamped"] is True
+    assert payload["expression_owner"] == "persona_llm"
+    assert payload["bypass_reason"] is None
+
+
+def test_final_boundary_wholesale_rewrite_not_persona_llm():
+    result_data = {
+        "compose_source": "persona_llm",
+        "chosen_path": "general_offer_discovery_compose",
+        "llm_candidate_present": True,
+        "compose_reply_candidate": "في منتجات بأسعار مخفّضة حسب بيانات الكتالوج.",
+        "general_offer_discovery_compose_active": True,
+    }
+    guard_reply = "نص بديل حتمي من الحارس بالكامل."
+    from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+        begin_product_sale_offer_text_tracking,
+        finalize_product_sale_offer_text_provenance,
+    )
+
+    begin_product_sale_offer_text_tracking(
+        result_data,
+        "في منتجات بأسعار مخفّضة حسب بيانات الكتالوج.",
+    )
+    finalize_product_sale_offer_text_provenance(
+        result_data,
+        guard_reply,
+        guard_replaced={"saudi_dialect_guard": True},
+    )
+    finalize_post_guard_compose_provenance(
+        result_data,
+        final_text=guard_reply,
+        guard_replaced={"saudi_dialect_guard": True},
+    )
+    reconcile_outbound_compose_provenance(
+        result_data,
+        decision_action="search_products",
+        intent="ask_product",
+        final_text=guard_reply,
+    )
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={},
+        reply_state=None,
+        chosen_path="general_offer_discovery_compose",
+        guard_replaced={"saudi_dialect_guard": True},
+        compose_source=result_data.get("compose_source"),
+        llm_candidate_present=result_data.get("llm_candidate_present"),
+        final_customer_text_source=result_data.get("final_customer_text_source"),
+        final_text_transformed=result_data.get("final_text_transformed"),
+        compose_reply_candidate=result_data.get("compose_reply_candidate"),
+        final_reply=guard_reply,
+    )
+    payload = rec.to_dict()
+    assert result_data.get("final_customer_text_source") not in {
+        "persona_llm",
+        "persona_llm_postprocess",
+    }
+    assert payload["persona_stamped"] is False
+    assert payload["bypass_reason"] == PersonaBypassReason.TRUTH_GUARD_REWRITE.value
+    assert payload["expression_owner"] == "saudi_dialect_guard"
+    assert payload["expression_owner"] != "persona_llm"
+    assert "template:search_products" not in str(payload["expression_owner"] or "")
 
 
 def test_on_text_replaced_noop_when_same():

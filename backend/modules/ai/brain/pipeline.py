@@ -3524,6 +3524,7 @@ class MerchantBrain:
         )
 
         _guard_replaced: dict[str, bool] = {}
+        _persona_ownership_dict: dict[str, Any] = {}
         if result.data.get("customer_conditional_coupon_general_llm_guard_rejected"):
             _guard_replaced["customer_conditional_coupon_general_llm_evidence_guard"] = True
         _op = getattr(new_state, "order_prep", None)
@@ -4527,121 +4528,8 @@ class MerchantBrain:
                     _ftc_guard_audit_exc,
                 )
 
-        # ── Persona ownership snapshot (measurement-only) ───────────────
-        try:
-            from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
-
-            _persona_ownership = build_brain_persona_ownership(
-                decision_action=str(getattr(decision, "action", "") or ""),
-                decision_args=dict(getattr(decision, "args", None) or {}),
-                reply_state=getattr(ctx, "reply_state", None),
-                chosen_path=_chosen_path,
-                guard_replaced=_guard_replaced,
-                compose_source=result.data.get("compose_source"),
-                llm_candidate_present=result.data.get("llm_candidate_present"),
-                persona_topic_hint=str(result.data.get("question_kind") or ""),
-            )
-            _persona_ownership_dict = _persona_ownership.to_dict()
-            result.data["persona_ownership"] = _persona_ownership_dict
-        except Exception as _po_exc:  # noqa: BLE001
-            _persona_ownership_dict = {}
-            logger.exception(
-                "[PERSONA_OWNERSHIP] brain snapshot failed tenant=%s",
-                tenant_id,
-            )
-
-        # ── 10. Structured turn trace (searchable in Railway logs) ────────
-        #
-        # Single per-turn record — every field the merchant's audit
-        # request asked for. Existing dashboards read ``[BrainTurn]``
-        # so we extend the same line rather than introducing a
-        # parallel log channel.
-        try:
-            logger.info(
-                "[BrainTurn] %s",
-                json.dumps({
-                    "tenant_id":     tenant_id,
-                    "phone":         customer_phone[-4:] if len(customer_phone) >= 4 else "****",
-                    "turn":          new_state.turn,
-                    "message_len":   len(message),
-                    # Inbound preview — truncated for log volume; the
-                    # full body lives in MessageEvent. The merchant's
-                    # audit explicitly asked for ``last_user_message``
-                    # so a misclassification can be traced without
-                    # joining tables.
-                    "inbound_preview": (message or "")[:160],
-                    # Intent layer
-                    "detected_intent": intent.name,
-                    "confidence":    round(intent.confidence, 2),
-                    "slots":         intent.slots,
-                    "method":        intent.extraction_method,
-                    "social_category": _social_category,
-                    # State transition
-                    "stage_before":  stage_before,
-                    "stage_after":   new_state.stage,
-                    "greeted":       new_state.greeted,
-                    "product_focus": (new_state.current_product_focus or {}).get("title"),
-                    "draft_order":   new_state.draft_order_id,
-                    "order_prep_missing": list(getattr(new_state.order_prep, "missing_fields", []) or []),
-                    # Order / payment state — for post-order context
-                    # disambiguation (delivery vs receipt).
-                    "order_status":  str(getattr(new_state.order_prep, "order_status", "") or ""),
-                    "awaiting_payment_receipt": bool(
-                        getattr(new_state.order_prep, "awaiting_payment_receipt", False)
-                    ),
-                    "payment_receipt_received": bool(
-                        getattr(new_state.order_prep, "payment_receipt_received", False)
-                    ),
-                    # Commerce facts snapshot
-                    "facts": {
-                        "products":      facts.product_count,
-                        "in_stock":      getattr(facts, "in_stock_count", None),
-                        "orderable":     getattr(facts, "orderable", facts.has_products and facts.has_active_integration),
-                        "coupons":       facts.has_coupons,
-                        "integration":   facts.has_active_integration,
-                        "platform":      getattr(facts, "integration_platform", "unknown"),
-                        "store":         facts.store_name,
-                    },
-                    # Decision layer
-                    "action":             decision.action,
-                    "chosen_path":        _chosen_path,
-                    "reason":             decision.reason,
-                    "policy_modified":    decision.reason != reason_before_policy,
-                    "whether_coupon_logic_considered": suggestion.coupon_logic_considered,
-                    "suggested_next_step": suggestion.suggested_next_step,
-                    "customer_goal":      new_state.customer_goal,
-                    "selected_product":   (new_state.current_product_focus or {}).get("title"),
-                    "checkout_city":      getattr(new_state.order_prep, "city", ""),
-                    "short_address_code": getattr(new_state.order_prep, "short_address_code", ""),
-                    # Execution + response
-                    "exec_success":     result.success,
-                    "exec_error":       result.error,
-                    "response_mode":    "llm" if _chosen_path.startswith("llm") else "template",
-                    "fallback_used":    _fallback_used,
-                    "model_used":       _model_used,
-                    "reply_len":        len(reply or ""),
-                    # Persona ownership (measurement-only)
-                    "persona_stamped":  _persona_ownership_dict.get("persona_stamped"),
-                    "persona_topic":    _persona_ownership_dict.get("persona_topic"),
-                    "persona_kind":     _persona_ownership_dict.get("persona_kind"),
-                    "bypass_reason":    _persona_ownership_dict.get("bypass_reason"),
-                    "expression_owner": _persona_ownership_dict.get("expression_owner"),
-                    "compose_pass_count": _persona_ownership_dict.get("compose_pass_count"),
-                    # Final answer-alignment outcome.
-                    "alignment_passed":   _align_passed,
-                    "alignment_mismatch": _align_mismatch,
-                    "alignment_regen":    _align_regen_fired,
-                    "latency_ms":       latency_ms,
-                    "pre_commerce_shortcut": bool(_pre_commerce_shortcut),
-                    "intent_priority": (
-                        _intent_priority.to_trace_dict()
-                        if _intent_priority is not None
-                        else None
-                    ),
-                }, ensure_ascii=False),
-            )
-        except Exception:
-            pass   # trace logging must never break the reply path
+        # Persona ownership + BrainTurn logging run after final provenance
+        # reconciliation below (post all text guards and finalizers).
 
         # ── Relational moment passthrough (Tenant 33 #49 — Commit 3) ──
         # The webhook's safety-net loop consults this token to decide
@@ -4757,6 +4645,123 @@ class MerchantBrain:
             final_text=reply or "",
             guard_replaced=_guard_replaced,
         )
+
+        try:
+            from core.outbound_text_policy import reconcile_outbound_compose_provenance  # noqa: PLC0415
+
+            reconcile_outbound_compose_provenance(
+                result.data,
+                decision_action=str(getattr(decision, "action", "") or ""),
+                intent=str(getattr(intent, "name", "") or ""),
+                final_text=reply or "",
+            )
+        except Exception as _otp_reconcile_exc:  # noqa: BLE001
+            logger.debug(
+                "[OUTBOUND_TEXT_POLICY] final reconcile skipped tenant=%s err=%s",
+                tenant_id,
+                _otp_reconcile_exc,
+            )
+
+        # ── Persona ownership snapshot (final boundary, post-finalization) ─
+        try:
+            from .persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
+
+            _persona_ownership = build_brain_persona_ownership(
+                decision_action=str(getattr(decision, "action", "") or ""),
+                decision_args=dict(getattr(decision, "args", None) or {}),
+                reply_state=getattr(ctx, "reply_state", None),
+                chosen_path=_chosen_path,
+                guard_replaced=_guard_replaced,
+                compose_source=result.data.get("compose_source"),
+                llm_candidate_present=result.data.get("llm_candidate_present"),
+                persona_topic_hint=str(result.data.get("question_kind") or ""),
+                final_customer_text_source=result.data.get("final_customer_text_source"),
+                final_text_transformed=result.data.get("final_text_transformed"),
+                compose_reply_candidate=result.data.get("compose_reply_candidate"),
+                final_reply=reply or "",
+            )
+            _persona_ownership_dict = _persona_ownership.to_dict()
+            result.data["persona_ownership"] = _persona_ownership_dict
+        except Exception:  # noqa: BLE001
+            _persona_ownership_dict = {}
+            logger.exception(
+                "[PERSONA_OWNERSHIP] brain snapshot failed tenant=%s",
+                tenant_id,
+            )
+
+        # ── 10. Structured turn trace (searchable in Railway logs) ────────
+        try:
+            logger.info(
+                "[BrainTurn] %s",
+                json.dumps({
+                    "tenant_id":     tenant_id,
+                    "phone":         customer_phone[-4:] if len(customer_phone) >= 4 else "****",
+                    "turn":          new_state.turn,
+                    "message_len":   len(message),
+                    "inbound_preview": (message or "")[:160],
+                    "detected_intent": intent.name,
+                    "confidence":    round(intent.confidence, 2),
+                    "slots":         intent.slots,
+                    "method":        intent.extraction_method,
+                    "social_category": _social_category,
+                    "stage_before":  stage_before,
+                    "stage_after":   new_state.stage,
+                    "greeted":       new_state.greeted,
+                    "product_focus": (new_state.current_product_focus or {}).get("title"),
+                    "draft_order":   new_state.draft_order_id,
+                    "order_prep_missing": list(getattr(new_state.order_prep, "missing_fields", []) or []),
+                    "order_status":  str(getattr(new_state.order_prep, "order_status", "") or ""),
+                    "awaiting_payment_receipt": bool(
+                        getattr(new_state.order_prep, "awaiting_payment_receipt", False)
+                    ),
+                    "payment_receipt_received": bool(
+                        getattr(new_state.order_prep, "payment_receipt_received", False)
+                    ),
+                    "facts": {
+                        "products":      facts.product_count,
+                        "in_stock":      getattr(facts, "in_stock_count", None),
+                        "orderable":     getattr(facts, "orderable", facts.has_products and facts.has_active_integration),
+                        "coupons":       facts.has_coupons,
+                        "integration":   facts.has_active_integration,
+                        "platform":      getattr(facts, "integration_platform", "unknown"),
+                        "store":         facts.store_name,
+                    },
+                    "action":             decision.action,
+                    "chosen_path":        _chosen_path,
+                    "reason":             decision.reason,
+                    "policy_modified":    decision.reason != reason_before_policy,
+                    "whether_coupon_logic_considered": suggestion.coupon_logic_considered,
+                    "suggested_next_step": suggestion.suggested_next_step,
+                    "customer_goal":      new_state.customer_goal,
+                    "selected_product":   (new_state.current_product_focus or {}).get("title"),
+                    "checkout_city":      getattr(new_state.order_prep, "city", ""),
+                    "short_address_code": getattr(new_state.order_prep, "short_address_code", ""),
+                    "exec_success":     result.success,
+                    "exec_error":       result.error,
+                    "response_mode":    "llm" if _chosen_path.startswith("llm") else "template",
+                    "fallback_used":    _fallback_used,
+                    "model_used":       _model_used,
+                    "reply_len":        len(reply or ""),
+                    "persona_stamped":  _persona_ownership_dict.get("persona_stamped"),
+                    "persona_topic":    _persona_ownership_dict.get("persona_topic"),
+                    "persona_kind":     _persona_ownership_dict.get("persona_kind"),
+                    "bypass_reason":    _persona_ownership_dict.get("bypass_reason"),
+                    "expression_owner": _persona_ownership_dict.get("expression_owner"),
+                    "compose_pass_count": _persona_ownership_dict.get("compose_pass_count"),
+                    "alignment_passed":   _align_passed,
+                    "alignment_mismatch": _align_mismatch,
+                    "alignment_regen":    _align_regen_fired,
+                    "latency_ms":       latency_ms,
+                    "pre_commerce_shortcut": bool(_pre_commerce_shortcut),
+                    "intent_priority": (
+                        _intent_priority.to_trace_dict()
+                        if _intent_priority is not None
+                        else None
+                    ),
+                }, ensure_ascii=False),
+            )
+        except Exception:
+            pass   # trace logging must never break the reply path
 
         return {
             "reply": reply,
