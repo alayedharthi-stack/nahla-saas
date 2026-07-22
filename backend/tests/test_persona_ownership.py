@@ -10,7 +10,10 @@ from modules.ai.brain.persona_ownership import (
     sync_persona_to_turn_trace,
 )
 from modules.ai.compose.reply_metadata_export import finalize_post_guard_compose_provenance
-from core.outbound_text_policy import reconcile_outbound_compose_provenance
+from core.outbound_text_policy import (
+    final_source_supports_llm_ownership,
+    reconcile_outbound_compose_provenance,
+)
 from services.turn_trace import TurnTrace
 
 
@@ -226,6 +229,69 @@ def test_final_boundary_wholesale_rewrite_not_persona_llm():
     assert payload["expression_owner"] == "saudi_dialect_guard"
     assert payload["expression_owner"] != "persona_llm"
     assert "template:search_products" not in str(payload["expression_owner"] or "")
+
+
+def test_stale_final_source_without_candidate_flag_not_persona_llm():
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={},
+        reply_state=None,
+        chosen_path="fact_bound_persona_compose",
+        compose_source="persona_llm",
+        llm_candidate_present=False,
+        final_customer_text_source="persona_llm",
+        compose_reply_candidate="حذاء رياضي أبيض سعره 220 ريال.",
+        final_reply="حذاء رياضي أبيض سعره 220 ريال.",
+    )
+    payload = rec.to_dict()
+    assert payload["persona_stamped"] is False
+    assert payload["expression_owner"] != "persona_llm"
+
+
+def test_stale_postprocess_label_with_empty_candidate_not_persona_llm():
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={},
+        reply_state=None,
+        chosen_path="fact_bound_persona_compose",
+        compose_source="persona_llm",
+        llm_candidate_present=True,
+        final_customer_text_source="persona_llm_postprocess",
+        final_text_transformed=True,
+        compose_reply_candidate="",
+        final_reply="حذاء رياضي أبيض سعره 220 ريال.",
+    )
+    payload = rec.to_dict()
+    assert payload["persona_stamped"] is False
+    assert payload["bypass_reason"] == PersonaBypassReason.TRUTH_GUARD_REWRITE.value
+
+
+def test_unrelated_postprocess_final_text_not_persona_llm():
+    candidate = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر."
+    unrelated_final = "نص بديل حتمي من الحارس بالكامل."
+    assert final_source_supports_llm_ownership(
+        final_customer_text_source="persona_llm_postprocess",
+        llm_candidate_present=True,
+        compose_reply_candidate=candidate,
+        final_text=unrelated_final,
+    ) is False
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={},
+        reply_state=None,
+        chosen_path="fact_bound_persona_compose",
+        guard_replaced={"saudi_dialect_guard": True},
+        compose_source="persona_llm",
+        llm_candidate_present=True,
+        final_customer_text_source="persona_llm_postprocess",
+        final_text_transformed=True,
+        compose_reply_candidate=candidate,
+        final_reply=unrelated_final,
+    )
+    payload = rec.to_dict()
+    assert payload["persona_stamped"] is False
+    assert payload["bypass_reason"] == PersonaBypassReason.TRUTH_GUARD_REWRITE.value
+    assert payload["expression_owner"] == "saudi_dialect_guard"
 
 
 def test_on_text_replaced_noop_when_same():

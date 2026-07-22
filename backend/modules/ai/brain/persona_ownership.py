@@ -210,6 +210,7 @@ def build_brain_persona_ownership(
     """
     from core.outbound_text_policy import (  # noqa: PLC0415
         _final_text_is_llm_derived,
+        final_source_supports_llm_ownership,
         is_producer_llm_chosen_path,
     )
     from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
@@ -236,14 +237,27 @@ def build_brain_persona_ownership(
                 return str(layer or "").strip() or "guard_rewrite"
         return "guard_rewrite"
 
-    if final_src in {"persona_llm", "persona_llm_postprocess"}:
+    def _final_supports_llm() -> bool:
+        return final_source_supports_llm_ownership(
+            final_customer_text_source=final_src,
+            llm_candidate_present=has_llm_candidate,
+            compose_reply_candidate=candidate,
+            final_text=final,
+        )
+
+    if final_src in {"persona_llm", "persona_llm_postprocess"} and _final_supports_llm():
         rec.stamp_persona(
             topic=topic_hint or "catalog_product_answer",
             kind="grounded_persona_compose",
             owner="persona_llm",
         )
-    elif final_src in {"llm", "llm_postprocess"}:
+    elif final_src in {"llm", "llm_postprocess"} and _final_supports_llm():
         rec.mark_bypass(PersonaBypassReason.COMMERCE_LLM, owner="llm_compose")
+    elif final_src in {"persona_llm", "persona_llm_postprocess", "llm", "llm_postprocess"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TRUTH_GUARD_REWRITE,
+            owner=_primary_guard_owner(),
+        )
     elif final_src == "fallback_deterministic" or src == "fallback_deterministic":
         rec.mark_bypass(
             PersonaBypassReason.FALLBACK_REPLY,
