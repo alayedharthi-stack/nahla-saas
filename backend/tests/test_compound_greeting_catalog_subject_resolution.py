@@ -14,6 +14,9 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
         sys.path.insert(0, p)
 
 from modules.ai.brain.compose.responder import DefaultComposer  # noqa: E402
+from modules.ai.brain.commerce.identity_collaboration_guard import (  # noqa: E402
+    try_identity_collaboration_decision,
+)
 from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.persona.facts_bundle import PERSONA_COMPOSER_SURFACES  # noqa: E402
@@ -172,6 +175,10 @@ class TestCompoundGreetingSubjectResolution:
                 "white running shoe",
             ),
             (
+                "Is rose perfume 100ml available? How much is it?",
+                "rose perfume 100ml",
+            ),
+            (
                 "Hi, rose perfume 100ml how much and is it available?",
                 "rose perfume 100ml",
             ),
@@ -183,6 +190,7 @@ class TestCompoundGreetingSubjectResolution:
                 "How much for the rose perfume 100ml? Is it available?",
                 "rose perfume 100ml",
             ),
+            ("العطر هل متوفر؟ وكم سعره؟", "عطر"),
         ],
     )
     def test_realistic_price_availability_word_orders(
@@ -196,6 +204,7 @@ class TestCompoundGreetingSubjectResolution:
         ("message", "expected"),
         [
             ("السلام عليكم، الفستان كم سعره وهل هو متوفر؟", "فستان"),
+            ("شكراً، كم سعر العطر؟", "عطر"),
             ("لو سمحت سعر حذاء رياضي أبيض وهل موجود", "حذاء رياضي ابيض"),
             ("هلا، عطر ورد 100ml بكم وهل موجود؟", "عطر ورد 100ml"),
             (
@@ -223,6 +232,7 @@ class TestCompoundGreetingSubjectResolution:
             "كم عندكم؟",
             "كم الكمية؟",
             "هل عندكم فرع؟",
+            "price and availability?",
             "أنا معلم وأرغب في التعاون معكم",
             "I am a teacher and would like to collaborate",
         ],
@@ -232,6 +242,49 @@ class TestCompoundGreetingSubjectResolution:
         message: str,
     ) -> None:
         assert _extract_price_subject(message) == ""
+
+    def test_malformed_english_availability_does_not_search_catalog(self) -> None:
+        ctx = _ctx(
+            "price and availability?",
+            slots={"product_query": "availability"},
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "كم سعره؟",
+            "كم سعره وهل متوفر؟",
+            "كم سعره وهل هو متوفر؟",
+            "كم سعر هذا؟",
+        ],
+    )
+    def test_weak_reference_price_turn_preserves_product_focus(
+        self,
+        message: str,
+    ) -> None:
+        focus = {"title": "حذاء رياضي أبيض", "external_id": "sku-1"}
+        ctx = _ctx(message, slots={"product_query": "عطر"}, focus=focus)
+        assert _resolved_product_query(ctx) == ""
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("product") == focus
+
+    def test_identity_guard_yields_to_explicit_catalog_price_evidence(self) -> None:
+        mixed = _ctx(
+            "أنا معلم، وكم سعر الفستان وهل هو متوفر؟",
+            slots={"product_query": "فستان"},
+        )
+        assert try_identity_collaboration_decision(mixed) is None
+
+        pure = _ctx(
+            "أنا معلم وأرغب في التعاون معكم",
+            intent_name="general",
+        )
+        decision = try_identity_collaboration_decision(pure)
+        assert decision is not None
+        assert decision.args.get("topic") == "identity_collaboration"
 
     @pytest.mark.parametrize(
         ("product", "template"),

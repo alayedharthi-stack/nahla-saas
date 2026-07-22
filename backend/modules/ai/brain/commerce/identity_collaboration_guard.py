@@ -50,10 +50,10 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
         msg = full_msg
     try:
         from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
-            _extract_price_subject,
+            extract_price_subject,
         )
 
-        if _extract_price_subject(msg):
+        if extract_price_subject(msg):
             return None
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional commerce evidence probe
         pass

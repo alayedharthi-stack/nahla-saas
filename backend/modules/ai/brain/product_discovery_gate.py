@@ -717,7 +717,7 @@ _SUBJECT_FIRST_PRICE_RE = re.compile(
 
 _AVAILABILITY_FIRST_PRICE_RE = re.compile(
     r"^(?P<subject>.{2,80}?)\s+"
-    r"(?:متوفر(?:ة|ه)?|موجود(?:ة|ه)?|available|in\s+stock)"
+    r"(?:هل\s+)?(?:متوفر(?:ة|ه)?|موجود(?:ة|ه)?|available|in\s+stock)"
     r"(?:\s+عندكم)?\s*[?؟!]?\s*(?:(?:و|and)\s*)?"
     r"(?:كم\s+سعر(?:ه|ها|هم)?|بكم|how\s+much(?:\s+is\s+it)?)",
     re.UNICODE | re.IGNORECASE,
@@ -731,12 +731,25 @@ _SUBJECT_BEFORE_PRICE_PRONOUN_RE = re.compile(
 
 _STANDALONE_GREETING_SLOT_TOKENS = frozenset({
     "سلام", "سلام عليكم", "السلام", "السلام عليكم",
-    "مرحبا", "مرحباً", "اهلا", "أهلا", "أهلاً", "هلا", "hello", "hi", "hey",
+    "مرحبا", "مرحباً", "اهلا", "أهلا", "أهلاً", "هلا",
+    "شكرا", "شكراً", "مشكور", "مشكوره",
+    "hello", "hi", "hey", "thanks", "thank you",
 })
 
 _WEAK_PRONOUN_SLOT_TOKENS = frozenset({
-    "ه", "ها", "هم", "هو", "هي", "it", "its",
+    "ه", "ها", "هم", "هو", "هي", "هذا", "هذه", "هذي", "ذا",
+    "it", "its", "this", "that",
+    "هل", "وهل", "and", "availability", "and availability",
 })
+
+_WEAK_REFERENCE_PRICE_MESSAGE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:كم\s+)?سعر(?:ه|ها|هم)\b|"
+    r"(?:كم\s+)?سعر\s+(?:هذا|هذه|هذي|ذا)\b|"
+    r"how\s+much\s+(?:is\s+)?(?:it|this|that)\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 
 
 def _message_commerce_probes(message: str) -> list[str]:
@@ -851,6 +864,8 @@ def _subject_has_product_substance(candidate: str) -> bool:
     norm = re.sub(r"^ال", "", norm)
     if not norm:
         return False
+    if norm in _WEAK_PRONOUN_SLOT_TOKENS:
+        return False
     tokens = [t for t in norm.split() if t]
     if not tokens:
         return False
@@ -860,7 +875,7 @@ def _subject_has_product_substance(candidate: str) -> bool:
 
 def _clean_price_subject_candidate(candidate: str) -> str:
     """Trim availability tails and fluff from a price-subject candidate."""
-    core = (candidate or "").strip(" ؟?!.")
+    core = (candidate or "").strip(" ,،؟?!.")
     core = re.sub(
         r"^(?:(?:السلام\s+عليكم|سلام\s+عليكم|هلا|اهلا|أهلا|مرحبا)"
         r"[,،]?\s+|"
@@ -884,7 +899,9 @@ def _clean_price_subject_candidate(candidate: str) -> str:
         "",
         core,
         flags=re.UNICODE | re.IGNORECASE,
-    ).strip(" ؟?!.")
+    ).strip(" ,،؟?!.")
+    if _normalize_ar(core) in _WEAK_PRONOUN_SLOT_TOKENS:
+        return ""
     return core
 
 
@@ -914,9 +931,11 @@ def _extract_price_subject_from_probe(message: str) -> str:
             if rest and _subject_has_product_substance(rest):
                 return rest
             return ""
-    m = _PRICE_SUFFIX_RE.match(raw.strip(" ؟?!."))
-    if m:
-        candidate = _clean_price_subject_candidate(m.group(1) or "")
+    availability_first = _AVAILABILITY_FIRST_PRICE_RE.search(raw)
+    if availability_first:
+        candidate = _clean_price_subject_candidate(
+            availability_first.group("subject") or "",
+        )
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     subject_first = _SUBJECT_FIRST_PRICE_RE.search(raw)
@@ -926,18 +945,16 @@ def _extract_price_subject_from_probe(message: str) -> str:
         )
         if candidate and _subject_has_product_substance(candidate):
             return candidate
-    availability_first = _AVAILABILITY_FIRST_PRICE_RE.search(raw)
-    if availability_first:
-        candidate = _clean_price_subject_candidate(
-            availability_first.group("subject") or "",
-        )
-        if candidate and _subject_has_product_substance(candidate):
-            return candidate
     before_pronoun = _SUBJECT_BEFORE_PRICE_PRONOUN_RE.search(raw)
     if before_pronoun:
         candidate = _clean_price_subject_candidate(
             before_pronoun.group("subject") or "",
         )
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    m = _PRICE_SUFFIX_RE.match(raw.strip(" ,،؟?!."))
+    if m:
+        candidate = _clean_price_subject_candidate(m.group(1) or "")
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     inline = _INLINE_PRICE_SUBJECT_RE.search(raw)
@@ -964,8 +981,22 @@ def _extract_price_subject(message: str) -> str:
     return ""
 
 
+def extract_price_subject(message: str) -> str:
+    """Public deterministic subject extractor for routing guards."""
+    return _extract_price_subject(message)
+
+
+def _is_weak_reference_price_message(message: str) -> bool:
+    return bool(_WEAK_REFERENCE_PRICE_MESSAGE_RE.search(message or ""))
+
+
 def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
     msg = ctx.message or ""
+    if (
+        getattr(ctx.state, "current_product_focus", None)
+        and _is_weak_reference_price_message(msg)
+    ):
+        return ""
     try:
         from .commerce.price_turn_classifier import (  # noqa: PLC0415
             PriceTurnKind,
@@ -1445,11 +1476,13 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
 
     scope_subject = extract_browse_category_scope(msg, "")
     price_subject = _extract_price_subject(msg)
+    if scope_subject and _is_greeting_or_social_slot_token(scope_subject, msg):
+        scope_subject = ""
     subject = scope_subject
     if price_subject and _subject_has_product_substance(price_subject):
         if not scope_subject or _is_greeting_or_social_slot_token(scope_subject, msg):
             subject = price_subject
-    if not subject:
+    if not subject or not _subject_has_product_substance(subject):
         return None
 
     if not is_category_price_or_availability_message(msg, ""):
@@ -2011,6 +2044,7 @@ __all__ = [
     "classify_product_inquiry_route",
     "clarify_instead_of_top_products",
     "extract_inquiry_product_query",
+    "extract_price_subject",
     "extract_types_overview_query",
     "has_explicit_broad_browse_request",
     "has_explicit_product_inquiry",
