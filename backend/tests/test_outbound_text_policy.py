@@ -19,11 +19,14 @@ from core.outbound_text_policy import (
     OutboundTextSource,
     OutboundTextTracker,
     attach_compose_provenance,
+    final_source_supports_llm_ownership,
     infer_compose_provenance,
     mark_compose_llm,
     mark_compose_template,
     merge_policy_into_extra_metadata,
+    reconcile_outbound_compose_provenance,
 )
+from modules.ai.compose.reply_metadata_export import finalize_post_guard_compose_provenance
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,24 @@ class TestComposeProvenance:
         assert policy["text_source"] == OutboundTextSource.LLM.value
         assert policy["customer_facing_text_debt"] is False
         assert policy["policy_path"] == "brain.compose._llm_compose"
+
+    def test_attach_stale_final_source_without_producer_candidate_fails_closed(self):
+        result = SimpleNamespace(
+            data={
+                "final_customer_text_source": "persona_llm",
+                "llm_candidate_present": True,
+            }
+        )
+        decision = SimpleNamespace(action="search_products")
+        ctx = SimpleNamespace(intent=SimpleNamespace(name="ask_price"))
+        policy = attach_compose_provenance(
+            result,
+            decision=decision,
+            ctx=ctx,
+            text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert policy["text_source"] == OutboundTextSource.DETERMINISTIC.value
+        assert policy["customer_facing_text_debt"] is True
 
     def test_faq_template_tags_deterministic_debt(self):
         result = SimpleNamespace(data={"_compose_via_template": True})
@@ -224,3 +245,236 @@ class TestInferComposeProvenance:
         )
         assert src == OutboundTextSource.HYBRID
         assert debt is True
+
+    def test_search_products_persona_llm_metadata_tags_llm_source(self):
+        result = SimpleNamespace(
+            data={
+                "compose_source": "persona_llm",
+                "chosen_path": "fact_bound_persona_compose",
+                "llm_candidate_present": True,
+                "response_mode": "grounded_persona_compose",
+            }
+        )
+        decision = SimpleNamespace(action="search_products")
+        ctx = SimpleNamespace(intent=SimpleNamespace(name="ask_price"))
+        policy = attach_compose_provenance(
+            result,
+            decision=decision,
+            ctx=ctx,
+            text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert policy["text_source"] == OutboundTextSource.LLM.value
+        assert policy["customer_facing_text_debt"] is False
+        assert policy["deterministic_text_detected"] is False
+        assert "persona" in policy["policy_path"]
+
+    def test_fallback_deterministic_on_search_products_stays_deterministic(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="fallback_deterministic",
+            chosen_path="catalog_miss_resolved_subject",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "fallback_deterministic" in path
+
+    def test_merchant_template_retains_template_ownership(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="faq_reply",
+            used_llm=False,
+            compose_source="merchant_template",
+            chosen_path="merchant_template",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "merchant_template" in path
+
+    def test_meta_template_retains_template_ownership(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="greet",
+            used_llm=False,
+            compose_source="meta_template",
+            chosen_path="meta_template",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "meta_template" in path
+
+    def test_deletion_postprocess_final_source_stays_llm_owned(self):
+        candidate = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر. كيف أقدر أساعدك اليوم؟"
+        final_reply = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر."
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="persona_llm",
+            chosen_path="fact_bound_persona_compose",
+            llm_candidate_present=True,
+            final_customer_text_source="persona_llm_postprocess",
+            compose_reply_candidate=candidate,
+            final_text=final_reply,
+        )
+        assert src == OutboundTextSource.LLM
+        assert debt is False
+
+    def test_stale_final_source_without_candidate_flag_fails_closed(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="persona_llm",
+            chosen_path="fact_bound_persona_compose",
+            llm_candidate_present=False,
+            final_customer_text_source="persona_llm",
+            compose_reply_candidate="حذاء رياضي أبيض سعره 220 ريال.",
+            final_text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+
+    def test_stale_postprocess_label_with_empty_candidate_fails_closed(self):
+        assert final_source_supports_llm_ownership(
+            final_customer_text_source="persona_llm_postprocess",
+            llm_candidate_present=True,
+            compose_reply_candidate="",
+            final_text="حذاء رياضي أبيض سعره 220 ريال.",
+        ) is False
+        policy = reconcile_outbound_compose_provenance(
+            {
+                "compose_source": "persona_llm",
+                "chosen_path": "fact_bound_persona_compose",
+                "llm_candidate_present": True,
+                "final_customer_text_source": "persona_llm_postprocess",
+                "compose_reply_candidate": "",
+            },
+            decision_action="search_products",
+            intent="ask_price",
+            final_text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert policy["text_source"] == OutboundTextSource.DETERMINISTIC.value
+
+    def test_unrelated_postprocess_final_text_fails_closed(self):
+        candidate = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر."
+        unrelated_final = "نص بديل حتمي من الحارس بالكامل."
+        assert final_source_supports_llm_ownership(
+            final_customer_text_source="persona_llm_postprocess",
+            llm_candidate_present=True,
+            compose_reply_candidate=candidate,
+            final_text=unrelated_final,
+        ) is False
+        policy = reconcile_outbound_compose_provenance(
+            {
+                "compose_source": "persona_llm",
+                "chosen_path": "fact_bound_persona_compose",
+                "llm_candidate_present": True,
+                "final_customer_text_source": "persona_llm_postprocess",
+                "final_text_transformed": True,
+                "compose_reply_candidate": candidate,
+            },
+            decision_action="search_products",
+            intent="ask_price",
+            final_text=unrelated_final,
+        )
+        assert policy["text_source"] == OutboundTextSource.DETERMINISTIC.value
+
+    def test_unapproved_compose_source_cannot_self_assert_llm(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="arbitrary_runtime_source",
+            chosen_path="fact_bound_persona_compose",
+            llm_candidate_present=True,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "templates.search_products" in path
+
+    def test_llm_source_without_candidate_fails_closed_to_action_mapping(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="llm",
+            chosen_path="llm",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+
+    def test_final_boundary_service_closer_deletion_stays_llm_owned(self):
+        result_data = {
+            "compose_source": "persona_llm",
+            "chosen_path": "fact_bound_persona_compose",
+            "llm_candidate_present": True,
+            "compose_reply_candidate": (
+                "حذاء رياضي أبيض سعره 220 ريال وهو متوفر. كيف أقدر أساعدك اليوم؟"
+            ),
+            "outbound_text_policy": {
+                "text_source": "deterministic",
+                "policy_path": "brain.compose.templates.search_products",
+            },
+        }
+        final_reply = "حذاء رياضي أبيض سعره 220 ريال وهو متوفر."
+        finalize_post_guard_compose_provenance(
+            result_data,
+            final_text=final_reply,
+            guard_replaced={"service_closer_guard": True},
+        )
+        policy = reconcile_outbound_compose_provenance(
+            result_data,
+            decision_action="search_products",
+            intent="ask_price",
+            final_text=final_reply,
+        )
+        assert result_data["final_customer_text_source"] == "persona_llm_postprocess"
+        assert policy["text_source"] == OutboundTextSource.LLM.value
+        assert policy["customer_facing_text_debt"] is False
+
+    def test_final_boundary_wholesale_guard_rewrite_is_not_llm_owned(self):
+        result_data = {
+            "compose_source": "persona_llm",
+            "chosen_path": "general_offer_discovery_compose",
+            "llm_candidate_present": True,
+            "compose_reply_candidate": "في منتجات بأسعار مخفّضة حسب بيانات الكتالوج.",
+            "general_offer_discovery_compose_active": True,
+            "outbound_text_policy": {
+                "text_source": "llm",
+                "policy_path": "brain.compose.persona.general_offer_discovery_compose",
+            },
+        }
+        guard_reply = "نص بديل حتمي من الحارس بالكامل."
+        from modules.ai.brain.persona.product_sale_offer_provenance import (  # noqa: PLC0415
+            begin_product_sale_offer_text_tracking,
+            finalize_product_sale_offer_text_provenance,
+        )
+
+        begin_product_sale_offer_text_tracking(
+            result_data,
+            "في منتجات بأسعار مخفّضة حسب بيانات الكتالوج.",
+        )
+        finalize_product_sale_offer_text_provenance(
+            result_data,
+            guard_reply,
+            guard_replaced={"saudi_dialect_guard": True},
+        )
+        finalize_post_guard_compose_provenance(
+            result_data,
+            final_text=guard_reply,
+            guard_replaced={"saudi_dialect_guard": True},
+        )
+        policy = reconcile_outbound_compose_provenance(
+            result_data,
+            decision_action="search_products",
+            intent="ask_product",
+            final_text=guard_reply,
+        )
+        assert result_data.get("final_customer_text_source") not in {
+            "persona_llm",
+            "persona_llm_postprocess",
+            "llm",
+            "llm_postprocess",
+        }
+        assert policy["text_source"] == OutboundTextSource.DETERMINISTIC.value
+        assert policy["customer_facing_text_debt"] is True
+        assert "saudi_dialect_guard" in result_data["final_transform_reasons"]

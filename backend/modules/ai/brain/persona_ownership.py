@@ -197,20 +197,113 @@ def build_brain_persona_ownership(
     reply_state: Any,
     chosen_path: str,
     guard_replaced: Optional[Dict[str, bool]] = None,
+    compose_source: object = "",
+    llm_candidate_present: object = None,
+    persona_topic_hint: str = "",
+    final_customer_text_source: object = "",
+    final_text_transformed: object = None,
+    compose_reply_candidate: object = "",
+    final_reply: object = "",
 ) -> PersonaOwnershipRecord:
     """
-    Classify ownership at the Brain pipeline boundary (post-compose, post-guards).
+    Classify ownership at the Brain pipeline final boundary (post-finalization).
     """
+    from core.outbound_text_policy import (  # noqa: PLC0415
+        _final_text_is_llm_derived,
+        final_source_supports_llm_ownership,
+        is_producer_llm_chosen_path,
+    )
+    from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
+
     rec = PersonaOwnershipRecord()
     action = str(decision_action or "").strip()
     args = dict(decision_args or {})
     path = str(chosen_path or "").strip()
+    src = approved_compose_source(compose_source)
+    has_llm_candidate = type(llm_candidate_present) is bool and llm_candidate_present
+    topic_hint = str(persona_topic_hint or args.get("question_kind") or "").strip()
+    final_src = str(final_customer_text_source or "").strip()
+    transformed = type(final_text_transformed) is bool and bool(final_text_transformed)
+    candidate = str(compose_reply_candidate or "").strip()
+    final = str(final_reply or "").strip()
 
     persona_mode = bool(getattr(reply_state, "persona_expression_mode", False))
     persona_topic = str(getattr(reply_state, "persona_topic", "") or "").strip()
     persona_kind = str(args.get("persona_kind") or "").strip()
 
-    if persona_mode and persona_topic:
+    def _primary_guard_owner() -> str:
+        for layer, replaced in (guard_replaced or {}).items():
+            if replaced:
+                return str(layer or "").strip() or "guard_rewrite"
+        return "guard_rewrite"
+
+    def _final_supports_llm() -> bool:
+        return final_source_supports_llm_ownership(
+            final_customer_text_source=final_src,
+            llm_candidate_present=has_llm_candidate,
+            compose_reply_candidate=candidate,
+            final_text=final,
+        )
+
+    if final_src in {"persona_llm", "persona_llm_postprocess"} and _final_supports_llm():
+        rec.stamp_persona(
+            topic=topic_hint or "catalog_product_answer",
+            kind="grounded_persona_compose",
+            owner="persona_llm",
+        )
+    elif final_src in {"llm", "llm_postprocess"} and _final_supports_llm():
+        rec.mark_bypass(PersonaBypassReason.COMMERCE_LLM, owner="llm_compose")
+    elif final_src in {"persona_llm", "persona_llm_postprocess", "llm", "llm_postprocess"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TRUTH_GUARD_REWRITE,
+            owner=_primary_guard_owner(),
+        )
+    elif final_src == "fallback_deterministic" or src == "fallback_deterministic":
+        rec.mark_bypass(
+            PersonaBypassReason.FALLBACK_REPLY,
+            owner=path or "fallback_deterministic",
+        )
+    elif final_src in {"guard_rewrite", "dedup_substitution"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TRUTH_GUARD_REWRITE,
+            owner=_primary_guard_owner(),
+        )
+    elif (
+        transformed
+        and not final_src
+        and src in {"persona_llm", "llm"}
+        and candidate
+        and final
+        and not _final_text_is_llm_derived(candidate, final)
+    ):
+        rec.mark_bypass(
+            PersonaBypassReason.TRUTH_GUARD_REWRITE,
+            owner=_primary_guard_owner(),
+        )
+    elif (
+        src == "persona_llm"
+        and has_llm_candidate
+        and is_producer_llm_chosen_path(path, decision_action=action)
+    ):
+        rec.stamp_persona(
+            topic=topic_hint or "catalog_product_answer",
+            kind="grounded_persona_compose",
+            owner="persona_llm",
+        )
+    elif (
+        src == "llm"
+        and has_llm_candidate
+        and is_producer_llm_chosen_path(path, decision_action=action)
+    ):
+        rec.mark_bypass(PersonaBypassReason.COMMERCE_LLM, owner="llm_compose")
+    elif src in {"merchant_template", "meta_template"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TEMPLATE_PATH,
+            owner=f"template:{src}",
+        )
+    elif src in {"legal_exact_text", "security_exact_text"}:
+        rec.mark_bypass(PersonaBypassReason.TEMPLATE_PATH, owner=src)
+    elif persona_mode and persona_topic:
         rec.stamp_persona(topic=persona_topic, kind=persona_kind)
     elif action == "social_reply":
         rec.mark_bypass(PersonaBypassReason.SOCIAL_TEMPLATE, owner="social_template")
@@ -236,10 +329,6 @@ def build_brain_persona_ownership(
             PersonaBypassReason.TEMPLATE_PATH,
             owner=action or path or "brain_compose",
         )
-
-    for layer, replaced in (guard_replaced or {}).items():
-        if replaced:
-            rec.invalidate_stamp(PersonaBypassReason.TRUTH_GUARD_REWRITE, str(layer))
 
     return rec
 
