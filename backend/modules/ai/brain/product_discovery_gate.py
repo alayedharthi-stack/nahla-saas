@@ -743,7 +743,7 @@ def _message_commerce_probes(message: str) -> list[str]:
             from .intent.rules import _strip_greeting_residue  # noqa: PLC0415
 
             _add(_strip_greeting_residue(line))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional per-line greeting residue probe
             pass
     return probes
 
@@ -817,7 +817,7 @@ def _deterministic_commerce_subject(ctx: BrainContext, extracted: str = "") -> s
             en = extract_english_order_product_query(probe)
             if en and _subject_has_product_substance(en):
                 return en
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional English catalog query probe
             pass
     return ""
 
@@ -928,7 +928,7 @@ def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
             PriceTurnKind.UNIT_PRICE_REFERENCE,
         }:
             return ""
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn context probe
         pass
     deterministic = _deterministic_commerce_subject(ctx, extracted)
     if deterministic:
@@ -972,7 +972,7 @@ def is_solution_seeking_commerce(ctx: BrainContext) -> bool:
         from .commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
 
         return classify_solution_seeking_commerce(ctx.message or "") is not None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional solution-seeking classifier
         return False
 
 
@@ -1019,7 +1019,7 @@ def is_price_without_product_context(
         kind = classify_price_turn(ctx)
         if kind == PriceTurnKind.PRODUCT_PRICE_ASK:
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn classification probe
         if _extract_price_subject(msg):
             return False
     norm = _normalize_ar(msg)
@@ -1032,7 +1032,7 @@ def _has_fulfillment_message_context(message: str) -> bool:
 
         if detect_fulfillment_update(message or "", {}):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional fulfillment update probe
         pass
     try:
         from services.address_resolution import extract_address_signals  # noqa: PLC0415
@@ -1152,7 +1152,7 @@ def product_discovery_block_reason(
             intent_confidence=getattr(intent, "confidence", None),
         ):
             return "non_commerce"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional non-commerce classification probe
         pass
 
     if is_price_without_product_context(ctx):
@@ -1196,7 +1196,7 @@ def product_discovery_block_reason(
 
         if is_bare_start_order_phrase(msg):
             return None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional bare start-order probe
         pass
 
     if src in _TOP_PRODUCTS_SOURCES and not has_explicit_broad_browse_request(msg):
