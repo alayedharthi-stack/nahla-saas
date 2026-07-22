@@ -1090,3 +1090,161 @@ class TestCatalogAvailabilityFactsSemantics:
 
         asyncio.run(_run())
 
+
+class TestCompoundCatalogFacetsSemantics:
+    """Platform-wide compound price+availability facet and ambiguity semantics."""
+
+    _WHITE_SHOE = {
+        "id": 501,
+        "title": "حذاء رياضي أبيض",
+        "category": "أحذية",
+        "price": 220,
+        "can_checkout": True,
+    }
+
+    def test_unique_generic_product_compound_enables_both_facets(self) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            classify_catalog_requested_facets,
+        )
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        message = "كم سعر حذاء رياضي أبيض وهل هو متوفر؟"
+        facets = classify_catalog_requested_facets(message, query="حذاء رياضي أبيض")
+        assert facets == ["price", "availability"]
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text=message,
+            tenant_id=20,
+            products=[self._WHITE_SHOE],
+            catalog_search_query="حذاء رياضي أبيض",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        assert facts["question_kind"] == "compound"
+        assert facts["requested_facets"] == ["price", "availability"]
+        assert facts["allow_price_mention"] is True
+        assert facts["allow_availability_mention"] is True
+        assert facts["has_positive_availability"] is True
+        assert facts.get("catalog_ambiguity") is not True
+
+        prompt = build_user_prompt(bundle)
+        assert "requested_facets: price, availability" in prompt
+        assert "answer both verified price and per-product availability" in prompt
+        assert "available=True" in prompt
+
+    def test_duplicate_exact_names_with_conflicting_prices_require_clarification(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 601,
+                "title": "عطر ورد 100ml",
+                "category": "عطور",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 602,
+                "title": "عطر ورد 100ml",
+                "category": "عطور",
+                "price": 210,
+                "can_checkout": True,
+            },
+        ]
+        message = "كم سعر عطر ورد 100ml وهل هو متوفر؟"
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text=message,
+            tenant_id=21,
+            products=products,
+            catalog_search_query="عطر ورد 100ml",
+            question_kind="price",
+        )
+        facts = bundle.verified_facts
+        assert facts["catalog_ambiguity"] is True
+        assert facts["require_clarification"] is True
+        assert facts["allow_price_mention"] is False
+        assert facts["allow_availability_mention"] is False
+        assert len(facts.get("ambiguous_catalog_candidates") or []) == 2
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert "catalog_ambiguity: true" in prompt
+        assert "ambiguous_candidate:" in prompt
+        assert "do not pick one price" in prompt
+
+        guard = apply_persona_compose_guards(
+            "عطر ورد 100ml سعره 185 ريال وهو متوفر",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_price"
+
+    def test_mixed_availability_duplicates_do_not_generalize_stock(self) -> None:
+        products = [
+            {
+                "id": 701,
+                "title": "قميص قطني أزرق",
+                "category": "ملابس",
+                "price": 129,
+                "can_checkout": True,
+            },
+            {
+                "id": 702,
+                "title": "قميص قطني أزرق",
+                "category": "ملابس",
+                "price": 129,
+                "can_checkout": False,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر قميص قطني أزرق وهل هو متوفر؟",
+            tenant_id=22,
+            products=products,
+            catalog_search_query="قميص قطني أزرق",
+        )
+        facts = bundle.verified_facts
+        assert facts["catalog_ambiguity"] is True
+        candidates = facts.get("ambiguous_catalog_candidates") or []
+        availability_values = {
+            bool(row.get("available"))
+            for row in candidates
+            if isinstance(row, dict) and "available" in row
+        }
+        assert availability_values == {True, False}
+        assert facts["allow_availability_mention"] is False
+
+    def test_compound_compose_metadata_stays_llm_owned(self) -> None:
+        async def _run() -> None:
+            shoe = dict(self._WHITE_SHOE)
+            compose = AsyncMock(
+                return_value=PersonaComposeResult(
+                    text="حذاء رياضي أبيض سعره 220 ريال وهو متوفر للطلب.",
+                    source="persona_llm",
+                    surface="catalog_product_answer",
+                    facts_hash="shoe-compound",
+                    guard_passed=True,
+                )
+            )
+            with patch.object(FactBoundPersonaComposer, "compose", new=compose):
+                _text, result, event = await try_compose_catalog_product_answer(
+                    tenant_id=23,
+                    customer_phone="966500000010",
+                    inbound_text="كم سعر حذاء رياضي أبيض وهل هو متوفر؟",
+                    products=[shoe],
+                    catalog_search_query="حذاء رياضي أبيض",
+                    question_kind="price",
+                    ai_settings=_enabled_catalog_ai_settings(),
+                )
+            assert result.source == "persona_llm"
+            assert event["compose_source"] == "persona_llm"
+            assert event["llm_candidate_present"] is True
+            assert event["final_text_transformed"] is False
+            assert event["final_customer_text_source"] == "persona_llm"
+            assert event["question_kind"] == "compound"
+            assert event["requested_facets"] == ["price", "availability"]
+            assert event["checkout_pressure_allowed"] is False
+
+        asyncio.run(_run())

@@ -122,33 +122,195 @@ def resolve_catalog_visible_price(raw: dict[str, Any]) -> Any:
     return None
 
 
+_CATALOG_FACET_PRICE = "price"
+_CATALOG_FACET_AVAILABILITY = "availability"
+_CATALOG_FACET_ORDER = (_CATALOG_FACET_PRICE, _CATALOG_FACET_AVAILABILITY)
+
+
+def _normalize_catalog_title_key(title: object) -> str:
+    return re.sub(r"\s+", " ", str(title or "").strip().lower())
+
+
+def classify_catalog_requested_facets(
+    message: str,
+    *,
+    query: str = "",
+    decision_args: Optional[dict[str, Any]] = None,
+) -> list[str]:
+    """Return explicit requested catalog facets (price, availability), never collapsed."""
+    args = dict(decision_args or {})
+    preset = [
+        str(f).strip()
+        for f in (args.get("requested_facets") or [])
+        if str(f).strip() in _CATALOG_FACET_ORDER
+    ]
+    if preset:
+        return [f for f in _CATALOG_FACET_ORDER if f in preset]
+
+    msg = str(message or "").strip()
+    q = str(query or args.get("query") or "").strip()
+    if _SOFT_BROWSE_RE.search(msg) and not _PRICE_ASK_RE.search(msg):
+        return []
+    haystack = f"{msg} {q}".strip()
+    facets: list[str] = []
+    if _PRICE_ASK_RE.search(haystack):
+        facets.append(_CATALOG_FACET_PRICE)
+    if _AVAILABILITY_ASK_RE.search(haystack):
+        facets.append(_CATALOG_FACET_AVAILABILITY)
+    return [f for f in _CATALOG_FACET_ORDER if f in facets]
+
+
+def _question_kind_from_requested_facets(facets: list[str]) -> str:
+    ordered = [f for f in _CATALOG_FACET_ORDER if f in facets]
+    if len(ordered) > 1:
+        return "compound"
+    if len(ordered) == 1:
+        return ordered[0]
+    return "browse"
+
+
 def classify_catalog_question_kind(
     message: str,
     *,
     query: str = "",
     decision_args: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Classify P0 catalog turns: browse | availability | price."""
-    msg = str(message or "").strip()
+    """Classify P0 catalog turns: browse | availability | price | compound."""
     args = dict(decision_args or {})
-    if str(args.get("question_kind") or "").strip() in {
-        "browse",
-        "availability",
-        "price",
-    }:
-        return str(args["question_kind"]).strip()
+    preset_kind = str(args.get("question_kind") or "").strip()
+    if preset_kind in {"browse", "availability", "price", "compound"}:
+        return preset_kind
 
+    facets = classify_catalog_requested_facets(
+        message,
+        query=query,
+        decision_args=args,
+    )
+    if facets:
+        # Responder routing still keys off price/availability kinds only.
+        if len(facets) > 1:
+            return "price"
+        return facets[0]
+
+    msg = str(message or "").strip()
     if _SOFT_BROWSE_RE.search(msg) and not _PRICE_ASK_RE.search(msg):
         return "browse"
-
-    if _PRICE_ASK_RE.search(msg):
-        return "price"
-    if _AVAILABILITY_ASK_RE.search(msg) and not _PRICE_ASK_RE.search(msg):
-        return "availability"
-    q = str(query or args.get("query") or "").strip()
-    if q and _PRICE_ASK_RE.search(f"{msg} {q}"):
-        return "price"
     return "browse"
+
+
+def _row_availability_value(raw: dict[str, Any]) -> Optional[bool]:
+    if "available" in raw:
+        return bool(raw.get("available"))
+    if "orderable" in raw:
+        return bool(raw.get("orderable"))
+    if raw.get("can_checkout") is not None:
+        return bool(raw.get("can_checkout"))
+    return None
+
+
+def _row_price_compare_value(raw: dict[str, Any]) -> Optional[float]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    return parse_price_amount(resolve_catalog_visible_price(raw))
+
+
+def _material_conflict_in_rows(rows: list[dict[str, Any]]) -> bool:
+    prices = {
+        amt
+        for amt in (_row_price_compare_value(row) for row in rows)
+        if amt is not None
+    }
+    if len(prices) > 1:
+        return True
+    availability = {
+        val
+        for val in (_row_availability_value(row) for row in rows)
+        if val is not None
+    }
+    return len(availability) > 1
+
+
+def _ambiguous_candidate_fact(row: dict[str, Any]) -> dict[str, Any]:
+    fact: dict[str, Any] = {
+        "id": row.get("id"),
+        "title": str(row.get("title") or "").strip(),
+    }
+    if row.get("variant_id") is not None:
+        fact["variant_id"] = row.get("variant_id")
+    if row.get("category"):
+        fact["category"] = row.get("category")
+    price = resolve_catalog_visible_price(row)
+    if price is not None:
+        fact["price"] = price
+    avail = _row_availability_value(row)
+    if avail is not None:
+        fact["available"] = avail
+    return fact
+
+
+def _trusted_focus_product(args: dict[str, Any]) -> dict[str, Any]:
+    for key in ("product", "product_focus", "resolved_product"):
+        raw = args.get(key)
+        if isinstance(raw, dict) and raw:
+            return dict(raw)
+    return {}
+
+
+def _resolve_catalog_compose_rows(
+    rows: list[dict[str, Any]],
+    *,
+    catalog_search_query: str,
+    decision_args: Optional[dict[str, Any]] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep trusted unique candidates; surface structured ambiguity without picking one."""
+    args = dict(decision_args or {})
+    meta: dict[str, Any] = {}
+    if not rows:
+        return [], meta
+
+    focus = _trusted_focus_product(args)
+    focus_id = focus.get("id") or focus.get("catalog_product_id")
+    focus_variant = focus.get("variant_id")
+    if focus_id is not None:
+        matched = [row for row in rows if row.get("id") == focus_id]
+        if len(matched) == 1:
+            return matched, meta
+    if focus_variant is not None:
+        matched = [row for row in rows if row.get("variant_id") == focus_variant]
+        if len(matched) == 1:
+            return matched, meta
+
+    query_key = _normalize_catalog_title_key(catalog_search_query)
+    exact_rows: list[dict[str, Any]] = []
+    if query_key:
+        exact_rows = [
+            row
+            for row in rows
+            if _normalize_catalog_title_key(row.get("title")) == query_key
+        ]
+    if len(exact_rows) == 1:
+        return exact_rows, meta
+
+    candidate_pool = exact_rows if exact_rows else list(rows)
+    if len(candidate_pool) == 1:
+        return candidate_pool, meta
+
+    if (
+        exact_rows
+        and len(exact_rows) > 1
+        and _material_conflict_in_rows(exact_rows)
+    ):
+        meta["catalog_ambiguity"] = True
+        meta["require_clarification"] = True
+        meta["catalog_ambiguity_reason"] = "conflicting_exact_title_candidates"
+        meta["ambiguous_catalog_candidates"] = [
+            _ambiguous_candidate_fact(row) for row in exact_rows
+        ]
+        return exact_rows, meta
+
+    return candidate_pool, meta
 
 
 def _catalog_rows_from_products(
@@ -242,27 +404,54 @@ def build_catalog_product_answer_facts_bundle(
     language = detect_language(inbound)
     args = dict(decision_args or {})
     items = catalog_fact_product_rows(products)
-    rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive = (
-        _catalog_rows_from_products(items)
-    )
-    qkind = str(question_kind or "").strip() or classify_catalog_question_kind(
+    requested_facets = classify_catalog_requested_facets(
         inbound,
         query=catalog_search_query,
         decision_args=args,
     )
+    qkind = _question_kind_from_requested_facets(requested_facets)
+    if not requested_facets:
+        qkind = str(question_kind or "").strip() or classify_catalog_question_kind(
+            inbound,
+            query=catalog_search_query,
+            decision_args=args,
+        )
+    rows, catalog_product_ids, variant_ids, any_price, any_availability, any_positive = (
+        _catalog_rows_from_products(items)
+    )
+    ambiguity_meta: dict[str, Any] = {}
+    if requested_facets:
+        resolved_rows, ambiguity_meta = _resolve_catalog_compose_rows(
+            rows,
+            catalog_search_query=str(catalog_search_query or args.get("query") or "").strip(),
+            decision_args=args,
+        )
+        if resolved_rows:
+            rows = resolved_rows
+            catalog_product_ids = [
+                row.get("id") for row in rows if row.get("id") is not None
+            ]
+            variant_ids = [
+                row.get("variant_id") for row in rows if row.get("variant_id") is not None
+            ]
+            any_price = any(resolve_catalog_visible_price(row) is not None for row in rows)
+            any_availability = any(_row_availability_value(row) is not None for row in rows)
+            any_positive = any(_row_availability_value(row) is True for row in rows)
     scope = str(category_scope or args.get("category_scope") or "").strip()
     allowed = str(allowed_category or scope or "").strip()
-    include_price = qkind == "price" and any_price
-    # Price turns ground on catalog price only; availability prose is reserved for
-    # explicit availability questions so guards are not fighting prompt invitation.
-    include_availability = qkind == "availability"
-    allow_availability_mention = qkind == "availability"
+    ambiguous = bool(ambiguity_meta.get("catalog_ambiguity"))
+    wants_price = _CATALOG_FACET_PRICE in requested_facets
+    wants_availability = _CATALOG_FACET_AVAILABILITY in requested_facets
+    include_price = wants_price and any_price and not ambiguous
+    include_availability = wants_availability and any_availability and not ambiguous
+    allow_availability_mention = wants_availability and not ambiguous
     eligible_product_count = _count_eligible_catalog_products(items)
 
     verified_facts: dict[str, Any] = {
         "surface": PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         "inbound_text": inbound,
         "question_kind": qkind,
+        "requested_facets": list(requested_facets),
         "catalog_search_query": str(catalog_search_query or args.get("query") or "").strip(),
         "search_result_count": int(search_result_count or len(items)),
         "category_scope": scope,
@@ -282,6 +471,7 @@ def build_catalog_product_answer_facts_bundle(
         "allow_superiority_claims": False,
         "has_catalog_products": bool(rows),
     }
+    verified_facts.update(ambiguity_meta)
     if include_price and any_price:
         verified_facts["price_source"] = "catalog"
     if include_availability and any_availability:
@@ -329,6 +519,9 @@ def build_catalog_product_answer_event_metadata(
         meta["fallback_action_type"] = "catalog_product_answer"
     facts = dict(catalog_facts or {})
     meta["question_kind"] = str(facts.get("question_kind") or "").strip()
+    facets = list(facts.get("requested_facets") or [])
+    if facets:
+        meta["requested_facets"] = facets
     meta["catalog_search_query"] = str(facts.get("catalog_search_query") or "").strip()
     meta["search_result_count"] = int(facts.get("search_result_count") or 0)
     meta["category_scope"] = str(facts.get("category_scope") or "").strip()
@@ -347,14 +540,14 @@ def build_catalog_product_answer_event_metadata(
     if facts.get("eligible_product_count") is not None:
         meta["eligible_product_count"] = int(facts.get("eligible_product_count") or 0)
     qkind = str(facts.get("question_kind") or meta.get("question_kind") or "").strip()
-    if qkind in _CATALOG_QA_KINDS:
+    if qkind in _CATALOG_QA_KINDS or facts.get("requested_facets"):
         fact_rows = catalog_fact_product_rows(catalog_fact_products)
         if fact_rows:
             meta["catalog_fact_products"] = fact_rows
     return meta
 
 
-_CATALOG_QA_KINDS = frozenset({"price", "availability"})
+_CATALOG_QA_KINDS = frozenset({"price", "availability", "compound"})
 _PRESSURE_MARKERS = (
     "اختر رقم",
     "اسمك",
@@ -371,7 +564,8 @@ def catalog_product_answer_deterministic_fallback(
     """Fact-bound price/availability reply when LLM compose is unavailable."""
     facts = bundle.verified_facts or {}
     qkind = str(facts.get("question_kind") or "").strip()
-    if qkind not in _CATALOG_QA_KINDS:
+    facets = list(facts.get("requested_facets") or [])
+    if qkind not in _CATALOG_QA_KINDS and not facets:
         return ""
 
     rows = [
@@ -383,7 +577,27 @@ def catalog_product_answer_deterministic_fallback(
         return ""
 
     lines: list[str] = []
-    if qkind == "price":
+    if qkind == "compound" or (
+        _CATALOG_FACET_PRICE in facets and _CATALOG_FACET_AVAILABILITY in facets
+    ):
+        if facts.get("allow_price_mention"):
+            for row in rows[:3]:
+                title = str(row.get("title") or "").strip()
+                price = row.get("price")
+                if title and price is not None and str(price).strip():
+                    lines.append(f"{title} سعره {str(price).strip()}")
+        if facts.get("allow_availability_mention"):
+            for row in rows[:3]:
+                title = str(row.get("title") or "").strip()
+                if not title:
+                    continue
+                if row.get("orderable") is True:
+                    lines.append(f"{title} متوفر للطلب حالياً")
+                else:
+                    lines.append(
+                        f"{title} موجود في الكتالوج لكن غير متاح للطلب حالياً"
+                    )
+    elif qkind == "price" or _CATALOG_FACET_PRICE in facets:
         if not facts.get("allow_price_mention"):
             return ""
         for row in rows[:3]:
@@ -398,7 +612,7 @@ def catalog_product_answer_deterministic_fallback(
             if row.get("orderable") is False:
                 line += "، والمنتج غير متاح للطلب حالياً"
             lines.append(line)
-    else:
+    elif qkind == "availability" or _CATALOG_FACET_AVAILABILITY in facets:
         if not facts.get("allow_availability_mention"):
             return ""
         for row in rows[:3]:
@@ -433,6 +647,8 @@ def _catalog_product_answer_emergency_fallback(
         text = "لا تتوفر تفاصيل سعر مؤكدة في الكتالوج حالياً."
     elif qkind == "availability":
         text = "لا تتوفر حالة توفر مؤكدة في الكتالوج حالياً."
+    elif qkind == "compound":
+        text = "لا تتوفر تفاصيل سعر وتوفر مؤكدة في الكتالوج حالياً."
     elif qkind == "browse":
         text = "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
     else:

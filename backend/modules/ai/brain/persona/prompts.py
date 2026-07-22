@@ -101,7 +101,10 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "no checkout pressure, name/address/payment/quantity asks"
             )
     elif bundle.surface == "catalog_product_answer":
+        requested_facets = list(facts.get("requested_facets") or [])
         lines.append(f"question_kind: {facts.get('question_kind') or ''}")
+        if requested_facets:
+            lines.append(f"requested_facets: {', '.join(requested_facets)}")
         if facts.get("category_scope"):
             lines.append(f"category_scope: {facts.get('category_scope')}")
         if facts.get("catalog_search_query"):
@@ -136,9 +139,29 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
         qkind = str(facts.get("question_kind") or "").strip()
         has_pos_avail = bool(facts.get("has_positive_availability"))
         allow_avail = bool(facts.get("allow_availability_mention"))
+        ambiguous = bool(facts.get("catalog_ambiguity"))
         lines.append(f"allow_price_mention: {bool(facts.get('allow_price_mention'))}")
         lines.append(f"allow_availability_mention: {allow_avail}")
         lines.append(f"has_positive_availability: {has_pos_avail}")
+        if ambiguous:
+            lines.append("catalog_ambiguity: true")
+            lines.append(
+                f"catalog_ambiguity_reason: {facts.get('catalog_ambiguity_reason') or ''}"
+            )
+            for candidate in facts.get("ambiguous_catalog_candidates") or []:
+                if not isinstance(candidate, dict):
+                    continue
+                title = str(candidate.get("title") or "").strip()
+                if not title:
+                    continue
+                parts = [f"ambiguous_candidate: {title}"]
+                if candidate.get("variant_id") is not None:
+                    parts.append(f"variant_id={candidate.get('variant_id')}")
+                if candidate.get("price") is not None:
+                    parts.append(f"price={candidate.get('price')} ريال")
+                if "available" in candidate:
+                    parts.append(f"available={candidate.get('available')}")
+                lines.append(" | ".join(parts))
         for product in facts.get("catalog_products") or []:
             if not isinstance(product, dict):
                 continue
@@ -162,7 +185,8 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             lines.append("catalog_products: none")
         if (
             not facts.get("has_eligible_products")
-            and qkind not in {"price", "availability"}
+            and qkind not in {"price", "availability", "compound"}
+            and not requested_facets
         ):
             lines.append(
                 "rules: honestly explain there are no confirmed sellable catalog products; "
@@ -178,12 +202,26 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "no checkout/name/address/payment/quantity prompts",
                 "no category drift outside scope",
             ]
-            if qkind == "price":
+            if ambiguous or facts.get("require_clarification"):
+                rule_parts.append(
+                    "multiple exact-title catalog matches conflict; ask a concise natural "
+                    "clarification using distinguishing candidate facts only; "
+                    "do not pick one price, do not generalize availability, "
+                    "do not invent distinguishing details"
+                )
+            elif qkind == "compound" or (
+                "price" in requested_facets and "availability" in requested_facets
+            ):
+                rule_parts.append(
+                    "answer both verified price and per-product availability from facts; "
+                    "do not generalize availability across products"
+                )
+            elif qkind == "price" or "price" in requested_facets:
                 rule_parts.append(
                     "answer from verified price facts only; "
                     "do not add availability or stock-status claims"
                 )
-            elif qkind == "availability":
+            elif qkind == "availability" or "availability" in requested_facets:
                 if has_pos_avail:
                     rule_parts.append(
                         "mention positive availability only for products with available=true in facts"

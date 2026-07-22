@@ -1126,3 +1126,85 @@ class TestCatalogPriceGuardStaleRowHandoff:
         assert diag["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
         assert 387 in diag["catalog_fact_price_values"]
         assert 109 in diag["catalog_fact_product_ids"]
+
+
+class TestCatalogCompoundProvenancePipeline:
+    def test_guard_context_accepts_compound_requested_facets(self) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "compound",
+            "requested_facets": ["price", "availability"],
+            "price_source": "catalog",
+            "catalog_product_ids": [501],
+            "checkout_pressure_allowed": False,
+        }
+        assert pl._is_catalog_product_price_guard_context(data) is True
+
+    def test_service_closer_guard_records_post_compose_provenance(self) -> None:
+        from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
+            apply_service_closer_guard,
+        )
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            finalize_post_guard_compose_provenance,
+        )
+
+        candidate = (
+            "حذاء رياضي أبيض سعره 220 ريال وهو متوفر للطلب. "
+            "كيف أقدر أساعدك اليوم؟"
+        )
+        scg = apply_service_closer_guard(candidate, tenant_id=24)
+        assert scg.stripped is True
+
+        result_data = {
+            "compose_source": "persona_llm",
+            "response_mode": "grounded_persona_compose",
+            "llm_candidate_present": True,
+            "compose_reply_candidate": candidate,
+            "final_text_transformed": False,
+            "final_transform_reasons": [],
+            "final_customer_text_source": "persona_llm",
+            "question_kind": "compound",
+            "requested_facets": ["price", "availability"],
+        }
+        guard_replaced = {"service_closer_guard": True}
+        finalize_post_guard_compose_provenance(
+            result_data,
+            final_text=scg.reply,
+            guard_replaced=guard_replaced,
+        )
+        assert result_data["final_text_transformed"] is True
+        assert "service_closer_guard" in result_data["final_transform_reasons"]
+        assert result_data["compose_source"] == "persona_llm"
+        assert result_data["final_customer_text_source"] == "persona_llm_postprocess"
+
+    def test_persona_llm_compose_overrides_template_search_products_owner(self) -> None:
+        from modules.ai.brain.persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
+        from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
+
+        result_data = {
+            "compose_source": "persona_llm",
+            "question_kind": "compound",
+            "requested_facets": ["price", "availability"],
+        }
+        ownership = build_brain_persona_ownership(
+            decision_action="search_products",
+            decision_args={"query": "حذاء رياضي أبيض"},
+            reply_state=None,
+            chosen_path="fact_bound_persona_compose",
+            guard_replaced={},
+        )
+        if approved_compose_source(result_data.get("compose_source")) == "persona_llm":
+            ownership.stamp_persona(
+                topic=str(result_data.get("question_kind") or "catalog_product_answer"),
+                kind="grounded_persona_compose",
+                owner="persona_llm",
+            )
+        payload = ownership.to_dict()
+        assert payload["persona_stamped"] is True
+        assert payload["expression_owner"] == "persona_llm"
+        assert payload["bypass_reason"] is None

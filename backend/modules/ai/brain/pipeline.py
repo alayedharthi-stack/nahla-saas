@@ -182,7 +182,14 @@ def _is_catalog_product_price_guard_context(result_data: Dict[str, Any]) -> bool
     surface = str(pc.get("surface") or "").strip() if isinstance(pc, dict) else ""
     if surface != "catalog_product_answer":
         return False
-    if str(result_data.get("question_kind") or "").strip() != "price":
+    qkind = str(result_data.get("question_kind") or "").strip()
+    facets = [
+        str(f).strip()
+        for f in (result_data.get("requested_facets") or [])
+        if str(f).strip()
+    ]
+    price_turn = qkind in {"price", "compound"} or "price" in facets
+    if not price_turn:
         return False
     if str(result_data.get("price_source") or "").strip() != "catalog":
         return False
@@ -4105,6 +4112,40 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
+                apply_service_closer_guard,
+            )
+
+            _scg_meta = dict((profile or {}).get("inbound_metadata") or {})
+            if brain_nc_category := str(
+                getattr(ctx, "non_commerce_category", "") or ""
+            ):
+                _scg_meta.setdefault("non_commerce_category", brain_nc_category)
+            if bool(getattr(ctx, "block_commerce_escalation", False)):
+                _scg_meta.setdefault("block_commerce_escalation", True)
+            _scg = apply_service_closer_guard(
+                reply or "",
+                inbound_text=message or "",
+                inbound_metadata=_scg_meta,
+                non_commerce_block_mode=bool(
+                    getattr(ctx, "block_commerce_escalation", False)
+                ),
+                block_commerce_escalation=bool(
+                    getattr(ctx, "block_commerce_escalation", False)
+                ),
+                tenant_id=tenant_id,
+            )
+            if _scg.stripped:
+                reply = _scg.reply
+                _guard_replaced["service_closer_guard"] = True
+        except Exception as _scg_exc:  # noqa: BLE001
+            logger.warning(
+                "[SERVICE_CLOSER_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id,
+                _scg_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: PLC0415
                 apply_commerce_reply_quality_guard,
             )
@@ -4497,6 +4538,17 @@ class MerchantBrain:
                 chosen_path=_chosen_path,
                 guard_replaced=_guard_replaced,
             )
+            from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+                approved_compose_source,
+            )
+
+            _compose_src = approved_compose_source(result.data.get("compose_source"))
+            if _compose_src == "persona_llm":
+                _persona_ownership.stamp_persona(
+                    topic=str(result.data.get("question_kind") or "catalog_product_answer"),
+                    kind="grounded_persona_compose",
+                    owner="persona_llm",
+                )
             _persona_ownership_dict = _persona_ownership.to_dict()
             result.data["persona_ownership"] = _persona_ownership_dict
         except Exception as _po_exc:  # noqa: BLE001
