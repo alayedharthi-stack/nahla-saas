@@ -20,12 +20,16 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_ARCH001_SIGNOFF_MISSING,
+    CODE_CHANNEL_D360_ONLY_LEGACY_PATH,
+    CODE_CHANNEL_READINESS_GAP,
     CODE_MANIFEST_INVALID,
     CODE_TENANT_NOT_ALLOWED,
+    D360_LEGACY_OBSERVABILITY_ENV_NAMES,
     EXECUTION_CONFIRM_ENV,
     EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
     MANIFEST_SCHEMA_VERSION,
     MASTER_ENABLE_ENV,
+    META_READINESS_REQUIRED_ENV_NAMES,
     PHASE_DEFAULT_OFF,
     PHASE_TENANT_1_INTENSIVE,
     PHASE_TENANT_33_LIMITED,
@@ -34,12 +38,26 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     SCENARIO_TAXONOMY,
     TENANT_1_PASS_CONFIRM_ENV,
     TENANT_48_SALLA_MINIMAL,
+    evaluate_meta_channel_readiness,
+    evaluate_meta_channel_readiness,
     load_scenario_manifest,
     resolve_acceptance_phase,
     validate_manifest,
 )
+from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noqa: E402
+    CODE_DB_WA_BINDING_MISSING,
+    CODE_WEBHOOK_ATTESTATION_FORGED,
+    CODE_WEBHOOK_ATTESTATION_MISSING,
+    CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH,
+    WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
+    build_webhook_attestation_artifact,
+)
 from scripts.operators.real_channel_acceptance_manifest_builder import (  # noqa: E402
     build_manifest,
+)
+from scripts.operators.staging_acceptance_config_consolidation_contract import (  # noqa: E402
+    D360_LEGACY_DETECTION_KEYS,
+    META_DIRECT_WEBHOOK_ROUTE,
 )
 
 
@@ -332,3 +350,212 @@ def test_cli_manifest_validate_exit_zero() -> None:
         check=False,
     )
     assert proc.returncode == 0
+
+
+def test_public_exports_preserve_baseline_symbols() -> None:
+    from scripts.operators import real_channel_conversational_acceptance_contract as contract
+
+    baseline = {
+        "DEFECT_BUNDLE_DIR",
+        "MASTER_ENABLE_ENV",
+        "EVIDENCE_ACCUMULATION_DIR",
+        "PINNED_REVISION_ENV",
+        "EXECUTION_CONFIRM_ENV",
+    }
+    for name in baseline:
+        assert name in contract.__all__
+        assert hasattr(contract, name)
+
+
+def _channel_health_env(monkeypatch: pytest.MonkeyPatch) -> str:
+    hmac_key = "unit-test-meta-acceptance-channel-evidence-key-32b"
+    backend_url = "https://staging.example.com"
+    pinned = "abc1234567890"
+    deployment = "deploy-staging-001"
+    monkeypatch.setenv("DATABASE_URL", "postgres://staging")
+    monkeypatch.setenv("BACKEND_URL", backend_url)
+    monkeypatch.setenv("NAHLA_REAL_CHANNEL_ACCEPTANCE_PINNED_REVISION", pinned)
+    monkeypatch.setenv("RAILWAY_DEPLOYMENT_ID", deployment)
+    for key in META_READINESS_REQUIRED_ENV_NAMES:
+        if key == "BACKEND_URL":
+            continue
+        monkeypatch.setenv(key, "present")
+    monkeypatch.setenv(WEBHOOK_ATTESTATION_HMAC_KEY_ENV, hmac_key)
+    return hmac_key
+
+
+def _valid_attestation(*, hmac_key: str, backend_url: str = "https://staging.example.com") -> dict:
+    return build_webhook_attestation_artifact(
+        tenant_id=1,
+        backend_url=backend_url,
+        pinned_revision="abc1234567890",
+        deployment_id="deploy-staging-001",
+        observed_callback_route=META_DIRECT_WEBHOOK_ROUTE,
+        waba_id="waba-tenant-1-example",
+        phone_number_id="phone-tenant-1-example",
+        rollback_snapshot_ref="rollback-ref-001",
+        hmac_key=hmac_key,
+    )
+
+
+def test_channel_health_blocks_d360_only_legacy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _channel_health_env(monkeypatch)
+    for key in D360_LEGACY_DETECTION_KEYS:
+        monkeypatch.setenv(key, "legacy-present")
+    for key in META_READINESS_REQUIRED_ENV_NAMES:
+        if key == "BACKEND_URL":
+            continue
+        monkeypatch.delenv(key, raising=False)
+    result = operator.execute_channel_health_preflight(tenant_id=1)
+    assert result["ok"] is False
+    assert result["code"] == CODE_CHANNEL_D360_ONLY_LEGACY_PATH
+    assert result["actual_provider_channel_ready"] is False
+
+
+def test_meta_config_present_does_not_unlock_without_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _channel_health_env(monkeypatch)
+    result = operator.execute_channel_health_preflight(tenant_id=1)
+    assert result["ok"] is False
+    assert result["meta_config_present"] is True
+    assert result["actual_provider_channel_ready"] is False
+    assert result["code"] == CODE_WEBHOOK_ATTESTATION_MISSING
+
+
+def test_channel_health_passes_with_complete_meta_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    db_row = {
+        "tenant_id": 1,
+        "provider": "meta",
+        "status": "connected",
+        "sending_enabled": True,
+        "phone_number_id": "phone-tenant-1-example",
+        "whatsapp_business_account_id": "waba-tenant-1-example",
+    }
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row=db_row,
+    )
+    assert result["ok"] is True
+    assert result["meta_config_present"] is True
+    assert result["actual_provider_channel_ready"] is True
+    assert result["observed_callback_route"] == META_DIRECT_WEBHOOK_ROUTE
+
+
+def test_channel_health_blocks_when_backend_url_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgres://staging")
+    monkeypatch.delenv("BACKEND_URL", raising=False)
+    for key in META_READINESS_REQUIRED_ENV_NAMES:
+        if key != "BACKEND_URL":
+            monkeypatch.setenv(key, "present")
+    result = operator.execute_channel_health_preflight(tenant_id=1)
+    assert result["ok"] is False
+    assert result["code"] == "channel_health_blocked"
+    assert "BACKEND_URL" in result["missing_credentials"]
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [key for key in META_READINESS_REQUIRED_ENV_NAMES if key != "BACKEND_URL"],
+)
+def test_channel_health_fails_when_meta_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_key: str,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    monkeypatch.delenv(missing_key, raising=False)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row={
+            "tenant_id": 1,
+            "provider": "meta",
+            "status": "connected",
+            "sending_enabled": True,
+            "phone_number_id": "phone-tenant-1-example",
+            "whatsapp_business_account_id": "waba-tenant-1-example",
+        },
+    )
+    assert result["ok"] is False
+    assert result["actual_provider_channel_ready"] is False
+    assert missing_key in (result.get("channel_evidence_gaps") or [])
+
+
+def test_channel_health_fails_on_forged_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    artifact["signature"] = "forged"
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row={
+            "tenant_id": 1,
+            "provider": "meta",
+            "status": "connected",
+            "sending_enabled": True,
+            "phone_number_id": "phone-tenant-1-example",
+            "whatsapp_business_account_id": "waba-tenant-1-example",
+        },
+    )
+    assert result["ok"] is False
+    assert result["code"] == CODE_WEBHOOK_ATTESTATION_FORGED
+
+
+def test_channel_health_fails_on_wrong_revision_attestation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    artifact["pinned_revision"] = "wrong-sha"
+    from scripts.operators.meta_acceptance_channel_evidence_contract import (
+        sign_webhook_attestation_artifact,
+    )
+
+    artifact["signature"] = sign_webhook_attestation_artifact(artifact, hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row={
+            "tenant_id": 1,
+            "provider": "meta",
+            "status": "connected",
+            "sending_enabled": True,
+            "phone_number_id": "phone-tenant-1-example",
+            "whatsapp_business_account_id": "waba-tenant-1-example",
+        },
+    )
+    assert result["ok"] is False
+    assert result["code"] == CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH
+
+
+def test_channel_health_fails_on_missing_db_binding_for_tenant_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row=None,
+    )
+    assert result["ok"] is False
+    assert result["code"] == CODE_DB_WA_BINDING_MISSING
+
+
+def test_meta_readiness_contract_passes_without_d360() -> None:
+    variables = {key: "present" for key in META_READINESS_REQUIRED_ENV_NAMES}
+    result = evaluate_meta_channel_readiness(variables)
+    assert result["meta_config_present"] is True
+    assert result["d360_legacy_present"] is False

@@ -40,6 +40,7 @@ from scripts.operators.staging_acceptance_config_consolidation_contract import (
     CODE_ARCH001_SHADOW_ACTIVE,
     CODE_ARCH001_SIGNOFF_MISSING,
     CODE_ARCH001_TEARDOWN_PROOF_MISSING,
+    CODE_CHANNEL_D360_ONLY_LEGACY_PATH,
     CODE_CHANNEL_READINESS_GAP,
     CODE_COMMAND_INVALID,
     CODE_CONFLICT_DETECTED,
@@ -92,11 +93,16 @@ from scripts.operators.staging_acceptance_config_consolidation_contract import (
     STAGING_PROJECT_VALUE,
     STAGING_RAILWAY_ENVIRONMENT_ID,
     STAGING_RAILWAY_PROJECT_ID,
+    ACCEPTANCE_TARGET_PROVIDER_PATH,
+    META_DIRECT_WEBHOOK_ROUTE,
+    META_ONBOARDING_EXTERNAL_BLOCKER,
+    META_ONBOARDING_TARGET_PATH,
     all_migratable_keys,
+    build_acceptance_cutover_guidance,
     build_migration_plan,
-    channel_readiness_gaps,
     detect_conflicts,
     env_flag_enabled,
+    evaluate_meta_channel_readiness,
     fingerprint_value,
     is_reference_bindable,
     presence_only,
@@ -121,6 +127,9 @@ class RailwayObservation:
     environment_id: str
     canonical: ServiceSnapshot
     legacy_source: ServiceSnapshot
+    staging_db_wa_binding: dict[str, str] | None = None
+    acceptance_cutover_snapshot: dict[str, Any] | None = None
+    require_tenant_1_acceptance_cutover: bool = False
 
 
 class RailwayReader(Protocol):
@@ -332,16 +341,37 @@ def execute_dry_run_plan(
     merged_preview = dict(observation.canonical.variables)
     for key in plan["copy_from_source"]:
         merged_preview[key] = observation.legacy_source.variables.get(key, "")
-    gaps = channel_readiness_gaps(merged_preview)
+    readiness = evaluate_meta_channel_readiness(
+        merged_preview,
+        routes=observation.canonical.routes,
+        db_binding=observation.staging_db_wa_binding,
+        acceptance_cutover_snapshot=observation.acceptance_cutover_snapshot,
+        require_tenant_1_cutover=observation.require_tenant_1_acceptance_cutover,
+    )
+    gaps = list(readiness["channel_readiness_gaps"])
+    d360_only = bool(readiness["d360_only_legacy_path"])
+    ok = not conflicts and not gaps and not d360_only
+    code = None
+    if conflicts:
+        code = CODE_CONFLICT_DETECTED
+    elif d360_only:
+        code = CODE_CHANNEL_D360_ONLY_LEGACY_PATH
+    elif gaps:
+        code = CODE_CHANNEL_READINESS_GAP
     return _report(
         PHASE_DRY_RUN_PLAN,
-        ok=not conflicts and not gaps,
-        code=CODE_CONFLICT_DETECTED if conflicts else (CODE_CHANNEL_READINESS_GAP if gaps else None),
+        ok=ok,
+        code=code,
         plan=plan,
         conflict_count=len(conflicts),
         conflicts=conflicts,
+        acceptance_target_path=readiness["acceptance_target_path"],
+        meta_onboarding_target_path=readiness["meta_onboarding_target_path"],
+        meta_onboarding_external_blocker=readiness["meta_onboarding_external_blocker"],
+        tenant_1_acceptance_cutover_required=readiness["tenant_1_acceptance_cutover_required"],
+        d360_only_legacy_path=d360_only,
         channel_readiness_gaps=gaps,
-        channel_ready=len(gaps) == 0,
+        channel_ready=bool(readiness["channel_ready"]) and not conflicts,
     )
 
 
@@ -577,15 +607,24 @@ def execute_rollback(
 
 
 def routing_selection_guidance() -> dict[str, Any]:
+    cutover = build_acceptance_cutover_guidance()
     return _report(
         PHASE_ROUTING_SELECTION,
         ok=True,
         canonical_public_app=CANONICAL_SERVICE_NAME,
         legacy_source_app=LEGACY_SOURCE_SERVICE_NAME,
+        acceptance_target_path=ACCEPTANCE_TARGET_PROVIDER_PATH,
+        meta_onboarding_target_path=META_ONBOARDING_TARGET_PATH,
+        meta_onboarding_external_blocker=META_ONBOARDING_EXTERNAL_BLOCKER,
+        meta_direct_webhook_route=META_DIRECT_WEBHOOK_ROUTE,
+        tenant_1_acceptance_cutover=cutover,
         routing_policy=(
-            "Route Meta/360dialog webhooks and BACKEND_URL to canonical nahla-saas only. "
-            "Do not delete nahla-saas-staging or its domains automatically; document "
-            "decommission after acceptance signoff."
+            "Route Meta Cloud API direct webhooks (/webhook/whatsapp) and BACKEND_URL "
+            "to canonical nahla-saas only. Target onboarding is per-merchant Meta "
+            "Embedded Signup (merchant-owned WABA, Phone Number ID, Access Token). "
+            "360dialog is legacy/transition-only and must not satisfy acceptance "
+            "readiness. Pre-verification acceptance may use Tenant 1 direct-Meta test "
+            "channel cutover with explicit snapshot/rollback only."
         ),
         arch001_note="ARCH-001 shadow remains on nahla-saas until explicit teardown",
         auto_delete_services=False,
@@ -593,14 +632,25 @@ def routing_selection_guidance() -> dict[str, Any]:
     )
 
 
+def execute_acceptance_cutover_guidance() -> dict[str, Any]:
+    return _report(
+        PHASE_ROUTING_SELECTION,
+        ok=True,
+        guidance=build_acceptance_cutover_guidance(),
+    )
+
+
 def execute_summary(observation: RailwayObservation, *, hmac_key: str) -> dict[str, Any]:
     dry_run = execute_dry_run_plan(observation, hmac_key=hmac_key)
     gaps = dry_run.get("channel_readiness_gaps") or []
+    d360_only = bool(dry_run.get("d360_only_legacy_path"))
     execution_status = "BLOCK"
     if dry_run.get("ok"):
         execution_status = "READY_AFTER_ARCH001"
     elif dry_run.get("code") == CODE_CONFLICT_DETECTED:
         execution_status = "BLOCK_CONFLICT"
+    elif d360_only:
+        execution_status = "BLOCK_D360_ONLY_LEGACY_PATH"
     elif gaps:
         execution_status = "BLOCK_CREDENTIAL_GAP"
     return _report(
@@ -609,11 +659,17 @@ def execute_summary(observation: RailwayObservation, *, hmac_key: str) -> dict[s
         canonical_service=CANONICAL_SERVICE_NAME,
         legacy_source_service=LEGACY_SOURCE_SERVICE_NAME,
         execution_status=execution_status,
+        acceptance_target_path=ACCEPTANCE_TARGET_PROVIDER_PATH,
+        d360_only_legacy_path=d360_only,
         channel_readiness_gaps=gaps,
         conflict_count=dry_run.get("conflict_count", 0),
         recommendation=(
-            "Use nahla-saas as canonical staging acceptance app. "
-            "nahla-saas-staging is legacy source only. Do not disturb ARCH-001 shadow."
+            "Use nahla-saas as canonical staging acceptance app on Meta Cloud API direct "
+            "only. Target onboarding is per-merchant Meta Embedded Signup; Business "
+            "Verification is the external blocker. Pre-verification acceptance may use "
+            "Tenant 1 direct-Meta test channel cutover (acceptance-only, reversible). "
+            "360dialog vars may remain for transition but never satisfy readiness. "
+            "Do not disturb ARCH-001 shadow."
         ),
     )
 
@@ -681,6 +737,19 @@ def load_fixture_observation(path: Path) -> RailwayObservation:
             default_name=LEGACY_SOURCE_SERVICE_NAME,
             default_id=LEGACY_SOURCE_SERVICE_ID,
         ),
+        staging_db_wa_binding=(
+            {str(k): str(v) for k, v in dict(payload.get("staging_db_wa_binding") or {}).items()}
+            if payload.get("staging_db_wa_binding")
+            else None
+        ),
+        acceptance_cutover_snapshot=(
+            dict(payload.get("acceptance_cutover_snapshot") or {})
+            if payload.get("acceptance_cutover_snapshot")
+            else None
+        ),
+        require_tenant_1_acceptance_cutover=bool(
+            payload.get("require_tenant_1_acceptance_cutover")
+        ),
     )
 
 
@@ -703,6 +772,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args[0] == "routing-selection":
         _emit(routing_selection_guidance())
+        return 0
+
+    if args[0] == "acceptance-cutover-guidance":
+        _emit(execute_acceptance_cutover_guidance())
         return 0
 
     if args[0] == "preflight":

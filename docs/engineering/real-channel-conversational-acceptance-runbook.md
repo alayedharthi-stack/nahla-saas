@@ -17,8 +17,14 @@ work. No auto-merge of fixes during the acceptance window.
 
 ## Architecture trace (real channel path)
 
+**Closed target path:** Meta Cloud API direct only (`meta_cloud_api_direct`).
+**Target onboarding:** per-merchant Meta Embedded Signup → merchant-owned WABA, Phone
+Number ID, and Access Token. **Meta Business Verification** is the current external blocker.
+
+360dialog is **legacy/transition-only** and must not satisfy acceptance readiness.
+
 ```
-Meta/360dialog → POST /webhook/whatsapp[/360dialog]
+Meta Cloud API direct → POST /webhook/whatsapp
   → signature/replay verification (webhook_security)
   → idempotency/dedup guards
   → message persistence (message_events)
@@ -29,7 +35,7 @@ Meta/360dialog → POST /webhook/whatsapp[/360dialog]
   → brain.process / legacy webhook path
   → compose (persona_llm) + guards + sanitizer + dedup
   → outbound adapter (provider_send_message)
-  → provider API → customer device
+  → Meta Graph API → customer device
 ```
 
 **Direct-code probes** (`merchant_assistant_constitution_smoke.py`, internal
@@ -42,9 +48,9 @@ signature, normalization, and routing integration. Launch acceptance requires:
 
 ```
 private allowlisted test phone/device
-  → Meta/360dialog inbound delivery
+  → Meta Cloud API direct inbound delivery
   → Nahla webhook + AI
-  → Meta/360dialog outbound provider ID/status
+  → Meta outbound provider ID/status
   → receipt visible on the same private test device
 ```
 
@@ -95,15 +101,48 @@ markers can never be upgraded.
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_CONVERSATION_ID` | Optional conversation pin |
 | `NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_33_CONVERSATION_ID` | Optional conversation pin |
 | `DATABASE_URL` | Staging DB (postgres-staging.railway.internal) |
-| `BACKEND_URL` | Public webhook target |
-| `D360_API_BASE_URL` | 360dialog channel API |
-| `D360_PARTNER_HUB_BASE` | Partner hub (optional) |
-| `D360_PARTNER_API_KEY` | Partner hub auth (secret) |
-| `D360_PARTNER_ID` | Partner ID |
-| `META_APP_SECRET` | Meta webhook signature verification |
+| `BACKEND_URL` | Public webhook target (**required for Meta readiness**) |
+| `META_APP_SECRET` | Meta webhook signature verification (**required**) |
 | `WHATSAPP_API_URL` | Graph API base |
-| `WHATSAPP_TOKEN` | Outbound send token (secret) |
-| `WHATSAPP_VERIFY_TOKEN` | Webhook verification |
+| `WHATSAPP_TOKEN` | Outbound send token (**required**, secret) |
+| `WHATSAPP_VERIFY_TOKEN` | Webhook verification (**required**) |
+| `D360_API_BASE_URL` | 360dialog — **legacy observability only, not readiness** |
+| `D360_PARTNER_HUB_BASE` | Partner hub (legacy observability) |
+| `D360_PARTNER_API_KEY` | Partner hub auth (legacy observability, secret) |
+| `D360_PARTNER_ID` | Partner ID (legacy observability) |
+| `NAHLA_META_ACCEPTANCE_WEBHOOK_ATTESTATION_ARTIFACT` | Signed bounded external webhook attestation (path or inline JSON) |
+| `NAHLA_META_ACCEPTANCE_WEBHOOK_ATTESTATION_HMAC_KEY` | HMAC key for attestation verification (min 32 bytes, operator-held) |
+
+**Meta readiness terminology (fail-closed):**
+
+| Signal | Meaning |
+|--------|---------|
+| `meta_config_present` | Required Meta env keys exist (`META_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `BACKEND_URL`). **Does not** unlock real-channel execution. |
+| `actual_provider_channel_ready` | `meta_config_present` **plus** valid signed webhook attestation **plus** (Tenant 1 cutover only) read-only `whatsapp_connections` binding consistent with attestation fingerprints. Required for session start. |
+
+**Meta readiness required env:** `META_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_VERIFY_TOKEN`,
+`BACKEND_URL`. D360 absence is never a blocker. D360-only environments **fail** readiness.
+
+### Pre-verification acceptance — Tenant 1 temporary cutover (acceptance-only)
+
+Until Business Verification unblocks Embedded Signup, Tenant 1's existing direct-Meta test
+channel may be used as a **temporary reversible cutover** to canonical staging. Before any
+cutover, snapshot and after acceptance restore:
+
+1. Meta webhook target
+2. Staging env secret fingerprints
+3. Tenant 1 `whatsapp_connections` DB binding
+
+Label: `acceptance_only_not_production`. Scope:
+`tenant_1_preverification_direct_meta_test_channel`. **Must not** unlock production or
+become a runtime abstraction. See
+`staging-acceptance-config-consolidation-runbook.md` and:
+
+```bash
+python -m scripts.operators.staging_acceptance_config_consolidation acceptance-cutover-guidance
+```
+
+**Do not** perform cutover from this PR or CI.
 
 **Never commit values.** Report `present|absent` in preflight only.
 
@@ -135,12 +174,26 @@ python -m scripts.operators.real_channel_conversational_acceptance defect-bundle
 
 ## Channel health preflight (Phase 0 — before any messages)
 
+Meta Cloud API direct credentials must be present. D360-only environments **BLOCK**.
+D360 vars may be reported for legacy observability but never satisfy readiness.
+
+**Route readiness is never inferred from constants.** Channel preflight requires a
+bounded external webhook attestation artifact (HMAC-signed operator evidence) tied to
+canonical staging `BACKEND_URL`, deployment/revision, `provider=meta_cloud_api_direct`,
+Tenant 1 WABA/Phone Number ID redacted fingerprints, observed callback route,
+issued/expiry, and rollback snapshot reference. Without attestation, preflight fails
+closed with a precise gap — no raw identifiers or secrets in output.
+
+For the Tenant 1 temporary cutover path, session start also requires read-only DB evidence
+of an enabled direct-Meta `whatsapp_connections` row: non-empty WABA + Phone Number ID
+(HMAC fingerprints only), tenant match, and consistency with attestation fingerprints.
+
 ```bash
-python scripts/probe_d360_forwarding.py --tenant 1
-python scripts/probe_d360_forwarding.py --tenant 33
+python -m scripts.operators.real_channel_conversational_acceptance preflight
 ```
 
-**BLOCK** if provider credentials absent. Do not simulate and call it real E2E.
+**BLOCK** if `actual_provider_channel_ready` is false. `meta_config_present` alone is
+insufficient. Do not simulate and call it real E2E.
 
 ## Execution (after ARCH-001 ends — not now)
 

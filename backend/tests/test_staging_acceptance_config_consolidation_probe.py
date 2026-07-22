@@ -496,3 +496,128 @@ def test_sanitize_report_rejects_value_like_payload() -> None:
 
     with pytest.raises(ValueError, match=CODE_SECRET_LEAKAGE):
         sanitize_report_payload({"note": "leaked WHATSAPP_TOKEN value"})
+
+
+_META_READY_VARS = {
+    "META_APP_SECRET": "present",
+    "WHATSAPP_VERIFY_TOKEN": "present",
+    "WHATSAPP_TOKEN": "present",
+    "BACKEND_URL": "https://nahla-saas-staging.example.com",
+    "META_WEBHOOK_ENFORCE_SIGNATURE": "true",
+    "META_WEBHOOK_ALLOW_MISSING_SIGNATURE": "false",
+}
+_META_ROUTES = ("/webhook/whatsapp", "/version", "/health")
+
+
+def test_meta_channel_readiness_complete_pass() -> None:
+    result = contract.evaluate_meta_channel_readiness(
+        _META_READY_VARS,
+    )
+    assert result["meta_config_present"] is True
+    assert result["channel_ready"] is True
+    assert result["channel_readiness_gaps"] == []
+    assert result["d360_only_legacy_path"] is False
+    assert result["acceptance_target_path"] == "meta_cloud_api_direct"
+    assert result["meta_onboarding_target_path"] == "meta_embedded_signup_per_merchant"
+    assert result["meta_onboarding_external_blocker"] == "meta_business_verification"
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    [
+        "META_APP_SECRET",
+        "WHATSAPP_VERIFY_TOKEN",
+        "WHATSAPP_TOKEN",
+        "BACKEND_URL",
+    ],
+)
+def test_meta_channel_readiness_fails_when_required_meta_key_missing(
+    missing_key: str,
+) -> None:
+    variables = dict(_META_READY_VARS)
+    variables.pop(missing_key)
+    result = contract.evaluate_meta_channel_readiness(variables, routes=_META_ROUTES)
+    assert result["channel_ready"] is False
+    assert missing_key in result["channel_readiness_gaps"]
+
+
+def test_d360_only_legacy_path_fails_meta_readiness() -> None:
+    variables = {key: "legacy-present" for key in contract.D360_LEGACY_DETECTION_KEYS}
+    result = contract.evaluate_meta_channel_readiness(
+        variables,
+        routes=_META_ROUTES,
+    )
+    assert result["channel_ready"] is False
+    assert result["d360_only_legacy_path"] is True
+
+
+def test_meta_readiness_passes_without_d360_vars() -> None:
+    result = contract.evaluate_meta_channel_readiness(
+        _META_READY_VARS,
+        routes=_META_ROUTES,
+    )
+    assert result["channel_ready"] is True
+    assert result["d360_legacy_present"] is False
+    for key in contract.D360_LEGACY_DETECTION_KEYS:
+        assert key not in result["channel_readiness_gaps"]
+
+
+def test_no_permanent_staging_waba_binding_required_by_default() -> None:
+    result = contract.evaluate_meta_channel_readiness(
+        _META_READY_VARS,
+        routes=_META_ROUTES,
+        db_binding=None,
+    )
+    assert result["channel_ready"] is True
+    assert "staging_db_wa_binding" not in result["channel_readiness_gaps"]
+    assert "acceptance_cutover_db_binding.waba_id" not in result["channel_readiness_gaps"]
+
+
+def test_tenant_1_acceptance_cutover_requires_snapshot_and_db_binding() -> None:
+    result = contract.evaluate_meta_channel_readiness(
+        _META_READY_VARS,
+        routes=_META_ROUTES,
+        require_tenant_1_cutover=True,
+    )
+    assert result["channel_ready"] is False
+    assert result["tenant_1_acceptance_cutover_required"] is True
+    assert "acceptance_cutover_snapshot" in result["channel_readiness_gaps"]
+
+    cutover_snapshot = {
+        "label": contract.ACCEPTANCE_CUTOVER_LABEL,
+        "scope": contract.ACCEPTANCE_CUTOVER_SCOPE,
+        "forbidden_unlocks_respected": True,
+        "meta_webhook_target": {"route": "/webhook/whatsapp"},
+        "staging_env_secrets_fingerprints": {"META_APP_SECRET": "hmac-sha256:abc"},
+        "staging_db_wa_connection_binding": {
+            "tenant_id": "1",
+            "waba_id": "waba-example",
+            "phone_number_id": "phone-example",
+            "provider": "meta",
+        },
+    }
+    ready = contract.evaluate_meta_channel_readiness(
+        _META_READY_VARS,
+        routes=_META_ROUTES,
+        db_binding=cutover_snapshot["staging_db_wa_connection_binding"],
+        acceptance_cutover_snapshot=cutover_snapshot,
+        require_tenant_1_cutover=True,
+    )
+    assert ready["channel_ready"] is True
+
+
+def test_acceptance_cutover_guidance_is_documentation_only() -> None:
+    guidance = contract.build_acceptance_cutover_guidance()
+    assert guidance["label"] == "acceptance_only_not_production"
+    assert guidance["production_unlock"] is False
+    assert guidance["permanent_staging_waba_dependency"] is False
+    assert guidance["rollback_required"] is True
+    assert "meta_business_verification" in guidance["external_blocker"]
+
+
+def test_routing_selection_documents_meta_embedded_signup_target() -> None:
+    result = routing_selection_guidance()
+    assert result["acceptance_target_path"] == "meta_cloud_api_direct"
+    assert result["meta_onboarding_target_path"] == "meta_embedded_signup_per_merchant"
+    assert "Embedded Signup" in result["routing_policy"]
+    assert result["tenant_1_acceptance_cutover"]["scope"] == contract.ACCEPTANCE_CUTOVER_SCOPE

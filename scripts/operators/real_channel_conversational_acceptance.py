@@ -15,9 +15,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from sqlalchemy import create_engine, text
+
 from scripts.operators.deployment_revision_attestation_contract import (
     evaluate_runtime_revision_attestation,
     normalize_revision_token,
+)
+from scripts.operators.meta_acceptance_channel_evidence_contract import (
+    CODE_DB_WA_BINDING_MISSING,
+    CODE_DB_WA_BINDING_MISMATCH,
+    CODE_WEBHOOK_ATTESTATION_FORGED,
+    CODE_WEBHOOK_ATTESTATION_MISSING,
+    CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH,
+    CODE_WEBHOOK_ATTESTATION_ROUTE_UNOBSERVED,
+    CODE_WEBHOOK_ATTESTATION_STALE,
+    CODE_WEBHOOK_ATTESTATION_TENANT_MISMATCH,
+    WEBHOOK_ATTESTATION_ARTIFACT_ENV,
+    WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
+    evaluate_actual_provider_channel_ready,
+    evaluate_meta_config_present,
+    load_webhook_attestation_artifact,
 )
 from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
     verify_arch001_preprod_signoff_for_gate,
@@ -29,8 +46,12 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     CHANNEL_PREFLIGHT_ENV_NAMES,
     CODE_ACCEPTANCE_NOT_ENABLED,
     CODE_ARCH001_SIGNOFF_MISSING,
+    CODE_CHANNEL_D360_ONLY_LEGACY_PATH,
     CODE_CHANNEL_HEALTH_BLOCKED,
+    CODE_CHANNEL_READINESS_GAP,
     CODE_COMMAND_INVALID,
+    CODE_DB_WA_BINDING_MISSING,
+    CODE_DB_WA_BINDING_MISMATCH,
     CODE_EXECUTION_NOT_CONFIRMED,
     CODE_MANIFEST_INVALID,
     CODE_PHONE_NOT_ALLOWLISTED,
@@ -42,7 +63,14 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     CODE_STORE_AI_MODE_INVALID,
     CODE_TENANT_1_NOT_PASSED,
     CODE_TENANT_NOT_ALLOWED,
+    CODE_WEBHOOK_ATTESTATION_FORGED,
+    CODE_WEBHOOK_ATTESTATION_MISSING,
+    CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH,
+    CODE_WEBHOOK_ATTESTATION_ROUTE_UNOBSERVED,
+    CODE_WEBHOOK_ATTESTATION_STALE,
+    CODE_WEBHOOK_ATTESTATION_TENANT_MISMATCH,
     DEFECT_BUNDLE_DIR,
+    D360_LEGACY_OBSERVABILITY_ENV_NAMES,
     EVIDENCE_ACCUMULATION_DIR,
     EVIDENCE_SCHEMA_VERSION,
     EVIDENCE_CHANNEL_ACTUAL_PROVIDER,
@@ -52,6 +80,10 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     EXECUTION_PATH_DIRECT_CODE_PROBE,
     EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
     MASTER_ENABLE_ENV,
+    META_DIRECT_WEBHOOK_ROUTE,
+    META_ONBOARDING_EXTERNAL_BLOCKER,
+    META_ONBOARDING_TARGET_PATH,
+    META_READINESS_REQUIRED_ENV_NAMES,
     PHASE_ARCH001_SHADOW_SIGNOFF_GATE,
     PHASE_CHANNEL_HEALTH,
     PHASE_CONFIG_SNAPSHOT,
@@ -76,6 +108,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     TENANT_1_PHONE_ENV,
     TENANT_33_LIMITED,
     TENANT_33_PHONE_ENV,
+    WEBHOOK_ATTESTATION_ARTIFACT_ENV,
+    WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
     count_scenarios_by_phase,
     env_flag_enabled,
     hash_identifier,
@@ -84,7 +118,13 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     parse_allowlist_phones,
     required_config_snapshot_keys,
 )
+from scripts.operators.staging_acceptance_config_consolidation_contract import (
+    TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID,
+)
 from scripts.operators.staging_migration_operator_gates import validate_staging_identity
+
+DEPLOYMENT_ID_ENV = "RAILWAY_DEPLOYMENT_ID"
+DATABASE_URL_ENV = "DATABASE_URL"
 
 
 def resolve_app_root(artifact_root: Path | None = None) -> Path:
@@ -266,8 +306,89 @@ def execute_config_snapshot_preflight(*, tenant_id: int) -> dict[str, Any]:
     )
 
 
-def execute_channel_health_preflight(*, tenant_id: int) -> dict[str, Any]:
-    """Read-only channel health gate. Blocks if provider credentials absent."""
+def _load_whatsapp_connection_row(tenant_id: int) -> dict[str, Any] | None:
+    database_url = (os.environ.get(DATABASE_URL_ENV) or "").strip()
+    if not database_url.startswith(("postgresql://", "postgresql+")):
+        return None
+    try:
+        engine = create_engine(database_url)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT tenant_id, provider, status, sending_enabled, phone_number_id, "
+                    "whatsapp_business_account_id "
+                    "FROM whatsapp_connections WHERE tenant_id = :tenant_id "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"tenant_id": tenant_id},
+            ).mappings().first()
+        return dict(row) if row else None
+    except Exception:  # noqa: silent-ok — read-only preflight; DB unavailable fails closed via missing binding
+        return None
+
+
+def _resolve_webhook_attestation_artifact(
+    attestation_artifact: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if attestation_artifact is not None:
+        return dict(attestation_artifact)
+    artifact_path = (os.environ.get(WEBHOOK_ATTESTATION_ARTIFACT_ENV) or "").strip()
+    if not artifact_path:
+        return None
+    return load_webhook_attestation_artifact(artifact_path)
+
+
+def _failure_code_for_channel_evidence(evidence: Mapping[str, Any]) -> str:
+    if "d360_only_legacy_path" in (evidence.get("channel_evidence_gaps") or []):
+        return CODE_CHANNEL_D360_ONLY_LEGACY_PATH
+    attestation_gaps = list(evidence.get("webhook_attestation_gaps") or [])
+    if "webhook_attestation_artifact" in attestation_gaps:
+        return CODE_WEBHOOK_ATTESTATION_MISSING
+    if "webhook_attestation_signature" in attestation_gaps:
+        return CODE_WEBHOOK_ATTESTATION_FORGED
+    if any(
+        gap in attestation_gaps
+        for gap in (
+            "webhook_attestation.expired",
+            "webhook_attestation.not_yet_valid",
+            "webhook_attestation.validity_window",
+            "webhook_attestation.validity_window_too_long",
+        )
+    ):
+        return CODE_WEBHOOK_ATTESTATION_STALE
+    if "webhook_attestation.pinned_revision" in attestation_gaps:
+        return CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH
+    if "webhook_attestation.tenant_id" in attestation_gaps:
+        return CODE_WEBHOOK_ATTESTATION_TENANT_MISMATCH
+    if "webhook_attestation.observed_callback_route" in attestation_gaps:
+        return CODE_WEBHOOK_ATTESTATION_ROUTE_UNOBSERVED
+    if "webhook_attestation.backend_url_fingerprint" in attestation_gaps:
+        return CODE_CHANNEL_READINESS_GAP
+    binding_gaps = list(evidence.get("db_wa_binding_gaps") or [])
+    if binding_gaps:
+        if "db_wa_binding.row_missing" in binding_gaps:
+            return CODE_DB_WA_BINDING_MISSING
+        if any("fingerprint" in gap for gap in binding_gaps):
+            return CODE_DB_WA_BINDING_MISMATCH
+        return CODE_DB_WA_BINDING_MISSING
+    return CODE_CHANNEL_READINESS_GAP
+
+
+_UNSET_DB_ROW = object()
+
+
+def execute_channel_health_preflight(
+    *,
+    tenant_id: int,
+    attestation_artifact: Mapping[str, Any] | None = None,
+    db_row: Mapping[str, Any] | None | object = _UNSET_DB_ROW,
+) -> dict[str, Any]:
+    """Read-only Meta-direct channel gate.
+
+    ``meta_config_present`` reflects env-key presence only.
+    ``actual_provider_channel_ready`` requires signed webhook attestation and,
+    for Tenant 1 cutover, read-only DB binding evidence.
+    """
     creds = _credential_presence()
     required_for_health = ("DATABASE_URL", "BACKEND_URL")
     missing = [name for name in required_for_health if creds.get(name) == "absent"]
@@ -279,20 +400,74 @@ def execute_channel_health_preflight(*, tenant_id: int) -> dict[str, Any]:
             tenant_id=tenant_id,
             missing_credentials=missing,
             credential_presence=creds,
-            probe_command=f"python scripts/probe_d360_forwarding.py --tenant {tenant_id}",
+            meta_config_present=False,
+            actual_provider_channel_ready=False,
+            acceptance_target_path="meta_cloud_api_direct",
         )
 
-    d360_ready = creds.get("D360_API_BASE_URL") == "present"
-    meta_ready = creds.get("META_APP_SECRET") == "present"
-    if not d360_ready and not meta_ready:
+    env_vars = {
+        name: os.environ.get(name, "")
+        for name in (
+            *META_READINESS_REQUIRED_ENV_NAMES,
+            *D360_LEGACY_OBSERVABILITY_ENV_NAMES,
+        )
+    }
+    config = evaluate_meta_config_present(env_vars)
+    if config.get("d360_only_legacy_path"):
         return _report(
             PHASE_CHANNEL_HEALTH,
             ok=False,
-            code=CODE_PROVIDER_SANDBOX_UNAVAILABLE,
+            code=CODE_CHANNEL_D360_ONLY_LEGACY_PATH,
             tenant_id=tenant_id,
             credential_presence=creds,
-            block_reason="no_whatsapp_provider_credentials",
-            note="BLOCK: cannot claim real-channel E2E without D360 or Meta credentials",
+            meta_config_present=False,
+            actual_provider_channel_ready=False,
+            acceptance_target_path="meta_cloud_api_direct",
+            meta_onboarding_target_path=META_ONBOARDING_TARGET_PATH,
+            meta_onboarding_external_blocker=META_ONBOARDING_EXTERNAL_BLOCKER,
+            channel_evidence_gaps=["d360_only_legacy_path"],
+            note="BLOCK: 360dialog-only legacy path cannot satisfy Meta acceptance readiness",
+        )
+
+    attestation = _resolve_webhook_attestation_artifact(attestation_artifact)
+    attestation_key = (os.environ.get(WEBHOOK_ATTESTATION_HMAC_KEY_ENV) or "").strip()
+    pinned_revision = (os.environ.get(PINNED_REVISION_ENV) or "").strip()
+    deployment_id = (os.environ.get(DEPLOYMENT_ID_ENV) or "").strip()
+    backend_url = (os.environ.get("BACKEND_URL") or "").strip()
+
+    if tenant_id == TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID:
+        if db_row is _UNSET_DB_ROW:
+            db_row = _load_whatsapp_connection_row(tenant_id)
+        elif db_row is None:
+            db_row = None
+
+    evidence = evaluate_actual_provider_channel_ready(
+        variables=env_vars,
+        tenant_id=tenant_id,
+        artifact=attestation,
+        hmac_key=attestation_key,
+        backend_url=backend_url,
+        pinned_revision=pinned_revision,
+        deployment_id=deployment_id,
+        db_row=db_row,
+    )
+    if not evidence.get("actual_provider_channel_ready"):
+        return _report(
+            PHASE_CHANNEL_HEALTH,
+            ok=False,
+            code=_failure_code_for_channel_evidence(evidence),
+            tenant_id=tenant_id,
+            credential_presence=creds,
+            meta_config_present=bool(evidence.get("meta_config_present")),
+            actual_provider_channel_ready=False,
+            acceptance_target_path="meta_cloud_api_direct",
+            meta_onboarding_target_path=META_ONBOARDING_TARGET_PATH,
+            meta_onboarding_external_blocker=META_ONBOARDING_EXTERNAL_BLOCKER,
+            webhook_attestation_gaps=evidence.get("webhook_attestation_gaps"),
+            db_wa_binding_gaps=evidence.get("db_wa_binding_gaps"),
+            channel_evidence_gaps=evidence.get("channel_evidence_gaps"),
+            observed_callback_route=evidence.get("observed_callback_route"),
+            note="BLOCK: actual provider channel evidence incomplete",
         )
 
     return _report(
@@ -300,11 +475,15 @@ def execute_channel_health_preflight(*, tenant_id: int) -> dict[str, Any]:
         ok=True,
         tenant_id=tenant_id,
         credential_presence=creds,
-        provider_paths_available={
-            "d360": d360_ready,
-            "meta": meta_ready,
+        meta_config_present=True,
+        actual_provider_channel_ready=True,
+        acceptance_target_path="meta_cloud_api_direct",
+        meta_onboarding_target_path=META_ONBOARDING_TARGET_PATH,
+        meta_onboarding_external_blocker=META_ONBOARDING_EXTERNAL_BLOCKER,
+        observed_callback_route=evidence.get("observed_callback_route"),
+        d360_legacy_observability_only={
+            name: creds.get(name) == "present" for name in D360_LEGACY_OBSERVABILITY_ENV_NAMES
         },
-        probe_command=f"python scripts/probe_d360_forwarding.py --tenant {tenant_id}",
         execution_path_required=EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
     )
 

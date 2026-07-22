@@ -46,7 +46,7 @@ Names only — **never log values**.
 | Key | Notes |
 |-----|-------|
 | `BACKEND_URL` | Public webhook target |
-| `D360_API_BASE_URL` | 360dialog channel API |
+| `D360_API_BASE_URL` | 360dialog channel API (**legacy/transition — not acceptance readiness**) |
 | `D360_PARTNER_HUB_BASE` | Partner hub (optional) |
 | `D360_PARTNER_API_KEY` | Secret |
 | `D360_PARTNER_ID` | Partner ID |
@@ -121,7 +121,7 @@ python -m scripts.operators.staging_acceptance_config_consolidation summary \
 5. Take encrypted snapshot (`snapshot` with `NAHLA_STAGING_ACCEPTANCE_CONFIG_SNAPSHOT_KEY`).
 6. Set master enable + confirmation token; run apply (one controlled deploy on canonical only).
 7. Verify: `/version`, health/db, webhook route, tenant routing, signature mode, no accidental flags.
-8. Route Meta/360dialog webhooks to canonical `BACKEND_URL` only (document; do not auto-delete legacy service/domains).
+8. Route Meta Cloud API direct webhooks to canonical `BACKEND_URL` only (document; do not auto-delete legacy service/domains). 360dialog remains legacy/transition-only.
 
 ## Rollback
 
@@ -133,24 +133,67 @@ python -m scripts.operators.staging_acceptance_config_consolidation rollback \
 
 Restores exact prior canonical variable references/values from encrypted snapshot and triggers one deploy.
 
-## Channel readiness
+## Channel readiness (Meta Cloud API direct only)
 
-Do **not** claim channel READY if these remain absent on the merged canonical config:
+**Closed target path:** Meta Cloud API direct (`meta_cloud_api_direct`). **360dialog is
+legacy/transition-only** and must **not** satisfy, block, or shape acceptance readiness.
+D360 absence is never reported as a gap.
+
+**Target onboarding (architecture):** per-merchant **Meta Embedded Signup** yielding
+merchant-owned WABA, Phone Number ID, and Access Token. **Meta Business Verification**
+is the current external blocker — not a Nahla runtime gate.
+
+**No permanent staging WABA dependency.** Do not create or document a standing staging
+WABA/channel that production would rely on.
+
+### Required on merged canonical config (platform credentials)
 
 - `META_APP_SECRET`
 - `WHATSAPP_VERIFY_TOKEN`
 - `WHATSAPP_TOKEN`
-- `BACKEND_URL`
-- `D360_API_BASE_URL` and/or `D360_PARTNER_ID` (360dialog path)
+- `BACKEND_URL` (canonical staging public URL)
+- Direct Meta webhook route `/webhook/whatsapp` on canonical app (inventory only — **not** readiness evidence)
+- Signature verification must remain enforced (`META_WEBHOOK_ENFORCE_SIGNATURE` not weakened)
+- `NAHLA_META_ACCEPTANCE_WEBHOOK_ATTESTATION_ARTIFACT` + HMAC key (operator-held, for acceptance readiness only)
+
+**Readiness terminology:**
+
+| Signal | Meaning |
+|--------|---------|
+| `meta_config_present` | Required Meta env keys exist. **Does not** unlock real-channel execution. |
+| `actual_provider_channel_ready` | Meta config **plus** signed external webhook attestation **plus** (Tenant 1 cutover) DB `whatsapp_connections` binding match. |
 
 Report `channel_readiness_gaps` with **names only**. Never weaken signature verification to compensate.
+
+### Pre-verification acceptance only — Tenant 1 temporary cutover
+
+Until Business Verification unblocks Embedded Signup, **Tenant 1's existing direct-Meta
+test channel** may be used as a **temporary, reversible, acceptance-only** cutover to
+canonical staging. This must:
+
+| Requirement | Detail |
+|-------------|--------|
+| Label | `acceptance_only_not_production` |
+| Scope | `tenant_1_preverification_direct_meta_test_channel` |
+| Snapshot before cutover | Meta webhook target, staging env secret fingerprints, Tenant 1 `whatsapp_connections` binding |
+| Rollback after window | Restore all three snapshot components |
+| Forbidden | Production unlock, runtime abstraction, permanent staging WABA |
+
+```bash
+# Documentation-only guidance (no mutations)
+python -m scripts.operators.staging_acceptance_config_consolidation acceptance-cutover-guidance
+```
+
+**Do not** perform cutover, webhook changes, secret writes, or DB binding updates from
+this governance PR or CI.
 
 ## Routing selection (documented only)
 
 | Traffic | Route to |
 |---------|----------|
-| Meta/360dialog webhooks | Canonical `nahla-saas` `BACKEND_URL` |
-| Real-channel acceptance | Canonical `nahla-saas` |
+| Meta Cloud API direct webhooks | Canonical `nahla-saas` `BACKEND_URL` → `/webhook/whatsapp` |
+| Real-channel acceptance | Canonical `nahla-saas` (Meta direct only) |
+| 360dialog (legacy) | Transition observability only — **excluded from readiness** |
 | Legacy `nahla-saas-staging` | Decommission after acceptance signoff — **manual**, no auto-delete |
 
 ## CI
