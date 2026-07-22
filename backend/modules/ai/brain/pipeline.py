@@ -4537,18 +4537,10 @@ class MerchantBrain:
                 reply_state=getattr(ctx, "reply_state", None),
                 chosen_path=_chosen_path,
                 guard_replaced=_guard_replaced,
+                compose_source=result.data.get("compose_source"),
+                llm_candidate_present=result.data.get("llm_candidate_present"),
+                persona_topic_hint=str(result.data.get("question_kind") or ""),
             )
-            from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
-                approved_compose_source,
-            )
-
-            _compose_src = approved_compose_source(result.data.get("compose_source"))
-            if _compose_src == "persona_llm":
-                _persona_ownership.stamp_persona(
-                    topic=str(result.data.get("question_kind") or "catalog_product_answer"),
-                    kind="grounded_persona_compose",
-                    owner="persona_llm",
-                )
             _persona_ownership_dict = _persona_ownership.to_dict()
             result.data["persona_ownership"] = _persona_ownership_dict
         except Exception as _po_exc:  # noqa: BLE001

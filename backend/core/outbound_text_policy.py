@@ -274,15 +274,132 @@ class OutboundTextTracker:
         return tracker
 
 
+_DETERMINISTIC_COMPOSE_SOURCES = frozenset({
+    "fallback_deterministic",
+    "merchant_template",
+    "meta_template",
+    "legal_exact_text",
+    "security_exact_text",
+})
+_LLM_COMPOSE_SOURCES = frozenset({"llm", "persona_llm"})
+_LLM_OWNED_FINAL_SOURCES = frozenset({
+    "llm",
+    "persona_llm",
+    "llm_postprocess",
+    "persona_llm_postprocess",
+})
+_GROUNDED_PERSONA_CHOSEN_PATHS = frozenset({
+    "fact_bound_persona_compose",
+    "catalog_miss_resolved_subject",
+    "catalog_navigation_top_products_fallback",
+})
+_LLM_COMPOSE_ROUTE_PATHS = frozenset({
+    "track_order_need_order_number",
+    "track_order_not_found",
+})
+_ACTION_FALLBACK_CHOSEN_PATHS = frozenset({"", "action", "rule"})
+
+
+def _approved_compose_source(value: object) -> str:
+    from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
+
+    return approved_compose_source(value)
+
+
+def _is_llm_candidate_flag(value: object) -> bool:
+    return type(value) is bool and bool(value)
+
+
+def is_producer_llm_chosen_path(
+    chosen_path: str,
+    *,
+    decision_action: str = "",
+) -> bool:
+    """True when ``chosen_path`` names an approved LLM/persona compose route."""
+    path = str(chosen_path or "").strip()
+    action = str(decision_action or "").strip().lower()
+    if not path or path in _ACTION_FALLBACK_CHOSEN_PATHS:
+        return False
+    if action and path == action and path in _TEMPLATE_COMPOSE_ACTIONS:
+        return False
+    if path in _GROUNDED_PERSONA_CHOSEN_PATHS:
+        return True
+    if path in _LLM_COMPOSE_ROUTE_PATHS:
+        return True
+    if path.startswith("llm"):
+        return True
+    if path.endswith("_compose"):
+        return True
+    return False
+
+
+def _infer_from_producer_metadata(
+    *,
+    decision_action: str,
+    compose_source: str,
+    chosen_path: str,
+    llm_candidate_present: bool,
+    final_customer_text_source: str,
+) -> Optional[tuple[OutboundTextSource, str, bool]]:
+    """Classify from closed producer metadata; return None when metadata is inconclusive."""
+    action = str(decision_action or "").strip().lower()
+    if compose_source in _LLM_COMPOSE_SOURCES:
+        if not llm_candidate_present:
+            return None
+        llm_path = is_producer_llm_chosen_path(
+            chosen_path,
+            decision_action=action,
+        )
+        if not llm_path and final_customer_text_source not in _LLM_OWNED_FINAL_SOURCES:
+            return None
+        if compose_source == "persona_llm":
+            policy_path = f"brain.compose.persona.{chosen_path or 'persona_llm'}"
+        else:
+            policy_path = f"brain.compose.llm.{chosen_path or 'llm'}"
+        return OutboundTextSource.LLM, policy_path, False
+
+    if compose_source in _DETERMINISTIC_COMPOSE_SOURCES:
+        route = chosen_path or action or "unknown"
+        return (
+            OutboundTextSource.DETERMINISTIC,
+            f"brain.compose.{compose_source}.{route}",
+            True,
+        )
+
+    return None
+
+
 def infer_compose_provenance(
     *,
     decision_action: str,
     used_llm: bool,
     used_template: bool = False,
     hybrid_layers: Optional[List[str]] = None,
+    compose_source: str = "",
+    chosen_path: str = "",
+    llm_candidate_present: bool = False,
+    final_customer_text_source: str = "",
 ) -> tuple[OutboundTextSource, str, bool]:
     action = str(decision_action or "").strip().lower()
     layers = list(hybrid_layers or [])
+    approved_source = _approved_compose_source(compose_source)
+    raw_final = str(final_customer_text_source or "").strip()
+    final_source = (
+        raw_final
+        if raw_final in _LLM_OWNED_FINAL_SOURCES
+        else _approved_compose_source(raw_final)
+    )
+
+    producer = _infer_from_producer_metadata(
+        decision_action=action,
+        compose_source=approved_source,
+        chosen_path=str(chosen_path or "").strip(),
+        llm_candidate_present=bool(llm_candidate_present),
+        final_customer_text_source=final_source,
+    )
+    if producer is not None:
+        return producer
+
     if used_llm and (used_template or layers):
         return OutboundTextSource.HYBRID, "brain.compose.hybrid", True
     if used_llm:
@@ -311,6 +428,11 @@ def attach_compose_provenance(
         except Exception:
             return {}
 
+    compose_source = _approved_compose_source(data.get("compose_source"))
+    chosen_path = str(data.get("chosen_path") or "").strip()
+    llm_candidate_present = _is_llm_candidate_flag(data.get("llm_candidate_present"))
+    raw_final_source = str(data.get("final_customer_text_source") or "").strip()
+
     used_llm = bool(data.pop("_compose_via_llm", False))
     used_template = bool(data.pop("_compose_via_template", False))
     hybrid_layers = list(data.pop("_compose_hybrid_layers", []) or [])
@@ -329,6 +451,10 @@ def attach_compose_provenance(
             used_llm=used_llm,
             used_template=used_template,
             hybrid_layers=hybrid_layers,
+            compose_source=compose_source,
+            chosen_path=chosen_path,
+            llm_candidate_present=llm_candidate_present,
+            final_customer_text_source=raw_final_source,
         )
 
     if hybrid_layers:
@@ -409,6 +535,7 @@ __all__ = [
     "PostprocessMutation",
     "attach_compose_provenance",
     "infer_compose_provenance",
+    "is_producer_llm_chosen_path",
     "log_outbound_text_policy",
     "mark_compose_llm",
     "mark_compose_metadata",

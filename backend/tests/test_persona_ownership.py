@@ -69,6 +69,62 @@ def test_build_brain_social_template():
     assert rec.bypass_reason == PersonaBypassReason.SOCIAL_TEMPLATE.value
 
 
+def test_build_brain_persona_llm_overrides_search_products_template_mapping():
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={"query": "حذاء رياضي أبيض"},
+        reply_state=_FakeReplyState(),
+        chosen_path="fact_bound_persona_compose",
+        compose_source="persona_llm",
+        llm_candidate_present=True,
+        persona_topic_hint="compound",
+    )
+    assert rec.persona_stamped is True
+    assert rec.expression_owner == "persona_llm"
+    assert rec.bypass_reason is None
+    assert rec.persona_topic == "compound"
+
+
+def test_build_brain_fallback_deterministic_on_search_products():
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={"query": "قميص قطني أزرق"},
+        reply_state=_FakeReplyState(),
+        chosen_path="catalog_miss_resolved_subject",
+        compose_source="fallback_deterministic",
+        llm_candidate_present=False,
+    )
+    assert rec.persona_stamped is False
+    assert rec.bypass_reason == PersonaBypassReason.FALLBACK_REPLY.value
+    assert rec.expression_owner == "catalog_miss_resolved_subject"
+
+
+def test_build_brain_merchant_template_ownership():
+    rec = build_brain_persona_ownership(
+        decision_action="faq_reply",
+        decision_args={},
+        reply_state=_FakeReplyState(),
+        chosen_path="merchant_template",
+        compose_source="merchant_template",
+        llm_candidate_present=False,
+    )
+    assert rec.bypass_reason == PersonaBypassReason.TEMPLATE_PATH.value
+    assert rec.expression_owner == "template:merchant_template"
+
+
+def test_build_brain_unapproved_source_cannot_claim_llm_ownership():
+    rec = build_brain_persona_ownership(
+        decision_action="search_products",
+        decision_args={},
+        reply_state=_FakeReplyState(),
+        chosen_path="fact_bound_persona_compose",
+        compose_source="arbitrary_runtime_source",
+        llm_candidate_present=True,
+    )
+    assert rec.bypass_reason == PersonaBypassReason.TEMPLATE_PATH.value
+    assert "search_products" in rec.expression_owner
+
+
 def test_on_text_replaced_noop_when_same():
     rec = PersonaOwnershipRecord()
     rec.stamp_persona(topic="persona_social")

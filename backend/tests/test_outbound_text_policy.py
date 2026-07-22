@@ -224,3 +224,96 @@ class TestInferComposeProvenance:
         )
         assert src == OutboundTextSource.HYBRID
         assert debt is True
+
+    def test_search_products_persona_llm_metadata_tags_llm_source(self):
+        result = SimpleNamespace(
+            data={
+                "compose_source": "persona_llm",
+                "chosen_path": "fact_bound_persona_compose",
+                "llm_candidate_present": True,
+                "response_mode": "grounded_persona_compose",
+            }
+        )
+        decision = SimpleNamespace(action="search_products")
+        ctx = SimpleNamespace(intent=SimpleNamespace(name="ask_price"))
+        policy = attach_compose_provenance(
+            result,
+            decision=decision,
+            ctx=ctx,
+            text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert policy["text_source"] == OutboundTextSource.LLM.value
+        assert policy["customer_facing_text_debt"] is False
+        assert policy["deterministic_text_detected"] is False
+        assert "persona" in policy["policy_path"]
+
+    def test_fallback_deterministic_on_search_products_stays_deterministic(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="fallback_deterministic",
+            chosen_path="catalog_miss_resolved_subject",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "fallback_deterministic" in path
+
+    def test_merchant_template_retains_template_ownership(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="faq_reply",
+            used_llm=False,
+            compose_source="merchant_template",
+            chosen_path="merchant_template",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "merchant_template" in path
+
+    def test_meta_template_retains_template_ownership(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="greet",
+            used_llm=False,
+            compose_source="meta_template",
+            chosen_path="meta_template",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "meta_template" in path
+
+    def test_deletion_postprocess_final_source_stays_llm_owned(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="persona_llm",
+            chosen_path="fact_bound_persona_compose",
+            llm_candidate_present=True,
+            final_customer_text_source="persona_llm_postprocess",
+        )
+        assert src == OutboundTextSource.LLM
+        assert debt is False
+
+    def test_unapproved_compose_source_cannot_self_assert_llm(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="arbitrary_runtime_source",
+            chosen_path="fact_bound_persona_compose",
+            llm_candidate_present=True,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True
+        assert "templates.search_products" in path
+
+    def test_llm_source_without_candidate_fails_closed_to_action_mapping(self):
+        src, path, debt = infer_compose_provenance(
+            decision_action="search_products",
+            used_llm=False,
+            compose_source="llm",
+            chosen_path="llm",
+            llm_candidate_present=False,
+        )
+        assert src == OutboundTextSource.DETERMINISTIC
+        assert debt is True

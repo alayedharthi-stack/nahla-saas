@@ -197,20 +197,57 @@ def build_brain_persona_ownership(
     reply_state: Any,
     chosen_path: str,
     guard_replaced: Optional[Dict[str, bool]] = None,
+    compose_source: object = "",
+    llm_candidate_present: object = None,
+    persona_topic_hint: str = "",
 ) -> PersonaOwnershipRecord:
     """
     Classify ownership at the Brain pipeline boundary (post-compose, post-guards).
     """
+    from core.outbound_text_policy import is_producer_llm_chosen_path  # noqa: PLC0415
+    from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
+
     rec = PersonaOwnershipRecord()
     action = str(decision_action or "").strip()
     args = dict(decision_args or {})
     path = str(chosen_path or "").strip()
+    src = approved_compose_source(compose_source)
+    has_llm_candidate = type(llm_candidate_present) is bool and llm_candidate_present
+    topic_hint = str(persona_topic_hint or args.get("question_kind") or "").strip()
 
     persona_mode = bool(getattr(reply_state, "persona_expression_mode", False))
     persona_topic = str(getattr(reply_state, "persona_topic", "") or "").strip()
     persona_kind = str(args.get("persona_kind") or "").strip()
 
-    if persona_mode and persona_topic:
+    if (
+        src == "persona_llm"
+        and has_llm_candidate
+        and is_producer_llm_chosen_path(path, decision_action=action)
+    ):
+        rec.stamp_persona(
+            topic=topic_hint or "catalog_product_answer",
+            kind="grounded_persona_compose",
+            owner="persona_llm",
+        )
+    elif (
+        src == "llm"
+        and has_llm_candidate
+        and is_producer_llm_chosen_path(path, decision_action=action)
+    ):
+        rec.mark_bypass(PersonaBypassReason.COMMERCE_LLM, owner="llm_compose")
+    elif src == "fallback_deterministic":
+        rec.mark_bypass(
+            PersonaBypassReason.FALLBACK_REPLY,
+            owner=path or "fallback_deterministic",
+        )
+    elif src in {"merchant_template", "meta_template"}:
+        rec.mark_bypass(
+            PersonaBypassReason.TEMPLATE_PATH,
+            owner=f"template:{src}",
+        )
+    elif src in {"legal_exact_text", "security_exact_text"}:
+        rec.mark_bypass(PersonaBypassReason.TEMPLATE_PATH, owner=src)
+    elif persona_mode and persona_topic:
         rec.stamp_persona(topic=persona_topic, kind=persona_kind)
     elif action == "social_reply":
         rec.mark_bypass(PersonaBypassReason.SOCIAL_TEMPLATE, owner="social_template")
