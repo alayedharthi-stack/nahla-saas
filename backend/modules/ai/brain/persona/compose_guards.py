@@ -1,10 +1,14 @@
 """Post-compose guard chain for FactBoundPersonaComposer."""
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
+
+logger = logging.getLogger("nahla.brain.persona.compose_guards")
 
 from .facts_bundle import (
     PersonaFactsBundle,
@@ -24,6 +28,132 @@ class PersonaGuardResult:
     passed: bool
     failed_reason: str = ""
     repaired: bool = False
+    rejected_observability: dict[str, Any] = field(default_factory=dict)
+
+
+def _ambiguous_allowed_amounts(facts: dict[str, Any]) -> set[Any]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    amounts: set[Any] = set()
+    for candidate in facts.get("ambiguous_catalog_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        amt = parse_price_amount(candidate.get("price"))
+        if amt is not None:
+            amounts.add(amt)
+    return amounts
+
+
+def _is_clarification_question_context(text: str) -> bool:
+    return "?" in str(text or "") or "؟" in str(text or "")
+
+
+def _ambiguous_claimed_amounts(text: str) -> list[Any]:
+    """Price amounts with explicit currency or price-keyword context (not product specs)."""
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        _CURRENCY_TOKEN_RE,
+        _PRICE_CONTEXT_RE,
+        _REPLY_PRICE_AMOUNT_RE,
+        _normalize_price_text,
+        parse_price_amount,
+    )
+
+    working = _normalize_price_text(text or "")
+    amounts: list[Any] = []
+    for match in _REPLY_PRICE_AMOUNT_RE.finditer(working):
+        start, end = match.span()
+        before = working[max(0, start - 16):start]
+        after = working[end: min(len(working), end + 16)]
+        has_currency = bool(_CURRENCY_TOKEN_RE.search(after))
+        has_price_ctx = bool(_PRICE_CONTEXT_RE.search(before))
+        if not has_currency and not has_price_ctx:
+            continue
+        amt = parse_price_amount(match.group(0))
+        if amt is not None:
+            amounts.append(amt)
+    return amounts
+
+
+def _build_rejected_candidate_observability(
+    text: str,
+    facts: dict[str, Any],
+    failed_reason: str,
+) -> dict[str, Any]:
+    raw = str(text or "")
+    claimed = _ambiguous_claimed_amounts(raw)
+    return {
+        "guard_reason": str(failed_reason or "").strip(),
+        "candidate_length": len(raw),
+        "candidate_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+        "claim_summary": {
+            "require_clarification": bool(facts.get("require_clarification")),
+            "claimed_amounts": claimed,
+            "allowed_amounts": sorted(_ambiguous_allowed_amounts(facts)),
+            "is_question_context": _is_clarification_question_context(raw),
+        },
+    }
+
+
+def _catalog_ambiguity_guard_fail(
+    text: str,
+    facts: dict[str, Any],
+    reason: str,
+) -> PersonaGuardResult:
+    observability = _build_rejected_candidate_observability(text, facts, reason)
+    facts["_rejected_compose_observability"] = observability
+    logger.info(
+        "[CATALOG_AMBIGUITY_GUARD] rejected reason=%s hash=%s len=%s summary=%s",
+        observability.get("guard_reason"),
+        observability.get("candidate_hash"),
+        observability.get("candidate_length"),
+        observability.get("claim_summary"),
+    )
+    return PersonaGuardResult(
+        text=text,
+        passed=False,
+        failed_reason=reason,
+        rejected_observability=observability,
+    )
+
+
+def _classify_ambiguous_catalog_reply_violation(
+    text: str,
+    facts: dict[str, Any],
+) -> str:
+    """Operational claim validation for catalog ambiguity clarifications."""
+    working = str(text or "").strip()
+    if not working or not facts.get("require_clarification"):
+        return ""
+
+    if not facts.get("allow_availability_mention"):
+        availability_markers = (
+            "متوفر",
+            "غير متوفر",
+            "نفذ",
+            "available",
+            "out of stock",
+        )
+        if any(m in working.lower() for m in availability_markers):
+            return "invented_availability"
+
+    allowed_amounts = _ambiguous_allowed_amounts(facts)
+    claimed_amounts = _ambiguous_claimed_amounts(working)
+    for claimed in claimed_amounts:
+        if claimed not in allowed_amounts:
+            return "invented_price_amount"
+
+    if claimed_amounts and not _is_clarification_question_context(working):
+        return "ambiguous_premature_price_selection"
+
+    if facts.get("allow_price_differentiator"):
+        return ""
+
+    price_markers = ("ريال", "ر.س", "السعر", "أسعار", "بكم", "كم سعر", "سعر")
+    if any(m in working for m in price_markers):
+        return "invented_price"
+    return ""
 
 
 def _count_emojis(text: str) -> int:
@@ -343,7 +473,19 @@ def _apply_catalog_product_answer_guards(
             failed_reason="order_confirmation_claim",
         )
 
-    if not facts.get("allow_price_mention"):
+    require_clarification = bool(facts.get("require_clarification"))
+    if require_clarification:
+        ambiguity_violation = _classify_ambiguous_catalog_reply_violation(
+            working,
+            facts,
+        )
+        if ambiguity_violation:
+            return _catalog_ambiguity_guard_fail(
+                working,
+                facts,
+                ambiguity_violation,
+            )
+    elif not facts.get("allow_price_mention"):
         price_markers = ("ريال", "ر.س", "السعر", "بكم", "كم سعر")
         if any(m in working for m in price_markers):
             return PersonaGuardResult(
@@ -374,26 +516,27 @@ def _apply_catalog_product_answer_guards(
                     failed_reason="invented_price_amount",
                 )
 
-    if not facts.get("allow_availability_mention"):
-        availability_markers = (
-            "متوفر",
-            "غير متوفر",
-            "نفذ",
-            "available",
-            "out of stock",
-        )
-        if any(m in working.lower() for m in availability_markers):
+    if not require_clarification:
+        if not facts.get("allow_availability_mention"):
+            availability_markers = (
+                "متوفر",
+                "غير متوفر",
+                "نفذ",
+                "available",
+                "out of stock",
+            )
+            if any(m in working.lower() for m in availability_markers):
+                return PersonaGuardResult(
+                    text=working,
+                    passed=False,
+                    failed_reason="invented_availability",
+                )
+        elif "متوفر" in working and not facts.get("has_positive_availability"):
             return PersonaGuardResult(
                 text=working,
                 passed=False,
-                failed_reason="invented_availability",
+                failed_reason="unsupported_available_claim",
             )
-    elif "متوفر" in working and not facts.get("has_positive_availability"):
-        return PersonaGuardResult(
-            text=working,
-            passed=False,
-            failed_reason="unsupported_available_claim",
-        )
 
     if not facts.get("allow_superiority_claims", False):
         for term in ("الأفضل", "الأصلي", "مضمون", "أفضل عسل"):

@@ -148,6 +148,12 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             lines.append(
                 f"catalog_ambiguity_reason: {facts.get('catalog_ambiguity_reason') or ''}"
             )
+            lines.append(
+                f"allow_price_differentiator: {bool(facts.get('allow_price_differentiator'))}"
+            )
+            lines.append(
+                f"require_clarification: {bool(facts.get('require_clarification'))}"
+            )
             for candidate in facts.get("ambiguous_catalog_candidates") or []:
                 if not isinstance(candidate, dict):
                     continue
@@ -205,8 +211,11 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             if ambiguous or facts.get("require_clarification"):
                 rule_parts.append(
                     "multiple exact-title catalog products are non-unique; ask a concise natural "
-                    "clarification using distinguishing candidate facts only; "
-                    "do not pick one price, do not generalize availability, "
+                    "clarification as a question using distinguishing ambiguous_candidate facts only; "
+                    "allow_price_mention is false — do not present one final selected price; "
+                    "when allow_price_differentiator is true, price concept may distinguish candidates; "
+                    "numeric amounts only when grounded in ambiguous_candidate facts and framed as a "
+                    "clarifying question (question mark); do not generalize availability across products; "
                     "do not invent distinguishing details"
                 )
             elif qkind == "compound" or (

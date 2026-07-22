@@ -1166,6 +1166,7 @@ class TestCompoundCatalogFacetsSemantics:
         assert facts["require_clarification"] is True
         assert facts["allow_price_mention"] is False
         assert facts["allow_availability_mention"] is False
+        assert facts["allow_price_differentiator"] is True
         assert len(facts.get("ambiguous_catalog_candidates") or []) == 2
 
         from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
@@ -1173,14 +1174,18 @@ class TestCompoundCatalogFacetsSemantics:
         prompt = build_user_prompt(bundle)
         assert "catalog_ambiguity: true" in prompt
         assert "ambiguous_candidate:" in prompt
-        assert "do not pick one price" in prompt
+        assert "allow_price_differentiator: True" in prompt
+        assert "do not present one final selected price" in prompt
 
         guard = apply_persona_compose_guards(
             "عطر ورد 100ml سعره 185 ريال وهو متوفر",
             bundle,
         )
         assert guard.passed is False
-        assert guard.failed_reason == "invented_price"
+        assert guard.failed_reason in {
+            "invented_availability",
+            "ambiguous_premature_price_selection",
+        }
 
     def test_identical_exact_duplicates_still_require_clarification(self) -> None:
         products = [
@@ -1313,3 +1318,134 @@ class TestCompoundCatalogFacetsSemantics:
             assert event["checkout_pressure_allowed"] is False
 
         asyncio.run(_run())
+
+
+class TestCatalogAmbiguityGuardGrounding:
+    """Ambiguity-aware compose guard grounding (platform-wide, generic commerce)."""
+
+    _DUPLICATE_PERFUME_PRODUCTS = [
+        {
+            "id": 801,
+            "title": "عطر ورد كلاسيك",
+            "category": "عطور",
+            "price": 185,
+            "can_checkout": True,
+        },
+        {
+            "id": 802,
+            "title": "عطر ورد كلاسيك",
+            "category": "عطور",
+            "price": 210,
+            "can_checkout": True,
+        },
+    ]
+
+    def _ambiguous_bundle(self):
+        return build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد كلاسيك؟",
+            tenant_id=31,
+            products=self._DUPLICATE_PERFUME_PRODUCTS,
+            catalog_search_query="عطر ورد كلاسيك",
+        )
+
+    def test_price_concept_clarification_passes_without_invented_price(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟",
+            bundle,
+        )
+        assert guard.passed is True
+        assert guard.failed_reason == ""
+
+    def test_grounded_candidate_amounts_pass_in_question_context(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد النوع بسعر 185 ريال أم بسعر 210 ريال؟",
+            bundle,
+        )
+        assert guard.passed is True
+
+    def test_unsupported_amount_rejects_invented_price_amount(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد بسعر 999 ريال؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_price_amount"
+
+    def test_declarative_single_price_selection_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عطر ورد كلاسيك سعره 185 ريال",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "ambiguous_premature_price_selection"
+
+    def test_generalized_availability_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد أحد الخيارات؟ المنتج متوفر",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_availability"
+
+    def test_full_compose_path_keeps_persona_llm_without_fallback(self) -> None:
+        bundle = self._ambiguous_bundle()
+
+        async def _run() -> None:
+            async def _clarify_llm(_bundle):
+                return "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _clarify_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert not result.fallback_reason
+
+        asyncio.run(_run())
+
+    def test_rejected_candidate_observability_has_hash_not_raw_text(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        candidate = "عطر ورد كلاسيك سعره 185 ريال"
+        guard = apply_persona_compose_guards(candidate, bundle)
+        assert guard.passed is False
+        obs = guard.rejected_observability
+        assert obs["guard_reason"] == "ambiguous_premature_price_selection"
+        assert obs["candidate_length"] == len(candidate)
+        assert len(obs["candidate_hash"]) == 16
+        assert candidate not in str(obs)
+        assert obs["claim_summary"]["claimed_amounts"] == [185]
+
+        event = build_catalog_product_answer_event_metadata(
+            PersonaComposeResult(
+                text="",
+                source="fallback_deterministic",
+                surface="catalog_product_answer",
+                facts_hash="ambiguity",
+                guard_passed=False,
+                guard_failed_reason=guard.failed_reason,
+                fallback_reason=guard.failed_reason,
+            ),
+            tenant_id=31,
+            allowlist_result="enabled",
+            catalog_facts=bundle.verified_facts,
+        )
+        rejected = event.get("rejected_compose_observability") or {}
+        assert rejected.get("candidate_hash") == obs["candidate_hash"]
+        assert candidate not in str(rejected)
