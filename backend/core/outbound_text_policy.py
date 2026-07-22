@@ -507,7 +507,7 @@ def attach_compose_provenance(
     chosen_path = str(data.get("chosen_path") or "").strip()
     llm_candidate_present = _is_llm_candidate_flag(data.get("llm_candidate_present"))
     raw_final_source = str(data.get("final_customer_text_source") or "").strip()
-    compose_reply_candidate = str(data.get("compose_reply_candidate") or text or "").strip()
+    compose_reply_candidate = str(data.get("compose_reply_candidate") or "").strip()
 
     used_llm = bool(data.pop("_compose_via_llm", False))
     used_template = bool(data.pop("_compose_via_template", False))

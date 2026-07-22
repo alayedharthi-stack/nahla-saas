@@ -42,6 +42,24 @@ class TestComposeProvenance:
         assert policy["customer_facing_text_debt"] is False
         assert policy["policy_path"] == "brain.compose._llm_compose"
 
+    def test_attach_stale_final_source_without_producer_candidate_fails_closed(self):
+        result = SimpleNamespace(
+            data={
+                "final_customer_text_source": "persona_llm",
+                "llm_candidate_present": True,
+            }
+        )
+        decision = SimpleNamespace(action="search_products")
+        ctx = SimpleNamespace(intent=SimpleNamespace(name="ask_price"))
+        policy = attach_compose_provenance(
+            result,
+            decision=decision,
+            ctx=ctx,
+            text="حذاء رياضي أبيض سعره 220 ريال.",
+        )
+        assert policy["text_source"] == OutboundTextSource.DETERMINISTIC.value
+        assert policy["customer_facing_text_debt"] is True
+
     def test_faq_template_tags_deterministic_debt(self):
         result = SimpleNamespace(data={"_compose_via_template": True})
         decision = SimpleNamespace(action="faq_reply")
