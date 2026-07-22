@@ -24,11 +24,11 @@
     }
   ],
   "phase_scenario_counts": {
-    "tenant_1_intensive": 49,
+    "tenant_1_intensive": 50,
     "tenant_33_limited": 16,
     "tenant_48_salla_minimal": 16
   },
-  "scenario_count": 81,
+  "scenario_count": 82,
   "scenarios": [
     {
       "scenario_id": "t1_faq_hours",
@@ -533,6 +533,111 @@
           "channel": "whatsapp",
           "type": "text",
           "body": "هل متوفر منتج غير موجود XYZ-999؟"
+        },
+        "automation_policy": "manual_unless_authorized_existing_test_device_integration",
+        "raw_input_archival": "hash_or_redact"
+      },
+      "channel_evidence_required": {
+        "evidence_channel": "actual_provider_channel",
+        "inbound_provider_message_id": true,
+        "live_webhook_origin": true,
+        "sender_hmac_match": true,
+        "outbound_provider_message_id": true,
+        "test_device_receipt_attestation": true,
+        "outbound_expected": true,
+        "reject_direct_signed_webhook": true,
+        "reject_direct_code_probe": true,
+        "reject_manual_db_insert": true
+      }
+    },
+    {
+      "scenario_id": "t1_catalog_dress_ambiguous",
+      "phase": "tenant_1_intensive",
+      "taxonomy": "catalog_search_availability",
+      "tenant_id": 1,
+      "execution_path": "actual_provider_channel",
+      "preconditions": {
+        "store_ai_mode": "test",
+        "store_ai_enabled": true,
+        "store_label": "متجر تجريبي عام",
+        "phone_env_ref": "NAHLA_REAL_CHANNEL_ACCEPTANCE_TENANT_1_PHONE",
+        "arch001_shadow_signoff": true,
+        "trusted_catalog_fixture": {
+          "scope": "tenant_1_private_test_store_only",
+          "query_subject": "فستان",
+          "multiple_exact_title_matches": true,
+          "candidate_count_min": 2
+        }
+      },
+      "inbound": {
+        "channel": "whatsapp",
+        "type": "text",
+        "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
+      },
+      "expected_state": {
+        "catalog_lookup": true,
+        "catalog_ambiguity_detected": true,
+        "multiple_exact_title_matches": true,
+        "llm_owned_clarification": true,
+        "order_created": false,
+        "compose_provenance_consistent": true
+      },
+      "allowed_conversational_variability": [
+        "greeting_wording",
+        "apology_tone",
+        "transition_phrasing",
+        "concise_vs_verbose"
+      ],
+      "prohibited_claims": [
+        "single_price_without_disambiguation",
+        "generalized_availability_without_disambiguation",
+        "price_without_catalog_evidence",
+        "in_stock_without_catalog_evidence",
+        "fallback_deterministic_without_compose_failure",
+        "order_created_without_confirmation",
+        "foreign_catalog_leak",
+        "cross_tenant_data_leak"
+      ],
+      "max_llm_calls": 4,
+      "max_tool_calls": 3,
+      "latency_budget_ms": 30000,
+      "outbound_evidence": [
+        "message_events_outbound_row",
+        "provider_send_metadata",
+        "wa_message_id_correlation",
+        "compose_provenance_metadata",
+        "decision_trace_present"
+      ],
+      "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
+      "eval_regression_mapping": [
+        "backend/tests/test_catalog_product_answer_persona.py",
+        "backend/tests/test_compound_greeting_catalog_subject_resolution.py"
+      ],
+      "automation_class": "hybrid",
+      "pass_fail_rubric": {
+        "pass_requires": [
+          "expected_state_evidence_met",
+          "no_prohibited_claims",
+          "provenance_fields_present",
+          "latency_within_budget",
+          "llm_tool_calls_within_cap"
+        ],
+        "fail_triggers": [
+          "prohibited_operational_claim",
+          "missing_evidence_for_claim",
+          "cross_tenant_leak",
+          "exact_prose_assertion_violation",
+          "provider_send_without_allowlist"
+        ],
+        "human_assessment_required": true
+      },
+      "device_action": {
+        "sender": "private_allowlisted_test_device",
+        "send_type": "text",
+        "input": {
+          "channel": "whatsapp",
+          "type": "text",
+          "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
         },
         "automation_policy": "manual_unless_authorized_existing_test_device_integration",
         "raw_input_archival": "hash_or_redact"
@@ -4360,10 +4465,15 @@
       "inbound": {
         "channel": "whatsapp",
         "type": "text",
-        "body": "هل متوفر منتج غير موجود XYZ-999؟"
+        "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
       },
       "expected_state": {
-        "availability_negative_truth": true
+        "catalog_lookup": true,
+        "catalog_ambiguity_detected": true,
+        "multiple_exact_title_matches": true,
+        "llm_owned_clarification": true,
+        "order_created": false,
+        "compose_provenance_consistent": true
       },
       "allowed_conversational_variability": [
         "greeting_wording",
@@ -4372,7 +4482,14 @@
         "concise_vs_verbose"
       ],
       "prohibited_claims": [
-        "available_claim_for_unknown_sku"
+        "single_price_without_disambiguation",
+        "generalized_availability_without_disambiguation",
+        "price_without_catalog_evidence",
+        "in_stock_without_catalog_evidence",
+        "fallback_deterministic_without_compose_failure",
+        "order_created_without_confirmation",
+        "foreign_catalog_leak",
+        "cross_tenant_data_leak"
       ],
       "max_llm_calls": 4,
       "max_tool_calls": 3,
@@ -4386,9 +4503,10 @@
       ],
       "cleanup": "restore_scenario_state_then_verify_against_session_snapshot",
       "eval_regression_mapping": [
-        "backend/tests/test_product_availability_truth_guard.py"
+        "backend/tests/test_catalog_product_answer_persona.py",
+        "backend/tests/test_compound_greeting_catalog_subject_resolution.py"
       ],
-      "automation_class": "automated_state_assertions",
+      "automation_class": "hybrid",
       "pass_fail_rubric": {
         "pass_requires": [
           "expected_state_evidence_met",
@@ -4404,7 +4522,7 @@
           "exact_prose_assertion_violation",
           "provider_send_without_allowlist"
         ],
-        "human_assessment_required": false
+        "human_assessment_required": true
       },
       "device_action": {
         "sender": "private_allowlisted_test_device",
@@ -4412,7 +4530,7 @@
         "input": {
           "channel": "whatsapp",
           "type": "text",
-          "body": "هل متوفر منتج غير موجود XYZ-999؟"
+          "body": "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
         },
         "automation_policy": "manual_unless_authorized_existing_test_device_integration",
         "raw_input_archival": "hash_or_redact"

@@ -150,6 +150,12 @@ SESSION_STATE_SCENARIO_COMPLETED = "scenario_completed"
 SESSION_STATE_COMPLETED = "completed"
 SESSION_STATE_TORN_DOWN = "torn_down"
 
+SESSION_SCOPE_PHASE_ACCEPTANCE = "phase_acceptance"
+SESSION_SCOPE_SINGLE_SCENARIO_RETEST = "single_scenario_retest"
+SESSION_SCOPES = frozenset(
+    {SESSION_SCOPE_PHASE_ACCEPTANCE, SESSION_SCOPE_SINGLE_SCENARIO_RETEST}
+)
+
 HUMAN_RUBRIC_VALUES = frozenset({"pass", "fail", "not_applicable"})
 
 # ── Closed scenario taxonomy (minimum required categories) ───────────────────
@@ -235,6 +241,8 @@ CODE_HUMAN_ASSESSMENT_REQUIRED = "human_assessment_required"
 CODE_CONFIG_DRIFT = "config_drift"
 CODE_TENANT_1_PASS_ARTIFACT_INVALID = "tenant_1_pass_artifact_invalid"
 CODE_ORDER_SIDE_EFFECT_DETECTED = "order_side_effect_detected"
+CODE_SCENARIO_NOT_IN_MANIFEST = "scenario_not_in_manifest"
+CODE_SCENARIO_PHASE_MISMATCH = "scenario_phase_mismatch"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 MANIFEST_RELATIVE_PATH = Path("docs/engineering/real-channel-acceptance-scenario-manifest.json")
@@ -307,7 +315,7 @@ ACCEPTANCE_TENANT_BY_PHASE: dict[str, int] = {
     phase: tenant_id for tenant_id, phase in ACCEPTANCE_PHASE_BY_TENANT.items()
 }
 PHASE_EXPECTED_SCENARIO_COUNTS: dict[str, int] = {
-    PHASE_TENANT_1_INTENSIVE: 49,
+    PHASE_TENANT_1_INTENSIVE: 50,
     PHASE_TENANT_33_LIMITED: 16,
     PHASE_TENANT_48_SALLA_MINIMAL: 16,
 }
@@ -444,6 +452,37 @@ def count_scenarios_by_phase(manifest: Mapping[str, Any]) -> dict[str, int]:
     return counts
 
 
+def resolve_session_scenario_scope(
+    manifest: Mapping[str, Any],
+    *,
+    phase: str,
+    tenant_id: int,
+    scenario_id: str | None = None,
+) -> tuple[list[str], str]:
+    """Resolve closed manifest scenario IDs and session scope for start-session."""
+    if scenario_id is None:
+        scenarios = [
+            str(row["scenario_id"])
+            for row in manifest.get("scenarios", [])
+            if str(row.get("phase") or "") == phase
+        ]
+        return scenarios, SESSION_SCOPE_PHASE_ACCEPTANCE
+
+    by_id = {
+        str(row["scenario_id"]): row
+        for row in manifest.get("scenarios", [])
+        if row.get("scenario_id")
+    }
+    row = by_id.get(str(scenario_id))
+    if row is None:
+        raise ValueError(CODE_SCENARIO_NOT_IN_MANIFEST)
+    if int(row.get("tenant_id") or -1) != tenant_id:
+        raise ValueError(CODE_SCENARIO_PHASE_MISMATCH)
+    if str(row.get("phase") or "") != phase:
+        raise ValueError(CODE_SCENARIO_PHASE_MISMATCH)
+    return [str(scenario_id)], SESSION_SCOPE_SINGLE_SCENARIO_RETEST
+
+
 def required_config_snapshot_keys() -> tuple[str, ...]:
     return (
         "store_ai_mode",
@@ -574,6 +613,10 @@ __all__ = [
     "TENANT_48_PHONE_ENV",
     "TENANT_48_SALLA_MINIMAL",
     "resolve_acceptance_phase",
+    "resolve_session_scenario_scope",
+    "SESSION_SCOPE_PHASE_ACCEPTANCE",
+    "SESSION_SCOPE_SINGLE_SCENARIO_RETEST",
+    "SESSION_SCOPES",
     "count_scenarios_by_phase",
     "env_flag_enabled",
     "hash_identifier",
