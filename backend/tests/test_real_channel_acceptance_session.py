@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,8 +18,16 @@ from scripts.operators.real_channel_acceptance_session import (  # noqa: E402
     classify_inbound_candidate,
     complete_scenario,
     load_session,
+    next_scenario,
+    observe,
     record_device_attestation,
     start_session,
+)
+from scripts.operators.real_channel_acceptance_order_side_effect_signatures import (  # noqa: E402
+    build_order_side_effect_snapshot,
+    extract_metadata_keys_by_row,
+    extract_volatile_metadata_by_row,
+    redacted_order_row_key,
 )
 from scripts.operators.real_channel_conversational_acceptance_contract import (  # noqa: E402
     ARCH001_SHADOW_SIGNOFF_ENV,
@@ -27,6 +36,8 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     CODE_CHANNEL_HEALTH_BLOCKED,
     CODE_DEVICE_ATTESTATION_REQUIRED,
     CODE_HUMAN_ASSESSMENT_REQUIRED,
+    CODE_ORDER_SIDE_EFFECT_DETECTED,
+    CODE_OUTBOUND_PROVIDER_ID_MISSING,
     CODE_STAGING_IDENTITY_REJECTED,
     CODE_TENANT_1_PASS_ARTIFACT_INVALID,
     CODE_TENANT_NOT_ALLOWED,
@@ -40,8 +51,10 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     REVIEWER_ID_ENV,
     SESSION_DIR_ENV,
     SESSION_SCHEMA_VERSION,
+    SESSION_STATE_AWAITING_DEVICE_SEND,
     SESSION_STATE_HUMAN_ASSESSED,
     SESSION_STATE_OBSERVED,
+    SESSION_STATE_STARTED,
     STAGING_ENVIRONMENT_ENV,
     STAGING_PROJECT_ENV,
     TENANT_48_SALLA_MINIMAL,
@@ -265,3 +278,260 @@ def test_tenant_48_start_blocks_on_staging_and_channel_prerequisites(
 def test_arbitrary_tenant_start_rejected() -> None:
     with pytest.raises(ValueError, match="tenant_not_allowed"):
         start_session(tenant_id=99, app_root=_REPO)
+
+
+def _sample_order_row(*, status: str = "pending", metadata: dict | None = None) -> dict:
+    return {
+        "id": 10,
+        "tenant_id": 1,
+        "status": status,
+        "total": "120.00",
+        "line_items": [{"sku": "SKU-1", "qty": 1}],
+        "source": "whatsapp",
+        "is_abandoned": False,
+        "external_id": "ext-100",
+        "external_order_number": "ORD-100",
+        "customer_id": 5,
+        "customer_name": "Generic Customer",
+        "customer_info": {"city": "الرياض"},
+        "checkout_url": "https://example.test/checkout",
+        "metadata": metadata
+        if metadata is not None
+        else {
+            "payment_method": "cod",
+            "payment_status": "pending",
+            "last_synced_at": "2026-07-22T17:35:00+00:00",
+        },
+        "order_source_kind": "whatsapp",
+        "identity_namespace": None,
+        "integration_connection_id": None,
+        "external_customer_ref": None,
+        "external_customer_profile_id": None,
+        "customer_link_state": "linked",
+        "customer_link_evidence_class": "verified",
+        "customer_link_source": "conversation",
+        "customer_linked_at": "2026-07-22T17:00:00+00:00",
+        "external_identity_link_state": None,
+        "external_identity_evidence_class": None,
+    }
+
+
+def _order_side_effect_arm_for_row(row: dict) -> dict:
+    row_fp = redacted_order_row_key(row["id"])
+    return {
+        "snapshot": build_order_side_effect_snapshot([row], tenant_id=1),
+        "volatile_metadata_by_row": extract_volatile_metadata_by_row([row]),
+        "metadata_keys_by_row": {row_fp: sorted(row["metadata"])},
+    }
+
+
+def _write_awaiting_session(
+    tmp_path: Path,
+    *,
+    scenario_id: str = "t1_faq_hours",
+    order_side_effect_arm: dict | None = None,
+) -> str:
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    key = "unit-test-evidence-key"
+    session = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "session_id": session_id,
+        "state": SESSION_STATE_AWAITING_DEVICE_SEND,
+        "tenant_id": 1,
+        "event_cursor": 10,
+        "usage_cursor": 0,
+        "order_cursor": 0,
+        "test_phone_hmac": hmac_identifier("15550001111", key=key),
+        "scenario_ids": [scenario_id],
+        "scenario_index": 0,
+        "scenario_results": [],
+        "totals": {"inbound": 0, "outbound_provider": 0, "llm_calls": 0, "cost_usd": 0.0},
+        "active_scenario": {
+            "scenario_id": scenario_id,
+            "opened_at_utc": (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(),
+            "cursor": 10,
+            "order_side_effect_arm": order_side_effect_arm,
+            "outbound_expected": True,
+            "send_type": "text",
+        },
+    }
+    (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
+    return session_id
+
+
+def _mock_observation_rows(*, include_outbound: bool = False) -> tuple[list[dict], dict]:
+    inbound = {
+        "id": 11,
+        "direction": "inbound",
+        "created_at": datetime.now(timezone.utc),
+        "metadata": {
+            "message_origin": "live_webhook",
+            "historical_import": False,
+            "wa_message_id": "wamid.HBgLREALSHAPED123456",
+            "phone": "15550001111",
+        },
+    }
+    rows = [inbound]
+    if include_outbound:
+        rows.append(
+            {
+                "id": 12,
+                "direction": "outbound",
+                "created_at": datetime.now(timezone.utc),
+                "metadata": {
+                    "wa_message_id": "wamid.HBgLOUTBOUND123456",
+                    "compose_source": "persona_llm",
+                    "response_mode": "normal",
+                    "chosen_path": "catalog",
+                    "llm_candidate_present": True,
+                    "final_text_transformed": False,
+                    "final_transform_reasons": [],
+                },
+            }
+        )
+    usage = {
+        "llm_calls": 1,
+        "cost_usd": 0.01,
+        "max_usage_id": 20,
+        "tool_calls": 0,
+        "trace_latency_ms": 500,
+        "state_evidence": {},
+    }
+    return rows, usage
+
+
+def test_next_scenario_arms_order_side_effect_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    armed = _order_side_effect_arm_for_row(_sample_order_row())
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    session = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "session_id": session_id,
+        "state": SESSION_STATE_STARTED,
+        "tenant_id": 1,
+        "event_cursor": 10,
+        "usage_cursor": 0,
+        "order_cursor": 0,
+        "scenario_ids": ["t1_faq_hours"],
+        "scenario_index": 0,
+        "scenario_results": [],
+        "totals": {"inbound": 0, "outbound_provider": 0, "llm_calls": 0, "cost_usd": 0.0},
+        "active_scenario": None,
+    }
+    (tmp_path / f"{session_id}.json").write_text(json.dumps(session), encoding="utf-8")
+
+    with patch("scripts.operators.real_channel_acceptance_session._engine") as engine_mock:
+        connection = MagicMock()
+        engine_mock.return_value.connect.return_value.__enter__.return_value = connection
+        engine_mock.return_value.connect.return_value.__exit__.return_value = False
+        with patch(
+            "scripts.operators.real_channel_acceptance_session.capture_order_side_effect_arm",
+            return_value=armed,
+        ) as capture_mock:
+            result = next_scenario(session_id, app_root=_REPO)
+
+    assert result["ok"] is True
+    capture_mock.assert_called_once_with(connection, tenant_id=1)
+    loaded = load_session(session_id, _REPO)
+    assert loaded["active_scenario"]["order_side_effect_arm"] == armed
+
+
+@patch("scripts.operators.real_channel_acceptance_session._engine")
+@patch("scripts.operators.real_channel_acceptance_session.fetch_tenant_order_rows")
+@patch("scripts.operators.real_channel_acceptance_session._query_observation")
+def test_observe_reports_outbound_provider_id_missing_without_name_error(
+    mock_query: MagicMock,
+    mock_fetch: MagicMock,
+    mock_engine: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(EVIDENCE_HMAC_KEY_ENV, "unit-test-evidence-key")
+    row = _sample_order_row()
+    session_id = _write_awaiting_session(
+        tmp_path,
+        order_side_effect_arm=_order_side_effect_arm_for_row(row),
+    )
+    mock_query.return_value = _mock_observation_rows(include_outbound=False)
+    mock_fetch.return_value = [row]
+    connection = MagicMock()
+    mock_engine.return_value.connect.return_value.__enter__.return_value = connection
+    mock_engine.return_value.connect.return_value.__exit__.return_value = False
+
+    result = observe(session_id, app_root=_REPO)
+
+    assert CODE_OUTBOUND_PROVIDER_ID_MISSING in result["blockers"]
+    assert CODE_ORDER_SIDE_EFFECT_DETECTED not in result["blockers"]
+    side_effects = result["state_evidence"]["order_side_effects"]
+    assert side_effects["ai_side_effect_detected"] is False
+
+
+@patch("scripts.operators.real_channel_acceptance_session._engine")
+@patch("scripts.operators.real_channel_acceptance_session.fetch_tenant_order_rows")
+@patch("scripts.operators.real_channel_acceptance_session._query_observation")
+def test_observe_classifies_volatile_only_drift_without_side_effect_failure(
+    mock_query: MagicMock,
+    mock_fetch: MagicMock,
+    mock_engine: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(EVIDENCE_HMAC_KEY_ENV, "unit-test-evidence-key")
+    armed_row = _sample_order_row()
+    after_row = _sample_order_row(
+        metadata={
+            **armed_row["metadata"],
+            "last_synced_at": "2026-07-22T17:39:18+00:00",
+        }
+    )
+    session_id = _write_awaiting_session(
+        tmp_path,
+        order_side_effect_arm=_order_side_effect_arm_for_row(armed_row),
+    )
+    mock_query.return_value = _mock_observation_rows(include_outbound=False)
+    mock_fetch.return_value = [after_row]
+    connection = MagicMock()
+    mock_engine.return_value.connect.return_value.__enter__.return_value = connection
+    mock_engine.return_value.connect.return_value.__exit__.return_value = False
+
+    result = observe(session_id, app_root=_REPO)
+
+    assert CODE_ORDER_SIDE_EFFECT_DETECTED not in result["blockers"]
+    drift = result["state_evidence"]["order_side_effects"]["concurrent_sync_drift"]
+    assert len(drift) == 1
+    assert drift[0]["drift_class"] == "volatile_sync_metadata"
+    assert drift[0]["actor_attribution"] == "unverified"
+
+
+@patch("scripts.operators.real_channel_acceptance_session._engine")
+@patch("scripts.operators.real_channel_acceptance_session.fetch_tenant_order_rows")
+@patch("scripts.operators.real_channel_acceptance_session._query_observation")
+def test_observe_appends_order_side_effect_blocker_alongside_outbound_missing(
+    mock_query: MagicMock,
+    mock_fetch: MagicMock,
+    mock_engine: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(SESSION_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(EVIDENCE_HMAC_KEY_ENV, "unit-test-evidence-key")
+    armed_row = _sample_order_row(status="pending")
+    after_row = _sample_order_row(status="paid")
+    session_id = _write_awaiting_session(
+        tmp_path,
+        order_side_effect_arm=_order_side_effect_arm_for_row(armed_row),
+    )
+    mock_query.return_value = _mock_observation_rows(include_outbound=False)
+    mock_fetch.return_value = [after_row]
+    connection = MagicMock()
+    mock_engine.return_value.connect.return_value.__enter__.return_value = connection
+    mock_engine.return_value.connect.return_value.__exit__.return_value = False
+
+    result = observe(session_id, app_root=_REPO)
+
+    assert CODE_OUTBOUND_PROVIDER_ID_MISSING in result["blockers"]
+    assert CODE_ORDER_SIDE_EFFECT_DETECTED in result["blockers"]

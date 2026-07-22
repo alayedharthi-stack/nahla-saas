@@ -184,14 +184,6 @@ def build_order_side_effect_snapshot(
     }
 
 
-def _volatile_field_names(before_meta: Mapping[str, Any], after_meta: Mapping[str, Any]) -> list[str]:
-    changed: list[str] = []
-    for key in ORDER_VOLATILE_METADATA_KEYS:
-        if before_meta.get(key) != after_meta.get(key):
-            changed.append(f"metadata.{key}")
-    return changed[:MAX_VOLATILE_FIELD_NAMES]
-
-
 def _unknown_metadata_changes(
     before_meta: Mapping[str, Any], after_meta: Mapping[str, Any]
 ) -> list[str]:
@@ -329,13 +321,17 @@ def compare_order_rows_with_metadata(
         for diff in result["critical_diffs"]
         if diff.get("change_kind") != "critical_group_changed"
     ]
-    refined_drift = list(result["concurrent_sync_drift"])
+    before_volatile = extract_volatile_metadata_by_row(before_rows)
+    after_volatile = extract_volatile_metadata_by_row(after_rows)
+    refined_drift = detect_concurrent_sync_drift(
+        armed_volatile_by_row=before_volatile,
+        after_rows=after_rows,
+    )
 
     for row_fp in sorted(set(before_by_fp) & set(after_by_fp)):
         before_meta = _metadata_mapping(before_by_fp[row_fp])
         after_meta = _metadata_mapping(after_by_fp[row_fp])
         unknown_changes = _unknown_metadata_changes(before_meta, after_meta)
-        volatile_changes = _volatile_field_names(before_meta, after_meta)
 
         before_sig = before_snapshot["rows"][row_fp]
         after_sig = after_snapshot["rows"][row_fp]
@@ -345,15 +341,12 @@ def compare_order_rows_with_metadata(
             if before_sig["critical_groups"].get(group) != after_sig["critical_groups"].get(group)
         )
 
-        if volatile_changes and not changed_groups and not unknown_changes:
-            if len(refined_drift) < MAX_CONCURRENT_SYNC_DRIFT_ROWS:
-                refined_drift.append(
-                    {
-                        "row_fingerprint": row_fp,
-                        "volatile_fields": volatile_changes,
-                        "actor_evidence": "concurrent_integration_sync",
-                    }
-                )
+        volatile_item = _volatile_drift_item(
+            row_fp,
+            before_volatile.get(row_fp, {}),
+            after_volatile.get(row_fp, {}),
+        )
+        if volatile_item and not changed_groups and not unknown_changes:
             continue
 
         if not changed_groups:
@@ -441,6 +434,14 @@ ORDER BY id ASC
 """
 
 
+def _volatile_values_for_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: metadata[key]
+        for key in ORDER_VOLATILE_METADATA_KEYS
+        if key in metadata
+    }
+
+
 def extract_volatile_metadata_by_row(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -449,15 +450,41 @@ def extract_volatile_metadata_by_row(
         if row.get("id") is None:
             continue
         row_fp = redacted_order_row_key(row.get("id"))
-        metadata = _metadata_mapping(row)
-        volatile = {
-            key: metadata[key]
-            for key in ORDER_VOLATILE_METADATA_KEYS
-            if key in metadata
-        }
-        if volatile:
-            volatile_by_row[row_fp] = volatile
+        volatile_by_row[row_fp] = _volatile_values_for_metadata(_metadata_mapping(row))
     return volatile_by_row
+
+
+def _volatile_drift_item(
+    row_fp: str,
+    before_values: Mapping[str, Any],
+    after_values: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    added: list[str] = []
+    changed: list[str] = []
+    removed: list[str] = []
+    for key in ORDER_VOLATILE_METADATA_KEYS:
+        before_has = key in before_values
+        after_has = key in after_values
+        if before_has and after_has and before_values[key] != after_values[key]:
+            changed.append(f"metadata.{key}")
+        elif not before_has and after_has:
+            added.append(f"metadata.{key}")
+        elif before_has and not after_has:
+            removed.append(f"metadata.{key}")
+    volatile_fields = sorted(added + changed + removed)[:MAX_VOLATILE_FIELD_NAMES]
+    if not volatile_fields:
+        return None
+    return {
+        "row_fingerprint": row_fp,
+        "volatile_fields": volatile_fields,
+        "volatile_changes": {
+            "added": added[:MAX_VOLATILE_FIELD_NAMES],
+            "changed": changed[:MAX_VOLATILE_FIELD_NAMES],
+            "removed": removed[:MAX_VOLATILE_FIELD_NAMES],
+        },
+        "drift_class": "volatile_sync_metadata",
+        "actor_attribution": "unverified",
+    }
 
 
 def detect_concurrent_sync_drift(
@@ -466,27 +493,18 @@ def detect_concurrent_sync_drift(
     after_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     after_volatile = extract_volatile_metadata_by_row(after_rows)
+    row_fps = sorted(set(armed_volatile_by_row) | set(after_volatile))
     drift: list[dict[str, Any]] = []
-    for row_fp, before_values in armed_volatile_by_row.items():
-        after_values = after_volatile.get(row_fp)
-        if after_values is None:
-            continue
-        volatile_fields = [
-            f"metadata.{key}"
-            for key in ORDER_VOLATILE_METADATA_KEYS
-            if before_values.get(key) != after_values.get(key)
-        ]
-        if not volatile_fields:
-            continue
+    for row_fp in row_fps:
         if len(drift) >= MAX_CONCURRENT_SYNC_DRIFT_ROWS:
             break
-        drift.append(
-            {
-                "row_fingerprint": row_fp,
-                "volatile_fields": volatile_fields[:MAX_VOLATILE_FIELD_NAMES],
-                "actor_evidence": "concurrent_integration_sync",
-            }
+        item = _volatile_drift_item(
+            row_fp,
+            dict(armed_volatile_by_row.get(row_fp) or {}),
+            dict(after_volatile.get(row_fp) or {}),
         )
+        if item is not None:
+            drift.append(item)
     return drift
 
 

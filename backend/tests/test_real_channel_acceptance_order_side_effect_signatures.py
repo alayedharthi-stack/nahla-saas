@@ -47,7 +47,8 @@ def _order_row(
         "customer_info": {"city": "الرياض"},
         "checkout_url": "https://example.test/checkout",
         "metadata": metadata
-        or {
+        if metadata is not None
+        else {
             "payment_method": "cod",
             "payment_status": "pending",
             "last_synced_at": "2026-07-22T17:35:00+00:00",
@@ -64,6 +65,12 @@ def _order_row(
         "external_identity_link_state": None,
         "external_identity_evidence_class": None,
     }
+
+
+def _assert_unverified_drift(drift_item: dict) -> None:
+    assert drift_item["drift_class"] == "volatile_sync_metadata"
+    assert drift_item["actor_attribution"] == "unverified"
+    assert "actor_evidence" not in drift_item
 
 
 def test_only_last_synced_at_change_records_concurrent_drift_not_failure() -> None:
@@ -83,8 +90,10 @@ def test_only_last_synced_at_change_records_concurrent_drift_not_failure() -> No
     assert result["ai_side_effect_detected"] is False
     assert result["blockers"] == []
     assert len(result["concurrent_sync_drift"]) == 1
-    assert result["concurrent_sync_drift"][0]["volatile_fields"] == ["metadata.last_synced_at"]
-    assert result["concurrent_sync_drift"][0]["actor_evidence"] == "concurrent_integration_sync"
+    drift = result["concurrent_sync_drift"][0]
+    assert drift["volatile_fields"] == ["metadata.last_synced_at"]
+    assert drift["volatile_changes"]["changed"] == ["metadata.last_synced_at"]
+    _assert_unverified_drift(drift)
 
 
 @pytest.mark.parametrize(
@@ -215,6 +224,57 @@ def test_detect_concurrent_sync_drift_is_bounded() -> None:
 
     assert len(drift) == 3
     assert all(item["volatile_fields"] == ["metadata.last_synced_at"] for item in drift)
+    assert all(item["actor_attribution"] == "unverified" for item in drift)
+
+
+def test_extract_volatile_metadata_preserves_empty_mapping_per_row() -> None:
+    row = _order_row(metadata={"payment_method": "cod", "payment_status": "pending"})
+    volatile = extract_volatile_metadata_by_row([row])
+
+    row_fp = redacted_order_row_key(10)
+    assert row_fp in volatile
+    assert volatile[row_fp] == {}
+
+
+def test_first_volatile_key_added_records_drift_without_failure() -> None:
+    before = [_order_row(metadata={"payment_method": "cod", "payment_status": "pending"})]
+    after = [
+        _order_row(
+            metadata={
+                "payment_method": "cod",
+                "payment_status": "pending",
+                "last_synced_at": "2026-07-22T17:39:18+00:00",
+            }
+        )
+    ]
+
+    result = compare_order_rows_with_metadata(before, after)
+
+    assert result["ai_side_effect_detected"] is False
+    assert len(result["concurrent_sync_drift"]) == 1
+    drift = result["concurrent_sync_drift"][0]
+    assert drift["volatile_changes"]["added"] == ["metadata.last_synced_at"]
+    _assert_unverified_drift(drift)
+
+
+def test_last_volatile_key_removed_records_drift_without_failure() -> None:
+    before = [_order_row()]
+    after = [
+        _order_row(
+            metadata={
+                "payment_method": "cod",
+                "payment_status": "pending",
+            }
+        )
+    ]
+
+    result = compare_order_rows_with_metadata(before, after)
+
+    assert result["ai_side_effect_detected"] is False
+    assert len(result["concurrent_sync_drift"]) == 1
+    drift = result["concurrent_sync_drift"][0]
+    assert drift["volatile_changes"]["removed"] == ["metadata.last_synced_at"]
+    _assert_unverified_drift(drift)
 
 
 def test_snapshot_evidence_contains_no_raw_order_ids_or_pii() -> None:
