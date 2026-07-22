@@ -1166,6 +1166,7 @@ class TestCompoundCatalogFacetsSemantics:
         assert facts["require_clarification"] is True
         assert facts["allow_price_mention"] is False
         assert facts["allow_availability_mention"] is False
+        assert facts["allow_price_differentiator"] is True
         assert len(facts.get("ambiguous_catalog_candidates") or []) == 2
 
         from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
@@ -1173,14 +1174,18 @@ class TestCompoundCatalogFacetsSemantics:
         prompt = build_user_prompt(bundle)
         assert "catalog_ambiguity: true" in prompt
         assert "ambiguous_candidate:" in prompt
-        assert "do not pick one price" in prompt
+        assert "allow_price_differentiator: True" in prompt
+        assert "do not present one final selected price" in prompt
 
         guard = apply_persona_compose_guards(
             "عطر ورد 100ml سعره 185 ريال وهو متوفر",
             bundle,
         )
         assert guard.passed is False
-        assert guard.failed_reason == "invented_price"
+        assert guard.failed_reason in {
+            "invented_availability",
+            "ambiguous_premature_price_selection",
+        }
 
     def test_identical_exact_duplicates_still_require_clarification(self) -> None:
         products = [
@@ -1313,3 +1318,344 @@ class TestCompoundCatalogFacetsSemantics:
             assert event["checkout_pressure_allowed"] is False
 
         asyncio.run(_run())
+
+
+class TestCatalogAmbiguityGuardGrounding:
+    """Ambiguity-aware compose guard grounding (platform-wide, generic commerce)."""
+
+    _DUPLICATE_PERFUME_PRODUCTS = [
+        {
+            "id": 801,
+            "title": "عطر ورد كلاسيك",
+            "category": "عطور",
+            "price": 185,
+            "can_checkout": True,
+        },
+        {
+            "id": 802,
+            "title": "عطر ورد كلاسيك",
+            "category": "عطور",
+            "price": 210,
+            "can_checkout": True,
+        },
+    ]
+
+    def _ambiguous_bundle(self):
+        return build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر عطر ورد كلاسيك؟",
+            tenant_id=31,
+            products=self._DUPLICATE_PERFUME_PRODUCTS,
+            catalog_search_query="عطر ورد كلاسيك",
+        )
+
+    def test_price_concept_clarification_passes_without_invented_price(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟",
+            bundle,
+        )
+        assert guard.passed is True
+        assert guard.failed_reason == ""
+
+    def test_grounded_candidate_amounts_pass_in_question_context(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد النوع بسعر 185 ريال أم بسعر 210 ريال؟",
+            bundle,
+        )
+        assert guard.passed is True
+
+    def test_unsupported_amount_rejects_invented_price_amount(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد بسعر 999 ريال؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_price_amount"
+
+    def test_declarative_single_price_selection_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عطر ورد كلاسيك سعره 185 ريال",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "ambiguous_premature_price_selection"
+
+    def test_generalized_availability_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "هل تقصد أحد الخيارات؟ المنتج متوفر",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "invented_availability"
+
+    def test_full_compose_path_keeps_persona_llm_without_fallback(self) -> None:
+        bundle = self._ambiguous_bundle()
+
+        async def _run() -> None:
+            async def _clarify_llm(_bundle):
+                return "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟"
+
+            composer = FactBoundPersonaComposer(enforce_gate=False)
+            composer._llm_callable = _clarify_llm  # noqa: SLF001
+            result = await composer.compose(bundle)
+            assert result.source == "persona_llm"
+            assert result.guard_passed is True
+            assert not result.fallback_reason
+
+        asyncio.run(_run())
+
+    def test_rejected_candidate_observability_has_hash_not_raw_text(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        candidate = "عطر ورد كلاسيك سعره 185 ريال"
+        guard = apply_persona_compose_guards(candidate, bundle)
+        assert guard.passed is False
+        obs = guard.rejected_observability
+        assert obs["guard_reason"] == "ambiguous_premature_price_selection"
+        assert obs["candidate_length"] == len(candidate)
+        assert len(obs["candidate_hash"]) == 16
+        assert candidate not in str(obs)
+        assert obs["claim_summary"]["claimed_amounts"] == [185]
+
+        event = build_catalog_product_answer_event_metadata(
+            PersonaComposeResult(
+                text="",
+                source="fallback_deterministic",
+                surface="catalog_product_answer",
+                facts_hash="ambiguity",
+                guard_passed=False,
+                guard_failed_reason=guard.failed_reason,
+                fallback_reason=guard.failed_reason,
+            ),
+            tenant_id=31,
+            allowlist_result="enabled",
+            catalog_facts=bundle.verified_facts,
+        )
+        rejected = event.get("rejected_compose_observability") or {}
+        assert rejected.get("candidate_hash") == obs["candidate_hash"]
+        assert candidate not in str(rejected)
+
+    def test_availability_only_duplicate_ambiguity_disallows_price_differentiator(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="هل عطر ورد كلاسيك متوفر؟",
+            tenant_id=32,
+            products=self._DUPLICATE_PERFUME_PRODUCTS,
+            catalog_search_query="عطر ورد كلاسيك",
+        )
+        facts = bundle.verified_facts
+        assert facts["require_clarification"] is True
+        assert facts["allow_price_differentiator"] is False
+        assert facts["allow_price_mention"] is False
+        assert "availability" in list(facts.get("requested_facets") or [])
+
+        prompt = build_user_prompt(bundle)
+        assert "allow_price_differentiator: False" in prompt
+
+        concept_guard = apply_persona_compose_guards(
+            "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟",
+            bundle,
+        )
+        assert concept_guard.passed is False
+        assert concept_guard.failed_reason == "invented_price"
+
+        amount_guard = apply_persona_compose_guards(
+            "هل تقصد بسعر 185 ريال؟",
+            bundle,
+        )
+        assert amount_guard.passed is False
+        assert amount_guard.failed_reason == "invented_price"
+
+    def test_declarative_price_then_unrelated_question_rejects(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "عطر ورد كلاسيك سعره 185 ريال. هل تريد المساعدة؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "ambiguous_premature_price_selection"
+
+    def test_trusted_price_in_same_clarifying_clause_passes(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        guard = apply_persona_compose_guards(
+            "بسعر 185 ريال، هل هذا المقصود؟",
+            bundle,
+        )
+        assert guard.passed is True
+
+    @pytest.mark.parametrize(
+        ("candidate", "should_pass", "failed_reason"),
+        [
+            (
+                "Classic Rose Perfume costs 185 SAR. Do you need help?",
+                False,
+                "ambiguous_premature_price_selection",
+            ),
+            (
+                "At 185 SAR, is that the one you mean?",
+                True,
+                "",
+            ),
+        ],
+    )
+    def test_english_clause_local_amount_behavior(
+        self,
+        candidate: str,
+        should_pass: bool,
+        failed_reason: str,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 811,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 812,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 210,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="What is the price of Classic Rose Perfume?",
+            tenant_id=33,
+            products=products,
+            catalog_search_query="Classic Rose Perfume",
+        )
+        assert bundle.verified_facts["allow_price_differentiator"] is True
+
+        guard = apply_persona_compose_guards(candidate, bundle)
+        assert guard.passed is should_pass
+        if should_pass:
+            assert guard.failed_reason == ""
+        else:
+            assert guard.failed_reason == failed_reason
+
+    def test_clarification_plus_arabic_phone_request_rejects_slot_prompt(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        clarification = "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟"
+        assert apply_persona_compose_guards(clarification, bundle).passed is True
+
+        guard = apply_persona_compose_guards(
+            f"{clarification} ممكن ترسل لي رقم جوالك؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+        assert guard.rejected_observability.get("guard_reason") == "slot_prompt"
+        assert clarification not in str(guard.rejected_observability)
+
+    def test_clarification_plus_english_phone_request_rejects_slot_prompt(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 821,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 822,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 210,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="What is the price of Classic Rose Perfume?",
+            tenant_id=34,
+            products=products,
+            catalog_search_query="Classic Rose Perfume",
+        )
+        clarification = (
+            "We have more than one match with the same name. "
+            "Which option do you mean?"
+        )
+        guard = apply_persona_compose_guards(
+            f"{clarification} Could you share your mobile number?",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+
+    def test_tenant48_semantic_shape_duplicate_clarification_plus_phone_rejects(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 901,
+                "title": "فستان سهرة",
+                "category": "ملابس",
+                "price": 320,
+                "can_checkout": True,
+            },
+            {
+                "id": 902,
+                "title": "فستان سهرة",
+                "category": "ملابس",
+                "price": 410,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر فستان سهرة؟",
+            tenant_id=35,
+            products=products,
+            catalog_search_query="فستان سهرة",
+        )
+        facts = bundle.verified_facts
+        assert facts["require_clarification"] is True
+        assert facts["allow_slot_prompts"] is False
+        assert facts["allow_price_differentiator"] is True
+
+        clarification = (
+            "عندنا أكثر من نوع بنفس الاسم بأسعار وألوان مختلفة، "
+            "أي نوع تقصد تحديداً؟"
+        )
+        assert apply_persona_compose_guards(clarification, bundle).passed is True
+
+        observed_shape = (
+            f"{clarification} "
+            "عشان نكمل، ممكن ترسل رقم جوالك؟"
+        )
+        guard = apply_persona_compose_guards(observed_shape, bundle)
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+        assert guard.rejected_observability.get("candidate_hash")
+        assert observed_shape not in str(guard.rejected_observability)

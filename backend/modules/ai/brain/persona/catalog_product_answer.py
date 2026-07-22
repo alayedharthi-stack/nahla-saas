@@ -444,6 +444,19 @@ def build_catalog_product_answer_facts_bundle(
         "has_catalog_products": bool(rows),
     }
     verified_facts.update(ambiguity_meta)
+    if ambiguous:
+        candidates = [
+            row
+            for row in (verified_facts.get("ambiguous_catalog_candidates") or [])
+            if isinstance(row, dict)
+        ]
+        has_candidate_prices = any(
+            resolve_catalog_visible_price(candidate) is not None
+            for candidate in candidates
+        )
+        verified_facts["allow_price_differentiator"] = bool(
+            wants_price and has_candidate_prices
+        )
     if include_price and any_price:
         verified_facts["price_source"] = "catalog"
     if include_availability and any_availability:
@@ -511,6 +524,15 @@ def build_catalog_product_answer_event_metadata(
         meta["availability_source"] = facts["availability_source"]
     if facts.get("eligible_product_count") is not None:
         meta["eligible_product_count"] = int(facts.get("eligible_product_count") or 0)
+    if facts.get("require_clarification"):
+        meta["require_clarification"] = True
+        if facts.get("catalog_ambiguity_reason"):
+            meta["catalog_ambiguity_reason"] = str(
+                facts.get("catalog_ambiguity_reason") or ""
+            ).strip()
+    rejected_obs = facts.get("_rejected_compose_observability")
+    if isinstance(rejected_obs, dict) and rejected_obs:
+        meta["rejected_compose_observability"] = rejected_obs
     qkind = str(facts.get("question_kind") or meta.get("question_kind") or "").strip()
     if qkind in _CATALOG_QA_KINDS or facts.get("requested_facets"):
         fact_rows = catalog_fact_product_rows(catalog_fact_products)
