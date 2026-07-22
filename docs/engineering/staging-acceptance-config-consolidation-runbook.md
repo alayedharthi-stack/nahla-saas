@@ -161,7 +161,7 @@ WABA/channel that production would rely on.
 | Signal | Meaning |
 |--------|---------|
 | `meta_config_present` | Required Meta env keys exist. **Does not** unlock real-channel execution. |
-| `actual_provider_channel_ready` | Meta config **plus** signed external webhook attestation **plus** (Tenant 1 cutover) DB `whatsapp_connections` binding match. |
+| `operator_attested_channel_ready` | Meta config **plus** signed operator webhook observation **plus** tenant DB binding match. Preflight only — not post-send provider proof. |
 
 Report `channel_readiness_gaps` with **names only**. Never weaken signature verification to compensate.
 

@@ -45,6 +45,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import ( 
     validate_manifest,
 )
 from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noqa: E402
+    CODE_DB_WA_BINDING_INVALID,
     CODE_DB_WA_BINDING_MISSING,
     CODE_WEBHOOK_ATTESTATION_FORGED,
     CODE_WEBHOOK_ATTESTATION_MISSING,
@@ -393,7 +394,6 @@ def _valid_attestation(*, hmac_key: str, backend_url: str = "https://staging.exa
         observed_callback_route=META_DIRECT_WEBHOOK_ROUTE,
         waba_id="waba-tenant-1-example",
         phone_number_id="phone-tenant-1-example",
-        rollback_snapshot_ref="rollback-ref-001",
         hmac_key=hmac_key,
     )
 
@@ -411,7 +411,7 @@ def test_channel_health_blocks_d360_only_legacy_path(
     result = operator.execute_channel_health_preflight(tenant_id=1)
     assert result["ok"] is False
     assert result["code"] == CODE_CHANNEL_D360_ONLY_LEGACY_PATH
-    assert result["actual_provider_channel_ready"] is False
+    assert result["operator_attested_channel_ready"] is False
 
 
 def test_meta_config_present_does_not_unlock_without_attestation(
@@ -421,7 +421,7 @@ def test_meta_config_present_does_not_unlock_without_attestation(
     result = operator.execute_channel_health_preflight(tenant_id=1)
     assert result["ok"] is False
     assert result["meta_config_present"] is True
-    assert result["actual_provider_channel_ready"] is False
+    assert result["operator_attested_channel_ready"] is False
     assert result["code"] == CODE_WEBHOOK_ATTESTATION_MISSING
 
 
@@ -445,7 +445,7 @@ def test_channel_health_passes_with_complete_meta_evidence(
     )
     assert result["ok"] is True
     assert result["meta_config_present"] is True
-    assert result["actual_provider_channel_ready"] is True
+    assert result["operator_attested_channel_ready"] is True
     assert result["observed_callback_route"] == META_DIRECT_WEBHOOK_ROUTE
 
 
@@ -487,7 +487,7 @@ def test_channel_health_fails_when_meta_key_missing(
         },
     )
     assert result["ok"] is False
-    assert result["actual_provider_channel_ready"] is False
+    assert result["operator_attested_channel_ready"] is False
     assert missing_key in (result.get("channel_evidence_gaps") or [])
 
 
@@ -552,6 +552,73 @@ def test_channel_health_fails_on_missing_db_binding_for_tenant_1(
     )
     assert result["ok"] is False
     assert result["code"] == CODE_DB_WA_BINDING_MISSING
+
+
+def test_channel_health_fails_on_missing_db_binding_for_tenant_33(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    artifact["tenant_id"] = 33
+    from scripts.operators.meta_acceptance_channel_evidence_contract import (
+        sign_webhook_attestation_artifact,
+    )
+
+    artifact["signature"] = sign_webhook_attestation_artifact(artifact, hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=33,
+        attestation_artifact=artifact,
+        db_row=None,
+    )
+    assert result["ok"] is False
+    assert result["code"] == CODE_DB_WA_BINDING_MISSING
+
+
+def test_channel_health_rejects_tenant_33_d360_db_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    artifact["tenant_id"] = 33
+    from scripts.operators.meta_acceptance_channel_evidence_contract import (
+        sign_webhook_attestation_artifact,
+    )
+
+    artifact["signature"] = sign_webhook_attestation_artifact(artifact, hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=33,
+        attestation_artifact=artifact,
+        db_row={
+            "tenant_id": 33,
+            "provider": "360dialog",
+            "status": "connected",
+            "sending_enabled": True,
+            "phone_number_id": "phone-tenant-33-example",
+            "whatsapp_business_account_id": "waba-tenant-33-example",
+        },
+    )
+    assert result["ok"] is False
+    assert result["code"] == CODE_DB_WA_BINDING_INVALID
+
+
+def test_channel_health_reports_operator_observed_evidence_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hmac_key = _channel_health_env(monkeypatch)
+    artifact = _valid_attestation(hmac_key=hmac_key)
+    result = operator.execute_channel_health_preflight(
+        tenant_id=1,
+        attestation_artifact=artifact,
+        db_row={
+            "tenant_id": 1,
+            "provider": "meta",
+            "status": "connected",
+            "sending_enabled": True,
+            "phone_number_id": "phone-tenant-1-example",
+            "whatsapp_business_account_id": "waba-tenant-1-example",
+        },
+    )
+    assert result["channel_evidence_class"] == "operator_observed_meta_webhook"
 
 
 def test_meta_readiness_contract_passes_without_d360() -> None:

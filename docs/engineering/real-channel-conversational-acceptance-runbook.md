@@ -118,7 +118,8 @@ markers can never be upgraded.
 | Signal | Meaning |
 |--------|---------|
 | `meta_config_present` | Required Meta env keys exist (`META_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `BACKEND_URL`). **Does not** unlock real-channel execution. |
-| `actual_provider_channel_ready` | `meta_config_present` **plus** valid signed webhook attestation **plus** (Tenant 1 cutover only) read-only `whatsapp_connections` binding consistent with attestation fingerprints. Required for session start. |
+| `actual_provider_channel_ready` | Meta config **plus** signed operator webhook observation attestation **plus** tenant-specific DB `whatsapp_connections` binding match. **Not** post-send provider proof. |
+| `operator_attested_channel_ready` | Same as above — preflight readiness only (`channel_evidence_class=operator_observed_meta_webhook`). |
 
 **Meta readiness required env:** `META_APP_SECRET`, `WHATSAPP_TOKEN`, `WHATSAPP_VERIFY_TOKEN`,
 `BACKEND_URL`. D360 absence is never a blocker. D360-only environments **fail** readiness.
@@ -178,22 +179,23 @@ Meta Cloud API direct credentials must be present. D360-only environments **BLOC
 D360 vars may be reported for legacy observability but never satisfy readiness.
 
 **Route readiness is never inferred from constants.** Channel preflight requires a
-bounded external webhook attestation artifact (HMAC-signed operator evidence) tied to
-canonical staging `BACKEND_URL`, deployment/revision, `provider=meta_cloud_api_direct`,
-Tenant 1 WABA/Phone Number ID redacted fingerprints, observed callback route,
-issued/expiry, and rollback snapshot reference. Without attestation, preflight fails
-closed with a precise gap — no raw identifiers or secrets in output.
+bounded **operator observation attestation** (HMAC-signed, not provider-cryptographic
+proof) with closed `observation_source`, `observer_id`, `observed_at_utc`,
+`observation_evidence_digest`, observed callback route, rollback snapshot evidence
+(tied to consolidation snapshot schema), plus deployment/revision binding.
 
-For the Tenant 1 temporary cutover path, session start also requires read-only DB evidence
-of an enabled direct-Meta `whatsapp_connections` row: non-empty WABA + Phone Number ID
-(HMAC fingerprints only), tenant match, and consistency with attestation fingerprints.
+For every acceptance tenant, session start also requires read-only DB evidence of an
+enabled direct-Meta `whatsapp_connections` row with `sending_enabled=true`, non-empty
+WABA + Phone Number ID (HMAC fingerprints only), tenant match, and consistency with
+attestation fingerprints. D360 provider rows are rejected.
 
 ```bash
 python -m scripts.operators.real_channel_conversational_acceptance preflight
 ```
 
-**BLOCK** if `actual_provider_channel_ready` is false. `meta_config_present` alone is
-insufficient. Do not simulate and call it real E2E.
+**BLOCK** if `operator_attested_channel_ready` is false. `meta_config_present` alone is
+insufficient. Post-send `actual_provider_channel` evidence is a separate gate after
+real device/provider IDs — never conflated with preflight attestation.
 
 ## Execution (after ARCH-001 ends — not now)
 
