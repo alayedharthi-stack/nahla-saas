@@ -205,7 +205,7 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "brief Saudi merchant tone",
                 "no invented products/prices/availability/discounts",
                 "no الأفضل/superiority claims",
-                "no checkout/name/address/payment/quantity prompts",
+                "no checkout/name/address/payment/quantity/phone/contact prompts",
                 "no category drift outside scope",
             ]
             if ambiguous or facts.get("require_clarification"):
@@ -216,6 +216,7 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                     "when allow_price_differentiator is true, price concept may distinguish candidates; "
                     "numeric amounts only when grounded in ambiguous_candidate facts and framed as a "
                     "clarifying question (question mark); do not generalize availability across products; "
+                    "do not ask for phone/mobile/contact details; "
                     "do not invent distinguishing details"
                 )
             elif qkind == "compound" or (

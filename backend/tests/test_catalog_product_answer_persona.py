@@ -1559,3 +1559,103 @@ class TestCatalogAmbiguityGuardGrounding:
             assert guard.failed_reason == ""
         else:
             assert guard.failed_reason == failed_reason
+
+    def test_clarification_plus_arabic_phone_request_rejects_slot_prompt(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        bundle = self._ambiguous_bundle()
+        clarification = "عندنا أكثر من خيار بنفس الاسم، هل تقصد حسب السعر؟"
+        assert apply_persona_compose_guards(clarification, bundle).passed is True
+
+        guard = apply_persona_compose_guards(
+            f"{clarification} ممكن ترسل لي رقم جوالك؟",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+        assert guard.rejected_observability.get("guard_reason") == "slot_prompt"
+        assert clarification not in str(guard.rejected_observability)
+
+    def test_clarification_plus_english_phone_request_rejects_slot_prompt(self) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 821,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 185,
+                "can_checkout": True,
+            },
+            {
+                "id": 822,
+                "title": "Classic Rose Perfume",
+                "category": "perfumes",
+                "price": 210,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="What is the price of Classic Rose Perfume?",
+            tenant_id=34,
+            products=products,
+            catalog_search_query="Classic Rose Perfume",
+        )
+        clarification = (
+            "We have more than one match with the same name. "
+            "Which option do you mean?"
+        )
+        guard = apply_persona_compose_guards(
+            f"{clarification} Could you share your mobile number?",
+            bundle,
+        )
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+
+    def test_tenant48_semantic_shape_duplicate_clarification_plus_phone_rejects(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards
+
+        products = [
+            {
+                "id": 901,
+                "title": "فستان سهرة",
+                "category": "ملابس",
+                "price": 320,
+                "can_checkout": True,
+            },
+            {
+                "id": 902,
+                "title": "فستان سهرة",
+                "category": "ملابس",
+                "price": 410,
+                "can_checkout": True,
+            },
+        ]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="كم سعر فستان سهرة؟",
+            tenant_id=35,
+            products=products,
+            catalog_search_query="فستان سهرة",
+        )
+        facts = bundle.verified_facts
+        assert facts["require_clarification"] is True
+        assert facts["allow_slot_prompts"] is False
+        assert facts["allow_price_differentiator"] is True
+
+        clarification = (
+            "عندنا أكثر من نوع بنفس الاسم بأسعار وألوان مختلفة، "
+            "أي نوع تقصد تحديداً؟"
+        )
+        assert apply_persona_compose_guards(clarification, bundle).passed is True
+
+        observed_shape = (
+            f"{clarification} "
+            "عشان نكمل، ممكن ترسل رقم جوالك؟"
+        )
+        guard = apply_persona_compose_guards(observed_shape, bundle)
+        assert guard.passed is False
+        assert guard.failed_reason == "slot_prompt"
+        assert guard.rejected_observability.get("candidate_hash")
+        assert observed_shape not in str(guard.rejected_observability)

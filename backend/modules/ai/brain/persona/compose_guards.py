@@ -197,6 +197,22 @@ def _classify_ambiguous_catalog_reply_violation(
     return ""
 
 
+def _reply_contains_forbidden_phone_slot_question(text: str) -> bool:
+    """Operational phone/contact slot ask — aligned with final_turn_audit coverage."""
+    from ..turn.final_turn_audit import _PHONE_QUESTION_RE  # noqa: PLC0415
+
+    return bool(_PHONE_QUESTION_RE.search(str(text or "")))
+
+
+def _catalog_slot_prompt_guard_fail(
+    text: str,
+    facts: dict[str, Any],
+) -> PersonaGuardResult:
+    if facts.get("require_clarification"):
+        return _catalog_ambiguity_guard_fail(text, facts, "slot_prompt")
+    return PersonaGuardResult(text=text, passed=False, failed_reason="slot_prompt")
+
+
 def _count_emojis(text: str) -> int:
     from ..compose.persona_template_engine import PERSONA_ALLOWED_EMOJI  # noqa: PLC0415
 
@@ -500,11 +516,9 @@ def _apply_catalog_product_answer_guards(
             "نكمل الطلب",
         )
         if any(m in working for m in slot_markers):
-            return PersonaGuardResult(
-                text=working,
-                passed=False,
-                failed_reason="slot_prompt",
-            )
+            return _catalog_slot_prompt_guard_fail(working, facts)
+        if _reply_contains_forbidden_phone_slot_question(working):
+            return _catalog_slot_prompt_guard_fail(working, facts)
 
     order_markers = ("تم إنشاء طلبك", "رقم الطلب", "NHL-")
     if any(m in working for m in order_markers):
