@@ -694,9 +694,15 @@ _PRICE_SUFFIX_RE = re.compile(
 )
 
 _INLINE_PRICE_SUBJECT_RE = re.compile(
-    r"(?:كم\s*سعر|بكم(?:\s+ال)?|سعر\s*(?:ال)?|how\s*much\s+(?:is\s+)?(?:the\s+)?)"
-    r"([^\s?,،؟!]+(?:\s+[^\s?,،؟!]+)?)"
-    r"(?:\s+وهل|\s+هل|\s+and\s+is|\?|$)",
+    r"(?:كم\s*سعر|بكم(?:\s+ال)?|سعر\s*(?:ال)?|"
+    r"how\s*much\s+(?:is\s+)?(?:the\s+)?)"
+    r"(?P<subject>.+?)"
+    r"(?="
+    r"\s+(?:وهل|هل)\s+|"
+    r"\s+and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
+    r"(?:available|in\s+stock)\b|"
+    r"[?؟!]|$"
+    r")",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -833,7 +839,17 @@ def _clean_price_subject_candidate(candidate: str) -> str:
     """Trim availability tails and fluff from a price-subject candidate."""
     core = (candidate or "").strip(" ؟?!.")
     core = re.sub(
-        r"\s+(?:وهل|هل)\s+.*$",
+        r"^(?:is\s+)?(?:the\s+)?",
+        "",
+        core,
+        flags=re.IGNORECASE,
+    ).strip()
+    core = re.sub(r"^ال(?=\S{2})", "", core, flags=re.UNICODE).strip()
+    core = re.sub(
+        r"\s+(?:"
+        r"(?:وهل|هل)\s+.*|"
+        r"and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
+        r"(?:available|in\s+stock).*)$",
         "",
         core,
         flags=re.UNICODE | re.IGNORECASE,
@@ -874,7 +890,7 @@ def _extract_price_subject_from_probe(message: str) -> str:
             return candidate
     inline = _INLINE_PRICE_SUBJECT_RE.search(raw)
     if inline:
-        candidate = _clean_price_subject_candidate(inline.group(1) or "")
+        candidate = _clean_price_subject_candidate(inline.group("subject") or "")
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     return ""
@@ -898,7 +914,25 @@ def _extract_price_subject(message: str) -> str:
 
 def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
     msg = ctx.message or ""
+    try:
+        from .commerce.price_turn_classifier import (  # noqa: PLC0415
+            PriceTurnKind,
+            classify_price_turn,
+        )
+
+        if getattr(ctx.state, "current_product_focus", None) and classify_price_turn(
+            ctx
+        ) in {
+            PriceTurnKind.PRONOUN_REFERENCE,
+            PriceTurnKind.PRICE_COMMENT,
+            PriceTurnKind.UNIT_PRICE_REFERENCE,
+        }:
+            return ""
+    except Exception:  # noqa: BLE001
+        pass
     deterministic = _deterministic_commerce_subject(ctx, extracted)
+    if deterministic:
+        return deterministic
     intent = ctx.intent
     slots = getattr(intent, "slots", None) or {}
     slot_query = (
@@ -907,8 +941,6 @@ def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
     )
     if slot_query and not _is_greeting_or_social_slot_token(slot_query, msg):
         return slot_query
-    if deterministic:
-        return deterministic
     return ""
 
 

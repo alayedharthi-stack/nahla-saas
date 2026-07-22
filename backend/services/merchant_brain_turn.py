@@ -1092,6 +1092,19 @@ def _merge_transform_reasons(*sources: Any) -> List[str]:
     return merged
 
 
+def _final_text_is_llm_derived(candidate: str, final_text: str) -> bool:
+    candidate_norm = " ".join(str(candidate or "").split())
+    final_norm = " ".join(str(final_text or "").split())
+    return bool(
+        candidate_norm
+        and final_norm
+        and (
+            final_norm in candidate_norm
+            or candidate_norm in final_norm
+        )
+    )
+
+
 def _resolve_response_mode(
     *,
     brain_result: Optional[Dict[str, Any]],
@@ -1185,6 +1198,14 @@ def _build_provenance(
         transform_reasons = []
     elif not transform_reasons and final_text_transformed:
         transform_reasons = ["post_compose_text_mutation"]
+    if (
+        final_text_transformed
+        and compose_source in _STRUCTURED_LLM_COMPOSE_SOURCES
+        and not _final_text_is_llm_derived(candidate_text, final_text)
+    ):
+        # A wholly substituted final reply is not owned by the original LLM
+        # candidate. The replacing component must stamp an approved source.
+        compose_source = ""
 
     route_payload = extract_persona_route_provenance(brain_persona_compose_event)
     persona_route = (
@@ -1219,6 +1240,8 @@ def _build_provenance(
         chosen_path=provenance.chosen_path,
         llm_candidate_present=provenance.llm_candidate_present,
     )
+    if provenance.final_text_transformed and not provenance.compose_source:
+        provenance.response_mode = ""
     return provenance
 
 

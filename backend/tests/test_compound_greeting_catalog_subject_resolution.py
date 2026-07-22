@@ -4,8 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -31,11 +30,6 @@ from modules.ai.brain.types import (  # noqa: E402
     Intent,
     MerchantConversationState,
 )
-from modules.ai.compose.reply_metadata_export import (  # noqa: E402
-    finalize_post_guard_compose_provenance,
-)
-from services.merchant_brain_turn import _build_provenance  # noqa: E402
-
 _PRODUCTION_MESSAGE = "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
 _GENERIC_MESSAGE = "أهلًا، كم سعر العطر وهل هو متوفر؟"
 
@@ -85,6 +79,25 @@ class TestCompoundGreetingSubjectResolution:
         assert _is_greeting_or_social_slot_token("سلام", _PRODUCTION_MESSAGE)
         assert _resolved_product_query(ctx) == "فستان"
 
+    def test_explicit_arabic_subject_beats_conflicting_product_slot(self) -> None:
+        ctx = _ctx(
+            _PRODUCTION_MESSAGE,
+            slots={"product_query": "عطر"},
+        )
+        assert _resolved_product_query(ctx) == "فستان"
+
+    def test_explicit_english_subject_beats_conflicting_product_slot(self) -> None:
+        message = (
+            "Hello, how much is the white running shoe "
+            "and is it available?"
+        )
+        ctx = _ctx(
+            message,
+            slots={"product_query": "rose perfume"},
+        )
+        assert _extract_price_subject(message) == "white running shoe"
+        assert _resolved_product_query(ctx) == "white running shoe"
+
     def test_generic_perfume_greeting_resolves_subject(self) -> None:
         ctx = _ctx(
             _GENERIC_MESSAGE,
@@ -92,6 +105,30 @@ class TestCompoundGreetingSubjectResolution:
         )
         assert _extract_price_subject(_GENERIC_MESSAGE) in {"العطر", "عطر"}
         assert _resolved_product_query(ctx) in {"العطر", "عطر"}
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            (
+                "أهلًا، كم سعر حذاء رياضي أبيض وهل هو متوفر؟",
+                "حذاء رياضي أبيض",
+            ),
+            (
+                "مرحبًا، كم سعر عطر ورد 100ml وهل هو متوفر؟",
+                "عطر ورد 100ml",
+            ),
+            (
+                "Hi, how much is the rose perfume 100ml and is it in stock?",
+                "rose perfume 100ml",
+            ),
+        ],
+    )
+    def test_multiword_subject_not_truncated_at_conjunction(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        assert _extract_price_subject(message) == expected
 
     def test_decision_engine_search_query_uses_resolved_subject(self) -> None:
         ctx = _ctx(
@@ -111,8 +148,10 @@ class TestCompoundGreetingSubjectResolution:
 
     def test_pronoun_price_with_focus_preserves_context(self) -> None:
         focus = {"title": "حذاء رياضي أبيض", "external_id": "sku-1"}
-        ctx = _ctx("كم سعره؟", slots={"product_query": "ه"}, focus=focus)
-        assert _resolved_product_query(ctx) == ""
+        ctx = _ctx("سعره؟", slots={"product_query": "عطر"}, focus=focus)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("product") == focus
 
 
 class TestCatalogMissComposePath:
@@ -178,9 +217,53 @@ class TestCatalogMissComposePath:
         text = asyncio.run(_run())
         assert text
         assert result.data.get("compose_source") == "fallback_deterministic"
-        assert result.data.get("fallback_reason")
+        assert result.data.get("fallback_reason") == "compose_exception:RuntimeError"
         assert result.data.get("fallback_action_type") == "catalog_search_miss"
         assert result.data.get("llm_candidate_present") is False
+        assert result.data.get("compose_route_attempted") is True
+
+    def test_subject_setup_exception_still_attempts_natural_compose(self) -> None:
+        composer = DefaultComposer()
+        ctx = _ctx("كم سعر قميص قطني أزرق؟", intent_name="ask_price")
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": "قميص قطني أزرق"},
+            reason="test",
+        )
+        result = _search_miss_result()
+
+        async def _run() -> str:
+            with (
+                patch(
+                    "modules.ai.brain.clarification.resolved_product_guard."
+                    "extract_resolved_product_subject",
+                    side_effect=RuntimeError("setup_failed"),
+                ),
+                patch(
+                    "modules.ai.brain.persona.catalog_product_answer."
+                    "try_compose_catalog_search_miss_answer",
+                    new=AsyncMock(
+                        return_value=(
+                            "ما ظهر تطابق مؤكد في الكتالوج حالياً.",
+                            None,
+                            {
+                                "compose_source": "persona_llm",
+                                "llm_candidate_present": True,
+                                "chosen_path": "catalog_miss_resolved_subject",
+                            },
+                        )
+                    ),
+                ) as compose_mock,
+            ):
+                text = await composer.compose(decision, result, ctx)
+                compose_mock.assert_awaited_once()
+                return text
+
+        text = asyncio.run(_run())
+        assert text
+        assert result.data.get("compose_source") == "persona_llm"
+        assert result.data.get("compose_route_attempted") is True
+        assert not result.data.get("fallback_reason")
 
     def test_resolved_subject_compose_receives_catalog_facts(self) -> None:
         composer = DefaultComposer()
@@ -231,53 +314,6 @@ class TestCatalogMissComposePath:
         text = asyncio.run(_run())
         assert "164" in text or "فستان" in text
         assert captured.get("catalog_search_query") == "فستان"
-
-
-class TestGuardReplacementProvenance:
-    def test_finalize_post_guard_compose_provenance_marks_guard_rewrite(self) -> None:
-        data = {
-            "compose_reply_candidate": "candidate from persona compose",
-            "compose_source": "persona_llm",
-            "llm_candidate_present": True,
-            "final_text_transformed": False,
-            "final_transform_reasons": [],
-        }
-        finalize_post_guard_compose_provenance(
-            data,
-            final_text="حدّد المنتج أو المقاس المطلوب.",
-            guard_replaced={"commerce_reply_quality_guard": True},
-        )
-        assert data["final_text_transformed"] is True
-        assert data["final_transform_reasons"] == ["commerce_reply_quality_guard"]
-        assert data["final_customer_text_source"] == "guard_rewrite"
-        assert data["compose_source"] == "persona_llm"
-
-    def test_build_provenance_uses_compose_reply_candidate_boundary(self) -> None:
-        provenance = _build_provenance(
-            brain_result={
-                "compose_source": "persona_llm",
-                "chosen_path": "catalog_miss_resolved_subject",
-                "llm_candidate_present": True,
-                "final_text_transformed": True,
-                "final_transform_reasons": ["commerce_reply_quality_guard"],
-                "compose_reply_candidate": "LLM catalog answer about فستان",
-            },
-            brain_reply_candidate="LLM catalog answer about فستان",
-            reply_text="حدّد المنتج أو المقاس المطلوب.",
-            brain_persona_compose_event={
-                "compose_source": "persona_llm",
-                "chosen_path": "catalog_miss_resolved_subject",
-                "llm_candidate_present": True,
-            },
-            trace=SimpleNamespace(chosen_path="", reply_source="", fallback_source=""),
-            live_provenance_tracker={
-                "final_transform_reasons": ["commerce_reply_quality_guard"],
-            },
-        )
-        assert provenance.final_text_transformed is True
-        assert provenance.final_transform_reasons == ["commerce_reply_quality_guard"]
-        assert provenance.llm_candidate_present is True
-        assert provenance.compose_source == "persona_llm"
 
 
 def test_constitution_compound_greeting_no_new_deterministic_prose_paths() -> None:

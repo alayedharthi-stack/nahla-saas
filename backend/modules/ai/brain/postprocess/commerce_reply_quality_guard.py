@@ -160,6 +160,7 @@ class CommerceReplyQualityGuardResult:
     stripped_english: bool
     used_fallback: bool
     fallback_kind: str = ""
+    requires_grounded_recompose: bool = False
 
 
 def _normalize_for_match(text: str) -> str:
@@ -656,6 +657,7 @@ def apply_commerce_reply_quality_guard(
     trusted_coupon_offer_facts: Optional[Dict[str, Any]] = None,
     customer_conditional_coupon_facts: Optional[Dict[str, Any]] = None,
     customer_conditional_coupon_compose_active: bool = False,
+    llm_candidate_present: bool = False,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     kb_negative = _kb_negative_availability_decision(
@@ -690,6 +692,16 @@ def apply_commerce_reply_quality_guard(
         pass
 
     if not original:
+        if llm_candidate_present:
+            return CommerceReplyQualityGuardResult(
+                reply="",
+                replaced=False,
+                stripped_residue=False,
+                stripped_english=False,
+                used_fallback=False,
+                fallback_kind="grounded_recompose_required",
+                requires_grounded_recompose=True,
+            )
         if contract is not None and contract.protected_final_reply:
             return CommerceReplyQualityGuardResult(
                 reply=original,
@@ -788,14 +800,17 @@ def apply_commerce_reply_quality_guard(
     used_fallback = False
     fallback_kind = ""
     needs_fallback = _meaningful_length(text) < _MIN_MEANINGFUL_CHARS
-    if (
-        not needs_fallback
-        and (stripped_residue or stripped_english)
-        and text
-        and not _has_commerce_substance(text)
-    ):
-        needs_fallback = True
     if needs_fallback:
+        if llm_candidate_present:
+            return CommerceReplyQualityGuardResult(
+                reply=text,
+                replaced=text != original,
+                stripped_residue=stripped_residue,
+                stripped_english=stripped_english,
+                used_fallback=False,
+                fallback_kind="grounded_recompose_required",
+                requires_grounded_recompose=True,
+            )
         if contract is not None and contract.protected_final_reply:
             return CommerceReplyQualityGuardResult(
                 reply=original,
@@ -854,6 +869,7 @@ def apply_commerce_reply_quality_guard(
 
         if (
             not replaced
+            and not llm_candidate_present
             and is_generic_stub_reply(text)
             and is_staff_route_rejection_message(inbound_text)
             and not (contract is not None and contract.protected_final_reply)

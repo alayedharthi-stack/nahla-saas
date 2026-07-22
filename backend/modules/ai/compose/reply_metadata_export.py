@@ -1,6 +1,7 @@
 """Closed reply-metadata export contract for Brain compose boundaries."""
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
 
 from modules.ai.compose.constitutional_policy import (
@@ -151,10 +152,33 @@ def finalize_post_guard_compose_provenance(
     ]
     if compose_source == "fallback_deterministic":
         result_data["final_customer_text_source"] = "fallback_deterministic"
-    elif guard_names and candidate and candidate != final:
-        result_data["final_customer_text_source"] = "guard_rewrite"
+    elif (
+        guard_names
+        and candidate
+        and final
+        and (
+            re.sub(r"\s+", " ", final).strip()
+            in re.sub(r"\s+", " ", candidate).strip()
+            or re.sub(r"\s+", " ", candidate).strip()
+            in re.sub(r"\s+", " ", final).strip()
+        )
+    ):
+        result_data["final_customer_text_source"] = (
+            "persona_llm_postprocess"
+            if compose_source == "persona_llm"
+            else "llm_postprocess"
+        )
+    elif guard_names and candidate != final:
+        # A wholesale canned substitution is not LLM-owned. Do not emit a
+        # fabricated ownership label; the guard must suppress/recompose or
+        # stamp an approved exact-text/fallback compose source itself.
+        result_data.pop("final_customer_text_source", None)
     elif result_data.get("llm_candidate_present"):
-        result_data["final_customer_text_source"] = "persona_llm_postprocess"
+        result_data["final_customer_text_source"] = (
+            "persona_llm_postprocess"
+            if compose_source == "persona_llm"
+            else "llm_postprocess"
+        )
 
 
 def extract_persona_route_provenance(

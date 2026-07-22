@@ -368,6 +368,127 @@ def test_tenant48_pr687_paths_export_live_provenance(
     ) == []
 
 
+def test_live_catalog_quality_guard_preserves_llm_answer_and_exports_provenance(
+    db,
+    tenant_ctx,
+) -> None:
+    """Exercise compose -> quality sanitizer -> Brain export -> merchant provenance."""
+    from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+
+    brain = get_brain()
+    message = "السلام عليكم، كم سعر الفستان وهل هو متوفر؟"
+    llm_candidate = "سعر الفستان 164 ريال."
+    decision = Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args={"query": "فستان"},
+    )
+    action_result = ActionResult(
+        success=True,
+        data={
+            "query": "فستان",
+            "products": [
+                {
+                    "id": 6961,
+                    "title": "فستان",
+                    "price": 164,
+                    "in_stock": True,
+                    "can_checkout": True,
+                },
+            ],
+            "catalog_fact_products": [
+                {
+                    "id": 6961,
+                    "title": "فستان",
+                    "price": 164,
+                    "in_stock": True,
+                    "can_checkout": True,
+                },
+            ],
+        },
+    )
+    stack = _base_brain_stack(
+        brain,
+        intent=Intent(name="ask_price", confidence=0.95, slots={}),
+        decision=decision,
+        state=MerchantConversationState(stage="exploring", greeted=True),
+    )
+    stack.enter_context(
+        patch.object(
+            brain._executor,
+            "execute",
+            new=AsyncMock(return_value=action_result),
+        )
+    )
+    compose_call = stack.enter_context(
+        patch(
+            "modules.ai.brain.persona.catalog_product_answer."
+            "try_compose_catalog_product_answer",
+            new=AsyncMock(
+                return_value=(
+                    llm_candidate,
+                    None,
+                    {
+                        "chosen_path": "fact_bound_persona_compose",
+                        "persona_compose": {
+                            "source": "persona_llm",
+                            "surface": "catalog_product_answer",
+                        },
+                        "compose_source": "persona_llm",
+                        "response_mode": "grounded_persona_compose",
+                        "llm_candidate_present": True,
+                        "final_text_transformed": False,
+                        "final_transform_reasons": [],
+                        "final_customer_text_source": "persona_llm",
+                    },
+                )
+            ),
+        )
+    )
+
+    async def invoke():
+        with stack:
+            return await evaluate_live_merchant_brain_turn(
+                db=db,
+                tenant_id=tenant_ctx.tenant_id,
+                phone_id="PH-QUALITY-696",
+                turn_input=LiveMerchantBrainTurnInput(
+                    customer_phone=tenant_ctx.phone,
+                    text=message,
+                    conversation_id=tenant_ctx.conversation_id,
+                    history=[],
+                    preconditions=LiveMerchantBrainPreconditions(),
+                    profile={
+                        "id": tenant_ctx.customer_id,
+                        "name": "Generic Customer",
+                        "preferred_language": "ar",
+                    },
+                ),
+                convo=_convo(),
+                trace=_trace(),
+                persona_ownership=MagicMock(),
+                brain_factory=lambda: brain,
+                brain_active=True,
+            )
+
+    turn_result = asyncio.run(invoke())
+    compose_call.assert_awaited_once()
+    assert turn_result.status == "evaluated"
+    assert turn_result.reply_text.endswith(llm_candidate), turn_result.brain_result
+    assert turn_result.brain_reply_candidate == llm_candidate
+    assert "حدّد المنتج أو المقاس المطلوب" not in turn_result.reply_text
+    assert turn_result.provenance.compose_source == "persona_llm"
+    assert turn_result.provenance.llm_candidate_present is True
+    assert turn_result.provenance.final_text_transformed is True
+    assert turn_result.provenance.final_transform_reasons == [
+        "greeting_etiquette"
+    ]
+    assert turn_result.brain_result is not None
+    assert (
+        turn_result.brain_result.get("final_customer_text_source")
+        == "persona_llm_postprocess"
+    )
+
+
 def test_general_llm_compose_stamps_metadata_with_provider_only_mock(db, tenant_ctx) -> None:
     ctx = _ctx(tenant_ctx, _GENERAL_MESSAGE, db=db)
     decision = Decision(action=ACTION_LLM_REPLY, args={})

@@ -88,6 +88,38 @@ class TestCommerceFriendlyArabic:
         assert "same-day" not in out.lower()
         assert "توصيل" in out
 
+    def test_valid_llm_catalog_answer_is_not_replaced_with_canned_prose(self) -> None:
+        candidate = "الفستان متوفر وسعره 164 ريال حسب بيانات الكتالوج."
+        guarded = apply_commerce_reply_quality_guard(
+            candidate,
+            inbound_text="السلام عليكم، كم سعر الفستان وهل هو متوفر؟",
+            intent_name="ask_price",
+            primary_customer_goal=GOAL_PRODUCT_AVAILABILITY,
+            tenant_id=7,
+            llm_candidate_present=True,
+        )
+        assert guarded.reply == candidate
+        assert guarded.replaced is False
+        assert guarded.used_fallback is False
+
+    def test_llm_residue_is_removed_without_canned_substitution(self) -> None:
+        candidate = (
+            "الفستان متوفر وسعره 164 ريال حسب بيانات الكتالوج.\n"
+            "Powered by Nahla"
+        )
+        guarded = apply_commerce_reply_quality_guard(
+            candidate,
+            inbound_text="كم سعر الفستان وهل هو متوفر؟",
+            intent_name="ask_price",
+            primary_customer_goal=GOAL_PRODUCT_AVAILABILITY,
+            tenant_id=7,
+            llm_candidate_present=True,
+        )
+        assert guarded.reply == "الفستان متوفر وسعره 164 ريال حسب بيانات الكتالوج"
+        assert guarded.replaced is True
+        assert guarded.used_fallback is False
+        assert guarded.requires_grounded_recompose is False
+
 
 class TestPromptSlimContract:
     @pytest.fixture
