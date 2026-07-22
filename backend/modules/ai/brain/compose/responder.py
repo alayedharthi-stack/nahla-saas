@@ -538,119 +538,94 @@ class DefaultComposer:
                     inquiry_query = extract_inquiry_product_query(ctx.message or "")
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — product_discovery_gate optional; generic clarify if unavailable
                     pass
+                from ..clarification.resolved_product_guard import (  # noqa: PLC0415
+                    extract_resolved_product_subject,
+                    log_clarification_leak,
+                )
+                from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    build_catalog_search_miss_emergency_outcome,
+                    try_compose_catalog_search_miss_answer,
+                )
+                from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
+
                 try:
-                    from ..clarification.resolved_product_guard import (  # noqa: PLC0415
-                        extract_resolved_product_subject,
-                        log_clarification_leak,
-                    )
-                    from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
-                        should_use_search_miss_template,
-                    )
                     subject = extract_resolved_product_subject(
                         ctx, query=query, inquiry_query=inquiry_query,
                     )
-                    if subject and should_use_search_miss_template(ctx, query, subject):
-                        log_clarification_leak(
-                            tenant_id=getattr(ctx, "tenant_id", None),
-                            source="search_miss_compose",
-                            normalized_subject=subject,
-                            resolved_query=query or subject,
-                            preview=str(ctx.message or "")[:80],
-                            blocked_text=(
-                                "search_miss_type_clarify:"
-                                f"{data.get('message') or result.error or 'unknown'}"
-                            ),
-                        )
-                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
-                        from ..persona.catalog_product_answer import (  # noqa: PLC0415
-                            build_catalog_search_miss_emergency_outcome,
-                            try_compose_catalog_search_miss_answer,
-                        )
-                        from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415
-
-                        miss_kwargs = {
-                            "tenant_id": int(getattr(ctx, "tenant_id", 0) or 0),
-                            "customer_phone": str(
-                                getattr(ctx, "customer_phone", "") or "",
-                            ),
-                            "inbound_text": str(getattr(ctx, "message", "") or ""),
-                            "resolved_subject": subject,
-                            "catalog_search_query": query,
-                            "chosen_path": "catalog_miss_resolved_subject",
-                            "ai_settings": _ai_settings_from_ctx(ctx),
-                        }
-                        try:
-                            _miss_text, _miss_result, _miss_event = (
-                                await try_compose_catalog_search_miss_answer(
-                                    **miss_kwargs,
-                                )
-                            )
-                            if not (
-                                (_miss_text or "").strip()
-                                and isinstance(_miss_event, dict)
-                                and _miss_event.get("compose_source")
-                            ):
-                                _miss_text, _miss_result, _miss_event = (
-                                    build_catalog_search_miss_emergency_outcome(
-                                        **miss_kwargs,
-                                        reason="invalid_compose_outcome",
-                                    )
-                                )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.exception(
-                                "[RESPONDER] catalog_search_miss persona compose failed",
-                            )
-                            _miss_text, _miss_result, _miss_event = (
-                                build_catalog_search_miss_emergency_outcome(
-                                    **miss_kwargs,
-                                    reason=f"responder_exception:{type(exc).__name__}",
-                                )
-                            )
-                        result.data.update(_miss_event)
-                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
-                        return (_miss_text or "").strip()
-                    from ..commerce.catalog_search_evidence import (  # noqa: PLC0415
-                        CATALOG_MISS_CHOSEN_PATH,
-                        compose_catalog_miss_deterministic_reply,
-                    )
-                    no_synced = data.get("message") == "no_products_in_catalog"
-                    variant = self._variant_idx(ctx)
-                    result.data["chosen_path"] = CATALOG_MISS_CHOSEN_PATH
-                    logger.info(
-                        "[CATALOG_SEARCH_GATE] search_miss_deterministic "
-                        "tenant=%s subject=%r query=%r no_synced=%s",
-                        getattr(ctx, "tenant_id", None),
-                        (subject or "")[:40],
-                        (query or "")[:40],
-                        no_synced,
-                    )
-                    return compose_catalog_miss_deterministic_reply(
-                        no_synced_products=no_synced,
-                        variant=variant,
-                    )
-                except Exception as exc:  # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     logger.exception(
-                        "[RESPONDER] resolved_product_search_miss compose failed",
+                        "[RESPONDER] catalog_search_miss subject resolution failed",
                     )
-                    if "miss_kwargs" in locals():
-                        from ..persona.catalog_product_answer import (  # noqa: PLC0415
-                            build_catalog_search_miss_emergency_outcome,
-                        )
+                    subject = ""
+                resolved_subject = subject or query
+                try:
+                    log_clarification_leak(
+                        tenant_id=getattr(ctx, "tenant_id", None),
+                        source="search_miss_compose",
+                        normalized_subject=resolved_subject,
+                        resolved_query=query or resolved_subject,
+                        preview=str(ctx.message or "")[:80],
+                        blocked_text=(
+                            "search_miss_type_clarify:"
+                            f"{data.get('message') or result.error or 'unknown'}"
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[RESPONDER] catalog_search_miss telemetry failed",
+                    )
+                try:
+                    ai_settings = _ai_settings_from_ctx(ctx)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[RESPONDER] catalog_search_miss AI settings failed",
+                    )
+                    ai_settings = {}
 
+                result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                result.data["compose_route_attempted"] = True
+                miss_kwargs = {
+                    "tenant_id": int(getattr(ctx, "tenant_id", 0) or 0),
+                    "customer_phone": str(
+                        getattr(ctx, "customer_phone", "") or "",
+                    ),
+                    "inbound_text": str(getattr(ctx, "message", "") or ""),
+                    "resolved_subject": resolved_subject,
+                    "catalog_search_query": query,
+                    "chosen_path": "catalog_miss_resolved_subject",
+                    "ai_settings": ai_settings,
+                }
+                try:
+                    _miss_text, _miss_result, _miss_event = (
+                        await try_compose_catalog_search_miss_answer(
+                            **miss_kwargs,
+                        )
+                    )
+                    if not (
+                        (_miss_text or "").strip()
+                        and isinstance(_miss_event, dict)
+                        and _miss_event.get("compose_source")
+                    ):
                         _miss_text, _miss_result, _miss_event = (
                             build_catalog_search_miss_emergency_outcome(
                                 **miss_kwargs,
-                                reason=f"outer_responder_exception:{type(exc).__name__}",
+                                reason="invalid_compose_outcome",
                             )
                         )
-                        result.data.update(_miss_event)
-                        result.data["chosen_path"] = "catalog_miss_resolved_subject"
-                        return (_miss_text or "").strip()
-                variant = self._variant_idx(ctx)
-                text = T.no_products(variant=variant)
-                if self._is_duplicate(text, ctx):
-                    text = T.no_products(variant=(variant + 1) % 3)
-                return text
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "[RESPONDER] catalog_search_miss persona compose failed",
+                    )
+                    _miss_text, _miss_result, _miss_event = (
+                        build_catalog_search_miss_emergency_outcome(
+                            **miss_kwargs,
+                            reason=f"compose_exception:{type(exc).__name__}",
+                        )
+                    )
+                result.data.update(_miss_event)
+                result.data["chosen_path"] = "catalog_miss_resolved_subject"
+                result.data["compose_route_attempted"] = True
+                return (_miss_text or "").strip()
             # Validate every product before we show it: if a product that
             # the executor already filtered as orderable somehow lacks
             # can_checkout=True, log it as a catalog bug and exclude it.

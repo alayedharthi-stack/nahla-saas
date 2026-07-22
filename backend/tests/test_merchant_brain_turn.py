@@ -572,5 +572,5 @@ def test_build_provenance_merges_guard_transform_reasons_from_live_tracker() -> 
     assert provenance.final_text_transformed is True
     assert provenance.final_transform_reasons == ["payment_reply_guard"]
     assert provenance.llm_candidate_present is True
-    assert provenance.compose_source == "persona_llm"
+    assert provenance.compose_source == ""
 

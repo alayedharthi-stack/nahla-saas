@@ -693,6 +693,134 @@ _PRICE_SUFFIX_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_INLINE_PRICE_SUBJECT_RE = re.compile(
+    r"(?:كم\s*سعر|بكم(?:\s+ال)?|سعر\s*(?:ال)?|"
+    r"how\s*much\s+(?:is\s+)?(?:the\s+)?)"
+    r"(?P<subject>.+?)"
+    r"(?="
+    r"\s+(?:وهل|هل)\s+|"
+    r"\s+and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
+    r"(?:available|in\s+stock)\b|"
+    r"[?؟!]|$"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_STANDALONE_GREETING_SLOT_TOKENS = frozenset({
+    "سلام", "سلام عليكم", "السلام", "السلام عليكم",
+    "مرحبا", "مرحباً", "اهلا", "أهلا", "أهلاً", "هلا", "hello", "hi", "hey",
+})
+
+_WEAK_PRONOUN_SLOT_TOKENS = frozenset({
+    "ه", "ها", "هم", "هو", "هي", "it", "its",
+})
+
+
+def _message_commerce_probes(message: str) -> list[str]:
+    """Message variants for deterministic commerce-subject extraction."""
+    raw = (message or "").strip()
+    if not raw:
+        return []
+    seen: set[str] = set()
+    probes: list[str] = []
+
+    def _add(candidate: str) -> None:
+        c = (candidate or "").strip()
+        if c and c not in seen:
+            seen.add(c)
+            probes.append(c)
+
+    _add(raw)
+    try:
+        from .intent.rules import _strip_greeting_residue  # noqa: PLC0415
+
+        _add(_strip_greeting_residue(raw))
+    except Exception:  # noqa: BLE001
+        pass
+    for line in raw.splitlines():
+        _add(line)
+        try:
+            from .intent.rules import _strip_greeting_residue  # noqa: PLC0415
+
+            _add(_strip_greeting_residue(line))
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional per-line greeting residue probe
+            pass
+    return probes
+
+
+def _is_greeting_or_social_slot_token(token: str, message: str = "") -> bool:
+    """True when an LLM slot token is greeting/social — not a catalog subject."""
+    q = (token or "").strip()
+    if not q:
+        return True
+    norm = _normalize_ar(q)
+    if norm in _STANDALONE_GREETING_SLOT_TOKENS or norm in _WEAK_PRONOUN_SLOT_TOKENS:
+        return True
+    try:
+        from .commerce.catalog_search_evidence import is_discourse_only_query  # noqa: PLC0415
+
+        if is_discourse_only_query(q):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from .intent.rules import (  # noqa: PLC0415
+            _GREETING_RESIDUE_LEAD_TOKENS,
+            _strip_greeting_residue,
+        )
+
+        for greeting in _GREETING_RESIDUE_LEAD_TOKENS:
+            gn = _normalize_ar(greeting)
+            if norm == gn:
+                return True
+            if len(norm) <= 6 and gn.startswith(norm):
+                return True
+        if message:
+            residue = (_strip_greeting_residue(message) or "").strip()
+            if residue and len(residue) < len(message) - 2:
+                greeting_only = message.replace(residue, "", 1).strip(" ,،؟?!.")
+                if _normalize_ar(greeting_only) == norm:
+                    return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _deterministic_commerce_subject(ctx: BrainContext, extracted: str = "") -> str:
+    """Extract catalog subject from message evidence — not weak LLM slots."""
+    msg = ctx.message or ""
+    ext = str(extracted or "").strip()
+    if ext and _subject_has_product_substance(ext) and not _is_greeting_or_social_slot_token(ext, msg):
+        return ext
+
+    try:
+        from .commerce.price_turn_classifier import normalize_price_subject  # noqa: PLC0415
+
+        price_subject = normalize_price_subject(ctx)
+        if price_subject and _subject_has_product_substance(price_subject):
+            return price_subject
+    except Exception:  # noqa: BLE001
+        pass
+
+    for probe in _message_commerce_probes(msg):
+        subject = _extract_price_subject(probe)
+        if subject and _subject_has_product_substance(subject):
+            return subject
+        inquiry = extract_inquiry_product_query(probe)
+        if inquiry and _subject_has_product_substance(inquiry):
+            return inquiry
+        try:
+            from .commerce.catalog_query_normalization import (  # noqa: PLC0415
+                extract_english_order_product_query,
+            )
+
+            en = extract_english_order_product_query(probe)
+            if en and _subject_has_product_substance(en):
+                return en
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional English catalog query probe
+            pass
+    return ""
+
 
 def _subject_has_product_substance(candidate: str) -> bool:
     """True when ``candidate`` is more than bare price/unit tokens."""
@@ -707,21 +835,36 @@ def _subject_has_product_substance(candidate: str) -> bool:
     return any(len(t) >= 2 for t in non_unit)
 
 
-def _extract_price_subject(message: str) -> str:
-    """Recover a product name from price-style messages.
+def _clean_price_subject_candidate(candidate: str) -> str:
+    """Trim availability tails and fluff from a price-subject candidate."""
+    core = (candidate or "").strip(" ؟?!.")
+    core = re.sub(
+        r"^(?:is\s+)?(?:the\s+)?",
+        "",
+        core,
+        flags=re.IGNORECASE,
+    ).strip()
+    core = re.sub(r"^ال(?=\S{2})", "", core, flags=re.UNICODE).strip()
+    core = re.sub(
+        r"\s+(?:"
+        r"(?:وهل|هل)\s+.*|"
+        r"and\s+(?:is|are)\s+(?:it|this|the\s+product)?\s*"
+        r"(?:available|in\s+stock).*)$",
+        "",
+        core,
+        flags=re.UNICODE | re.IGNORECASE,
+    ).strip(" ؟?!.")
+    return core
 
-    Supported shapes (platform-wide, any catalog wording):
-      * ``<product> بكم`` / ``<product> كم سعره``
-      * ``<product> بكم <unit>``  (e.g. per-kilo / per-litre asks)
-      * ``بكم <product>`` / ``كم سعر <product>``
-    """
+
+def _extract_price_subject_from_probe(message: str) -> str:
     raw = (message or "").strip()
     if not raw:
         return ""
     norm = _normalize_ar(raw)
     prefix_match = _CATEGORY_PRICE_PREFIX_RE.match(norm)
     if prefix_match:
-        candidate = (prefix_match.group(1) or "").strip(" ؟?!.")
+        candidate = _clean_price_subject_candidate(prefix_match.group(1) or "")
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     for prefix in (
@@ -736,47 +879,69 @@ def _extract_price_subject(message: str) -> str:
     ):
         pn = _normalize_ar(prefix)
         if norm.startswith(pn):
-            rest = raw[len(prefix):].strip(" ؟?!.")
+            rest = _clean_price_subject_candidate(raw[len(prefix):])
             if rest and _subject_has_product_substance(rest):
                 return rest
             return ""
     m = _PRICE_SUFFIX_RE.match(raw.strip(" ؟?!."))
     if m:
-        candidate = (m.group(1) or "").strip(" ؟?!.")
+        candidate = _clean_price_subject_candidate(m.group(1) or "")
+        if candidate and _subject_has_product_substance(candidate):
+            return candidate
+    inline = _INLINE_PRICE_SUBJECT_RE.search(raw)
+    if inline:
+        candidate = _clean_price_subject_candidate(inline.group("subject") or "")
         if candidate and _subject_has_product_substance(candidate):
             return candidate
     return ""
 
 
+def _extract_price_subject(message: str) -> str:
+    """Recover a product name from price-style messages.
+
+    Supported shapes (platform-wide, any catalog wording):
+      * ``<product> بكم`` / ``<product> كم سعره``
+      * ``<product> بكم <unit>``  (e.g. per-kilo / per-litre asks)
+      * ``بكم <product>`` / ``كم سعر <product>``
+      * greeting-prefixed turns after residue peel / inline price markers
+    """
+    for probe in _message_commerce_probes(message):
+        subject = _extract_price_subject_from_probe(probe)
+        if subject:
+            return subject
+    return ""
+
+
 def _resolved_product_query(ctx: BrainContext, extracted: str = "") -> str:
+    msg = ctx.message or ""
+    try:
+        from .commerce.price_turn_classifier import (  # noqa: PLC0415
+            PriceTurnKind,
+            classify_price_turn,
+        )
+
+        if getattr(ctx.state, "current_product_focus", None) and classify_price_turn(
+            ctx
+        ) in {
+            PriceTurnKind.PRONOUN_REFERENCE,
+            PriceTurnKind.PRICE_COMMENT,
+            PriceTurnKind.UNIT_PRICE_REFERENCE,
+        }:
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn context probe
+        pass
+    deterministic = _deterministic_commerce_subject(ctx, extracted)
+    if deterministic:
+        return deterministic
     intent = ctx.intent
     slots = getattr(intent, "slots", None) or {}
     slot_query = (
         str(slots.get("product_query") or "").strip()
         or str(slots.get("product_name") or "").strip()
     )
-    if slot_query:
+    if slot_query and not _is_greeting_or_social_slot_token(slot_query, msg):
         return slot_query
-    if str(extracted or "").strip():
-        return str(extracted or "").strip()
-    try:
-        from .commerce.catalog_query_normalization import (  # noqa: PLC0415
-            extract_english_order_product_query,
-        )
-
-        en = extract_english_order_product_query(ctx.message or "")
-        if en:
-            return en
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from .commerce.price_turn_classifier import (  # noqa: PLC0415
-            normalize_price_subject,
-        )
-
-        return normalize_price_subject(ctx)
-    except Exception:  # noqa: BLE001 — never break routing
-        return _extract_price_subject(ctx.message or "")
+    return ""
 
 
 def _is_unit_only_price_message(message: str) -> bool:
@@ -807,7 +972,7 @@ def is_solution_seeking_commerce(ctx: BrainContext) -> bool:
         from .commerce.solution_seeking import classify_solution_seeking_commerce  # noqa: PLC0415
 
         return classify_solution_seeking_commerce(ctx.message or "") is not None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional solution-seeking classifier
         return False
 
 
@@ -854,7 +1019,7 @@ def is_price_without_product_context(
         kind = classify_price_turn(ctx)
         if kind == PriceTurnKind.PRODUCT_PRICE_ASK:
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional price-turn classification probe
         if _extract_price_subject(msg):
             return False
     norm = _normalize_ar(msg)
@@ -867,7 +1032,7 @@ def _has_fulfillment_message_context(message: str) -> bool:
 
         if detect_fulfillment_update(message or "", {}):
             return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional fulfillment update probe
         pass
     try:
         from services.address_resolution import extract_address_signals  # noqa: PLC0415
@@ -987,7 +1152,7 @@ def product_discovery_block_reason(
             intent_confidence=getattr(intent, "confidence", None),
         ):
             return "non_commerce"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional non-commerce classification probe
         pass
 
     if is_price_without_product_context(ctx):
@@ -1031,7 +1196,7 @@ def product_discovery_block_reason(
 
         if is_bare_start_order_phrase(msg):
             return None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional bare start-order probe
         pass
 
     if src in _TOP_PRODUCTS_SOURCES and not has_explicit_broad_browse_request(msg):
@@ -1226,14 +1391,18 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
         logger.exception("[PRODUCT_DISCOVERY] category_price_browse_import_failed")
         return None
 
-    subject = extract_browse_category_scope(msg, "")
+    scope_subject = extract_browse_category_scope(msg, "")
+    price_subject = _extract_price_subject(msg)
+    subject = scope_subject
+    if price_subject and _subject_has_product_substance(price_subject):
+        if not scope_subject or _is_greeting_or_social_slot_token(scope_subject, msg):
+            subject = price_subject
     if not subject:
         return None
 
     if not is_category_price_or_availability_message(msg, ""):
         return None
 
-    price_subject = _extract_price_subject(msg)
     if price_subject and not is_generic_category_noun(price_subject):
         return None
 

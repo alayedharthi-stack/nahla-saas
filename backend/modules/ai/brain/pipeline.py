@@ -2855,6 +2855,7 @@ class MerchantBrain:
 
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
+        result.data["compose_reply_candidate"] = str(reply or "").strip()
 
         try:
             from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
@@ -3230,7 +3231,20 @@ class MerchantBrain:
                 and reply.strip()
                 and not reply_already_has_salam_return(reply)
             ):
+                _before_greeting_etiquette = reply
                 reply = _prepend_first_contact_salaam(reply, ctx)
+                if reply != _before_greeting_etiquette:
+                    result.data["final_text_transformed"] = True
+                    _transform_reasons = [
+                        str(reason)
+                        for reason in (
+                            result.data.get("final_transform_reasons") or []
+                        )
+                        if str(reason or "").strip()
+                    ]
+                    if "greeting_etiquette" not in _transform_reasons:
+                        _transform_reasons.append("greeting_etiquette")
+                    result.data["final_transform_reasons"] = _transform_reasons
                 if not new_state.greeted:
                     new_state.greeted = True
                     new_state.assistant_identity_introduced = True
@@ -3478,6 +3492,10 @@ class MerchantBrain:
             and str(result.data.get("turn_owner") or "") == "catalog_navigation"
         )
         _owned_reply_snapshot = reply or ""
+        result.data.setdefault(
+            "compose_reply_candidate",
+            str(_owned_reply_snapshot or "").strip(),
+        )
         _owned_path_snapshot = _chosen_path
         _owned_kind_snapshot = str(result.data.get("discovery_output_kind") or "")
         _owned_hash_snapshot = str(result.data.get("owner_reply_hash") or "")
@@ -4134,8 +4152,141 @@ class MerchantBrain:
                     customer_conditional_coupon_compose_active=bool(
                         result.data.get("customer_conditional_coupon_compose_active")
                     ),
+                    llm_candidate_present=bool(
+                        result.data.get("llm_candidate_present")
+                    ),
                 )
-                if _crqg.replaced:
+                if _crqg.requires_grounded_recompose:
+                    result.data["quality_guard_recompose_attempted"] = True
+                    recomposed_reply = await self._composer.compose(decision, result, ctx)
+                    if (recomposed_reply or "").strip():
+                        result.data["compose_reply_candidate"] = (
+                            recomposed_reply or ""
+                        ).strip()
+                        _crqg = apply_commerce_reply_quality_guard(
+                            reply=recomposed_reply or "",
+                            inbound_text=message or "",
+                            intent_name=str(getattr(intent, "name", "") or ""),
+                            primary_customer_goal=str(
+                                getattr(
+                                    getattr(ctx, "reply_state", None),
+                                    "primary_customer_goal",
+                                    "",
+                                )
+                                or ""
+                            ),
+                            conversation_objective=str(
+                                getattr(
+                                    state,
+                                    "active_conversation_objective",
+                                    "",
+                                )
+                                or ""
+                            ),
+                            locale=str(
+                                (profile or {}).get("preferred_language") or "ar"
+                            ),
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                            state=new_state,
+                            inbound_metadata=_crqg_meta,
+                            decision_topic=str(
+                                (decision.args or {}).get("topic") or ""
+                            ),
+                            availability_polarity=str(
+                                (decision.args or {}).get(
+                                    "availability_polarity",
+                                )
+                                or ""
+                            ),
+                            chosen_path=_chosen_path,
+                            kb_availability_facts=(decision.args or {}).get(
+                                "allowed_facts",
+                            ),
+                            trusted_coupon_offer_facts=_tc_offer_facts or None,
+                            customer_conditional_coupon_facts=(
+                                _cc_coupon_facts or None
+                            ),
+                            customer_conditional_coupon_compose_active=bool(
+                                result.data.get(
+                                    "customer_conditional_coupon_compose_active",
+                                )
+                            ),
+                            llm_candidate_present=bool(
+                                result.data.get("llm_candidate_present")
+                            ),
+                        )
+                    if _crqg.requires_grounded_recompose:
+                        if decision.action == ACTION_SEARCH_PRODUCTS:
+                            from .clarification.resolved_product_guard import (  # noqa: PLC0415
+                                extract_resolved_product_subject,
+                            )
+                            from .persona.catalog_product_answer import (  # noqa: PLC0415
+                                build_catalog_product_answer_emergency_outcome,
+                                build_catalog_search_miss_emergency_outcome,
+                                classify_catalog_question_kind,
+                            )
+                            from .persona.integration import (  # noqa: PLC0415
+                                _ai_settings_from_ctx,
+                            )
+
+                            search_query = str(
+                                (decision.args or {}).get("query") or ""
+                            ).strip()
+                            fallback_products = list(
+                                result.data.get("catalog_fact_products")
+                                or result.data.get("products")
+                                or []
+                            )
+                            if fallback_products:
+                                fallback_text, _, fallback_event = (
+                                    build_catalog_product_answer_emergency_outcome(
+                                        tenant_id=int(tenant_id),
+                                        customer_phone=str(customer_phone or ""),
+                                        inbound_text=str(message or ""),
+                                        products=fallback_products,
+                                        catalog_search_query=search_query,
+                                        search_result_count=len(fallback_products),
+                                        question_kind=classify_catalog_question_kind(
+                                            str(message or ""),
+                                            query=search_query,
+                                            decision_args=dict(decision.args or {}),
+                                        ),
+                                        decision_args=dict(decision.args or {}),
+                                        ai_settings=_ai_settings_from_ctx(ctx),
+                                        reason="quality_guard_recompose_invalid",
+                                    )
+                                )
+                            else:
+                                fallback_text, _, fallback_event = (
+                                    build_catalog_search_miss_emergency_outcome(
+                                        tenant_id=int(tenant_id),
+                                        customer_phone=str(customer_phone or ""),
+                                        inbound_text=str(message or ""),
+                                        resolved_subject=(
+                                            extract_resolved_product_subject(
+                                                ctx,
+                                                query=search_query,
+                                            )
+                                            or search_query
+                                        ),
+                                        catalog_search_query=search_query,
+                                        chosen_path="catalog_miss_resolved_subject",
+                                        ai_settings=_ai_settings_from_ctx(ctx),
+                                        reason="quality_guard_recompose_invalid",
+                                    )
+                                )
+                            result.data.update(fallback_event)
+                            result.data["quality_guard_recompose_attempted"] = True
+                            result.data["compose_route_attempted"] = True
+                            reply = fallback_text
+                        else:
+                            reply = _crqg.reply
+                    else:
+                        reply = _crqg.reply
+                    if _crqg.replaced and not _crqg.requires_grounded_recompose:
+                        _guard_replaced["commerce_reply_quality_guard"] = True
+                elif _crqg.replaced:
                     reply = _crqg.reply
                     _guard_replaced["commerce_reply_quality_guard"] = True
         except Exception as _crqg_exc:  # noqa: BLE001
@@ -4554,6 +4705,13 @@ class MerchantBrain:
 
         from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
             extract_reply_metadata_export,
+            finalize_post_guard_compose_provenance,
+        )
+
+        finalize_post_guard_compose_provenance(
+            result.data,
+            final_text=reply or "",
+            guard_replaced=_guard_replaced,
         )
 
         return {
@@ -4563,6 +4721,15 @@ class MerchantBrain:
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,
             "chosen_path": _chosen_path,
+            "compose_route_attempted": bool(
+                result.data.get("compose_route_attempted")
+            ),
+            "quality_guard_recompose_attempted": bool(
+                result.data.get("quality_guard_recompose_attempted")
+            ),
+            "compose_reply_candidate": str(
+                result.data.get("compose_reply_candidate") or _owned_reply_snapshot or "",
+            ).strip(),
             **extract_reply_metadata_export(
                 dict(getattr(result, "data", None) or {}),
                 chosen_path=_chosen_path,
