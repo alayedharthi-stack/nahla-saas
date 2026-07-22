@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, patch
 
@@ -1126,3 +1128,229 @@ class TestCatalogPriceGuardStaleRowHandoff:
         assert diag["catalog_fact_rebuild_source"] == "db_by_catalog_product_ids"
         assert 387 in diag["catalog_fact_price_values"]
         assert 109 in diag["catalog_fact_product_ids"]
+
+
+class TestCatalogCompoundProvenancePipeline:
+    def test_guard_context_accepts_compound_requested_facets(self) -> None:
+        from modules.ai.brain import pipeline as pl  # noqa: PLC0415
+
+        data = {
+            "persona_compose": {
+                "surface": "catalog_product_answer",
+                "source": "persona_llm",
+            },
+            "question_kind": "compound",
+            "requested_facets": ["price", "availability"],
+            "price_source": "catalog",
+            "catalog_product_ids": [501],
+            "checkout_pressure_allowed": False,
+        }
+        assert pl._is_catalog_product_price_guard_context(data) is True
+
+    def test_live_pipeline_records_service_closer_llm_provenance(self) -> None:
+        from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+        from tests.commerce_scenario_fixtures import (  # noqa: PLC0415
+            make_scenario_db,
+            seed_conversation,
+            seed_customer,
+            seed_tenant,
+        )
+
+        session, _engine = make_scenario_db()
+        tenant = seed_tenant(session, name="متجر تجريبي عام")
+        customer = seed_customer(session, tenant.id, name="أحمد سالم")
+        conversation = seed_conversation(
+            session,
+            tenant.id,
+            customer_id=customer.id,
+        )
+        brain = get_brain()
+        message = "كم سعر حذاء رياضي أبيض وهل هو متوفر؟"
+        candidate = (
+            "حذاء رياضي أبيض سعره 220 ريال وهو متوفر للطلب. "
+            "كيف أقدر أساعدك اليوم؟"
+        )
+        product = {
+            "id": 501,
+            "title": "حذاء رياضي أبيض",
+            "price": 220,
+            "can_checkout": True,
+            "in_stock": True,
+        }
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": "حذاء رياضي أبيض"},
+        )
+        action_result = ActionResult(
+            success=True,
+            data={
+                "query": "حذاء رياضي أبيض",
+                "products": [product],
+                "catalog_fact_products": [product],
+            },
+        )
+
+        stack = ExitStack()
+        stack.enter_context(patch("core.billing.has_billing_access", return_value=True))
+        stack.enter_context(
+            patch(
+                "core.wa_usage.check_limit",
+                return_value=SimpleNamespace(
+                    allowed=True,
+                    used_total=0,
+                    limit=1000,
+                    reason="",
+                ),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "core.ai_disabled_gate.is_ai_disabled_for_conversation",
+                return_value=SimpleNamespace(disabled=False, reason=None),
+            )
+        )
+        stack.enter_context(
+            patch("core.store_knowledge.build_merchant_context", return_value={})
+        )
+        stack.enter_context(
+            patch.object(
+                brain._classifier,
+                "classify",
+                return_value=Intent(
+                    name="ask_price",
+                    confidence=0.95,
+                    raw_message=message,
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(brain._decision_engine, "decide", return_value=decision)
+        )
+        stack.enter_context(
+            patch.object(brain._policy_gate, "gate", side_effect=lambda d, _ctx: d)
+        )
+        stack.enter_context(
+            patch.object(
+                brain._state_store,
+                "load",
+                return_value=MerchantConversationState(
+                    stage="exploring",
+                    greeted=True,
+                ),
+            )
+        )
+        stack.enter_context(patch.object(brain._state_store, "save"))
+        stack.enter_context(
+            patch.object(
+                brain._facts_loader,
+                "load",
+                return_value=CommerceFacts(
+                    store_name="متجر تجريبي عام",
+                    has_products=True,
+                    product_count=1,
+                    in_stock_count=1,
+                    orderable=True,
+                ),
+            )
+        )
+        stack.enter_context(patch.object(brain._memory_updater, "update"))
+        stack.enter_context(
+            patch.object(
+                brain._executor,
+                "execute",
+                new=AsyncMock(return_value=action_result),
+            )
+        )
+        compose_call = stack.enter_context(
+            patch(
+                "modules.ai.brain.persona.catalog_product_answer."
+                "try_compose_catalog_product_answer",
+                new=AsyncMock(
+                    return_value=(
+                        candidate,
+                        None,
+                        {
+                            "chosen_path": "fact_bound_persona_compose",
+                            "persona_compose": {
+                                "source": "persona_llm",
+                                "surface": "catalog_product_answer",
+                            },
+                            "compose_source": "persona_llm",
+                            "response_mode": "grounded_persona_compose",
+                            "llm_candidate_present": True,
+                            "final_text_transformed": False,
+                            "final_transform_reasons": [],
+                            "final_customer_text_source": "persona_llm",
+                            "question_kind": "compound",
+                            "requested_facets": ["price", "availability"],
+                            "price_source": "catalog",
+                            "availability_source": "catalog",
+                            "checkout_pressure_allowed": False,
+                            "catalog_product_ids": [501],
+                            "catalog_fact_products": [product],
+                        },
+                    )
+                ),
+            )
+        )
+
+        async def _run() -> dict[str, Any]:
+            with stack:
+                return await brain.process(
+                    db=session,
+                    tenant_id=tenant.id,
+                    customer_phone="966500000001",
+                    message=message,
+                    history=[],
+                    profile={
+                        "id": customer.id,
+                        "name": "أحمد سالم",
+                        "preferred_language": "ar",
+                    },
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+
+        try:
+            output = asyncio.run(_run())
+        finally:
+            session.close()
+
+        compose_call.assert_awaited_once()
+        assert "كيف أقدر أساعدك اليوم" not in output["reply"]
+        assert "220" in output["reply"]
+        assert output["compose_source"] == "persona_llm"
+        assert output["llm_candidate_present"] is True
+        assert output["final_text_transformed"] is True
+        assert "service_closer_guard" in output["final_transform_reasons"]
+        assert output["final_customer_text_source"] == "persona_llm_postprocess"
+        assert output["decision_action"] == ACTION_SEARCH_PRODUCTS
+        assert output["persona_ownership"]["expression_owner"] == "persona_llm"
+        assert output["persona_ownership"]["bypass_reason"] is None
+
+    def test_persona_llm_compose_overrides_template_search_products_owner(self) -> None:
+        from modules.ai.brain.persona_ownership import build_brain_persona_ownership  # noqa: PLC0415
+        from modules.ai.compose.reply_metadata_export import approved_compose_source  # noqa: PLC0415
+
+        result_data = {
+            "compose_source": "persona_llm",
+            "question_kind": "compound",
+            "requested_facets": ["price", "availability"],
+        }
+        ownership = build_brain_persona_ownership(
+            decision_action="search_products",
+            decision_args={"query": "حذاء رياضي أبيض"},
+            reply_state=None,
+            chosen_path="fact_bound_persona_compose",
+            guard_replaced={},
+        )
+        if approved_compose_source(result_data.get("compose_source")) == "persona_llm":
+            ownership.stamp_persona(
+                topic=str(result_data.get("question_kind") or "catalog_product_answer"),
+                kind="grounded_persona_compose",
+                owner="persona_llm",
+            )
+        payload = ownership.to_dict()
+        assert payload["persona_stamped"] is True
+        assert payload["expression_owner"] == "persona_llm"
+        assert payload["bypass_reason"] is None
