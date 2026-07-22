@@ -4655,11 +4655,10 @@ class MerchantBrain:
                 intent=str(getattr(intent, "name", "") or ""),
                 final_text=reply or "",
             )
-        except Exception as _otp_reconcile_exc:  # noqa: BLE001
-            logger.debug(
-                "[OUTBOUND_TEXT_POLICY] final reconcile skipped tenant=%s err=%s",
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[OUTBOUND_TEXT_POLICY] final reconcile failed tenant=%s",
                 tenant_id,
-                _otp_reconcile_exc,
             )
 
         # ── Persona ownership snapshot (final boundary, post-finalization) ─
