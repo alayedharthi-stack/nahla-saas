@@ -234,6 +234,7 @@ CODE_PROVENANCE_INCOMPLETE = "provenance_incomplete"
 CODE_HUMAN_ASSESSMENT_REQUIRED = "human_assessment_required"
 CODE_CONFIG_DRIFT = "config_drift"
 CODE_TENANT_1_PASS_ARTIFACT_INVALID = "tenant_1_pass_artifact_invalid"
+CODE_ORDER_SIDE_EFFECT_DETECTED = "order_side_effect_detected"
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 MANIFEST_RELATIVE_PATH = Path("docs/engineering/real-channel-acceptance-scenario-manifest.json")
