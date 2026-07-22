@@ -22,6 +22,11 @@ from typing import Any, Mapping, Sequence
 
 from sqlalchemy import create_engine, text
 
+from scripts.operators.real_channel_acceptance_order_side_effect_signatures import (
+    capture_order_side_effect_arm,
+    evaluate_order_side_effect_gate,
+    fetch_tenant_order_rows,
+)
 from scripts.operators.real_channel_conversational_acceptance import (
     execute_channel_health_preflight,
     gate_runtime_revision_attestation,
@@ -46,7 +51,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     CODE_INBOUND_ORIGIN_REJECTED,
     CODE_INBOUND_PROVIDER_ID_MISSING,
     CODE_INBOUND_PROVIDER_ID_REJECTED,
-    CODE_OUTBOUND_PROVIDER_ID_MISSING,
+    CODE_ORDER_SIDE_EFFECT_DETECTED,
     CODE_PHONE_NOT_ALLOWLISTED,
     CODE_PROVENANCE_INCOMPLETE,
     CODE_RATE_CAP_EXCEEDED,
@@ -411,10 +416,16 @@ def next_scenario(session_id: str, *, app_root: Path | None = None) -> dict[str,
     manifest = load_scenario_manifest(app_root)
     by_id = {row["scenario_id"]: row for row in manifest["scenarios"]}
     scenario = by_id[session["scenario_ids"][index]]
+    with _engine().connect() as conn:
+        order_side_effect_arm = capture_order_side_effect_arm(
+            conn,
+            tenant_id=int(session["tenant_id"]),
+        )
     session["active_scenario"] = {
         "scenario_id": scenario["scenario_id"],
         "opened_at_utc": _utc_now(),
         "cursor": session["event_cursor"],
+        "order_side_effect_arm": order_side_effect_arm,
         "machine_observation": None,
         "device_attestation": None,
         "human_assessment": None,
@@ -779,6 +790,18 @@ def observe(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]:
     if latency_ms is None or latency_ms > int(scenario["latency_budget_ms"]):
         blockers.append("latency_budget_exceeded")
 
+    order_side_effect_evidence: dict[str, Any] | None = None
+    armed = (session.get("active_scenario") or {}).get("order_side_effect_arm")
+    if isinstance(armed, Mapping):
+        with _engine().connect() as conn:
+            after_rows = fetch_tenant_order_rows(conn, tenant_id=int(session["tenant_id"]))
+        order_side_effect_evidence = evaluate_order_side_effect_gate(
+            armed=armed,
+            after_rows=after_rows,
+        )
+        if order_side_effect_evidence.get("ai_side_effect_detected"):
+            blockers.append(CODE_ORDER_SIDE_EFFECT_DETECTED)
+
     observation = {
         "machine_verdict": "candidate_pass" if not blockers else "fail",
         "evidence_channel": inbound["evidence_channel"],
@@ -802,6 +825,7 @@ def observe(session_id: str, *, app_root: Path | None = None) -> dict[str, Any]:
         "state_evidence": {
             "expected_contract": scenario["expected_state"],
             "observed": usage.get("state_evidence") or {},
+            "order_side_effects": order_side_effect_evidence,
             "machine_scope": (
                 "persisted conversation/order/action state; semantic truthfulness "
                 "requires closed human rubric"
