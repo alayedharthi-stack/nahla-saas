@@ -131,6 +131,34 @@ FORBIDDEN_SIGNATURE_WEAKENING: dict[str, str] = {
     "META_WEBHOOK_ALLOW_MISSING_SIGNATURE": "true",
 }
 
+# Closed acceptance target path — Meta Cloud API direct only.
+# 360dialog is legacy/transition observability; it must not satisfy readiness.
+ACCEPTANCE_TARGET_PROVIDER_PATH = "meta_cloud_api_direct"
+LEGACY_PROVIDER_PATH = "360dialog_legacy_transition_only"
+
+# Closed target onboarding — per-merchant Meta Embedded Signup (merchant-owned assets).
+META_ONBOARDING_TARGET_PATH = "meta_embedded_signup_per_merchant"
+META_ONBOARDING_MERCHANT_OWNED_ASSETS: tuple[str, ...] = (
+    "waba_id",
+    "phone_number_id",
+    "access_token",
+)
+META_ONBOARDING_EXTERNAL_BLOCKER = "meta_business_verification"
+
+# Pre-verification acceptance only: Tenant 1 direct-Meta test channel cutover.
+# Must remain reversible, acceptance-only, and must not unlock production.
+ACCEPTANCE_CUTOVER_LABEL = "acceptance_only_not_production"
+ACCEPTANCE_CUTOVER_SCOPE = "tenant_1_preverification_direct_meta_test_channel"
+TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID = 1
+ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS: tuple[str, ...] = (
+    "meta_webhook_target",
+    "staging_env_secrets_fingerprints",
+    "staging_db_wa_connection_binding",
+)
+ACCEPTANCE_CUTOVER_FORBIDDEN_UNLOCKS: frozenset[str] = frozenset(
+    {"production", "runtime_abstraction", "permanent_staging_waba"}
+)
+
 # Channel readiness — report absent names; never claim READY without these present.
 CHANNEL_READINESS_REQUIRED_KEYS: tuple[str, ...] = (
     "META_APP_SECRET",
@@ -138,10 +166,25 @@ CHANNEL_READINESS_REQUIRED_KEYS: tuple[str, ...] = (
     "WHATSAPP_TOKEN",
     "BACKEND_URL",
 )
-D360_READINESS_KEYS: tuple[str, ...] = (
+# Legacy D360 keys may remain migratable but never count toward acceptance readiness.
+D360_LEGACY_DETECTION_KEYS: tuple[str, ...] = (
     "D360_API_BASE_URL",
     "D360_PARTNER_ID",
 )
+# Backward alias — do not use for readiness gaps.
+D360_READINESS_KEYS = D360_LEGACY_DETECTION_KEYS
+
+META_DIRECT_WEBHOOK_ROUTE = "/webhook/whatsapp"
+# Used only for Tenant 1 acceptance-only cutover attestation — not a permanent staging WABA.
+ACCEPTANCE_CUTOVER_DB_BINDING_FIELDS: tuple[str, ...] = (
+    "waba_id",
+    "phone_number_id",
+    "tenant_id",
+)
+ACCEPTANCE_CUTOVER_DB_BINDING_PROVIDER_VALUE = "meta"
+# Backward aliases — prefer ACCEPTANCE_CUTOVER_* names.
+STAGING_DB_WA_BINDING_REQUIRED_FIELDS = ACCEPTANCE_CUTOVER_DB_BINDING_FIELDS
+STAGING_DB_WA_BINDING_PROVIDER_VALUE = ACCEPTANCE_CUTOVER_DB_BINDING_PROVIDER_VALUE
 
 # ── Phases ───────────────────────────────────────────────────────────────────
 PHASE_DEFAULT_OFF = "default_off"
@@ -177,6 +220,7 @@ CODE_PROTECTED_VARIABLE_TOUCH = "protected_variable_touch"
 CODE_SIGNATURE_WEAKENING = "signature_weakening"
 CODE_REFERENCE_BINDING_REJECTED = "reference_binding_rejected"
 CODE_CHANNEL_READINESS_GAP = "channel_readiness_gap"
+CODE_CHANNEL_D360_ONLY_LEGACY_PATH = "channel_d360_only_legacy_path"
 CODE_RUNTIME_REVISION_MISMATCH = "runtime_revision_mismatch"
 CODE_DEPLOY_ATTESTATION_FAILED = "deploy_attestation_failed"
 CODE_SECRET_LEAKAGE = "secret_leakage"
@@ -411,15 +455,161 @@ def build_migration_plan(
     }
 
 
-def channel_readiness_gaps(variables: Mapping[str, str]) -> list[str]:
+def _variable_present(variables: Mapping[str, str], key: str) -> bool:
+    return bool((variables.get(key) or "").strip())
+
+
+def is_d360_legacy_present(variables: Mapping[str, str]) -> bool:
+    return any(_variable_present(variables, key) for key in D360_LEGACY_DETECTION_KEYS)
+
+
+def is_meta_credential_complete(variables: Mapping[str, str]) -> bool:
+    return all(_variable_present(variables, key) for key in CHANNEL_READINESS_REQUIRED_KEYS)
+
+
+def is_d360_only_legacy_path(variables: Mapping[str, str]) -> bool:
+    """True when D360 legacy vars exist but Meta direct credentials are incomplete."""
+    return is_d360_legacy_present(variables) and not is_meta_credential_complete(variables)
+
+
+def meta_signature_mode_gaps(variables: Mapping[str, str]) -> list[str]:
+    gaps: list[str] = []
+    if _variable_present(variables, "META_WEBHOOK_ENFORCE_SIGNATURE"):
+        if (variables.get("META_WEBHOOK_ENFORCE_SIGNATURE") or "").strip().lower() == "false":
+            gaps.append("META_WEBHOOK_ENFORCE_SIGNATURE")
+    if _variable_present(variables, "META_WEBHOOK_ALLOW_MISSING_SIGNATURE"):
+        if (variables.get("META_WEBHOOK_ALLOW_MISSING_SIGNATURE") or "").strip().lower() == "true":
+            gaps.append("META_WEBHOOK_ALLOW_MISSING_SIGNATURE")
+    return gaps
+
+
+def meta_webhook_route_gaps(routes: tuple[str, ...] | list[str] | None) -> list[str]:
+    if not routes:
+        return ["meta_direct_webhook_route"]
+    normalized = {str(route).strip().rstrip("/") or "/" for route in routes}
+    if META_DIRECT_WEBHOOK_ROUTE not in normalized:
+        return ["meta_direct_webhook_route"]
+    return []
+
+
+def staging_db_wa_binding_gaps(binding: Mapping[str, str] | None) -> list[str]:
+    """Acceptance-only cutover binding gaps. None binding is not a gap by default."""
+    if binding is None:
+        return []
+    gaps: list[str] = []
+    for field in ACCEPTANCE_CUTOVER_DB_BINDING_FIELDS:
+        if not str(binding.get(field) or "").strip():
+            gaps.append(f"acceptance_cutover_db_binding.{field}")
+    provider = str(
+        binding.get("provider") or ACCEPTANCE_CUTOVER_DB_BINDING_PROVIDER_VALUE
+    ).strip().lower()
+    if provider != ACCEPTANCE_CUTOVER_DB_BINDING_PROVIDER_VALUE:
+        gaps.append("acceptance_cutover_db_binding.provider")
+    tenant_id = str(binding.get("tenant_id") or "").strip()
+    if tenant_id and tenant_id != str(TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID):
+        gaps.append("acceptance_cutover_db_binding.tenant_id")
+    return gaps
+
+
+def acceptance_cutover_snapshot_gaps(snapshot: Mapping[str, Any] | None) -> list[str]:
+    if snapshot is None:
+        return ["acceptance_cutover_snapshot"]
+    gaps: list[str] = []
+    if str(snapshot.get("label") or "").strip() != ACCEPTANCE_CUTOVER_LABEL:
+        gaps.append("acceptance_cutover_snapshot.label")
+    if str(snapshot.get("scope") or "").strip() != ACCEPTANCE_CUTOVER_SCOPE:
+        gaps.append("acceptance_cutover_snapshot.scope")
+    for component in ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS:
+        if component not in snapshot:
+            gaps.append(f"acceptance_cutover_snapshot.{component}")
+    unlocks = snapshot.get("forbidden_unlocks_respected")
+    if unlocks is not True:
+        gaps.append("acceptance_cutover_snapshot.forbidden_unlocks_respected")
+    return gaps
+
+
+def channel_readiness_gaps(
+    variables: Mapping[str, str],
+    *,
+    routes: tuple[str, ...] | list[str] | None = None,
+    db_binding: Mapping[str, str] | None = None,
+    acceptance_cutover_snapshot: Mapping[str, Any] | None = None,
+    require_tenant_1_cutover: bool = False,
+) -> list[str]:
+    """Meta config gaps only. Route readiness requires external attestation."""
+    _ = routes  # inventory-only callers may pass observed routes without claiming readiness
+    gaps = meta_config_readiness_gaps(variables)
+    if require_tenant_1_cutover:
+        gaps.extend(acceptance_cutover_snapshot_gaps(acceptance_cutover_snapshot))
+        gaps.extend(staging_db_wa_binding_gaps(db_binding))
+    return gaps
+
+
+def meta_config_readiness_gaps(variables: Mapping[str, str]) -> list[str]:
+    """Env-key readiness only. D360 absence is never reported as a gap."""
     gaps: list[str] = []
     for key in CHANNEL_READINESS_REQUIRED_KEYS:
-        if not (variables.get(key) or "").strip():
+        if not _variable_present(variables, key):
             gaps.append(key)
-    d360_present = any((variables.get(key) or "").strip() for key in D360_READINESS_KEYS)
-    if not d360_present:
-        gaps.extend(list(D360_READINESS_KEYS))
+    gaps.extend(meta_signature_mode_gaps(variables))
     return gaps
+
+
+def evaluate_meta_channel_readiness(
+    variables: Mapping[str, str],
+    *,
+    routes: tuple[str, ...] | list[str] | None = None,
+    db_binding: Mapping[str, str] | None = None,
+    acceptance_cutover_snapshot: Mapping[str, Any] | None = None,
+    require_tenant_1_cutover: bool = False,
+) -> dict[str, Any]:
+    d360_only = is_d360_only_legacy_path(variables)
+    gaps = channel_readiness_gaps(
+        variables,
+        routes=routes,
+        db_binding=db_binding,
+        acceptance_cutover_snapshot=acceptance_cutover_snapshot,
+        require_tenant_1_cutover=require_tenant_1_cutover,
+    )
+    meta_config_present = (not d360_only) and not meta_config_readiness_gaps(variables)
+    return {
+        "acceptance_target_path": ACCEPTANCE_TARGET_PROVIDER_PATH,
+        "meta_onboarding_target_path": META_ONBOARDING_TARGET_PATH,
+        "meta_onboarding_external_blocker": META_ONBOARDING_EXTERNAL_BLOCKER,
+        "legacy_provider_path_excluded": LEGACY_PROVIDER_PATH,
+        "d360_only_legacy_path": d360_only,
+        "d360_legacy_present": is_d360_legacy_present(variables),
+        "meta_credential_complete": is_meta_credential_complete(variables),
+        "meta_config_present": meta_config_present,
+        "tenant_1_acceptance_cutover_required": require_tenant_1_cutover,
+        "acceptance_cutover_label": ACCEPTANCE_CUTOVER_LABEL if require_tenant_1_cutover else None,
+        "channel_readiness_gaps": gaps,
+        "channel_ready": meta_config_present and not gaps,
+    }
+
+
+def build_acceptance_cutover_guidance() -> dict[str, Any]:
+    """Document-only guidance for Tenant 1 pre-verification cutover. No mutations."""
+    return {
+        "label": ACCEPTANCE_CUTOVER_LABEL,
+        "scope": ACCEPTANCE_CUTOVER_SCOPE,
+        "tenant_id": TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID,
+        "target_onboarding_path": META_ONBOARDING_TARGET_PATH,
+        "external_blocker": META_ONBOARDING_EXTERNAL_BLOCKER,
+        "merchant_owned_assets": list(META_ONBOARDING_MERCHANT_OWNED_ASSETS),
+        "snapshot_components": list(ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS),
+        "forbidden_unlocks": sorted(ACCEPTANCE_CUTOVER_FORBIDDEN_UNLOCKS),
+        "rollback_required": True,
+        "production_unlock": False,
+        "runtime_abstraction": False,
+        "permanent_staging_waba_dependency": False,
+        "operator_note": (
+            "Pre-verification acceptance only. Snapshot Meta webhook target, staging "
+            "env secret fingerprints, and Tenant 1 whatsapp_connections binding before "
+            "cutover; restore from snapshot after acceptance window. Do not perform "
+            "cutover in CI or from this governance PR."
+        ),
+    }
 
 
 def sanitize_report_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -431,6 +621,13 @@ def sanitize_report_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "ACCEPTANCE_CUTOVER_DB_BINDING_FIELDS",
+    "ACCEPTANCE_CUTOVER_DB_BINDING_PROVIDER_VALUE",
+    "ACCEPTANCE_CUTOVER_FORBIDDEN_UNLOCKS",
+    "ACCEPTANCE_CUTOVER_LABEL",
+    "ACCEPTANCE_CUTOVER_SCOPE",
+    "ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS",
+    "ACCEPTANCE_TARGET_PROVIDER_PATH",
     "ALLOWED_STAGING_DATABASE_REFERENCE_MARKERS",
     "ALLOWED_STAGING_REDIS_REFERENCE_MARKERS",
     "APPLY_CONFIRM_ENV",
@@ -454,6 +651,7 @@ __all__ = [
     "CODE_ARCH001_SHADOW_ACTIVE",
     "CODE_ARCH001_SIGNOFF_MISSING",
     "CODE_ARCH001_TEARDOWN_PROOF_MISSING",
+    "CODE_CHANNEL_D360_ONLY_LEGACY_PATH",
     "CODE_CHANNEL_READINESS_GAP",
     "CODE_COMMAND_INVALID",
     "CODE_CONFLICT_DETECTED",
@@ -470,12 +668,29 @@ __all__ = [
     "CODE_SNAPSHOT_INVALID",
     "CODE_SNAPSHOT_KEY_MISSING",
     "CODE_STAGING_IDENTITY_REJECTED",
+    "D360_LEGACY_DETECTION_KEYS",
     "D360_READINESS_KEYS",
+    "evaluate_meta_channel_readiness",
     "FORBIDDEN_ENVIRONMENT_MARKERS",
     "FORBIDDEN_SERVICE_NAMES",
     "FORBIDDEN_SIGNATURE_WEAKENING",
+    "is_d360_legacy_present",
+    "is_d360_only_legacy_path",
+    "is_meta_credential_complete",
+    "LEGACY_PROVIDER_PATH",
+    "all_migratable_keys",
+    "META_ONBOARDING_EXTERNAL_BLOCKER",
+    "META_ONBOARDING_MERCHANT_OWNED_ASSETS",
+    "META_ONBOARDING_TARGET_PATH",
     "LEGACY_SOURCE_SERVICE_ID",
     "LEGACY_SOURCE_SERVICE_NAME",
+    "meta_config_readiness_gaps",
+    "meta_signature_mode_gaps",
+    "meta_webhook_route_gaps",
+    "staging_db_wa_binding_gaps",
+    "META_DIRECT_WEBHOOK_ROUTE",
+    "TENANT_1_ACCEPTANCE_CUTOVER_TENANT_ID",
+    "STAGING_DB_WA_BINDING_REQUIRED_FIELDS",
     "MASTER_ENABLE_ENV",
     "MIGRATABLE_VARIABLE_KEYS",
     "PHASE_APPLY",
@@ -511,7 +726,8 @@ __all__ = [
     "STAGING_RAILWAY_ENVIRONMENT_ID",
     "STAGING_RAILWAY_PROJECT_ID",
     "STAGING_SERVICE_ALLOWLIST",
-    "all_migratable_keys",
+    "acceptance_cutover_snapshot_gaps",
+    "build_acceptance_cutover_guidance",
     "build_migration_plan",
     "channel_readiness_gaps",
     "detect_conflicts",
