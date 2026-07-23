@@ -5,6 +5,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from scripts.operators.arch001_container_restart_evidence import (
+    RESTART_COLLECTION_METHOD_PROC1_STAT_FIELD22,
+    RESTART_EVIDENCE_SNAPSHOT_KEYS,
+    RESTART_PROOF_CONTAINER_ID_CHANGE,
+    RESTART_PROOF_PID1_STARTTIME_CHANGE,
+)
+
 INITIATIVE_ID = "ARCH-001-PREPROD-SYNTHETIC-SIGNOFF-v2"
 BUNDLE_SCHEMA_VERSION = "product_availability_preprod_synthetic_signoff_v2"
 PHASE_ARTIFACT_SCHEMA_VERSION = "arch001_preprod_phase_artifact_v1"
@@ -192,6 +199,19 @@ CODE_PHASE_IDENTITY_INCONSISTENT = "phase_identity_inconsistent"
 CODE_IMAGE_DIGEST_INCONSISTENT = "image_digest_inconsistent"
 CODE_REVISION_FORMAT_INVALID = "revision_format_invalid"
 CODE_IMAGE_DIGEST_INVALID = "image_digest_invalid"
+CODE_RESTART_EVIDENCE_INVALID = "restart_evidence_invalid"
+
+RESTART_IDENTITY_BINDING_KEYS: frozenset[str] = frozenset(
+    {
+        "pinned_target_revision",
+        "manifest_digest",
+        "service_role",
+        "service_name",
+        "service_id",
+        "deployment_id",
+        "image_digest",
+    }
+)
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{7,40}$")
@@ -453,6 +473,158 @@ def validate_stable_counters(counters: Mapping[str, Any]) -> list[str]:
     return blockers
 
 
+def _safe_non_negative_int(value: Any) -> int | None:
+    parsed = _safe_counter_int(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed
+
+
+def _restart_snapshot_identity_matches(
+    snapshot_binding: Mapping[str, Any],
+    expected: Mapping[str, str],
+) -> list[str]:
+    blockers: list[str] = []
+    if not isinstance(snapshot_binding, Mapping):
+        return [CODE_RESTART_EVIDENCE_INVALID]
+    for key in RESTART_IDENTITY_BINDING_KEYS:
+        if str(snapshot_binding.get(key) or "") != str(expected.get(key) or ""):
+            blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    return blockers
+
+
+def validate_restart_evidence_snapshot(
+    snapshot: Any,
+    *,
+    expected_identity: Mapping[str, str],
+    require_production: bool = False,
+) -> list[str]:
+    blockers: list[str] = []
+    if not isinstance(snapshot, Mapping):
+        return [CODE_RESTART_EVIDENCE_INVALID]
+    missing = RESTART_EVIDENCE_SNAPSHOT_KEYS - set(snapshot)
+    if missing:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    if _parse_utc(snapshot.get("collected_at_utc")) is None:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    starttime = _safe_non_negative_int(snapshot.get("pid1_starttime_ticks"))
+    if starttime is None:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    cmdline = str(snapshot.get("pid1_cmdline") or "").strip()
+    if not cmdline:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    identity = snapshot.get("identity_binding")
+    if isinstance(identity, Mapping):
+        blockers.extend(
+            validate_identity_binding_shape(identity, require_production=require_production)
+        )
+        blockers.extend(_restart_snapshot_identity_matches(identity, expected_identity))
+    else:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    return blockers
+
+
+def validate_restart_evidence(
+    restart: Any,
+    *,
+    expected_identity: Mapping[str, str] | None = None,
+    require_production: bool = False,
+) -> list[str]:
+    blockers: list[str] = []
+    if not isinstance(restart, Mapping):
+        return [CODE_RESTART_EVIDENCE_INVALID]
+    proof_mode = str(restart.get("proof_mode") or "").strip()
+    if not proof_mode:
+        if str(restart.get("prior_container_id") or "").strip() and str(restart.get("new_container_id") or "").strip():
+            proof_mode = RESTART_PROOF_CONTAINER_ID_CHANGE
+        elif isinstance(restart.get("pre_restart"), Mapping) and isinstance(restart.get("post_restart"), Mapping):
+            proof_mode = RESTART_PROOF_PID1_STARTTIME_CHANGE
+    if proof_mode not in {RESTART_PROOF_CONTAINER_ID_CHANGE, RESTART_PROOF_PID1_STARTTIME_CHANGE}:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+        return blockers
+    restart_completed = _parse_utc(restart.get("restart_completed_at_utc"))
+    if restart_completed is None:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+
+    if proof_mode == RESTART_PROOF_CONTAINER_ID_CHANGE:
+        for key in ("prior_container_id", "new_container_id"):
+            if not str(restart.get(key) or "").strip():
+                blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+        prior_cid = str(restart.get("prior_container_id") or "")
+        new_cid = str(restart.get("new_container_id") or "")
+        if prior_cid and new_cid and prior_cid == new_cid:
+            blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+        return blockers
+
+    if str(restart.get("collection_method") or "") != RESTART_COLLECTION_METHOD_PROC1_STAT_FIELD22:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    if expected_identity is None:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+        return blockers
+
+    pre = restart.get("pre_restart")
+    post = restart.get("post_restart")
+    blockers.extend(
+        validate_restart_evidence_snapshot(
+            pre,
+            expected_identity=expected_identity,
+            require_production=require_production,
+        )
+    )
+    blockers.extend(
+        validate_restart_evidence_snapshot(
+            post,
+            expected_identity=expected_identity,
+            require_production=require_production,
+        )
+    )
+    if blockers:
+        return blockers
+
+    if not isinstance(pre, Mapping) or not isinstance(post, Mapping):
+        return blockers + [CODE_RESTART_EVIDENCE_INVALID]
+
+    pre_ticks = _safe_non_negative_int(pre.get("pid1_starttime_ticks"))
+    post_ticks = _safe_non_negative_int(post.get("pid1_starttime_ticks"))
+    if pre_ticks is None or post_ticks is None:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    elif pre_ticks == post_ticks:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    elif post_ticks < pre_ticks:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+
+    pre_cmd = str(pre.get("pid1_cmdline") or "").strip()
+    post_cmd = str(post.get("pid1_cmdline") or "").strip()
+    if not pre_cmd or pre_cmd != post_cmd:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+
+    pre_ts = _parse_utc(pre.get("collected_at_utc"))
+    post_ts = _parse_utc(post.get("collected_at_utc"))
+    if pre_ts is None or post_ts is None or post_ts <= pre_ts:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    if restart_completed and pre_ts and restart_completed < pre_ts:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    if restart_completed and post_ts and restart_completed < post_ts:
+        blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+
+    # Reject caller-supplied self-assertion without in-container collection proof.
+    for key in (
+        "restart_confirmed",
+        "restart_asserted",
+        "hostname_changed",
+        "pid1_restarted",
+        "proof_asserted",
+    ):
+        if key in restart:
+            blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+    for snapshot in (pre, post):
+        for key in ("restart_confirmed", "restart_asserted", "proof_asserted"):
+            if key in snapshot:
+                blockers.append(CODE_RESTART_EVIDENCE_INVALID)
+
+    return blockers
+
+
 def validate_isolated_service_constraints(constraints: Any) -> list[str]:
     if not isinstance(constraints, Mapping):
         return [CODE_PHASE_ARTIFACT_INVALID]
@@ -470,6 +642,8 @@ def validate_lifecycle_attestation(
     attestation: Any,
     baseline_deployment_id: str | None = None,
     redeploy_deployment_id: str | None = None,
+    expected_identity: Mapping[str, str] | None = None,
+    require_production: bool = False,
 ) -> list[str]:
     blockers: list[str] = []
     if not isinstance(attestation, Mapping):
@@ -484,16 +658,14 @@ def validate_lifecycle_attestation(
         if action != "container_restart":
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
         restart = attestation.get("restart_evidence")
-        if not isinstance(restart, Mapping):
+        restart_blockers = validate_restart_evidence(
+            restart,
+            expected_identity=expected_identity,
+            require_production=require_production,
+        )
+        if restart_blockers:
+            blockers.extend(restart_blockers)
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
-        else:
-            for key in ("prior_container_id", "new_container_id", "restart_completed_at_utc"):
-                if not str(restart.get(key) or "").strip():
-                    blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
-            prior_cid = str(restart.get("prior_container_id") or "")
-            new_cid = str(restart.get("new_container_id") or "")
-            if prior_cid and new_cid and prior_cid == new_cid:
-                blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
     elif phase == PHASE_FRESH_PINNED_REDEPLOY:
         if action != "fresh_pinned_redeploy":
             blockers.append(CODE_PHASE_LIFECYCLE_ATTESTATION_INVALID)
@@ -608,12 +780,15 @@ def validate_phase_artifact(
     blockers.extend(
         validate_isolated_service_constraints(artifact.get("isolated_service_constraints"))
     )
+    phase_identity = identity if isinstance(identity, Mapping) else None
     blockers.extend(
         validate_lifecycle_attestation(
             phase=phase,
             attestation=artifact.get("lifecycle_attestation"),
             baseline_deployment_id=baseline_deployment_id,
             redeploy_deployment_id=redeploy_deployment_id,
+            expected_identity=phase_identity if phase == PHASE_CONTAINER_RESTART else None,
+            require_production=require_production_provenance,
         )
     )
     dependency_fault = artifact.get("dependency_fault")
@@ -654,6 +829,19 @@ def validate_phase_timestamp_order(phases: list[Mapping[str, Any]]) -> list[str]
             restart_evidence = attestation.get("restart_evidence")
             if isinstance(restart_evidence, Mapping):
                 restart_completed = _parse_utc(restart_evidence.get("restart_completed_at_utc"))
+                proof_mode = str(restart_evidence.get("proof_mode") or "")
+                if proof_mode == RESTART_PROOF_PID1_STARTTIME_CHANGE:
+                    pre = restart_evidence.get("pre_restart")
+                    post = restart_evidence.get("post_restart")
+                    if isinstance(pre, Mapping) and isinstance(post, Mapping):
+                        pre_collected = _parse_utc(pre.get("collected_at_utc"))
+                        post_collected = _parse_utc(post.get("collected_at_utc"))
+                        if baseline_ts and pre_collected and pre_collected <= baseline_ts:
+                            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+                        if pre_collected and post_collected and post_collected <= pre_collected:
+                            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
+                        if restart_completed and post_collected and restart_completed < post_collected:
+                            blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
         if baseline_ts and restart_completed and restart_completed <= baseline_ts:
             blockers.append(CODE_PHASE_TIMESTAMP_ORDER_INVALID)
         if restart_completed and restart_ts and restart_completed > restart_ts:
@@ -1015,6 +1203,7 @@ __all__ = [
     "CODE_PHASE_IDENTITY_INCONSISTENT",
     "CODE_IMAGE_DIGEST_INCONSISTENT",
     "CODE_IMAGE_DIGEST_INVALID",
+    "CODE_RESTART_EVIDENCE_INVALID",
     "CODE_REVISION_FORMAT_INVALID",
     "CODE_STABLE_COUNTERS_DRIFT",
     "CODE_SUPERSEDED_WINDOW_ACTIVE",
@@ -1063,6 +1252,7 @@ __all__ = [
     "POST_APPROVAL_PENDING",
     "REQUIRED_SUPERSEDED_WINDOW_IDS",
     "REPEAT_MATRIX_MIN_SPACING_SECONDS",
+    "RESTART_IDENTITY_BINDING_KEYS",
     "REQUIRED_CASE_IDS",
     "SERVICE_ROLE_CANONICAL_CONTROL",
     "SERVICE_ROLE_ISOLATED_PREPROD_SHADOW",
@@ -1089,6 +1279,8 @@ __all__ = [
     "validate_phase_artifact",
     "validate_phase_timestamp_order",
     "validate_production_image_digest",
+    "validate_restart_evidence",
+    "validate_restart_evidence_snapshot",
     "validate_revision_token",
     "validate_stable_counters",
     "validate_superseded_windows",

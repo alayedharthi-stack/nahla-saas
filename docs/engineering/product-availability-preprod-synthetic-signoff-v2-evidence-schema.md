@@ -103,7 +103,10 @@ Artifacts must prove:
 - Matrix 7/7 with absolute stable counters (7 evaluated turns, 2 would_rewrite, four zero safety counters)
 - Phase-specific lifecycle attestation:
   - `baseline`: initial deploy
-  - `container_restart`: bounded restart evidence (may retain deployment ID)
+  - `container_restart`: bounded restart evidence (may retain deployment ID). Accepts either:
+    - **Legacy** `container_id_change`: `prior_container_id` ≠ `new_container_id`
+    - **Railway V2** `pid1_starttime_change`: in-container pre/post `/proc/1/stat` field-22
+      starttime ticks with matching PID1 cmdline and identity binding snapshots
   - `fresh_pinned_redeploy`: new deployment ID ≠ baseline, same revision/manifest
   - `repeat_matrix_*`: bind to post-redeploy identity; timestamps strictly ordered with ≥15m spacing
 
@@ -117,6 +120,28 @@ Artifacts must prove:
 | `enforce_enabled` | `enforce_mode_enabled` |
 
 Each control artifact must bind to the same current revision/manifest/runtime identity.
+
+### Container restart evidence (`restart_evidence`)
+
+Railway V2 service restarts may recycle PID1 **without** changing container hostname.
+Hostname alone is **not** accepted as restart proof.
+
+| `proof_mode` | When used | Required fields |
+|--------------|-----------|-----------------|
+| `container_id_change` | Legacy platforms where restart changes container ID | `prior_container_id`, `new_container_id`, `restart_completed_at_utc` |
+| `pid1_starttime_change` | Railway V2 hostname-stable restart | `collection_method=in_container_proc1_stat_field22`, `pre_restart`, `post_restart`, `restart_completed_at_utc` |
+
+PID1 path collection (inside `/app` container, no caller self-assertion):
+
+1. Before restart: collect snapshot via `collect_pid1_restart_snapshot()` reading
+   `/proc/1/stat` field 22 (starttime ticks) and `/proc/1/cmdline`.
+2. Trigger Railway service restart (same deployment/revision/image/manifest).
+3. After restart: collect a second snapshot with the same identity binding.
+4. Record `restart_completed_at_utc` between collection ordering bounds.
+
+Validation fails closed on missing/malformed snapshots, equal or backwards starttime
+ticks, changed PID1 cmdline, identity-binding mismatch, stale timestamps, or
+self-assertion fields such as `restart_confirmed`.
 
 ### Teardown proof (`arch001_preprod_teardown_v1`)
 
