@@ -72,6 +72,7 @@ ALLOWED_OBSERVATION_SOURCES = frozenset(
 )
 
 _FINGERPRINT_RE = re.compile(r"^hmac-sha256:[0-9a-f]{32}$")
+_CONTENT_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _OBSERVER_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 
 REQUIRED_ATTESTATION_FIELDS: tuple[str, ...] = (
@@ -85,6 +86,7 @@ REQUIRED_ATTESTATION_FIELDS: tuple[str, ...] = (
     "observer_id",
     "observed_at_utc",
     "observation_evidence_digest",
+    "observation_evidence_ref",
     "observed_callback_route",
     "waba_id_fingerprint",
     "phone_number_id_fingerprint",
@@ -257,8 +259,11 @@ def webhook_attestation_gaps(
     if not observer_id or not _OBSERVER_ID_RE.fullmatch(observer_id):
         gaps.append("webhook_attestation.observer_id")
     evidence_digest = str(artifact.get("observation_evidence_digest") or "").strip()
-    if not _FINGERPRINT_RE.fullmatch(evidence_digest):
+    if not _CONTENT_DIGEST_RE.fullmatch(evidence_digest):
         gaps.append("webhook_attestation.observation_evidence_digest")
+    evidence_ref = str(artifact.get("observation_evidence_ref") or "").strip()
+    if not _FINGERPRINT_RE.fullmatch(evidence_ref):
+        gaps.append("webhook_attestation.observation_evidence_ref")
 
     observed_route = str(artifact.get("observed_callback_route") or "").strip()
     if observed_route != META_DIRECT_WEBHOOK_ROUTE:
@@ -406,60 +411,33 @@ def evaluate_operator_attested_channel_ready(
     }
 
 
-def evaluate_actual_provider_channel_ready(
-    *,
-    variables: Mapping[str, str],
-    tenant_id: int,
-    artifact: Mapping[str, Any] | None,
-    hmac_key: str,
-    backend_url: str,
-    pinned_revision: str,
-    deployment_id: str,
-    db_row: Mapping[str, Any] | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Deprecated alias — preflight uses operator attestation, not provider proof."""
-    result = evaluate_operator_attested_channel_ready(
-        variables=variables,
-        tenant_id=tenant_id,
-        artifact=artifact,
-        hmac_key=hmac_key,
-        backend_url=backend_url,
-        pinned_revision=pinned_revision,
-        deployment_id=deployment_id,
-        db_row=db_row,
-        now=now,
-    )
-    result["actual_provider_channel_ready"] = result["operator_attested_channel_ready"]
-    return result
-
-
 def build_rollback_snapshot_evidence(
     *,
     snapshot_fingerprint: str,
     captured_at_utc: str,
     component_fingerprints: Mapping[str, str],
-    hmac_key: str,
+    observed_at_utc: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble caller-supplied consolidation rollback evidence only."""
     components: dict[str, Any] = {}
     for component in ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS:
-        raw = str(component_fingerprints.get(component) or "").strip()
-        if raw and not raw.startswith("hmac-sha256:"):
-            raw = fingerprint_value(material=raw, label=f"rollback_component:{component}", hmac_key=hmac_key)
-        components[component] = {"fingerprint": raw}
-    fingerprint = str(snapshot_fingerprint or "").strip()
-    if fingerprint and not fingerprint.startswith("hmac-sha256:"):
-        fingerprint = fingerprint_value(material=fingerprint, label="rollback_snapshot", hmac_key=hmac_key)
-    return {
+        fingerprint = str(component_fingerprints.get(component) or "").strip()
+        components[component] = {"fingerprint": fingerprint}
+    snapshot: dict[str, Any] = {
         "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
-        "snapshot_fingerprint": fingerprint,
-        "captured_at_utc": captured_at_utc,
+        "snapshot_fingerprint": str(snapshot_fingerprint or "").strip(),
+        "captured_at_utc": str(captured_at_utc or "").strip(),
         "rollback_required": True,
         "label": ACCEPTANCE_CUTOVER_LABEL,
         "scope": ACCEPTANCE_CUTOVER_SCOPE,
         "forbidden_unlocks_respected": True,
         "components": components,
     }
+    observed_at = _parse_utc(observed_at_utc or "") if observed_at_utc else None
+    gaps = rollback_snapshot_evidence_gaps(snapshot, observed_at=observed_at)
+    if gaps:
+        raise ValueError(CODE_ROLLBACK_SNAPSHOT_INVALID)
+    return snapshot
 
 
 def build_webhook_attestation_artifact(
@@ -472,34 +450,40 @@ def build_webhook_attestation_artifact(
     waba_id: str,
     phone_number_id: str,
     hmac_key: str,
-    observation_source: str = "meta_developer_console_manual_review",
-    observer_id: str = "acceptance.reviewer.example",
-    observed_at_utc: str | None = None,
-    observation_evidence_digest: str | None = None,
-    rollback_snapshot_evidence: Mapping[str, Any] | None = None,
-    issued_at_utc: str | None = None,
-    expires_at_utc: str | None = None,
+    observation_source: str,
+    observer_id: str,
+    observed_at_utc: str,
+    observation_evidence_digest: str,
+    observation_evidence_ref: str,
+    rollback_snapshot_evidence: Mapping[str, Any],
+    issued_at_utc: str,
+    expires_at_utc: str,
 ) -> dict[str, Any]:
-    """Test/operator helper — values are fingerprinted; raw IDs never stored in artifact."""
-    issued = _parse_utc(issued_at_utc or "") or _utc_now()
-    observed = _parse_utc(observed_at_utc or "") or (issued - timedelta(minutes=15))
-    expires = _parse_utc(expires_at_utc or "") or (issued + timedelta(hours=1))
-    evidence_digest = observation_evidence_digest or fingerprint_value(
-        material=f"{observation_source}:{observer_id}:{observed_callback_route}:{observed.isoformat()}",
-        label="observation_evidence",
-        hmac_key=hmac_key,
-    )
-    if rollback_snapshot_evidence is None:
-        rollback_snapshot_evidence = build_rollback_snapshot_evidence(
-            snapshot_fingerprint="rollback-snapshot-example",
-            captured_at_utc=(observed - timedelta(minutes=5)).isoformat(),
-            component_fingerprints={
-                "meta_webhook_target": "prior-webhook-target-example",
-                "staging_env_secrets_fingerprints": "prior-env-secrets-example",
-                "staging_db_wa_connection_binding": "prior-db-binding-example",
-            },
-            hmac_key=hmac_key,
-        )
+    """Assemble operator attestation from caller-supplied external evidence only."""
+    if not str(observation_source or "").strip():
+        raise ValueError(CODE_WEBHOOK_OBSERVATION_INVALID)
+    if not str(observer_id or "").strip():
+        raise ValueError(CODE_WEBHOOK_OBSERVATION_INVALID)
+    if not str(observed_at_utc or "").strip():
+        raise ValueError(CODE_WEBHOOK_OBSERVATION_INVALID)
+    if not _CONTENT_DIGEST_RE.fullmatch(str(observation_evidence_digest or "").strip()):
+        raise ValueError(CODE_WEBHOOK_OBSERVATION_INVALID)
+    if not _FINGERPRINT_RE.fullmatch(str(observation_evidence_ref or "").strip()):
+        raise ValueError(CODE_WEBHOOK_OBSERVATION_INVALID)
+    if not isinstance(rollback_snapshot_evidence, Mapping):
+        raise ValueError(CODE_ROLLBACK_SNAPSHOT_MISSING)
+
+    issued = _parse_utc(issued_at_utc)
+    observed = _parse_utc(observed_at_utc)
+    expires = _parse_utc(expires_at_utc)
+    if issued is None or observed is None or expires is None:
+        raise ValueError(CODE_WEBHOOK_ATTESTATION_INVALID)
+
+    rollback = dict(rollback_snapshot_evidence)
+    rollback_gaps = rollback_snapshot_evidence_gaps(rollback, observed_at=observed)
+    if rollback_gaps:
+        raise ValueError(CODE_ROLLBACK_SNAPSHOT_INVALID)
+
     payload: dict[str, Any] = {
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         "provider": ACCEPTANCE_TARGET_PROVIDER_PATH,
@@ -514,7 +498,8 @@ def build_webhook_attestation_artifact(
         "observation_source": observation_source.strip(),
         "observer_id": observer_id.strip(),
         "observed_at_utc": observed.isoformat(),
-        "observation_evidence_digest": evidence_digest,
+        "observation_evidence_digest": observation_evidence_digest.strip(),
+        "observation_evidence_ref": observation_evidence_ref.strip(),
         "observed_callback_route": observed_callback_route.strip(),
         "waba_id_fingerprint": fingerprint_value(
             material=waba_id.strip(),
@@ -528,7 +513,7 @@ def build_webhook_attestation_artifact(
         ),
         "issued_at_utc": issued.isoformat(),
         "expires_at_utc": expires.isoformat(),
-        "rollback_snapshot_evidence": dict(rollback_snapshot_evidence),
+        "rollback_snapshot_evidence": rollback,
         "forbidden_unlocks_respected": True,
     }
     payload["signature"] = sign_webhook_attestation_artifact(payload, hmac_key=hmac_key)
@@ -564,7 +549,6 @@ __all__ = [
     "WEBHOOK_ATTESTATION_HMAC_KEY_ENV",
     "build_rollback_snapshot_evidence",
     "build_webhook_attestation_artifact",
-    "evaluate_actual_provider_channel_ready",
     "evaluate_meta_config_present",
     "evaluate_operator_attested_channel_ready",
     "fingerprint_value",

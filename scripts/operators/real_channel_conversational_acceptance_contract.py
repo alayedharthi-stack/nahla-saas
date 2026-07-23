@@ -100,7 +100,6 @@ from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noq
     EVIDENCE_CLASS_OPERATOR_OBSERVED_META_WEBHOOK,
     WEBHOOK_ATTESTATION_ARTIFACT_ENV,
     WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
-    evaluate_actual_provider_channel_ready,
     evaluate_meta_config_present,
     evaluate_operator_attested_channel_ready,
 )
@@ -701,7 +700,6 @@ __all__ = [
     "build_acceptance_cutover_guidance",
     "count_scenarios_by_phase",
     "env_flag_enabled",
-    "evaluate_actual_provider_channel_ready",
     "evaluate_meta_channel_readiness",
     "evaluate_meta_config_present",
     "evaluate_operator_attested_channel_ready",

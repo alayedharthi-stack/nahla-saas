@@ -51,6 +51,7 @@ from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noq
     CODE_WEBHOOK_ATTESTATION_MISSING,
     CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH,
     WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
+    build_rollback_snapshot_evidence,
     build_webhook_attestation_artifact,
 )
 from scripts.operators.real_channel_acceptance_manifest_builder import (  # noqa: E402
@@ -386,6 +387,20 @@ def _channel_health_env(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 def _valid_attestation(*, hmac_key: str, backend_url: str = "https://staging.example.com") -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    observed = now - timedelta(minutes=15)
+    rollback = build_rollback_snapshot_evidence(
+        snapshot_fingerprint="hmac-sha256:cccccccccccccccccccccccccccccccc",
+        captured_at_utc=(observed - timedelta(minutes=5)).isoformat(),
+        component_fingerprints={
+            "meta_webhook_target": "hmac-sha256:dddddddddddddddddddddddddddddddd",
+            "staging_env_secrets_fingerprints": "hmac-sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "staging_db_wa_connection_binding": "hmac-sha256:ffffffffffffffffffffffffffffffff",
+        },
+        observed_at_utc=observed.isoformat(),
+    )
     return build_webhook_attestation_artifact(
         tenant_id=1,
         backend_url=backend_url,
@@ -395,6 +410,16 @@ def _valid_attestation(*, hmac_key: str, backend_url: str = "https://staging.exa
         waba_id="waba-tenant-1-example",
         phone_number_id="phone-tenant-1-example",
         hmac_key=hmac_key,
+        observation_source="meta_developer_console_manual_review",
+        observer_id="reviewer.acceptance.ops",
+        observed_at_utc=observed.isoformat(),
+        observation_evidence_digest=(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
+        observation_evidence_ref="hmac-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        rollback_snapshot_evidence=rollback,
+        issued_at_utc=now.isoformat(),
+        expires_at_utc=(now + timedelta(hours=1)).isoformat(),
     )
 
 

@@ -15,12 +15,15 @@ if str(_REPO) not in sys.path:
 
 from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noqa: E402
     CODE_DB_WA_BINDING_MISMATCH,
+    CODE_ROLLBACK_SNAPSHOT_INVALID,
     CODE_WEBHOOK_ATTESTATION_FORGED,
+    CODE_WEBHOOK_ATTESTATION_INVALID,
     CODE_WEBHOOK_ATTESTATION_MISSING,
     CODE_WEBHOOK_ATTESTATION_REVISION_MISMATCH,
     CODE_WEBHOOK_ATTESTATION_ROUTE_UNOBSERVED,
     CODE_WEBHOOK_ATTESTATION_STALE,
     CODE_WEBHOOK_ATTESTATION_TENANT_MISMATCH,
+    CODE_WEBHOOK_OBSERVATION_INVALID,
     EVIDENCE_CLASS_OPERATOR_OBSERVED_META_WEBHOOK,
     META_DIRECT_WEBHOOK_ROUTE,
     build_rollback_snapshot_evidence,
@@ -50,6 +53,26 @@ _TENANT_33 = 33
 _WABA = "waba-tenant-1-example"
 _PHONE = "phone-tenant-1-example"
 _NOW = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
+_OBSERVED_AT = _NOW - timedelta(minutes=15)
+_OBSERVATION_DIGEST = (
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+_OBSERVATION_REF = "hmac-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_SNAPSHOT_FINGERPRINT = "hmac-sha256:cccccccccccccccccccccccccccccccc"
+_COMPONENT_FINGERPRINTS = {
+    "meta_webhook_target": "hmac-sha256:dddddddddddddddddddddddddddddddd",
+    "staging_env_secrets_fingerprints": "hmac-sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "staging_db_wa_connection_binding": "hmac-sha256:ffffffffffffffffffffffffffffffff",
+}
+
+
+def _test_rollback_snapshot(*, captured_at: datetime | None = None) -> dict[str, object]:
+    return build_rollback_snapshot_evidence(
+        snapshot_fingerprint=_SNAPSHOT_FINGERPRINT,
+        captured_at_utc=(captured_at or (_OBSERVED_AT - timedelta(minutes=5))).isoformat(),
+        component_fingerprints=_COMPONENT_FINGERPRINTS,
+        observed_at_utc=_OBSERVED_AT.isoformat(),
+    )
 
 
 def _valid_artifact(**overrides: object) -> dict[str, object]:
@@ -62,9 +85,14 @@ def _valid_artifact(**overrides: object) -> dict[str, object]:
         waba_id=_WABA,
         phone_number_id=_PHONE,
         hmac_key=_HMAC_KEY,
+        observation_source="meta_developer_console_manual_review",
+        observer_id="reviewer.acceptance.ops",
+        observed_at_utc=_OBSERVED_AT.isoformat(),
+        observation_evidence_digest=_OBSERVATION_DIGEST,
+        observation_evidence_ref=_OBSERVATION_REF,
+        rollback_snapshot_evidence=_test_rollback_snapshot(),
         issued_at_utc=_NOW.isoformat(),
         expires_at_utc=(_NOW + timedelta(hours=1)).isoformat(),
-        observed_at_utc=(_NOW - timedelta(minutes=15)).isoformat(),
     )
     artifact.update(overrides)
     if "signature" not in overrides:
@@ -116,6 +144,7 @@ def test_complete_operator_attestation_passes() -> None:
         now=_NOW,
     )
     assert evidence["operator_attested_channel_ready"] is True
+    assert "actual_provider_channel_ready" not in evidence
     assert evidence["observed_callback_route"] == META_DIRECT_WEBHOOK_ROUTE
     assert evidence["observation_source"] == "meta_developer_console_manual_review"
 
@@ -230,25 +259,68 @@ def test_post_observation_rollback_snapshot_fails() -> None:
 
 
 def test_incomplete_rollback_snapshot_components_fail() -> None:
-    rollback = build_rollback_snapshot_evidence(
-        snapshot_fingerprint="snapshot-example",
-        captured_at_utc=(_NOW - timedelta(minutes=20)).isoformat(),
-        component_fingerprints={
-            "meta_webhook_target": "prior-webhook-target-example",
-        },
-        hmac_key=_HMAC_KEY,
-    )
-    artifact = _valid_artifact(rollback_snapshot_evidence=rollback)
-    gaps = webhook_attestation_gaps(
-        artifact,
-        tenant_id=_TENANT_ID,
-        backend_url=_BACKEND_URL,
-        pinned_revision=_PINNED,
-        deployment_id=_DEPLOYMENT,
-        hmac_key=_HMAC_KEY,
-        now=_NOW,
-    )
-    assert any(gap.startswith("rollback_snapshot_evidence.components.") for gap in gaps)
+    with pytest.raises(ValueError, match=CODE_ROLLBACK_SNAPSHOT_INVALID):
+        build_rollback_snapshot_evidence(
+            snapshot_fingerprint=_SNAPSHOT_FINGERPRINT,
+            captured_at_utc=(_OBSERVED_AT - timedelta(minutes=20)).isoformat(),
+            component_fingerprints={
+                "meta_webhook_target": _COMPONENT_FINGERPRINTS["meta_webhook_target"],
+            },
+            observed_at_utc=_OBSERVED_AT.isoformat(),
+        )
+
+
+def test_builder_rejects_missing_observation_evidence() -> None:
+    with pytest.raises(ValueError, match=CODE_WEBHOOK_OBSERVATION_INVALID):
+        build_webhook_attestation_artifact(
+            tenant_id=_TENANT_ID,
+            backend_url=_BACKEND_URL,
+            pinned_revision=_PINNED,
+            deployment_id=_DEPLOYMENT,
+            observed_callback_route=META_DIRECT_WEBHOOK_ROUTE,
+            waba_id=_WABA,
+            phone_number_id=_PHONE,
+            hmac_key=_HMAC_KEY,
+            observation_source="meta_developer_console_manual_review",
+            observer_id="reviewer.acceptance.ops",
+            observed_at_utc=_OBSERVED_AT.isoformat(),
+            observation_evidence_digest="not-a-content-digest",
+            observation_evidence_ref=_OBSERVATION_REF,
+            rollback_snapshot_evidence=_test_rollback_snapshot(),
+            issued_at_utc=_NOW.isoformat(),
+            expires_at_utc=(_NOW + timedelta(hours=1)).isoformat(),
+        )
+
+
+def test_builder_rejects_missing_rollback_snapshot() -> None:
+    with pytest.raises(ValueError, match=CODE_ROLLBACK_SNAPSHOT_INVALID):
+        build_webhook_attestation_artifact(
+            tenant_id=_TENANT_ID,
+            backend_url=_BACKEND_URL,
+            pinned_revision=_PINNED,
+            deployment_id=_DEPLOYMENT,
+            observed_callback_route=META_DIRECT_WEBHOOK_ROUTE,
+            waba_id=_WABA,
+            phone_number_id=_PHONE,
+            hmac_key=_HMAC_KEY,
+            observation_source="meta_developer_console_manual_review",
+            observer_id="reviewer.acceptance.ops",
+            observed_at_utc=_OBSERVED_AT.isoformat(),
+            observation_evidence_digest=_OBSERVATION_DIGEST,
+            observation_evidence_ref=_OBSERVATION_REF,
+            rollback_snapshot_evidence={
+                "snapshot_schema_version": "invalid",
+                "snapshot_fingerprint": _SNAPSHOT_FINGERPRINT,
+                "captured_at_utc": (_OBSERVED_AT - timedelta(minutes=5)).isoformat(),
+                "rollback_required": True,
+                "label": "acceptance_only_not_production",
+                "scope": "tenant_1_preverification_direct_meta_test_channel",
+                "forbidden_unlocks_respected": True,
+                "components": {},
+            },
+            issued_at_utc=_NOW.isoformat(),
+            expires_at_utc=(_NOW + timedelta(hours=1)).isoformat(),
+        )
 
 
 def test_forged_attestation_signature_fails() -> None:
