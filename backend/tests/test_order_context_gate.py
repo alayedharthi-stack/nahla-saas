@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
@@ -265,6 +266,209 @@ class TestFulfillmentSessionLock:
         assert decision is not None
         assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
         assert decision.args.get("fulfillment_lock") is True
+
+    def test_stale_city_and_short_address_code_do_not_block_new_product_question(self):
+        """Root-cause regression (2026-07-26) — reproduces the EXACT
+        production field combination that caused the live FAIL 1 incident,
+        not a simplified stand-in.
+
+        The abandoned May checkout attempt (conversation_id=13, tenant_id=1)
+        left ``city="الطايف"`` and ``short_address_code="TAPA7401"``
+        persisted in ``order_prep`` for months. With ``stage`` already back
+        to ``discovery`` and no strong signal (no product_id, no
+        order_status, no payment/variant flags), a brand-new, unrelated
+        product question must NOT be blocked."""
+        msg = "عندكم أحذية رياضية بيضاء؟"
+        prep = OrderPreparationState(
+            city="الطايف",
+            short_address_code="TAPA7401",
+        )
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+        )
+        intent = Intent(name="ask_product", confidence=0.82, raw_message=msg)
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True, store_name="Test"),
+        )
+        assert not is_fulfillment_session_locked(ctx)
+        assert not should_block_product_discovery(ctx)
+        assert not should_skip_catalog_preload(message=msg, state=state, intent=intent)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_stale_name_and_address_together_do_not_block_new_product_question(self):
+        """Same regression with the full residual field set actually
+        observed live in production at incident time (customer name AND
+        address fragments both persisted, no strong signal)."""
+        msg = "عندكم أحذية رياضية بيضاء؟"
+        prep = OrderPreparationState(
+            customer_first_name="هيثم",
+            customer_last_name="الحارثي",
+            city="الطايف",
+            short_address_code="TAPA7401",
+        )
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+        )
+        intent = Intent(name="ask_product", confidence=0.82, raw_message=msg)
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True, store_name="Test"),
+        )
+        assert not is_fulfillment_session_locked(ctx)
+        assert not should_block_product_discovery(ctx)
+        assert not should_skip_catalog_preload(message=msg, state=state, intent=intent)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_weak_order_prep_fields_still_lock_during_active_ordering_stage(self):
+        """Counterpart to the regression above: the SAME weak-only fields
+        (name, no product_id/order_status) must still lock while the
+        conversation stage genuinely reflects an active ordering flow —
+        the fix narrows the stale-forever case, it does not remove the
+        lock for a real, current checkout."""
+        msg = "تمام"
+        prep = OrderPreparationState(customer_first_name="هيثم")
+        state = MerchantConversationState(
+            stage=STAGE_ORDERING,
+            greeted=True,
+            order_prep=prep,
+            current_product_focus=dict(_PRODUCT),
+        )
+        intent = Intent(name="general", confidence=0.5, raw_message=msg)
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        assert is_fulfillment_session_locked(ctx)
+        assert should_block_product_discovery(ctx)
+
+    def test_stale_product_id_and_order_status_ttl_expires_and_unlocks(self):
+        """Review point 2 — 'strong' signals (product_id, order_status,
+        missing_fields) must not lock discovery forever either. A
+        product_id + order_status left over from an order abandoned/failed
+        long ago (old ``updated_at``, stage settled back to discovery, no
+        payment/receipt evidence) infers ``STAGE_PRODUCT_SELECTED``
+        (12h TTL) via the existing, already-shipped
+        ``conversation_context_reset`` TTL — and must expire, unlocking a
+        fresh product question. This reuses the pre-existing TTL system;
+        no new staleness logic was invented for this fix."""
+        msg = "عندكم أحذية رياضية بيضاء؟"
+        stale_updated_at = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+        prep = OrderPreparationState(product_id="ext-old-abandoned-1")
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+            updated_at=stale_updated_at,
+        )
+        intent = Intent(name="ask_product", confidence=0.82, raw_message=msg)
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=intent,
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True, store_name="Test"),
+        )
+        assert not is_fulfillment_session_locked(ctx)
+        assert not should_block_product_discovery(ctx)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_recent_product_id_and_order_status_still_locks(self):
+        """Counterpart — the SAME strong signals, freshly updated (well
+        inside the TTL window), must still lock. TTL narrows the eternal
+        lock; it must not weaken protection for a genuinely current order
+        in progress."""
+        msg = "تمام"
+        recent_updated_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        prep = OrderPreparationState(
+            product_id="ext-honey-1",
+            order_status="awaiting_address",
+        )
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+            updated_at=recent_updated_at,
+        )
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=Intent(name="general", confidence=0.5, raw_message=msg),
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        assert is_fulfillment_session_locked(ctx)
+        assert should_block_product_discovery(ctx)
+
+    def test_paid_order_status_never_ttl_expires_even_when_old(self):
+        """A genuinely paid/in-review order (payment_receipt_received or a
+        paid-adjacent order_status) must stay locked regardless of age —
+        ``STAGE_PAID_ORDER`` is a deliberate, already-tested exception to
+        the TTL system (see conversation_context_reset). The TTL relief
+        added for stale strong signals must not weaken this."""
+        msg = "عندكم أحذية رياضية بيضاء؟"
+        very_old_updated_at = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        prep = OrderPreparationState(
+            product_id="ext-honey-1",
+            payment_receipt_received=True,
+        )
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+            updated_at=very_old_updated_at,
+        )
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message=msg,
+            intent=Intent(name="ask_product", confidence=0.82, raw_message=msg),
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        assert is_fulfillment_session_locked(ctx)
+        assert should_block_product_discovery(ctx)
+
+    def test_missing_updated_at_conservatively_still_locks(self):
+        """No ``updated_at`` at all means age cannot be judged — stay
+        conservative and keep locking rather than assume staleness (matches
+        ``conversation_context_reset.is_context_expired``'s own default)."""
+        prep = OrderPreparationState(product_id="ext-honey-1")
+        state = MerchantConversationState(
+            stage="discovery",
+            greeted=True,
+            order_prep=prep,
+        )
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966542980511",
+            message="تمام",
+            intent=Intent(name="general", confidence=0.5, raw_message="تمام"),
+            state=state,
+            facts=CommerceFacts(has_products=True, orderable=True),
+        )
+        assert is_fulfillment_session_locked(ctx)
 
     def test_webhook_suppress_helper_uses_persisted_state(self):
         prep = {

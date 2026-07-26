@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ..catalog.navigation import (
+    OWNER_STEP_TOP_FALLBACK,
     PATH_GROUPS,
     PATH_GROUP_PRODUCTS,
     PATH_NATIVE_CATALOG,
@@ -33,8 +34,6 @@ class CatalogNavigateHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         args = getattr(decision, "args", None) or {}
         step = str(args.get("navigator_step") or "").strip().lower()
-        chosen_path = str(args.get("chosen_path") or "").strip()
-        owner_step = str(args.get("owner_step") or "").strip()
 
         try:
             if step == STEP_NATIVE_CATALOG_ENTRY:
@@ -48,12 +47,22 @@ class CatalogNavigateHandler:
             else:
                 return ActionResult(success=False, error=f"unknown_navigator_step:{step}")
 
+            # Provenance is read AFTER rendering: a render step may legitimately
+            # re-own the navigator step (native catalog falling back to the
+            # top-products path), and downstream compose keys off chosen_path.
+            # Priority is unchanged (decision args still win over payload) —
+            # only the read happens at stamp time. Every other render step
+            # leaves args untouched, so their stamping is byte-identical.
+            stamped_args = getattr(decision, "args", None) or {}
+            stamped_chosen_path = str(stamped_args.get("chosen_path") or "").strip()
+            stamped_owner_step = str(stamped_args.get("owner_step") or "").strip()
+
             reply = str(payload.get("discovery_presentation_text") or payload.get("product_lines") or "")
             payload.update({
                 "turn_owner": TURN_OWNER,
                 "owner_locked": True,
-                "owner_step": owner_step or step,
-                "chosen_path": chosen_path or payload.get("chosen_path") or "",
+                "owner_step": stamped_owner_step or step,
+                "chosen_path": stamped_chosen_path or payload.get("chosen_path") or "",
                 "owner_replaced": False,
                 "navigator_owner": True,
                 "owner_reply_hash": owner_reply_hash(reply),
@@ -92,6 +101,20 @@ class CatalogNavigateHandler:
             except Exception:  # noqa: BLE001
                 thumbnail = ""
 
+        if not thumbnail:
+            # Native/Meta catalog isn't actually deliverable here (e.g.
+            # unpublished catalog, synthetic/sku-only retailer ids, missing
+            # connection...). Rendering the bare native-catalog body text
+            # anyway told the customer to "choose from the list" while
+            # attaching no list at all (production regression 2026-07-26:
+            # customer_facing_text_debt=True, catalog_sent=False).
+            logger.info(
+                "[CATALOG_NAVIGATOR] native_catalog_thumbnail_unavailable_text_fallback "
+                "tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
+            return await self._render_native_catalog_text_fallback(decision, ctx)
+
         from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
             resolve_native_catalog_body_text,
         )
@@ -117,6 +140,81 @@ class CatalogNavigateHandler:
                 collections=[],
                 products=[],
                 source="native_catalog",
+            ),
+        }
+
+    async def _render_native_catalog_text_fallback(
+        self,
+        decision: Decision,
+        ctx: BrainContext,
+    ) -> Dict[str, Any]:
+        """Native/Meta catalog attachment is unavailable — reuse the general
+        product search (empty query → ``CatalogContextBuilder.get_top_
+        products``) so the reply is a real numbered list of currently
+        orderable products. Deliberately bypasses merchant-curated
+        best-seller ranking (a separate, opt-in feature unrelated to native
+        catalog eligibility) and goes straight to the same synced-catalog
+        query every plain "عندكم إيه؟" answer already uses.
+
+        The navigator step is re-owned as ``STEP_TOP_FALLBACK`` /
+        ``PATH_TOP_FALLBACK`` **on the decision args**, because ``handle()``
+        and ``compose/responder.py`` both key provenance off
+        ``decision.args["chosen_path"]``: the production decision carries
+        ``chosen_path="commerce_entry_send_catalog"``, which would otherwise
+        keep the response outside the ``PATH_TOP_FALLBACK`` branch and leave
+        no persona surface for the reply.
+
+        This method deliberately returns **no customer-facing text** — only
+        the trusted ``products`` facts. ``compose/responder.py`` routes
+        ``PATH_TOP_FALLBACK`` to ``try_compose_catalog_navigation_browse_
+        answer`` (with ``build_catalog_navigation_emergency_outcome`` as the
+        audited fail-closed path), so the wording — including how the list is
+        presented and how an empty catalog is explained — stays LLM/persona
+        owned per the natural-language rule in AGENTS.md.
+        """
+        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+
+        db = getattr(ctx, "_db", None)
+        products: List[Dict[str, Any]] = []
+        if db is not None and getattr(ctx, "tenant_id", None):
+            try:
+                runtime = CommerceToolRuntime(
+                    db,
+                    tenant_id=ctx.tenant_id,
+                    customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                    customer_id=getattr(ctx, "customer_id", None),
+                )
+                tool_result = await runtime.execute("search_products", {"query": "", "limit": 12})
+                if tool_result.ok:
+                    products = list(tool_result.payload.get("products") or [])
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — text fallback is best-effort
+                logger.exception(
+                    "[CATALOG_NAVIGATOR] native_catalog_text_fallback_search_failed tenant=%s",
+                    getattr(ctx, "tenant_id", None),
+                )
+
+        args = getattr(decision, "args", None)
+        if isinstance(args, dict):
+            args["navigator_step"] = STEP_TOP_FALLBACK
+            args["owner_step"] = OWNER_STEP_TOP_FALLBACK
+            args["chosen_path"] = PATH_TOP_FALLBACK
+
+        return {
+            "products": products,
+            "collections": [],
+            "product_lines": "",
+            "discovery_presentation_text": "",
+            "discovery_output_kind": "products" if products else "empty",
+            "chosen_path": PATH_TOP_FALLBACK,
+            "count": len(products),
+            "query": "",
+            "navigator_no_groups_fallback": False,
+            "native_catalog_thumbnail_unavailable": True,
+            "navigation_state_patch": self._navigation_patch(
+                decision,
+                collections=[],
+                products=products,
+                source="native_catalog_text_fallback",
             ),
         }
 

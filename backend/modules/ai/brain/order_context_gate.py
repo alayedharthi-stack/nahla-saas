@@ -208,6 +208,30 @@ def _order_prep_has_progress(op: Any) -> bool:
     )
 
 
+def _order_prep_has_strong_progress(op: Any) -> bool:
+    """Concrete, currently-active order evidence — locks regardless of stage.
+
+    Deliberately excludes weak identity/address fragments (customer name,
+    city, short address code, maps link, ...) which can legitimately linger
+    in persisted state for months after a checkout was abandoned or failed
+    (see production regression 2026-07-26: a stale ``customer_first_name``
+    from a May checkout attempt blocked a brand-new, unrelated product
+    question forever). Those weak fields still lock while ``state.stage``
+    itself confirms an active ordering flow — see
+    ``is_fulfillment_session_locked`` — but must never do so on their own
+    once the conversation has moved back to discovery.
+    """
+    if op is None:
+        return False
+    return bool(
+        str(getattr(op, "product_id", "") or "").strip()
+        or bool(getattr(op, "missing_fields", None))
+        or getattr(op, "awaiting_payment_receipt", False)
+        or getattr(op, "payment_receipt_received", False)
+        or str(getattr(op, "order_status", "") or "").strip()
+    )
+
+
 def _order_prep_dict_has_progress(raw: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(raw, dict):
         return False
@@ -264,23 +288,57 @@ def _structured_pre_ship_locked(bundle: Optional[Dict[str, Any]]) -> bool:
         return False
 
 
+def _order_context_ttl_expired(state: Any) -> bool:
+    """Reuse the existing, already-shipped order-context TTL instead of
+    treating any order_prep evidence as a permanent lock.
+
+    ``conversation_context_reset.is_context_expired`` infers a stage
+    (browsing / product_selected / order_draft / awaiting_address_payment /
+    paid_order) from the same ``order_prep`` fields and applies its
+    existing 6h/12h/24h/48h TTL against ``state.updated_at``.
+    ``STAGE_PAID_ORDER`` is a deliberate, already-tested exception that
+    never expires (see ``test_paid_order_does_not_expire_by_ttl``) — a
+    customer who already paid must not be treated as a stranger again.
+    No new TTL table or schema is introduced here.
+    """
+    try:
+        from .commerce.conversation_context_reset import is_context_expired  # noqa: PLC0415
+
+        return bool(is_context_expired(state))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def is_fulfillment_session_locked(ctx: BrainContext) -> bool:
-    """True when checkout / fulfillment must not reopen product discovery."""
+    """True when checkout / fulfillment must not reopen product discovery.
+
+    Strong order-prep signals (a chosen product, fields actively being
+    collected, or a payment/receipt funnel) lock regardless of stage — they
+    represent a real, currently-active order. Weak identity/address
+    fragments alone (name, city, short address code, maps link) only lock
+    while ``state.stage`` still reflects an active ordering flow.
+
+    Neither category locks *forever*: once the existing order-context TTL
+    (``conversation_context_reset``) considers the context expired for its
+    inferred stage, the lock lifts — a product_id/order_status left over
+    from an abandoned or failed order must not block discovery indefinitely
+    any more than a stale customer name would. ``STAGE_PAID_ORDER`` never
+    expires by design, so a genuinely paid/in-review order stays locked.
+    """
     state = ctx.state
     op = getattr(state, "order_prep", None)
 
-    if _order_prep_has_progress(op):
+    order_prep_signal = (
+        _order_prep_has_strong_progress(op)
+        or _awaiting_fulfillment_fields(op)
+        or bool(str(getattr(state, "draft_order_id", "") or "").strip())
+        or (
+            state.stage in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT)
+            and bool(state.current_product_focus or _order_prep_has_progress(op))
+        )
+    )
+    if order_prep_signal and not _order_context_ttl_expired(state):
         return True
-
-    if _awaiting_fulfillment_fields(op):
-        return True
-
-    if str(getattr(state, "draft_order_id", "") or "").strip():
-        return True
-
-    if state.stage in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT):
-        if state.current_product_focus or _order_prep_has_progress(op):
-            return True
 
     if _structured_pre_ship_locked(getattr(ctx, "commerce_bundle", None) or {}):
         return True

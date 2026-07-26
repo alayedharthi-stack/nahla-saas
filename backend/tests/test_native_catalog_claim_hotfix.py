@@ -102,6 +102,212 @@ class TestCatalogNavigateDoesNotPreclaim:
         assert "تفضّل، اختر من الكتالوج" not in body
 
 
+def _fake_tool_execution_result(products: list):
+    from modules.ai.commerce.runtime import ToolExecutionResult
+
+    return ToolExecutionResult(
+        ok=True,
+        tool_name="search_products",
+        payload={"products": products, "count": len(products), "query": ""},
+    )
+
+
+class TestNativeCatalogThumbnailUnavailableTextFallback:
+    """Root-cause regression (2026-07-26): when the native/Meta catalog
+    thumbnail can't be resolved (unpublished catalog, missing connection,
+    synthetic/sku-only retailer ids...), the reply must be a real
+    product-search text list — never the bare native-catalog body
+    ("اختر المنتجات المناسبة من القائمة") with no list attached.
+
+    ``CommerceToolRuntime.execute`` is patched rather than exercised via a
+    real DB/query chain here — that executor's own correctness (FTS/ILIKE,
+    ``get_top_products``, ``_filter_orderable``) already has dedicated
+    coverage elsewhere; this test is scoped to *this* method's routing and
+    payload-shaping contract only.
+    """
+
+    def test_no_thumbnail_with_orderable_products_returns_real_list(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake_products = [
+            {"id": 1, "title": "حذاء رياضي أبيض", "price": "199", "external_id": "ext-1"},
+            {"id": 2, "title": "حذاء رياضي أسود", "price": "179", "external_id": "ext-2"},
+        ]
+
+        async def _fake_execute(_self, _tool_name, _payload):
+            return _fake_tool_execution_result(fake_products)
+
+        monkeypatch.setattr(
+            "modules.ai.commerce.runtime.CommerceToolRuntime.execute",
+            _fake_execute,
+        )
+        ctx = _browse_ctx(db=MagicMock())
+        decision = Decision(
+            action=ACTION_CATALOG_NAVIGATE,
+            args={
+                "navigator_step": "native_catalog_entry",
+                # No thumbnail_product_retailer_id at all — mirrors the
+                # production fallback decision built when native capability
+                # is ineligible (e.g. meta_catalog_unpublished).
+                "native_catalog_entry": {},
+            },
+        )
+        result = asyncio.run(CatalogNavigateHandler().handle(decision, ctx))
+        assert result.success is True
+        assert result.data.get("chosen_path") == "catalog_navigation_top_products_fallback"
+        # Trusted product facts are carried for the persona surface...
+        products = result.data.get("products") or []
+        assert len(products) == 2
+        assert {p["title"] for p in products} == {"حذاء رياضي أبيض", "حذاء رياضي أسود"}
+        assert result.data.get("discovery_output_kind") == "products"
+        # ...and the executor authors NO customer-facing text of its own
+        # (wording is owned by the catalog-navigation persona composer).
+        assert (result.data.get("product_lines") or "") == ""
+        assert (result.data.get("discovery_presentation_text") or "") == ""
+        # And must not silently claim a native catalog was attached.
+        assert not result.data.get("native_catalog_entry")
+
+    def test_no_thumbnail_with_no_orderable_products_yields_empty_not_fake_list(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _fake_execute(_self, _tool_name, _payload):
+            return _fake_tool_execution_result([])
+
+        monkeypatch.setattr(
+            "modules.ai.commerce.runtime.CommerceToolRuntime.execute",
+            _fake_execute,
+        )
+        ctx = _browse_ctx(db=MagicMock())
+        decision = Decision(
+            action=ACTION_CATALOG_NAVIGATE,
+            args={"navigator_step": "native_catalog_entry", "native_catalog_entry": {}},
+        )
+        result = asyncio.run(CatalogNavigateHandler().handle(decision, ctx))
+        assert result.success is True
+        assert (result.data.get("products") or []) == []
+        assert not (result.data.get("product_lines") or "").strip()
+        assert result.data.get("discovery_output_kind") == "empty"
+
+
+# Literal production decision args for the native-catalog send path, as built by
+# ``commerce_entry_catalog_delivery._resolve_send_catalog`` when native catalog
+# capability is ineligible (e.g. meta_catalog_unpublished). Copied verbatim —
+# the earlier regression tests used a shape without ``chosen_path``, which does
+# not occur in production and hid a provenance defect.
+PRODUCTION_SEND_CATALOG_ARGS = {
+    "catalog_delivery_kind": "send_catalog",
+    "commerce_entry_owner": "commerce_entry_catalog",
+    "navigator_step": "native_catalog_entry",
+    "turn_owner": "commerce_entry_catalog_delivery",
+    "owner_locked": True,
+    "chosen_path": "commerce_entry_send_catalog",
+    "owner_step": "send_catalog",
+}
+
+PATH_TOP_FALLBACK_VALUE = "catalog_navigation_top_products_fallback"
+PERSONA_COMPOSED_REPLY = "PERSONA_COMPOSED_BROWSE_REPLY"
+LEGACY_NO_SECTIONS_SENTENCE = "ما ظهر عندي أقسام واضحة حالياً."
+
+
+class TestNativeCatalogFallbackFinalTextProvenance:
+    """AGENTS.md 'final customer text provenance' — with the *production*
+    decision shape, the reply for a native-catalog-unavailable browse turn
+    must be composed by the catalog-navigation persona surface, never by a
+    deterministic string built inside the executor."""
+
+    def _patch_persona(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        seen: dict = {}
+
+        async def _fake_compose(**kwargs):
+            seen.update(kwargs)
+            return (
+                PERSONA_COMPOSED_REPLY,
+                None,
+                {"compose_source": "persona_llm", "chosen_path": kwargs.get("chosen_path")},
+            )
+
+        monkeypatch.setattr(
+            "modules.ai.brain.persona.catalog_product_answer"
+            ".try_compose_catalog_navigation_browse_answer",
+            _fake_compose,
+        )
+        return seen
+
+    def _run_production_turn(self, products: list, monkeypatch: pytest.MonkeyPatch):
+        async def _fake_execute(_self, _tool_name, _payload):
+            return _fake_tool_execution_result(products)
+
+        monkeypatch.setattr(
+            "modules.ai.commerce.runtime.CommerceToolRuntime.execute",
+            _fake_execute,
+        )
+        ctx = _browse_ctx(db=MagicMock())
+        decision = Decision(
+            action=ACTION_CATALOG_NAVIGATE,
+            args=dict(PRODUCTION_SEND_CATALOG_ARGS),
+        )
+
+        async def _run():
+            executed = await CatalogNavigateHandler().handle(decision, ctx)
+            reply = await DefaultComposer().compose(decision, executed, ctx)
+            return executed, reply
+
+        return asyncio.run(_run())
+
+    def test_production_shape_with_products_reply_is_persona_composed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = self._patch_persona(monkeypatch)
+        products = [
+            {"id": 1, "title": "حذاء رياضي أبيض", "price": "199", "external_id": "e1", "can_checkout": True},
+            {"id": 2, "title": "حذاء رياضي أسود", "price": "179", "external_id": "e2", "can_checkout": True},
+        ]
+        executed, reply = self._run_production_turn(products, monkeypatch)
+
+        # Provenance actually reaches compose as the top-products fallback.
+        assert executed.data.get("chosen_path") == PATH_TOP_FALLBACK_VALUE
+        # Executor contributed facts only — no customer-facing text.
+        assert (executed.data.get("product_lines") or "") == ""
+        assert (executed.data.get("discovery_presentation_text") or "") == ""
+        assert len(executed.data.get("products") or []) == 2
+        # Persona surface received the trusted product facts and owns wording.
+        assert len(seen.get("products") or []) == 2
+        assert reply == PERSONA_COMPOSED_REPLY
+        assert executed.data.get("compose_source") == "persona_llm"
+        # No deterministic executor-authored list leaks to the customer.
+        assert "•" not in reply
+        assert "ريال" not in reply
+        assert "199" not in reply and "179" not in reply
+
+    def test_production_shape_without_products_is_persona_not_legacy_sentence(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch_persona(monkeypatch)
+        executed, reply = self._run_production_turn([], monkeypatch)
+
+        assert executed.data.get("chosen_path") == PATH_TOP_FALLBACK_VALUE
+        assert (executed.data.get("products") or []) == []
+        assert (executed.data.get("product_lines") or "") == ""
+        # Empty catalog is explained by the persona surface, not by the legacy
+        # deterministic "no clear sections" sentence.
+        assert reply == PERSONA_COMPOSED_REPLY
+        assert LEGACY_NO_SECTIONS_SENTENCE not in reply
+        assert executed.data.get("compose_source") == "persona_llm"
+
+    def test_production_shape_does_not_claim_native_catalog_was_sent(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._patch_persona(monkeypatch)
+        executed, _reply = self._run_production_turn(
+            [{"id": 1, "title": "قميص قطني أزرق", "price": "120", "external_id": "e9", "can_checkout": True}],
+            monkeypatch,
+        )
+        # No interactive-catalog payload, and the audit flag records why.
+        assert not executed.data.get("native_catalog_entry")
+        assert executed.data.get("native_catalog_thumbnail_unavailable") is True
+        assert executed.data.get("discovery_output_kind") == "products"
+
+
 class TestResponderDoesNotPreclaim:
     def test_native_catalog_compose_returns_empty_reply(self):
         responder = DefaultComposer()
