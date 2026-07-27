@@ -45,6 +45,7 @@ from ..types import (
     INTENT_TRACK_ORDER,
     INTENT_ORDER_HISTORY_COUNT,
     INTENT_LATEST_ORDER_SUMMARY,
+    INTENT_ORDER_REFERENCE_LIST,
     INTENT_COMPLAINT_REFUND,
     INTENT_WHO_ARE_YOU,
     Intent,
@@ -488,6 +489,23 @@ _register(RuleSet(
         r"آخر طلب وش",
         r"وش آخر طلب",
         r"what(?:'s| is) my latest order",
+    ],
+    confidence=0.94,
+))
+
+# ── Order reference listing (ledger — phase 2, issue #709) ───────────────────
+# Distinct from INTENT_LATEST_ORDER_SUMMARY (summary of latest order) and
+# INTENT_ORDER_HISTORY_COUNT (count/history). Fires only when «أرقام» is
+# explicitly bound to طلب/طلبات/طلباتي — never on bare pronoun «أرقامها»
+# (those stay staff-contact at the decision-engine layer).
+_register(RuleSet(
+    intent=INTENT_ORDER_REFERENCE_LIST,
+    patterns=[
+        r"(?:أ?رسل|ارسل|ابعث|أبعث)\s*(?:لي\s+)?أ?رقام\s+(?:ال)?طلبات",
+        r"أ?رقام\s+طلباتي(?:\s*السابقة)?\s*[\?؟]?",
+        r"أ?رقام\s+(?:طلباتي|طلبي)\s*[\?؟]?",
+        r"أ?رقام\s+(?:ال)?طلبات(?:\s*السابقة)?\s*[\?؟]?",
+        r"(?:send|give)\s+(?:me\s+)?(?:the\s+)?order\s+(?:reference\s+)?numbers?",
     ],
     confidence=0.94,
 ))
@@ -1155,6 +1173,7 @@ _FIRST_CONTACT_ACTIONABLE_INTENTS: frozenset[str] = frozenset({
     INTENT_TRACK_ORDER,
     INTENT_ORDER_HISTORY_COUNT,
     INTENT_LATEST_ORDER_SUMMARY,
+    INTENT_ORDER_REFERENCE_LIST,
     INTENT_PLATFORM_INQUIRY,
     INTENT_NEED_BASED_PRODUCT_ADVICE,
 })

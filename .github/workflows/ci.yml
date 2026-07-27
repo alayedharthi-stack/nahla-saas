@@ -284,4 +284,5 @@ jobs:
             backend/tests/test_real_channel_acceptance_session_pg.py \
             backend/tests/test_tenant_merchant_clone_operator.py \
             backend/tests/test_salla_integration_resolver_ambiguity.py \
+            "backend/tests/test_customer_commerce_ledger.py::TestLedgerOrderingPostgres" \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning
