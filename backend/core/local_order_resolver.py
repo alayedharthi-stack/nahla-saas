@@ -215,14 +215,26 @@ def _fetch_tenant_orders_for_customer(
         .all()
     )
     matched: List[Any] = []
+    seen_ids: Set[int] = set()
     for row in rows:
-        if keys and _order_matches_phone(row, keys):
-            matched.append(row)
+        oid = int(getattr(row, "id", 0) or 0)
+        if oid and oid in seen_ids:
             continue
-        if customer_id:
-            meta = dict(getattr(row, "extra_metadata", None) or {})
-            if int(meta.get("customer_id") or 0) == int(customer_id):
-                matched.append(row)
+        matched_row = False
+        if keys and _order_matches_phone(row, keys):
+            matched_row = True
+        elif customer_id:
+            row_cid = getattr(row, "customer_id", None)
+            if row_cid is not None and int(row_cid) == int(customer_id):
+                matched_row = True
+            else:
+                meta = dict(getattr(row, "extra_metadata", None) or {})
+                if int(meta.get("customer_id") or 0) == int(customer_id):
+                    matched_row = True
+        if matched_row:
+            if oid:
+                seen_ids.add(oid)
+            matched.append(row)
     return matched
 
 

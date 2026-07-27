@@ -28,6 +28,7 @@ logger = logging.getLogger("nahla.customer_commerce_ledger")
 
 _CANCELLED_STATUSES = frozenset({"cancelled", "canceled", "refunded"})
 _ABANDONED_STATUSES = frozenset({"abandoned"})
+_MAX_ORDER_REFERENCE_LIST_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,69 @@ def resolve_customer_commerce_profile(
     return profile
 
 
+def list_recent_order_snapshots(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int] = None,
+    customer_id: Optional[int] = None,
+    phone: Optional[str] = None,
+    include_abandoned: bool = False,
+    include_cancelled: bool = True,
+    limit: int = 5,
+) -> List[LocalOrderSnapshot]:
+    """
+    Return recent order snapshots for a tenant-scoped customer lookup.
+
+    Tenant isolation is enforced on every retrieval path. Only ``display_reference``
+    from each snapshot is customer-safe for outbound replies.
+    """
+    _ = conversation_id
+    effective_limit = max(1, min(int(limit or 5), _MAX_ORDER_REFERENCE_LIST_LIMIT))
+    resolved_phone = _resolve_phone(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=customer_id,
+        phone=phone,
+    )
+    identity = _load_customer_identity(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=customer_id,
+        phone=resolved_phone or str(phone or ""),
+    )
+
+    rows = _fetch_tenant_orders_for_customer(
+        db,
+        tenant_id=int(tenant_id),
+        phone=resolved_phone,
+        customer_id=identity.customer_id or customer_id,
+        # Same window as resolve_customer_commerce_profile: the helper caps
+        # tenant-wide rows in SQL then filters by customer in Python, so a
+        # smaller limit can miss recent matches when other customers' orders
+        # fill the top of the tenant's id-desc window.
+        limit=200,
+    )
+    snapshots_all = _to_snapshots(db, int(tenant_id), rows)
+    filtered: List[LocalOrderSnapshot] = []
+
+    for row, snap in zip(rows, snapshots_all):
+        abandoned = _is_abandoned_order(row)
+        cancelled = _is_cancelled_status(snap.status)
+        include = True
+        if abandoned and not include_abandoned:
+            include = False
+        if cancelled and not include_cancelled:
+            include = False
+        if not include:
+            continue
+        filtered.append(snap)
+        if len(filtered) >= effective_limit:
+            break
+
+    return filtered
+
+
 def _to_snapshots(
     db: Any,
     tenant_id: int,
@@ -304,5 +368,6 @@ __all__ = [
     "CustomerIdentity",
     "EvidenceQuality",
     "OrderCounts",
+    "list_recent_order_snapshots",
     "resolve_customer_commerce_profile",
 ]
