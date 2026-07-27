@@ -15,7 +15,10 @@ from modules.ai.brain.persona.catalog_product_answer import (  # noqa: E402
     build_catalog_product_answer_facts_bundle,
     classify_catalog_question_kind,
 )
-from modules.ai.brain.persona.compose_guards import apply_persona_compose_guards  # noqa: E402
+from modules.ai.brain.persona.compose_guards import (  # noqa: E402
+    apply_persona_compose_guards,
+    detect_ungrounded_product_titles,
+)
 from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: E402
 
 
@@ -103,10 +106,20 @@ class TestCatalogBrowseAvailabilityMention:
         assert guard.passed is True
         assert not guard.failed_reason
 
-        invented_reply = "ساعة ذكية فاخرة متوفرة الآن وسعرها 999 ريال"
+        invented_reply = "عندنا ساعة ذكية فاخرة مناسبة للاستخدام اليومي"
         invented_guard = apply_persona_compose_guards(invented_reply, bundle)
-        assert invented_guard.passed is False
-        assert invented_guard.failed_reason == "invented_price"
+        assert invented_guard.passed is True
+        assert not invented_guard.failed_reason
+        shadow_hits = detect_ungrounded_product_titles(invented_reply, facts)
+        assert len(shadow_hits) == 1
+        assert shadow_hits[0]["reason"] == "invented_product_title_shadow"
+        assert shadow_hits[0]["phrase"]
+        assert "ساعه" in shadow_hits[0]["phrase"]
+
+        priced_reply = "قميص قطني أزرق بسعر 999 ريال"
+        priced_guard = apply_persona_compose_guards(priced_reply, bundle)
+        assert priced_guard.passed is False
+        assert priced_guard.failed_reason == "invented_price"
 
     def test_zero_orderable_products_keeps_guard_closed(self) -> None:
         message = "وش المنتجات المتوفرة طيب؟"
