@@ -71,6 +71,11 @@ INTENT_PERSONA_INTERACTION = "persona_interaction"
 INTENT_TRACK_ORDER      = "track_order"
 INTENT_ORDER_HISTORY_COUNT = "order_history_count"
 INTENT_LATEST_ORDER_SUMMARY = "latest_order_summary"
+# "وش أرقامها؟" / "أرسل أرقام الطلبات" — the customer asks for the *references*
+# of their own previous orders, not a count and not a single latest summary.
+# Value doubles as the ``ledger_topic`` passed to the answerer, so the intent
+# and the topic must stay literally equal.
+INTENT_ORDER_REFERENCE_LIST = "order_reference_list"
 INTENT_GENERAL          = "general"
 INTENT_PICK_LIST_ITEM   = "pick_list_item"   # customer picks numbered option
 # Social / courtesy / religious signals — thanks ("جزاك الله خير"),
