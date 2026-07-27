@@ -1269,6 +1269,11 @@ class DefaultDecisionEngine:
                 _oc_exc,
             )
 
+        # ── 0a.614 Active in-flight order review (before DB track_order) ─
+        _review_dec = _try_active_order_review_decision(ctx)
+        if _review_dec is not None:
+            return _review_dec
+
         # ── 0a.615 Active checkout amount (before DB track_order) ───────
         try:
             from ..commerce.current_order_amount import (  # noqa: PLC0415
@@ -4264,6 +4269,88 @@ def _extract_product_switch_target(message: str) -> str:
 def _order_prep_has_active_product(state: Any) -> bool:
     op = getattr(state, "order_prep", None)
     return bool(op and str(getattr(op, "product_id", "") or "").strip())
+
+
+_ACTIVE_ORDER_REVIEW_RE = re.compile(
+    r"(?:"
+    r"(?:راجع|مراجعة|ورني|وريني|اعرض|عرض|شوف|اشوف)\s*(?:لي\s*)?(?:ال)?(?:طلب|طلبي|طلبيتي)"
+    r"|(?:ملخص)\s*(?:ال)?(?:طلب|طلبي|طلبيتي)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_active_order_review_request(message: str) -> bool:
+    """Review/show verb bound to an order noun — not shipment tracking."""
+    raw = str(message or "").strip()
+    if not raw:
+        return False
+    try:
+        from ..commerce.current_order_amount import (  # noqa: PLC0415
+            _norm_ar,
+            _TRACKING_ONLY_RE,
+            is_current_order_inquiry,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — review probe must not block decide
+        return False
+    norm = _norm_ar(raw)
+    if not norm:
+        return False
+    if _TRACKING_ONLY_RE.search(norm):
+        return False
+    if re.search(r"(?:^|\s)(?:تتبع|tracking)(?:\s|$)", norm):
+        return False
+    if is_current_order_inquiry(raw):
+        return True
+    return bool(_ACTIVE_ORDER_REVIEW_RE.search(norm))
+
+
+def _try_active_order_review_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route in-flight order review to checkout summary — not DB track_order."""
+    msg = ctx.message or ""
+    if not _is_active_order_review_request(msg):
+        return None
+    try:
+        from ..commerce.current_order_amount import has_active_current_order  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — review guard must not block decide
+        return None
+
+    _review_meta: Dict[str, Any] = {}
+    try:
+        _prof = getattr(ctx, "profile", None) or {}
+        if isinstance(_prof, dict):
+            _review_meta = dict(_prof.get("inbound_metadata") or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — profile read must not block review route
+        _review_meta = {}
+
+    state = ctx.state
+    if not has_active_current_order(state=state, inbound_metadata=_review_meta):
+        return None
+
+    focus = dict(getattr(state, "current_product_focus", None) or {})
+    if not focus and _order_prep_has_active_product(state):
+        _op = getattr(state, "order_prep", None)
+        focus = {
+            "external_id": str(getattr(_op, "product_id", "") or "").strip(),
+            "title": str(getattr(_op, "product_name", "") or "").strip(),
+        }
+
+    logger.info(
+        "[ACTIVE_ORDER_REVIEW] route=propose_draft_order tenant=%s product=%r preview=%r",
+        getattr(ctx, "tenant_id", None),
+        focus.get("title"),
+        msg[:60],
+    )
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args={
+            "product": focus,
+            "review_in_flight_order": True,
+            "skip_product_discovery": True,
+        },
+        reason="active_order_review: in-flight draft summary",
+        confidence=0.96,
+    )
 
 
 def _try_order_resume_decision(ctx: BrainContext) -> Optional[Decision]:

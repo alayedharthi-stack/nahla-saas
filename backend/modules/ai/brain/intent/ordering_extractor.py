@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict
+import unicodedata
+from typing import Any, Dict, Optional
 
 from services.address_resolution import extract_address_signals
 
@@ -192,6 +193,52 @@ _NUMBERED_LINE_PREFIX_RE = re.compile(
     r"^\s*(?:[1-9][0-9]?|[١٢٣٤٥٦٧٨٩][٠-٩]{0,2})\s*[-–—.)]\s*",
     re.UNICODE,
 )
+_DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
+_QTY_NORM_RE = re.compile(f"[{_DIA}]+")
+_QTY_WS_RE = re.compile(r"\s+")
+
+# Dual / counted-noun quantity forms — structural, not phrase-list driven.
+_AR_DUAL_QTY_RE = re.compile(
+    r"^(?:كميتين|حبتين|قطعتين|اثنتين|اثنين|إثنين|ثنتين)\s*$",
+    re.I | re.UNICODE,
+)
+_AR_COUNTED_NOUN_RE = re.compile(
+    r"(?:حبة|حبات|حبه|حبتين|قطعة|قطع|قطعتين|كمية|كميات|كميتين|عدد|وحدة|وحدات)",
+    re.I | re.UNICODE,
+)
+_AR_SPELLED_QTY_WITH_NOUN_RE = re.compile(
+    r"^(?P<num>"
+    r"واحد|واحدة|حبة|"
+    r"اثنين|إثنين|اثنتين|ثنتين|"
+    r"ثلاث|ثلاثة|تلات|تلاته|"
+    r"اربع|أربع|اربعة|أربعة|"
+    r"خمس|خمسة|"
+    r"ست|ستة|"
+    r"سبع|سبعة|"
+    r"ثمان|ثمانية|"
+    r"تسع|تسعة|"
+    r"عشر|عشرة"
+    r")\s+"
+    r"(?:حبة|حبات|حبه|قطعة|قطع|كمية|كميات|عدد|وحدة|وحدات)\s*$",
+    re.I | re.UNICODE,
+)
+_BARE_DIGIT_QTY_RE = re.compile(r"^[0-9٠-٩]{1,3}$", re.UNICODE)
+
+# Reused from cart_intent_extractor._AR_NUM_WORDS (extended for counted-noun parser).
+_AR_COUNT_WORDS = {
+    "واحد": 1, "واحدة": 1, "حبة": 1,
+    "اثنين": 2, "إثنين": 2, "اثنتين": 2, "ثنتين": 2,
+    "حبتين": 2, "كميتين": 2, "قطعتين": 2,
+    "ثلاث": 3, "ثلاثة": 3, "تلات": 3, "تلاته": 3,
+    "اربع": 4, "أربع": 4, "اربعة": 4, "أربعة": 4,
+    "خمس": 5, "خمسة": 5,
+    "ست": 6, "ستة": 6,
+    "سبع": 7, "سبعة": 7,
+    "ثمان": 8, "ثمانية": 8,
+    "تسع": 9, "تسعة": 9,
+    "عشر": 10, "عشرة": 10,
+}
+
 _NON_NAME_LINE_PREFIXES = (
     "العنوان",
     "العنوان الوطني",
@@ -207,6 +254,77 @@ _NON_NAME_LINE_PREFIXES = (
     "المدينة",
     "رقم الجوال",
 )
+
+
+def _norm_qty_text(text: str) -> str:
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", str(text).lower())
+    t = _QTY_NORM_RE.sub("", t)
+    t = (
+        t.replace("\u0623", "\u0627")
+        .replace("\u0625", "\u0627")
+        .replace("\u0622", "\u0627")
+        .replace("\u0649", "\u064a")
+        .replace("\u0629", "\u0647")
+    )
+    return _QTY_WS_RE.sub(" ", t).strip()
+
+
+def extract_ordering_quantity(message: str) -> Optional[int]:
+    """
+    Structural Arabic quantity parser for the single-product order funnel.
+
+    Reuses ``active_order_quantity_extract._parse_count_quantity`` for the
+    حبتين / اثنين / 4-forms it already covers, then extends with dual forms
+    (كميتين, قطعتين), spelled-number + counted-noun (ثلاث حبات), and bare
+    ASCII / Eastern-Arabic digits.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+
+    from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: PLC0415
+        _parse_count_quantity,
+    )
+
+    reused = _parse_count_quantity(text)
+    if reused:
+        return reused
+
+    norm = _norm_qty_text(text)
+    if not norm:
+        return None
+
+    if _AR_DUAL_QTY_RE.match(norm):
+        return 2
+
+    spelled = _AR_SPELLED_QTY_WITH_NOUN_RE.match(norm)
+    if spelled:
+        num_word = _norm_qty_text(spelled.group("num") or "")
+        if num_word in _AR_COUNT_WORDS:
+            return _AR_COUNT_WORDS[num_word]
+
+    if _BARE_DIGIT_QTY_RE.match(text.strip()):
+        digits = _digits_to_western(text.strip())
+        try:
+            qty = int(digits)
+        except (TypeError, ValueError):
+            return None
+        return qty if qty >= 1 else None
+
+    # Leading spelled number + optional counted noun anywhere in a short message.
+    tokens = norm.split()
+    if tokens and tokens[0] in _AR_COUNT_WORDS and len(tokens) <= 3:
+        if len(tokens) == 1 or _AR_COUNTED_NOUN_RE.search(norm):
+            return _AR_COUNT_WORDS[tokens[0]]
+
+    return None
+
+
+def message_is_quantity_only(message: str) -> bool:
+    """True when the inbound text is purely a quantity expression."""
+    return extract_ordering_quantity(message) is not None
 
 
 def extract_ordering_slots(message: str) -> Dict[str, Any]:
@@ -230,14 +348,19 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
 
     slots: Dict[str, Any] = {}
 
-    _skip_name = False
-    try:
-        from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
-            detect_future_transfer_intent,
-        )
-        _skip_name = detect_future_transfer_intent(text)
-    except Exception:  # noqa: BLE001
-        _skip_name = False
+    quantity = extract_ordering_quantity(text)
+    if quantity is not None:
+        slots["quantity"] = quantity
+
+    _skip_name = message_is_quantity_only(text)
+    if not _skip_name:
+        try:
+            from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
+                detect_future_transfer_intent,
+            )
+            _skip_name = detect_future_transfer_intent(text)
+        except Exception:  # noqa: BLE001
+            _skip_name = False
 
     # ── Layer 1: Labeled field parsing ────────────────────────────────
     if not _skip_name:
@@ -277,7 +400,7 @@ def extract_ordering_slots(message: str) -> Dict[str, Any]:
             slots["city"] = city
 
     # ── Layer 4: Heuristic name detection (if not already found) ─────
-    if not _skip_name and not slots.get("customer_first_name"):
+    if not _skip_name and not slots.get("quantity") and not slots.get("customer_first_name"):
         name_first, name_last = _detect_name(text, slots)
         if name_first or name_last:
             if name_first:
@@ -435,6 +558,8 @@ def _detect_name(text: str, already_extracted: Dict[str, Any]) -> tuple[str, str
         if re.search(r"[A-Za-z]{4}\d{4}", line.upper()):
             continue
         if _DIGIT_RE.search(line):
+            continue
+        if extract_ordering_quantity(line):
             continue
         candidate = _clean_name_candidate(line)
         if not candidate:

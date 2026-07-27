@@ -113,6 +113,9 @@ def normalize_line_item(raw: Dict[str, Any], *, source: str = "whatsapp") -> Dic
         item["product_id"] = product_id
     if variant_id:
         item["variant_id"] = variant_id
+    retailer_id = str(raw.get("product_retailer_id") or "").strip()
+    if retailer_id:
+        item["product_retailer_id"] = retailer_id
     for price_key in ("unit_price", "price"):
         if raw.get(price_key) is not None:
             if isinstance(raw.get(price_key), dict):
@@ -410,10 +413,31 @@ def _item_from_focus(
         "quantity":     quantity,
         "source":       "whatsapp",
     }
-    price = focus.get("price") or order_prep.get("price") or order_prep.get("total_price")
+    line_items = order_prep.get("line_items") or []
+    first_li = line_items[0] if line_items and isinstance(line_items[0], dict) else {}
+    if first_li.get("match_status"):
+        raw["match_status"] = first_li.get("match_status")
+    elif product_id and (
+        first_li.get("unit_price") is not None
+        or first_li.get("price") is not None
+        or focus.get("price") is not None
+    ):
+        raw["match_status"] = ITEM_STATUS_CONFIRMED
+    price = (
+        first_li.get("unit_price")
+        or first_li.get("price")
+        or focus.get("price")
+        or order_prep.get("unit_price")
+        or order_prep.get("price")
+        or order_prep.get("total_price")
+    )
     if price is not None:
         raw["unit_price"] = price
         raw["price"] = price
+    if first_li.get("product_retailer_id"):
+        raw["product_retailer_id"] = first_li.get("product_retailer_id")
+    elif product_id:
+        raw["product_retailer_id"] = product_id
     return normalize_line_item(raw)
 
 
