@@ -1138,6 +1138,11 @@ class DefaultDecisionEngine:
                 _ce3_channel_exc,
             )
 
+        # ── 0a.508 Order resume / checkout continuation (before catalog) ──
+        _resume_dec = _try_order_resume_decision(ctx)
+        if _resume_dec is not None:
+            return _resume_dec
+
         # ── 0a.51 Commerce entry catalog delivery (CE2) ───────────────────
         try:
             from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
@@ -1821,6 +1826,9 @@ class DefaultDecisionEngine:
         _msg_words  = set(_msg_lower.split())
         _is_confirm = bool(_msg_words & _CONFIRM_KEYWORDS)
         _has_prep   = bool(getattr(state, "order_prep", None))
+        _is_search_continue = _is_search_continuation_message(ctx.message or "")
+        if _is_search_continue:
+            _is_confirm = False
         try:
             from ..order_context_gate import has_explicit_commerce_topic_change  # noqa: PLC0415
 
@@ -1838,10 +1846,47 @@ class DefaultDecisionEngine:
             and not _explicit_commerce_switch
             and not _checkout_topic_blocks()
             and not getattr(_current_social_nc, "matched", False)
+            and not _is_search_continue
         ):
             _eos_dec = _try_existing_order_support_ownership_decision(ctx)
             if _eos_dec is not None:
                 return _eos_dec
+            if _order_prep_has_active_product(state):
+                if _is_explicit_product_switch_signal(ctx.message or ""):
+                    return _try_active_order_product_switch_decision(ctx)
+                if _is_generic_product_availability_enquiry(ctx.message or ""):
+                    _focus_title = (state.current_product_focus or {}).get("title") or ""
+                    _enquiry_q = _extract_product_switch_target(ctx.message or "") or (
+                        ctx.message or ""
+                    ).strip()
+                    logger.info(
+                        "[PRODUCT_SWITCH] generic enquiry during active order | "
+                        "tenant=%s active=%r enquiry=%r",
+                        ctx.tenant_id,
+                        _focus_title,
+                        _enquiry_q[:60],
+                    )
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={
+                            "topic": "active_order_product_enquiry",
+                            "active_product": _focus_title,
+                            "enquiry_query": _enquiry_q,
+                            "response_goal": (
+                                "Customer has an in-progress draft order for "
+                                "active_product and asked about a different product "
+                                "(enquiry_query). Do not assume they want to switch. "
+                                "Briefly acknowledge the enquiry and ask whether to "
+                                "continue the current order or explore the new product."
+                            ),
+                            "suppress_checkout": True,
+                        },
+                        reason=(
+                            "active order — generic alternate-product enquiry "
+                            "(not a confirmed switch)"
+                        ),
+                        confidence=0.91,
+                    )
             _focus_title = (state.current_product_focus or {}).get("title")
             logger.info(
                 "[ORDER FLOW] FORCED action=propose_draft_order "
@@ -4137,3 +4182,211 @@ def _match_product_from_message(
 
     # Require at least a substring match to avoid false positives
     return best if best_score >= 40 else None
+
+
+_PRODUCT_SWITCH_RE = re.compile(
+    r"(?:"
+    r"بدل(?:اً)?\s*(?:من\s*)?"
+    r"|غي(?:ّ|ي)?ر\s+(?:ال)?منتج\s+(?:إلى|الى|ل)"
+    r"|(?:^|[\s،,.])(?:لا|مو)\s+[^،,.!\n]{0,50}?\s+أ?بي\s+"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SEARCH_CONTINUATION_RE = re.compile(
+    r"(?:"
+    r"ك(?:م|مل)\s*البحث|تابع\s*البحث|"
+    r"دور\s+لي\s+علي\s+خيار\s+ا?خر"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_GENERIC_AVAILABILITY_ENQUIRY_RE = re.compile(
+    r"(?:"
+    r"(?:هل\s+)?عندكم\s+"
+    r"|(?:هل\s+)?(?:متوفر|موجود)\s+"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_WANT_PREFIX_RE = re.compile(
+    r"^(?:ابي|ابغى|أبي|أبغى|اريد|أريد|ودي|حاب|حابب|بدي|عطني|عطيني)\s+",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _is_search_continuation_message(message: str) -> bool:
+    return bool(_SEARCH_CONTINUATION_RE.search(_normalize_ar(message)))
+
+
+def _is_explicit_product_switch_signal(message: str) -> bool:
+    norm = _normalize_ar(message)
+    if not norm:
+        return False
+    return bool(_PRODUCT_SWITCH_RE.search(norm))
+
+
+def _is_generic_product_availability_enquiry(message: str) -> bool:
+    norm = _normalize_ar(message)
+    if not norm:
+        return False
+    if _is_explicit_product_switch_signal(message):
+        return False
+    return bool(_GENERIC_AVAILABILITY_ENQUIRY_RE.search(norm))
+
+
+def _extract_product_switch_target(message: str) -> str:
+    raw = (message or "").strip()
+    norm = _normalize_ar(raw)
+    if not norm:
+        return ""
+
+    m = re.search(
+        r"غي(?:ّ|ي)?ر\s+(?:ال)?منتج\s+(?:إلى|الى|ل)\s+(.+)$",
+        norm,
+    )
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"^(.+?)\s+بدل(?:اً)?\s*(?:من\s*)?.+$", norm)
+    if m:
+        candidate = _WANT_PREFIX_RE.sub("", m.group(1).strip()).strip()
+        if len(candidate) >= 3:
+            return candidate
+
+    m = re.search(r"(?:لا|مو)\s+[^،,.!\n]{0,50}?\s+أ?بي\s+(.+)$", norm)
+    if m:
+        return m.group(1).strip()
+
+    return ""
+
+
+def _order_prep_has_active_product(state: Any) -> bool:
+    op = getattr(state, "order_prep", None)
+    return bool(op and str(getattr(op, "product_id", "") or "").strip())
+
+
+def _try_order_resume_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Resume/checkout phrases — never catalog search or invented orders."""
+    try:
+        from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
+            is_order_resume_or_completion_phrase,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — resume guard import must not block decide
+        return None
+
+    if not is_order_resume_or_completion_phrase(ctx.message or ""):
+        return None
+
+    state = ctx.state
+    focus = dict(state.current_product_focus or {})
+    if _order_prep_has_active_product(state) and focus:
+        logger.info(
+            "[ORDER_RESUME] active draft continuation | tenant=%s product=%r preview=%r",
+            ctx.tenant_id,
+            focus.get("title"),
+            (ctx.message or "")[:60],
+        )
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={"product": focus},
+            reason="order_resume: active draft — continue checkout",
+            confidence=0.96,
+        )
+
+    from ..commerce.product_ordering_prompt import build_ordering_clarify_args  # noqa: PLC0415
+
+    logger.info(
+        "[ORDER_RESUME] no active draft — clarify | tenant=%s preview=%r",
+        ctx.tenant_id,
+        (ctx.message or "")[:60],
+    )
+    return Decision(
+        action=ACTION_CLARIFY,
+        args=build_ordering_clarify_args(ctx),
+        reason="order_resume: no active draft — clarify before checkout",
+        confidence=0.88,
+    )
+
+
+def _try_active_order_product_switch_decision(
+    ctx: BrainContext,
+    *,
+    candidates: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Decision]:
+    msg = ctx.message or ""
+    state = ctx.state
+    focus = dict(state.current_product_focus or {})
+    focus_ext = str(focus.get("external_id") or "").strip().lower()
+
+    cands = list(
+        candidates
+        if candidates is not None
+        else list(state.last_search_candidates or [])
+        or list(state.last_recommended_products or [])
+    )
+    target = _extract_product_switch_target(msg)
+
+    matched = _match_product_from_message(target, cands) if target else None
+    if not matched:
+        matched = _match_product_from_message(msg, cands)
+
+    matched_ext = str((matched or {}).get("external_id") or "").strip().lower()
+    if matched and matched_ext and matched_ext != focus_ext:
+        logger.info(
+            "[PRODUCT_SWITCH] matched replacement | tenant=%s from=%r to=%r",
+            ctx.tenant_id,
+            focus.get("title"),
+            matched.get("title"),
+        )
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={
+                "product": matched,
+                "forced_product": matched,
+                "source": "product_switch",
+            },
+            reason=f"explicit product switch — matched '{matched.get('title')}'",
+            confidence=0.94,
+        )
+
+    if target:
+        logger.info(
+            "[PRODUCT_SWITCH] search replacement | tenant=%s from=%r query=%r",
+            ctx.tenant_id,
+            focus.get("title"),
+            target[:80],
+        )
+        return Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={"query": target, "source": "product_switch"},
+            reason=f"explicit product switch — search replacement {target!r}",
+            confidence=0.92,
+        )
+
+    narrow: List[Dict[str, Any]] = []
+    for prod in cands:
+        title = str(prod.get("title") or "").strip()
+        if not title:
+            continue
+        title_norm = _normalize_ar(title)
+        if title_norm and title_norm in _normalize_ar(msg):
+            narrow.append(prod)
+    narrow = [p for p in narrow if str(p.get("external_id") or "").strip().lower() != focus_ext]
+    if 2 <= len(narrow) <= 3:
+        return Decision(
+            action=ACTION_NARROW,
+            args={"products": narrow, "topic": "product_switch"},
+            reason="explicit product switch — narrow replacement candidates",
+            confidence=0.90,
+        )
+
+    return Decision(
+        action=ACTION_CLARIFY,
+        args={
+            "topic": "product_switch",
+            "active_product": focus.get("title") or "",
+        },
+        reason="explicit product switch — replacement unclear",
+        confidence=0.88,
+    )
