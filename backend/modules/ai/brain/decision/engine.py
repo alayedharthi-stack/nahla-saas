@@ -69,6 +69,7 @@ from ..types import (
     INTENT_TRACK_ORDER,
     INTENT_ORDER_HISTORY_COUNT,
     INTENT_LATEST_ORDER_SUMMARY,
+    INTENT_ORDER_REFERENCE_LIST,
     INTENT_GENERAL,
     INTENT_WHO_ARE_YOU,
     INTENT_COMPLAINT_REFUND,
@@ -1019,6 +1020,32 @@ class DefaultDecisionEngine:
                     block_commerce=True,
                 )
 
+        # ── 0a.495 Ledger reference-list follow-up (before staff_contact probe) ─
+        # «تعرف أرقامها؟» after a ledger turn must not match staff_contact.
+        try:
+            from ..commerce.ledger_follow_up import (  # noqa: PLC0415
+                try_ledger_follow_up_decision,
+            )
+
+            _ledger_fu_dec = try_ledger_follow_up_decision(ctx)
+            if _ledger_fu_dec is not None:
+                logger.info(
+                    "[LEDGER_FOLLOW_UP] route=%s tenant=%s preview=%r",
+                    _ledger_fu_dec.action,
+                    getattr(ctx, "tenant_id", None),
+                    (ctx.message or "")[:60],
+                )
+                return _ledger_fu_dec
+        except Exception:  # noqa: BLE001
+            # Fail open so a hook fault never breaks the turn, but never
+            # silently: a swallowed fault here sends an order-reference
+            # follow-up back to staff_contact routing, which is the exact
+            # production bug this hook exists to fix.
+            logger.exception(
+                "[LEDGER_FOLLOW_UP] hook failed — falling through tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
+
         from ..current_turn_social_non_commerce import CurrentTurnSocialNonCommerce  # noqa: PLC0415
 
         _current_social_nc = CurrentTurnSocialNonCommerce(False)
@@ -1191,7 +1218,7 @@ class DefaultDecisionEngine:
             _types_dec = try_types_overview_decision(ctx)
             if _types_dec is not None:
                 return _types_dec
-        except Exception as _types_exc:  # noqa: BLE001
+        except Exception as _types_exc:  # noqa: BLE001  # noqa: silent-ok — types overview hook must not block decide
             logger.debug(
                 "[TYPES_OVERVIEW] skipped tenant=%s err=%s",
                 getattr(ctx, "tenant_id", None),
@@ -2031,7 +2058,14 @@ class DefaultDecisionEngine:
                 )
 
         # ── 2.9 Customer commerce ledger (order history — phase 1) ───────
-        if intent.name in (INTENT_ORDER_HISTORY_COUNT, INTENT_LATEST_ORDER_SUMMARY):
+        if intent.name in (
+            INTENT_ORDER_HISTORY_COUNT,
+            INTENT_LATEST_ORDER_SUMMARY,
+            INTENT_ORDER_REFERENCE_LIST,
+        ):
+            from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+            stamp_ledger_context(state)
             return Decision(
                 action=ACTION_CUSTOMER_LEDGER_REPLY,
                 args={"ledger_topic": intent.name},
