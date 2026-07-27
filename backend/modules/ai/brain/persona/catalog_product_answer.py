@@ -416,7 +416,11 @@ def build_catalog_product_answer_facts_bundle(
     wants_availability = _CATALOG_FACET_AVAILABILITY in requested_facets
     include_price = wants_price and any_price and not ambiguous
     include_availability = wants_availability and any_availability and not ambiguous
-    allow_availability_mention = wants_availability and not ambiguous
+    # Evidence-gated: browse turns may echo availability only when orderable products exist;
+    # all compose guards still apply when has_positive_availability is False.
+    allow_availability_mention = (wants_availability and not ambiguous) or (
+        qkind == "browse" and any_positive
+    )
     eligible_product_count = _count_eligible_catalog_products(items)
 
     verified_facts: dict[str, Any] = {

@@ -242,7 +242,13 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                         "claiming متوفر or غير متوفر/نفذ/out-of-stock"
                     )
             elif qkind == "browse" or facts.get("navigation_browse"):
-                rule_parts.append("do not mention availability or stock status")
+                # Evidence-gated browse availability, EM review 2026-07-27.
+                if allow_avail and has_pos_avail:
+                    rule_parts.append(
+                        "mention positive availability only for products with available=true in facts"
+                    )
+                else:
+                    rule_parts.append("do not mention availability or stock status")
             else:
                 rule_parts.append("mention prices only when listed in product facts")
             lines.append("; ".join(rule_parts))
