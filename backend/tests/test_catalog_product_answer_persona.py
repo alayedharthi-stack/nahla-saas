@@ -993,6 +993,8 @@ class TestCatalogAvailabilityFactsSemantics:
         asyncio.run(_run())
 
     def test_navigation_true_browse_forbids_availability_claims(self) -> None:
+        # Pre-fix contract (allow_availability_mention=False on browse) caused tenant-1
+        # production incident: orderable browse turn rejected «متوفر» as invented_availability.
         from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
             _build_catalog_navigation_bundle,
         )
@@ -1009,12 +1011,47 @@ class TestCatalogAvailabilityFactsSemantics:
         facts = bundle.verified_facts
         assert facts["question_kind"] == "browse"
         assert facts["navigation_browse"] is True
-        assert facts["allow_availability_mention"] is False
+        assert facts["allow_availability_mention"] is True
+        assert facts["has_positive_availability"] is True
 
         from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
 
         prompt = build_user_prompt(bundle)
-        assert "do not mention availability or stock status" in prompt
+        assert (
+            "mention positive availability only for products with available=true in facts"
+            in prompt
+        )
+        assert "do not mention availability or stock status" not in prompt
+
+    def test_navigation_browse_without_evidence_still_forbids_availability_claims(
+        self,
+    ) -> None:
+        from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+            _build_catalog_navigation_bundle,
+        )
+
+        bundle, _rows = _build_catalog_navigation_bundle(
+            tenant_id=16,
+            customer_phone="966500000004",
+            inbound_text="وش عندكم من أحذية؟",
+            products=[self._GENERIC_PERFUME],
+            navigator_no_groups_fallback=False,
+            decision_args={},
+            settings={},
+        )
+        facts = bundle.verified_facts
+        assert facts["question_kind"] == "browse"
+        assert facts["navigation_browse"] is True
+        assert facts["allow_availability_mention"] is False
+        assert facts["has_positive_availability"] is False
+
+        from modules.ai.brain.persona.prompts import build_user_prompt  # noqa: PLC0415
+
+        prompt = build_user_prompt(bundle)
+        assert (
+            "mention positive availability only for products with available=true in facts"
+            not in prompt
+        )
 
     def test_positive_availability_evidence_allows_grounded_mتوفر(self) -> None:
         async def _run() -> None:
