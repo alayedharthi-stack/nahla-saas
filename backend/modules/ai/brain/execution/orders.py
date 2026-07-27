@@ -320,6 +320,7 @@ class DraftOrderHandler:
         # ── From here on, the product is confirmed to exist on Salla. ─────
 
         _seed_checkout_state(prep, ctx)
+        _sync_single_product_line_item(prep, product_info, ctx)
 
         from modules.ai.brain.commerce.cart_state import maybe_apply_cart_message  # noqa: PLC0415
 
@@ -457,6 +458,14 @@ class DraftOrderHandler:
             k: v.get("value_name") for k, v in (prep.product_options or {}).items()
         }
         _options_captured_early = _merge_message_options(prep, ctx.message)
+        _refresh_unit_price_after_options(prep, product_info, ctx)
+        _apply_quantity_from_message(prep, ctx.message)
+        _sync_single_product_line_item(prep, product_info, ctx)
+        _unmatched_option = _detect_unmatched_option_attempt(
+            prep,
+            ctx.message,
+            captured_count=_options_captured_early,
+        )
         _selected_after_merge = {
             k: v.get("value_name") for k, v in (prep.product_options or {}).items()
         }
@@ -547,9 +556,10 @@ class DraftOrderHandler:
                     "missing_fields": missing,
                     "question": _checkout_question(missing[0], is_sa=is_sa),
                     "is_first_ask": _is_first_ask,
-                    "order_prep": prep.to_dict(),
+                    "order_prep": _order_prep_export_dict(prep),
                     "resolution_available": spl_resolution_available(),
                     "customer_region": "SA" if is_sa else "INTL",
+                    **({"unmatched_option_attempt": True} if _unmatched_option else {}),
                 },
             )
 
@@ -558,14 +568,12 @@ class DraftOrderHandler:
         # that _ensure_product_options_loaded has run.
         if not _options_captured_early and prep.product_options_meta:
             _merge_message_options(prep, ctx.message)
+            _refresh_unit_price_after_options(prep, product_info, ctx)
 
-        # ── Number-by-stage interpretation (quantity) ────────────────────────
-        # When the customer sends a bare number ("2" / "3") AND the product
-        # is already selected AND no required options are pending, treat it
-        # as a quantity update. The same digits would have been interpreted
-        # as a list-pick (no product yet) or option-pick (options pending)
-        # in the earlier stages — this branch only fires when both prior
-        # interpretations are no longer ambiguous.
+        _apply_quantity_from_message(prep, ctx.message)
+        _sync_single_product_line_item(prep, product_info, ctx)
+
+        # ── Number-by-stage interpretation (quantity) — legacy bare-digit path ─
         _msg_clean = (ctx.message or "").strip()
         if (
             _msg_clean.isdigit()
@@ -578,6 +586,7 @@ class DraftOrderHandler:
                 _qty_from_msg = 0
             if _qty_from_msg >= 1 and _qty_from_msg != int(prep.quantity or 1):
                 prep.quantity = _qty_from_msg
+                _sync_single_product_line_item_quantity(prep)
                 logger.info(
                     "[ORDER FLOW] number interpreted as quantity | tenant=%s "
                     "product=%s quantity=%d",
@@ -675,7 +684,8 @@ class DraftOrderHandler:
                     "needs_options": True,
                     "missing_option_groups": _missing_options,
                     "selected_options": prep.product_options,
-                    "order_prep": prep.to_dict(),
+                    "order_prep": _order_prep_export_dict(prep),
+                    **({"unmatched_option_attempt": True} if _unmatched_option else {}),
                 },
             )
         if prep.product_has_required_options:
@@ -2300,8 +2310,228 @@ def _safe_float(value: object) -> float | None:
         if value in (None, ""):
             return None
         return float(value)
-    except Exception:
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — float coercion is best-effort for price fields
         return None
+
+
+def _order_prep_export_dict(prep: OrderPreparationState) -> Dict[str, Any]:
+    """Augment persisted prep with derived unit/total price for bridge consumers."""
+    data = prep.to_dict()
+    unit = _prep_unit_price(prep)
+    qty = max(int(prep.quantity or 1), 1)
+    if unit is not None:
+        data["price"] = unit
+        data["unit_price"] = unit
+        data["total_price"] = round(unit * qty, 2)
+    return data
+
+
+def _prep_unit_price(prep: OrderPreparationState) -> float | None:
+    for item in prep.line_items or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("unit_price", "price"):
+            amt = _safe_float(item.get(key))
+            if amt is not None:
+                return amt
+    return None
+
+
+def _apply_quantity_from_message(prep: OrderPreparationState, message: str) -> bool:
+    from modules.ai.brain.intent.ordering_extractor import extract_ordering_quantity  # noqa: PLC0415
+
+    qty = extract_ordering_quantity(message or "")
+    if qty is None or qty < 1:
+        return False
+    if int(prep.quantity or 1) == qty:
+        return False
+    prep.quantity = qty
+    _sync_single_product_line_item_quantity(prep)
+    return True
+
+
+def _sync_single_product_line_item_quantity(prep: OrderPreparationState) -> None:
+    qty = max(int(prep.quantity or 1), 1)
+    if not prep.line_items:
+        return
+    item = dict(prep.line_items[0])
+    item["quantity"] = qty
+    prep.line_items = [item] + list(prep.line_items[1:])
+
+
+def _load_local_catalog_product(ctx: BrainContext, external_id: str) -> Any:
+    db = getattr(ctx, "_db", None)
+    if db is None or not external_id:
+        return None
+    try:
+        from models import Product  # noqa: PLC0415
+
+        return (
+            db.query(Product)
+            .filter(
+                Product.tenant_id == ctx.tenant_id,
+                Product.external_id == str(external_id).strip(),
+            )
+            .first()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional catalog row lookup must not block checkout
+        return None
+
+
+def _local_product_options_from_row(product_row: Any) -> List[Dict[str, Any]]:
+    if product_row is None:
+        return []
+    meta = getattr(product_row, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return []
+    opts = meta.get("options")
+    if not isinstance(opts, list):
+        return []
+    return [dict(o) for o in opts if isinstance(o, dict)]
+
+
+def _trusted_catalog_unit_price(
+    prep: OrderPreparationState,
+    product_info: Dict[str, Any],
+    ctx: BrainContext,
+) -> float | None:
+    """Resolve unit price from selected option value, then catalog row / focus."""
+    for group in prep.product_options_meta or []:
+        gname = str(group.get("name") or "").strip()
+        if not gname:
+            continue
+        selected = (prep.product_options or {}).get(gname.lower())
+        if not isinstance(selected, dict):
+            continue
+        value_id = selected.get("value_id")
+        for val in group.get("values") or []:
+            if not isinstance(val, dict):
+                continue
+            if value_id is not None and val.get("id") == value_id:
+                opt_price = _safe_float(val.get("price"))
+                if opt_price is not None:
+                    return opt_price
+            vname = str(val.get("name") or "").strip().lower()
+            if vname and vname == str(selected.get("value_name") or "").strip().lower():
+                opt_price = _safe_float(val.get("price"))
+                if opt_price is not None:
+                    return opt_price
+
+    for key in ("price", "sale_price"):
+        amt = _safe_float(product_info.get(key))
+        if amt is not None:
+            return amt
+
+    row = _load_local_catalog_product(ctx, str(product_info.get("external_id") or prep.product_id or ""))
+    if row is not None:
+        for key in ("price",):
+            amt = _safe_float(getattr(row, key, None))
+            if amt is not None:
+                return amt
+    return None
+
+
+def _sync_single_product_line_item(
+    prep: OrderPreparationState,
+    product_info: Dict[str, Any],
+    ctx: BrainContext,
+) -> None:
+    """Keep one authoritative line item with trusted unit price + quantity."""
+    external_id = str(product_info.get("external_id") or prep.product_id or "").strip()
+    title = str(
+        product_info.get("title")
+        or product_info.get("product_name")
+        or ""
+    ).strip()
+    unit = _trusted_catalog_unit_price(prep, product_info, ctx)
+    qty = max(int(prep.quantity or 1), 1)
+    variant = ""
+    for sel in (prep.product_options or {}).values():
+        if isinstance(sel, dict) and sel.get("value_name"):
+            variant = str(sel.get("value_name") or "").strip()
+            break
+
+    existing = dict(prep.line_items[0]) if prep.line_items else {}
+    item: Dict[str, Any] = {
+        "product_id": external_id or existing.get("product_id") or "",
+        "product_name": title or existing.get("product_name") or existing.get("title") or "",
+        "title": title or existing.get("title") or existing.get("product_name") or "",
+        "quantity": qty,
+        "variant": variant or existing.get("variant") or "",
+        "product_retailer_id": external_id or existing.get("product_retailer_id") or "",
+        "source": "whatsapp",
+        "match_status": "confirmed",
+    }
+    if unit is not None:
+        item["unit_price"] = unit
+        item["price"] = unit
+    prep.line_items = [item]
+
+
+def _refresh_unit_price_after_options(
+    prep: OrderPreparationState,
+    product_info: Dict[str, Any],
+    ctx: BrainContext,
+) -> None:
+    unit = _trusted_catalog_unit_price(prep, product_info, ctx)
+    if unit is None:
+        return
+    if not prep.line_items:
+        _sync_single_product_line_item(prep, product_info, ctx)
+        return
+    item = dict(prep.line_items[0])
+    item["unit_price"] = unit
+    item["price"] = unit
+    prep.line_items = [item] + list(prep.line_items[1:])
+
+
+def _detect_unmatched_option_attempt(
+    prep: OrderPreparationState,
+    message: str,
+    *,
+    captured_count: int,
+) -> bool:
+    """True when the customer named an option value that does not exist in catalog meta."""
+    if captured_count > 0 or not prep.product_options_meta:
+        return False
+    if not _missing_product_options(prep):
+        return False
+    text = (message or "").strip()
+    if not text or len(text) > 40:
+        return False
+    from modules.ai.brain.intent.ordering_extractor import (  # noqa: PLC0415
+        extract_ordering_quantity,
+        message_is_quantity_only,
+    )
+
+    if message_is_quantity_only(text):
+        return False
+    if extract_ordering_quantity(text):
+        return False
+    if extract_address_signals(text).get("short_address_code"):
+        return False
+    norm = _norm_ar(text.lower())
+    for group in prep.product_options_meta or []:
+        gname = _norm_ar(str(group.get("name") or ""))
+        value_names = {
+            _norm_ar(str(val.get("name") or "").lower())
+            for val in (group.get("values") or [])
+            if isinstance(val, dict)
+        }
+        if norm in value_names:
+            return False
+        if ("مقاس" in gname or "size" in gname) and len(norm.split()) == 1:
+            if norm and norm not in value_names:
+                return True
+    try:
+        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+
+        if validate_customer_name(text).valid and " " not in text.strip():
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — name validator is optional for option mismatch guard
+        pass
+    # Short non-address token during option collection — likely a bad pick.
+    return len(norm.split()) <= 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2347,10 +2577,33 @@ async def _ensure_product_options_loaded(
         return
     if not external_id:
         return
+
+    local_row = _load_local_catalog_product(ctx, external_id)
+    local_opts = _local_product_options_from_row(local_row)
+    if local_opts:
+        prep.product_unsyncable = False
+        prep.product_options_loaded = True
+        prep.product_options_meta = local_opts
+        groups_with_values = [o for o in local_opts if o.get("values")]
+        prep.product_has_required_options = bool(groups_with_values)
+        logger.info(
+            "[ORDER FLOW] product options loaded from local catalog | tenant=%s "
+            "product_id=%s groups=%d has_required=%s",
+            ctx.tenant_id,
+            external_id,
+            len(local_opts),
+            prep.product_has_required_options,
+        )
+        return
+
     try:
         from store_integration.registry import get_adapter  # noqa: PLC0415
         adapter = get_adapter(ctx.tenant_id)
         if not adapter:
+            if local_row is not None:
+                prep.product_options_loaded = True
+                prep.product_options_meta = []
+                prep.product_has_required_options = False
             return
         product = await adapter.get_product(external_id)
         if not product:

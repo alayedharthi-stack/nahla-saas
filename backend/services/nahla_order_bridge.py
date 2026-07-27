@@ -546,6 +546,22 @@ def _enrich_receipt_metadata(
     return merged
 
 
+def _effective_order_quantity(
+    order_prep: Dict[str, Any],
+    line_items: List[Dict[str, Any]],
+) -> int:
+    for src in (order_prep, *((line_items or [])[:1])):
+        if not isinstance(src, dict):
+            continue
+        try:
+            qty = int(src.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty >= 1:
+            return qty
+    return 1
+
+
 def _resolve_order_amount(
     *,
     db: Any,
@@ -580,6 +596,7 @@ def _resolve_order_amount(
 
     cart_total = cart_total_amount(line_items)
     prep_total = _parse_amount(order_prep.get("total_price"))
+    qty = _effective_order_quantity(order_prep, line_items)
 
     # Multi-item carts: line_items sum beats order_prep.price (often last focus item).
     if cart_total is not None and len(line_items) > 1:
@@ -594,13 +611,13 @@ def _resolve_order_amount(
     for key in ("price",):
         amt = _parse_amount(order_prep.get(key))
         if amt is not None:
-            return amt, False, "order_prep_total_price"
+            return round(amt * qty, 2), False, "order_prep_total_price"
 
     focus = brain_state.get("current_product_focus") or {}
     if isinstance(focus, dict):
         amt = _parse_amount(focus.get("price"))
         if amt is not None:
-            return amt, False, "product_focus_price"
+            return round(amt * qty, 2), False, "product_focus_price"
 
     return None, not is_paid_path, "unknown"
 
