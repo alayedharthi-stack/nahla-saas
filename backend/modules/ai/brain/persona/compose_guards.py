@@ -491,6 +491,362 @@ def _apply_customer_conditional_coupon_answer_guards(
     return PersonaGuardResult(text=working, passed=True)
 
 
+# Closed presenter constructions asserting the store offers something (language-level).
+_CATALOG_PRESENTER_SURFACES: tuple[str, ...] = (
+    "متوفر عندنا",
+    "متوفر لدينا",
+    "متوفرة عندنا",
+    "يتوفر عندنا",
+    "من الكتالوج",
+    "عندنا",
+    "لدينا",
+)
+
+# Closed generic lexicon for non-named catalog prose (language-level, not category-specific).
+_CATALOG_GENERIC_LEXICON_RAW: tuple[str, ...] = (
+    "منتجات",
+    "المنتجات",
+    "خيارات",
+    "الخيارات",
+    "تشكيلة",
+    "التشكيلة",
+    "أصناف",
+    "الأصناف",
+    "أقسام",
+    "الأقسام",
+)
+
+_CATALOG_FUNCTION_WORDS_RAW: tuple[str, ...] = (
+    "من",
+    "في",
+    "على",
+    "مع",
+    "عدة",
+    "بعض",
+    "كل",
+    "هذه",
+    "هذي",
+    "اللي",
+    "لك",
+    "لكم",
+    "حاليا",
+)
+
+# Closed first-person/second-person service verbs (language-level, not category-specific).
+_CATALOG_SERVICE_VERBS_RAW: tuple[str, ...] = (
+    "نقدر",
+    "أقدر",
+    "نعرض",
+    "أعرض",
+    "أرشح",
+    "نرشح",
+    "تحب",
+    "تبي",
+    "أقترح",
+    "نوفر",
+)
+
+# Closed pro-forms / placeholders for service-verb offers (language-level, not product nouns).
+_CATALOG_SERVICE_PROFORMS_RAW: tuple[str, ...] = (
+    "الأنسب",
+    "المناسب",
+    "الانسب",
+    "شي",
+    "شيء",
+    "اللي يناسبك",
+    "الخيارات",
+    "المتاح",
+)
+
+_INVENTED_PRODUCT_TITLE_SHADOW_REASON = "invented_product_title_shadow"
+_SLOT_TOKEN_BOUND = 8
+
+
+def _norm_presenter_text(text: str) -> str:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        _norm,
+    )
+
+    base = _norm(text)
+    return re.sub(r"[\s.,!?؟\n]+", " ", base).strip()
+
+
+def _catalog_generic_lexicon() -> frozenset[str]:
+    return frozenset(_norm_presenter_text(word) for word in _CATALOG_GENERIC_LEXICON_RAW)
+
+
+def _catalog_function_words() -> frozenset[str]:
+    return frozenset(_norm_presenter_text(word) for word in _CATALOG_FUNCTION_WORDS_RAW)
+
+
+def _catalog_service_verbs() -> frozenset[str]:
+    return frozenset(_norm_presenter_text(word) for word in _CATALOG_SERVICE_VERBS_RAW)
+
+
+def _catalog_service_proforms() -> frozenset[str]:
+    return frozenset(_norm_presenter_text(phrase) for phrase in _CATALOG_SERVICE_PROFORMS_RAW)
+
+
+def _strip_al_prefix(token: str) -> str:
+    if token.startswith("ال") and len(token) > 2:
+        return token[2:]
+    return token
+
+
+def _skip_tokens() -> frozenset[str]:
+    return _catalog_function_words() | _catalog_service_verbs()
+
+
+def _trusted_vocabulary(facts: dict, allowed_titles: list[str]) -> frozenset[str]:
+    from modules.ai.knowledge.product_matcher import normalize_arabic, tokenize  # noqa: PLC0415
+
+    trusted: set[str] = set(_catalog_generic_lexicon())
+    trusted |= _skip_tokens()
+
+    for title in allowed_titles:
+        for token in tokenize(normalize_arabic(title)):
+            norm_tok = _norm_presenter_text(token)
+            if norm_tok:
+                trusted.add(norm_tok)
+                trusted.add(_strip_al_prefix(norm_tok))
+
+    for product in facts.get("catalog_products") or []:
+        if not isinstance(product, dict):
+            continue
+        category = str(product.get("category") or "").strip()
+        if not category:
+            continue
+        for token in tokenize(normalize_arabic(category)):
+            norm_tok = _norm_presenter_text(token)
+            if norm_tok:
+                trusted.add(norm_tok)
+                trusted.add(_strip_al_prefix(norm_tok))
+
+    return frozenset(trusted)
+
+
+def _resolve_conjunct_head(conjunct: str) -> str:
+    """First content token after skipping function/service words (ال prefix kept on surface)."""
+    norm = _norm_presenter_text(conjunct)
+    if not norm:
+        return ""
+    skip = _skip_tokens()
+    for token in norm.split():
+        bare = _strip_al_prefix(token)
+        if token in skip or bare in skip:
+            continue
+        return token
+    return ""
+
+
+def _head_is_trusted(head: str, trusted: frozenset[str]) -> bool:
+    if not head:
+        return True
+    bare = _strip_al_prefix(head)
+    return head in trusted or bare in trusted
+
+
+def _normalized_presenter_surfaces() -> list[tuple[str, str]]:
+    return [
+        (surface, _norm_presenter_text(surface))
+        for surface in sorted(
+            _CATALOG_PRESENTER_SURFACES,
+            key=len,
+            reverse=True,
+        )
+    ]
+
+
+def _iter_presenter_hits(norm_text: str) -> list[tuple[int, int, str]]:
+    """Return non-overlapping (start, end, surface) presenter hits left-to-right."""
+    hits: list[tuple[int, int, str]] = []
+    pos = 0
+    presenters = _normalized_presenter_surfaces()
+    while pos < len(norm_text):
+        matched: tuple[int, int, str] | None = None
+        for surface, pres_norm in presenters:
+            if pres_norm and norm_text.startswith(pres_norm, pos):
+                matched = (pos, pos + len(pres_norm), surface)
+                break
+        if matched is None:
+            pos += 1
+            continue
+        hits.append(matched)
+        pos = matched[1]
+    return hits
+
+
+def _extract_presenter_slot(norm_text: str, presenter_end: int) -> str:
+    remainder = norm_text[presenter_end:].lstrip()
+    if not remainder:
+        return ""
+    terminator = re.search(r"[.!?؟\n]", remainder)
+    term_end = terminator.start() if terminator else len(remainder)
+    tokens = remainder.split()
+    token_end = len(" ".join(tokens[:_SLOT_TOKEN_BOUND])) if tokens else 0
+    if len(tokens) > _SLOT_TOKEN_BOUND:
+        cut = min(term_end, token_end)
+    else:
+        cut = term_end
+    return remainder[:cut].strip()
+
+
+def _split_presenter_conjuncts(slot: str) -> list[str]:
+    parts = [slot]
+    for separator in ("،", " و "):
+        split_parts: list[str] = []
+        for part in parts:
+            split_parts.extend(part.split(separator))
+        parts = split_parts
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _conjunct_has_service_verb(conjunct: str) -> bool:
+    service = _catalog_service_verbs()
+    for token in _norm_presenter_text(conjunct).split():
+        bare = _strip_al_prefix(token)
+        if token in service or bare in service:
+            return True
+    return False
+
+
+def _trim_function_edge_tokens(tokens: list[str]) -> list[str]:
+    skip = _catalog_function_words()
+    trimmed = list(tokens)
+    while trimmed:
+        bare = _strip_al_prefix(trimmed[0])
+        if trimmed[0] in skip or bare in skip:
+            trimmed.pop(0)
+            continue
+        break
+    while trimmed:
+        bare = _strip_al_prefix(trimmed[-1])
+        if trimmed[-1] in skip or bare in skip:
+            trimmed.pop()
+            continue
+        break
+    return trimmed
+
+
+def _tokens_after_last_service_verb(conjunct: str) -> list[str]:
+    tokens = _norm_presenter_text(conjunct).split()
+    if not tokens:
+        return []
+    service = _catalog_service_verbs()
+    last_service_idx = -1
+    for idx, token in enumerate(tokens):
+        bare = _strip_al_prefix(token)
+        if token in service or bare in service:
+            last_service_idx = idx
+    if last_service_idx < 0:
+        return []
+    return tokens[last_service_idx + 1 :]
+
+
+def _trailing_offer_matches_proform(tokens: list[str]) -> bool:
+    trimmed = _trim_function_edge_tokens(tokens)
+    if not trimmed:
+        return True
+    phrase = " ".join(trimmed)
+    proforms = _catalog_service_proforms()
+    if phrase in proforms:
+        return True
+    last_token = trimmed[-1]
+    bare_last = _strip_al_prefix(last_token)
+    if last_token in proforms or bare_last in proforms:
+        return True
+    for proform in sorted(proforms, key=len, reverse=True):
+        proform_tokens = proform.split()
+        if len(trimmed) >= len(proform_tokens) and trimmed[-len(proform_tokens) :] == proform_tokens:
+            return True
+    return False
+
+
+def _conjunct_is_service_proform_offer(conjunct: str) -> bool:
+    """Accept service-verb conjunct only when the trailing offer is a closed pro-form."""
+    if not _conjunct_has_service_verb(conjunct):
+        return False
+    return _trailing_offer_matches_proform(_tokens_after_last_service_verb(conjunct))
+
+
+def _conjunct_has_ungrounded_head(conjunct: str, trusted: frozenset[str]) -> bool:
+    if _conjunct_is_service_proform_offer(conjunct):
+        return False
+    head = _resolve_conjunct_head(conjunct)
+    if not head:
+        return False
+    return not _head_is_trusted(head, trusted)
+
+
+def _conjunct_grounded_title(conjunct: str, allowed_titles: list[str]) -> str:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        _text_references_product,
+    )
+
+    for title in allowed_titles:
+        if _text_references_product(conjunct, title):
+            return title
+    return ""
+
+
+def detect_ungrounded_product_titles(text: str, facts: dict) -> list[dict]:
+    """Shadow detector for presenter-slot product title grounding (language-level)."""
+    working = str(text or "").strip()
+    if not working:
+        return []
+
+    allowed_titles = [
+        str(p.get("title") or "").strip()
+        for p in (facts.get("catalog_products") or [])
+        if isinstance(p, dict) and str(p.get("title") or "").strip()
+    ]
+    catalog_empty = not allowed_titles
+    trusted = _trusted_vocabulary(facts, allowed_titles)
+    norm_text = _norm_presenter_text(working)
+    if not norm_text:
+        return []
+
+    detections: list[dict] = []
+    for _start, presenter_end, surface in _iter_presenter_hits(norm_text):
+        slot = _extract_presenter_slot(norm_text, presenter_end)
+        if not slot:
+            continue
+        conjuncts = _split_presenter_conjuncts(slot)
+        if not conjuncts:
+            continue
+
+        slot_grounded = False
+        slot_detections: list[dict] = []
+        for conjunct in conjuncts:
+            matched_title = _conjunct_grounded_title(conjunct, allowed_titles)
+            if matched_title:
+                slot_grounded = True
+                continue
+            if not _conjunct_has_ungrounded_head(conjunct, trusted):
+                continue
+            phrase = _norm_presenter_text(conjunct)
+            slot_detections.append(
+                {
+                    "surface": surface,
+                    "phrase": phrase,
+                    "candidate_phrase": phrase,
+                    "matched_title": "",
+                    "reason": _INVENTED_PRODUCT_TITLE_SHADOW_REASON,
+                    "mixed": False,
+                    "catalog_empty": catalog_empty,
+                    "would_reject_enforce": True,
+                }
+            )
+
+        if slot_detections:
+            mixed = slot_grounded
+            for entry in slot_detections:
+                entry["mixed"] = mixed
+            detections.extend(slot_detections)
+
+    return detections
+
+
 def _apply_catalog_product_answer_guards(
     text: str,
     facts: dict[str, Any],
@@ -610,11 +966,6 @@ def _apply_catalog_product_answer_guards(
             failed_reason="invented_offer",
         )
 
-    allowed_titles = [
-        str(p.get("title") or "").strip()
-        for p in (facts.get("catalog_products") or [])
-        if isinstance(p, dict) and str(p.get("title") or "").strip()
-    ]
     scope = str(facts.get("category_scope") or facts.get("allowed_category") or "")
     if scope == "عسل":
         cross_markers = ("كريم", "زيت", "سم النحل", "عكبر")
@@ -634,10 +985,22 @@ def _apply_catalog_product_answer_guards(
             failed_reason="generic_product_label",
         )
 
-    if allowed_titles and len(allowed_titles) == 1:
-        title = allowed_titles[0]
-        if title and title not in working and len(working) > 40:
-            pass  # composer may paraphrase; titles not strictly required in short replies
+    try:
+        shadow_detections = detect_ungrounded_product_titles(working, facts)
+        for detection in shadow_detections:
+            logger.info(
+                "[INVENTED_PRODUCT_TITLE_SHADOW] surface=%s phrase=%s matched_title=%s "
+                "reason=%s mixed=%s catalog_empty=%s would_reject_enforce=%s",
+                detection.get("surface"),
+                detection.get("phrase") or detection.get("candidate_phrase"),
+                detection.get("matched_title") or "",
+                detection.get("reason"),
+                detection.get("mixed"),
+                detection.get("catalog_empty"),
+                detection.get("would_reject_enforce"),
+            )
+    except Exception:
+        logger.exception("[INVENTED_PRODUCT_TITLE_SHADOW] detector failed")
 
     return PersonaGuardResult(text=working, passed=True)
 
