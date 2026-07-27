@@ -10,6 +10,12 @@ from typing import Any, Optional
 
 logger = logging.getLogger("nahla.brain.persona.compose_guards")
 
+# Discount/offer markers. «عرض» is matched as a standalone noun (optionally with
+# the definite article, singular or plural) rather than as a bare substring,
+# because the substring also occurs inside verb forms with no discount meaning.
+_DISCOUNT_MARKERS = ("خصم", "تخفيض", "%")
+_OFFER_NOUN_RE = re.compile(r"(?<![\u0621-\u064A])(?:ال)?عرو?ض(?![\u0621-\u064A])")
+
 from .facts_bundle import (
     PersonaFactsBundle,
     PHASE2_SOCIAL_SURFACES,
@@ -958,8 +964,12 @@ def _apply_catalog_product_answer_guards(
                     failed_reason="unsupported_superiority_claim",
                 )
 
-    discount_markers = ("خصم", "تخفيض", "عرض", "%")
-    if any(m in working for m in discount_markers):
+    # «عرض» was matched as a bare substring, so it also fired inside verb forms
+    # that carry no discount meaning — «نعرض», «تعرض», «يعرض», «نستعرض», and the
+    # noun «معرض». Production case: «من الكتالوج نقدر نعرض لك الأنسب» was rejected
+    # as invented_offer. Require the offer noun to stand alone (optionally with
+    # the definite article) instead; the other markers keep substring matching.
+    if any(m in working for m in _DISCOUNT_MARKERS) or _OFFER_NOUN_RE.search(working):
         return PersonaGuardResult(
             text=working,
             passed=False,
