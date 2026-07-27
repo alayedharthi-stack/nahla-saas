@@ -56,6 +56,20 @@ _FILLER_TOKENS = frozenset({
     "شي", "شيء", "منتج", "بضاعه", "بضاعة", "حاجه", "حاجة", "طلب",
 })
 
+# Approved checkout/resume phrases — never become catalog product queries.
+# Patterns use ي not ى because _norm() maps ى→ي before matching.
+_ORDER_COMPLETION_EXTRA_RE = re.compile(
+    r"(?:"
+    r"أ?(?:بي|بغي|ابغي|ابي)\s+أ?(?:كمل|اتم|أتم)\s*(?:ال)?طلب"
+    r"|أ?(?:كمل|كمل)\s*(?:ال)?طلب(?:ي)?"
+    r"|تمام\s+ك?مل\s*(?:ال)?طلب"
+    r"|اعتمد\s*(?:ال)?طلب"
+    r"|تابع\s+(?:إتمام|اتمام|أتمام|اتم)\s*(?:ال)?طلب"
+    r"|تابع\s+الدفع"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def _norm(text: str) -> str:
     if not text:
@@ -118,6 +132,31 @@ def _has_product_substance(candidate: str) -> bool:
     return any(len(t) >= 2 and t not in ORDER_VERB_TOKENS for t in tokens)
 
 
+def is_order_resume_or_completion_phrase(message: str) -> bool:
+    """True for checkout-resume phrases that must never become product queries."""
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    norm = _norm(raw)
+    if not norm:
+        return False
+    try:
+        from modules.ai.order_flow_v2.triggers import is_resume_order_command  # noqa: PLC0415
+
+        if is_resume_order_command(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — resume probe optional at guard boundary
+        pass
+    try:
+        from .fresh_commerce_context import detect_explicit_order_resume  # noqa: PLC0415
+
+        if detect_explicit_order_resume(raw):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — resume probe optional at guard boundary
+        pass
+    return bool(_ORDER_COMPLETION_EXTRA_RE.search(norm))
+
+
 def extract_start_order_product_query(message: str) -> str:
     """
     Product name after an order-start prefix, or ``""`` when none / bare opener.
@@ -129,6 +168,8 @@ def extract_start_order_product_query(message: str) -> str:
     """
     raw = (message or "").strip()
     if not raw or is_bare_start_order_phrase(raw):
+        return ""
+    if is_order_resume_or_completion_phrase(raw):
         return ""
 
     rest = raw
@@ -158,6 +199,7 @@ __all__ = [
     "ORDER_VERB_TOKENS",
     "extract_start_order_product_query",
     "is_bare_start_order_phrase",
+    "is_order_resume_or_completion_phrase",
     "is_order_verb_only_query",
     "is_order_verb_token",
 ]
