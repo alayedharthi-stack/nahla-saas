@@ -582,6 +582,8 @@ export interface Translations {
       paymentLink: string
     }
     empty: string
+    loadError: string
+    retry: string
     showing: string
     currency: string
   }

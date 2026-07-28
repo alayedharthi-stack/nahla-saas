@@ -83,6 +83,9 @@ export default function Orders() {
   const [search, setSearch] = useState('')
   const [data, setData] = useState<OrdersDashboard>(emptyData)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const { t, lang, dir } = useLanguage()
   const op = t(tr => tr.ordersPage)
 
@@ -119,13 +122,25 @@ export default function Orders() {
 
   useEffect(() => {
     setLoading(true)
+    setLoadError(null)
     const lifecycle = TAB_TO_FILTER[tab]
     const source = tab === 'whatsapp' ? 'whatsapp' : undefined
     featureRealityApi.orders({ lifecycle_filter: lifecycle, source })
-      .then(setData)
-      .catch(() => setData(emptyData))
+      .then((dashboard) => {
+        setData(dashboard)
+        setHasLoadedOnce(true)
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : op.loadError
+        setLoadError(message || op.loadError)
+      })
       .finally(() => setLoading(false))
-  }, [tab])
+  }, [tab, reloadNonce])
+
+  const statValue = (value: number) => {
+    if (loadError && !hasLoadedOnce) return '—'
+    return String(value)
+  }
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
     if (tab === 'store' && (o.source === 'whatsapp' || o.source === 'manual')) return false
@@ -161,30 +176,34 @@ export default function Orders() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label={op.cards.totalOrders}      value={String(data.summary.total_orders)}         icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label={op.cards.needsFollowUpNow} value={String(data.summary.orders_needing_action)} icon={AlertTriangle} iconColor="text-red-600"     iconBg="bg-red-50" />
-        <StatCard label={op.cards.pendingPayment}   value={String(data.summary.pending_orders)}       icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label={op.cards.completedToday}   value={String(data.summary.completed_today)}      icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
+        <StatCard label={op.cards.totalOrders}      value={statValue(data.summary.total_orders)}         icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label={op.cards.needsFollowUpNow} value={statValue(data.summary.orders_needing_action)} icon={AlertTriangle} iconColor="text-red-600"     iconBg="bg-red-50" />
+        <StatCard label={op.cards.pendingPayment}   value={statValue(data.summary.pending_orders)}       icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label={op.cards.completedToday}   value={statValue(data.summary.completed_today)}      icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <StatCard
           label={op.cards.whatsappOrdersToday}
-          value={String(data.summary.whatsapp_orders_today)}
+          value={statValue(data.summary.whatsapp_orders_today)}
           icon={MessageSquare}
           iconColor="text-green-600"
           iconBg="bg-green-50"
         />
         <StatCard
           label={op.cards.whatsappRevenueToday}
-          value={`${data.summary.whatsapp_revenue_today.toLocaleString(locale)} ${op.currency}`}
+          value={loadError && !hasLoadedOnce
+            ? '—'
+            : `${data.summary.whatsapp_revenue_today.toLocaleString(locale)} ${op.currency}`}
           icon={Crown}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={op.cards.todayRevenue}
-          value={`${data.summary.today_revenue_sar.toLocaleString(locale)} ${op.currency}`}
+          value={loadError && !hasLoadedOnce
+            ? '—'
+            : `${data.summary.today_revenue_sar.toLocaleString(locale)} ${op.currency}`}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
@@ -192,6 +211,18 @@ export default function Orders() {
       </div>
 
       <div className="card p-0 overflow-hidden">
+        {loadError && (
+          <div className="px-5 py-4 border-b border-red-100 bg-red-50 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-red-700">{loadError}</p>
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={() => setReloadNonce((n) => n + 1)}
+            >
+              {op.retry}
+            </button>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2 p-4 border-b border-slate-100">
           {tabs.map(({ key, label }) => (
             <button
@@ -324,7 +355,7 @@ export default function Orders() {
             </tbody>
           </table>
           )}
-          {!loading && filtered.length === 0 && (
+          {!loading && !loadError && filtered.length === 0 && (
             <div className="py-12 text-center text-sm text-slate-400">{op.empty}</div>
           )}
         </div>

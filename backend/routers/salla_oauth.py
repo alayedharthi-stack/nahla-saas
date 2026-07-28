@@ -1406,14 +1406,22 @@ async def salla_activate_from_email(request: Request, db: Session = Depends(get_
     is_new = False
 
     if merchant_id_str:
-        existing = db.query(Integration).filter(
-            Integration.provider == "salla",
-            Integration.external_store_id == merchant_id_str,
-        ).first()
+        from services.salla_store_identity import find_salla_integration_by_identity  # noqa: PLC0415
+
+        existing, matched_via = find_salla_integration_by_identity(
+            db,
+            merchant_id_str,
+            include_disabled=True,
+            allow_alias_match=True,
+        )
         if existing:
             tenant_id = existing.tenant_id
+            logger.info(
+                "[SallaActivate] Resolved tenant from store_id | store=%s tenant=%s matched_via=%s",
+                merchant_id_str, tenant_id, matched_via,
+            )
 
-    if not tenant_id and owner_email:
+    if not tenant_id and owner_email and not merchant_id_str:
         user_row = db.query(User).filter(User.email == owner_email).first()
         if user_row:
             tenant_id = user_row.tenant_id
@@ -3120,19 +3128,19 @@ async def salla_oauth_callback(
 
     else:
         # Existing merchant — tenant_id came from state
-        if tenant_id == 0 and salla_store_id:
-            # State was not in our format (Salla may replace it).
-            # Search ALL integrations (enabled+disabled) to find the tenant.
-            existing_integ = db.query(Integration).filter(
-                Integration.provider == "salla",
-                Integration.external_store_id == str(salla_store_id),
-            ).first()
-            if existing_integ:
-                tenant_id = existing_integ.tenant_id
-                logger.info(
-                    "[Salla OAuth] Resolved tenant from store_id | store=%s → tenant=%s enabled=%s",
-                    salla_store_id, tenant_id, existing_integ.enabled,
-                )
+        if salla_store_id:
+            from services.salla_store_identity import reconcile_salla_oauth_tenant_id  # noqa: PLC0415
+
+            tenant_id, reconcile_reason = reconcile_salla_oauth_tenant_id(
+                db,
+                session_tenant_id=tenant_id,
+                store_id=str(salla_store_id),
+            )
+            logger.info(
+                "[Salla OAuth] tenant reconcile (existing merchant) | store=%s tenant=%s reason=%s",
+                salla_store_id, tenant_id, reconcile_reason,
+            )
+
         if tenant_id == 0:
             if not salla_store_id:
                 logger.error(
@@ -3143,27 +3151,60 @@ async def salla_oauth_callback(
                     content=_install_error_html("tenant_resolution_failed"),
                     status_code=500,
                 )
-            # Create a brand-new tenant for this store instead of
-            # silently falling back to tenant_id=1.
-            unique_name = (
-                f"{store_name or 'متجر سلة'}-{salla_store_id}"
-                if salla_store_id
-                else (store_name or "متجر سلة")
-            )
-            new_tenant = Tenant(name=unique_name)
-            from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: PLC0415
-            init_new_tenant_trial_state(new_tenant)
-            db.add(new_tenant)
-            db.flush()
-            tenant_id = new_tenant.id
-            logger.info(
-                "[Salla OAuth] Created new tenant (existing-merchant-path, "
-                "state was lost by Salla) | store_id=%s tenant=%s",
-                salla_store_id, tenant_id,
-            )
+            # OAuth state was lost — provision Tenant+User via store_id instead of
+            # creating a ghost Tenant row with no merchant User (Tenant 47 pattern).
+            try:
+                from core.merchant_provisioning import get_or_create_merchant_user  # noqa: PLC0415
+
+                safe_store = "".join(
+                    c for c in (store_name or "") if c.isalnum() or c in "-_"
+                ).lower()[:30]
+                fallback_email = f"{safe_store or 'store'}-{salla_store_id}@salla-merchant.nahlah.ai"
+                provision_state_lost = get_or_create_merchant_user(
+                    db,
+                    provider="salla",
+                    external_store_id=str(salla_store_id),
+                    owner_email=fallback_email,
+                    store_name=store_name or "",
+                    is_email_derived=True,
+                    issued_via="salla_oauth_callback_state_lost",
+                    allow_alias_match=True,
+                )
+                tenant_id = provision_state_lost.tenant_id
+                logger.info(
+                    "[Salla OAuth] provisioned after state loss | store=%s tenant=%s "
+                    "created_tenant=%s created_user=%s",
+                    salla_store_id,
+                    tenant_id,
+                    provision_state_lost.created_tenant,
+                    provision_state_lost.created_user,
+                )
+            except Exception as exc:
+                logger.exception("[Salla OAuth] State-loss provisioning failed: %s", exc)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                return HTMLResponse(
+                    content=_install_error_html("registration_failed"),
+                    status_code=500,
+                )
         get_or_create_tenant(db, tenant_id)
 
     # ── Step 4b: Save Salla integration to DB ──────────────────────────────────
+    if salla_store_id:
+        from services.salla_store_identity import reconcile_salla_oauth_tenant_id  # noqa: PLC0415
+
+        tenant_id, pre_claim_reason = reconcile_salla_oauth_tenant_id(
+            db,
+            session_tenant_id=tenant_id,
+            store_id=str(salla_store_id),
+        )
+        logger.info(
+            "[Salla OAuth] pre-claim reconcile | store=%s tenant=%s reason=%s",
+            salla_store_id, tenant_id, pre_claim_reason,
+        )
+
     logger.info(
         "[Salla OAuth] ▶ Saving integration | tenant=%s store_id=%r store_name=%r",
         tenant_id, salla_store_id, store_name,
@@ -3175,7 +3216,10 @@ async def salla_oauth_callback(
         )
 
     try:
-        from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415
+        from services.salla_guard import (  # noqa: PLC0415
+            claim_store_for_tenant,
+            SallaStoreOwnershipConflictError,
+        )
         from services.salla_store_identity import assert_oauth_tenant_matches_store_owner  # noqa: PLC0415
 
         new_config = {
@@ -3238,6 +3282,21 @@ async def salla_oauth_callback(
             "Widget URL: /merchant/widgets/salla/%s/nahla-widgets.js",
             tenant_id, salla_store_id, salla_store_id,
         )
+    except SallaStoreOwnershipConflictError as ownership_exc:
+        logger.error(
+            "[Salla OAuth] store ownership conflict | owner=%s requested=%s store=%s",
+            ownership_exc.owner_tenant_id,
+            ownership_exc.requested_tenant_id,
+            ownership_exc.store_id,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return HTMLResponse(
+            content=_install_error_html("store_owned_by_other_tenant"),
+            status_code=403,
+        )
     except Exception as exc:
         logger.exception("[Salla OAuth] ❌ DB save FAILED: %s", exc)
         try:
@@ -3297,8 +3356,16 @@ async def salla_oauth_callback(
             await _asyncio2.sleep(3)
             from core.database import get_db as _gdb  # noqa: PLC0415
             from services.store_sync import StoreSyncService  # noqa: PLC0415
+            from services.salla_guard import validate_before_sync  # noqa: PLC0415
             _db = next(_gdb())
             try:
+                ok, msg = validate_before_sync(_db, tid)
+                if not ok:
+                    logger.warning(
+                        "[Salla OAuth] Initial sync skipped | tenant=%s: %s",
+                        tid, msg,
+                    )
+                    return
                 svc = StoreSyncService(_db, tid)
                 result = await svc.full_sync(triggered_by="oauth_connect")
                 logger.info("[Salla OAuth] Initial sync done | tenant=%s result=%s", tid, result.get("status"))

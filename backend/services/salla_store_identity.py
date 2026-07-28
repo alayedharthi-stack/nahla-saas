@@ -651,3 +651,51 @@ def assert_oauth_tenant_matches_store_owner(
         result=result,
     )
     return True, owner_tenant_id, ""
+
+
+def reconcile_salla_oauth_tenant_id(
+    db: Session,
+    *,
+    session_tenant_id: int,
+    store_id: str,
+) -> Tuple[int, str]:
+    """
+    Bind an OAuth reconnect to the documented store owner before claim/sync.
+
+    When Salla drops or replaces the OAuth ``state`` param, the callback must
+    not create a ghost tenant or sync orders under a fresh tenant_id if an
+    integration row (including legacy ``config.store_id`` aliases) already
+    documents ownership elsewhere.
+
+    Returns ``(effective_tenant_id, reconciliation_reason)``.
+    """
+    sid = _str_id(store_id)
+    if not sid:
+        return session_tenant_id or 0, "no_store_id"
+
+    owner_tid, integration, matched_via = resolve_tenant_for_salla_store(
+        db,
+        SallaStoreIdentity(store_id=sid),
+        include_disabled=True,
+        allow_alias_match=True,
+    )
+    if owner_tid is not None:
+        if session_tenant_id and session_tenant_id != owner_tid:
+            _log_salla_tenant_guard(
+                context="oauth_reconcile_to_owner",
+                jwt_tenant_id=session_tenant_id,
+                store_id=sid,
+                result=SallaTenantGuardResult(
+                    ok=True,
+                    owner_tenant_id=owner_tid,
+                    integration_id=integration.id if integration else None,
+                    matched_via=matched_via,
+                    reason="reconciled_session_to_store_owner",
+                ),
+            )
+        return owner_tid, "store_owner_resolved"
+
+    if session_tenant_id > 0:
+        return session_tenant_id, "session_tenant_preserved"
+
+    return 0, "no_owner_found"
