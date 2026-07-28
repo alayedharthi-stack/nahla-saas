@@ -27,6 +27,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.database import get_db
+from core.phone_coerce import coerce_customer_info_phone, coerce_phone_str as _coerce_phone_str
 from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import (
     Conversation,
@@ -343,7 +344,7 @@ def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
         .filter(Customer.tenant_id == tenant_id)
         .all()
     ):
-        phone = (cust.phone or "").strip()
+        phone = _coerce_phone_str(cust.phone)
         if not phone:
             continue
         meta = cust.extra_metadata or {}
@@ -369,7 +370,7 @@ def _build_customer_lookup(db: Session, tenant_id: int) -> Dict[str, str]:
 
 def _normalise_phone_key(phone: Optional[str]) -> str:
     """Digits-only phone, with leading + stripped — suitable for DB lookups."""
-    return (phone or "").strip().lstrip("+").replace(" ", "").replace("-", "")
+    return _coerce_phone_str(phone).lstrip("+").replace(" ", "").replace("-", "")
 
 
 def _build_vip_phone_set(db: Session, tenant_id: int) -> set[str]:
@@ -421,7 +422,10 @@ def _build_unread_phone_set(db: Session, tenant_id: int) -> set[str]:
         .all()
     )
     for convo, phone in convos:
-        meta_phone = (convo.extra_metadata or {}).get("customer_phone") or (convo.extra_metadata or {}).get("phone")
+        meta_phone = (
+            _coerce_phone_str((convo.extra_metadata or {}).get("customer_phone"))
+            or _coerce_phone_str((convo.extra_metadata or {}).get("phone"))
+        )
         digits = _normalise_phone_key(phone or meta_phone)
         if digits:
             out.add(digits)
@@ -891,7 +895,7 @@ def _serialise_order(
     source_label = SOURCE_LABELS_AR.get(source_key, source_key)
     order_number = _resolve_order_number(order)
     display_name = _resolve_customer_display(order, customer_lookup)
-    phone        = (customer_info.get("phone") or customer_info.get("mobile") or "").strip()
+    phone        = coerce_customer_info_phone(customer_info)
     is_ai_created = source_key == "whatsapp" or (
         (order.extra_metadata or {}).get("source") in ("ai_sales_agent", "ai_sales", "ai")
     )
@@ -1440,7 +1444,7 @@ async def send_payment_reminder(
         )
 
     customer_info = order.customer_info or {}
-    phone = (customer_info.get("phone") or customer_info.get("mobile") or "").strip()
+    phone = coerce_customer_info_phone(customer_info)
     if not phone:
         raise HTTPException(status_code=409, detail="customer_phone_missing")
 

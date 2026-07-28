@@ -1362,8 +1362,10 @@ def _read_order_created_at(order: Any) -> Optional[datetime]:
 def _resolve_order_customer(db: Session, tenant_id: int, order: Any) -> Optional[Any]:
     from models import Customer  # noqa: PLC0415
 
+    from core.phone_coerce import coerce_customer_info_phone  # noqa: PLC0415
+
     info = getattr(order, "customer_info", None) or {}
-    phone = (info.get("phone") or info.get("mobile") or "").strip()
+    phone = coerce_customer_info_phone(info)
     if not phone:
         return None
     cust = (

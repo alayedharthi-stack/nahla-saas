@@ -1995,7 +1995,9 @@ async def autopilot_queues_debug(
 
         # Phone resolution mirrors the sweeper so we mark unreachable rows.
         ci = o.customer_info or {}
-        phone = (ci.get("phone") or ci.get("mobile") or "").strip()
+        from core.phone_coerce import coerce_customer_info_phone  # noqa: PLC0415
+
+        phone = coerce_customer_info_phone(ci)
 
         created_at = _ts_from_meta(meta.get("created_at"))
 

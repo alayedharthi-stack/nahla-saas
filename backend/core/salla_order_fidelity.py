@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.phone_coerce import coerce_phone_str
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
@@ -326,9 +328,10 @@ def enrich_salla_customer_info(raw: Dict[str, Any], customer_info: Dict[str, Any
         if name:
             out["name"] = name
         mobile = customer.get("mobile") or customer.get("phone")
-        if mobile:
-            out["mobile"] = mobile
-            out["phone"] = mobile
+        mobile_str = coerce_phone_str(mobile)
+        if mobile_str:
+            out["mobile"] = mobile_str
+            out["phone"] = mobile_str
 
     ship = raw.get("shipping") or raw.get("ship_to") or {}
     if isinstance(ship, dict):
@@ -365,8 +368,9 @@ def enrich_salla_customer_info(raw: Dict[str, Any], customer_info: Dict[str, Any
     if receiver and not out.get("name"):
         if receiver.get("name"):
             out["name"] = receiver.get("name")
-        if receiver.get("phone"):
-            out["phone"] = receiver.get("phone")
+        receiver_phone = coerce_phone_str(receiver.get("phone"))
+        if receiver_phone:
+            out["phone"] = receiver_phone
 
     return out
 
