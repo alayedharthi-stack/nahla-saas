@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AlertTriangle, Bot, Crown, Link2, Search, Filter, Download, Store, MessageCircle, ShoppingBag } from 'lucide-react'
 import Badge from '../components/ui/Badge'
@@ -10,23 +10,16 @@ import { ShoppingCart, Clock, CheckCircle, MessageSquare } from 'lucide-react'
 import { featureRealityApi, type DashboardOrder, type NeedsActionLevel, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
 import { formatOrderNumberLabel, orderDetailPath } from '../lib/orderRoutes'
 import { formatRiyadh } from '../lib/datetime'
+import {
+  EMPTY_ORDERS_DASHBOARD,
+  ordersRevenueDisplay,
+  ordersStatDisplay,
+  shouldApplyOrdersRequest,
+} from './ordersLoadState'
 
 // UI_ONLY_GUARD: only static labels below use t(); customer/product names stay as API data.
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
-
-const emptyData: OrdersDashboard = {
-  summary: {
-    total_orders: 0,
-    today_revenue_sar: 0,
-    pending_orders: 0,
-    completed_today: 0,
-    whatsapp_orders_today: 0,
-    whatsapp_revenue_today: 0,
-    orders_needing_action: 0,
-  },
-  orders: [],
-}
 
 const TAB_KEYS = [
   'all',
@@ -81,8 +74,11 @@ const formatDate = (iso: string): string => formatRiyadh(iso)
 export default function Orders() {
   const [tab, setTab] = useState<TabKey>('all')
   const [search, setSearch] = useState('')
-  const [data, setData] = useState<OrdersDashboard>(emptyData)
+  const [data, setData] = useState<OrdersDashboard>(EMPTY_ORDERS_DASHBOARD)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
+  const latestRequestRef = useRef(0)
   const { t, lang, dir } = useLanguage()
   const op = t(tr => tr.ordersPage)
 
@@ -118,14 +114,38 @@ export default function Orders() {
   const locale = lang === 'ar' ? 'ar-SA' : 'en-US'
 
   useEffect(() => {
+    let cancelled = false
+    const requestId = latestRequestRef.current + 1
+    latestRequestRef.current = requestId
+
     setLoading(true)
+    setLoadError(null)
+    setData(EMPTY_ORDERS_DASHBOARD)
+
     const lifecycle = TAB_TO_FILTER[tab]
     const source = tab === 'whatsapp' ? 'whatsapp' : undefined
     featureRealityApi.orders({ lifecycle_filter: lifecycle, source })
-      .then(setData)
-      .catch(() => setData(emptyData))
-      .finally(() => setLoading(false))
-  }, [tab])
+      .then((dashboard) => {
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
+        setData(dashboard)
+      })
+      .catch((err: unknown) => {
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
+        console.error('[Orders] failed to load orders', err)
+        setLoadError(op.loadError)
+        setData(EMPTY_ORDERS_DASHBOARD)
+      })
+      .finally(() => {
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
+        setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [tab, reloadNonce, op.loadError])
+
+  const statValue = (value: number) => ordersStatDisplay(value, loadError)
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
     if (tab === 'store' && (o.source === 'whatsapp' || o.source === 'manual')) return false
@@ -161,30 +181,40 @@ export default function Orders() {
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label={op.cards.totalOrders}      value={String(data.summary.total_orders)}         icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
-        <StatCard label={op.cards.needsFollowUpNow} value={String(data.summary.orders_needing_action)} icon={AlertTriangle} iconColor="text-red-600"     iconBg="bg-red-50" />
-        <StatCard label={op.cards.pendingPayment}   value={String(data.summary.pending_orders)}       icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
-        <StatCard label={op.cards.completedToday}   value={String(data.summary.completed_today)}      icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
+        <StatCard label={op.cards.totalOrders}      value={statValue(data.summary.total_orders)}         icon={ShoppingCart} iconColor="text-brand-600"   iconBg="bg-brand-50" />
+        <StatCard label={op.cards.needsFollowUpNow} value={statValue(data.summary.orders_needing_action)} icon={AlertTriangle} iconColor="text-red-600"     iconBg="bg-red-50" />
+        <StatCard label={op.cards.pendingPayment}   value={statValue(data.summary.pending_orders)}       icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+        <StatCard label={op.cards.completedToday}   value={statValue(data.summary.completed_today)}      icon={CheckCircle}  iconColor="text-blue-600"    iconBg="bg-blue-50" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <StatCard
           label={op.cards.whatsappOrdersToday}
-          value={String(data.summary.whatsapp_orders_today)}
+          value={statValue(data.summary.whatsapp_orders_today)}
           icon={MessageSquare}
           iconColor="text-green-600"
           iconBg="bg-green-50"
         />
         <StatCard
           label={op.cards.whatsappRevenueToday}
-          value={`${data.summary.whatsapp_revenue_today.toLocaleString(locale)} ${op.currency}`}
+          value={ordersRevenueDisplay(
+            data.summary.whatsapp_revenue_today,
+            loadError,
+            locale,
+            op.currency,
+          )}
           icon={Crown}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={op.cards.todayRevenue}
-          value={`${data.summary.today_revenue_sar.toLocaleString(locale)} ${op.currency}`}
+          value={ordersRevenueDisplay(
+            data.summary.today_revenue_sar,
+            loadError,
+            locale,
+            op.currency,
+          )}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
@@ -192,6 +222,18 @@ export default function Orders() {
       </div>
 
       <div className="card p-0 overflow-hidden">
+        {loadError && (
+          <div className="px-5 py-4 border-b border-red-100 bg-red-50 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-red-700">{loadError}</p>
+            <button
+              type="button"
+              className="btn-secondary text-xs"
+              onClick={() => setReloadNonce((n) => n + 1)}
+            >
+              {op.retry}
+            </button>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2 p-4 border-b border-slate-100">
           {tabs.map(({ key, label }) => (
             <button
@@ -324,7 +366,7 @@ export default function Orders() {
             </tbody>
           </table>
           )}
-          {!loading && filtered.length === 0 && (
+          {!loading && !loadError && filtered.length === 0 && (
             <div className="py-12 text-center text-sm text-slate-400">{op.empty}</div>
           )}
         </div>

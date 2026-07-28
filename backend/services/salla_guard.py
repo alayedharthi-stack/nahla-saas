@@ -26,6 +26,24 @@ from models import Integration  # noqa: E402
 
 logger = logging.getLogger("nahla.salla_guard")
 
+
+class SallaStoreOwnershipConflictError(RuntimeError):
+    """Raised when OAuth tries to claim a store already owned by another tenant."""
+
+    def __init__(
+        self,
+        owner_tenant_id: int,
+        requested_tenant_id: int,
+        store_id: str,
+    ) -> None:
+        self.owner_tenant_id = owner_tenant_id
+        self.requested_tenant_id = requested_tenant_id
+        self.store_id = store_id
+        super().__init__(
+            f"Salla store {store_id} is owned by tenant {owner_tenant_id}, "
+            f"not tenant {requested_tenant_id}",
+        )
+
 # ── Integration health definitions ────────────────────────────────────────────
 
 def can_call_api(integration: Optional[Integration]) -> bool:
@@ -91,13 +109,46 @@ def claim_store_for_tenant(
     if not store_id:
         raise ValueError("store_id is required to claim a store binding")
 
+    store_id_str = str(store_id)
+
+    from services.salla_store_identity import find_salla_integration_by_identity  # noqa: PLC0415
+    from models import User  # noqa: PLC0415
+
+    documented_owner, matched_via = find_salla_integration_by_identity(
+        db,
+        store_id_str,
+        include_disabled=True,
+        allow_alias_match=True,
+    )
+    if documented_owner is not None and documented_owner.tenant_id != tenant_id:
+        has_merchant_users = (
+            db.query(User.id)
+            .filter(User.tenant_id == documented_owner.tenant_id, User.role == "merchant")
+            .limit(1)
+            .first()
+        ) is not None
+        if has_merchant_users:
+            logger.error(
+                "[SallaGuard] CLAIM_BLOCKED | store_id=%s owner_tenant=%s "
+                "requested_tenant=%s matched_via=%s",
+                store_id_str,
+                documented_owner.tenant_id,
+                tenant_id,
+                matched_via,
+            )
+            raise SallaStoreOwnershipConflictError(
+                documented_owner.tenant_id,
+                tenant_id,
+                store_id_str,
+            )
+
     # ── Revoke stale bindings ─────────────────────────────────────────────
     stale_rows = (
         db.query(Integration)
         .filter(
             Integration.provider == "salla",
             Integration.tenant_id != tenant_id,
-            Integration.external_store_id == str(store_id),
+            Integration.external_store_id == store_id_str,
         )
         .all()
     )
@@ -117,14 +168,24 @@ def claim_store_for_tenant(
     integration = (
         db.query(Integration)
         .filter(
+            Integration.tenant_id == tenant_id,
             Integration.provider == "salla",
-            Integration.external_store_id == str(store_id),
         )
+        .order_by(Integration.id.asc())
         .first()
     )
+    if integration is None:
+        integration = (
+            db.query(Integration)
+            .filter(
+                Integration.provider == "salla",
+                Integration.external_store_id == store_id_str,
+            )
+            .first()
+        )
     if integration:
         integration.tenant_id = tenant_id
-        integration.external_store_id = str(store_id)
+        integration.external_store_id = store_id_str
         integration.config = new_config
         integration.enabled = True
         logger.info(
@@ -135,7 +196,7 @@ def claim_store_for_tenant(
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
-            external_store_id=str(store_id),
+            external_store_id=store_id_str,
             config=new_config,
             enabled=True,
         )

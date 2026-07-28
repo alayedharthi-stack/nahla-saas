@@ -571,6 +571,8 @@ const en: Translations = {
       paymentLink:  'Payment link',
     },
     empty:   'No orders.',
+    loadError: 'Could not load orders. Check your connection or sign in again.',
+    retry:     'Retry',
     showing: 'Showing {shown} of {total} orders',
     currency: 'SAR',
   },

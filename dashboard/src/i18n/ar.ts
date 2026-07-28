@@ -575,6 +575,8 @@ const ar: Translations = {
       paymentLink:  'رابط الدفع',
     },
     empty:   'لا توجد طلبات.',
+    loadError: 'تعذّر تحميل الطلبات. تحقق من الاتصال أو أعد تسجيل الدخول.',
+    retry:     'إعادة المحاولة',
     showing: 'عرض {shown} من {total} طلب',
     currency: 'ر.س',
   },
