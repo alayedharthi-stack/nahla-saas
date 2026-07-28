@@ -3067,8 +3067,11 @@ async def salla_oauth_callback(
                 logger.exception("[Salla OAuth] provisioning helper failed: %s", exc)
                 try:
                     db.rollback()
-                except Exception:
-                    pass
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "[Salla OAuth] rollback after provisioning failure: %s",
+                        rollback_exc,
+                    )
                 return HTMLResponse(content=_install_error_html("registration_failed"), status_code=500)
 
             tenant_id   = provision_legacy.tenant_id
@@ -3189,8 +3192,11 @@ async def salla_oauth_callback(
                 logger.exception("[Salla OAuth] State-loss provisioning failed: %s", exc)
                 try:
                     db.rollback()
-                except Exception:
-                    pass
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "[Salla OAuth] rollback after state-loss provisioning failure: %s",
+                        rollback_exc,
+                    )
                 from services.salla_store_identity import SallaStoreIdentityConflictError  # noqa: PLC0415
 
                 if isinstance(exc, SallaStoreIdentityConflictError):
