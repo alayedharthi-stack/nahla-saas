@@ -4092,6 +4092,18 @@ class DefaultDecisionEngine:
                 getattr(ctx, "tenant_id", None), _pm_exc,
             )
 
+        _option_capture = _try_pending_option_capture_decision(ctx)
+        if _option_capture is not None:
+            return _option_capture
+
+        _checkout_slot = _try_checkout_slot_recompute_decision(ctx)
+        if _checkout_slot is not None:
+            return _checkout_slot
+
+        _qty_dec = _try_quantity_update_decision(ctx)
+        if _qty_dec is not None:
+            return _qty_dec
+
         return Decision(
             action=ACTION_LLM_REPLY,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",
@@ -4264,6 +4276,482 @@ def _extract_product_switch_target(message: str) -> str:
         return m.group(1).strip()
 
     return ""
+
+
+_QTY_LABEL_RE = re.compile(
+    r"(?:كمية|كميتين|حبة|حبات|حبتين|قطعة|قطع|قطعتين|عدد|وحدة|وحدات|"
+    r"نبغى|أبغى|ابغى|ابي|أبي|ودي|بغيت)",
+    re.I | re.UNICODE,
+)
+_BARE_QTY_DIGIT_RE = re.compile(r"^[0-9٠-٩]{1,3}$", re.UNICODE)
+
+
+def _prep_focus_product_aligned(state: Any) -> bool:
+    """True when ``current_product_focus`` matches ``order_prep.product_id``."""
+    focus = dict(getattr(state, "current_product_focus", None) or {})
+    prep = getattr(state, "order_prep", None)
+    if not focus or prep is None:
+        return False
+    prep_id = str(getattr(prep, "product_id", "") or "").strip().lower()
+    if not prep_id:
+        return False
+    keys = {
+        str(focus.get(key) or "").strip().lower()
+        for key in ("external_id", "id", "product_id", "sku")
+        if focus.get(key) not in (None, "")
+    }
+    return prep_id in keys
+
+
+def _prep_unit_price_value(prep: Any) -> Optional[float]:
+    for item in list(getattr(prep, "line_items", None) or []):
+        if not isinstance(item, dict):
+            continue
+        for key in ("unit_price", "price"):
+            val = item.get(key)
+            if val is None:
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _quantity_update_conflicts(ctx: BrainContext, message: str, qty: int) -> bool:
+    """True when another owner should consume this message instead of quantity."""
+    text = (message or "").strip()
+    if not text:
+        return True
+
+    intent = ctx.intent
+    slots = dict(getattr(intent, "slots", None) or {})
+    if getattr(intent, "name", "") == INTENT_PICK_LIST_ITEM and slots.get("list_index"):
+        return True
+
+    try:
+        from core.wa_address_ingestion import (  # noqa: PLC0415
+            is_accepted_maps_url,
+            is_bare_short_address_code,
+        )
+
+        if is_bare_short_address_code(text) or is_accepted_maps_url(text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address probe must not block quantity gate
+        pass
+
+    try:
+        from modules.ai.brain.intent.ordering_extractor import extract_address_signals  # noqa: PLC0415
+
+        if extract_address_signals(text).get("short_address_code"):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address probe must not block quantity gate
+        pass
+
+    pending_opts = list(getattr(ctx.state, "pending_option_groups", None) or [])
+    if pending_opts and text.replace(" ", "").isdigit():
+        return True
+
+    if re.search(r"[\-–—_/\\|]", text) and not _QTY_LABEL_RE.search(text):
+        return True
+
+    has_qty_marker = bool(_QTY_LABEL_RE.search(text))
+    bare_digits = bool(_BARE_QTY_DIGIT_RE.match(text))
+    if bare_digits and not has_qty_marker:
+        prep = getattr(ctx.state, "order_prep", None)
+        unit = _prep_unit_price_value(prep)
+        if unit is not None and int(unit) == int(qty):
+            return True
+        candidates = list(getattr(ctx.state, "last_search_candidates", None) or [])
+        if candidates and 1 <= qty <= len(candidates):
+            return True
+
+    return False
+
+
+def _option_capture_conflicts(ctx: BrainContext, message: str) -> bool:
+    """True when another owner should consume this message instead of an option."""
+    text = (message or "").strip()
+    if not text:
+        return True
+
+    intent = ctx.intent
+    slots = dict(getattr(intent, "slots", None) or {})
+    if getattr(intent, "name", "") == INTENT_PICK_LIST_ITEM and slots.get("list_index"):
+        return True
+
+    try:
+        from modules.ai.brain.intent.ordering_extractor import (  # noqa: PLC0415
+            extract_ordering_quantity,
+            message_is_quantity_only,
+        )
+
+        if message_is_quantity_only(text):
+            return True
+        if slots.get("quantity") and extract_ordering_quantity(text) is not None:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — quantity probe must not block option gate
+        pass
+
+    try:
+        from core.wa_address_ingestion import (  # noqa: PLC0415
+            is_accepted_maps_url,
+            is_bare_short_address_code,
+        )
+
+        if is_bare_short_address_code(text) or is_accepted_maps_url(text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address probe must not block option gate
+        pass
+
+    try:
+        from modules.ai.brain.intent.ordering_extractor import extract_address_signals  # noqa: PLC0415
+
+        if extract_address_signals(text).get("short_address_code"):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — address probe must not block option gate
+        pass
+
+    bare_digits = bool(_BARE_QTY_DIGIT_RE.match(text))
+    if bare_digits:
+        prep = getattr(ctx.state, "order_prep", None)
+        unit = _prep_unit_price_value(prep)
+        try:
+            num = int(text)
+        except ValueError:
+            num = None
+        if unit is not None and num is not None and int(unit) == num:
+            return True
+        candidates = list(getattr(ctx.state, "last_search_candidates", None) or [])
+        if candidates and num is not None and 1 <= num <= len(candidates):
+            return True
+
+    return False
+
+
+def _try_pending_option_capture_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route a stated option value to DraftOrderHandler during active checkout."""
+    state = ctx.state
+    message = (ctx.message or "").strip()
+    if not message:
+        return None
+
+    if state.stage not in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT):
+        return None
+    if state.checkout_url:
+        return None
+    if not state.current_product_focus or not _order_prep_has_active_product(state):
+        return None
+    if not _prep_focus_product_aligned(state):
+        return None
+
+    prep = getattr(state, "order_prep", None)
+    if prep is None:
+        return None
+
+    try:
+        from ..commerce.product_option_capture import (  # noqa: PLC0415
+            capture_pending_option_value,
+            pending_option_groups_from_prep,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — option capture imports must not block decide
+        return None
+
+    pending_groups = pending_option_groups_from_prep(prep)
+    if not pending_groups:
+        return None
+
+    if _option_capture_conflicts(ctx, message):
+        return None
+
+    capture = capture_pending_option_value(pending_groups, message)
+    if capture.ambiguous:
+        names = sorted({c.value_name for c in capture.candidates})
+        logger.info(
+            "[ORDER FLOW] option capture gate → clarify | tenant=%s values=%s",
+            ctx.tenant_id,
+            names[:6],
+        )
+        return Decision(
+            action=ACTION_CLARIFY,
+            args={
+                "question": "option_value_ambiguous",
+                "ambiguous_option_values": names,
+            },
+            reason="active_order_option_capture: ambiguous option value",
+            confidence=0.90,
+        )
+
+    if not capture.matched or capture.match is None:
+        return None
+
+    focus = dict(state.current_product_focus or {})
+    logger.info(
+        "[ORDER FLOW] option capture gate → propose_draft_order | tenant=%s "
+        "product=%r group=%r value=%r value_id=%s active_candidates=%d orderable=%s",
+        ctx.tenant_id,
+        focus.get("title"),
+        capture.match.group_name,
+        capture.match.value_name,
+        capture.match.value_id,
+        len(list(getattr(state, "last_search_candidates", None) or [])),
+        getattr(getattr(ctx, "facts", None), "orderable", None),
+    )
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args={"product": focus},
+        reason="active_order_option_capture: consume option value in DraftOrderHandler",
+        confidence=0.94,
+    )
+
+
+def _prep_for_checkout_slot_probe(prep: Any, missing: List[str]) -> Any:
+    """Ephemeral prep view with freshly computed ``missing_fields`` (no write)."""
+    from ..types import OrderPreparationState  # noqa: PLC0415
+
+    data = prep.to_dict()
+    data["missing_fields"] = list(missing)
+    return OrderPreparationState.from_dict(data)
+
+
+def _checkout_slot_recompute_conflicts(ctx: BrainContext, message: str) -> bool:
+    """True when another owner should consume this message instead of checkout slots."""
+    text = (message or "").strip()
+    if not text:
+        return True
+
+    intent = ctx.intent
+    slots = dict(getattr(intent, "slots", None) or {})
+    if getattr(intent, "name", "") == INTENT_PICK_LIST_ITEM and slots.get("list_index"):
+        return True
+
+    if _is_active_order_review_request(text):
+        return True
+
+    try:
+        from ..commerce.product_option_capture import (  # noqa: PLC0415
+            capture_pending_option_value,
+            pending_option_groups_from_prep,
+        )
+
+        prep = getattr(ctx.state, "order_prep", None)
+        pending_groups = pending_option_groups_from_prep(prep) if prep else []
+        if pending_groups:
+            capture = capture_pending_option_value(pending_groups, text)
+            if capture.matched or capture.ambiguous:
+                return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — option probe must not block checkout gate
+        pass
+
+    try:
+        from modules.ai.brain.intent.ordering_extractor import (  # noqa: PLC0415
+            extract_ordering_quantity,
+            message_is_quantity_only,
+        )
+
+        if message_is_quantity_only(text):
+            return True
+        if slots.get("quantity") and extract_ordering_quantity(text) is not None:
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — quantity probe must not block checkout gate
+        pass
+
+    bare_digits = bool(_BARE_QTY_DIGIT_RE.match(text))
+    if bare_digits:
+        prep = getattr(ctx.state, "order_prep", None)
+        unit = _prep_unit_price_value(prep)
+        try:
+            num = int(text)
+        except ValueError:
+            num = None
+        if unit is not None and num is not None and int(unit) == num:
+            return True
+        candidates = list(getattr(ctx.state, "last_search_candidates", None) or [])
+        if candidates and num is not None and 1 <= num <= len(candidates):
+            return True
+
+    return False
+
+
+def _checkout_slot_already_persisted(prep: Any, missing: List[str], slots: Dict[str, Any]) -> bool:
+    """True when the inbound slot value is already stored — no recompute needed."""
+    missing_set = set(missing)
+    if "city" in missing_set:
+        city_val = str(slots.get("city") or "").strip()
+        if city_val and str(getattr(prep, "city", "") or "").strip() == city_val:
+            return True
+    if missing_set & {
+        "address",
+        "address_location",
+        "short_address_code",
+        "google_maps_url",
+        "delivery_address",
+        "location",
+    }:
+        code = str(slots.get("short_address_code") or "").strip().upper()
+        if code and str(getattr(prep, "short_address_code", "") or "").strip().upper() == code:
+            return True
+        maps_url = str(slots.get("google_maps_url") or "").strip()
+        if maps_url and str(getattr(prep, "google_maps_url", "") or "").strip() == maps_url:
+            return True
+    if missing_set & {"customer_first_name", "customer_name"}:
+        first = str(slots.get("customer_first_name") or slots.get("customer_name") or "").strip()
+        if first and str(getattr(prep, "customer_first_name", "") or "").strip() == first:
+            return True
+    return False
+
+
+def _try_checkout_slot_recompute_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route a confirmed checkout slot answer to DraftOrderHandler during active checkout."""
+    state = ctx.state
+    message = (ctx.message or "").strip()
+    if not message:
+        return None
+
+    if state.stage not in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT):
+        return None
+    if state.checkout_url:
+        return None
+    if not state.current_product_focus or not _order_prep_has_active_product(state):
+        return None
+    if not _prep_focus_product_aligned(state):
+        return None
+
+    prep = getattr(state, "order_prep", None)
+    if prep is None:
+        return None
+
+    try:
+        from ..commerce.product_option_capture import pending_option_groups_from_prep  # noqa: PLC0415
+
+        if pending_option_groups_from_prep(prep):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — option pending probe must not block checkout gate
+        pass
+
+    try:
+        from ..execution.orders import (  # noqa: PLC0415
+            _filter_missing_phone_if_known,
+            _is_saudi_customer,
+            _missing_checkout_fields,
+        )
+        from ..commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+            message_fulfills_awaited_checkout_slot,
+        )
+        from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — checkout slot imports must not block decide
+        return None
+
+    is_sa = _is_saudi_customer(ctx.customer_phone)
+    missing = _filter_missing_phone_if_known(
+        _missing_checkout_fields(prep, is_sa=is_sa),
+        ctx.customer_phone,
+    )
+    if not missing:
+        return None
+
+    if _checkout_slot_recompute_conflicts(ctx, message):
+        return None
+
+    probe_prep = _prep_for_checkout_slot_probe(prep, missing)
+    if not message_fulfills_awaited_checkout_slot(
+        message,
+        order_prep=probe_prep,
+        customer_phone=str(ctx.customer_phone or ""),
+    ):
+        return None
+
+    slots = dict(getattr(ctx.intent, "slots", None) or {})
+    extracted = extract_ordering_slots(message) or {}
+    for key, value in extracted.items():
+        if value not in (None, "") and not slots.get(key):
+            slots[key] = value
+
+    if _checkout_slot_already_persisted(prep, missing, slots):
+        return None
+
+    focus = dict(state.current_product_focus or {})
+    logger.info(
+        "[ORDER FLOW] checkout slot gate → propose_draft_order | tenant=%s "
+        "product=%r missing=%s slots=%s active_candidates=%d orderable=%s",
+        ctx.tenant_id,
+        focus.get("title"),
+        missing[:4],
+        sorted(k for k, v in slots.items() if v not in (None, ""))[:4],
+        len(list(getattr(state, "last_search_candidates", None) or [])),
+        getattr(getattr(ctx, "facts", None), "orderable", None),
+    )
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args={"product": focus},
+        reason="active_order_checkout_slot: consume checkout field in DraftOrderHandler",
+        confidence=0.94,
+    )
+
+
+def _try_quantity_update_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route a confirmed quantity slot to DraftOrderHandler during active checkout."""
+    state = ctx.state
+    message = (ctx.message or "").strip()
+    if not message:
+        return None
+
+    if state.stage not in (STAGE_ORDERING, STAGE_DECIDING, STAGE_CHECKOUT):
+        return None
+    if state.checkout_url:
+        return None
+    if not state.current_product_focus or not _order_prep_has_active_product(state):
+        return None
+    if not _prep_focus_product_aligned(state):
+        return None
+
+    slots = dict(getattr(ctx.intent, "slots", None) or {})
+    qty_raw = slots.get("quantity")
+    if qty_raw is None:
+        try:
+            from modules.ai.brain.intent.ordering_extractor import (  # noqa: PLC0415
+                extract_ordering_quantity,
+            )
+
+            qty_raw = extract_ordering_quantity(message)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — quantity probe must not block decide
+            return None
+
+    if qty_raw is None:
+        return None
+
+    try:
+        qty = int(qty_raw)
+    except (TypeError, ValueError):
+        return None
+    if qty < 1:
+        return None
+
+    prep = getattr(state, "order_prep", None)
+    current_qty = int(getattr(prep, "quantity", None) or 1)
+    if qty == current_qty:
+        return None
+
+    if _quantity_update_conflicts(ctx, message, qty):
+        return None
+
+    focus = dict(state.current_product_focus or {})
+    logger.info(
+        "[ORDER FLOW] quantity update gate → propose_draft_order | tenant=%s "
+        "product=%r quantity=%d→%d active_candidates=%d orderable=%s",
+        ctx.tenant_id,
+        focus.get("title"),
+        current_qty,
+        qty,
+        len(list(getattr(state, "last_search_candidates", None) or [])),
+        getattr(getattr(ctx, "facts", None), "orderable", None),
+    )
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args={"product": focus},
+        reason="active_order_quantity_update: consume quantity slot in DraftOrderHandler",
+        confidence=0.93,
+    )
 
 
 def _order_prep_has_active_product(state: Any) -> bool:
