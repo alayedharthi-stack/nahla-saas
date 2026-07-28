@@ -25,6 +25,24 @@ logger = logging.getLogger("nahla.salla_store_identity")
 SALLA_STORE_INFO_URL = "https://api.salla.dev/admin/v2/store/info"
 
 
+class SallaStoreIdentityConflictError(RuntimeError):
+    """Multiple tenants match the same Salla store identity — fail closed."""
+
+    def __init__(
+        self,
+        lookup_id: str,
+        tenant_ids: List[int],
+        matched_via: str,
+    ) -> None:
+        self.lookup_id = lookup_id
+        self.tenant_ids = tenant_ids
+        self.matched_via = matched_via
+        super().__init__(
+            f"Salla store identity conflict for {lookup_id}: tenants {tenant_ids} "
+            f"(matched_via={matched_via})",
+        )
+
+
 @dataclass
 class SallaTenantGuardResult:
     """Result of verifying a JWT tenant against a Salla store owner."""
@@ -473,6 +491,9 @@ def find_salla_integration_by_identity(
     Returns ``(integration, matched_via)`` where ``matched_via`` is one of:
     ``external_store_id``, ``config.store_id``, ``config.salla_merchant_id_alt``,
     ``config.merchant_id``, or ``""`` when not found.
+
+    Raises ``SallaStoreIdentityConflictError`` when the same identity maps to
+    more than one tenant (fail closed — never pick an arbitrary first row).
     """
     from models import Integration  # noqa: PLC0415
 
@@ -484,24 +505,45 @@ def find_salla_integration_by_identity(
     if not include_disabled:
         q = q.filter(Integration.enabled == True)  # noqa: E712
 
-    # Exact column match first (indexed).
-    row = q.filter(Integration.external_store_id == sid).first()
-    if row:
-        return row, "external_store_id"
+    canonical_rows = list(q.filter(Integration.external_store_id == sid).all())
+    canonical_tenants = sorted({row.tenant_id for row in canonical_rows})
+    if len(canonical_tenants) > 1:
+        logger.error(
+            "[SallaIdentity] ownership conflict | lookup_id=%s matched_via=external_store_id "
+            "tenant_ids=%s",
+            sid,
+            canonical_tenants,
+        )
+        raise SallaStoreIdentityConflictError(sid, canonical_tenants, "external_store_id")
+    if len(canonical_rows) == 1:
+        return canonical_rows[0], "external_store_id"
 
     if not allow_alias_match:
         return None, ""
 
-    # Config alias fields — portable across SQLite (tests) and Postgres.
-    rows = q.all()
-    for row in rows:
+    alias_matches: List[Tuple[Any, str]] = []
+    for row in q.all():
         cfg = row.config or {}
         if _str_id(cfg.get("store_id")) == sid:
-            return row, "config.store_id"
-        if _str_id(cfg.get("salla_merchant_id_alt")) == sid:
-            return row, "config.salla_merchant_id_alt"
-        if _str_id(cfg.get("merchant_id")) == sid:
-            return row, "config.merchant_id"
+            alias_matches.append((row, "config.store_id"))
+        elif _str_id(cfg.get("salla_merchant_id_alt")) == sid:
+            alias_matches.append((row, "config.salla_merchant_id_alt"))
+        elif _str_id(cfg.get("merchant_id")) == sid:
+            alias_matches.append((row, "config.merchant_id"))
+
+    alias_tenants = sorted({row.tenant_id for row, _ in alias_matches})
+    if len(alias_tenants) > 1:
+        matched_via = alias_matches[0][1] if alias_matches else "config.store_id"
+        logger.error(
+            "[SallaIdentity] ownership conflict | lookup_id=%s matched_via=%s tenant_ids=%s",
+            sid,
+            matched_via,
+            alias_tenants,
+        )
+        raise SallaStoreIdentityConflictError(sid, alias_tenants, matched_via)
+
+    if alias_matches:
+        return alias_matches[0][0], alias_matches[0][1]
 
     return None, ""
 
@@ -673,12 +715,24 @@ def reconcile_salla_oauth_tenant_id(
     if not sid:
         return session_tenant_id or 0, "no_store_id"
 
-    owner_tid, integration, matched_via = resolve_tenant_for_salla_store(
-        db,
-        SallaStoreIdentity(store_id=sid),
-        include_disabled=True,
-        allow_alias_match=True,
-    )
+    try:
+        owner_tid, integration, matched_via = resolve_tenant_for_salla_store(
+            db,
+            SallaStoreIdentity(store_id=sid),
+            include_disabled=True,
+            allow_alias_match=True,
+        )
+    except SallaStoreIdentityConflictError as conflict:
+        logger.error(
+            "[SallaIdentity] oauth reconcile blocked by ownership conflict | "
+            "store_id=%s tenant_ids=%s matched_via=%s session_tenant=%s",
+            conflict.lookup_id,
+            conflict.tenant_ids,
+            conflict.matched_via,
+            session_tenant_id,
+        )
+        return session_tenant_id or 0, "store_identity_conflict"
+
     if owner_tid is not None:
         if session_tenant_id and session_tenant_id != owner_tid:
             _log_salla_tenant_guard(

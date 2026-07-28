@@ -3018,6 +3018,7 @@ async def salla_oauth_callback(
 
     # ── Step 4: Resolve / create Nahla account for this merchant ───────────────
     auto_jwt: str = ""
+    owner_email: str = ""
 
     if is_new_merchant:
         # ── Auto-register new merchant from Salla ────────────────────────────
@@ -3072,6 +3073,7 @@ async def salla_oauth_callback(
 
             tenant_id   = provision_legacy.tenant_id
             salla_email = provision_legacy.email   # canonical, may be remapped
+            owner_email = salla_email
 
             if provision_legacy.linked_existing:
                 audit("salla_oauth_linked_existing", sub=salla_email,
@@ -3140,6 +3142,11 @@ async def salla_oauth_callback(
                 "[Salla OAuth] tenant reconcile (existing merchant) | store=%s tenant=%s reason=%s",
                 salla_store_id, tenant_id, reconcile_reason,
             )
+            if reconcile_reason == "store_identity_conflict":
+                return HTMLResponse(
+                    content=_install_error_html("store_owned_by_other_tenant"),
+                    status_code=403,
+                )
 
         if tenant_id == 0:
             if not salla_store_id:
@@ -3154,8 +3161,6 @@ async def salla_oauth_callback(
             # OAuth state was lost — provision Tenant+User via store_id instead of
             # creating a ghost Tenant row with no merchant User (Tenant 47 pattern).
             try:
-                from core.merchant_provisioning import get_or_create_merchant_user  # noqa: PLC0415
-
                 safe_store = "".join(
                     c for c in (store_name or "") if c.isalnum() or c in "-_"
                 ).lower()[:30]
@@ -3171,6 +3176,7 @@ async def salla_oauth_callback(
                     allow_alias_match=True,
                 )
                 tenant_id = provision_state_lost.tenant_id
+                owner_email = provision_state_lost.email
                 logger.info(
                     "[Salla OAuth] provisioned after state loss | store=%s tenant=%s "
                     "created_tenant=%s created_user=%s",
@@ -3185,6 +3191,13 @@ async def salla_oauth_callback(
                     db.rollback()
                 except Exception:
                     pass
+                from services.salla_store_identity import SallaStoreIdentityConflictError  # noqa: PLC0415
+
+                if isinstance(exc, SallaStoreIdentityConflictError):
+                    return HTMLResponse(
+                        content=_install_error_html("store_owned_by_other_tenant"),
+                        status_code=403,
+                    )
                 return HTMLResponse(
                     content=_install_error_html("registration_failed"),
                     status_code=500,
@@ -3204,6 +3217,11 @@ async def salla_oauth_callback(
             "[Salla OAuth] pre-claim reconcile | store=%s tenant=%s reason=%s",
             salla_store_id, tenant_id, pre_claim_reason,
         )
+        if pre_claim_reason == "store_identity_conflict":
+            return HTMLResponse(
+                content=_install_error_html("store_owned_by_other_tenant"),
+                status_code=403,
+            )
 
     logger.info(
         "[Salla OAuth] ▶ Saving integration | tenant=%s store_id=%r store_name=%r",
@@ -3306,6 +3324,25 @@ async def salla_oauth_callback(
         return HTMLResponse(content=_install_error_html("db_save_failed"), status_code=500)
 
     # ── Email: welcome (new) or salla_connected (returning) ─────────────────────
+    if not owner_email and tenant_id:
+        merchant_user = (
+            db.query(User)
+            .filter(User.tenant_id == tenant_id, User.role == "merchant")
+            .order_by(User.id.asc())
+            .first()
+        )
+        if merchant_user:
+            owner_email = merchant_user.email
+        else:
+            integration_row = (
+                db.query(Integration)
+                .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+                .order_by(Integration.id.asc())
+                .first()
+            )
+            cfg = integration_row.config if integration_row else {}
+            owner_email = str((cfg or {}).get("salla_owner_email") or "").strip().lower()
+
     try:
         from services.email_service import enqueue_email  # noqa: PLC0415
         if owner_email and "@" in owner_email:

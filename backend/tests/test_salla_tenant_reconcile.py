@@ -13,6 +13,7 @@ import os
 import sys
 
 import pytest
+from unittest.mock import patch
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
@@ -170,6 +171,126 @@ class TestClaimStoreOwnershipGuard:
         assert updated.id == integration_id
         assert updated.tenant_id == PARTNER_TENANT
         assert updated.config.get("api_key") == "fresh-token"
+
+
+class TestStoreIdentityConflict:
+    def test_canonical_external_store_id_wins_over_legacy_alias_on_other_tenant(self, db):
+        from services.salla_store_identity import find_salla_integration_by_identity
+
+        _seed_legacy_integration(db, tenant_id=PARTNER_TENANT, store_id=PARTNER_STORE)
+        db.merge(Tenant(id=WRONG_TENANT, name="Ghost"))
+        db.add(Integration(
+            tenant_id=WRONG_TENANT,
+            provider="salla",
+            external_store_id=None,
+            config={"store_id": PARTNER_STORE},
+            enabled=True,
+        ))
+        db.commit()
+
+        canonical = db.query(Integration).filter_by(tenant_id=PARTNER_TENANT).one()
+        canonical.external_store_id = PARTNER_STORE
+        db.commit()
+
+        found, matched_via = find_salla_integration_by_identity(
+            db, PARTNER_STORE, allow_alias_match=True,
+        )
+        assert found is not None
+        assert found.tenant_id == PARTNER_TENANT
+        assert matched_via == "external_store_id"
+
+    def test_duplicate_config_store_id_raises_conflict(self, db):
+        from services.salla_store_identity import (
+            find_salla_integration_by_identity,
+            SallaStoreIdentityConflictError,
+        )
+
+        _seed_legacy_integration(db, tenant_id=PARTNER_TENANT, store_id=PARTNER_STORE)
+        db.merge(Tenant(id=WRONG_TENANT, name="Ghost"))
+        db.add(Integration(
+            tenant_id=WRONG_TENANT,
+            provider="salla",
+            external_store_id=None,
+            config={"store_id": PARTNER_STORE},
+            enabled=True,
+        ))
+        db.commit()
+
+        with pytest.raises(SallaStoreIdentityConflictError) as exc_info:
+            find_salla_integration_by_identity(
+                db, PARTNER_STORE, allow_alias_match=True,
+            )
+
+        assert set(exc_info.value.tenant_ids) == {PARTNER_TENANT, WRONG_TENANT}
+
+    def test_duplicate_external_store_id_raises_conflict(self, db):
+        from services.salla_store_identity import (
+            find_salla_integration_by_identity,
+            SallaStoreIdentityConflictError,
+        )
+        from models import Integration as IntegrationModel  # noqa: PLC0415
+
+        row_a = IntegrationModel(
+            id=101,
+            tenant_id=PARTNER_TENANT,
+            provider="salla",
+            external_store_id=PARTNER_STORE,
+            config={"store_id": PARTNER_STORE},
+            enabled=True,
+        )
+        row_b = IntegrationModel(
+            id=102,
+            tenant_id=WRONG_TENANT,
+            provider="salla",
+            external_store_id=PARTNER_STORE,
+            config={"store_id": PARTNER_STORE},
+            enabled=True,
+        )
+
+        class _CanonicalQuery:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def all(self):
+                return [row_a, row_b]
+
+        original_query = db.query
+
+        def _query_wrapper(model):
+            if model is IntegrationModel:
+                return _CanonicalQuery()
+            return original_query(model)
+
+        with patch.object(db, "query", side_effect=_query_wrapper):
+            with pytest.raises(SallaStoreIdentityConflictError) as exc_info:
+                find_salla_integration_by_identity(
+                    db, PARTNER_STORE, allow_alias_match=True,
+                )
+
+        assert set(exc_info.value.tenant_ids) == {PARTNER_TENANT, WRONG_TENANT}
+        assert exc_info.value.matched_via == "external_store_id"
+
+    def test_reconcile_returns_conflict_without_picking_owner(self, db):
+        from services.salla_store_identity import reconcile_salla_oauth_tenant_id
+
+        _seed_legacy_integration(db, tenant_id=PARTNER_TENANT, store_id=PARTNER_STORE)
+        db.merge(Tenant(id=WRONG_TENANT, name="Ghost"))
+        db.add(Integration(
+            tenant_id=WRONG_TENANT,
+            provider="salla",
+            external_store_id=None,
+            config={"store_id": PARTNER_STORE},
+            enabled=True,
+        ))
+        db.commit()
+
+        tenant_id, reason = reconcile_salla_oauth_tenant_id(
+            db,
+            session_tenant_id=WRONG_TENANT,
+            store_id=PARTNER_STORE,
+        )
+        assert tenant_id == WRONG_TENANT
+        assert reason == "store_identity_conflict"
 
 
 class TestOrderUpsertTenantIsolation:

@@ -168,14 +168,24 @@ def claim_store_for_tenant(
     integration = (
         db.query(Integration)
         .filter(
+            Integration.tenant_id == tenant_id,
             Integration.provider == "salla",
-            Integration.external_store_id == str(store_id),
         )
+        .order_by(Integration.id.asc())
         .first()
     )
+    if integration is None:
+        integration = (
+            db.query(Integration)
+            .filter(
+                Integration.provider == "salla",
+                Integration.external_store_id == store_id_str,
+            )
+            .first()
+        )
     if integration:
         integration.tenant_id = tenant_id
-        integration.external_store_id = str(store_id)
+        integration.external_store_id = store_id_str
         integration.config = new_config
         integration.enabled = True
         logger.info(
@@ -186,7 +196,7 @@ def claim_store_for_tenant(
         integration = Integration(
             tenant_id=tenant_id,
             provider="salla",
-            external_store_id=str(store_id),
+            external_store_id=store_id_str,
             config=new_config,
             enabled=True,
         )

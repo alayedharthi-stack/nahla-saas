@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { AlertTriangle, Bot, Crown, Link2, Search, Filter, Download, Store, MessageCircle, ShoppingBag } from 'lucide-react'
 import Badge from '../components/ui/Badge'
@@ -10,23 +10,16 @@ import { ShoppingCart, Clock, CheckCircle, MessageSquare } from 'lucide-react'
 import { featureRealityApi, type DashboardOrder, type NeedsActionLevel, type OrderSourceKey, type OrdersDashboard } from '../api/featureReality'
 import { formatOrderNumberLabel, orderDetailPath } from '../lib/orderRoutes'
 import { formatRiyadh } from '../lib/datetime'
+import {
+  EMPTY_ORDERS_DASHBOARD,
+  ordersRevenueDisplay,
+  ordersStatDisplay,
+  shouldApplyOrdersRequest,
+} from './ordersLoadState'
 
 // UI_ONLY_GUARD: only static labels below use t(); customer/product names stay as API data.
 
 type OrderStatus = 'paid' | 'pending' | 'failed' | 'cancelled'
-
-const emptyData: OrdersDashboard = {
-  summary: {
-    total_orders: 0,
-    today_revenue_sar: 0,
-    pending_orders: 0,
-    completed_today: 0,
-    whatsapp_orders_today: 0,
-    whatsapp_revenue_today: 0,
-    orders_needing_action: 0,
-  },
-  orders: [],
-}
 
 const TAB_KEYS = [
   'all',
@@ -81,11 +74,11 @@ const formatDate = (iso: string): string => formatRiyadh(iso)
 export default function Orders() {
   const [tab, setTab] = useState<TabKey>('all')
   const [search, setSearch] = useState('')
-  const [data, setData] = useState<OrdersDashboard>(emptyData)
+  const [data, setData] = useState<OrdersDashboard>(EMPTY_ORDERS_DASHBOARD)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
+  const latestRequestRef = useRef(0)
   const { t, lang, dir } = useLanguage()
   const op = t(tr => tr.ordersPage)
 
@@ -121,26 +114,38 @@ export default function Orders() {
   const locale = lang === 'ar' ? 'ar-SA' : 'en-US'
 
   useEffect(() => {
+    let cancelled = false
+    const requestId = latestRequestRef.current + 1
+    latestRequestRef.current = requestId
+
     setLoading(true)
     setLoadError(null)
+    setData(EMPTY_ORDERS_DASHBOARD)
+
     const lifecycle = TAB_TO_FILTER[tab]
     const source = tab === 'whatsapp' ? 'whatsapp' : undefined
     featureRealityApi.orders({ lifecycle_filter: lifecycle, source })
       .then((dashboard) => {
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
         setData(dashboard)
-        setHasLoadedOnce(true)
       })
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : op.loadError
-        setLoadError(message || op.loadError)
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
+        console.error('[Orders] failed to load orders', err)
+        setLoadError(op.loadError)
+        setData(EMPTY_ORDERS_DASHBOARD)
       })
-      .finally(() => setLoading(false))
-  }, [tab, reloadNonce])
+      .finally(() => {
+        if (!shouldApplyOrdersRequest(requestId, latestRequestRef.current, cancelled)) return
+        setLoading(false)
+      })
 
-  const statValue = (value: number) => {
-    if (loadError && !hasLoadedOnce) return '—'
-    return String(value)
-  }
+    return () => {
+      cancelled = true
+    }
+  }, [tab, reloadNonce, op.loadError])
+
+  const statValue = (value: number) => ordersStatDisplay(value, loadError)
 
   const filtered = data.orders.filter((o: DashboardOrder) => {
     if (tab === 'store' && (o.source === 'whatsapp' || o.source === 'manual')) return false
@@ -192,18 +197,24 @@ export default function Orders() {
         />
         <StatCard
           label={op.cards.whatsappRevenueToday}
-          value={loadError && !hasLoadedOnce
-            ? '—'
-            : `${data.summary.whatsapp_revenue_today.toLocaleString(locale)} ${op.currency}`}
+          value={ordersRevenueDisplay(
+            data.summary.whatsapp_revenue_today,
+            loadError,
+            locale,
+            op.currency,
+          )}
           icon={Crown}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
         />
         <StatCard
           label={op.cards.todayRevenue}
-          value={loadError && !hasLoadedOnce
-            ? '—'
-            : `${data.summary.today_revenue_sar.toLocaleString(locale)} ${op.currency}`}
+          value={ordersRevenueDisplay(
+            data.summary.today_revenue_sar,
+            loadError,
+            locale,
+            op.currency,
+          )}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
