@@ -48,6 +48,7 @@ are data-driven and always unique — they need no variants.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from .mirror_replies import mirror_reply as _mirror_reply
@@ -142,6 +143,248 @@ def re_greeting(
 
 # ── Product search ────────────────────────────────────────────────────────────
 
+_SEARCH_CANDIDATE_PRICE_RE = re.compile(r"^\s*\d+(\.\d+)?\s*$")
+_SEARCH_CLOSING_HINTS = (
+    "رقم المنتج",
+    "اسم المنتج",
+    "رقم الخيار",
+    "أكمل طلبك",
+    "أكمل معك",
+    "تفضل رقم",
+)
+
+
+def _search_candidate_price_value(product: Dict[str, Any]) -> Any:
+    for key in ("sale_price", "price", "regular_price"):
+        raw = product.get(key)
+        if raw is None:
+            continue
+        if str(raw).strip():
+            return raw
+    return None
+
+
+def _search_candidate_price_label(product: Dict[str, Any]) -> str:
+    raw = _search_candidate_price_value(product)
+    if raw is None:
+        return ""
+    text = str(raw).strip()
+    if _SEARCH_CANDIDATE_PRICE_RE.match(text):
+        return f"{text} ريال"
+    return text
+
+
+def normalize_search_candidate_products(
+    products: List[Dict[str, Any]] | None,
+) -> List[Dict[str, Any]]:
+    """Keep checkoutable catalog rows with presentation evidence and a price field."""
+    normalized: List[Dict[str, Any]] = []
+    for product in list(products or []):
+        if not isinstance(product, dict):
+            continue
+        if not product.get("can_checkout", product.get("orderable", True)):
+            continue
+        title = str(product.get("title") or "").strip()
+        if len(title) < 2:
+            continue
+        row = dict(product)
+        price = _search_candidate_price_value(product)
+        if price is not None:
+            row["price"] = price
+        normalized.append(row)
+    return normalized
+
+
+def build_search_products_compose_facts(
+    products: List[Dict[str, Any]] | None,
+    *,
+    query: str = "",
+    inbound_text: str = "",
+    search_result_count: int = 0,
+) -> Dict[str, Any]:
+    """Structured candidate facts for grounded persona compose (no customer prose)."""
+    candidates = normalize_search_candidate_products(products)
+    rows: List[Dict[str, Any]] = []
+    for product in candidates:
+        row: Dict[str, Any] = {
+            "id": product.get("id"),
+            "title": str(product.get("title") or "").strip(),
+        }
+        price = _search_candidate_price_value(product)
+        if price is not None:
+            row["price"] = price
+        if product.get("can_checkout") is not None:
+            row["available"] = bool(product.get("can_checkout"))
+            row["orderable"] = bool(product.get("can_checkout"))
+        rows.append(row)
+    return {
+        "catalog_search_query": str(query or "").strip(),
+        "inbound_text": str(inbound_text or "").strip(),
+        "search_result_count": int(search_result_count or len(candidates)),
+        "eligible_product_count": len(candidates),
+        "has_eligible_products": bool(candidates),
+        "catalog_products": rows,
+        "catalog_product_ids": [
+            row.get("id") for row in rows if row.get("id") is not None
+        ],
+        "display_count": len(candidates),
+        "question_kind": "browse",
+    }
+
+
+def presentation_text_lists_products(
+    text: str,
+    products: List[Dict[str, Any]],
+) -> bool:
+    body = str(text or "").strip()
+    if not body or not products:
+        return False
+    for product in products:
+        title = str(product.get("title") or "").strip()
+        if title and title in body:
+            return True
+        price = _search_candidate_price_value(product)
+        if price is None:
+            continue
+        price_text = str(price).strip()
+        if price_text and price_text in body.replace(" ريال", ""):
+            return True
+    return False
+
+
+def presentation_is_dangling_closing_only(
+    text: str,
+    products: List[Dict[str, Any]],
+) -> bool:
+    """True when *text* is a product-less closing prompt despite supplied candidates."""
+    body = str(text or "").strip()
+    if not body:
+        return False
+    if presentation_text_lists_products(body, products):
+        return False
+    return any(hint in body for hint in _SEARCH_CLOSING_HINTS)
+
+
+def search_products(
+    products: List[Dict[str, Any]] | None = None,
+    query: str = "",
+    count: int = 0,
+    variant: int = 0,
+    *,
+    discovery_presentation_text: str = "",
+    product_lines: str = "",
+    show_more_hint: bool = False,
+    **_: Any,
+) -> str:
+    """Compose search/browse presentation from catalog candidate facts.
+
+    When upstream discovery text is only a closing prompt with no embedded
+    product facts, rebuild the numbered list from *products* instead of
+    forwarding the dangling prompt. Uses existing list templates only —
+    never invents prices or SKUs absent from the supplied facts.
+    """
+    candidates = normalize_search_candidate_products(products)
+    total = len(candidates)
+    if total == 0:
+        return no_products(variant=variant)
+
+    presentation = str(discovery_presentation_text or product_lines or "").strip()
+    if presentation and presentation_text_lists_products(presentation, candidates):
+        return presentation
+    if presentation and not presentation_is_dangling_closing_only(
+        presentation,
+        candidates,
+    ):
+        return presentation
+
+    return narrow_choices(
+        products=candidates,
+        variant=variant,
+        show_more_hint=show_more_hint,
+    )
+
+
+async def compose_search_products_with_persona(
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_text: str,
+    products: List[Dict[str, Any]] | None,
+    catalog_search_query: str = "",
+    search_result_count: int = 0,
+    decision_args: Optional[Dict[str, Any]] = None,
+    ai_settings: Optional[Dict[str, Any]] = None,
+    variant: int = 0,
+    discovery_presentation_text: str = "",
+    show_more_hint: bool = False,
+) -> tuple[str, Dict[str, Any]]:
+    """Route search-candidate facts through catalog persona compose, then repair gaps."""
+    from ..persona.catalog_product_answer import (  # noqa: PLC0415
+        build_catalog_product_answer_emergency_outcome,
+        try_compose_catalog_product_answer,
+    )
+
+    candidates = normalize_search_candidate_products(products)
+    facts = build_search_products_compose_facts(
+        candidates,
+        query=catalog_search_query,
+        inbound_text=inbound_text,
+        search_result_count=search_result_count,
+    )
+    compose_kwargs = {
+        "tenant_id": int(tenant_id or 0),
+        "customer_phone": str(customer_phone or ""),
+        "inbound_text": str(inbound_text or ""),
+        "products": list(candidates),
+        "catalog_search_query": str(catalog_search_query or "").strip(),
+        "search_result_count": int(facts.get("search_result_count") or len(candidates)),
+        "question_kind": "browse",
+        "display_count": len(candidates),
+        "decision_args": dict(decision_args or {}),
+        "ai_settings": dict(ai_settings or {}),
+    }
+    try:
+        text, _result, event = await try_compose_catalog_product_answer(
+            **compose_kwargs,
+        )
+    except Exception:  # noqa: BLE001
+        text, _result, event = build_catalog_product_answer_emergency_outcome(
+            **compose_kwargs,
+            reason="compose_exception",
+        )
+    event = dict(event or {})
+    event["search_products_facts"] = facts
+    composed = str(text or "").strip()
+    if composed and presentation_text_lists_products(composed, candidates):
+        event.setdefault("compose_source", event.get("compose_source") or "persona_llm")
+        return composed, event
+    repaired = search_products(
+        products=candidates,
+        query=catalog_search_query,
+        discovery_presentation_text=discovery_presentation_text,
+        variant=variant,
+        show_more_hint=show_more_hint,
+    )
+    event["compose_source"] = "fallback_deterministic"
+    event["fallback_reason"] = "search_products_missing_candidate_facts"
+    event["chosen_path"] = "templates.search_products"
+    return repaired, event
+
+
+def _format_search_candidate_lines(products: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for idx, product in enumerate(products, start=1):
+        title = str(product.get("title") or "").strip()
+        if not title:
+            continue
+        line = f"{idx}. *{title}*"
+        price_label = _search_candidate_price_label(product)
+        if price_label:
+            line += f" — {price_label}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 _PRODUCT_RESULTS_INTROS = [
     # variant 0
     lambda count, query: (
@@ -171,12 +414,22 @@ def product_results(
     query: str = "",
     count: int = 0,
     variant: int = 0,
+    products: List[Dict[str, Any]] | None = None,
     **_: Any,
 ) -> str:
+    lines = str(product_lines or "").strip()
+    if not lines:
+        rebuilt = _format_search_candidate_lines(
+            normalize_search_candidate_products(products),
+        )
+        if rebuilt:
+            lines = rebuilt
+    if not lines:
+        return no_products(variant=variant)
     v = variant % 3
     intro   = _PRODUCT_RESULTS_INTROS[v](count, query)
     closing = _PRODUCT_RESULTS_CLOSINGS[v]
-    return f"{intro}\n\n{product_lines}\n\n{closing}"
+    return f"{intro}\n\n{lines}\n\n{closing}"
 
 
 _NO_PRODUCTS_VARIANTS = [
@@ -1263,7 +1516,7 @@ def narrow_choices(
         header = _NARROW_CHOICES_HEADERS[v]
     lines = [header + "\n"]
     for i, p in enumerate(products, 1):
-        price_str = f"{p['price']} ريال" if p.get("price") else ""
+        price_str = _search_candidate_price_label(p)
         line = f"{i}. *{p['title']}*"
         if price_str:
             line += f" — {price_str}"
