@@ -239,6 +239,7 @@ def _resolve_catalog_compose_rows(
     *,
     catalog_search_query: str,
     decision_args: Optional[dict[str, Any]] = None,
+    inbound_text: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep trusted unique candidates; surface structured ambiguity without picking one."""
     args = dict(decision_args or {})
@@ -274,6 +275,26 @@ def _resolve_catalog_compose_rows(
         return candidate_pool, meta
 
     if exact_rows and len(exact_rows) > 1:
+        from ..commerce.candidate_price_selection import (  # noqa: PLC0415
+            resolve_candidates_by_stated_price,
+        )
+
+        _price_pick = resolve_candidates_by_stated_price(inbound_text, exact_rows)
+        if _price_pick.kind == "selected" and _price_pick.selected:
+            return [_price_pick.selected], meta
+        if _price_pick.kind in {"clarify", "no_match"}:
+            _ambig_rows = list(_price_pick.candidates or exact_rows)
+            meta["catalog_ambiguity"] = True
+            meta["require_clarification"] = True
+            meta["catalog_ambiguity_reason"] = (
+                "price_constraint_multiple"
+                if _price_pick.kind == "clarify"
+                else "price_constraint_no_match"
+            )
+            meta["ambiguous_catalog_candidates"] = [
+                _ambiguous_candidate_fact(row) for row in _ambig_rows
+            ]
+            return _ambig_rows, meta
         meta["catalog_ambiguity"] = True
         meta["require_clarification"] = True
         meta["catalog_ambiguity_reason"] = "multiple_exact_title_candidates"
@@ -397,6 +418,7 @@ def build_catalog_product_answer_facts_bundle(
             rows,
             catalog_search_query=str(catalog_search_query or args.get("query") or "").strip(),
             decision_args=args,
+            inbound_text=inbound,
         )
         if resolved_rows:
             rows = resolved_rows

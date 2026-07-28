@@ -2187,7 +2187,58 @@ class DefaultDecisionEngine:
                 pass
             if _block_stale_resume("pending_candidates"):
                 _candidates = []
-            _matched_product = _match_product_from_message(ctx.message, _candidates) if _candidates else None
+            _matched_product = None
+            if _candidates:
+                from ..commerce.candidate_price_selection import (  # noqa: PLC0415
+                    resolve_candidates_by_stated_price,
+                )
+
+                _price_pick = resolve_candidates_by_stated_price(ctx.message, _candidates)
+                if _price_pick.kind == "selected" and _price_pick.selected:
+                    _matched_product = _price_pick.selected
+                    logger.info(
+                        "[ORDER FLOW] product selection by stated price | "
+                        "price=%s product=%r tenant=%s",
+                        _price_pick.stated_price,
+                        _matched_product.get("title"),
+                        ctx.tenant_id,
+                    )
+                elif _price_pick.kind == "clarify":
+                    logger.info(
+                        "[ORDER FLOW] stated price ambiguous | price=%s count=%d tenant=%s",
+                        _price_pick.stated_price,
+                        len(_price_pick.candidates),
+                        ctx.tenant_id,
+                    )
+                    return Decision(
+                        action=ACTION_CLARIFY,
+                        args={
+                            "topic": "product_price_ambiguity",
+                            "stated_price": _price_pick.stated_price,
+                            "products": list(_price_pick.candidates),
+                        },
+                        reason="multiple candidates share name and stated price — clarify",
+                        confidence=0.90,
+                    )
+                elif _price_pick.kind == "no_match":
+                    logger.info(
+                        "[ORDER FLOW] stated price unmatched | price=%s pool=%d tenant=%s",
+                        _price_pick.stated_price,
+                        len(_price_pick.candidates),
+                        ctx.tenant_id,
+                    )
+                    return Decision(
+                        action=ACTION_NARROW,
+                        args={
+                            "products": list(_price_pick.candidates),
+                            "source": "price_constraint_no_match",
+                            "stated_price": _price_pick.stated_price,
+                        },
+                        reason="stated price matches no candidate — present available options",
+                        confidence=0.89,
+                    )
+                else:
+                    _matched_product = _match_product_from_message(ctx.message, _candidates)
             if _matched_product:
                 # Use can_checkout as the single source of truth; fall back to
                 # orderable for older state entries that pre-date can_checkout.

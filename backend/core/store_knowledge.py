@@ -213,6 +213,43 @@ class CatalogSearchProductsResult:
     catalog_fact_products: List[Dict[str, Any]] = field(default_factory=list)
 
 
+_AR_DEF_ARTICLE = "\u0627\u0644"
+
+
+def _catalog_search_query_variants(query: str) -> List[str]:
+    """
+    Deterministic search-query variants (query layer only — not product data).
+
+    Strips a leading Arabic definite article when the primary query misses,
+    without altering non-Arabic queries or product titles in the database.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    variants: List[str] = [q]
+    if not _re.search(r"[\u0600-\u06FF]", q):
+        return variants
+    if q.startswith(_AR_DEF_ARTICLE) and len(q) > len(_AR_DEF_ARTICLE) + 1:
+        bare = q[len(_AR_DEF_ARTICLE):].strip()
+        if bare and bare not in variants:
+            variants.append(bare)
+    tokens = q.split()
+    if len(tokens) > 1:
+        stripped_tokens: List[str] = []
+        changed = False
+        for tok in tokens:
+            if tok.startswith(_AR_DEF_ARTICLE) and len(tok) > len(_AR_DEF_ARTICLE) + 1:
+                stripped_tokens.append(tok[len(_AR_DEF_ARTICLE):])
+                changed = True
+            else:
+                stripped_tokens.append(tok)
+        if changed:
+            alt = " ".join(stripped_tokens)
+            if alt not in variants:
+                variants.append(alt)
+    return variants
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CatalogContextBuilder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,41 +325,53 @@ class CatalogContextBuilder:
             )
             return filtered
 
-        # -- Full-text search (tsvector, works with Arabic tokens) ------------
-        try:
-            fts_sql = sa_text("""
-                SELECT id FROM products
-                WHERE tenant_id = :tid
-                  AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
-                      @@ plainto_tsquery('simple', :q)
-                ORDER BY in_stock DESC, id
-                LIMIT :lim
-            """)
-            result = self.db.execute(fts_sql, {"tid": self.tenant_id, "q": q_clean, "lim": limit})
-            ids = [row[0] for row in result]
-            if ids:
-                rows = (
-                    self.db.query(Product)
-                    .filter(Product.id.in_(ids))
-                    .all()
+        variants = _catalog_search_query_variants(q_clean)
+        for search_q in variants:
+            # -- Full-text search (tsvector, works with Arabic tokens) --------
+            try:
+                fts_sql = sa_text("""
+                    SELECT id FROM products
+                    WHERE tenant_id = :tid
+                      AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
+                          @@ plainto_tsquery('simple', :q)
+                    ORDER BY in_stock DESC, id
+                    LIMIT :lim
+                """)
+                result = self.db.execute(
+                    fts_sql,
+                    {"tid": self.tenant_id, "q": search_q, "lim": limit},
                 )
-                return _finalize(rows, source="search", method="fts")
-        except Exception:
-            pass  # fall through to ILIKE
+                ids = [row[0] for row in result]
+                if ids:
+                    rows = (
+                        self.db.query(Product)
+                        .filter(Product.id.in_(ids))
+                        .all()
+                    )
+                    method = "fts" if search_q == q_clean else "fts_def_article_norm"
+                    return _finalize(rows, source="search", method=method)
+            except Exception:
+                pass  # fall through to ILIKE
 
-        # -- ILIKE fallback ---------------------------------------------------
-        q_like = f"%{q_clean.lower()}%"
-        rows = (
-            self.db.query(Product)
-            .filter(
-                Product.tenant_id == self.tenant_id,
-                Product.title.ilike(q_like),
+            # -- ILIKE fallback ---------------------------------------------------
+            q_like = f"%{search_q.lower()}%"
+            rows = (
+                self.db.query(Product)
+                .filter(
+                    Product.tenant_id == self.tenant_id,
+                    Product.title.ilike(q_like),
+                )
+                .order_by(Product.in_stock.desc())
+                .limit(limit)
+                .all()
             )
-            .order_by(Product.in_stock.desc())
-            .limit(limit)
-            .all()
-        )
-        return _finalize(rows, source="search_ilike", method="ilike")
+            if rows:
+                method = "ilike" if search_q == q_clean else "ilike_def_article_norm"
+                return _finalize(rows, source="search_ilike", method=method)
+
+        if include_non_orderable_facts:
+            return CatalogSearchProductsResult(products=[], catalog_fact_products=[])
+        return []
 
     def get_by_external_id(self, ext_id: str) -> Optional[Dict]:
         p = (

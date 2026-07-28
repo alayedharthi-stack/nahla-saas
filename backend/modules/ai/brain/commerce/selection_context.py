@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from ..decision.actions import (
     ACTION_CLARIFY,
     ACTION_LLM_REPLY,
+    ACTION_NARROW,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
 )
@@ -275,6 +276,10 @@ def _extract_ordinal_token(norm: str) -> Optional[int]:
         if token in _ORDINAL_INDEX:
             return _ORDINAL_INDEX[token]
     for word, idx in _ORDINAL_INDEX.items():
+        if word.isdigit():
+            if re.search(rf"(?:^|\s){re.escape(word)}(?:\s|$)", norm):
+                return idx
+            continue
         if word in norm:
             return idx
     return None
@@ -516,6 +521,31 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
     pool = selection_product_pool(state)
     reference = _resolve_reference_product(state)
 
+    from .candidate_price_selection import (  # noqa: PLC0415
+        extract_stated_price_constraint,
+        resolve_candidates_by_stated_price,
+    )
+
+    if extract_stated_price_constraint(msg) is not None:
+        _price_pick = resolve_candidates_by_stated_price(msg, presented)
+        if _price_pick.kind == "selected" and _price_pick.selected:
+            product = _price_pick.selected
+            return SelectionResolution(
+                kind="price_select",
+                selected=product,
+                presentation_text=compose_selected_product(product),
+            )
+        if _price_pick.kind == "clarify":
+            return SelectionResolution(
+                kind="price_ambiguous",
+                products=list(_price_pick.candidates),
+            )
+        if _price_pick.kind == "no_match":
+            return SelectionResolution(
+                kind="price_no_match",
+                products=list(_price_pick.candidates),
+            )
+
     price_ord = _PRICE_ORDINAL_RE.search(norm)
     if price_ord:
         idx = _ORDINAL_INDEX.get(price_ord.group(1).lower())
@@ -661,6 +691,43 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
         (resolution.selected or {}).get("title") if resolution.selected else None,
         (ctx.message or "")[:60],
     )
+
+    if resolution.kind == "price_select" and resolution.selected:
+        product = resolution.selected
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={
+                "product": _focus_from_product(product),
+                "source": "selection_context_price_select",
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": _selection_patch_from_product(product),
+                "await_quantity": True,
+            },
+            reason="selection context stated-price product match",
+            confidence=0.93,
+        )
+
+    if resolution.kind == "price_ambiguous":
+        return Decision(
+            action=ACTION_CLARIFY,
+            args={
+                "topic": "product_price_ambiguity",
+                "products": list(resolution.products or []),
+            },
+            reason="selection context — multiple products at stated price",
+            confidence=0.90,
+        )
+
+    if resolution.kind == "price_no_match":
+        return Decision(
+            action=ACTION_NARROW,
+            args={
+                "products": list(resolution.products or []),
+                "source": "selection_context_price_no_match",
+            },
+            reason="selection context — stated price unmatched, present options",
+            confidence=0.89,
+        )
 
     if resolution.kind in {"ordinal_select", "name_select"} and resolution.selected:
         product = resolution.selected
