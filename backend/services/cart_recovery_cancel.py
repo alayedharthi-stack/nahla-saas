@@ -285,7 +285,9 @@ def cancel_recovery_for_customer(
     )
     for cart in abandoned_carts:
         info = cart.customer_info or {}
-        cart_phone = (info.get("phone") or info.get("mobile") or "").strip()
+        from core.phone_coerce import coerce_customer_info_phone  # noqa: PLC0415
+
+        cart_phone = coerce_customer_info_phone(info)
         if not cart_phone and not matched_cart_external_id:
             continue
         if matched_cart_external_id and cart.external_id != matched_cart_external_id:

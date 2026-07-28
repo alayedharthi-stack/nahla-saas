@@ -20,6 +20,7 @@ import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.catalog_image import coerce_image_url, extract_sync_product_image
+from core.phone_coerce import coerce_phone_str
 from store_integration.models import (
     NormalizedOffer,
     NormalizedOrder,
@@ -195,7 +196,7 @@ def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
     customer = body.get("customer") or {}
     if not (customer.get("first_name") or "").strip():
         missing.append("customer_first_name")
-    _mobile = (customer.get("mobile") or "").strip()
+    _mobile = coerce_phone_str(customer.get("mobile"))
     if not _mobile:
         missing.append("customer_phone")
     elif not _re.fullmatch(r"05\d{8}", _mobile):
