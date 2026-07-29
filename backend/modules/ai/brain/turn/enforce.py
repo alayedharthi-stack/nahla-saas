@@ -21,7 +21,7 @@ from .flags import (
     is_turn_arbiter_enforce_enabled,
 )
 from .legacy_owner import legacy_owner_from_decision
-from .mismatch import MISMATCH_NONE, classify_owner_mismatch
+from .mismatch import MISMATCH_CHECKOUT_VS_DISCOVERY, MISMATCH_NONE, classify_owner_mismatch
 from .owner_brief import topic_for_owner
 from .telemetry import build_shadow_telemetry
 
@@ -142,6 +142,20 @@ def maybe_enforce_turn_decision(
     mismatch_type = telemetry.mismatch_type
     if mismatch_type not in get_enforce_mismatch_types():
         return decision, noop
+
+    if mismatch_type == MISMATCH_CHECKOUT_VS_DISCOVERY:
+        try:
+            from ..commerce.selection_context import (  # noqa: PLC0415
+                verify_structured_unique_selection_against_state,
+            )
+
+            if verify_structured_unique_selection_against_state(
+                decision,
+                getattr(ctx, "state", None),
+            ):
+                return decision, noop
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — verified selection carve-out must not block enforce
+            pass
 
     legacy_action = str(getattr(decision, "action", "") or "")
     legacy_owner = legacy_owner_from_decision(decision)

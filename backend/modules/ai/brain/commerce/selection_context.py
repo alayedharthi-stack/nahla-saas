@@ -82,6 +82,30 @@ _WEIGHT_STRIP_RE = re.compile(
     re.I | re.UNICODE,
 )
 
+_ORDINAL_WORDS: Dict[str, int] = {
+    k: v for k, v in _ORDINAL_INDEX.items() if not str(k).isdigit()
+}
+
+_EXPLORATORY_PRICE_QUESTION_RE = re.compile(
+    r"(?:"
+    r"^(?:كم|بكم|قد\s*ايش|how\s*much)\b"
+    r"|(?:كم\s+سعر|كم\s+ثمن|كم\s+تمن|بكم\s+)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_NAME_PRICE_SELECTION_RE = re.compile(
+    r"^(?:ابغ|ابغى|ابغي|ابي|أبغ|أبغى|أبي|اريد|أريد|ودي|اختر|اختار)\s+"
+    r"(?P<name>.+?)\s+"
+    r"(?:سعره|سعرها|بسعر|بسعره|بسعرها|السعر)\s+"
+    r"(?P<price>\d+(?:[.,]\d+)?)\s*(?:ريال|r|sar|ر\.?\s*)?\s*[?؟.]?\s*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
+STRUCTURED_UNIQUE_SELECTION_KEY = "structured_unique_selection"
+NAME_PRICE_CANDIDATE_MATCH = "name_price_candidate_match"
+CANDIDATE_SOURCE_LAST_SEARCH = "last_search_candidates"
+
 
 def _normalize_ar(text: str) -> str:
     return normalize_text(text or "")
@@ -266,18 +290,189 @@ def is_selection_followup_message(message: str) -> bool:
         return True
     if _extract_name_pick(norm):
         return True
+    if _NAME_PRICE_SELECTION_RE.match(norm) and not _is_exploratory_price_question(norm):
+        return True
     return False
 
 
 def _extract_ordinal_token(norm: str) -> Optional[int]:
+    """Resolve list-index tokens without treating price digits as ordinals."""
     tokens = norm.split()
     for token in tokens:
-        if token in _ORDINAL_INDEX:
-            return _ORDINAL_INDEX[token]
-    for word, idx in _ORDINAL_INDEX.items():
+        clean = token.strip(".,؟?!")
+        if clean in _ORDINAL_INDEX:
+            return _ORDINAL_INDEX[clean]
+    # Arabic ordinal words may appear inside longer phrases; numeric indices must
+    # be standalone tokens (never substring of a price like 114 → 1).
+    for word, idx in _ORDINAL_WORDS.items():
         if word in norm:
             return idx
     return None
+
+
+def _is_exploratory_price_question(norm: str) -> bool:
+    if not norm:
+        return False
+    if _EXPLORATORY_PRICE_QUESTION_RE.search(norm):
+        return True
+    if _PRICE_ORDINAL_RE.search(norm):
+        return True
+    return False
+
+
+def _product_normalized_price(product: Dict[str, Any]) -> Optional[int]:
+    from ..postprocess.product_claim_grounding_evidence import parse_price_amount  # noqa: PLC0415
+
+    raw = product.get("sale_price")
+    if raw is None:
+        raw = product.get("price")
+    return parse_price_amount(raw)
+
+
+def _product_is_checkout_eligible(product: Dict[str, Any]) -> bool:
+    orderable = product.get("can_checkout", product.get("orderable", True))
+    if not orderable:
+        return False
+    return bool(_product_id(product) or str(product.get("external_id") or "").strip())
+
+
+def _get_last_search_candidates(state: Any) -> List[Dict[str, Any]]:
+    return list(getattr(state, "last_search_candidates", None) or [])
+
+
+def _build_structured_unique_selection(
+    product: Dict[str, Any],
+    *,
+    kind: str,
+    candidate_source: str,
+    stated_price: int,
+    name_reference: str,
+) -> Dict[str, Any]:
+    return {
+        "kind": kind,
+        "candidate_source": candidate_source,
+        "candidate_id": _product_id(product),
+        "external_id": str(product.get("external_id") or "").strip(),
+        "stated_price": stated_price,
+        "name_reference": _normalize_name_reference(name_reference),
+        "verified_unique": True,
+    }
+
+
+def _candidate_identity(product: Dict[str, Any]) -> tuple[str, str]:
+    return _product_id(product), str(product.get("external_id") or "").strip()
+
+
+def _candidate_identity_matches(product: Dict[str, Any], marker: Dict[str, Any]) -> bool:
+    pid, ext = _candidate_identity(product)
+    marker_id = str(marker.get("candidate_id") or "").strip()
+    marker_ext = str(marker.get("external_id") or "").strip()
+    if marker_id and pid == marker_id:
+        return True
+    if marker_ext and ext == marker_ext:
+        return True
+    return False
+
+
+def _normalize_name_reference(name_reference: str) -> str:
+    return re.sub(r"^ال\s*", "", _normalize_ar(name_reference or "")).strip()
+
+
+def _eligible_name_price_hits(
+    name_reference: str,
+    stated_price: int,
+    candidates: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    norm_name = _normalize_name_reference(name_reference)
+    if not norm_name:
+        return []
+    hits = _match_product_by_name(norm_name, candidates)
+    return [
+        product
+        for product in hits
+        if _product_is_checkout_eligible(product)
+        and _product_normalized_price(product) == stated_price
+    ]
+
+
+def verify_structured_unique_selection_against_state(
+    decision: Any,
+    state: Any,
+) -> bool:
+    """Verify name+price selection marker against live last_search_candidates."""
+    args = dict(getattr(decision, "args", None) or {})
+    marker = args.get(STRUCTURED_UNIQUE_SELECTION_KEY)
+    if not isinstance(marker, dict):
+        return False
+    if marker.get("kind") != NAME_PRICE_CANDIDATE_MATCH:
+        return False
+    if marker.get("candidate_source") != CANDIDATE_SOURCE_LAST_SEARCH:
+        return False
+
+    stated_price = marker.get("stated_price")
+    name_reference = str(marker.get("name_reference") or "").strip()
+    if not isinstance(stated_price, int) or stated_price <= 0 or not name_reference:
+        return False
+    if not str(marker.get("candidate_id") or marker.get("external_id") or "").strip():
+        return False
+
+    candidates = _get_last_search_candidates(state)
+    if not candidates:
+        return False
+
+    identified: Optional[Dict[str, Any]] = None
+    for product in candidates:
+        if _candidate_identity_matches(product, marker):
+            identified = product
+            break
+    if identified is None:
+        return False
+    if _product_normalized_price(identified) != stated_price:
+        return False
+    if not _product_is_checkout_eligible(identified):
+        return False
+
+    hits = _eligible_name_price_hits(name_reference, stated_price, candidates)
+    if len(hits) != 1:
+        return False
+    hit_id, _ = _candidate_identity(hits[0])
+    identified_id, _ = _candidate_identity(identified)
+    return bool(hit_id) and hit_id == identified_id
+
+
+def has_verified_structured_unique_selection(decision: Any, state: Any = None) -> bool:
+    """Backward-compatible alias when state is available."""
+    if state is None:
+        return False
+    return verify_structured_unique_selection_against_state(decision, state)
+
+
+def _resolve_name_price_unique_selection(
+    norm: str,
+    candidates: Sequence[Dict[str, Any]],
+) -> Optional[tuple[Dict[str, Any], int, str]]:
+    if not candidates or _is_exploratory_price_question(norm):
+        return None
+    match = _NAME_PRICE_SELECTION_RE.match(norm)
+    if not match:
+        return None
+    name_ref = (match.group("name") or "").strip()
+    name_ref = re.sub(r"^ال\s*", "", _normalize_ar(name_ref)).strip()
+    stated_price = _product_normalized_price({"price": match.group("price")})
+    if not name_ref or stated_price is None:
+        return None
+
+    hits = _match_product_by_name(name_ref, candidates)
+    hits = [
+        product
+        for product in hits
+        if _product_is_checkout_eligible(product)
+        and _product_normalized_price(product) == stated_price
+    ]
+
+    if len(hits) != 1:
+        return None
+    return hits[0], stated_price, name_ref
 
 
 def _extract_ordinal_pick(norm: str) -> Optional[int]:
@@ -594,6 +789,16 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
             presentation_text="ما لقينا هذا الحجم ضمن الخيارات المعروضة — تبغى نعرض الأحجام المتوفرة؟",
         )
 
+    search_candidates = _get_last_search_candidates(state)
+    name_price = _resolve_name_price_unique_selection(norm, search_candidates)
+    if name_price is not None:
+        product, _stated_price, _name_ref = name_price
+        return SelectionResolution(
+            kind="name_price_select",
+            selected=product,
+            presentation_text=compose_selected_product(product),
+        )
+
     ordinal = _extract_ordinal_pick(norm)
     if ordinal is not None:
         product = _product_at_index(presented, ordinal)
@@ -677,6 +882,36 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
             confidence=0.92,
         )
 
+    if resolution.kind == "name_price_select" and resolution.selected:
+        product = resolution.selected
+        match = _NAME_PRICE_SELECTION_RE.match(_normalize_ar(ctx.message or ""))
+        stated_price = _product_normalized_price({"price": match.group("price")}) if match else None
+        name_ref = _normalize_name_reference((match.group("name") or "").strip()) if match else ""
+        forced = dict(product)
+        forced["candidate_source"] = CANDIDATE_SOURCE_LAST_SEARCH
+        marker = _build_structured_unique_selection(
+            product,
+            kind=NAME_PRICE_CANDIDATE_MATCH,
+            candidate_source=CANDIDATE_SOURCE_LAST_SEARCH,
+            stated_price=int(stated_price or 0),
+            name_reference=name_ref,
+        )
+        return Decision(
+            action=ACTION_PROPOSE_DRAFT_ORDER,
+            args={
+                "product": _focus_from_product(product),
+                "forced_product": forced,
+                "source": "selection_context_name_price",
+                "candidate_source": CANDIDATE_SOURCE_LAST_SEARCH,
+                STRUCTURED_UNIQUE_SELECTION_KEY: marker,
+                "selection_presentation_text": resolution.presentation_text,
+                "selection_context_patch": _selection_patch_from_product(product),
+                "await_quantity": True,
+            },
+            reason="selection context name_price_select",
+            confidence=0.94,
+        )
+
     if resolution.kind == "price_ordinal" and resolution.selected:
         product = resolution.selected
         return Decision(
@@ -748,7 +983,10 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
 
 
 __all__ = [
+    "CANDIDATE_SOURCE_LAST_SEARCH",
+    "NAME_PRICE_CANDIDATE_MATCH",
     "SELECTION_CONTEXT_TTL_TURNS",
+    "STRUCTURED_UNIQUE_SELECTION_KEY",
     "apply_selection_context_patch",
     "compose_family_sizes",
     "compose_selected_product",
@@ -758,6 +996,8 @@ __all__ = [
     "find_product_family",
     "get_presented_products",
     "has_active_selection_context",
+    "has_verified_structured_unique_selection",
+    "verify_structured_unique_selection_against_state",
     "is_selection_followup_message",
     "normalize_presented_product",
     "resolve_selection_context",
