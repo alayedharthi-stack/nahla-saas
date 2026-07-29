@@ -1,8 +1,8 @@
 """Closed contract for normal bootstrap migration targets (multi-head aware).
 
 Repository Alembic graph has parallel heads ``0092`` (A1-Validate branch) and
-``0093`` (conversation A1-subject bindings branch), both branching from the
-``0090`` / ``0091`` siblings off ``0088`` / ``0089``.
+``0094`` (commerce lifecycle send-audit branch extending ``0093``), both
+branching from the ``0090`` / ``0091`` siblings off ``0088`` / ``0089``.
 
 Normal application bootstrap must never invoke bare ``head`` — that would apply
 both sibling heads and advance capability to ``validated`` unintentionally.
@@ -16,7 +16,7 @@ validated-staging state ``{0088, 0093}``; it must not select ``0092``.
 """
 from __future__ import annotations
 
-REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0093"})
+REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0094"})
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})
 VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0093"})
