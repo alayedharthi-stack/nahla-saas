@@ -40,11 +40,15 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
     CHANNEL_PREFLIGHT_ENV_NAMES,
     CODE_ACCEPTANCE_NOT_ENABLED,
+    CODE_AI_TEST_ALLOWLIST_INVALID,
+    CODE_APPROVED_EGRESS_CONFIGURATION_MISSING,
     CODE_ARCH001_SIGNOFF_MISSING,
     CODE_CHANNEL_D360_ONLY_LEGACY_PATH,
     CODE_CHANNEL_HEALTH_BLOCKED,
     CODE_CHANNEL_READINESS_GAP,
     CODE_COMMAND_INVALID,
+    CODE_DATABASE_BINDING_REJECTED,
+    CODE_DATABASE_QUERY_FAILED,
     CODE_DB_WA_BINDING_INVALID,
     CODE_DB_WA_BINDING_MISSING,
     CODE_DB_WA_BINDING_MISMATCH,
@@ -59,6 +63,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     CODE_STORE_AI_MODE_INVALID,
     CODE_TENANT_1_NOT_PASSED,
     CODE_TENANT_NOT_ALLOWED,
+    CODE_TENANT_SETTINGS_MISSING,
     CODE_ROLLBACK_SNAPSHOT_INVALID,
     CODE_ROLLBACK_SNAPSHOT_MISSING,
     CODE_ROLLBACK_SNAPSHOT_STALE,
@@ -111,12 +116,15 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     TENANT_33_PHONE_ENV,
     WEBHOOK_ATTESTATION_ARTIFACT_ENV,
     WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
+    config_snapshot_db_io_permitted,
     count_scenarios_by_phase,
     env_flag_enabled,
+    evaluate_execution_gate_chain,
     hash_identifier,
     load_scenario_manifest,
     mask_phone_tail,
     parse_allowlist_phones,
+    read_only_preflight_db_io_permitted,
     required_config_snapshot_keys,
 )
 from scripts.operators.staging_migration_operator_gates import validate_staging_identity
@@ -259,46 +267,172 @@ def _resolve_test_phones() -> dict[str, Any]:
     }
 
 
+_PHONE_ENV_BY_TENANT = {
+    TENANT_1_INTENSIVE: TENANT_1_PHONE_ENV,
+    TENANT_33_LIMITED: TENANT_33_PHONE_ENV,
+}
+
+
+def _phone_env_for_tenant(tenant_id: int) -> str:
+    try:
+        return _PHONE_ENV_BY_TENANT[tenant_id]
+    except KeyError as exc:
+        raise ValueError(CODE_TENANT_NOT_ALLOWED) from exc
+
+
+def _read_tenant_ai_settings(
+    tenant_id: int,
+    *,
+    conn: Any | None = None,
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    """Read-only tenant_settings.ai_settings; no writes."""
+    if conn is not None:
+        ai_settings = conn.execute(
+            text("SELECT ai_settings FROM tenant_settings WHERE tenant_id=:tenant_id"),
+            {"tenant_id": tenant_id},
+        ).scalar_one_or_none()
+        if not isinstance(ai_settings, Mapping):
+            return None, CODE_TENANT_SETTINGS_MISSING
+        return dict(ai_settings), None
+
+    database_url = (os.environ.get(DATABASE_URL_ENV) or "").strip()
+    if not database_url:
+        return None, CODE_DATABASE_BINDING_REJECTED
+    try:
+        engine = create_engine(database_url)
+        with engine.connect() as connection:
+            return _read_tenant_ai_settings(tenant_id, conn=connection)
+    except Exception:  # noqa: silent-ok — read-only preflight; fail closed
+        return None, CODE_DATABASE_QUERY_FAILED
+
+
+def _validate_tenant_ai_preflight(
+    *,
+    tenant_id: int,
+    ai_settings: Mapping[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    env_map = env or os.environ
+    if str(ai_settings.get("store_ai_mode") or "") != "test":
+        return CODE_STORE_AI_MODE_INVALID
+    if ai_settings.get("store_ai_enabled", True) is not True:
+        return CODE_STORE_AI_MODE_INVALID
+
+    raw_allowlist = ai_settings.get("ai_test_allowed_numbers")
+    if not isinstance(raw_allowlist, list) or not raw_allowlist:
+        return CODE_AI_TEST_ALLOWLIST_INVALID
+
+    db_allowlist = {
+        re.sub(r"\D", "", str(value))
+        for value in raw_allowlist
+        if re.sub(r"\D", "", str(value))
+    }
+    if not db_allowlist:
+        return CODE_AI_TEST_ALLOWLIST_INVALID
+
+    env_allowlist = set(parse_allowlist_phones(env_map.get(ALLOWLIST_PHONES_ENV)))
+    if not env_allowlist:
+        return CODE_PHONE_NOT_ALLOWLISTED
+
+    phone = re.sub(r"\D", "", str(env_map.get(_phone_env_for_tenant(tenant_id), "")))
+    if not phone or phone not in env_allowlist:
+        return CODE_PHONE_NOT_ALLOWLISTED
+    if phone not in db_allowlist or not db_allowlist.issubset(env_allowlist):
+        return CODE_PHONE_NOT_ALLOWLISTED
+    return None
+
+
 def build_config_snapshot(
     *,
     tenant_id: int,
+    ai_settings: Mapping[str, Any],
     correlation_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build a sanitized config snapshot template (no secrets, no raw phones)."""
-    phones = _resolve_test_phones()
+    """Build a sanitized snapshot from actual tenant settings (no fabrication)."""
+    allowlist_hashes = [
+        hash_identifier(re.sub(r"\D", "", str(phone)))
+        for phone in (ai_settings.get("ai_test_allowed_numbers") or [])
+    ]
     return {
         key: None
         for key in required_config_snapshot_keys()
     } | {
         "tenant_id": tenant_id,
-        "store_ai_mode": "test",
-        "store_ai_enabled": True,
-        "ai_test_allowed_numbers_hash": phones.get(
-            "tenant_1_phone_hash" if tenant_id == TENANT_1_INTENSIVE else "tenant_33_phone_hash"
-        ),
-        "ai_paused": False,
-        "handoff_active": False,
-        "subscription_status": "active",
+        "store_ai_mode": str(ai_settings.get("store_ai_mode") or ""),
+        "store_ai_enabled": ai_settings.get("store_ai_enabled"),
+        "ai_test_allowed_numbers_hash": allowlist_hashes[0] if len(allowlist_hashes) == 1 else None,
+        "ai_test_allowed_numbers_hashes": allowlist_hashes,
+        "ai_paused": ai_settings.get("ai_paused"),
+        "handoff_active": ai_settings.get("handoff_active"),
+        "subscription_status": None,
         "blocklist_hash": None,
         "pinned_revision": os.environ.get(PINNED_REVISION_ENV),
         "correlation_id": correlation_id or str(uuid.uuid4()),
         "captured_at_utc": _utc_now(),
+        "source": "tenant_settings_read_only",
     }
 
 
-def execute_config_snapshot_preflight(*, tenant_id: int) -> dict[str, Any]:
+def execute_config_snapshot_preflight(
+    *,
+    tenant_id: int,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    env_map = dict(env or os.environ)
     if tenant_id not in {TENANT_1_INTENSIVE, TENANT_33_LIMITED}:
         return _report(
             PHASE_CONFIG_SNAPSHOT,
             ok=False,
             code=CODE_TENANT_NOT_ALLOWED,
             tenant_id=tenant_id,
+            db_io_performed=False,
         )
-    snapshot = build_config_snapshot(tenant_id=tenant_id)
+
+    permitted, gate_code = config_snapshot_db_io_permitted(env_map)
+    if not permitted:
+        return _report(
+            PHASE_CONFIG_SNAPSHOT,
+            ok=False,
+            code=gate_code,
+            tenant_id=tenant_id,
+            db_io_performed=False,
+            note="read_only_db_skipped_until_acceptance_gates_pass",
+        )
+
+    ai_settings, read_error = _read_tenant_ai_settings(tenant_id)
+    if read_error:
+        return _report(
+            PHASE_CONFIG_SNAPSHOT,
+            ok=False,
+            code=read_error,
+            tenant_id=tenant_id,
+            db_io_performed=True,
+        )
+
+    validation_error = _validate_tenant_ai_preflight(
+        tenant_id=tenant_id,
+        ai_settings=ai_settings or {},
+        env=env_map,
+    )
+    if validation_error:
+        return _report(
+            PHASE_CONFIG_SNAPSHOT,
+            ok=False,
+            code=validation_error,
+            tenant_id=tenant_id,
+            db_io_performed=True,
+            snapshot=build_config_snapshot(
+                tenant_id=tenant_id,
+                ai_settings=ai_settings or {},
+            ),
+        )
+
+    snapshot = build_config_snapshot(tenant_id=tenant_id, ai_settings=ai_settings or {})
     return _report(
         PHASE_CONFIG_SNAPSHOT,
         ok=True,
         tenant_id=tenant_id,
+        db_io_performed=True,
         snapshot=snapshot,
         restoration_note="Restore tenant ai_settings from snapshot file after session",
     )
@@ -406,6 +540,7 @@ def execute_channel_health_preflight(
     tenant_id: int,
     attestation_artifact: Mapping[str, Any] | None = None,
     db_row: Mapping[str, Any] | None | object = _UNSET_DB_ROW,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Read-only Meta-direct channel gate.
 
@@ -413,8 +548,13 @@ def execute_channel_health_preflight(
     ``operator_attested_channel_ready`` requires signed operator webhook
     observation attestation plus tenant-specific read-only DB binding evidence.
     This is not post-send ``actual_provider_channel`` proof.
+
+    DB reads occur only when master-enable, staging identity, and DB binding
+    all permit read-only preflight I/O.
     """
-    creds = _credential_presence()
+    env_map = dict(env or os.environ)
+    db_io_permitted, db_gate_code = read_only_preflight_db_io_permitted(env_map)
+    creds = _credential_presence(env_map)
     required_for_health = ("DATABASE_URL", "BACKEND_URL")
     missing = [name for name in required_for_health if creds.get(name) == "absent"]
     if missing:
@@ -429,10 +569,11 @@ def execute_channel_health_preflight(
             operator_attested_channel_ready=False,
             channel_evidence_class=EVIDENCE_CLASS_OPERATOR_OBSERVED_META_WEBHOOK,
             acceptance_target_path="meta_cloud_api_direct",
+            db_io_performed=False,
         )
 
     env_vars = {
-        name: os.environ.get(name, "")
+        name: env_map.get(name, "")
         for name in (
             *META_READINESS_REQUIRED_ENV_NAMES,
             *D360_LEGACY_OBSERVABILITY_ENV_NAMES,
@@ -454,16 +595,21 @@ def execute_channel_health_preflight(
             meta_onboarding_external_blocker=META_ONBOARDING_EXTERNAL_BLOCKER,
             channel_evidence_gaps=["d360_only_legacy_path"],
             note="BLOCK: 360dialog-only legacy path cannot satisfy Meta acceptance readiness",
+            db_io_performed=False,
         )
 
     attestation = _resolve_webhook_attestation_artifact(attestation_artifact)
-    attestation_key = (os.environ.get(WEBHOOK_ATTESTATION_HMAC_KEY_ENV) or "").strip()
-    pinned_revision = (os.environ.get(PINNED_REVISION_ENV) or "").strip()
-    deployment_id = (os.environ.get(DEPLOYMENT_ID_ENV) or "").strip()
-    backend_url = (os.environ.get("BACKEND_URL") or "").strip()
+    attestation_key = (env_map.get(WEBHOOK_ATTESTATION_HMAC_KEY_ENV) or "").strip()
+    pinned_revision = (env_map.get(PINNED_REVISION_ENV) or "").strip()
+    deployment_id = (env_map.get(DEPLOYMENT_ID_ENV) or "").strip()
+    backend_url = (env_map.get("BACKEND_URL") or "").strip()
 
+    db_row_explicit = db_row is not _UNSET_DB_ROW
     if db_row is _UNSET_DB_ROW:
-        db_row = _load_whatsapp_connection_row(tenant_id)
+        if db_io_permitted:
+            db_row = _load_whatsapp_connection_row(tenant_id)
+        else:
+            db_row = None
 
     evidence = evaluate_operator_attested_channel_ready(
         variables=env_vars,
@@ -476,10 +622,17 @@ def execute_channel_health_preflight(
         db_row=db_row,
     )
     if not evidence.get("operator_attested_channel_ready"):
+        failure_code = _failure_code_for_channel_evidence(evidence)
+        if (
+            not db_io_permitted
+            and not db_row_explicit
+            and failure_code == CODE_DB_WA_BINDING_MISSING
+        ):
+            failure_code = db_gate_code or CODE_DATABASE_BINDING_REJECTED
         return _report(
             PHASE_CHANNEL_HEALTH,
             ok=False,
-            code=_failure_code_for_channel_evidence(evidence),
+            code=failure_code,
             tenant_id=tenant_id,
             credential_presence=creds,
             meta_config_present=bool(evidence.get("meta_config_present")),
@@ -494,6 +647,7 @@ def execute_channel_health_preflight(
             observed_callback_route=evidence.get("observed_callback_route"),
             observation_source=evidence.get("observation_source"),
             note="BLOCK: operator-attested webhook + DB binding evidence incomplete",
+            db_io_performed=db_io_permitted,
         )
 
     return _report(
@@ -513,6 +667,7 @@ def execute_channel_health_preflight(
             name: creds.get(name) == "present" for name in D360_LEGACY_OBSERVABILITY_ENV_NAMES
         },
         execution_path_required=EXECUTION_PATH_REAL_CHANNEL_WEBHOOK,
+        db_io_performed=db_io_permitted,
     )
 
 
@@ -534,6 +689,25 @@ def _execution_gates(*, phase: str, tenant_id: int) -> dict[str, Any] | None:
         return _report(PHASE_SUMMARY, ok=False, code=CODE_TENANT_1_NOT_PASSED)
     if tenant_id not in {TENANT_1_INTENSIVE, TENANT_33_LIMITED}:
         return _report(PHASE_SUMMARY, ok=False, code=CODE_TENANT_NOT_ALLOWED)
+
+    channel = execute_channel_health_preflight(tenant_id=tenant_id)
+    gate_chain = evaluate_execution_gate_chain(
+        tenant_id=tenant_id,
+        arch001_signoff_ok=True,
+        channel_health_ok=channel.get("ok") is True,
+    )
+    if not gate_chain.get("ok"):
+        blockers = list(gate_chain.get("blockers") or [])
+        primary = CODE_APPROVED_EGRESS_CONFIGURATION_MISSING
+        if blockers:
+            primary = blockers[0]
+        return _report(
+            PHASE_SUMMARY,
+            ok=False,
+            code=primary,
+            execution_gate_blockers=blockers,
+            execution_gate_proofs=gate_chain.get("proofs"),
+        )
     return None
 
 
@@ -793,6 +967,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if arguments == ["teardown"]:
             _emit(teardown_instructions())
+            return 0
+        if arguments == ["webhook-attestation-template"]:
+            from scripts.operators.meta_acceptance_channel_evidence_contract import (
+                build_unsigned_webhook_attestation_template,
+            )
+
+            _emit(build_unsigned_webhook_attestation_template())
+            return 0
+        if arguments == ["arch001-unsigned-bundle-template"]:
+            from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (
+                build_unsigned_signoff_bundle_template,
+            )
+
+            _emit(build_unsigned_signoff_bundle_template())
             return 0
         if arguments[:2] == ["defect-bundle", "template"]:
             scenario_id = arguments[2] if len(arguments) > 2 else "unknown_scenario"

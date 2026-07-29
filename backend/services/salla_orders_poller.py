@@ -69,10 +69,22 @@ _state: Dict[str, Any] = {
 
 def get_poller_state() -> Dict[str, Any]:
     """Return a deep-ish copy of the poller's in-memory state for diag UI."""
+    try:
+        from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+            commerce_lifecycle_dispatch_enabled,
+        )
+
+        dispatch_enabled = commerce_lifecycle_dispatch_enabled()
+    except Exception:
+        dispatch_enabled = False
+
     return {
         **_state,
         "tenants": {tid: dict(stats) for tid, stats in _state["tenants"].items()},
-        "config":  dict(_state["config"]),
+        "config": {
+            **dict(_state["config"]),
+            "commerce_lifecycle_dispatch_enabled": dispatch_enabled,
+        },
     }
 
 

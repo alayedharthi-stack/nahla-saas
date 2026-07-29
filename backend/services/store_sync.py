@@ -816,6 +816,53 @@ def _record_external_lifecycle_shadow_best_effort(
         )
 
 
+async def _handle_external_lifecycle_transition_best_effort(
+    sync: "StoreSyncService",
+    *,
+    order: Any,
+    provider: str,
+    raw_previous_status: Optional[str],
+    raw_current_status: str,
+    normalized_order: Dict[str, Any],
+    raw_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Dispatch lifecycle templates when enabled; otherwise shadow-only audit."""
+    try:
+        from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+            commerce_lifecycle_dispatch_enabled,
+            dispatch_external_lifecycle_notification,
+        )
+
+        if commerce_lifecycle_dispatch_enabled():
+            await dispatch_external_lifecycle_notification(
+                sync.db,
+                tenant_id=sync.tenant_id,
+                order=order,
+                provider=provider,
+                raw_previous_status=raw_previous_status,
+                raw_current_status=raw_current_status,
+                normalized_order=normalized_order,
+                raw_payload=raw_payload,
+            )
+            return
+    except Exception:
+        logger.exception(
+            "[StoreSync] external lifecycle dispatch failed tenant=%s order=%s",
+            sync.tenant_id,
+            getattr(order, "id", None),
+        )
+
+    _record_external_lifecycle_shadow_best_effort(
+        sync,
+        order=order,
+        provider=provider,
+        raw_previous_status=raw_previous_status,
+        raw_current_status=raw_current_status,
+        normalized_order=normalized_order,
+        raw_payload=raw_payload,
+    )
+
+
 def _merge_order_extra_metadata(
     existing: Optional[Dict[str, Any]],
     normalised: Dict[str, Any],
@@ -1727,7 +1774,7 @@ class StoreSyncService:
                 )
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(existing, previous_status=prev_status)
-                _record_external_lifecycle_shadow_best_effort(
+                await _handle_external_lifecycle_transition_best_effort(
                     self,
                     order=existing,
                     provider=adapter_source,
@@ -1851,7 +1898,7 @@ class StoreSyncService:
                             self.tenant_id, ext_id, _ae,
                         )
 
-                _record_external_lifecycle_shadow_best_effort(
+                await _handle_external_lifecycle_transition_best_effort(
                     self,
                     order=new_row,
                     provider=adapter_source,
@@ -3318,7 +3365,7 @@ class StoreSyncService:
             except Exception:
                 self.db.rollback()
 
-            _record_external_lifecycle_shadow_best_effort(
+            await _handle_external_lifecycle_transition_best_effort(
                 self,
                 order=order_row,
                 provider=webhook_source,

@@ -354,3 +354,54 @@ def test_commerce_runtime_discards_success_when_wrapper_swallows_denial() -> Non
     assert result.payload == {}
     assert result.audit["egress_kind"] == "salla_integration"
     assert "checkout_url" not in result.audit
+
+
+def test_shipping_create_denied_before_db_add() -> None:
+    from core.order_shipment_service import create_order_shipment
+
+    db = MagicMock()
+    order = MagicMock()
+    order.id = 101
+
+    with internal_conversational_e2e_context(
+        session_id=SESSION_ID,
+        tenant_id=TENANT_ID,
+    ), pytest.raises(InternalE2EEgressDenied) as caught:
+        create_order_shipment(
+            db,
+            tenant_id=TENANT_ID,
+            order=order,
+            verified_by="unit-test",
+        )
+
+    assert caught.value.egress_kind == "shipping"
+    assert caught.value.operation == "create_order_shipment"
+    db.add.assert_not_called()
+
+
+def test_shipping_label_denied_before_status_mutation() -> None:
+    from core.order_shipment_service import generate_shipment_label
+
+    db = MagicMock()
+    order = MagicMock()
+    order.id = 101
+    shipment = MagicMock()
+    shipment.id = 55
+    shipment.status = "created"
+
+    with internal_conversational_e2e_context(
+        session_id=SESSION_ID,
+        tenant_id=TENANT_ID,
+    ), pytest.raises(InternalE2EEgressDenied) as caught:
+        generate_shipment_label(
+            db,
+            tenant_id=TENANT_ID,
+            order=order,
+            shipment=shipment,
+            verified_by="unit-test",
+        )
+
+    assert caught.value.egress_kind == "shipping"
+    assert caught.value.operation == "generate_shipment_label"
+    db.flush.assert_not_called()
+    assert shipment.status == "created"

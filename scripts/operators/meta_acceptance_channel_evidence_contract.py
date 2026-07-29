@@ -520,6 +520,52 @@ def build_webhook_attestation_artifact(
     return payload
 
 
+def build_unsigned_webhook_attestation_template() -> dict[str, Any]:
+    """Human-signable operator webhook attestation skeleton (unsigned).
+
+    Contains no fabricated signature or approval defaults. Operators must
+    supply observation evidence and sign with ``sign_webhook_attestation_artifact``.
+    """
+    rollback_components = {
+        component: {"fingerprint": ""}
+        for component in ACCEPTANCE_CUTOVER_SNAPSHOT_COMPONENTS
+    }
+    return {
+        "template_schema_version": "meta_acceptance_operator_webhook_observation_unsigned_v1",
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "provider": ACCEPTANCE_TARGET_PROVIDER_PATH,
+        "tenant_id": None,
+        "backend_url_fingerprint": "",
+        "pinned_revision": "",
+        "deployment_id": "",
+        "observation_source": "",
+        "observer_id": "",
+        "observed_at_utc": "",
+        "observation_evidence_digest": "",
+        "observation_evidence_ref": "",
+        "observed_callback_route": META_DIRECT_WEBHOOK_ROUTE,
+        "waba_id_fingerprint": "",
+        "phone_number_id_fingerprint": "",
+        "issued_at_utc": "",
+        "expires_at_utc": "",
+        "rollback_snapshot_evidence": {
+            "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "snapshot_fingerprint": "",
+            "captured_at_utc": "",
+            "label": ACCEPTANCE_CUTOVER_LABEL,
+            "scope": ACCEPTANCE_CUTOVER_SCOPE,
+            "components": rollback_components,
+        },
+        "signature": None,
+        "human_signoff_required": True,
+        "note": (
+            "Populate all fields from operator observation; set "
+            "forbidden_unlocks_respected and rollback_required to true only "
+            "after human verification; sign before use"
+        ),
+    }
+
+
 __all__ = [
     "ALLOWED_OBSERVATION_SOURCES",
     "ARTIFACT_MAX_AGE_SECONDS",
@@ -548,6 +594,7 @@ __all__ = [
     "WEBHOOK_ATTESTATION_ARTIFACT_ENV",
     "WEBHOOK_ATTESTATION_HMAC_KEY_ENV",
     "build_rollback_snapshot_evidence",
+    "build_unsigned_webhook_attestation_template",
     "build_webhook_attestation_artifact",
     "evaluate_meta_config_present",
     "evaluate_operator_attested_channel_ready",

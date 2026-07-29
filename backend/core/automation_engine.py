@@ -3281,6 +3281,270 @@ def _render_named_slots(template: str, values: Dict[str, str]) -> str:
     return out
 
 
+async def send_lifecycle_whatsapp_template(
+    db: Session,
+    tenant_id: int,
+    to_phone: str,
+    template: Any,
+    payload: Dict[str, Any],
+    *,
+    customer_name: Optional[str] = None,
+    service_key: Optional[str] = None,
+    blocked_path: str = "lifecycle_dispatch",
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Send a resolved approved WhatsApp template for lifecycle dispatch.
+
+    Returns ``(outcome, info)`` where outcome is one of ``sent``,
+    ``failed``, or ``ambiguous``. Does not raise on provider failures.
+    """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="lifecycle_template_send",
+        tenant_id=tenant_id,
+    )
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    from core.billing import has_billing_access as _has_access  # noqa: PLC0415
+
+    if not _has_access(db, tenant_id):
+        return "failed", {
+            "error_code": "billing_access_denied",
+            "template": getattr(template, "name", None),
+        }
+
+    normalized_phone = normalize_phone(to_phone)
+    if not normalized_phone:
+        return "failed", {
+            "error_code": "invalid_phone_number",
+            "template": getattr(template, "name", None),
+        }
+
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(
+            WhatsAppConnection.tenant_id == tenant_id,
+            WhatsAppConnection.status == "connected",
+        )
+        .first()
+    )
+    if not wa_conn:
+        return "failed", {
+            "error_code": "no_whatsapp_connection",
+            "template": getattr(template, "name", None),
+        }
+
+    customer_stub = type(
+        "LifecycleCustomer",
+        (),
+        {"name": customer_name or "", "phone": normalized_phone},
+    )()
+    event_stub = type("LifecycleEvent", (), {"payload": dict(payload or {})})()
+    config_stub: Dict[str, Any] = {}
+    store_name = _resolve_store_name(db, tenant_id)
+
+    vars_map = _build_template_vars(
+        event_stub,
+        customer_stub,
+        config_stub,
+        template_name=template.name,
+        store_name=store_name,
+    )
+
+    import re as _re
+
+    _PLACEHOLDER_RE = _re.compile(r"\{\{[^{}]+\}\}")
+
+    def _ph_count(text: Any) -> int:
+        return len(_PLACEHOLDER_RE.findall(str(text or "")))
+
+    _body_ph_count = 0
+    _header_ph_count = 0
+    _header_format = ""
+    _button_ph_count = 0
+    for _tcomp in (template.components or []):
+        _ttype = str(_tcomp.get("type", "")).upper()
+        if _ttype == "BODY":
+            _body_ph_count = _ph_count(_tcomp.get("text"))
+        elif _ttype == "HEADER":
+            _header_format = str(_tcomp.get("format", "")).upper()
+            if _header_format == "TEXT":
+                _header_ph_count = _ph_count(_tcomp.get("text"))
+        elif _ttype == "BUTTONS":
+            for _btn in (_tcomp.get("buttons") or []):
+                _btype = str(_btn.get("type", "")).upper()
+                if _btype == "COPY_CODE":
+                    _button_ph_count += 1
+                elif _btype == "URL" and "{{" in str(_btn.get("url", "") or ""):
+                    _button_ph_count += 1
+
+    _payload_rich = dict(payload or {})
+    _rich_fallback_values = [
+        (customer_name or "").strip() or "عميلنا الغالي",
+        str(
+            _payload_rich.get("order_number")
+            or _payload_rich.get("external_order_number")
+            or _payload_rich.get("order_id")
+            or ""
+        ),
+        str(store_name or _payload_rich.get("store_name") or "متجرنا"),
+        str(_payload_rich.get("total") or _payload_rich.get("amount") or ""),
+        str(
+            _payload_rich.get("tracking_url")
+            or _payload_rich.get("payment_url")
+            or _payload_rich.get("checkout_url")
+            or ""
+        ),
+        str(_payload_rich.get("coupon_code") or ""),
+    ]
+
+    _var_values = list(vars_map.values())
+    if _body_ph_count and len(_var_values) > _body_ph_count:
+        _var_values = _var_values[:_body_ph_count]
+    elif _body_ph_count and len(_var_values) < _body_ph_count:
+        _gap_start = len(_var_values)
+        _padding = []
+        for _fi in range(_gap_start, _gap_start + (_body_ph_count - len(_var_values))):
+            _fv = _rich_fallback_values[_fi] if _fi < len(_rich_fallback_values) else " "
+            _padding.append(_fv if str(_fv).strip() else " ")
+        _var_values = list(_var_values) + _padding
+
+    body_params = [
+        {"type": "text", "text": (str(v) if str(v).strip() else " ")}
+        for v in _var_values
+    ]
+    components: List[Dict[str, Any]] = []
+
+    if _header_ph_count > 0 and _header_format == "TEXT":
+        _hdr_values = list(vars_map.values())[:_header_ph_count]
+        if len(_hdr_values) < _header_ph_count:
+            _hdr_values = list(_hdr_values) + [" "] * (_header_ph_count - len(_hdr_values))
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "text", "text": (str(v) if str(v).strip() else " ")}
+                for v in _hdr_values
+            ],
+        })
+
+    if body_params:
+        components.append({"type": "body", "parameters": body_params})
+
+    _URL_SLOT_PRECEDENCE = (
+        "checkout_url", "cart_url", "tracking_url", "payment_url",
+        "product_url", "reorder_url", "store_url",
+    )
+    _customer_name_for_btn = display_name_passthrough_or_fallback(customer_name)
+    _store_name_for_btn = store_name
+    _payload_for_btn: Dict[str, Any] = dict(payload or {})
+    _coupon_code_for_btn = str(_payload_for_btn.get("coupon_code") or "")
+
+    for comp in (template.components or []):
+        if str(comp.get("type", "")).upper() != "BUTTONS":
+            continue
+        for btn_idx, btn in enumerate(comp.get("buttons", [])):
+            btn_type = str(btn.get("type", "")).upper()
+            if btn_type == "COPY_CODE":
+                components.append({
+                    "type": "button",
+                    "sub_type": "copy_code",
+                    "index": str(btn_idx),
+                    "parameters": [
+                        {
+                            "type": "coupon_code",
+                            "coupon_code": _coupon_code_for_btn or " ",
+                        }
+                    ],
+                })
+            elif btn_type == "URL" and "{{" in str(btn.get("url", "") or ""):
+                _full_url = ""
+                for slot in _URL_SLOT_PRECEDENCE:
+                    _full_url = str(_payload_for_btn.get(slot) or "").strip()
+                    if _full_url:
+                        break
+                _suffix = _extract_button_url_suffix(str(btn.get("url") or ""), _full_url)
+                components.append({
+                    "type": "button",
+                    "sub_type": "url",
+                    "index": str(btn_idx),
+                    "parameters": [{"type": "text", "text": _suffix or " "}],
+                })
+
+    send_payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "to": normalized_phone,
+        "type": "template",
+        "template": {
+            "name": template.name,
+            "language": {"code": template.language or "ar"},
+            "components": components,
+        },
+    }
+
+    try:
+        from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+        from services.cart_recovery_failures import (  # noqa: PLC0415
+            classify_meta_response,
+            classify_send_exception,
+        )
+
+        response, _ctx = await provider_send_message(
+            db,
+            wa_conn,
+            tenant_id=tenant_id,
+            operation="lifecycle_template_send",
+            phone_id=wa_conn.phone_number_id,
+            payload=send_payload,
+            blocked_path=blocked_path,
+            automation_guard=False,
+        )
+
+        failure = classify_meta_response(response)
+        if failure is not None:
+            code, _label_ar, _raw_meta = failure
+            return "failed", {
+                "error_code": code,
+                "template": template.name,
+                "service_key": service_key,
+                "meta_error": _raw_meta,
+            }
+
+        wamid = (response or {}).get("messages", [{}])[0].get("id")
+        if not wamid:
+            return "ambiguous", {
+                "error_code": "provider_empty_response",
+                "template": template.name,
+                "service_key": service_key,
+            }
+
+        return "sent", {
+            "template": template.name,
+            "service_key": service_key,
+            "wa_message_id": wamid,
+            "to": normalized_phone,
+        }
+    except Exception as exc:
+        from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
+
+        code, _label_ar, raw = classify_send_exception(exc)
+        if code == "provider_timeout":
+            return "ambiguous", {
+                "error_code": code,
+                "template": template.name,
+                "service_key": service_key,
+                "raw": raw,
+            }
+        return "failed", {
+            "error_code": code,
+            "template": template.name,
+            "service_key": service_key,
+            "raw": raw,
+        }
+
+
 # ── Scheduler loop (called from core/scheduler.py) ───────────────────────────
 
 async def run_automation_engine_scheduler() -> None:

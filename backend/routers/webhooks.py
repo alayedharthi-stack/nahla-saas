@@ -1067,6 +1067,12 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
             )
             .first()
         )
+        _ps_prev_status = (
+            str(getattr(ps, "status", "") or "").strip().lower()
+            if ps is not None
+            else ""
+        )
+        _ps_was_paid = _ps_prev_status in ("paid", "authorized")
         if ps:
             ps.status        = "paid" if payment_status in ("paid", "authorized") else "failed"
             ps.callback_data = data
@@ -1079,37 +1085,55 @@ async def moyasar_webhook(request: Request, db: Session = Depends(get_db)):
                     Order.id == oid, Order.tenant_id == tenant_id,
                 ).first()
                 if order:
+                    _PAID_ORDER_STATUSES = frozenset({
+                        "paid",
+                        "payment_received",
+                        "completed",
+                        "authorized",
+                    })
+                    _prev_order_status = str(order.status or "").strip().lower()
+                    _was_already_paid = _prev_order_status in _PAID_ORDER_STATUSES
                     if payment_status in ("paid", "authorized"):
                         order.status = "paid"
                         logger.info(
                             "[Moyasar Webhook] Order #%s marked paid for tenant=%s", oid, tenant_id,
                         )
-                        # Emit automation event for order payment
-                        try:
-                            from core.automation_engine import emit_automation_event  # noqa: PLC0415
-                            from models import Customer  # noqa: PLC0415
-                            _ci = order.customer_info or {}
-                            _raw_phone = _ci.get("mobile") or _ci.get("phone")
-                            _cust = None
-                            if _raw_phone:
-                                from services.customer_intelligence import normalize_phone as _np  # noqa: PLC0415
-                                _phone = _np(_raw_phone) or _raw_phone
-                                _cust = db.query(Customer).filter(
-                                    Customer.tenant_id == tenant_id,
-                                    Customer.phone == _phone,
-                                ).first()
-                            emit_automation_event(
-                                db, tenant_id, "order_paid",
-                                customer_id=_cust.id if _cust else None,
-                                payload={
-                                    "order_id": oid,
-                                    "payment_id": payment_id,
-                                    "amount": data.get("amount"),
-                                    "gateway": "moyasar",
-                                },
+                        # Emit automation event for order payment — once per paid transition.
+                        if not _was_already_paid and not _ps_was_paid:
+                            try:
+                                from core.automation_engine import emit_automation_event  # noqa: PLC0415
+                                from models import Customer  # noqa: PLC0415
+                                _ci = order.customer_info or {}
+                                _raw_phone = _ci.get("mobile") or _ci.get("phone")
+                                _cust = None
+                                if _raw_phone:
+                                    from services.customer_intelligence import normalize_phone as _np  # noqa: PLC0415
+                                    _phone = _np(_raw_phone) or _raw_phone
+                                    _cust = db.query(Customer).filter(
+                                        Customer.tenant_id == tenant_id,
+                                        Customer.phone == _phone,
+                                    ).first()
+                                emit_automation_event(
+                                    db, tenant_id, "order_paid",
+                                    customer_id=_cust.id if _cust else None,
+                                    payload={
+                                        "order_id": oid,
+                                        "payment_id": payment_id,
+                                        "amount": data.get("amount"),
+                                        "gateway": "moyasar",
+                                    },
+                                )
+                            except Exception as _ae:
+                                logger.debug("[Webhook] emit order_paid failed: %s", _ae)
+                        else:
+                            logger.info(
+                                "[Moyasar Webhook] replay skipped order_paid tenant=%s order=%s "
+                                "prev_status=%s ps_paid=%s",
+                                tenant_id,
+                                oid,
+                                _prev_order_status or "unknown",
+                                _ps_was_paid,
                             )
-                        except Exception as _ae:
-                            logger.debug("[Webhook] emit order_paid failed: %s", _ae)
 
                         # Attribute the order back to its decision (if any).
                         # Failures here MUST NOT block the webhook ack.

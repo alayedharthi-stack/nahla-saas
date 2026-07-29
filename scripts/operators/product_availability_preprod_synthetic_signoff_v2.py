@@ -357,6 +357,61 @@ def build_unsigned_bundle(
     }
 
 
+def build_unsigned_signoff_bundle_template() -> dict[str, Any]:
+    """Human-signable ARCH-001 preprod bundle skeleton (unsigned).
+
+    Contains no signature and no approval defaults. Operators must ingest real
+    phase artifacts and call ``sign_bundle`` before gate use.
+    """
+    identity_binding = {
+        "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
+        "service_name": "",
+        "service_id": "",
+        "deployment_id": "",
+        "image_digest": "",
+        "pinned_revision": "",
+        "manifest_digest": "",
+    }
+    teardown_proof = {
+        "teardown_proof_schema_version": TEARDOWN_PROOF_SCHEMA_VERSION,
+        "isolated_service": {
+            "guard_mode": "off",
+            "service_state": "",
+            "verified_at_utc": "",
+            "service_role": SERVICE_ROLE_ISOLATED_PREPROD_SHADOW,
+            "service_name": "",
+            "service_id": "",
+            "deployment_id": "",
+        },
+        "canonical_control": {
+            "guard_mode": "off",
+            "service_role": SERVICE_ROLE_CANONICAL_CONTROL,
+            "service_name": "",
+            "service_id": "",
+            "deployment_id": "",
+            "verified_at_utc": "",
+        },
+    }
+    return build_unsigned_bundle(
+        identity_binding=identity_binding,
+        lifecycle_phases=[],
+        negative_controls={"ok": False, "controls": []},
+        teardown_proof=teardown_proof,
+        superseded_invalid_windows=[],
+        evidence_class=EVIDENCE_CLASS_PRODUCTION_SIGNOFF,
+        eligible_for_signoff=False,
+    ) | {
+        "template_schema_version": "arch001_preprod_signoff_unsigned_v1",
+        "signature": None,
+        "signed_at_utc": None,
+        "human_signoff_required": True,
+        "note": (
+            "Populate lifecycle phases and controls from observed runs; set "
+            "signed_at_utc only when signing; sign before gate use"
+        ),
+    }
+
+
 def sign_bundle(bundle: Mapping[str, Any], *, hmac_key: str, allow_fixture_keys: bool = False) -> dict[str, Any]:
     if not is_strong_hmac_key(hmac_key, allow_fixture_keys=allow_fixture_keys):
         raise ValueError(CODE_HMAC_KEY_WEAK)
@@ -1184,6 +1239,9 @@ def main(argv: list[str] | None = None) -> int:
             result = verify_arch001_preprod_signoff_for_gate()
             _emit(result)
             return 0 if result.get("ok") else 1
+        if arguments == ["emit-unsigned-template"]:
+            _emit(build_unsigned_signoff_bundle_template())
+            return 0
         raise ValueError(CODE_COMMAND_INVALID)
     except ValueError:
         _emit(_report(PHASE_BUNDLE, ok=False, code=CODE_COMMAND_INVALID))

@@ -41,6 +41,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     ARCH001_PREPROD_SIGNOFF_HMAC_KEY_ENV,
     ARCH001_SHADOW_SIGNOFF_ENV,
     CODE_ACCEPTANCE_NOT_ENABLED,
+    CODE_APPROVED_EGRESS_CONFIGURATION_MISSING,
     CODE_ARCH001_SIGNOFF_MISSING,
     CODE_CHANNEL_HEALTH_BLOCKED,
     CODE_CONFIG_DRIFT,
@@ -102,6 +103,7 @@ from scripts.operators.real_channel_conversational_acceptance_contract import (
     TENANT_48_PHONE_ENV,
     TENANT_48_SALLA_MINIMAL,
     env_flag_enabled,
+    evaluate_execution_gate_chain,
     hmac_identifier,
     load_scenario_manifest,
     parse_allowlist_phones,
@@ -260,6 +262,13 @@ def _required_start_gates(tenant_id: int, app_root: Path | None) -> list[str]:
     channel = execute_channel_health_preflight(tenant_id=tenant_id)
     if not channel.get("ok"):
         blockers.append(str(channel.get("code") or CODE_CHANNEL_HEALTH_BLOCKED))
+    gate_chain = evaluate_execution_gate_chain(
+        tenant_id=tenant_id,
+        arch001_signoff_ok=signoff.get("ok") is True,
+        channel_health_ok=bool(channel.get("ok")),
+    )
+    if not gate_chain.get("ok"):
+        blockers.extend(list(gate_chain.get("blockers") or []))
     if not (os.environ.get(DEPLOYMENT_ID_ENV) or "").strip():
         blockers.append("deployment_id_missing")
     if not (os.environ.get(EVIDENCE_HMAC_KEY_ENV) or "").strip():
