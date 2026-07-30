@@ -171,6 +171,16 @@ class FinalizeSendResult:
     send_error_code: Optional[str]
 
 
+@dataclass(frozen=True)
+class MarkSendSendingResult:
+    ledger_id: int
+    outcome: str
+    send_state: str
+    provider_message_id: Optional[str]
+    send_error_code: Optional[str]
+    transitioned: bool
+
+
 def _normalize_required_text(value: str, *, field: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -634,6 +644,62 @@ def try_conditional_retry_failed_send_row(
     return bool(updated)
 
 
+def try_conditional_promote_shadow_send_row(
+    db: Session,
+    *,
+    tenant_id: int,
+    ledger_id: int,
+    dispatch_decision: Optional[Mapping[str, Any]] = None,
+    capabilities_snapshot: Optional[Mapping[str, Any]] = None,
+    evidence_present: Optional[Sequence[str]] = None,
+    service_key_audit: Optional[str] = None,
+    template_name_audit: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> bool:
+    """
+    Atomically promote a shadow-only ledger row to ``send_reserved``.
+
+    Returns True when this worker won the conditional transition.
+    """
+    from models import CommerceLifecycleNotificationLedger  # noqa: PLC0415
+
+    current = now or _utcnow()
+    table = CommerceLifecycleNotificationLedger
+    values: dict[Any, Any] = {
+        table.outcome: SendLedgerOutcome.SEND_RESERVED.value,
+        table.send_state: _SEND_STATE_RESERVED,
+        table.send_reserved_at: current,
+        table.send_attempt_count: 0,
+        table.reclaim_count: 0,
+    }
+    if dispatch_decision is not None:
+        values[table.dispatch_decision_json] = sanitize_dispatch_decision(dispatch_decision)
+    if capabilities_snapshot is not None:
+        values[table.capabilities_snapshot_json] = sanitize_capabilities_snapshot(
+            capabilities_snapshot
+        )
+    if evidence_present is not None:
+        values[table.evidence_present_json] = list(sanitize_evidence_present(evidence_present))
+    if service_key_audit is not None:
+        values[table.template_service_key] = service_key_audit
+    if template_name_audit is not None:
+        values[table.template_name] = template_name_audit
+
+    updated = (
+        db.query(table)
+        .filter(
+            table.id == int(ledger_id),
+            table.tenant_id == int(tenant_id),
+            table.send_state.is_(None),
+            table.outcome.like(f"{_SHADOW_OUTCOME_PREFIX}%"),
+        )
+        .update(values, synchronize_session=False)
+    )
+    if updated:
+        db.flush()
+    return bool(updated)
+
+
 def try_conditional_reevaluate_blocked_send_row(
     db: Session,
     *,
@@ -779,30 +845,31 @@ def _resolve_existing_send_reservation(
         )
 
     if _is_shadow_only_row(existing):
-        existing.outcome = SendLedgerOutcome.SEND_RESERVED.value
-        existing.send_state = _SEND_STATE_RESERVED
-        existing.send_reserved_at = _utcnow()
-        existing.send_attempt_count = 0
-        existing.reclaim_count = 0
-        if dispatch_decision is not None:
-            existing.dispatch_decision_json = sanitize_dispatch_decision(dispatch_decision)
-        if capabilities_snapshot is not None:
-            existing.capabilities_snapshot_json = sanitize_capabilities_snapshot(
-                capabilities_snapshot
+        if try_conditional_promote_shadow_send_row(
+            db,
+            tenant_id=tenant_id,
+            ledger_id=int(existing.id),
+            dispatch_decision=dispatch_decision,
+            capabilities_snapshot=capabilities_snapshot,
+            evidence_present=evidence_present,
+            service_key_audit=service_key_audit,
+            template_name_audit=template_name_audit,
+        ):
+            db.refresh(existing)
+            if commit:
+                db.commit()
+            return ReserveSendResult(
+                ledger_id=int(existing.id),
+                idempotency_key=idempotency_key,
+                duplicate=False,
+                outcome=existing.outcome,
+                send_state=existing.send_state,
             )
-        if evidence_present is not None:
-            existing.evidence_present_json = list(sanitize_evidence_present(evidence_present))
-        if service_key_audit is not None:
-            existing.template_service_key = service_key_audit
-        if template_name_audit is not None:
-            existing.template_name = template_name_audit
-        db.flush()
-        if commit:
-            db.commit()
+        db.refresh(existing)
         return ReserveSendResult(
             ledger_id=int(existing.id),
             idempotency_key=idempotency_key,
-            duplicate=False,
+            duplicate=True,
             outcome=existing.outcome,
             send_state=existing.send_state,
         )
@@ -927,6 +994,7 @@ def reserve_send_decision(
             db.add(row)
             db.flush()
     except IntegrityError:
+        db.expire_all()
         existing = (
             db.query(CommerceLifecycleNotificationLedger)
             .filter_by(tenant_id=tid, idempotency_key=idempotency_key)
@@ -964,45 +1032,62 @@ def mark_send_sending(
     template_name: Optional[str] = None,
     template_service_key: Optional[str] = None,
     commit: bool = False,
-) -> FinalizeSendResult:
-    """Transition a reserved row to sending before the provider call."""
+) -> MarkSendSendingResult:
+    """Atomically transition a reserved row to sending before the provider call."""
     from models import CommerceLifecycleNotificationLedger  # noqa: PLC0415
 
     tid = int(tenant_id)
     if tid <= 0:
         raise ValueError("tenant_id must be positive")
 
+    current = _utcnow()
+    table = CommerceLifecycleNotificationLedger
+    values: dict[Any, Any] = {
+        table.outcome: SendLedgerOutcome.SEND_SENDING.value,
+        table.send_state: _SEND_STATE_SENDING,
+        table.send_attempted_at: current,
+        table.send_attempt_count: table.send_attempt_count + 1,
+    }
+    if template_name is not None:
+        values[table.template_name] = _normalize_required_text(
+            template_name,
+            field="template_name",
+        )
+    if template_service_key is not None:
+        values[table.template_service_key] = _normalize_required_text(
+            template_service_key,
+            field="template_service_key",
+        )
+
+    updated = (
+        db.query(table)
+        .filter(
+            table.id == int(ledger_id),
+            table.tenant_id == tid,
+            table.send_state == _SEND_STATE_RESERVED,
+        )
+        .update(values, synchronize_session=False)
+    )
+    if updated:
+        db.flush()
+        if commit:
+            db.commit()
+
     row = (
         db.query(CommerceLifecycleNotificationLedger)
         .filter_by(id=int(ledger_id), tenant_id=tid)
         .one()
     )
-    if row.send_state not in {_SEND_STATE_RESERVED, _SEND_STATE_SENDING}:
-        raise ValueError(
-            f"ledger {ledger_id} cannot enter sending from send_state={row.send_state!r}"
-        )
-
-    row.outcome = SendLedgerOutcome.SEND_SENDING.value
-    row.send_state = _SEND_STATE_SENDING
-    row.send_attempted_at = _utcnow()
-    row.send_attempt_count = int(getattr(row, "send_attempt_count", 0) or 0) + 1
-    if template_name is not None:
-        row.template_name = _normalize_required_text(template_name, field="template_name")
-    if template_service_key is not None:
-        row.template_service_key = _normalize_required_text(
-            template_service_key,
-            field="template_service_key",
-        )
-    db.flush()
-    if commit:
+    if not updated and commit:
         db.commit()
 
-    return FinalizeSendResult(
+    return MarkSendSendingResult(
         ledger_id=int(row.id),
         outcome=row.outcome,
         send_state=row.send_state,
         provider_message_id=row.provider_message_id,
         send_error_code=row.send_error_code,
+        transitioned=bool(updated),
     )
 
 
@@ -1127,6 +1212,7 @@ def finalize_send_dispatch_error(
 
 __all__ = [
     "FinalizeSendResult",
+    "MarkSendSendingResult",
     "MarkShadowOutcomeResult",
     "ReserveSendResult",
     "ReserveShadowResult",
@@ -1144,6 +1230,7 @@ __all__ = [
     "sanitize_capabilities_snapshot",
     "sanitize_dispatch_decision",
     "sanitize_evidence_present",
+    "try_conditional_promote_shadow_send_row",
     "try_conditional_reclaim_send_row",
     "try_conditional_reevaluate_blocked_send_row",
     "try_conditional_retry_failed_send_row",

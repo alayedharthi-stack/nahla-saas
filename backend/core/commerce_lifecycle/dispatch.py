@@ -24,6 +24,8 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 
 
+from sqlalchemy import inspect as sa_inspect
+
 from sqlalchemy.exc import SQLAlchemyError
 
 from sqlalchemy.orm import Session
@@ -85,6 +87,37 @@ logger = logging.getLogger("nahla.commerce_lifecycle.dispatch")
 
 
 _DISPATCH_CHANNEL = "whatsapp"
+
+_SEND_AUDIT_0094_COLUMNS: frozenset[str] = frozenset({
+    "send_state",
+    "send_reserved_at",
+    "send_attempt_count",
+    "reclaim_count",
+    "send_attempted_at",
+    "send_completed_at",
+    "send_error_code",
+    "provider_message_id",
+    "template_name",
+    "template_service_key",
+    "last_reclaimed_at",
+})
+
+
+def commerce_lifecycle_send_audit_schema_ready(db: Session) -> bool:
+    """True when migration 0094 send-audit columns are present on the ledger table."""
+    try:
+        bind = db.get_bind()
+        insp = sa_inspect(bind)
+        table_names = set(insp.get_table_names())
+        if "commerce_lifecycle_notification_ledger" not in table_names:
+            return False
+        columns = {
+            col["name"]
+            for col in insp.get_columns("commerce_lifecycle_notification_ledger")
+        }
+        return _SEND_AUDIT_0094_COLUMNS.issubset(columns)
+    except Exception:
+        return False
 
 
 
@@ -402,7 +435,7 @@ async def _execute_reserved_send(
 
 
 
-    mark_send_sending(
+    sending = mark_send_sending(
 
         db,
 
@@ -417,6 +450,40 @@ async def _execute_reserved_send(
         commit=True,
 
     )
+
+    if not sending.transitioned:
+
+        logger.info(
+
+            "[LifecycleDispatch] send_cas_loser tenant=%s order=%s intent=%s ledger=%s state=%s",
+
+            tenant_id,
+
+            order_id,
+
+            intent.value,
+
+            reserve.ledger_id,
+
+            sending.send_state,
+
+        )
+
+        return LifecycleDispatchResult(
+
+            ledger_id=reserve.ledger_id,
+
+            dispatched=False,
+
+            duplicate=True,
+
+            recovered=reserve.recovered,
+
+            outcome=sending.outcome,
+
+            reason_code="duplicate",
+
+        )
 
 
 
@@ -864,6 +931,36 @@ async def dispatch_external_lifecycle_notification(
 
 
 
+        if not commerce_lifecycle_send_audit_schema_ready(db):
+
+            logger.warning(
+
+                "[LifecycleDispatch] migration_0094_required tenant=%s order=%s intent=%s",
+
+                tenant_id,
+
+                order_id,
+
+                intent.value,
+
+            )
+
+            return LifecycleDispatchResult(
+
+                ledger_id=None,
+
+                dispatched=False,
+
+                duplicate=False,
+
+                outcome="skipped",
+
+                reason_code="migration_0094_required",
+
+            )
+
+
+
         reserve = reserve_send_decision(
 
             db,
@@ -1081,6 +1178,8 @@ __all__ = [
     "LifecycleDispatchResult",
 
     "commerce_lifecycle_dispatch_enabled",
+
+    "commerce_lifecycle_send_audit_schema_ready",
 
     "dispatch_external_lifecycle_notification",
 
