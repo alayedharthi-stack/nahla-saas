@@ -19,6 +19,7 @@ _CUSTOMER_CONDITIONAL_COUPON_SHADOW = "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONA
 _CUSTOMER_CONDITIONAL_COUPON_COMPOSE = (
     "NAHLA_TRUSTED_CONTEXT_CUSTOMER_CONDITIONAL_COUPON_COMPOSE_ENABLED"
 )
+_TRUSTED_CONTEXT_BRAIN_PROJECTION = "NAHLA_TRUSTED_CONTEXT_BRAIN_PROJECTION_ENABLED"
 
 
 def _is_enabled(flag: str) -> bool:
@@ -82,6 +83,12 @@ def is_customer_conditional_coupon_compose_enabled() -> bool:
     return _is_enabled(_CUSTOMER_CONDITIONAL_COUPON_COMPOSE)
 
 
+def is_trusted_context_brain_projection_enabled() -> bool:
+    """Trusted-context Brain/Compose projection — on by default with shadow."""
+    raw = os.getenv(_TRUSTED_CONTEXT_BRAIN_PROJECTION, "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def is_customer_conditional_coupon_layer0_enabled() -> bool:
     """
     Coarse env gate — shadow master OR compose master.
@@ -103,6 +110,7 @@ __all__ = [
     "is_general_offer_discovery_compose_enabled",
     "is_layer2_shadow_enabled",
     "is_product_sale_offer_compose_enabled",
+    "is_trusted_context_brain_projection_enabled",
     "is_trusted_context_coupon_offer_compose_enabled",
     "is_trusted_context_shadow_enabled",
     "is_truth_surface_shadow_enabled",

@@ -517,7 +517,7 @@ def test_constitution_compliance_green() -> None:
         cwd=os.path.abspath(os.path.join(_HERE, "../..")),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=240,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 

@@ -1484,6 +1484,24 @@ class MerchantBrain:
                 tenant_id,
                 _fresh_soc_exc,
             )
+        try:
+            from modules.ai.brain.truth_surface.trusted_context_brain_consumption_gate import (  # noqa: PLC0415
+                attach_trusted_context_brain_projection,
+                safe_trusted_context_brain_projection_trace_metadata,
+            )
+
+            _tc_brain_projection = attach_trusted_context_brain_projection(ctx)
+            if _tc_brain_projection is not None:
+                logger.info(
+                    "[TRUSTED_CONTEXT_BRAIN] %s",
+                    safe_trusted_context_brain_projection_trace_metadata(_tc_brain_projection),
+                )
+        except Exception as _tc_brain_exc:  # noqa: BLE001  # noqa: silent-ok
+            logger.debug(
+                "[TRUSTED_CONTEXT_BRAIN] attach failed tenant=%s err=%s",
+                tenant_id,
+                _tc_brain_exc,
+            )
         ctx._pre_commerce_shortcut = _pre_commerce_shortcut  # type: ignore[attr-defined]
         try:
             from .commerce.external_outbound_context import apply_external_outbound_context  # noqa: PLC0415
@@ -5025,6 +5043,24 @@ def _build_reply_state(
         if _browse_defocus
         else (current_state.current_product_focus or None)
     )
+    _trusted_brain_projection = getattr(ctx, "trusted_context_projection", None)
+    if _trusted_brain_projection is None:
+        try:
+            from modules.ai.brain.truth_surface.trusted_context_brain_consumption_gate import (  # noqa: PLC0415
+                maybe_trusted_context_brain_projection,
+            )
+            from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                current_trusted_context,
+            )
+
+            _trusted_brain_projection = maybe_trusted_context_brain_projection(
+                snapshot=current_trusted_context(),
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+                conversation_id=getattr(ctx, "conversation_id", None),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok
+            _trusted_brain_projection = None
 
     platform_kb_mode = False
     platform_topic = ""
@@ -5134,6 +5170,20 @@ def _build_reply_state(
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — price objection facts must not block compose
         pass
+
+    if isinstance(_trusted_brain_projection, dict) and _trusted_brain_projection:
+        known_facts["trusted_context_projection"] = dict(_trusted_brain_projection)
+        try:
+            from modules.ai.brain.truth_surface.trusted_context_brain_projection import (  # noqa: PLC0415
+                selected_product_from_projection,
+            )
+
+            if not _browse_defocus and not selected_product:
+                _projected_product = selected_product_from_projection(_trusted_brain_projection)
+                if _projected_product:
+                    selected_product = _projected_product
+        except Exception:  # noqa: BLE001  # noqa: silent-ok
+            pass
 
     try:
         from modules.ai.brain.truth_surface.coupon_offer_consumption_gate import (  # noqa: PLC0415

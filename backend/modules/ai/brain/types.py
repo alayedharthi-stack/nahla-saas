@@ -1047,6 +1047,8 @@ class BrainContext:
     commerce_turn_contract: Optional[Any] = None
     # PR-B1 — merchant operational policy hint from KB (shadow-only; no enforce).
     merchant_operational_policy_hint: Optional[Any] = None
+    # Scoped trusted-context projection for Brain/Compose (structured facts only).
+    trusted_context_projection: Optional[Dict[str, Any]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
