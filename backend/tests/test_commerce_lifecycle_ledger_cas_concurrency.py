@@ -633,6 +633,15 @@ class TestMigration0094GuardPostgres:
             with Session.begin() as session:
                 tenant_id = _pg_tenant_id()
                 _pg_ensure_tenant(session, tenant_id)
+            # Allowlists must pass so the 0093 schema gate is the observed reason.
+            monkeypatch.setenv(
+                "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST",
+                str(tenant_id),
+            )
+            monkeypatch.setenv(
+                "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST",
+                "+966500111222",
+            )
             with Session() as session:
                 result = asyncio.run(
                     dispatch_external_lifecycle_notification(
@@ -641,4 +650,5 @@ class TestMigration0094GuardPostgres:
                 )
             assert result.reason_code == "migration_0094_required"
             assert result.dispatched is False
+            assert result.ledger_id is None
             assert mock_send.await_count == 0
