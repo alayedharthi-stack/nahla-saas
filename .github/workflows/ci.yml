@@ -352,3 +352,26 @@ jobs:
           assert_no_skips /tmp/lifecycle_cas_0094.txt 3
 
           echo "4 passed, 0 skipped"
+
+  # Dashboard Route/Nav/Page Metadata + product identity policy gates.
+  # Source-level regression scripts (tsx via npx); no npm ci / full build.
+  # Does not run AI, backend, migrations, or deploy steps.
+  dashboard-platform-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run platform policy checks
+        run: npm run check:platform-policy
