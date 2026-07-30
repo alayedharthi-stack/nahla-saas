@@ -43,7 +43,7 @@ from core.commerce_lifecycle.ledger import (  # noqa: E402
     mark_shadow_outcome,
     try_conditional_promote_shadow_send_row,
 )
-from models import CommerceLifecycleNotificationLedger, Tenant  # noqa: E402
+from models import CommerceLifecycleNotificationLedger, Tenant, TenantSettings  # noqa: E402
 
 _GENERIC_TENANT_ID = 10
 _GENERIC_ORDER_ID = 8801
@@ -340,6 +340,13 @@ def _pg_tenant_name(tenant_id: int) -> str:
 def _pg_ensure_tenant(session, tenant_id: int) -> None:
     if session.get(Tenant, tenant_id) is None:
         session.add(Tenant(id=tenant_id, name=_pg_tenant_name(tenant_id)))
+    # Pre-create settings so concurrent dispatch workers do not race on
+    # get_or_create_settings → tenant_settings_tenant_id_key.
+    existing_settings = (
+        session.query(TenantSettings).filter_by(tenant_id=tenant_id).one_or_none()
+    )
+    if existing_settings is None:
+        session.add(TenantSettings(tenant_id=tenant_id))
 
 
 def _pg_seed_shadow(engine, *, tenant_id: int, order_id: int) -> int:
