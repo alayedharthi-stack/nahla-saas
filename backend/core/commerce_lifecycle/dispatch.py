@@ -145,6 +145,141 @@ def commerce_lifecycle_dispatch_enabled() -> bool:
 
     return val in {"1", "true", "yes", "on"}
 
+_ENV_DISPATCH_TENANT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST"
+
+_ENV_DISPATCH_RECIPIENT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST"
+
+
+
+
+
+def _parse_dispatch_tenant_allowlist() -> frozenset[int]:
+
+    raw = str(os.environ.get(_ENV_DISPATCH_TENANT_ALLOWLIST, "")).strip()
+
+    if not raw:
+
+        return frozenset()
+
+    allowed: set[int] = set()
+
+    for part in raw.split(","):
+
+        piece = part.strip()
+
+        if not piece:
+
+            continue
+
+        try:
+
+            tenant_id = int(piece)
+
+        except ValueError:
+
+            continue
+
+        if tenant_id > 0:
+
+            allowed.add(tenant_id)
+
+    return frozenset(allowed)
+
+
+
+
+
+def _parse_dispatch_recipient_allowlist() -> frozenset[str]:
+
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    raw = str(os.environ.get(_ENV_DISPATCH_RECIPIENT_ALLOWLIST, "")).strip()
+
+    if not raw:
+
+        return frozenset()
+
+    allowed: set[str] = set()
+
+    for part in raw.split(","):
+
+        piece = part.strip()
+
+        if not piece:
+
+            continue
+
+        normalized = normalize_phone(piece) or piece
+
+        allowed.add(normalized)
+
+    return frozenset(allowed)
+
+
+
+
+
+def commerce_lifecycle_dispatch_tenant_allowlist() -> frozenset[int]:
+
+    """Tenant IDs permitted when lifecycle dispatch master flag is on."""
+
+    return _parse_dispatch_tenant_allowlist()
+
+
+
+
+
+def commerce_lifecycle_dispatch_recipient_allowlist() -> frozenset[str]:
+
+    """E.164 recipient phones permitted for lifecycle provider sends."""
+
+    return _parse_dispatch_recipient_allowlist()
+
+
+
+
+
+def commerce_lifecycle_dispatch_tenant_permitted(tenant_id: int) -> bool:
+
+    if not commerce_lifecycle_dispatch_enabled():
+
+        return False
+
+    allowlist = commerce_lifecycle_dispatch_tenant_allowlist()
+
+    if not allowlist:
+
+        return False
+
+    return int(tenant_id) in allowlist
+
+
+
+
+
+def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
+
+    if not commerce_lifecycle_dispatch_enabled():
+
+        return False
+
+    allowlist = commerce_lifecycle_dispatch_recipient_allowlist()
+
+    if not allowlist:
+
+        return False
+
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    normalized = normalize_phone(str(phone or "").strip()) or str(phone or "").strip()
+
+    if not normalized:
+
+        return False
+
+    return normalized in allowlist
+
+
 
 
 
@@ -346,6 +481,42 @@ async def _execute_reserved_send(
 ) -> LifecycleDispatchResult:
 
     to_phone = str(evidence.customer_phone or "").strip()
+
+    if not commerce_lifecycle_dispatch_recipient_permitted(to_phone):
+
+        finalize_send_outcome(
+
+            db,
+
+            ledger_id=reserve.ledger_id,
+
+            tenant_id=int(tenant_id),
+
+            outcome=SendLedgerOutcome.SEND_BLOCKED,
+
+            send_error_code="recipient_not_allowlisted",
+
+            commit=True,
+
+        )
+
+        return LifecycleDispatchResult(
+
+            ledger_id=reserve.ledger_id,
+
+            dispatched=False,
+
+            duplicate=False,
+
+            recovered=reserve.recovered,
+
+            outcome=SendLedgerOutcome.SEND_BLOCKED.value,
+
+            reason_code="recipient_not_allowlisted",
+
+        )
+
+
 
     if not to_phone:
 
@@ -677,6 +848,24 @@ async def dispatch_external_lifecycle_notification(
 
 
 
+    if not commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+
+        return LifecycleDispatchResult(
+
+            ledger_id=None,
+
+            dispatched=False,
+
+            duplicate=False,
+
+            outcome="skipped",
+
+            reason_code="tenant_not_allowlisted",
+
+        )
+
+
+
     order_id = int(getattr(order, "id", 0) or 0)
 
     if order_id <= 0:
@@ -792,6 +981,40 @@ async def dispatch_external_lifecycle_notification(
             transition_version=transition_version,
 
         )
+
+
+
+        if not commerce_lifecycle_dispatch_recipient_permitted(
+
+            str(evidence.customer_phone or "")
+
+        ):
+
+            logger.info(
+
+                "[LifecycleDispatch] recipient_blocked tenant=%s order=%s intent=%s",
+
+                tenant_id,
+
+                order_id,
+
+                intent.value,
+
+            )
+
+            return LifecycleDispatchResult(
+
+                ledger_id=None,
+
+                dispatched=False,
+
+                duplicate=False,
+
+                outcome="skipped",
+
+                reason_code="recipient_not_allowlisted",
+
+            )
 
 
 
@@ -1178,6 +1401,14 @@ __all__ = [
     "LifecycleDispatchResult",
 
     "commerce_lifecycle_dispatch_enabled",
+
+    "commerce_lifecycle_dispatch_tenant_allowlist",
+
+    "commerce_lifecycle_dispatch_recipient_allowlist",
+
+    "commerce_lifecycle_dispatch_tenant_permitted",
+
+    "commerce_lifecycle_dispatch_recipient_permitted",
 
     "commerce_lifecycle_send_audit_schema_ready",
 
