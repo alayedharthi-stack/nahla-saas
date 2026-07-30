@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { billingApi, type BillingPlan, type BillingStatus } from '../api/billing'
 import { displayPlanFeature } from '../lib/planFeatures'
+import { trackPlatformEvent } from '../lib/platformTelemetry'
 
 // ── Salla app URL ─────────────────────────────────────────────────────────────
 // Single source of truth for "subscribe / manage your plan via Salla".
@@ -31,32 +32,6 @@ function sallaPlanCtaLabel(isManage: boolean): string {
   const en = document.documentElement.lang === 'en'
   if (isManage) return en ? 'Manage via Salla' : 'إدارة الاشتراك عبر سلة'
   return en ? 'Subscribe via Salla' : 'الاشتراك عبر سلة'
-}
-
-// ── Analytics ─────────────────────────────────────────────────────────────────
-// Lightweight event tracker that forwards to whichever analytics platform is
-// loaded on the page (posthog, GA4 via gtag) and always logs to console so
-// tracking still works in dev / before any tool is wired.
-type TrackPayload = Record<string, string | number | boolean | null | undefined>
-
-function trackEvent(name: string, payload: TrackPayload = {}): void {
-  try {
-    console.info(`[track] ${name}`, payload)
-
-    // PostHog — if loaded (posthog.com)
-    const ph = (window as unknown as { posthog?: { capture: (n: string, p: TrackPayload) => void } }).posthog
-    if (ph && typeof ph.capture === 'function') {
-      ph.capture(name, payload)
-    }
-
-    // Google Analytics 4 / GTM — if loaded (gtag('event', ...))
-    const gtag = (window as unknown as { gtag?: (cmd: string, eventName: string, p: TrackPayload) => void }).gtag
-    if (typeof gtag === 'function') {
-      gtag('event', name, payload)
-    }
-  } catch (e) {
-    console.warn('[track] failed:', e)
-  }
 }
 
 // Detect whether the merchant is browsing this billing page from inside the
@@ -246,7 +221,7 @@ function PlanCard({
               href={renewalUrl}
               target="_top"
               rel="noopener noreferrer"
-              onClick={() => trackEvent('salla_redirect_clicked', {
+              onClick={() => trackPlatformEvent('salla_redirect_clicked', {
                 source:   'plan_card',
                 plan:     plan.slug,
                 is_salla: true,
@@ -372,7 +347,7 @@ export default function Billing() {
         const cleanSearch = params.toString()
         const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
         window.history.replaceState(null, '', cleanUrl)
-        trackEvent('billing_payment_success_landed', { source: 'billing_page' })
+        trackPlatformEvent('billing_payment_success_landed', { source: 'billing_page' })
       } else if (params.get('payment') === 'failed') {
         setPaymentFailed(true)
         params.delete('payment')
@@ -392,7 +367,7 @@ export default function Billing() {
         const cleanSearch = params.toString()
         const cleanUrl    = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : '')
         window.history.replaceState(null, '', cleanUrl)
-        trackEvent('salla_returned_without_subscription', { is_salla: true })
+        trackPlatformEvent('salla_returned_without_subscription', { is_salla: true })
       }
     } catch { /* noop */ }
   }, [isSallaEmbedded])
@@ -637,7 +612,7 @@ export default function Billing() {
             rel="noopener noreferrer"
             onClick={() => {
               setReturnedFromSalla(false)
-              trackEvent('salla_redirect_clicked', {
+              trackPlatformEvent('salla_redirect_clicked', {
                 source:   'returned_banner',
                 plan:     null,
                 is_salla: true,
@@ -1223,7 +1198,7 @@ export default function Billing() {
             onClick={() => {
               setShowSallaHint(false)
               setReturnedFromSalla(false)
-              trackEvent('salla_redirect_clicked', {
+              trackPlatformEvent('salla_redirect_clicked', {
                 source:   'billing_cta',
                 plan:     null,
                 is_salla: true,

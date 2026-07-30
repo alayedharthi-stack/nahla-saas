@@ -12,6 +12,7 @@
     "check:resolvers": "npx --yes tsx@4 scripts/smoke-embedded-resolvers.mts",
     "check:billing-redirects": "npx --yes tsx@4 scripts/check-billing-redirects.mts",
     "check:navigation-policy": "npx --yes tsx@4 scripts/check-navigation-policy.mts",
+    "check:platform-telemetry": "npx --yes tsx@4 scripts/check-platform-telemetry.mts",
     "check:page-metadata": "npx --yes tsx@4 scripts/check-page-metadata.mts",
     "check:product-identity": "npx --yes tsx@4 scripts/check-product-identity.mts",
     "check:platform-policy": "npm run check:navigation-policy && npm run check:page-metadata && npm run check:product-identity",
