@@ -52,6 +52,47 @@ def _ambiguous_allowed_amounts(facts: dict[str, Any]) -> set[Any]:
     return amounts
 
 
+def _all_catalog_candidate_amounts(facts: dict[str, Any]) -> set[Any]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    amounts = set(_ambiguous_allowed_amounts(facts))
+    for row in facts.get("catalog_products") or []:
+        if not isinstance(row, dict):
+            continue
+        amt = parse_price_amount(row.get("price"))
+        if amt is not None:
+            amounts.add(amt)
+    return amounts
+
+
+_PRICE_INCORRECTNESS_RE = re.compile(
+    r"(?:"
+    r"السعر\s+غير\s+صحيح"
+    r"|سعر(?:ك|ه|هما)?\s+غير\s+صحيح"
+    r"|السعر\s+(?:خطأ|غلط|مش\s+صحيح)"
+    r"|(?:يبدو|يبين|واضح).{0,24}السعر\s+غير\s+صحيح"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _reply_negates_valid_candidate_price(text: str, facts: dict[str, Any]) -> bool:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        extract_reply_prices,
+    )
+
+    working = str(text or "").strip()
+    if not working or not _PRICE_INCORRECTNESS_RE.search(working):
+        return False
+    allowed = _all_catalog_candidate_amounts(facts)
+    if not allowed:
+        return False
+    inbound_prices = extract_reply_prices(str(facts.get("inbound_text") or ""))
+    return bool(inbound_prices & allowed)
+
+
 def _split_bounded_clauses(text: str) -> list[str]:
     """Split reply into clause/sentence spans on language-agnostic boundaries."""
     working = str(text or "").strip()
@@ -193,6 +234,9 @@ def _classify_ambiguous_catalog_reply_violation(
 
     if _claimed_amounts_in_non_interrogative_clauses(working):
         return "ambiguous_premature_price_selection"
+
+    if _reply_negates_valid_candidate_price(working, facts):
+        return "negated_valid_candidate_price"
 
     if facts.get("allow_price_differentiator"):
         return ""
@@ -925,6 +969,12 @@ def _apply_catalog_product_answer_guards(
             )
             if amt is not None
         }
+        if _reply_negates_valid_candidate_price(working, facts):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="negated_valid_candidate_price",
+            )
         for claimed in extract_reply_prices(working):
             if allowed_amounts and claimed not in allowed_amounts:
                 return PersonaGuardResult(

@@ -704,6 +704,33 @@ def _is_product_option_number_context(text: str) -> bool:
     return bool(_PRODUCT_OPTION_NUMBER_RE.search(text))
 
 
+# ``_is_product_option_number_context`` above only gates the standalone
+# «الرقم:» intro shape. The promise-verb patterns were never exempted, so a
+# promise verb sitting in front of a catalog prompt still matched: production
+# incident 2026-07-28 turned «يا هلا، تفضل رقم المنتج أو اسمه وأكمل طلبك ✨»
+# into «يا هلا، حالياً لا يوجد رقم تواصل مهيأ لإرساله. المنتج أو اسمه وأكمل
+# طلبك ✨» — the phone fallback swallowed «تفضل رقم» and left a dangling tail.
+# «اكتب رقم» / «اختر رقم» escaped only because those verbs are absent from
+# ``_PROMISE_VERB``, so the exemption must key off the catalog noun bound to
+# «رقم» rather than off the verb. Deliberately evaluated against the matched
+# span, so «تفضل رقم» is never exempted when a real contact number follows.
+_PHONE_NOUN_CATALOG_BINDING_RE = re.compile(
+    r"رقم\s+(?:ال)?(?:خيار|منتج|صنف)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _phone_promise_match_is_product_option_false_positive(
+    text: str,
+    match: "re.Match[str]",
+) -> bool:
+    """True when the matched «رقم» names a catalog option, not a phone."""
+    if not text or match is None:
+        return False
+    window = text[match.start(): min(len(text), match.end() + 24)]
+    return bool(_PHONE_NOUN_CATALOG_BINDING_RE.search(window))
+
+
 # Customer commerce ledger replies refer to the customer's WhatsApp
 # identity («على هذا الرقم») — not a staff-contact phone promise.
 # Without this guard, ``_PROMISE_VERB``'s «هذا» + ``_PHONE_NOUN``'s
@@ -845,10 +872,15 @@ def contains_promised_asset(text: str) -> Optional[str]:
         for pattern in patterns:
             if asset_class == ASSET_PHONE:
                 for match in pattern.finditer(text):
-                    if not _phone_promise_match_is_order_reference_false_positive(
+                    if _phone_promise_match_is_order_reference_false_positive(
                         text, match
                     ):
-                        return asset_class
+                        continue
+                    if _phone_promise_match_is_product_option_false_positive(
+                        text, match
+                    ):
+                        continue
+                    return asset_class
             elif pattern.search(text):
                 return asset_class
     m = _STANDALONE_INTRO.search(text)
@@ -957,6 +989,8 @@ def maybe_scrub_unkept_asset_promise(
 
             def _replace_phone(match: re.Match[str], _replacement: str = replacement) -> str:
                 if _phone_promise_match_is_order_reference_false_positive(text, match):
+                    return match.group(0)
+                if _phone_promise_match_is_product_option_false_positive(text, match):
                     return match.group(0)
                 return _replacement
 
