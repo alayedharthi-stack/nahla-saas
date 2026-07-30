@@ -41,6 +41,9 @@ import { isAdmin } from '../../auth'
 import { useMerchantIdentity } from '../../context/MerchantIdentityContext'
 import { NAVIGATION_PATHS } from '../../lib/navigationPolicy'
 import { PLATFORM_BRAND } from '../../lib/productIdentity'
+import { trackPlatformEvent } from '../../lib/platformTelemetry'
+
+type NavGroupKey = 'main' | 'ai' | 'store' | 'admin_platform' | 'admin_settings'
 
 interface NavItem {
   to:    string
@@ -50,6 +53,7 @@ interface NavItem {
 }
 
 interface NavGroup {
+  groupKey: NavGroupKey
   groupLabel: (tr: Translations) => string
   items: NavItem[]
 }
@@ -57,6 +61,7 @@ interface NavGroup {
 // ── Admin-only navigation (platform owner) ────────────────────────────────────
 const ADMIN_NAV_GROUPS: NavGroup[] = [
   {
+    groupKey: 'admin_platform',
     groupLabel: tr => tr.nav.groups.adminPlatform,
     items: [
       { to: '/admin',                  icon: Crown,        label: tr => tr.nav.adminItems.dashboard       },
@@ -74,6 +79,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    groupKey: 'admin_settings',
     groupLabel: tr => tr.nav.groups.adminSettings,
     items: [
       // Phase 2A Sprint 1 — direct entry to the owner's personal 2FA
@@ -94,6 +100,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
 // /conversations so merchants find it where their attention already is.
 const MERCHANT_NAV_GROUPS: NavGroup[] = [
   {
+    groupKey: 'main',
     groupLabel: tr => tr.nav.groups.main,
     items: [
       { to: '/overview',               icon: LayoutDashboard, label: tr => tr.nav.items.overview         },
@@ -111,6 +118,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    groupKey: 'ai',
     groupLabel: tr => tr.nav.groups.ai,
     items: [
       { to: '/intelligence',  icon: Brain,        label: tr => tr.nav.items.intelligence, isAI: true },
@@ -122,6 +130,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    groupKey: 'store',
     groupLabel: tr => tr.nav.groups.store,
     items: [
       { to: '/integrations',               icon: Plug,         label: tr => tr.nav.items.integrations     },
@@ -214,7 +223,14 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
                   <NavLink
                     key={to}
                     to={to}
-                    onClick={onClose}
+                    onClick={() => {
+                      trackPlatformEvent('platform_nav_click', {
+                        path: to,
+                        nav_group: group.groupKey,
+                        admin_mode: adminMode,
+                      })
+                      onClose()
+                    }}
                     className={({ isActive }) =>
                       `relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation ${
                         isActive

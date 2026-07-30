@@ -11,6 +11,7 @@ import { useLanguage } from '../../i18n/context'
 import { getApiBase, getRole, isImpersonating, isPlatformStaffRole } from '../../auth'
 import { useDashboardPoll } from '../../lib/dashboardPolling'
 import { resolvePageMetaSelector } from '../../lib/pageMetadata'
+import { trackPlatformEvent } from '../../lib/platformTelemetry'
 import { X } from 'lucide-react'
 
 // ── Countdown hook ────────────────────────────────────────────────────────────
@@ -169,9 +170,13 @@ export default function Layout() {
 
 function LayoutShell() {
   const { pathname } = useLocation()
-  const { t, dir } = useLanguage()
+  const { t, dir, lang } = useLanguage()
   const { active: mobileChatFullscreen } = useMobileChatFullscreen()
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    trackPlatformEvent('platform_page_view', { path: pathname, locale: lang })
+  }, [pathname, lang])
 
   const metaSelector =
     resolvePageMetaSelector(pathname)

@@ -15,6 +15,7 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { apiCall } from '../api/client'
+import { trackPlatformEvent } from '../lib/platformTelemetry'
 
 // UI_ONLY_GUARD: only static labels use t(); merchant/customer data stays as API values.
 
@@ -100,6 +101,10 @@ interface WaUsage {
 const TIER_SOURCE_LABEL: Record<string, string> = {
   meta_graph: 'Meta Cloud API',
   dialog360:  '360dialog (Coexistence)',
+}
+
+function trackOverviewCta(target: '/wa-usage' | '/billing') {
+  trackPlatformEvent('overview_cta_clicked', { target })
 }
 
 function formatSyncedAt(
@@ -207,7 +212,11 @@ export default function Overview() {
       apiCall<any>(`/store-sync/status?period=${encodeURIComponent(period)}`).catch(() => null),
       apiCall<any>('/store-sync/knowledge').catch(() => null),
     ]).then(([syncStatus]) => {
+      let hasData = false
       if (syncStatus) {
+        hasData =
+          (syncStatus.orders_today ?? syncStatus.orders ?? 0) > 0
+          || (syncStatus.recent_orders?.length ?? 0) > 0
         setStats({
           period:               (syncStatus.period as Period) ?? period,
           period_label_ar:      syncStatus.period_label_ar ?? periodLabel(period),
@@ -226,6 +235,7 @@ export default function Overview() {
           revenue_chart:        syncStatus.revenue_chart        ?? chartPlaceholder,
         })
       }
+      trackPlatformEvent('overview_loaded', { has_data: hasData, period })
     }).finally(() => setLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period])
@@ -436,6 +446,7 @@ export default function Overview() {
             <div className="flex flex-col gap-2 shrink-0">
               <Link
                 to="/wa-usage"
+                onClick={() => trackOverviewCta('/wa-usage')}
                 className="flex items-center gap-1.5 text-xs font-medium text-slate-500 border border-slate-200 hover:border-slate-300 bg-white px-3 py-1.5 rounded-xl transition-colors"
               >
                 <ExternalLink className="w-3 h-3" />
@@ -444,6 +455,7 @@ export default function Overview() {
               {(waUsage.marketing_blocked || isWarning90 || isWarning70) && (
                 <Link
                   to="/billing"
+                  onClick={() => trackOverviewCta('/billing')}
                   className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl transition-all ${
                     waUsage.marketing_blocked
                       ? 'bg-orange-600 text-white hover:bg-orange-500'
@@ -469,13 +481,13 @@ export default function Overview() {
             <p className="text-xs text-orange-700 mt-2 font-medium bg-orange-50 rounded-lg px-3 py-2">
               {wu.campaignsBanner}{' '}
               {wu.campaignsBannerNote}{' '}
-              <Link to="/billing" className="underline mr-1 font-bold">{wu.upgradeLink}</Link>
+              <Link to="/billing" onClick={() => trackOverviewCta('/billing')} className="underline mr-1 font-bold">{wu.upgradeLink}</Link>
             </p>
           )}
           {isWarning90 && (
             <p className="text-xs text-red-700 mt-2 font-medium bg-red-50 rounded-lg px-3 py-2">
               {wu.nearLimitBanner}{' '}
-              <Link to="/billing" className="underline mr-1 font-bold">{wu.upgradeNowLink}</Link>
+              <Link to="/billing" onClick={() => trackOverviewCta('/billing')} className="underline mr-1 font-bold">{wu.upgradeNowLink}</Link>
             </p>
           )}
 
@@ -629,7 +641,12 @@ export default function Overview() {
               type="button"
               role="tab"
               aria-selected={period === p}
-              onClick={() => setPeriod(p)}
+              onClick={() => {
+                if (p !== period) {
+                  trackPlatformEvent('overview_period_changed', { period: p })
+                  setPeriod(p)
+                }
+              }}
               className={`px-3 py-1.5 rounded-lg transition-colors ${
                 period === p
                   ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-sm'
