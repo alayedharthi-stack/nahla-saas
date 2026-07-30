@@ -561,13 +561,16 @@ class TestDispatchProviderCasPostgres:
     ) -> None:
         monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
         monkeypatch.setenv("COMMERCE_LIFECYCLE_SEND_STALE_SECONDS", "300")
-        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", "20")
         monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST", "+966500111222")
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = _approved_template()
         mock_send.return_value = ("sent", {"wa_message_id": "wamid.pg.cas"})
 
         tenant_id = _pg_tenant_id()
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST",
+            str(tenant_id),
+        )
         Session = sessionmaker(bind=lifecycle_pg_engine)
 
         def _run_dispatch() -> bool:
