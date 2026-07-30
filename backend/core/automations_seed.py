@@ -66,6 +66,11 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
                 "تنبيهات واتساب لمراحل الطلب (تأكيد، شحن وتتبع، تسليم، COD…) "
                 "باستخدام قوالب نحلة المعتمدة."
             ),
+            "lifecycle_dispatch": {
+                "order_confirmed": "order_confirmation",
+                "shipment_available": "shipping_tracking",
+                "out_for_delivery": "shipping_tracking",
+            },
         },
     },
     {

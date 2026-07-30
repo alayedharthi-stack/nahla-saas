@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Mapping
@@ -102,6 +103,10 @@ from scripts.operators.meta_acceptance_channel_evidence_contract import (  # noq
     WEBHOOK_ATTESTATION_HMAC_KEY_ENV,
     evaluate_meta_config_present,
     evaluate_operator_attested_channel_ready,
+)
+from scripts.operators.staging_migration_operator_gates import (  # noqa: E402
+    validate_database_binding,
+    validate_staging_identity,
 )
 from scripts.operators.staging_acceptance_config_consolidation_contract import (  # noqa: E402
     ACCEPTANCE_CUTOVER_LABEL,
@@ -269,6 +274,11 @@ CODE_RUNTIME_REVISION_MISMATCH = "runtime_revision_mismatch"
 CODE_RUNTIME_REVISION_UNKNOWN = "runtime_revision_unknown"
 CODE_TARGET_APP_ROOT_REQUIRED = "target_app_root_required"
 CODE_STORE_AI_MODE_INVALID = "store_ai_mode_invalid"
+CODE_DATABASE_BINDING_REJECTED = "database_binding_rejected"
+CODE_TENANT_SETTINGS_MISSING = "tenant_settings_missing"
+CODE_DATABASE_QUERY_FAILED = "database_query_failed"
+CODE_AI_TEST_ALLOWLIST_INVALID = "ai_test_allowlist_invalid"
+CODE_APPROVED_EGRESS_CONFIGURATION_MISSING = "approved_egress_configuration_missing"
 CODE_PHONE_NOT_ALLOWLISTED = "phone_not_allowlisted"
 CODE_TENANT_NOT_ALLOWED = "tenant_not_allowed"
 CODE_CHANNEL_HEALTH_BLOCKED = "channel_health_blocked"
@@ -547,6 +557,191 @@ def required_config_snapshot_keys() -> tuple[str, ...]:
     )
 
 
+EXECUTION_GATE_REQUIRED_PROOFS: tuple[str, ...] = (
+    "staging_identity",
+    "database_binding",
+    "arch001_signoff",
+    "operator_channel_health",
+    "allowlisted_test_number",
+    "approved_egress_configuration",
+)
+
+_PHONE_ENV_BY_TENANT: dict[int, str] = {
+    TENANT_1_INTENSIVE: TENANT_1_PHONE_ENV,
+    TENANT_33_LIMITED: TENANT_33_PHONE_ENV,
+    TENANT_48_SALLA_MINIMAL: TENANT_48_PHONE_ENV,
+}
+
+_PLATFORM_EGRESS_GUARD_KINDS: tuple[str, ...] = (
+    "automation",
+    "campaign",
+    "external_tool",
+    "financial",
+    "salla_integration",
+    "shipping",
+    "whatsapp_provider",
+)
+
+
+def evaluate_approved_egress_configuration() -> dict[str, Any]:
+    """Permanent fail-closed egress gate for real-channel execution (intentional).
+
+    Platform egress guards (Moyasar, Salla, automations, shipping, WhatsApp)
+    are enforced via ``deny_external_egress`` only under
+    ``internal_conversational_e2e_context``. Real-channel acceptance cannot
+    install that context without altering provider send behavior, so this proof
+    **always** reports ``ok=False`` until a dedicated real-channel egress
+    contract is approved and wired. This is policy, not an accidental gap.
+    """
+    return {
+        "ok": False,
+        "code": CODE_APPROVED_EGRESS_CONFIGURATION_MISSING,
+        "policy": "permanent_fail_closed",
+        "intentional_block": True,
+        "internal_acceptance_context_installable": False,
+        "reused_egress_guard_kinds": list(_PLATFORM_EGRESS_GUARD_KINDS),
+        "note": (
+            "Real-channel execution is intentionally blocked: internal acceptance "
+            "context cannot be installed without altering channel behavior, and "
+            "dedicated real-channel egress wiring is not yet approved"
+        ),
+    }
+
+
+def _tenant_phone_env(tenant_id: int) -> str:
+    try:
+        return _PHONE_ENV_BY_TENANT[tenant_id]
+    except KeyError as exc:
+        raise ValueError(CODE_TENANT_NOT_ALLOWED) from exc
+
+
+def evaluate_allowlisted_test_number(
+    *,
+    tenant_id: int,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    env = env or {}
+    allowlist = parse_allowlist_phones(env.get(ALLOWLIST_PHONES_ENV))
+    phone = re.sub(r"\D", "", str(env.get(_tenant_phone_env(tenant_id), "")))
+    if not allowlist:
+        return {
+            "ok": False,
+            "code": CODE_PHONE_NOT_ALLOWLISTED,
+            "allowlist_count": 0,
+            "test_phone_present": bool(phone),
+        }
+    if not phone or phone not in allowlist:
+        return {
+            "ok": False,
+            "code": CODE_PHONE_NOT_ALLOWLISTED,
+            "allowlist_count": len(allowlist),
+            "test_phone_present": bool(phone),
+        }
+    return {
+        "ok": True,
+        "code": None,
+        "allowlist_count": len(allowlist),
+        "test_phone_hash": hash_identifier(phone),
+    }
+
+
+def evaluate_execution_gate_chain(
+    *,
+    tenant_id: int,
+    env: Mapping[str, str] | None = None,
+    arch001_signoff_ok: bool | None = None,
+    channel_health_ok: bool | None = None,
+) -> dict[str, Any]:
+    """Fail closed unless every mandatory execution proof is present."""
+    env_map = dict(env or os.environ)
+    proofs: dict[str, bool] = {}
+    blockers: list[str] = []
+
+    identity_failure = validate_staging_identity(
+        env_map,
+        staging_project_env=STAGING_PROJECT_ENV,
+        staging_environment_env=STAGING_ENVIRONMENT_ENV,
+        staging_project_value=STAGING_PROJECT_VALUE,
+        staging_environment_value=STAGING_ENVIRONMENT_VALUE,
+    )
+    proofs["staging_identity"] = identity_failure is None
+    if identity_failure is not None:
+        blockers.append(CODE_STAGING_IDENTITY_REJECTED)
+
+    binding_failure = validate_database_binding(env_map)
+    proofs["database_binding"] = binding_failure is None
+    if binding_failure is not None:
+        blockers.append(CODE_DATABASE_BINDING_REJECTED)
+
+    if arch001_signoff_ok is None:
+        from scripts.operators.product_availability_preprod_synthetic_signoff_v2 import (  # noqa: PLC0415
+            verify_arch001_preprod_signoff_for_gate,
+        )
+
+        signoff = verify_arch001_preprod_signoff_for_gate()
+        arch001_signoff_ok = signoff.get("ok") is True
+        if not arch001_signoff_ok:
+            blockers.append(str(signoff.get("code") or CODE_ARCH001_SIGNOFF_MISSING))
+    proofs["arch001_signoff"] = bool(arch001_signoff_ok)
+    if not arch001_signoff_ok:
+        if CODE_ARCH001_SIGNOFF_MISSING not in blockers:
+            blockers.append(CODE_ARCH001_SIGNOFF_MISSING)
+
+    proofs["operator_channel_health"] = channel_health_ok is True
+    if channel_health_ok is not True:
+        blockers.append(CODE_CHANNEL_HEALTH_BLOCKED)
+
+    phone_proof = evaluate_allowlisted_test_number(tenant_id=tenant_id, env=env_map)
+    proofs["allowlisted_test_number"] = phone_proof.get("ok") is True
+    if not proofs["allowlisted_test_number"]:
+        blockers.append(str(phone_proof.get("code") or CODE_PHONE_NOT_ALLOWLISTED))
+
+    egress_proof = evaluate_approved_egress_configuration()
+    proofs["approved_egress_configuration"] = egress_proof.get("ok") is True
+    if not proofs["approved_egress_configuration"]:
+        blockers.append(CODE_APPROVED_EGRESS_CONFIGURATION_MISSING)
+
+    return {
+        "ok": not blockers,
+        "proofs": proofs,
+        "required_proofs": list(EXECUTION_GATE_REQUIRED_PROOFS),
+        "blockers": sorted(set(blockers)),
+        "approved_egress_policy": egress_proof.get("policy"),
+        "approved_egress_intentional_block": egress_proof.get("intentional_block"),
+    }
+
+
+def read_only_preflight_db_io_permitted(
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, str | None]:
+    """Return whether read-only preflight DB I/O is allowed."""
+    env_map = dict(env or os.environ)
+    if not env_flag_enabled(env_map.get(MASTER_ENABLE_ENV)):
+        return False, CODE_ACCEPTANCE_NOT_ENABLED
+    identity_failure = validate_staging_identity(
+        env_map,
+        staging_project_env=STAGING_PROJECT_ENV,
+        staging_environment_env=STAGING_ENVIRONMENT_ENV,
+        staging_project_value=STAGING_PROJECT_VALUE,
+        staging_environment_value=STAGING_ENVIRONMENT_VALUE,
+    )
+    if identity_failure is not None:
+        return False, CODE_STAGING_IDENTITY_REJECTED
+    binding_failure = validate_database_binding(env_map)
+    if binding_failure is not None:
+        return False, CODE_DATABASE_BINDING_REJECTED
+    if not str(env_map.get("DATABASE_URL") or "").strip():
+        return False, CODE_DATABASE_BINDING_REJECTED
+    return True, None
+
+
+def config_snapshot_db_io_permitted(
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, str | None]:
+    """Return whether read-only config snapshot DB I/O is allowed."""
+    return read_only_preflight_db_io_permitted(env)
+
+
 __all__ = [
     "ACCEPTANCE_CUTOVER_LABEL",
     "ACCEPTANCE_CUTOVER_SCOPE",
@@ -571,6 +766,11 @@ __all__ = [
     "CODE_CHANNEL_READINESS_GAP",
     "CODE_COMMAND_INVALID",
     "CODE_CONFIG_DRIFT",
+    "CODE_AI_TEST_ALLOWLIST_INVALID",
+    "CODE_APPROVED_EGRESS_CONFIGURATION_MISSING",
+    "CODE_DATABASE_BINDING_REJECTED",
+    "CODE_DATABASE_QUERY_FAILED",
+    "CODE_TENANT_SETTINGS_MISSING",
     "CODE_DB_WA_BINDING_INVALID",
     "CODE_DB_WA_BINDING_MISMATCH",
     "CODE_DB_WA_BINDING_MISSING",
@@ -624,6 +824,7 @@ __all__ = [
     "EVIDENCE_CHANNELS",
     "EVIDENCE_CLASS_OPERATOR_OBSERVED_META_WEBHOOK",
     "EVIDENCE_HMAC_KEY_ENV",
+    "EXECUTION_GATE_REQUIRED_PROOFS",
     "EVIDENCE_SCHEMA_VERSION",
     "EXECUTION_CONFIRM_ENV",
     "EXECUTION_PATH_DIRECT_CODE_PROBE",
@@ -698,8 +899,12 @@ __all__ = [
     "WEBHOOK_ATTESTATION_ARTIFACT_ENV",
     "WEBHOOK_ATTESTATION_HMAC_KEY_ENV",
     "build_acceptance_cutover_guidance",
+    "config_snapshot_db_io_permitted",
     "count_scenarios_by_phase",
     "env_flag_enabled",
+    "evaluate_allowlisted_test_number",
+    "evaluate_approved_egress_configuration",
+    "evaluate_execution_gate_chain",
     "evaluate_meta_channel_readiness",
     "evaluate_meta_config_present",
     "evaluate_operator_attested_channel_ready",
@@ -709,6 +914,7 @@ __all__ = [
     "load_scenario_manifest",
     "mask_phone_tail",
     "parse_allowlist_phones",
+    "read_only_preflight_db_io_permitted",
     "required_config_snapshot_keys",
     "resolve_acceptance_phase",
     "resolve_manifest_path",

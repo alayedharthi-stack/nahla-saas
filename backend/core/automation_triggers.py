@@ -61,8 +61,8 @@ class AutomationTrigger(str, Enum):
     # Recovery engine: stale Nahla WhatsApp draft / address / payment nudge.
     WA_ORDER_DRAFT_REMINDER_DUE = "wa_order_draft_reminder_due"
     # Order lifecycle WhatsApp notices (confirmation, shipping, delivery, COD…).
-    # No emitter fans into this trigger yet — the row exists for dashboard + readiness;
-    # real sends use events like ``order_shipped`` / dedicated flows. Kept stable for UI/sync.
+    # Platform lifecycle dispatch sends approved templates directly from store_sync;
+    # this trigger remains for dashboard compatibility and future automation wiring.
     ORDER_NOTIFICATIONS    = "order_notifications"
     # Post-delivery: one-time review request after ``delivered_at + delay``.
     # Emitted by ``automation_emitters.scan_post_delivery_review_requests``.

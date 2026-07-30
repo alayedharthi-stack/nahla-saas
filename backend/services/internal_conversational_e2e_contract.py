@@ -83,9 +83,10 @@ EGRESS_DENIAL_KINDS = frozenset(
         "automation",
         "campaign",
         "external_tool",
-        "financial",
-        "salla_integration",
-        "whatsapp_provider",
+    "financial",
+    "salla_integration",
+    "shipping",
+    "whatsapp_provider",
     }
 )
 LIVE_TURN_STATUSES = frozenset(

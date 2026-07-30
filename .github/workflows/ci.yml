@@ -286,3 +286,69 @@ jobs:
             backend/tests/test_salla_integration_resolver_ambiguity.py \
             "backend/tests/test_customer_commerce_ledger.py::TestLedgerOrderingPostgres" \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning
+
+      # Dedicated PG16 proof for lifecycle CAS claims. Uses a fresh database so
+      # migration_0094_required stays on 0093 while CAS races upgrade to 0094.
+      # Any skip (missing PG / fixtures / env) fails this step.
+      - name: Commerce lifecycle CAS concurrency - PostgreSQL
+        env:
+          A1_PG_INTEGRATION_REQUIRED: "1"
+          A1_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/lifecycle_cas
+          DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/lifecycle_cas
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+
+          admin = create_engine(
+              "postgresql://nahla:nahla_password@127.0.0.1:5433/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          with admin.connect() as conn:
+              conn.execute(text("DROP DATABASE IF EXISTS lifecycle_cas WITH (FORCE)"))
+              conn.execute(text("CREATE DATABASE lifecycle_cas"))
+          PY
+
+          assert_no_skips() {
+            local file="$1"
+            local expected_passed="$2"
+            if grep -E 'skipped' "$file"; then
+              echo "FAIL: unexpected skip in commerce lifecycle CAS PostgreSQL proof"
+              exit 1
+            fi
+            if ! grep -E "${expected_passed} passed" "$file"; then
+              echo "FAIL: expected ${expected_passed} passed in commerce lifecycle CAS PostgreSQL proof"
+              exit 1
+            fi
+          }
+
+          # 1) migration_0094_required on 0093-only schema (fixture pins 0093)
+          python -m pytest \
+            backend/tests/test_commerce_lifecycle_ledger_cas_concurrency.py::TestMigration0094GuardPostgres \
+            -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning \
+            | tee /tmp/lifecycle_cas_0093.txt
+          assert_no_skips /tmp/lifecycle_cas_0093.txt 1
+
+          # Fresh DB for 0094 CAS races so schema upgrade starts cleanly.
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+
+          admin = create_engine(
+              "postgresql://nahla:nahla_password@127.0.0.1:5433/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          with admin.connect() as conn:
+              conn.execute(text("DROP DATABASE IF EXISTS lifecycle_cas WITH (FORCE)"))
+              conn.execute(text("CREATE DATABASE lifecycle_cas"))
+          PY
+
+          # 2) CAS races on 0094 (fixture upgrades 0093 -> 0094 in this process)
+          python -m pytest \
+            backend/tests/test_commerce_lifecycle_ledger_cas_concurrency.py::TestShadowPromotionCasPostgres \
+            backend/tests/test_commerce_lifecycle_ledger_cas_concurrency.py::TestMarkSendSendingCasPostgres \
+            backend/tests/test_commerce_lifecycle_ledger_cas_concurrency.py::TestDispatchProviderCasPostgres \
+            -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning \
+            | tee /tmp/lifecycle_cas_0094.txt
+          assert_no_skips /tmp/lifecycle_cas_0094.txt 3
+
+          echo "4 passed, 0 skipped"

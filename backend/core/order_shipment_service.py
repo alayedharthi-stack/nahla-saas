@@ -201,6 +201,14 @@ def create_order_shipment(
 
     Raises ``ValueError`` with reason_key when blocked.
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="shipping",
+        operation="create_order_shipment",
+        tenant_id=tenant_id,
+    )
+
     from models import OrderShipment  # noqa: PLC0415
 
     cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
@@ -261,6 +269,14 @@ def generate_shipment_label(
     """
     Placeholder label generation — stores metadata only (no external PDF).
     """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="shipping",
+        operation="generate_shipment_label",
+        tenant_id=tenant_id,
+    )
+
     cod_enabled = resolve_tenant_cod_enabled(db, tenant_id)
     gate = can_generate_label(order, shipment, cod_enabled=cod_enabled)
     if not gate.allowed:

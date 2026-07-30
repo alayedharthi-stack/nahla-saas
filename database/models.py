@@ -3927,11 +3927,11 @@ class ProductRanking(Base):
 
 class CommerceLifecycleNotificationLedger(Base):
     """
-    Shadow-only lifecycle notification idempotency and audit ledger (PR 2B).
+    Lifecycle notification idempotency and outbound send audit ledger.
 
-    Stores structured dispatch metadata — never customer message text, prompts,
-    tokens, or sensitive evidence values.
-    """
+    Stores structured dispatch metadata and send lifecycle state — never
+    customer message text, prompts, tokens, or sensitive evidence values.
+  """
 
     __tablename__ = "commerce_lifecycle_notification_ledger"
     __table_args__ = (
@@ -3945,6 +3945,11 @@ class CommerceLifecycleNotificationLedger(Base):
             "ix_lifecycle_ledger_tenant_intent",
             "tenant_id",
             "business_intent",
+        ),
+        Index(
+            "ix_lifecycle_ledger_tenant_send_state",
+            "tenant_id",
+            "send_state",
         ),
     )
 
@@ -3966,6 +3971,17 @@ class CommerceLifecycleNotificationLedger(Base):
         ForeignKey("automation_executions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    send_state = Column(String(32), nullable=True)
+    template_name = Column(String(128), nullable=True)
+    template_service_key = Column(String(64), nullable=True)
+    provider_message_id = Column(String(128), nullable=True)
+    send_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    send_completed_at = Column(DateTime(timezone=True), nullable=True)
+    send_error_code = Column(String(64), nullable=True)
+    send_attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    reclaim_count = Column(Integer, nullable=False, default=0, server_default="0")
+    send_reserved_at = Column(DateTime(timezone=True), nullable=True)
+    last_reclaimed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
