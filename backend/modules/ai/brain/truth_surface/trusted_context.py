@@ -63,6 +63,114 @@ def _append(facts: List[TrustedFact], item: Optional[TrustedFact]) -> None:
         facts.append(item)
 
 
+_CANDIDATE_SOURCE_PATH = "brain_state.last_search_candidates"
+
+_CANDIDATE_ROW_KEYS: Tuple[str, ...] = (
+    "ref",
+    "product_id",
+    "variant_id",
+    "title",
+    "price",
+    "sale_price",
+    "regular_price",
+    "available",
+    "in_stock",
+    "product_url",
+    "image_url",
+    "cart_url",
+)
+
+
+def _first_nonempty_candidate_value(
+    candidate: Dict[str, Any],
+    keys: Tuple[str, ...],
+) -> Any:
+    for key in keys:
+        value = candidate.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _last_search_candidates_from_brain_state(brain_state: Any) -> List[Any]:
+    if brain_state is None:
+        return []
+    if isinstance(brain_state, dict):
+        raw = brain_state.get("last_search_candidates")
+    else:
+        raw = getattr(brain_state, "last_search_candidates", None)
+    if not isinstance(raw, list):
+        return []
+    return raw
+
+
+def _normalize_search_candidate_row(candidate: Any, ref: int) -> Optional[Dict[str, Any]]:
+    """Map one conversation-scoped candidate to approved identity fields only."""
+    if not isinstance(candidate, dict):
+        return None
+    product_id = _first_nonempty_candidate_value(candidate, ("product_id", "id"))
+    variant_id = _first_nonempty_candidate_value(candidate, ("variant_id",))
+    title = _first_nonempty_candidate_value(candidate, ("title", "name"))
+    if title is None:
+        return None
+    if product_id is None and variant_id is None:
+        return None
+
+    row: Dict[str, Any] = {"ref": ref, "title": title}
+    if product_id is not None:
+        row["product_id"] = product_id
+    if variant_id is not None:
+        row["variant_id"] = variant_id
+
+    for key, aliases in (
+        ("price", ("price",)),
+        ("sale_price", ("sale_price",)),
+        ("regular_price", ("regular_price",)),
+        ("available", ("available", "availability")),
+        ("in_stock", ("in_stock",)),
+        ("product_url", ("product_url", "url")),
+        ("image_url", ("image_url", "image", "product_image_url")),
+        ("cart_url", ("cart_url",)),
+    ):
+        value = _first_nonempty_candidate_value(candidate, aliases)
+        if value is not None:
+            row[key] = value
+    return row
+
+
+def _load_search_candidate_facts(brain_state: Any) -> List[TrustedFact]:
+    facts: List[TrustedFact] = []
+    candidates = _last_search_candidates_from_brain_state(brain_state)
+    if not candidates:
+        return facts
+
+    rows: List[Dict[str, Any]] = []
+    ref = 1
+    for candidate in candidates:
+        row = _normalize_search_candidate_row(candidate, ref)
+        if row is None:
+            continue
+        rows.append(row)
+        ref += 1
+    if not rows:
+        return facts
+
+    _append(
+        facts,
+        _fact(
+            domain=TrustedDomain.CATALOG,
+            key="product_candidates",
+            value=rows,
+            source=TruthSource.ORDER_PREPARATION_STATE,
+            path=_CANDIDATE_SOURCE_PATH,
+        ),
+    )
+    return facts
+
+
 def _prep_dict(brain_state: Any) -> Dict[str, Any]:
     prep = getattr(brain_state, "order_prep", None)
     if prep is None:
@@ -502,6 +610,13 @@ def build_trusted_context_snapshot(
         if TrustedDomain.ORDER.value not in loaded_domains:
             loaded_domains.append(TrustedDomain.ORDER.value)
         sources.append("brain_state.order_prep")
+
+    candidate_facts = _load_search_candidate_facts(brain_state)
+    if candidate_facts:
+        facts.extend(candidate_facts)
+        if TrustedDomain.CATALOG.value not in loaded_domains:
+            loaded_domains.append(TrustedDomain.CATALOG.value)
+        sources.append("brain_state.last_search_candidates")
 
     payment_facts = _load_payment_shipment_facts(
         db=db,
