@@ -26,6 +26,8 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 
 from core.commerce_lifecycle.dispatch import (  # noqa: E402
     commerce_lifecycle_dispatch_enabled,
+    commerce_lifecycle_dispatch_recipient_permitted,
+    commerce_lifecycle_dispatch_tenant_permitted,
     dispatch_external_lifecycle_notification,
 )
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
@@ -111,6 +113,11 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
+def _configure_lifecycle_dispatch_pilot_allowlists(monkeypatch, *, tenants: str, recipients: str) -> None:
+    monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", tenants)
+    monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST", recipients)
+
+
 def _ensure_webhook_dedupe_index(db) -> None:
     """Mirror migration 0023 partial unique index for SQLite test idempotency."""
     from sqlalchemy import text  # noqa: PLC0415
@@ -179,6 +186,11 @@ def _generic_salla_order_created_payload(*, store_id: str) -> tuple[dict, dict]:
 def _enable_dispatch_flag(monkeypatch):
     monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
     monkeypatch.setenv("COMMERCE_LIFECYCLE_SEND_STALE_SECONDS", "0")
+    _configure_lifecycle_dispatch_pilot_allowlists(
+        monkeypatch,
+        tenants="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50",
+        recipients="+966500111222,+966500222333",
+    )
 
 
 class TestDispatchFlag:
@@ -284,6 +296,199 @@ class TestReserveSendLedger:
         row = db.query(CommerceLifecycleNotificationLedger).one()
         assert row.reclaim_count == 1
         assert row.send_state == "reserved"
+
+    def test_reclaim_blocked_when_send_attempts_exhausted(self):
+        db, _ = _make_db()
+        reserve = reserve_send_decision(
+            db,
+            tenant_id=10,
+            order_id=501,
+            business_intent=BusinessIntent.ORDER_CONFIRMED,
+            channel="whatsapp",
+            source_event_id="evt-attempts",
+            transition_version="v1",
+            template_service_key="order_confirmation",
+            commit=True,
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        row.send_state = "sending"
+        row.send_attempt_count = 2
+        db.commit()
+        assert not try_conditional_reclaim_send_row(
+            db,
+            tenant_id=10,
+            ledger_id=reserve.ledger_id,
+        )
+
+    def test_reclaim_blocked_when_provider_message_id_present(self):
+        db, _ = _make_db()
+        reserve = reserve_send_decision(
+            db,
+            tenant_id=10,
+            order_id=501,
+            business_intent=BusinessIntent.ORDER_CONFIRMED,
+            channel="whatsapp",
+            source_event_id="evt-wamid",
+            transition_version="v1",
+            template_service_key="order_confirmation",
+            commit=True,
+        )
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        row.send_state = "sending"
+        row.provider_message_id = "wamid.lifecycle.existing"
+        db.commit()
+        assert not try_conditional_reclaim_send_row(
+            db,
+            tenant_id=10,
+            ledger_id=reserve.ledger_id,
+        )
+
+
+
+
+class TestLifecycleDispatchPilotAllowlists:
+    def test_master_flag_false_skips_dispatch(self, monkeypatch):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "false")
+        _configure_lifecycle_dispatch_pilot_allowlists(
+            monkeypatch,
+            tenants="20",
+            recipients="+966500111222",
+        )
+        db, _ = _make_db()
+        order = _generic_order()
+        result = _run_async(
+            dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=20,
+                order=order,
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="under_review",
+                normalized_order={
+                    "external_id": "salla-ord-8801",
+                    "status": "under_review",
+                    "external_order_number": "ORD-8801",
+                },
+                raw_payload={"event_id": "evt-disabled", "updated_at": "2026-07-30T10:00:00Z"},
+            )
+        )
+        assert result.outcome == "disabled"
+        assert result.reason_code == "dispatch_disabled"
+
+    def test_master_flag_true_empty_tenant_allowlist_blocks(self, monkeypatch):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        _configure_lifecycle_dispatch_pilot_allowlists(monkeypatch, tenants="", recipients="+966500111222")
+        assert commerce_lifecycle_dispatch_tenant_permitted(20) is False
+
+    def test_tenant_not_on_allowlist_blocks_before_reserve(self, monkeypatch):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        _configure_lifecycle_dispatch_pilot_allowlists(
+            monkeypatch,
+            tenants="99",
+            recipients="+966500111222",
+        )
+        db, _ = _make_db()
+        order = _generic_order()
+        result = _run_async(
+            dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=20,
+                order=order,
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="under_review",
+                normalized_order={
+                    "external_id": "salla-ord-8801",
+                    "status": "under_review",
+                    "external_order_number": "ORD-8801",
+                },
+                raw_payload={"event_id": "evt-tenant", "updated_at": "2026-07-30T10:00:00Z"},
+            )
+        )
+        assert result.reason_code == "tenant_not_allowlisted"
+        assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_tenant_and_recipient_allowlisted_dispatches(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        _configure_lifecycle_dispatch_pilot_allowlists(
+            monkeypatch,
+            tenants="20",
+            recipients="+966500111222",
+        )
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.allowlist.001"})
+
+        db, _ = _make_db()
+        order = _generic_order()
+        result = _run_async(
+            dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=20,
+                order=order,
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="under_review",
+                normalized_order={
+                    "external_id": "salla-ord-8801",
+                    "status": "under_review",
+                    "external_order_number": "ORD-8801",
+                },
+                raw_payload={"event_id": "evt-allow", "updated_at": "2026-07-30T10:00:00Z"},
+            )
+        )
+        assert result.dispatched is True
+        mock_send.assert_awaited_once()
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_recipient_not_allowlisted_blocks_without_provider(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        _configure_lifecycle_dispatch_pilot_allowlists(
+            monkeypatch,
+            tenants="20",
+            recipients="+966500999888",
+        )
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+
+        db, _ = _make_db()
+        order = _generic_order(customer_info={"phone": "+966500111222"})
+        result = _run_async(
+            dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=20,
+                order=order,
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="under_review",
+                normalized_order={
+                    "external_id": "salla-ord-8801",
+                    "status": "under_review",
+                    "external_order_number": "ORD-8801",
+                },
+                raw_payload={"event_id": "evt-recipient", "updated_at": "2026-07-30T10:00:00Z"},
+            )
+        )
+        assert result.reason_code == "recipient_not_allowlisted"
+        mock_send.assert_not_awaited()
+        assert commerce_lifecycle_dispatch_recipient_permitted("+966500111222") is False
 
 
 class TestLifecycleDispatcher:
@@ -823,6 +1028,11 @@ class TestSallaLifecycleIngressIntegration:
     ):
         monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
         monkeypatch.setenv("COMMERCE_LIFECYCLE_SEND_STALE_SECONDS", "300")
+        _configure_lifecycle_dispatch_pilot_allowlists(
+            monkeypatch,
+            tenants="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50",
+            recipients="+966500222333",
+        )
 
         from commerce_scenario_fixtures import make_scenario_db, seed_tenant  # noqa: PLC0415
         from core.webhook_dispatcher import _process_event  # noqa: PLC0415

@@ -581,6 +581,8 @@ def try_conditional_reclaim_send_row(
             table.tenant_id == int(tenant_id),
             table.send_state.in_((_SEND_STATE_RESERVED, _SEND_STATE_SENDING)),
             table.reclaim_count < _MAX_RECLAIM_COUNT,
+            table.send_attempt_count < _MAX_SEND_ATTEMPTS,
+            table.provider_message_id.is_(None),
             or_(
                 table.send_attempted_at.is_(None),
                 table.send_attempted_at < stale_before,
