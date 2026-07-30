@@ -329,6 +329,19 @@ jobs:
             | tee /tmp/lifecycle_cas_0093.txt
           assert_no_skips /tmp/lifecycle_cas_0093.txt 1
 
+          # Fresh DB for 0094 CAS races so schema upgrade starts cleanly.
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+
+          admin = create_engine(
+              "postgresql://nahla:nahla_password@127.0.0.1:5433/postgres",
+              isolation_level="AUTOCOMMIT",
+          )
+          with admin.connect() as conn:
+              conn.execute(text("DROP DATABASE IF EXISTS lifecycle_cas WITH (FORCE)"))
+              conn.execute(text("CREATE DATABASE lifecycle_cas"))
+          PY
+
           # 2) CAS races on 0094 (fixture upgrades 0093 -> 0094 in this process)
           python -m pytest \
             backend/tests/test_commerce_lifecycle_ledger_cas_concurrency.py::TestShadowPromotionCasPostgres \

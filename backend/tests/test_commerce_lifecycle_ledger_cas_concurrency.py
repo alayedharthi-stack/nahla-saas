@@ -332,11 +332,21 @@ def _pg_tenant_id() -> int:
     return 995_000_000 + (uuid.uuid4().int % 900_000)
 
 
+def _pg_tenant_name(tenant_id: int) -> str:
+    # Tenant.name is globally unique on PostgreSQL.
+    return f"متجر تجريبي عام-{tenant_id}"
+
+
+def _pg_ensure_tenant(session, tenant_id: int) -> None:
+    if session.get(Tenant, tenant_id) is None:
+        session.add(Tenant(id=tenant_id, name=_pg_tenant_name(tenant_id)))
+
+
 def _pg_seed_shadow(engine, *, tenant_id: int, order_id: int) -> int:
     Session = sessionmaker(bind=engine, expire_on_commit=False)
-    with Session.begin() as session:
-        if session.get(Tenant, tenant_id) is None:
-            session.add(Tenant(id=tenant_id, name="متجر تجريبي عام"))
+    session = Session()
+    try:
+        _pg_ensure_tenant(session, tenant_id)
         shadow = reserve_shadow_decision(
             session,
             tenant_id=tenant_id,
@@ -355,7 +365,10 @@ def _pg_seed_shadow(engine, *, tenant_id: int, order_id: int) -> int:
             tenant_id=tenant_id,
             outcome=ShadowLedgerOutcome.SHADOW_ELIGIBLE,
         )
+        session.commit()
         return int(shadow.ledger_id)
+    finally:
+        session.close()
 
 
 def _pg_reserve_send(engine, *, tenant_id: int, order_id: int) -> bool:
@@ -430,9 +443,10 @@ class TestMarkSendSendingCasPostgres:
     def test_concurrent_reserved_to_sending_single_winner_pg(self, lifecycle_pg_engine) -> None:
         tenant_id = _pg_tenant_id()
         order_id = 8802
-        Session = sessionmaker(bind=lifecycle_pg_engine)
-        with Session.begin() as session:
-            session.add(Tenant(id=tenant_id, name="متجر تجريبي عام"))
+        Session = sessionmaker(bind=lifecycle_pg_engine, expire_on_commit=False)
+        session = Session()
+        try:
+            _pg_ensure_tenant(session, tenant_id)
             reserve = reserve_send_decision(
                 session,
                 tenant_id=tenant_id,
@@ -444,6 +458,9 @@ class TestMarkSendSendingCasPostgres:
                 template_service_key=_GENERIC_SERVICE_KEY,
             )
             ledger_id = int(reserve.ledger_id)
+            session.commit()
+        finally:
+            session.close()
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             transitions = list(
@@ -558,7 +575,7 @@ class TestDispatchProviderCasPostgres:
                 session.close()
 
         with Session.begin() as session:
-            session.add(Tenant(id=tenant_id, name="متجر تجريبي عام"))
+            _pg_ensure_tenant(session, tenant_id)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             dispatched_flags = list(executor.map(lambda _: _run_dispatch(), range(2)))
@@ -606,7 +623,7 @@ class TestMigration0094GuardPostgres:
         ):
             with Session.begin() as session:
                 tenant_id = _pg_tenant_id()
-                session.add(Tenant(id=tenant_id, name="متجر تجريبي عام"))
+                _pg_ensure_tenant(session, tenant_id)
             with Session() as session:
                 result = asyncio.run(
                     dispatch_external_lifecycle_notification(
