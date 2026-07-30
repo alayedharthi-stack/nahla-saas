@@ -20,7 +20,7 @@ export const PLATFORM_TELEMETRY_EVENTS = {
   billing_payment_success_landed: 'billing_payment_success_landed',
   salla_returned_without_subscription: 'salla_returned_without_subscription',
 
-  // Baseline navigation / overview (registered for P2+; not wired yet)
+  // Baseline navigation / overview (wired in Layout, Sidebar, Overview — P2)
   platform_page_view: 'platform_page_view',
   platform_nav_click: 'platform_nav_click',
   overview_loaded: 'overview_loaded',
