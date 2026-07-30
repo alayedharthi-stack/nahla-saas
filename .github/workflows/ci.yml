@@ -353,7 +353,7 @@ jobs:
 
           echo "4 passed, 0 skipped"
 
-  # Dashboard Route/Nav/Page Metadata + product identity policy gates.
+  # Dashboard Route/Nav/Page Metadata + product identity + platform telemetry/flags.
   # Source-level regression scripts (tsx via npx); no npm ci / full build.
   # Does not run AI, backend, migrations, or deploy steps.
   dashboard-platform-policy:

@@ -61,6 +61,55 @@ assert(
   source.includes('export type PlatformTelemetryPayload'),
 )
 
+const layoutSource = readFileSync(
+  new URL('../src/components/layout/Layout.tsx', import.meta.url),
+  'utf8',
+)
+const sidebarSource = readFileSync(
+  new URL('../src/components/layout/Sidebar.tsx', import.meta.url),
+  'utf8',
+)
+const overviewSource = readFileSync(
+  new URL('../src/pages/Overview.tsx', import.meta.url),
+  'utf8',
+)
+
+assert(
+  'Layout wires platform_page_view',
+  layoutSource.includes("trackPlatformEvent('platform_page_view'")
+    || layoutSource.includes('trackPlatformEvent("platform_page_view"'),
+)
+
+assert(
+  'Sidebar wires platform_nav_click',
+  sidebarSource.includes("trackPlatformEvent('platform_nav_click'")
+    || sidebarSource.includes('trackPlatformEvent("platform_nav_click"'),
+)
+
+assert(
+  'Sidebar uses stable nav_group keys',
+  sidebarSource.includes("groupKey: 'main'")
+    && sidebarSource.includes("groupKey: 'admin_platform'"),
+)
+
+assert(
+  'Overview wires overview_loaded',
+  overviewSource.includes("trackPlatformEvent('overview_loaded'")
+    || overviewSource.includes('trackPlatformEvent("overview_loaded"'),
+)
+
+assert(
+  'Overview wires overview_period_changed',
+  overviewSource.includes("trackPlatformEvent('overview_period_changed'")
+    || overviewSource.includes('trackPlatformEvent("overview_period_changed"'),
+)
+
+assert(
+  'Overview wires overview_cta_clicked',
+  overviewSource.includes("trackPlatformEvent('overview_cta_clicked'")
+    || overviewSource.includes('trackPlatformEvent("overview_cta_clicked"'),
+)
+
 if (failed > 0) {
   console.error(`\n${failed} platform telemetry check(s) failed`)
   process.exit(1)
