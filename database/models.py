@@ -1556,6 +1556,13 @@ class WhatsAppTemplate(Base):
     step_number = Column(Integer, nullable=True)                 # sequence step (multi-step flows like cart recovery)
     has_coupon = Column(Boolean, default=False, nullable=True)   # template includes a coupon/discount code
     trigger_delay_hours = Column(Float, nullable=True)           # delay before auto-send (hours)
+    # Order-updates revision chain (migration 0096)
+    revision = Column(Integer, nullable=False, default=1, server_default='1')
+    supersedes_template_id = Column(
+        Integer,
+        ForeignKey('whatsapp_templates.id', ondelete='SET NULL'),
+        nullable=True,
+    )
 
 
 class Campaign(Base):

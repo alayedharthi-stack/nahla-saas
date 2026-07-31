@@ -320,6 +320,25 @@ async def _execute_reserved_send(
             reason_code="no_approved_template",
         )
 
+    from core.commerce_lifecycle.order_updates import is_order_update_enabled  # noqa: PLC0415
+    if not is_order_update_enabled(db, int(tenant_id), service_key):
+        finalize_send_outcome(
+            db,
+            ledger_id=reserve.ledger_id,
+            tenant_id=int(tenant_id),
+            outcome=SendLedgerOutcome.SEND_BLOCKED,
+            send_error_code="order_update_disabled",
+            commit=True,
+        )
+        return LifecycleDispatchResult(
+            ledger_id=reserve.ledger_id,
+            dispatched=False,
+            duplicate=False,
+            recovered=reserve.recovered,
+            outcome=SendLedgerOutcome.SEND_BLOCKED.value,
+            reason_code="order_update_disabled",
+        )
+
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
     from models import CommerceLifecycleNotificationLedger  # noqa: PLC0415

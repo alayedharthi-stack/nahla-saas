@@ -1380,6 +1380,7 @@ export interface Translations {
       searchPlaceholder: string
       tags: {
         all:       string
+        order_updates: string
         marketing: string
         orders:    string
         shipping:  string

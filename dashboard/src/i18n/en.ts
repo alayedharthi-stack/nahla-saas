@@ -1429,6 +1429,7 @@ const en: Translations = {
       searchPlaceholder: 'Search templates...',
       tags: {
         all:       'All',
+        order_updates: 'Order updates',
         marketing: 'Marketing',
         orders:    'Orders',
         shipping:  'Shipping',
