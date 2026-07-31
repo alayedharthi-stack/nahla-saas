@@ -324,7 +324,8 @@ def lifecycle_pg_engine_0093():
 
 @pytest.fixture(scope="module")
 def lifecycle_pg_engine(lifecycle_pg_engine_0093):
-    _upgrade_pg(lifecycle_pg_engine_0093, "0094")
+    # Lifecycle integration branch head is 0096 (0094 → 0095 send_method → 0096 revisions).
+    _upgrade_pg(lifecycle_pg_engine_0093, "0096")
     yield lifecycle_pg_engine_0093
 
 
