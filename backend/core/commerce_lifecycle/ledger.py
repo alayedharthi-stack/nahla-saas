@@ -46,6 +46,12 @@ _ALLOWED_DISPATCH_DECISION_KEYS: FrozenSet[str] = frozenset({
     "capabilities_valid",
     "template_evidence_valid",
     "template_missing_evidence",
+    "send_method",
+})
+
+_ALLOWED_SEND_METHODS: FrozenSet[str] = frozenset({
+    "session_message",
+    "approved_template",
 })
 
 _FORBIDDEN_PAYLOAD_KEYS: FrozenSet[str] = frozenset({
@@ -328,6 +334,18 @@ def sanitize_evidence_present(fields: Optional[Sequence[str]]) -> Tuple[str, ...
             seen.append(name)
     return tuple(seen)
 
+
+
+def normalize_send_method(value: Optional[str]) -> Optional[str]:
+    """Return validated send_method or None (legacy / undecided)."""
+    if value is None:
+        return None
+    method = str(value).strip()
+    if not method:
+        return None
+    if method not in _ALLOWED_SEND_METHODS:
+        raise ValueError(f"unsupported send_method: {method!r}")
+    return method
 
 def sanitize_dispatch_decision(payload: Optional[Mapping[str, Any]]) -> dict[str, str]:
     if not payload:
@@ -1033,6 +1051,7 @@ def mark_send_sending(
     tenant_id: int,
     template_name: Optional[str] = None,
     template_service_key: Optional[str] = None,
+    send_method: Optional[str] = None,
     commit: bool = False,
 ) -> MarkSendSendingResult:
     """Atomically transition a reserved row to sending before the provider call."""
@@ -1060,6 +1079,9 @@ def mark_send_sending(
             template_service_key,
             field="template_service_key",
         )
+    method = normalize_send_method(send_method)
+    if method is not None:
+        values[table.send_method] = method
 
     updated = (
         db.query(table)
@@ -1102,6 +1124,7 @@ def finalize_send_outcome(
     provider_message_id: Optional[str] = None,
     send_error_code: Optional[str] = None,
     template_name: Optional[str] = None,
+    send_method: Optional[str] = None,
     commit: bool = False,
 ) -> FinalizeSendResult:
     """Finalize sent / failed / ambiguous — never auto-resend ambiguous rows."""
@@ -1146,6 +1169,9 @@ def finalize_send_outcome(
     row.send_completed_at = _utcnow()
     if template_name is not None:
         row.template_name = _normalize_required_text(template_name, field="template_name")
+    method = normalize_send_method(send_method)
+    if method is not None:
+        row.send_method = method
     if provider_message_id is not None:
         wamid = str(provider_message_id).strip()
         row.provider_message_id = wamid or None
@@ -1230,6 +1256,7 @@ __all__ = [
     "reserve_send_decision",
     "reserve_shadow_decision",
     "sanitize_capabilities_snapshot",
+    "normalize_send_method",
     "sanitize_dispatch_decision",
     "sanitize_evidence_present",
     "try_conditional_promote_shadow_send_row",
