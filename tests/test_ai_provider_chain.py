@@ -8,11 +8,13 @@ class _FakeProvider:
         self._configured = configured
         self._reply_text = reply_text
         self._status = status
+        self.call_count = 0
 
     def is_configured(self):
         return self._configured
 
     def call(self, message, prompt, *, history=None):
+        self.call_count += 1
         return {
             "provider": self.provider_name,
             "model": f"{self.provider_name}-model",
@@ -81,14 +83,16 @@ def test_call_with_chain_passes_history_to_provider(monkeypatch):
     assert raw["history_len"] == 2
 
 
-def test_call_with_chain_uses_default_provider_when_all_chain_calls_fail(monkeypatch):
+def test_call_with_chain_returns_controlled_failure_when_chain_exhausted(monkeypatch):
     engine = AIOrchestratorEngine()
 
-    fallback_provider = _FakeProvider("anthropic", configured=True, reply_text="fallback")
+    anthropic_provider = _FakeProvider("anthropic", configured=True, reply_text="should-not-run")
+    openai_provider = _FakeProvider("openai_compatible", configured=True, reply_text="")
+    gemini_provider = _FakeProvider("gemini", configured=False, reply_text="")
     providers = {
-        "anthropic": _FakeProvider("anthropic", configured=True, reply_text=""),
-        "openai_compatible": _FakeProvider("openai_compatible", configured=True, reply_text=""),
-        "gemini": _FakeProvider("gemini", configured=False, reply_text=""),
+        "anthropic": anthropic_provider,
+        "openai_compatible": openai_provider,
+        "gemini": gemini_provider,
     }
 
     monkeypatch.setattr(
@@ -99,7 +103,7 @@ def test_call_with_chain_uses_default_provider_when_all_chain_calls_fail(monkeyp
         "modules.ai.orchestrator.engine.call_with_resilience",
         lambda provider_name, call_fn, timeout: call_fn() if provider_name != "openai_compatible" else None,
     )
-    engine._provider = fallback_provider
+    engine._provider = openai_provider
 
     chain = ProviderChainConfig(
         providers=["anthropic", "openai_compatible", "gemini"],
@@ -108,5 +112,8 @@ def test_call_with_chain_uses_default_provider_when_all_chain_calls_fail(monkeyp
     )
     raw = engine._call_with_chain("hello", "system prompt", chain)
 
-    assert raw["provider"] == "anthropic"
-    assert raw["reply_text"] == "fallback"
+    assert raw["reply_text"] == ""
+    assert raw["status"] == "openai_chain_exhausted"
+    assert raw["provider"] == "openai_compatible"
+    assert anthropic_provider.call_count == 0
+    assert "anthropic_fallback_blocked" not in raw
