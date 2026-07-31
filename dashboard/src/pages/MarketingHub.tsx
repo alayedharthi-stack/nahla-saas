@@ -1,4 +1,3 @@
-import { Link } from 'react-router-dom'
 import {
   Megaphone,
   Gift,
@@ -6,55 +5,82 @@ import {
   TrendingUp,
   Bot,
   BookOpen,
-  ChevronRight,
+  FileText,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
+import { HubCardGrid, HubSectionHeading, type HubCardItem } from '../components/ui/HubCardGrid'
 import { useLanguage } from '../i18n/context'
-
-const HUB_LINKS = [
-  { key: 'campaigns' as const, to: '/campaigns', icon: Megaphone },
-  { key: 'promotions' as const, to: '/promotions', icon: Gift },
-  { key: 'coupons' as const, to: '/coupons', icon: Tag },
-  { key: 'widgets' as const, to: '/widgets', icon: TrendingUp },
-  { key: 'smartAutomations' as const, to: '/smart-automations', icon: Bot },
-  { key: 'templateLibrary' as const, to: '/marketing/templates', icon: BookOpen },
-] as const
 
 export default function MarketingHub() {
   const { t } = useLanguage()
   const page = t(tr => tr.pages.marketingHub)
 
+  const operationalItems: HubCardItem[] = [
+    {
+      to: '/campaigns',
+      icon: Megaphone,
+      title: page.cards.campaigns.title,
+      description: page.cards.campaigns.description,
+    },
+    {
+      to: '/promotions',
+      icon: Gift,
+      title: page.cards.promotions.title,
+      description: page.cards.promotions.description,
+      isAI: true,
+    },
+    {
+      to: '/coupons',
+      icon: Tag,
+      title: page.cards.coupons.title,
+      description: page.cards.coupons.description,
+      isAI: true,
+    },
+    {
+      to: '/widgets',
+      icon: TrendingUp,
+      title: page.cards.widgets.title,
+      description: page.cards.widgets.description,
+    },
+    {
+      to: '/smart-automations',
+      icon: Bot,
+      title: page.cards.smartAutomations.title,
+      description: page.cards.smartAutomations.description,
+      isAI: true,
+    },
+  ]
+
+  const templateItems: HubCardItem[] = [
+    {
+      to: '/marketing/templates',
+      icon: BookOpen,
+      title: page.cards.templateLibrary.title,
+      description: page.cards.templateLibrary.description,
+    },
+    {
+      to: '/templates',
+      icon: FileText,
+      title: page.cards.whatsappTemplates.title,
+      description: page.cards.whatsappTemplates.description,
+    },
+  ]
+
   return (
-    <div>
+    <div className="space-y-8">
       <PageHeader title={page.title} subtitle={page.subtitle} />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {HUB_LINKS.map(({ key, to, icon: Icon }) => {
-          const card = page.cards[key]
-          return (
-            <Link
-              key={to}
-              to={to}
-              className="card p-5 hover:border-brand-200 hover:shadow-sm transition-all group"
-            >
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
-                  <Icon className="w-5 h-5 text-slate-600" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold text-slate-900 group-hover:text-brand-600 transition-colors">
-                      {card.title}
-                    </h2>
-                    <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-brand-400 shrink-0" />
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">{card.description}</p>
-                </div>
-              </div>
-            </Link>
-          )
-        })}
-      </div>
+      <section>
+        <HubCardGrid items={operationalItems} />
+      </section>
+
+      <section>
+        <HubSectionHeading
+          title={page.sections.templates.title}
+          description={page.sections.templates.description}
+        />
+        <HubCardGrid items={templateItems} />
+      </section>
     </div>
   )
 }

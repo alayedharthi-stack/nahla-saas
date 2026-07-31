@@ -176,16 +176,67 @@ export interface Translations {
     settings:         { title: string; subtitle: string }
     billing:          { title: string; subtitle: string }
     widgets:          { title: string; subtitle: string }
-    marketingHub: {
+    inboxHub: {
       title: string
       subtitle: string
       cards: {
-        campaigns:        { title: string; description: string }
-        promotions:       { title: string; description: string }
-        coupons:          { title: string; description: string }
-        widgets:          { title: string; description: string }
-        smartAutomations: { title: string; description: string }
-        templateLibrary:  { title: string; description: string }
+        conversations: { title: string; description: string }
+        handoffQueue:  { title: string; description: string }
+      }
+    }
+    productsHub: {
+      title: string
+      subtitle: string
+      cards: {
+        catalog:              { title: string; description: string }
+        catalogIntelligence:  { title: string; description: string }
+      }
+    }
+    channelsHub: {
+      title: string
+      subtitle: string
+      cards: {
+        integrations:     { title: string; description: string }
+        storeIntegration: { title: string; description: string }
+        whatsappConnect:  { title: string; description: string }
+        manualSetup:      { title: string; description: string }
+        salesChannels:    { title: string; description: string }
+      }
+    }
+    settingsHub: {
+      title: string
+      subtitle: string
+      sections: {
+        core:       { title: string; description: string }
+        nahlaSmart: { title: string; description: string }
+        advanced:   { title: string; description: string }
+      }
+      cards: {
+        general:         { title: string; description: string }
+        security:        { title: string; description: string }
+        billing:         { title: string; description: string }
+        intelligence:    { title: string; description: string }
+        knowledgeBase:   { title: string; description: string }
+        systemStatus:    { title: string; description: string }
+        deliveryQuality: { title: string; description: string }
+        salesAgent:      { title: string; description: string }
+        analytics:       { title: string; description: string }
+      }
+    }
+    marketingHub: {
+      title: string
+      subtitle: string
+      sections: {
+        templates: { title: string; description: string }
+      }
+      cards: {
+        campaigns:         { title: string; description: string }
+        promotions:        { title: string; description: string }
+        coupons:           { title: string; description: string }
+        widgets:           { title: string; description: string }
+        smartAutomations:  { title: string; description: string }
+        templateLibrary:   { title: string; description: string }
+        whatsappTemplates: { title: string; description: string }
       }
     }
     nahlaTemplateLibrary: {

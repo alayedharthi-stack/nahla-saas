@@ -90,6 +90,29 @@ assert(
   `got ${topLevelDestCount}`,
 )
 
+const directLinkCount = (destBlock.match(/directLink:/g) ?? []).length
+assert(
+  'every simplified destination has a directLink (sidebar shows eight only)',
+  directLinkCount === 8,
+  `got ${directLinkCount}`,
+)
+
+assert(
+  'Sidebar simplified nav does not render child links in the sidebar',
+  !sidebarSource.includes('renderChildLinks')
+    && !sidebarSource.includes('dest.children &&'),
+)
+
+assert(
+  'Sidebar uses parent destination active state',
+  sidebarSource.includes('isPathInSimplifiedDestination'),
+)
+
+assert(
+  'merchantNavSimplified exports sidebar link count constant',
+  navDataSource.includes('SIMPLIFIED_SIDEBAR_LINK_COUNT = 8'),
+)
+
 const forbiddenPaths = [
   '/post_delivery',
   '/order-updates',

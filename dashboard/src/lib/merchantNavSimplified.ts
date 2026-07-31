@@ -113,6 +113,11 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destKey: 'dest_inbox',
     destLabel: tr => tr.nav.destinations.inbox,
     destIcon: 'message-square',
+    directLink: {
+      to: '/inbox',
+      icon: 'message-square',
+      label: tr => tr.nav.destinations.inbox,
+    },
     children: [
       { to: '/conversations', icon: 'message-square', label: tr => tr.nav.items.conversations },
       { to: '/handoff-queue', icon: 'user-check', label: tr => tr.nav.items.handoffQueue },
@@ -122,6 +127,11 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destKey: 'dest_products',
     destLabel: tr => tr.nav.destinations.products,
     destIcon: 'package',
+    directLink: {
+      to: '/products',
+      icon: 'package',
+      label: tr => tr.nav.destinations.products,
+    },
     children: [
       { to: '/catalog', icon: 'package', label: tr => tr.nav.items.whatsappCatalog },
       { to: '/catalog-intelligence', icon: 'folder-tree', label: tr => tr.nav.items.catalogIntelligence },
@@ -170,6 +180,11 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destKey: 'dest_channels',
     destLabel: tr => tr.nav.destinations.channels,
     destIcon: 'plug',
+    directLink: {
+      to: '/channels',
+      icon: 'plug',
+      label: tr => tr.nav.destinations.channels,
+    },
     children: [
       { to: '/integrations', icon: 'plug', label: tr => tr.nav.items.integrations },
       { to: '/store-integration', icon: 'store', label: tr => tr.nav.items.storeIntegration },
@@ -182,6 +197,11 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destKey: 'dest_settings',
     destLabel: tr => tr.nav.destinations.settings,
     destIcon: 'settings',
+    directLink: {
+      to: '/settings-hub',
+      icon: 'settings',
+      label: tr => tr.nav.destinations.settings,
+    },
     children: [
       { to: '/settings', icon: 'settings', label: tr => tr.nav.items.settings },
       { to: '/settings/security', icon: 'shield-check', label: tr => tr.nav.items.security },
@@ -225,3 +245,28 @@ export function collectSimplifiedNavPaths(
   }
   return paths
 }
+
+/** Paths belonging to one top-level destination (hub + children + sections). */
+export function collectDestinationPaths(
+  dest: SimplifiedNavDestination,
+): string[] {
+  const paths: string[] = []
+  if (dest.directLink) paths.push(dest.directLink.to)
+  dest.children?.forEach(item => paths.push(item.to))
+  dest.sections?.forEach(section => section.items.forEach(item => paths.push(item.to)))
+  return paths
+}
+
+/** Whether the current pathname belongs to a simplified destination (parent active state). */
+export function isPathInSimplifiedDestination(
+  pathname: string,
+  dest: SimplifiedNavDestination,
+): boolean {
+  const paths = collectDestinationPaths(dest)
+  return paths.some(
+    path => pathname === path || pathname.startsWith(`${path}/`),
+  )
+}
+
+/** Sidebar shows exactly eight top-level destination links (directLink only). */
+export const SIMPLIFIED_SIDEBAR_LINK_COUNT = 8

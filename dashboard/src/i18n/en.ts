@@ -158,9 +158,125 @@ const en: Translations = {
     settings:         { title: 'Settings',             subtitle: 'Store settings, AI permissions & billing' },
     billing:          { title: 'Billing',              subtitle: 'Manage your Nahla subscription' },
     widgets:          { title: 'Sales Tools',          subtitle: 'Sales-boosting tools embedded in your store' },
+    inboxHub: {
+      title:    'Conversations',
+      subtitle: 'Inbox and handoff queue — one entry point',
+      cards: {
+        conversations: {
+          title:       'Conversations',
+          description: 'WhatsApp inbox with AI, human, and campaign badges',
+        },
+        handoffQueue: {
+          title:       'Handoff queue',
+          description: 'Customers waiting for staff — highlighted when human help is requested',
+        },
+      },
+    },
+    productsHub: {
+      title:    'Products',
+      subtitle: 'Catalog and catalog intelligence',
+      cards: {
+        catalog: {
+          title:       'WhatsApp catalog',
+          description: 'Products Nahla reads from and sends in WhatsApp cards',
+        },
+        catalogIntelligence: {
+          title:       'Catalog groups',
+          description: 'Product groups, alternatives, and bestsellers for AI',
+        },
+      },
+    },
+    channelsHub: {
+      title:    'Channels',
+      subtitle: 'Integrations, store link, WhatsApp, and sales channels',
+      cards: {
+        integrations: {
+          title:       'Integrations',
+          description: 'Salla, Zid, and third-party connections',
+        },
+        storeIntegration: {
+          title:       'Store integration',
+          description: 'Connect your e-commerce store to Nahla',
+        },
+        whatsappConnect: {
+          title:       'Connect WhatsApp',
+          description: 'Link your WhatsApp Business number',
+        },
+        manualSetup: {
+          title:       'Manual WhatsApp setup guide',
+          description: 'Step-by-step help when guided connect is not available',
+        },
+        salesChannels: {
+          title:       'Sales & contact channels',
+          description: 'Online store, showroom, branches, and routing',
+        },
+      },
+    },
+    settingsHub: {
+      title:    'Settings',
+      subtitle: 'Store settings, security, billing, Nahla Intelligence, and advanced tools',
+      sections: {
+        core: {
+          title:       'Store & account',
+          description: 'General settings, security, and subscription',
+        },
+        nahlaSmart: {
+          title:       'Nahla Intelligence',
+          description: 'AI intelligence and knowledge base',
+        },
+        advanced: {
+          title:       'Advanced',
+          description: 'System status, delivery quality, logs, and analytics — collapsed by default',
+        },
+      },
+      cards: {
+        general: {
+          title:       'General settings',
+          description: 'Store profile, AI permissions, and preferences',
+        },
+        security: {
+          title:       'Security & authentication',
+          description: 'Two-factor authentication and account security',
+        },
+        billing: {
+          title:       'Billing & subscription',
+          description: 'Plan, invoices, and payment',
+        },
+        intelligence: {
+          title:       'Nahla Intelligence',
+          description: 'AI behavior and sales intelligence settings',
+        },
+        knowledgeBase: {
+          title:       'Knowledge base',
+          description: 'Facts Nahla uses when replying to customers',
+        },
+        systemStatus: {
+          title:       'System status',
+          description: 'Health, dependencies, and platform events',
+        },
+        deliveryQuality: {
+          title:       'Delivery quality',
+          description: 'Message delivery metrics and quality signals',
+        },
+        salesAgent: {
+          title:       'Sales agent logs',
+          description: 'AI sales conversation history and traces',
+        },
+        analytics: {
+          title:       'Analytics & AI',
+          description: 'Revenue, conversion, and product insights',
+        },
+      },
+    },
     marketingHub: {
       title:    'Marketing',
       subtitle: 'Campaigns, promotions, automations, and templates — one entry point',
+      sections: {
+        templates: {
+          title:       'Templates',
+          description: 'Nahla library and WhatsApp templates',
+        },
+      },
       cards: {
         campaigns: {
           title:       'Campaigns',
@@ -185,6 +301,10 @@ const en: Translations = {
         templateLibrary: {
           title:       'Nahla Template Library',
           description: 'Store, WhatsApp, and order-update templates — organizational shell',
+        },
+        whatsappTemplates: {
+          title:       'WhatsApp templates',
+          description: 'Manage Meta-approved templates in the existing surface',
         },
       },
     },

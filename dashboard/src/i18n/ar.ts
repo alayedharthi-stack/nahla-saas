@@ -162,9 +162,125 @@ const ar: Translations = {
     settings:         { title: 'الإعدادات',              subtitle: 'إعدادات المتجر وصلاحيات الذكاء الاصطناعي' },
     billing:          { title: 'الاشتراك والفوترة',      subtitle: 'إدارة خطة نحلة' },
     widgets:          { title: 'أدوات زيادة المبيعات',   subtitle: 'أدوات تعزيز المبيعات المدمجة بالمتجر' },
+    inboxHub: {
+      title:    'المحادثات',
+      subtitle: 'صندوق الوارد وطابور التحويل — نقطة دخول واحدة',
+      cards: {
+        conversations: {
+          title:       'المحادثات',
+          description: 'صندوق واتساب مع شارات الذكاء والبشري والحملات',
+        },
+        handoffQueue: {
+          title:       'طابور التحويل',
+          description: 'عملاء بانتظار الموظف — يُبرز عند طلب التحدث مع موظف',
+        },
+      },
+    },
+    productsHub: {
+      title:    'المنتجات',
+      subtitle: 'كتالوج المنتجات وذكاء الكتالوج',
+      cards: {
+        catalog: {
+          title:       'كتالوج واتساب',
+          description: 'المنتجات التي يقرأها نحلة ويرسلها في بطاقات واتساب',
+        },
+        catalogIntelligence: {
+          title:       'تصنيف الكتالوج',
+          description: 'مجموعات المنتجات والبدائل والأكثر مبيعاً للذكاء',
+        },
+      },
+    },
+    channelsHub: {
+      title:    'القنوات',
+      subtitle: 'التكاملات وربط المتجر وواتساب وقنوات البيع',
+      cards: {
+        integrations: {
+          title:       'التكاملات',
+          description: 'سلة وزد وربط المنصات الخارجية',
+        },
+        storeIntegration: {
+          title:       'ربط المتجر',
+          description: 'ربط متجرك الإلكتروني بنحلة',
+        },
+        whatsappConnect: {
+          title:       'ربط واتساب',
+          description: 'ربط رقم واتساب للأعمال',
+        },
+        manualSetup: {
+          title:       'دليل الربط اليدوي لواتساب',
+          description: 'خطوات مساعدة عند تعذّر الربط الموجّه',
+        },
+        salesChannels: {
+          title:       'قنوات البيع والتواصل',
+          description: 'المتجر الإلكتروني والمعرض والفروع والتوجيه',
+        },
+      },
+    },
+    settingsHub: {
+      title:    'الإعدادات',
+      subtitle: 'إعدادات المتجر والأمان والفوترة ونحلة الذكية والأدوات المتقدمة',
+      sections: {
+        core: {
+          title:       'المتجر والحساب',
+          description: 'الإعدادات العامة والأمان والاشتراك',
+        },
+        nahlaSmart: {
+          title:       'نحلة الذكية',
+          description: 'ذكاء نحلة وقاعدة المعرفة',
+        },
+        advanced: {
+          title:       'متقدم',
+          description: 'حالة النظام وجودة التسليم والسجلات والتحليلات — مطوي افتراضياً',
+        },
+      },
+      cards: {
+        general: {
+          title:       'الإعدادات العامة',
+          description: 'ملف المتجر وصلاحيات الذكاء والتفضيلات',
+        },
+        security: {
+          title:       'الأمان والمصادقة',
+          description: 'المصادقة الثنائية وأمان الحساب',
+        },
+        billing: {
+          title:       'الاشتراك والفوترة',
+          description: 'الخطة والفواتير والدفع',
+        },
+        intelligence: {
+          title:       'ذكاء نحلة',
+          description: 'إعدادات سلوك الذكاء وذكاء المبيعات',
+        },
+        knowledgeBase: {
+          title:       'قاعدة المعرفة',
+          description: 'المعلومات التي يستخدمها نحلة عند الرد على العملاء',
+        },
+        systemStatus: {
+          title:       'حالة النظام',
+          description: 'الصحة والتبعيات وأحداث المنصة',
+        },
+        deliveryQuality: {
+          title:       'جودة التسليم',
+          description: 'مقاييس تسليم الرسائل وإشارات الجودة',
+        },
+        salesAgent: {
+          title:       'سجل المبيعات',
+          description: 'تاريخ محادثات المبيعات بالذكاء',
+        },
+        analytics: {
+          title:       'التحليلات والذكاء',
+          description: 'الإيرادات والتحويل ورؤى المنتجات',
+        },
+      },
+    },
     marketingHub: {
       title:    'التسويق',
       subtitle: 'الحملات والعروض والأتمتة ومكتبة القوالب — نقطة دخول واحدة لأدوات التسويق',
+      sections: {
+        templates: {
+          title:       'القوالب',
+          description: 'مكتبة قوالب نحلة وقوالب واتساب',
+        },
+      },
       cards: {
         campaigns: {
           title:       'الحملات',
@@ -189,6 +305,10 @@ const ar: Translations = {
         templateLibrary: {
           title:       'مكتبة قوالب نحلة',
           description: 'قوالب المتجر وواتساب وتحديثات الطلبات — سطح تنظيمي',
+        },
+        whatsappTemplates: {
+          title:       'قوالب واتساب',
+          description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
         },
       },
     },

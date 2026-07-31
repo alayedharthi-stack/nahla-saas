@@ -72,8 +72,24 @@ assert(
   simplifiedPaths.has('/marketing/templates'),
 )
 assert(
-  'simplified tree exposes 29 routes (27 legacy + 2 P3.2)',
-  simplifiedPaths.size === 29,
+  'simplified tree includes inbox hub route',
+  simplifiedPaths.has('/inbox'),
+)
+assert(
+  'simplified tree includes products hub route',
+  simplifiedPaths.has('/products'),
+)
+assert(
+  'simplified tree includes channels hub route',
+  simplifiedPaths.has('/channels'),
+)
+assert(
+  'simplified tree includes settings hub route',
+  simplifiedPaths.has('/settings-hub'),
+)
+assert(
+  'simplified tree exposes 33 routes (27 legacy + 6 hub shells)',
+  simplifiedPaths.size === 33,
   `got ${simplifiedPaths.size}`,
 )
 
@@ -90,6 +106,22 @@ assert(
 assert(
   'App.tsx registers /marketing/templates route',
   appSource.includes('path="marketing/templates"') && appSource.includes('NahlaTemplateLibrary'),
+)
+assert(
+  'App.tsx registers inbox hub route',
+  appSource.includes('path="inbox"') && appSource.includes('InboxHub'),
+)
+assert(
+  'App.tsx registers products hub route',
+  appSource.includes('path="products"') && appSource.includes('ProductsHub'),
+)
+assert(
+  'App.tsx registers channels hub route',
+  appSource.includes('path="channels"') && appSource.includes('ChannelsHub'),
+)
+assert(
+  'App.tsx registers settings hub route',
+  appSource.includes('path="settings-hub"') && appSource.includes('SettingsHub'),
 )
 assert(
   'App.tsx keeps /templates route',
