@@ -1,32 +1,3 @@
-import {
-  LayoutDashboard,
-  MessageSquare,
-  ShoppingCart,
-  Bot,
-  Tag,
-  Gift,
-  Megaphone,
-  FileText,
-  Brain,
-  Plug,
-  BarChart2,
-  Settings,
-  BrainCircuit,
-  FolderTree,
-  Store,
-  UserCheck,
-  Users,
-  Activity,
-  CreditCard,
-  MessageCircle,
-  HelpCircle,
-  BookOpen,
-  Gauge,
-  Package,
-  ShieldCheck,
-  TrendingUp,
-} from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
 import type { Translations } from '../i18n/types'
 
 /** Stable telemetry keys for the simplified 8-destination shell (P3.1). */
@@ -41,9 +12,38 @@ export type SimplifiedNavGroupKey =
   | 'dest_settings'
   | 'dest_settings_advanced'
 
+/** Icon keys resolved to Lucide components in Sidebar render only. */
+export type MerchantNavIconKey =
+  | 'layout-dashboard'
+  | 'message-square'
+  | 'shopping-cart'
+  | 'bot'
+  | 'tag'
+  | 'gift'
+  | 'megaphone'
+  | 'file-text'
+  | 'brain'
+  | 'plug'
+  | 'bar-chart-2'
+  | 'settings'
+  | 'brain-circuit'
+  | 'folder-tree'
+  | 'store'
+  | 'user-check'
+  | 'users'
+  | 'activity'
+  | 'credit-card'
+  | 'message-circle'
+  | 'help-circle'
+  | 'book-open'
+  | 'gauge'
+  | 'package'
+  | 'shield-check'
+  | 'trending-up'
+
 export interface SimplifiedNavLink {
   to: string
-  icon: LucideIcon
+  icon: MerchantNavIconKey
   label: (tr: Translations) => string
   isAI?: boolean
 }
@@ -59,7 +59,7 @@ export interface SimplifiedNavSection {
 export interface SimplifiedNavDestination {
   destKey: SimplifiedNavGroupKey
   destLabel: (tr: Translations) => string
-  destIcon: LucideIcon
+  destIcon: MerchantNavIconKey
   /** Single-route destinations render as one top-level link. */
   directLink?: SimplifiedNavLink
   children?: SimplifiedNavLink[]
@@ -102,84 +102,84 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
   {
     destKey: 'dest_overview',
     destLabel: tr => tr.nav.destinations.overview,
-    destIcon: LayoutDashboard,
+    destIcon: 'layout-dashboard',
     directLink: {
       to: '/overview',
-      icon: LayoutDashboard,
+      icon: 'layout-dashboard',
       label: tr => tr.nav.items.overview,
     },
   },
   {
     destKey: 'dest_inbox',
     destLabel: tr => tr.nav.destinations.inbox,
-    destIcon: MessageSquare,
+    destIcon: 'message-square',
     children: [
-      { to: '/conversations', icon: MessageSquare, label: tr => tr.nav.items.conversations },
-      { to: '/handoff-queue', icon: UserCheck, label: tr => tr.nav.items.handoffQueue },
+      { to: '/conversations', icon: 'message-square', label: tr => tr.nav.items.conversations },
+      { to: '/handoff-queue', icon: 'user-check', label: tr => tr.nav.items.handoffQueue },
     ],
   },
   {
     destKey: 'dest_products',
     destLabel: tr => tr.nav.destinations.products,
-    destIcon: Package,
+    destIcon: 'package',
     children: [
-      { to: '/catalog', icon: Package, label: tr => tr.nav.items.whatsappCatalog },
-      { to: '/catalog-intelligence', icon: FolderTree, label: tr => tr.nav.items.catalogIntelligence },
+      { to: '/catalog', icon: 'package', label: tr => tr.nav.items.whatsappCatalog },
+      { to: '/catalog-intelligence', icon: 'folder-tree', label: tr => tr.nav.items.catalogIntelligence },
     ],
   },
   {
     destKey: 'dest_orders',
     destLabel: tr => tr.nav.destinations.orders,
-    destIcon: ShoppingCart,
+    destIcon: 'shopping-cart',
     directLink: {
       to: '/orders',
-      icon: ShoppingCart,
+      icon: 'shopping-cart',
       label: tr => tr.nav.items.orders,
     },
   },
   {
     destKey: 'dest_customers',
     destLabel: tr => tr.nav.destinations.customers,
-    destIcon: Users,
+    destIcon: 'users',
     directLink: {
       to: '/customers',
-      icon: Users,
+      icon: 'users',
       label: tr => tr.nav.items.customers,
     },
   },
   {
     destKey: 'dest_marketing',
     destLabel: tr => tr.nav.destinations.marketing,
-    destIcon: Megaphone,
+    destIcon: 'megaphone',
     children: [
-      { to: '/campaigns', icon: Megaphone, label: tr => tr.nav.items.campaigns },
-      { to: '/promotions', icon: Gift, label: tr => tr.nav.items.promotions, isAI: true },
-      { to: '/coupons', icon: Tag, label: tr => tr.nav.items.coupons, isAI: true },
-      { to: '/widgets', icon: TrendingUp, label: tr => tr.nav.items.widgets },
-      { to: '/smart-automations', icon: Bot, label: tr => tr.nav.items.autopilot, isAI: true },
-      { to: '/templates', icon: FileText, label: tr => tr.nav.items.templates },
+      { to: '/campaigns', icon: 'megaphone', label: tr => tr.nav.items.campaigns },
+      { to: '/promotions', icon: 'gift', label: tr => tr.nav.items.promotions, isAI: true },
+      { to: '/coupons', icon: 'tag', label: tr => tr.nav.items.coupons, isAI: true },
+      { to: '/widgets', icon: 'trending-up', label: tr => tr.nav.items.widgets },
+      { to: '/smart-automations', icon: 'bot', label: tr => tr.nav.items.autopilot, isAI: true },
+      { to: '/templates', icon: 'file-text', label: tr => tr.nav.items.templates },
     ],
   },
   {
     destKey: 'dest_channels',
     destLabel: tr => tr.nav.destinations.channels,
-    destIcon: Plug,
+    destIcon: 'plug',
     children: [
-      { to: '/integrations', icon: Plug, label: tr => tr.nav.items.integrations },
-      { to: '/store-integration', icon: Store, label: tr => tr.nav.items.storeIntegration },
-      { to: '/whatsapp-connect', icon: MessageCircle, label: tr => tr.nav.items.whatsappConnect },
-      { to: '/help/whatsapp-manual-setup', icon: HelpCircle, label: tr => tr.nav.items.manualSetup },
-      { to: '/sales-channels', icon: Store, label: tr => tr.nav.items.salesChannels },
+      { to: '/integrations', icon: 'plug', label: tr => tr.nav.items.integrations },
+      { to: '/store-integration', icon: 'store', label: tr => tr.nav.items.storeIntegration },
+      { to: '/whatsapp-connect', icon: 'message-circle', label: tr => tr.nav.items.whatsappConnect },
+      { to: '/help/whatsapp-manual-setup', icon: 'help-circle', label: tr => tr.nav.items.manualSetup },
+      { to: '/sales-channels', icon: 'store', label: tr => tr.nav.items.salesChannels },
     ],
   },
   {
     destKey: 'dest_settings',
     destLabel: tr => tr.nav.destinations.settings,
-    destIcon: Settings,
+    destIcon: 'settings',
     children: [
-      { to: '/settings', icon: Settings, label: tr => tr.nav.items.settings },
-      { to: '/settings/security', icon: ShieldCheck, label: tr => tr.nav.items.security },
-      { to: '/billing', icon: CreditCard, label: tr => tr.nav.items.billing },
+      { to: '/settings', icon: 'settings', label: tr => tr.nav.items.settings },
+      { to: '/settings/security', icon: 'shield-check', label: tr => tr.nav.items.security },
+      { to: '/billing', icon: 'credit-card', label: tr => tr.nav.items.billing },
     ],
     sections: [
       {
@@ -187,8 +187,8 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
         sectionLabel: tr => tr.nav.sections.nahlaSmart,
         navGroupKey: 'dest_settings',
         items: [
-          { to: '/intelligence', icon: Brain, label: tr => tr.nav.items.intelligence, isAI: true },
-          { to: '/knowledge-base', icon: BookOpen, label: tr => tr.nav.items.knowledgeBase, isAI: true },
+          { to: '/intelligence', icon: 'brain', label: tr => tr.nav.items.intelligence, isAI: true },
+          { to: '/knowledge-base', icon: 'book-open', label: tr => tr.nav.items.knowledgeBase, isAI: true },
         ],
       },
       {
@@ -197,10 +197,10 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
         navGroupKey: 'dest_settings_advanced',
         defaultCollapsed: true,
         items: [
-          { to: '/system-status', icon: Activity, label: tr => tr.nav.items.systemStatus },
-          { to: '/delivery-quality', icon: Gauge, label: tr => tr.nav.items.deliveryQuality },
-          { to: '/ai-sales-logs', icon: BrainCircuit, label: tr => tr.nav.items.salesAgent, isAI: true },
-          { to: '/analytics', icon: BarChart2, label: tr => tr.nav.items.analyticsAI, isAI: true },
+          { to: '/system-status', icon: 'activity', label: tr => tr.nav.items.systemStatus },
+          { to: '/delivery-quality', icon: 'gauge', label: tr => tr.nav.items.deliveryQuality },
+          { to: '/ai-sales-logs', icon: 'brain-circuit', label: tr => tr.nav.items.salesAgent, isAI: true },
+          { to: '/analytics', icon: 'bar-chart-2', label: tr => tr.nav.items.analyticsAI, isAI: true },
         ],
       },
     ],

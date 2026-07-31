@@ -48,9 +48,39 @@ import { trackPlatformEvent } from '../../lib/platformTelemetry'
 import { isNavSimplified8Enabled } from '../../lib/platformFeatureFlags'
 import {
   SIMPLIFIED_NAV_DESTINATIONS,
+  type MerchantNavIconKey,
   type SimplifiedNavGroupKey,
   type SimplifiedNavLink,
 } from '../../lib/merchantNavSimplified'
+
+const MERCHANT_NAV_ICONS: Record<MerchantNavIconKey, LucideIcon> = {
+  'layout-dashboard': LayoutDashboard,
+  'message-square': MessageSquare,
+  'shopping-cart': ShoppingCart,
+  bot: Bot,
+  tag: Tag,
+  gift: Gift,
+  megaphone: Megaphone,
+  'file-text': FileText,
+  brain: Brain,
+  plug: Plug,
+  'bar-chart-2': BarChart2,
+  settings: Settings,
+  'brain-circuit': BrainCircuit,
+  'folder-tree': FolderTree,
+  store: Store,
+  'user-check': UserCheck,
+  users: Users,
+  activity: Activity,
+  'credit-card': CreditCard,
+  'message-circle': MessageCircle,
+  'help-circle': HelpCircle,
+  'book-open': BookOpen,
+  gauge: Gauge,
+  package: Package,
+  'shield-check': ShieldCheck,
+  'trending-up': TrendingUp,
+}
 
 type NavGroupKey = 'main' | 'ai' | 'store' | 'admin_platform' | 'admin_settings'
 
@@ -174,6 +204,10 @@ interface SidebarNavLinkProps {
   indent?: boolean
 }
 
+function resolveNavIcon(iconKey: MerchantNavIconKey): LucideIcon {
+  return MERCHANT_NAV_ICONS[iconKey]
+}
+
 function SidebarNavLink({
   to,
   icon: Icon,
@@ -247,7 +281,7 @@ function SimplifiedMerchantNav({
         <SidebarNavLink
           key={item.to}
           to={item.to}
-          icon={item.icon}
+          icon={resolveNavIcon(item.icon)}
           label={item.label}
           isAI={item.isAI}
           navGroup={navGroup}
@@ -267,7 +301,7 @@ function SimplifiedMerchantNav({
           {dest.directLink ? (
             <SidebarNavLink
               to={dest.directLink.to}
-              icon={dest.directLink.icon}
+              icon={resolveNavIcon(dest.directLink.icon)}
               label={dest.destLabel}
               isAI={dest.directLink.isAI}
               navGroup={dest.destKey}

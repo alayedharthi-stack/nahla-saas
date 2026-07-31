@@ -54,6 +54,13 @@ for (const forbidden of forbiddenPaths) {
   )
 }
 
+const navDataSource = source('../src/lib/merchantNavSimplified.ts')
+assert(
+  'simplified nav data module has no lucide-react import (CI-safe)',
+  !navDataSource.includes("from 'lucide-react'")
+    && !navDataSource.includes('from "lucide-react"'),
+)
+
 const flagsSource = source('../src/lib/platformFeatureFlags.ts')
 assert(
   'isNavSimplified8Enabled defaults via env (OFF when unset)',
