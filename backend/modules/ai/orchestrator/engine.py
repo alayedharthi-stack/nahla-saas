@@ -36,6 +36,7 @@ from modules.ai.orchestrator.providers.resilience import (
     call_with_resilience,
 )
 from modules.ai.orchestrator.customer_chat_models import (
+    customer_chat_provider,
     emit_customer_chat_model_telemetry,
     technical_escalation_models,
 )
@@ -252,40 +253,32 @@ class AIOrchestratorEngine:
         if escalated.get("reply_text"):
             return escalated
 
-        if block_anthropic_fallback:
-            logger.info(
-                "[engine] provider_chain: all providers exhausted — "
-                "no cross-provider fallback (OpenAI-only path)"
-            )
-            observer.finalize(final_provider=None, fallback_used=False)
-            return {
-                "reply_text": "",
-                "provider": "",
-                "model": requested_model,
-                "status": "openai_chain_exhausted",
-                "anthropic_fallback_blocked": True,
-            }
-
         logger.info(
             "[engine] provider_chain: all providers exhausted — "
-            "controlled failure (no Anthropic/Gemini fallback)"
+            "no cross-provider fallback (OpenAI-only path)"
+            if block_anthropic_fallback
+            else "controlled failure (no Anthropic/Gemini fallback)"
         )
         observer.finalize(final_provider=None, fallback_used=False)
         emit_customer_chat_model_telemetry(
-            provider=str(self._provider.provider_name),
+            provider=customer_chat_provider(),
             requested_model=requested_model,
-            actual_model=requested_model,
+            actual_model=requested_model or None,
             escalation_reason="openai_chain_exhausted",
             tenant_id=audit_context.get("tenant_id"),
             conversation_id=audit_context.get("conversation_id"),
             turn_id=audit_context.get("turn_id"),
+            extra={"status": "openai_chain_exhausted"},
         )
-        return {
+        exhausted: Dict[str, Any] = {
             "reply_text": "",
-            "provider": self._provider.provider_name,
+            "provider": "" if block_anthropic_fallback else self._provider.provider_name,
             "model": requested_model,
             "status": "openai_chain_exhausted",
         }
+        if block_anthropic_fallback:
+            exhausted["anthropic_fallback_blocked"] = True
+        return exhausted
 
     def _try_technical_model_escalation(
         self,

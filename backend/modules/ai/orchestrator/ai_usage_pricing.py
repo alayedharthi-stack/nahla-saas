@@ -13,6 +13,12 @@ from typing import Dict, Optional, Tuple
 
 PRICING_VERSION = "2026-06-v1"
 
+# cost_source distinguishes ledger estimate origin (routing unchanged by this field):
+#   "provisional" — placeholder rates until billing confirms list pricing
+#   "invoice"     — reconciled against provider invoice (not yet wired)
+COST_SOURCE_PROVISIONAL = "provisional"
+COST_SOURCE_INVOICE = "invoice"
+
 _MILLION = Decimal("1000000")
 
 

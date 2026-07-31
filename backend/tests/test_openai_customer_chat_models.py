@@ -103,9 +103,34 @@ class TestTechnicalEscalation:
 
 
 class TestEngineNoAnthropicGemini:
-    def test_chain_skips_anthropic_and_gemini(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_chain_skips_anthropic_and_gemini(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class _FakeProvider:
+            def __init__(self, name: str) -> None:
+                self.provider_name = name
+                self.call_count = 0
+
+            def is_configured(self) -> bool:
+                return True
+
+            def call(self, *args, **kwargs) -> dict:
+                self.call_count += 1
+                return {"reply_text": "", "provider": self.provider_name, "model": MODEL_LUNA}
+
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        caplog.set_level(logging.INFO)
         engine = AIOrchestratorEngine()
+        anthropic = _FakeProvider("anthropic")
+        gemini = _FakeProvider("gemini")
+        openai = _FakeProvider("openai_compatible")
+        providers = {
+            "anthropic": anthropic,
+            "gemini": gemini,
+            "openai_compatible": openai,
+        }
         request = AIOrchestrationRequest(
             context=AIContext(tenant_id=1),
             message="مرحبا",
@@ -120,18 +145,33 @@ class TestEngineNoAnthropicGemini:
         chain = ProviderChainConfig(
             providers=["anthropic", "gemini", "openai_compatible"],
         )
-        with patch.object(engine, "_invoke_provider_call", return_value=None) as mock_invoke:
-            with patch(
-                "modules.ai.orchestrator.engine.call_with_resilience",
-                return_value=None,
-            ):
-                with patch.object(
-                    engine, "_try_technical_model_escalation", return_value={"reply_text": ""},
+        with patch(
+            "modules.ai.orchestrator.engine.get_provider",
+            side_effect=lambda name: providers.get(name),
+        ):
+            with patch.object(engine, "_invoke_provider_call", return_value=None) as mock_invoke:
+                with patch(
+                    "modules.ai.orchestrator.engine.call_with_resilience",
+                    return_value=None,
                 ):
-                    result = engine._call_with_chain(request, "system", chain)
+                    with patch.object(
+                        engine,
+                        "_try_technical_model_escalation",
+                        return_value={"reply_text": ""},
+                    ):
+                        result = engine._call_with_chain(request, "system", chain)
         assert mock_invoke.call_count == 0
-        assert result.get("status") in {"openai_chain_exhausted", "blocked_anthropic_fallback"}
+        assert anthropic.call_count == 0
+        assert gemini.call_count == 0
+        assert result.get("status") == "openai_chain_exhausted"
         assert result.get("reply_text") == ""
+        joined = "\n".join(r.message for r in caplog.records)
+        assert "[CUSTOMER_CHAT_MODEL]" in joined
+        payload = json.loads(joined.split("[CUSTOMER_CHAT_MODEL] ", 1)[1])
+        assert payload["provider"] == "openai_compatible"
+        assert payload["requested_model"] == MODEL_LUNA
+        assert payload["status"] == "openai_chain_exhausted"
+        assert payload["escalation_reason"] == "openai_chain_exhausted"
 
     def test_technical_escalation_luna_to_terra(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
