@@ -45,6 +45,7 @@ node_modules/
 .coverage
 htmlcov/
 .pytest_cache/
+backend/tests/artifacts/
 
 # ── Editor / OS ───────────────────────────────────────────────────────────────
 .DS_Store
