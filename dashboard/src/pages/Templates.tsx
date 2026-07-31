@@ -24,6 +24,11 @@ import {
   STATUS_COLORS,
 } from '../api/templates'
 import { useDashboardPoll } from '../lib/dashboardPolling'
+import {
+  ORDER_UPDATES_LIBRARY_TAG,
+  filterOrderUpdatesLibraryGroups,
+  filterOrderUpdatesLibraryTemplates,
+} from './templates/orderUpdatesLibraryFilter'
 
 // ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
 
@@ -1392,7 +1397,7 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
   PHONE_NUMBER:'📞',
 }
 
-const LIBRARY_TAG_KEYS = ['all', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
+const LIBRARY_TAG_KEYS = ['all', 'order_updates', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
 function NahlaLibraryModal({ onClose, onImported }: {
   onClose: () => void
@@ -1432,15 +1437,21 @@ function NahlaLibraryModal({ onClose, onImported }: {
   const load = useCallback(async (tag: string, q: string) => {
     setLoading(true)
     try {
-      const res = await templatesApi.nahlaLibrary({ tag: tag !== 'all' ? tag : undefined, search: q || undefined })
-      const groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
+      const apiTag = tag !== 'all' && tag !== ORDER_UPDATES_LIBRARY_TAG ? tag : undefined
+      const res = await templatesApi.nahlaLibrary({ tag: apiTag, search: q || undefined })
+      let groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
+      let flatTemplates = res.templates ?? []
+      if (tag === ORDER_UPDATES_LIBRARY_TAG) {
+        groups = filterOrderUpdatesLibraryGroups(groups)
+        flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
+      }
       setLibraryGroups(groups)
       if (groups.length > 0) {
         setActiveGroupChannel(groups[0].channel)
         setTemplates(groups[0].templates ?? [])
       } else {
         setActiveGroupChannel(null)
-        setTemplates(res.templates)
+        setTemplates(flatTemplates)
       }
     } catch {
       setTemplates([])

@@ -1728,7 +1728,13 @@ async def set_template_active(
     ).first()
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
-    if not tpl.service_key or tpl.step_number is None:
+    if not tpl.service_key:
+        raise HTTPException(
+            status_code=400,
+            detail="لا يمكن تعيين هذا القالب كنشط — لم يُربط بخدمة بعد.",
+        )
+    from core.commerce_lifecycle.order_updates import is_order_update_service_key  # noqa: PLC0415
+    if tpl.step_number is None and not is_order_update_service_key(tpl.service_key):
         raise HTTPException(
             status_code=400,
             detail="لا يمكن تعيين هذا القالب كنشط — لم يُربط بخدمة ومرحلة بعد.",
@@ -2796,6 +2802,15 @@ async def _sync_templates_for_tenant_inner(
             }
             existing.synced_at        = now
             existing.updated_at       = now
+
+            if normalized_status == "APPROVED":
+                try:
+                    from core.commerce_lifecycle.order_updates import promote_approved_revision  # noqa: PLC0415
+                    promote_approved_revision(
+                        db, tenant_id=int(tenant_id), template_id=int(existing.id), commit=False,
+                    )
+                except Exception as _promo_exc:  # noqa: BLE001
+                    logger.warning("[templates/sync] order_updates promote failed: %s", _promo_exc)
             if lib_match:
                 if not existing.service_key and lib_service_key:
                     existing.service_key = lib_service_key

@@ -316,19 +316,21 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "name_ar":        "تحديث الشحن",
         "description_ar": "تُرسل عند شحن الطلب لإبقاء العميل على اطلاع بحالة طلبه",
         "category":       "UTILITY",
-        "filter_tags":    ["shipping", "orders"],
+        "filter_tags":    ["shipping", "orders", "order_updates"],
         "smart_trigger":  "order_shipped",
         "smart_label":    "يُرسل تلقائياً: عند شحن الطلب",
-        "slots":          ["customer_name", "order_id"],
+        "slots":          ["customer_name", "order_id", "carrier", "tracking_number", "tracking_url"],
         "components": [
             {
                 "type": "BODY",
                 "text": (
                     "خبر سار يا {{1}} 🚚\n\n"
-                    "طلبك رقم #{{2}} تم شحنه وهو في طريقه إليك!\n\n"
-                    "يمكنك متابعة حالة الشحن لحظةً بلحظة من هنا:"
+                    "طلبك رقم #{{2}} تم شحنه عبر {{3}}.\n"
+                    "رقم التتبع: {{4}}\n"
+                    "رابط التتبع: {{5}}\n\n"
+                    "يمكنك متابعة شحنتك من الرابط أعلاه."
                 ),
-                "example": {"body_text": [["محمد", "12345"]]},
+                "example": {"body_text": [["محمد", "12345", "سمسا", "TRK123", "https://example.com/track/TRK123"]]},
             },
             {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
             {
@@ -536,7 +538,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "name_ar":        "تأكيد الطلب",
         "description_ar": "إشعار رسمي بتأكيد الطلب يتضمن رقم الطلب وتفاصيله",
         "category":       "UTILITY",
-        "filter_tags":    ["orders"],
+        "filter_tags":    ["orders", "order_updates"],
         "smart_trigger":  "order_confirmed",
         "smart_label":    "يُرسل تلقائياً: عند تأكيد الطلب",
         "slots":          ["customer_name", "order_id", "order_total"],
