@@ -226,8 +226,9 @@ export interface Translations {
       title: string
       subtitle: string
       cards: {
-        nahlaLibrary:      { title: string; description: string }
-        whatsappTemplates: { title: string; description: string }
+        nahlaLibrary:        { title: string; description: string }
+        whatsappTemplates:   { title: string; description: string }
+        ecommerceTemplates:  { title: string; description: string }
       }
     }
     settingsHub: {
@@ -565,6 +566,7 @@ export interface Translations {
     kpiConversationsToday: string
     kpiMessagesToday: string
     kpiOrders:      string
+    kpiNewCustomers: string
     kpiAiRate:      string
     recentConvTitle:string
     recentOrdTitle: string
@@ -717,6 +719,7 @@ export interface Translations {
   /** Conversations page — static UI only */
   conversationsPage: {
     title: string
+    handoffQueueLink: string
     unreadCount: string
     searchPlaceholder: string
     emptyList: string

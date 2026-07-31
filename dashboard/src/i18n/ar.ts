@@ -249,15 +249,19 @@ const ar: Translations = {
     },
     templatesHub: {
       title:    'القوالب',
-      subtitle: 'مكتبة قوالب نحلة وقوالب واتساب',
+      subtitle: 'مكتبة قوالب نحلة وقوالب واتساب والمتجر',
       cards: {
         nahlaLibrary: {
           title:       'مكتبة قوالب نحلة',
-          description: 'تنظيم قوالب المتجر وواتساب وتحديثات الطلبات',
+          description: 'تنظيم قوالب المتجر وواتساب',
         },
         whatsappTemplates: {
           title:       'قوالب واتساب',
           description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
+        },
+        ecommerceTemplates: {
+          title:       'قوالب المتجر الإلكتروني',
+          description: 'قوالب صفحات المتجر والتجربة الشرائية',
         },
       },
     },
@@ -267,7 +271,7 @@ const ar: Translations = {
       sections: {
         core: {
           title:       'المتجر والحساب',
-          description: 'نظرة عامة والإعدادات العامة والأمان والاشتراك وتحديثات الطلب',
+          description: 'الإعدادات العامة والأمان والاشتراك وتحديثات الطلب',
         },
         nahlaSmart: {
           title:       'نحلة الذكية',
@@ -349,7 +353,7 @@ const ar: Translations = {
     },
     nahlaTemplateLibrary: {
       title:    'مكتبة قوالب نحلة',
-      subtitle: 'تنظيم قوالب التسويق وتحديثات الطلبات — بدون محرك جديد',
+      subtitle: 'تنظيم قوالب التسويق والمتجر — بدون محرك جديد',
       sections: {
         ecommerce: {
           title:       'قوالب المتجر الإلكتروني',
@@ -664,6 +668,7 @@ const ar: Translations = {
     kpiConversationsToday: 'محادثات اليوم',
     kpiMessagesToday: 'رسائل اليوم',
     kpiOrders:        'الطلبات',
+    kpiNewCustomers:  'عملاء جدد',
     kpiAiRate:        'معدل الرد بالذكاء',
     recentConvTitle:  'آخر المحادثات',
     recentOrdTitle:   'آخر الطلبات',
@@ -814,6 +819,7 @@ const ar: Translations = {
 
   conversationsPage: {
     title:               'المحادثات',
+    handoffQueueLink:    'طابور التحويل',
     unreadCount:         '{count} غير مقروءة',
     searchPlaceholder:   'ابحث في المحادثات…',
     emptyList:           'لا توجد محادثات',
