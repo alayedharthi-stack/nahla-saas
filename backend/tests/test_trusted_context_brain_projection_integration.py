@@ -209,6 +209,8 @@ def test_pipeline_attaches_projection_to_brain_context_and_reply_state() -> None
         captured["ctx"] = kwargs["ctx"]
         reply_state = original_build(**kwargs)
         captured["reply_state"] = reply_state
+        captured["brain_attestation"] = getattr(kwargs["ctx"], "model_payload_attestation", None)
+        captured["reply_attestation"] = getattr(reply_state, "model_payload_attestation", None)
         return reply_state
 
     with stack:
@@ -244,6 +246,25 @@ def test_pipeline_attaches_projection_to_brain_context_and_reply_state() -> None
         assert wired["product_candidates"][1]["product_id"] == 712
         assert reply_state.selected_product is not None
         assert reply_state.selected_product.get("product_id") == 501
+
+        from modules.ai.brain.truth_surface.model_payload_attestation import (  # noqa: E402
+            assert_attestation_redacted,
+        )
+
+        ctx_attestation = captured.get("brain_attestation")
+        reply_attestation = captured.get("reply_attestation")
+        assert isinstance(ctx_attestation, dict)
+        assert isinstance(reply_attestation, dict)
+        assert ctx_attestation.get("stage") == "brain"
+        assert reply_attestation.get("stage") == "reply_state"
+        assert ctx_attestation["facts_loaded"]["facts_snapshot_id"] == snap.snapshot_id
+        assert reply_attestation["facts_reaching_brain"]["product_id"] == 501
+        assert reply_attestation["candidate_ids_and_order"] == [
+            {"ref": 1, "product_id": 711},
+            {"ref": 2, "product_id": 712},
+        ]
+        assert reply_attestation["selected_product_and_variant"]["product_id"] == 501
+        assert_attestation_redacted(reply_attestation)
     finally:
         clear_trusted_context()
 

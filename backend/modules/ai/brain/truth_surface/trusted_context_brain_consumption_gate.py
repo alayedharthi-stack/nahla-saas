@@ -11,6 +11,7 @@ from ..types import BrainContext
 from .contract import TrustedContextSnapshot
 from .flags import is_trusted_context_brain_projection_enabled
 from .trusted_context import current_trusted_context
+from .model_payload_attestation import facts_reaching_brain_from_projection
 from .trusted_context_brain_projection import (
     TrustedContextBrainProjectionError,
     project_trusted_context_brain_facts,
@@ -62,17 +63,21 @@ def safe_trusted_context_brain_projection_trace_metadata(
 ) -> Dict[str, Any]:
     """Safe trace metadata for logs — no raw fact payloads."""
     if isinstance(result_or_error, dict):
+        brain_facts = facts_reaching_brain_from_projection(result_or_error)
         return {
             "status": "ok",
-            "surface": str(result_or_error.get("surface") or ""),
-            "facts_snapshot_id": str(result_or_error.get("facts_snapshot_id") or ""),
-            "loaded_domains": list(result_or_error.get("loaded_domains") or []),
-            "has_product_identity": bool(result_or_error.get("product_identity")),
-            "product_candidate_count": len(
-                list(result_or_error.get("product_candidates") or [])
-            ),
-            "has_order": bool(result_or_error.get("order")),
-            "has_shipment": bool(result_or_error.get("shipment")),
+            "surface": brain_facts.get("surface") or str(result_or_error.get("surface") or ""),
+            "facts_snapshot_id": brain_facts.get("facts_snapshot_id")
+            or str(result_or_error.get("facts_snapshot_id") or ""),
+            "loaded_domains": list(brain_facts.get("loaded_domains") or []),
+            "domains_present": list(brain_facts.get("domains_present") or []),
+            "has_product_identity": "product_identity" in (brain_facts.get("domains_present") or []),
+            "product_id": brain_facts.get("product_id"),
+            "variant_id": brain_facts.get("variant_id"),
+            "product_candidate_count": int(brain_facts.get("candidate_count") or 0),
+            "has_order": bool(brain_facts.get("has_order")),
+            "has_shipment": bool(brain_facts.get("has_shipment")),
+            "facts_reaching_brain": brain_facts,
         }
     if isinstance(result_or_error, TrustedContextBrainProjectionError):
         return {
