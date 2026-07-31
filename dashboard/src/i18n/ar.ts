@@ -62,6 +62,7 @@ const ar: Translations = {
       manualSetup:          'دليل الربط اليدوي',
       widgets:          'أدوات زيادة المبيعات',
       nahlaTemplateLibrary: 'مكتبة قوالب نحلة',
+      ecommerceTemplates: 'قوالب المتجر',
       orderUpdates:     'إعدادات تحديثات الطلب',
       systemStatus:     'حالة النظام',
       deliveryQuality:  'جودة الإرسال',
@@ -249,19 +250,15 @@ const ar: Translations = {
     },
     templatesHub: {
       title:    'القوالب',
-      subtitle: 'مكتبة قوالب نحلة وقوالب واتساب والمتجر',
+      subtitle: 'قوالب واتساب وقوالب المتجر الإلكتروني',
       cards: {
-        nahlaLibrary: {
-          title:       'مكتبة قوالب نحلة',
-          description: 'تنظيم قوالب المتجر وواتساب',
-        },
         whatsappTemplates: {
           title:       'قوالب واتساب',
-          description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
+          description: 'مكتبة نحلة وقوالبك وحالات اعتماد Meta',
         },
         ecommerceTemplates: {
           title:       'قوالب المتجر الإلكتروني',
-          description: 'قوالب صفحات المتجر والتجربة الشرائية',
+          description: 'التسويق وتحديثات الطلبات وتجربة المتجر',
         },
       },
     },
@@ -351,35 +348,28 @@ const ar: Translations = {
         },
       },
     },
-    nahlaTemplateLibrary: {
-      title:    'مكتبة قوالب نحلة',
-      subtitle: 'تنظيم قوالب التسويق والمتجر — بدون محرك جديد',
-      sections: {
-        ecommerce: {
-          title:       'قوالب المتجر الإلكتروني',
-          description: 'قوالب صفحات المتجر والتجربة الشرائية — سطح تنظيمي فقط.',
-          comingSoon:  'قريبًا — تنظيم فقط، بدون وظائف إرسال أو تحرير هنا.',
-        },
-        whatsapp: {
-          title:       'قوالب واتساب',
-          description: 'إدارة القوالب المعتمدة من Meta وإنشاء قوالب جديدة في السطح الحالي.',
-          linkLabel:   'فتح قوالب واتساب',
-        },
-        orderUpdates: {
-          title:       'قوالب تحديثات الطلبات',
-          description: 'قوالب إشعار تأكيد الطلب وتتبع الشحن — عرض تنظيمي فقط.',
-          editLink:    'تحرير في قوالب واتساب',
-          templates: {
-            order_confirmation: {
-              title:       'تأكيد الطلب',
-              description: 'إشعار العميل باستلام الطلب مع ملخص الطلب',
-            },
-            shipping_tracking: {
-              title:       'تتبع الشحن',
-              description: 'إبقاء العميل على اطلاع بحالة الشحنة',
-            },
-          },
-        },
+    ecommerceTemplates: {
+      title:    'قوالب المتجر الإلكتروني',
+      subtitle: 'قوالب التسويق وتحديثات الطلبات لمتجرك — مكتبة نحلة مصدر داخل هذا النوع',
+      filters: {
+        all:          'الكل',
+        marketing:    'التسويق',
+        orderUpdates: 'تحديثات الطلبات',
+      },
+      empty: {
+        all:          'لا توجد قوالب متجر في هذا العرض بعد',
+        marketing:    'لا توجد قوالب تسويق',
+        orderUpdates: 'لا توجد قوالب لتحديثات الطلبات',
+      },
+      libraryTitle:    'مكتبة نحلة للمتجر',
+      librarySubtitle: 'قوالب جاهزة لهذا النوع — التنظيم هنا، وتشغيل الإرسال يبقى في الإعدادات',
+      openInWhatsapp:  'فتح في قوالب واتساب',
+      orderUpdates: {
+        title:        'قوالب تحديثات الطلبات',
+        description:  'نص القالب ومعاينته لتأكيد الطلب وتحديثات الشحن. تُعرض الأنواع الموجودة فعليًا فقط.',
+        scopeNote:    'التفعيل والتوقيت والقناة وشروط الإرسال تبقى في إعدادات تحديثات الطلبات.',
+        opsLink:      'إدارة تشغيل تحديثات الطلبات',
+        opsLinkShort: 'إعدادات التشغيل',
       },
     },
     systemStatus:     { title: 'حالة النظام',            subtitle: 'الصحة العامة والتبعيات والأحداث' },
@@ -1494,6 +1484,8 @@ const ar: Translations = {
 
   templatesMgmt: {
     filterAll:         'الكل',
+    filterNahlaLibrary:'مكتبة نحلة',
+    filterMine:        'قوالبي',
     filterApproved:    'معتمدة',
     filterPending:     'قيد المراجعة',
     filterRejected:    'مرفوضة',

@@ -1942,6 +1942,7 @@ export default function Templates() {
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [filterTab, setFilterTab] = useState<TemplateStatus | 'all'>('all')
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'library' | 'mine'>('all')
   const [showCreate, setShowCreate] = useState(false)
   const [showNahlaLibrary, setShowNahlaLibrary] = useState(false)
   const [preview, setPreview] = useState<WhatsAppTemplateRecord | null>(null)
@@ -1955,15 +1956,34 @@ export default function Templates() {
   const manualCoupon = tStatic(tr => tr.templatesMgmt.manualCoupon)
   const mgmt = tStatic(tr => tr.templatesMgmt)
 
-  const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = [
-    { key: 'all',      label: mgmt.filterAll      },
-    { key: 'DRAFT',    label: mgmt.statDraft      },
-    { key: 'APPROVED', label: mgmt.filterApproved },
-    { key: 'PENDING',  label: mgmt.filterPending  },
-    { key: 'REJECTED', label: mgmt.filterRejected },
-    { key: 'DISABLED', label: mgmt.disabled       },
-    { key: 'PAUSED',   label: mgmt.filterPaused   },
+  const SOURCE_TABS: { key: 'all' | 'library' | 'mine'; label: string }[] = [
+    { key: 'all',     label: mgmt.filterAll },
+    { key: 'library', label: mgmt.filterNahlaLibrary },
+    { key: 'mine',    label: mgmt.filterMine },
   ]
+
+  const statusCounts = {
+    all: templates.length,
+    DRAFT: templates.filter(t => t.status === 'DRAFT').length,
+    APPROVED: templates.filter(t => t.status === 'APPROVED').length,
+    PENDING: templates.filter(t => t.status === 'PENDING').length,
+    REJECTED: templates.filter(t => t.status === 'REJECTED').length,
+    DISABLED: templates.filter(t => t.status === 'DISABLED').length,
+    PAUSED: templates.filter(t => t.status === 'PAUSED').length,
+  }
+
+  // Only surface status filters that have real rows (plus All).
+  const FILTER_TABS: { key: TemplateStatus | 'all'; label: string }[] = (
+    [
+      { key: 'all' as const, label: mgmt.filterAll },
+      { key: 'DRAFT' as const, label: mgmt.statDraft },
+      { key: 'APPROVED' as const, label: mgmt.filterApproved },
+      { key: 'PENDING' as const, label: mgmt.filterPending },
+      { key: 'REJECTED' as const, label: mgmt.filterRejected },
+      { key: 'DISABLED' as const, label: mgmt.disabled },
+      { key: 'PAUSED' as const, label: mgmt.filterPaused },
+    ] as const
+  ).filter(tab => tab.key === 'all' || (statusCounts[tab.key] ?? 0) > 0)
 
   const TABLE_HEADERS = [
     mgmt.colName,
@@ -2109,9 +2129,15 @@ export default function Templates() {
     }
   }
 
+  const bySource = templates.filter(t => {
+    if (sourceFilter === 'library') return Boolean(t.nahla_source_key)
+    if (sourceFilter === 'mine') return !t.nahla_source_key
+    return true
+  })
+
   const filtered = filterTab === 'all'
-    ? templates
-    : templates.filter(t => t.status === filterTab)
+    ? bySource
+    : bySource.filter(t => t.status === filterTab)
 
   const counts = {
     draft: templates.filter(t => t.status === 'DRAFT').length,
@@ -2315,11 +2341,29 @@ export default function Templates() {
 
       {/* Table */}
       <div className="card">
-        {/* Filter tabs */}
-        <div className="flex items-center gap-1 px-5 py-4 border-b border-slate-100">
+        {/* Source filters — Nahla library is a source, not a third hub type */}
+        <div className="flex flex-wrap items-center gap-1 px-5 pt-4 pb-2">
+          {SOURCE_TABS.map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setSourceFilter(tab.key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                sourceFilter === tab.key
+                  ? 'bg-amber-500 text-white'
+                  : 'text-slate-500 hover:bg-slate-100'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        {/* Status filters — only statuses with rows */}
+        <div className="flex flex-wrap items-center gap-1 px-5 py-3 border-b border-slate-100">
           {FILTER_TABS.map(tab => (
             <button
               key={tab.key}
+              type="button"
               onClick={() => setFilterTab(tab.key)}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 filterTab === tab.key
@@ -2332,7 +2376,7 @@ export default function Templates() {
                 <span className={`ms-1.5 text-[10px] px-1 rounded-full ${
                   filterTab === tab.key ? 'bg-white/20' : 'bg-slate-100'
                 }`}>
-                  {templates.filter(t => t.status === tab.key).length}
+                  {statusCounts[tab.key as keyof typeof statusCounts] ?? 0}
                 </span>
               )}
             </button>

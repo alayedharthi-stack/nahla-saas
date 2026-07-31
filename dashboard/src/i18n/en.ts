@@ -58,6 +58,7 @@ const en: Translations = {
       manualSetup:          'Manual Setup Guide',
       widgets:          'Sales Tools',
       nahlaTemplateLibrary: 'Nahla Template Library',
+      ecommerceTemplates: 'Store templates',
       orderUpdates:     'Order update settings',
       systemStatus:     'System Status',
       deliveryQuality:  'Delivery Quality',
@@ -245,19 +246,15 @@ const en: Translations = {
     },
     templatesHub: {
       title:    'Templates',
-      subtitle: 'Nahla library, WhatsApp templates, and store templates',
+      subtitle: 'WhatsApp templates and store templates',
       cards: {
-        nahlaLibrary: {
-          title:       'Nahla Template Library',
-          description: 'Organize store and WhatsApp templates',
-        },
         whatsappTemplates: {
           title:       'WhatsApp templates',
-          description: 'Manage Meta-approved templates in the existing surface',
+          description: 'Nahla library, your templates, and Meta approval statuses',
         },
         ecommerceTemplates: {
           title:       'E-commerce store templates',
-          description: 'Store page and shopping-experience templates',
+          description: 'Marketing, order updates, and store experience templates',
         },
       },
     },
@@ -347,35 +344,28 @@ const en: Translations = {
         },
       },
     },
-    nahlaTemplateLibrary: {
-      title:    'Nahla Template Library',
-      subtitle: 'Organize marketing and store templates — no new engine',
-      sections: {
-        ecommerce: {
-          title:       'E-commerce store templates',
-          description: 'Store page and checkout experience templates — organizational shell only.',
-          comingSoon:  'Coming soon — organization only, no send or edit flows here.',
-        },
-        whatsapp: {
-          title:       'WhatsApp templates',
-          description: 'Manage Meta-approved templates and create new ones in the existing surface.',
-          linkLabel:   'Open WhatsApp templates',
-        },
-        orderUpdates: {
-          title:       'Order update templates',
-          description: 'Order confirmation and shipping tracking templates — informational shell only.',
-          editLink:    'Edit in WhatsApp templates',
-          templates: {
-            order_confirmation: {
-              title:       'Order confirmation',
-              description: 'Notify the customer that their order was received with a summary',
-            },
-            shipping_tracking: {
-              title:       'Shipping & tracking',
-              description: 'Keep the customer updated on shipment status',
-            },
-          },
-        },
+    ecommerceTemplates: {
+      title:    'E-commerce store templates',
+      subtitle: 'Marketing and order-update templates for your store — Nahla library as a source inside this type',
+      filters: {
+        all:          'All',
+        marketing:    'Marketing',
+        orderUpdates: 'Order updates',
+      },
+      empty: {
+        all:          'No store templates in this view yet',
+        marketing:    'No marketing templates found',
+        orderUpdates: 'No order-update templates found',
+      },
+      libraryTitle:    'Nahla store library',
+      librarySubtitle: 'Ready-made templates for this store type — organize here; send ops stay in settings',
+      openInWhatsapp:  'Open in WhatsApp templates',
+      orderUpdates: {
+        title:        'Order update templates',
+        description:  'Template copy and preview for confirmation and shipping updates. Only types that exist today are listed.',
+        scopeNote:    'Enablement, timing, channel, and send conditions stay in order-update settings.',
+        opsLink:      'Manage order-update operations',
+        opsLinkShort: 'Operations settings',
       },
     },
     systemStatus:     { title: 'System Status',        subtitle: 'Overall health, dependencies & events' },
@@ -1490,6 +1480,8 @@ const en: Translations = {
 
   templatesMgmt: {
     filterAll:         'All',
+    filterNahlaLibrary:'Nahla library',
+    filterMine:        'My templates',
     filterApproved:    'Approved',
     filterPending:     'Under Review',
     filterRejected:    'Rejected',

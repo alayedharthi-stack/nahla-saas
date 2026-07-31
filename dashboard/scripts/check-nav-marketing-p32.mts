@@ -1,5 +1,5 @@
 /**
- * P3.2 Marketing Hub + Nahla Template Library regression checks.
+ * P3.2 Marketing Hub + Templates IA regression checks.
  *
  * Run: npm run check:nav-marketing-p32 (from dashboard/)
  *
@@ -45,6 +45,7 @@ function extractSimplifiedNavPaths(tsSource: string): string[] {
 const navDataSource = source('../src/lib/merchantNavSimplified.ts')
 const appSource = source('../src/App.tsx')
 const templateLibrarySource = source('../src/pages/NahlaTemplateLibrary.tsx')
+const templatesHubSource = source('../src/pages/TemplatesHub.tsx')
 const flagsSource = source('../src/lib/platformFeatureFlags.ts')
 
 const legacyPaths = extractConstStringArray(navDataSource, 'LEGACY_MERCHANT_NAV_PATHS')
@@ -68,7 +69,7 @@ assert(
   simplifiedPaths.has('/marketing'),
 )
 assert(
-  'simplified tree includes /marketing/templates library route',
+  'simplified tree includes /marketing/templates store templates route',
   simplifiedPaths.has('/marketing/templates'),
 )
 assert(
@@ -160,42 +161,43 @@ assert(
 )
 
 assert(
-  'NahlaTemplateLibrary anchors ecommerce section',
+  'TemplatesHub exposes exactly two hub cards',
+  (templatesHubSource.match(/to:\s*'\/[^']+'/g) ?? []).length === 2
+    && templatesHubSource.includes("to: '/templates'")
+    && templatesHubSource.includes("to: '/marketing/templates'")
+    && !templatesHubSource.includes('nahlaLibrary'),
+)
+
+assert(
+  'Store templates page keeps #ecommerce anchor for legacy links',
   templateLibrarySource.includes('id="ecommerce"'),
 )
 assert(
-  'NahlaTemplateLibrary does not expose order-updates as a primary template family',
-  !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS')
-    && !templateLibrarySource.includes('orderUpdates.templates'),
+  'Store templates page anchors order-updates section',
+  templateLibrarySource.includes('id="order-updates"'),
 )
-
-const forbiddenOrderStates = [
-  'post_delivery',
-  'delivered',
-  'cancelled',
-  'cod_confirmation',
-  'predictive_reorder',
-  'payment_reminder',
-  'out_for_delivery',
-  'failed_delivery',
-  'reorder',
-]
-for (const forbidden of forbiddenOrderStates) {
-  assert(
-    `NahlaTemplateLibrary does not expose forbidden order state "${forbidden}" as a card key`,
-    !templateLibrarySource.includes(`'${forbidden}'`),
-  )
-}
-
 assert(
-  'NahlaTemplateLibrary documents Meta open-window scope comment',
+  'Store templates page does not expose order-updates as a primary hub family key',
+  !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS'),
+)
+assert(
+  'Store templates page links ops to settings order_updates',
+  templateLibrarySource.includes('/settings?tab=order_updates'),
+)
+assert(
+  'Store templates page documents Meta open-window scope comment',
   templateLibrarySource.includes('Open-window')
     && templateLibrarySource.includes('Lifecycle'),
 )
-
 assert(
-  'NahlaTemplateLibrary links WhatsApp section to /templates',
-  templateLibrarySource.includes('to="/templates"'),
+  'Active-path helper prefers longer destination matches',
+  navDataSource.includes('destinationMatchLength')
+    && navDataSource.includes('longer / more specific'),
+)
+assert(
+  'Sidebar simplified destinations use Link with owned active matching',
+  source('../src/components/layout/Sidebar.tsx').includes('isPathInSimplifiedDestination')
+    && source('../src/components/layout/Sidebar.tsx').includes("aria-current={isActive ? 'page' : undefined}"),
 )
 
 assert(
