@@ -37,7 +37,7 @@ class TestTierSuggestions:
     def test_slot_extractor_suggests_tiny(self):
         s = suggest_model_tier(call_site="brain.intent.slot_extractor")
         assert s.tier == TIER_TINY
-        assert s.suggested_model == "gpt-4o-mini"
+        assert s.suggested_model == "gpt-5.6-luna"
 
     def test_memory_summarise_suggests_tiny(self):
         s = suggest_model_tier(call_site="brain.memory.updater._summarise")
@@ -57,7 +57,7 @@ class TestTierSuggestions:
             intent_name="talk_to_human",
         )
         assert s.tier == TIER_STANDARD
-        assert "claude-sonnet" in (s.suggested_model or "")
+        assert s.suggested_model == "gpt-5.6-terra"
 
     def test_premium_disabled_by_default(self):
         assert is_premium_model_allowed() is False
@@ -68,13 +68,13 @@ class TestTierSuggestions:
         assert s.tier != TIER_PREMIUM
 
 
-class TestGpt4oMiniPricingAudit:
+class TestLunaPricingAudit:
     def test_pricing_matches_reference(self):
         check = audit_gpt4o_mini_pricing_v2()
-        assert check["model"] == "gpt-4o-mini"
+        assert check["model"] == "gpt-5.6-luna"
         assert check["pricing_ok"] is True
-        assert Decimal(check["input_per_1m_usd"]) == Decimal("0.15")
-        assert Decimal(check["output_per_1m_usd"]) == Decimal("0.60")
+        assert Decimal(check["input_per_1m_usd"]) == Decimal("0.015")
+        assert Decimal(check["output_per_1m_usd"]) == Decimal("0.060")
 
 
 class TestAuditLogging:
@@ -89,7 +89,7 @@ class TestAuditLogging:
         emit_model_router_audit(call_site="brain.compose._llm_compose", tier=TIER_CHEAP)
         lines = [r.message for r in caplog.records if "[MODEL_ROUTER_AUDIT]" in r.message]
         assert len(lines) == 1
-        assert "gpt4o_mini_pricing_check" in lines[0]
+        assert "luna_pricing_check" in lines[0]
         assert "behavior_change" not in lines[0] or "false" in lines[0].lower()
 
     def test_maybe_audit_never_raises_when_disabled(self):

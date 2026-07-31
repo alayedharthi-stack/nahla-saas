@@ -396,16 +396,21 @@ class DefaultMemoryUpdater:
     # ── 4. ConversationHistorySummary ─────────────────────────────────────────
 
     def _summarise(self, db: Any, ctx: BrainContext) -> None:
-        """Call Claude Haiku to write a rolling summary of the conversation."""
+        """Call OpenAI tiny model to write a rolling summary of the conversation."""
         if not ctx.customer_id:
             return
 
-        api_key = os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
             return
 
         try:
-            import anthropic
+            from modules.ai.orchestrator.customer_chat_models import (  # noqa: PLC0415
+                resolve_tiny_customer_chat_model,
+            )
+            from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+                OpenAICompatibleProvider,
+            )
 
             # Build history text from last 10 turns
             history_lines = []
@@ -428,15 +433,14 @@ class DefaultMemoryUpdater:
                 f'{{ "summary": "...", "last_intent": "browse|order|complaint|inquiry", "sentiment": "positive|neutral|negative|frustrated" }}'
             )
 
-            client = anthropic.Anthropic(api_key=api_key)
-            _summary_model = "claude-haiku-4-5"
+            _summary_model = resolve_tiny_customer_chat_model()
             from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
 
             emit_llm_cost_audit(
                 tenant_id=ctx.tenant_id,
                 turn_id=getattr(ctx.state, "turn", None),
                 model=_summary_model,
-                provider="anthropic",
+                provider="openai_compatible",
                 messages_count=1,
                 messages_chars=len(prompt),
                 total_prompt_chars=len(prompt),
@@ -450,27 +454,21 @@ class DefaultMemoryUpdater:
                 tenant_id=ctx.tenant_id,
                 turn_id=getattr(ctx.state, "turn", None),
             )
-            response = client.messages.create(
-                model=_summary_model,
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic  # noqa: PLC0415
-
-            record_ai_usage_from_anthropic(
-                audit_extra={
+            provider = OpenAICompatibleProvider()
+            result = provider.call(
+                prompt,
+                "أنت مساعد تلخيص محادثات. أجب بـ JSON فقط.",
+                audit_context={
                     "tenant_id": ctx.tenant_id,
                     "turn_id": getattr(ctx.state, "turn", None),
+                    "model_override": _summary_model,
                     "reason": "brain.memory.updater._summarise",
                     "estimated_input_tokens": len(prompt) // 4,
                 },
-                model=_summary_model,
-                response=response,
-                reply_text=response.content[0].text if response.content else "",
-                total_prompt_chars=len(prompt),
-                db=db,
             )
-            raw = response.content[0].text.strip()
+            raw = str(result.get("reply_text") or "").strip()
+            if not raw:
+                return
 
             import json, re
             raw = re.sub(r"^```(?:json)?\s*", "", raw)

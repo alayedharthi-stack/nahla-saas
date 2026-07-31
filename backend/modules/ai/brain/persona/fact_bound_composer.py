@@ -119,14 +119,10 @@ def is_persona_compose_provider_configured(provider: str) -> bool:
 
 
 def _platform_default_persona_candidates() -> list[tuple[str, str]]:
-    """Cost-ordered tiny-tier persona compose candidates for platform default."""
+    """Cost-ordered tiny-tier persona compose candidates — OpenAI-only."""
     tiny = _env_tier_default(TIER_TINY)
     preferred_provider = str(tiny.suggested_provider or "openai_compatible").strip().lower()
-    preferred_model = str(tiny.suggested_model or "gpt-4o-mini")
-    from modules.ai.orchestrator.llm_cost_audit import resolve_anthropic_model  # noqa: PLC0415
-
-    anthropic_model = resolve_anthropic_model()
-    openai_model = "gpt-4o-mini"
+    preferred_model = str(tiny.suggested_model or "gpt-5.6-luna")
 
     candidates: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -138,13 +134,6 @@ def _platform_default_persona_candidates() -> list[tuple[str, str]]:
             candidates.append(key)
 
     _add(preferred_provider, preferred_model)
-    if preferred_provider == "openai_compatible":
-        _add("anthropic", anthropic_model)
-    elif preferred_provider == "anthropic":
-        _add("openai_compatible", openai_model)
-    else:
-        _add("openai_compatible", openai_model)
-        _add("anthropic", anthropic_model)
     return candidates
 
 

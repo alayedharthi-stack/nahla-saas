@@ -436,7 +436,12 @@ CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 # Used by optional voice transcription and compatible fallback providers.
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
-OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL      = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
+# Customer-chat semantic tiers (OpenAI-only; see customer_chat_models.py).
+NAHLA_MODEL_CHEAP     = os.environ.get("NAHLA_MODEL_CHEAP", "gpt-5.6-luna")
+NAHLA_MODEL_STANDARD  = os.environ.get("NAHLA_MODEL_STANDARD", "gpt-5.6-terra")
+NAHLA_MODEL_PREMIUM   = os.environ.get("NAHLA_MODEL_PREMIUM", "gpt-5.6-sol")
+NAHLA_MODEL_TINY      = os.environ.get("NAHLA_MODEL_TINY", "gpt-5.6-luna")
 OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
 # Vision model for describing inbound WhatsApp images. Must be a
 # chat-completions endpoint that accepts ``image_url`` parts (default

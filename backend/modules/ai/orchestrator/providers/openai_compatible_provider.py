@@ -13,7 +13,7 @@ API (POST /chat/completions with the same request/response shape), including:
 Configuration (via environment variables only — no hardcoded values):
   OPENAI_API_KEY      : bearer token for the endpoint
   OPENAI_API_BASE     : base URL (default: https://api.openai.com/v1)
-  OPENAI_MODEL        : model name (default: gpt-4o-mini)
+  OPENAI_MODEL        : model name (default: gpt-5.6-luna)
 
 Status:
   REGISTERED but NOT activated for runtime routing.
@@ -44,7 +44,7 @@ logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as eng
 # ── Configuration (read once at module import) ─────────────────────────────────
 _API_KEY  = os.environ.get("OPENAI_API_KEY", "")
 _API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
-_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
 _TIMEOUT  = 25.0
 
 

@@ -34,6 +34,13 @@ from modules.ai.brain.types import (
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
 )
+from modules.ai.orchestrator.customer_chat_models import (
+    customer_chat_provider,
+    openai_only_provider_chain,
+    resolve_default_customer_chat_model,
+    resolve_premium_customer_chat_model,
+    resolve_standard_customer_chat_model,
+)
 
 _ROUTER_FLAG = "NAHLA_MODEL_ROUTER_ENABLED"
 
@@ -136,28 +143,29 @@ def is_model_router_enabled() -> bool:
 
 
 def _cheap_chain_override() -> Tuple[str, ...]:
-    """Cheap tier never falls back to Anthropic (cost guard)."""
+    """Cheap tier — OpenAI-only, no Anthropic/Gemini."""
     return _cheap_chain_no_anthropic()
 
 
 def _cheap_chain_no_anthropic() -> Tuple[str, ...]:
-    """Routine daily commerce — never fall back to Anthropic full-prompt calls."""
-    return ("openai_compatible", "gemini")
+    """Routine daily commerce — OpenAI-compatible only."""
+    return openai_only_provider_chain()
 
 
 def _standard_chain_override() -> Tuple[str, ...]:
-    return ("anthropic", "openai_compatible", "gemini")
+    return openai_only_provider_chain()
 
 
 def _disabled_route() -> ComposeModelRoute:
     return ComposeModelRoute(
         enforced=False,
-        tier=TIER_STANDARD,
-        provider="anthropic",
-        model=os.getenv("NAHLA_MODEL_STANDARD", "claude-sonnet-4-6"),
-        reason="router_disabled",
-        provider_hint="anthropic",
-        provider_chain_override=None,
+        tier=TIER_CHEAP,
+        provider=customer_chat_provider(),
+        model=resolve_default_customer_chat_model(),
+        reason="router_disabled_openai_default",
+        provider_hint=customer_chat_provider(),
+        provider_chain_override=openai_only_provider_chain(),
+        block_anthropic_fallback=True,
     )
 
 
@@ -285,10 +293,10 @@ def resolve_compose_model_route(
         return ComposeModelRoute(
             enforced=True,
             tier=TIER_PREMIUM,
-            provider=str(premium.suggested_provider or "anthropic"),
-            model=str(premium.suggested_model or "claude-opus-4-6"),
+            provider=str(premium.suggested_provider or customer_chat_provider()),
+            model=str(premium.suggested_model or resolve_premium_customer_chat_model()),
             reason=premium.reason,
-            provider_hint="anthropic",
+            provider_hint=customer_chat_provider(),
             provider_chain_override=_standard_chain_override(),
         )
 
@@ -317,10 +325,10 @@ def resolve_compose_model_route(
         return ComposeModelRoute(
             enforced=True,
             tier=TIER_STANDARD,
-            provider=str(standard.suggested_provider or "anthropic"),
-            model=str(standard.suggested_model or "claude-sonnet-4-6"),
+            provider=str(standard.suggested_provider or customer_chat_provider()),
+            model=str(standard.suggested_model or resolve_standard_customer_chat_model()),
             reason=std_reason or standard.reason,
-            provider_hint="anthropic",
+            provider_hint=customer_chat_provider(),
             provider_chain_override=_standard_chain_override(),
         )
 
@@ -329,10 +337,10 @@ def resolve_compose_model_route(
         return ComposeModelRoute(
             enforced=True,
             tier=TIER_CHEAP,
-            provider=str(cheap.suggested_provider or "openai_compatible"),
-            model=str(cheap.suggested_model or "gpt-4o-mini"),
+            provider=str(cheap.suggested_provider or customer_chat_provider()),
+            model=str(cheap.suggested_model or resolve_default_customer_chat_model()),
             reason="commerce_cheap_first",
-            provider_hint="openai_compatible",
+            provider_hint=customer_chat_provider(),
             provider_chain_override=_cheap_chain_no_anthropic(),
             block_anthropic_fallback=True,
         )
@@ -342,10 +350,10 @@ def resolve_compose_model_route(
     return ComposeModelRoute(
         enforced=True,
         tier=TIER_STANDARD,
-        provider=str(standard.suggested_provider or "anthropic"),
-        model=str(standard.suggested_model or "claude-sonnet-4-6"),
+        provider=str(standard.suggested_provider or customer_chat_provider()),
+        model=str(standard.suggested_model or resolve_standard_customer_chat_model()),
         reason="default_standard_when_enabled",
-        provider_hint="anthropic",
+        provider_hint=customer_chat_provider(),
         provider_chain_override=_standard_chain_override(),
     )
 

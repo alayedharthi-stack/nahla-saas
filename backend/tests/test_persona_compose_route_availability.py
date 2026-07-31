@@ -61,7 +61,7 @@ def _clear_persona_overrides(monkeypatch) -> None:
 
 
 class TestPlatformDefaultRouteAvailability:
-    def test_platform_default_anthropic_only_uses_canonical_model(
+    def test_platform_default_openai_when_anthropic_only_configured(
         self, monkeypatch
     ) -> None:
         _clear_persona_overrides(monkeypatch)
@@ -72,10 +72,8 @@ class TestPlatformDefaultRouteAvailability:
             )
             resolution = resolve_persona_compose_route_resolution(bundle)
         assert resolution.route.source == "platform_default"
-        assert resolution.route.provider == "anthropic"
-        assert resolution.route.model == resolve_anthropic_model()
-        assert resolution.compose_attempt == COMPOSE_ATTEMPT_PROVIDER_CALL
-        assert resolution.provider_configured is True
+        assert resolution.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE
+        assert resolution.provider_configured is False
 
     def test_platform_default_openai_only(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
@@ -86,17 +84,17 @@ class TestPlatformDefaultRouteAvailability:
             )
             resolution = resolve_persona_compose_route_resolution(bundle)
         assert resolution.route.provider == "openai_compatible"
-        assert resolution.route.model == "gpt-4o-mini"
+        assert resolution.route.model == "gpt-5.6-luna"
         assert resolution.compose_attempt == COMPOSE_ATTEMPT_PROVIDER_CALL
 
-    def test_platform_default_both_prefers_openai_cost_first(self, monkeypatch) -> None:
+    def test_platform_default_both_still_openai_only(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
         with _provider_availability(openai=True, anthropic=True):
             route = resolve_persona_compose_model_route(
                 build_social_facts_bundle(surface="thanks", inbound_text="شكراً")
             )
         assert route.provider == "openai_compatible"
-        assert route.model == "gpt-4o-mini"
+        assert route.model == "gpt-5.6-luna"
 
     def test_platform_default_neither_skips_no_route(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
@@ -178,8 +176,7 @@ class TestExplicitOverrideFailClosed:
         assert res_a.route.source == "tenant_override"
         assert res_a.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_UNCONFIGURED
         assert res_b.route.source == "platform_default"
-        assert res_b.route.provider == "anthropic"
-        assert res_b.compose_attempt == COMPOSE_ATTEMPT_PROVIDER_CALL
+        assert res_b.compose_attempt == COMPOSE_ATTEMPT_SKIPPED_NO_ROUTE
 
     def test_explicit_configured_tenant_override_honored(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
@@ -199,7 +196,7 @@ class TestExplicitOverrideFailClosed:
 
 
 class TestComposeProviderBoundary:
-    def test_anthropic_only_one_provider_call(self, monkeypatch) -> None:
+    def test_openai_only_one_provider_call(self, monkeypatch) -> None:
         _clear_persona_overrides(monkeypatch)
 
         async def _run() -> None:
@@ -211,26 +208,26 @@ class TestComposeProviderBoundary:
 
             def _good_call(*_args, **_kwargs):
                 return {
-                    "provider": "anthropic",
-                    "model": resolve_anthropic_model(),
+                    "provider": "openai_compatible",
+                    "model": "gpt-5.6-luna",
                     "reply_text": "بخير الله يسعدك",
                     "status": "ok",
                 }
 
-            with _provider_availability(openai=False, anthropic=True):
+            with _provider_availability(openai=True, anthropic=True):
                 with patch(
-                    "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
                     side_effect=_good_call,
-                ) as anthropic_call:
+                ) as openai_call:
                     with patch(
-                        "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
-                    ) as openai_call:
+                        "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    ) as anthropic_call:
                         result = await composer.compose(bundle)
 
-            anthropic_call.assert_called_once()
-            openai_call.assert_not_called()
+            openai_call.assert_called_once()
+            anthropic_call.assert_not_called()
             assert result.source == "persona_llm"
-            assert result.metadata["route_provider"] == "anthropic"
+            assert result.metadata["route_provider"] == "openai_compatible"
             assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
             assert result.metadata["llm_candidate_present"] is True
 
@@ -375,8 +372,8 @@ class TestComposeProviderBoundary:
 
         asyncio.run(_run())
 
-    def test_confined_style_anthropic_only_usage_intent(self, monkeypatch) -> None:
-        """Anthropic-only confined runner: one provider call, usage intent."""
+    def test_confined_style_openai_only_usage_intent(self, monkeypatch) -> None:
+        """OpenAI-only customer chat: one provider call, usage intent."""
         _clear_persona_overrides(monkeypatch)
 
         async def _run() -> None:
@@ -388,26 +385,26 @@ class TestComposeProviderBoundary:
 
             def _good_call(*_args, **_kwargs):
                 return {
-                    "provider": "anthropic",
-                    "model": resolve_anthropic_model(),
+                    "provider": "openai_compatible",
+                    "model": "gpt-5.6-luna",
                     "reply_text": "وعليكم السلام",
                     "status": "ok",
                 }
 
-            with _provider_availability(openai=False, anthropic=True):
+            with _provider_availability(openai=True, anthropic=False):
                 with patch(
-                    "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
                     side_effect=_good_call,
-                ) as anthropic_call:
+                ) as openai_call:
                     with patch(
-                        "modules.ai.orchestrator.providers.openai_compatible_provider.OpenAICompatibleProvider.call",
-                    ) as openai_call:
+                        "modules.ai.orchestrator.providers.anthropic_provider.AnthropicProvider.call",
+                    ) as anthropic_call:
                         result = await composer.compose(bundle)
 
-            anthropic_call.assert_called_once()
-            openai_call.assert_not_called()
-            assert result.metadata["route_provider"] == "anthropic"
-            assert result.metadata["route_model"] == resolve_anthropic_model()
+            openai_call.assert_called_once()
+            anthropic_call.assert_not_called()
+            assert result.metadata["route_provider"] == "openai_compatible"
+            assert result.metadata["route_model"] == "gpt-5.6-luna"
             assert result.metadata["compose_attempt"] == COMPOSE_ATTEMPT_PROVIDER_CALL
 
         asyncio.run(_run())

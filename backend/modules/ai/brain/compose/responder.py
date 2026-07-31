@@ -2475,7 +2475,7 @@ class DefaultComposer:
             _provider_hint = (
                 _compose_route.provider_hint
                 if _compose_route.enforced
-                else "anthropic"
+                else "openai_compatible"
             )
 
             _slim_applied, _slim_reason, _slim_meta = explain_commerce_prompt_slim_gate(

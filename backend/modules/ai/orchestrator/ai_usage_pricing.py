@@ -62,7 +62,16 @@ _MODEL_PRICING_V2: Dict[str, ModelPricingV2] = {
     "claude": ModelPricingV2(
         Decimal("3"), Decimal("15"), Decimal("0.30"), Decimal("3.75"),
     ),
-    # OpenAI compatible
+    # OpenAI customer-chat models (provisional pricing — confirm with billing).
+    "gpt-5.6-luna": ModelPricingV2(
+        Decimal("0.015"), Decimal("0.060"), Decimal("0.0075"), Decimal("0.01875"),
+    ),
+    "gpt-5.6-terra": ModelPricingV2(
+        Decimal("0.150"), Decimal("0.600"), Decimal("0.075"), Decimal("0.1875"),
+    ),
+    "gpt-5.6-sol": ModelPricingV2(
+        Decimal("0.375"), Decimal("1.500"), Decimal("0.1875"), Decimal("0.46875"),
+    ),
     "gpt-4o-mini": ModelPricingV2(
         Decimal("0.15"), Decimal("0.60"), Decimal("0.075"), Decimal("0.1875"),
     ),
@@ -168,6 +177,12 @@ def pricing_tier_for_model(model: str) -> str:
         return "sonnet"
     if "haiku" in model_lower:
         return "haiku"
+    if model_lower.startswith("gpt-5.6-luna") or model_lower.endswith("-luna"):
+        return "luna"
+    if model_lower.startswith("gpt-5.6-terra") or model_lower.endswith("-terra"):
+        return "terra"
+    if model_lower.startswith("gpt-5.6-sol") or model_lower.endswith("-sol"):
+        return "sol"
     if model_lower.startswith("gpt"):
         return "openai_compatible"
     if model_lower.startswith("gemini"):
