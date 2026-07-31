@@ -48,6 +48,25 @@ _MODEL    = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
 _TIMEOUT  = 25.0
 
 
+def _build_chat_completion_body(
+    model: str,
+    messages: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build OpenAI chat completion body with model-specific constraints.
+
+    GPT-5.6 family rejects non-default temperature (400). Omit temperature
+    for those models; keep legacy temperature for older slugs.
+    """
+    body: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": 1024,
+    }
+    if not str(model).startswith("gpt-5.6-"):
+        body["temperature"] = 0.7
+    return body
+
+
 class OpenAICompatibleProvider(BaseAIProvider):
     """
     OpenAI Chat Completions-compatible provider.
@@ -116,12 +135,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 "Content-Type":  "application/json",
             }
             merged_messages = [{"role": "system", "content": prompt}, *_merge_history(history, message)]
-            body = {
-                "model": model,
-                "messages": merged_messages,
-                "max_completion_tokens": 1024,
-                "temperature": 0.7,
-            }
+            body = _build_chat_completion_body(model, merged_messages)
             audit_extra = dict(audit_context or {})
             messages_chars = sum(len(str(m.get("content") or "")) for m in merged_messages[1:])
             total_prompt_chars = len(prompt or "") + messages_chars
