@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import {
   LayoutDashboard,
@@ -33,6 +34,8 @@ import {
   Gauge,
   Package,
   ShieldCheck,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -42,6 +45,12 @@ import { useMerchantIdentity } from '../../context/MerchantIdentityContext'
 import { NAVIGATION_PATHS } from '../../lib/navigationPolicy'
 import { PLATFORM_BRAND } from '../../lib/productIdentity'
 import { trackPlatformEvent } from '../../lib/platformTelemetry'
+import { isNavSimplified8Enabled } from '../../lib/platformFeatureFlags'
+import {
+  SIMPLIFIED_NAV_DESTINATIONS,
+  type SimplifiedNavGroupKey,
+  type SimplifiedNavLink,
+} from '../../lib/merchantNavSimplified'
 
 type NavGroupKey = 'main' | 'ai' | 'store' | 'admin_platform' | 'admin_settings'
 
@@ -153,10 +162,167 @@ interface SidebarProps {
   onClose: () => void
 }
 
+interface SidebarNavLinkProps {
+  to: string
+  icon: LucideIcon
+  label: (tr: Translations) => string
+  isAI?: boolean
+  navGroup: NavGroupKey | SimplifiedNavGroupKey
+  adminMode: boolean
+  accentColor: string
+  onClose: () => void
+  indent?: boolean
+}
+
+function SidebarNavLink({
+  to,
+  icon: Icon,
+  label,
+  isAI,
+  navGroup,
+  adminMode,
+  accentColor,
+  onClose,
+  indent = false,
+}: SidebarNavLinkProps) {
+  const { t } = useLanguage()
+
+  return (
+    <NavLink
+      to={to}
+      onClick={() => {
+        trackPlatformEvent('platform_nav_click', {
+          path: to,
+          nav_group: navGroup,
+          admin_mode: adminMode,
+        })
+        onClose()
+      }}
+      className={({ isActive }) =>
+        `relative flex items-center gap-3 ${indent ? 'ps-6' : 'px-3'} py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation ${
+          isActive
+            ? 'bg-white/10 text-white'
+            : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+        }`
+      }
+    >
+      {({ isActive }) => (
+        <>
+          {isActive && (
+            <span className={`absolute start-0 inset-y-1.5 w-0.5 ${accentColor} rounded-e-full`} />
+          )}
+          <span className="relative shrink-0">
+            <Icon className="w-4 h-4" />
+            {isAI && (
+              <span className="absolute -bottom-1.5 -end-1.5 inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/50 shadow-[0_0_6px_rgba(245,158,11,0.4)]">
+                <span className="text-[6px] font-black text-amber-400 leading-none tracking-wide">AI</span>
+              </span>
+            )}
+          </span>
+          {t(label)}
+        </>
+      )}
+    </NavLink>
+  )
+}
+
+function SimplifiedMerchantNav({
+  accentColor,
+  adminMode,
+  onClose,
+}: {
+  accentColor: string
+  adminMode: boolean
+  onClose: () => void
+}) {
+  const { t } = useLanguage()
+  const [advancedExpanded, setAdvancedExpanded] = useState(false)
+
+  const renderChildLinks = (
+    items: SimplifiedNavLink[],
+    navGroup: SimplifiedNavGroupKey,
+  ) => (
+    <div className="space-y-0.5">
+      {items.map(item => (
+        <SidebarNavLink
+          key={item.to}
+          to={item.to}
+          icon={item.icon}
+          label={item.label}
+          isAI={item.isAI}
+          navGroup={navGroup}
+          adminMode={adminMode}
+          accentColor={accentColor}
+          onClose={onClose}
+          indent
+        />
+      ))}
+    </div>
+  )
+
+  return (
+    <div className="space-y-5">
+      {SIMPLIFIED_NAV_DESTINATIONS.map(dest => (
+        <div key={dest.destKey}>
+          {dest.directLink ? (
+            <SidebarNavLink
+              to={dest.directLink.to}
+              icon={dest.directLink.icon}
+              label={dest.destLabel}
+              isAI={dest.directLink.isAI}
+              navGroup={dest.destKey}
+              adminMode={adminMode}
+              accentColor={accentColor}
+              onClose={onClose}
+            />
+          ) : (
+            <>
+              <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+                {t(dest.destLabel)}
+              </p>
+              {dest.children && renderChildLinks(dest.children, dest.destKey)}
+              {dest.sections?.map(section => {
+                if (section.sectionKey === 'advanced') {
+                  return (
+                    <div key={section.sectionKey} className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setAdvancedExpanded(prev => !prev)}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
+                        aria-expanded={advancedExpanded}
+                      >
+                        {advancedExpanded
+                          ? <ChevronDown className="w-3 h-3 shrink-0" />
+                          : <ChevronRight className="w-3 h-3 shrink-0" />}
+                        {t(section.sectionLabel)}
+                      </button>
+                      {advancedExpanded && renderChildLinks(section.items, section.navGroupKey)}
+                    </div>
+                  )
+                }
+
+                return (
+                  <div key={section.sectionKey} className="mt-2">
+                    <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500/80">
+                      {t(section.sectionLabel)}
+                    </p>
+                    {renderChildLinks(section.items, section.navGroupKey)}
+                  </div>
+                )
+              })}
+            </>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const { t, lang } = useLanguage()
   const merchantIdentity = useMerchantIdentity()
   const adminMode = isAdmin()
+  const simplifiedNav = !adminMode && isNavSimplified8Enabled()
   const platformBrandName = PLATFORM_BRAND.name[lang]
   const platformAccessibleName = PLATFORM_BRAND.accessibleName[lang]
 
@@ -213,54 +379,36 @@ export default function Sidebar({ isOpen, onClose }: SidebarProps) {
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 overflow-y-auto space-y-5">
-          {navGroups.map((group, gi) => (
-            <div key={gi}>
-              <p className={`px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
-                {t(group.groupLabel)}
-              </p>
-              <div className="space-y-0.5">
-                {group.items.map(({ to, icon: Icon, label, isAI }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    onClick={() => {
-                      trackPlatformEvent('platform_nav_click', {
-                        path: to,
-                        nav_group: group.groupKey,
-                        admin_mode: adminMode,
-                      })
-                      onClose()
-                    }}
-                    className={({ isActive }) =>
-                      `relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation ${
-                        isActive
-                          ? 'bg-white/10 text-white'
-                          : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
-                      }`
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        {isActive && (
-                          <span className={`absolute start-0 inset-y-1.5 w-0.5 ${accentColor} rounded-e-full`} />
-                        )}
-                        {/* Icon with optional AI badge */}
-                        <span className="relative shrink-0">
-                          <Icon className="w-4 h-4" />
-                          {isAI && (
-                            <span className="absolute -bottom-1.5 -end-1.5 inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/50 shadow-[0_0_6px_rgba(245,158,11,0.4)]">
-                              <span className="text-[6px] font-black text-amber-400 leading-none tracking-wide">AI</span>
-                            </span>
-                          )}
-                        </span>
-                        {t(label)}
-                      </>
-                    )}
-                  </NavLink>
-                ))}
+          {simplifiedNav ? (
+            <SimplifiedMerchantNav
+              accentColor={accentColor}
+              adminMode={adminMode}
+              onClose={onClose}
+            />
+          ) : (
+            navGroups.map((group, gi) => (
+              <div key={gi}>
+                <p className={`px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest ${adminMode ? 'text-amber-500/60' : 'text-slate-500'}`}>
+                  {t(group.groupLabel)}
+                </p>
+                <div className="space-y-0.5">
+                  {group.items.map(({ to, icon, label, isAI }) => (
+                    <SidebarNavLink
+                      key={to}
+                      to={to}
+                      icon={icon}
+                      label={label}
+                      isAI={isAI}
+                      navGroup={group.groupKey}
+                      adminMode={adminMode}
+                      accentColor={accentColor}
+                      onClose={onClose}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </nav>
 
         {/* Bottom badge — with safe area for iOS home bar */}
