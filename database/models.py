@@ -121,6 +121,10 @@ class TenantSettings(Base):
     ai_settings = Column(JSONB, nullable=True)
     store_settings = Column(JSONB, nullable=True)
     notification_settings = Column(JSONB, nullable=True)
+    # Phase 1 abandoned-cart source override (nullable = use computed default).
+    # Allowed: salla_storefront | nahla_shop | disabled. No server_default —
+    # absence must not force all tenants onto one source.
+    abandoned_cart_source = Column(String(32), nullable=True)
 
 class User(Base):
     __tablename__ = 'users'
