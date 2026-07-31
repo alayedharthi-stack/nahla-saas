@@ -59,6 +59,7 @@ const ar: Translations = {
       catalogIntelligence:  'تصنيف الكتالوج',
       manualSetup:          'دليل الربط اليدوي',
       widgets:          'أدوات زيادة المبيعات',
+      nahlaTemplateLibrary: 'مكتبة قوالب نحلة',
       systemStatus:     'حالة النظام',
       deliveryQuality:  'جودة الإرسال',
       billing:          'الاشتراك والفوترة',
@@ -161,6 +162,67 @@ const ar: Translations = {
     settings:         { title: 'الإعدادات',              subtitle: 'إعدادات المتجر وصلاحيات الذكاء الاصطناعي' },
     billing:          { title: 'الاشتراك والفوترة',      subtitle: 'إدارة خطة نحلة' },
     widgets:          { title: 'أدوات زيادة المبيعات',   subtitle: 'أدوات تعزيز المبيعات المدمجة بالمتجر' },
+    marketingHub: {
+      title:    'التسويق',
+      subtitle: 'الحملات والعروض والأتمتة ومكتبة القوالب — نقطة دخول واحدة لأدوات التسويق',
+      cards: {
+        campaigns: {
+          title:       'الحملات',
+          description: 'حملات واتساب واسترداد العربات المتروكة واستهداف VIP',
+        },
+        promotions: {
+          title:       'العروض',
+          description: 'تعريفات الحوافز التي يستخدمها الطيار الآلي عند إطلاق الحملات',
+        },
+        coupons: {
+          title:       'الكوبونات',
+          description: 'قواعد توليد الكوبونات التي يُديرها الطيار الآلي',
+        },
+        widgets: {
+          title:       'أدوات زيادة المبيعات',
+          description: 'ويدجت واتساب العائم وويدجتات المتجر التحويلية',
+        },
+        smartAutomations: {
+          title:       'الأتمتة',
+          description: 'إدارة الأتمتة الذكية والطيار الآلي',
+        },
+        templateLibrary: {
+          title:       'مكتبة قوالب نحلة',
+          description: 'قوالب المتجر وواتساب وتحديثات الطلبات — سطح تنظيمي',
+        },
+      },
+    },
+    nahlaTemplateLibrary: {
+      title:    'مكتبة قوالب نحلة',
+      subtitle: 'تنظيم قوالب التسويق وتحديثات الطلبات — بدون محرك جديد',
+      sections: {
+        ecommerce: {
+          title:       'قوالب المتجر الإلكتروني',
+          description: 'قوالب صفحات المتجر والتجربة الشرائية — سطح تنظيمي فقط.',
+          comingSoon:  'قريبًا — تنظيم فقط، بدون وظائف إرسال أو تحرير هنا.',
+        },
+        whatsapp: {
+          title:       'قوالب واتساب',
+          description: 'إدارة القوالب المعتمدة من Meta وإنشاء قوالب جديدة في السطح الحالي.',
+          linkLabel:   'فتح قوالب واتساب',
+        },
+        orderUpdates: {
+          title:       'قوالب تحديثات الطلبات',
+          description: 'قوالب إشعار تأكيد الطلب وتتبع الشحن — عرض تنظيمي فقط.',
+          editLink:    'تحرير في قوالب واتساب',
+          templates: {
+            order_confirmation: {
+              title:       'تأكيد الطلب',
+              description: 'إشعار العميل باستلام الطلب مع ملخص الطلب',
+            },
+            shipping_tracking: {
+              title:       'تتبع الشحن',
+              description: 'إبقاء العميل على اطلاع بحالة الشحنة',
+            },
+          },
+        },
+      },
+    },
     systemStatus:     { title: 'حالة النظام',            subtitle: 'الصحة العامة والتبعيات والأحداث' },
     storeIntegration: { title: 'ربط المتجر',             subtitle: 'ربط متجرك بنحلة' },
     whatsappConnect:  { title: 'ربط واتساب',             subtitle: 'ربط رقم واتساب للأعمال ليردّ نحلة تلقائياً على عملائك' },

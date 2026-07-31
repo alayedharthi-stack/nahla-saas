@@ -64,9 +64,9 @@ assert(
 
 const simplifiedPaths = new Set(extractSimplifiedNavPaths(navDataSource))
 assert(
-  'simplified tree exposes exactly 27 merchant routes',
-  simplifiedPaths.size === 27,
-  `got ${simplifiedPaths.size}`,
+  'simplified tree exposes exactly 27 legacy merchant routes',
+  [...simplifiedPaths].filter(p => legacyPaths.includes(p)).length === 27,
+  `legacy subset got ${[...simplifiedPaths].filter(p => legacyPaths.includes(p)).length}`,
 )
 
 for (const legacyPath of legacyPaths) {

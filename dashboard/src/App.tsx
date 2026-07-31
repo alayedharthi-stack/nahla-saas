@@ -81,6 +81,8 @@ import WhatsAppCatalog from './pages/WhatsAppCatalog'
 import CatalogIntelligence from './pages/CatalogIntelligence'
 import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
+import MarketingHub from './pages/MarketingHub'
+import NahlaTemplateLibrary from './pages/NahlaTemplateLibrary'
 
 export default function App() {
   return (
@@ -147,6 +149,8 @@ export default function App() {
             <Route path="promotions"         element={<Promotions />} />
             <Route path="campaigns"          element={<Campaigns />} />
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
+            <Route path="marketing"            element={<MarketingHub />} />
+            <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
             <Route path="templates"          element={<Templates />} />
             <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
