@@ -15,7 +15,7 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.truth_surface.contract import (  # noqa: E402
     TrustedContextSnapshot,
     TrustedDomain,
@@ -27,6 +27,7 @@ from modules.ai.brain.truth_surface.trusted_context import (  # noqa: E402
     set_current_trusted_context,
 )
 from modules.ai.brain.types import (  # noqa: E402
+    ActionResult,
     CommerceFacts,
     Decision,
     INTENT_ASK_PRODUCT,
@@ -520,3 +521,270 @@ def test_missing_trusted_context_leaves_legacy_compose_path() -> None:
     assert isinstance(result, dict)
     known = dict(getattr(captured.get("reply_state"), "known_facts", None) or {})
     assert "trusted_context_projection" not in known
+
+
+def _snapshot_without_candidates() -> TrustedContextSnapshot:
+    snap = TrustedContextSnapshot(
+        tenant_id=_TENANT,
+        customer_phone=_PHONE,
+        conversation_id=_CONV,
+        facts=[
+            TrustedFact(
+                domain=TrustedDomain.ORDER,
+                key="external_id",
+                value="RRRD1234",
+                source=TruthSource.ORDER_PREPARATION_STATE,
+            ),
+        ],
+        loaded_domains=["order"],
+    )
+    snap.ensure_snapshot_id()
+    return snap
+
+
+_SEARCH_PRODUCTS = [
+    {
+        "id": 701,
+        "product_id": 701,
+        "title": "فستان سهرة أزرق",
+        "price": 289.0,
+        "can_checkout": True,
+        "orderable": True,
+        "external_id": "ext-dress-701",
+    },
+    {
+        "id": 702,
+        "product_id": 702,
+        "title": "فستان صيفي وردي",
+        "price": 149.0,
+        "can_checkout": True,
+        "orderable": True,
+        "external_id": "ext-dress-702",
+    },
+]
+
+
+def test_pipeline_refreshes_search_candidates_before_compose() -> None:
+    """Post-execute search must reach Brain/Compose projection on the same turn."""
+    from modules.ai.brain import pipeline as brain_pipeline  # noqa: PLC0415
+    from modules.ai.brain.pipeline import get_brain  # noqa: E402
+
+    clear_trusted_context()
+    brain = get_brain()
+    snap = _snapshot_without_candidates()
+    state = MerchantConversationState(stage="browsing", greeted=True)
+    intent = Intent(name=INTENT_ASK_PRODUCT, confidence=0.92, slots={"product_query": "فساتين"})
+    decision = Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args={"query": "فساتين"},
+        reason="browse dresses",
+    )
+    stack = ExitStack()
+    stack.enter_context(patch("core.billing.has_billing_access", return_value=True))
+    stack.enter_context(
+        patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(
+                allowed=True,
+                used_total=0,
+                limit=1000,
+                reason="",
+            ),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.truth_surface.flags.is_trusted_context_shadow_enabled",
+            return_value=True,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.truth_surface.flags.is_trusted_context_brain_projection_enabled",
+            return_value=True,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.truth_surface.trusted_context_brain_consumption_gate.is_trusted_context_brain_projection_enabled",
+            return_value=True,
+        )
+    )
+    stack.enter_context(patch.object(brain._classifier, "classify", return_value=intent))
+    stack.enter_context(patch.object(brain._decision_engine, "decide", return_value=decision))
+    stack.enter_context(patch.object(brain._policy_gate, "gate", side_effect=lambda d, _ctx: d))
+    stack.enter_context(patch.object(brain._state_store, "load", return_value=state))
+    saved_state: dict = {}
+
+    def _save_state(_db, _tid, _phone, st):
+        saved_state["state"] = st
+
+    stack.enter_context(patch.object(brain._state_store, "save", side_effect=_save_state))
+    stack.enter_context(patch.object(brain._facts_loader, "load", return_value=_commerce_facts()))
+    stack.enter_context(patch.object(brain._memory_updater, "update"))
+    stack.enter_context(
+        patch(
+            "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+            side_effect=lambda products, **kwargs: list(products),
+        )
+    )
+    stack.enter_context(
+        patch.object(
+            brain._executor,
+            "execute",
+            new=AsyncMock(
+                return_value=ActionResult(
+                    success=True,
+                    data={"products": list(_SEARCH_PRODUCTS), "count": 2, "query": "فساتين"},
+                ),
+            ),
+        )
+    )
+    compose_mock = stack.enter_context(
+        patch(
+            "modules.ai.brain.persona.fact_bound_composer.FactBoundPersonaComposer.compose",
+            new_callable=AsyncMock,
+        )
+    )
+    from modules.ai.brain.persona.facts_bundle import PersonaComposeResult  # noqa: E402
+
+    compose_mock.return_value = PersonaComposeResult(
+        text="رد تجريبي بعد البحث.",
+        source="persona_llm",
+        surface="catalog_product",
+        facts_hash="search-refresh-hash",
+        guard_passed=True,
+        language="ar",
+    )
+    set_current_trusted_context(snap)
+    captured: dict = {}
+    original_build = brain_pipeline._build_reply_state
+
+    def _capture_reply_state(**kwargs):
+        captured["ctx"] = kwargs["ctx"]
+        reply_state = original_build(**kwargs)
+        captured["reply_state"] = reply_state
+        captured["reply_attestation"] = getattr(reply_state, "model_payload_attestation", None)
+        return reply_state
+
+    with stack:
+        with patch.object(brain_pipeline, "_build_reply_state", side_effect=_capture_reply_state):
+            _run(
+                brain.process(
+                    db=MagicMock(),
+                    tenant_id=_TENANT,
+                    customer_phone=_PHONE,
+                    message="اعرض لي فساتين",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    conversation_id=_CONV,
+                )
+            )
+
+    try:
+        persisted = saved_state.get("state")
+        assert persisted is not None
+        assert len(persisted.last_search_candidates or []) == 2
+
+        projection = getattr(captured["ctx"], "trusted_context_projection", None)
+        assert isinstance(projection, dict)
+        assert [row["ref"] for row in projection.get("product_candidates") or []] == [1, 2]
+        assert projection["product_candidates"][0]["product_id"] == 701
+        assert projection["product_candidates"][1]["product_id"] == 702
+
+        known = dict(getattr(captured["reply_state"], "known_facts", None) or {})
+        wired = known.get("trusted_context_projection") or {}
+        assert wired.get("conversational_reference", {}).get("candidate_count") == 2
+
+        reply_attestation = captured.get("reply_attestation")
+        assert isinstance(reply_attestation, dict)
+        assert reply_attestation.get("candidate_ids_and_order") == [
+            {"ref": 1, "product_id": 701},
+            {"ref": 2, "product_id": 702},
+        ]
+        assert reply_attestation["facts_reaching_brain"]["candidate_count"] == 2
+        assert "catalog" in reply_attestation["facts_loaded"]["loaded_domains"]
+    finally:
+        clear_trusted_context()
+
+
+def test_search_candidate_isolation_across_customers() -> None:
+    from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+        clear_trusted_context,
+        refresh_trusted_context_brain_state,
+        set_current_trusted_context,
+    )
+
+    phone_a = "966500000001"
+    phone_b = "966500000002"
+    state_a = MerchantConversationState(
+        last_search_candidates=[
+            {"id": 801, "title": "قميص قطني أزرق", "price": 80},
+        ],
+    )
+    state_b = MerchantConversationState(last_search_candidates=[])
+
+    empty_snap = TrustedContextSnapshot(
+        tenant_id=_TENANT,
+        customer_phone=phone_a,
+        conversation_id=_CONV,
+        facts=[],
+        loaded_domains=[],
+    )
+    empty_snap.ensure_snapshot_id()
+    set_current_trusted_context(empty_snap)
+
+    with patch(
+        "modules.ai.brain.truth_surface.trusted_context.is_trusted_context_shadow_enabled",
+        return_value=True,
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context._load_customer_order_facts",
+        return_value=[],
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context._load_state_order_facts",
+        return_value=[],
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context._load_payment_shipment_facts",
+        return_value=[],
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context._load_capability_facts",
+        return_value=[],
+    ), patch(
+        "modules.ai.brain.truth_surface.trusted_context._load_merchant_policy_facts",
+        return_value=[],
+    ), patch(
+        "modules.ai.brain.truth_surface.coupon_offer_loader.should_load_coupon_promotion_facts",
+        return_value=False,
+    ):
+        refreshed_a = refresh_trusted_context_brain_state(
+            db=None,
+            tenant_id=_TENANT,
+            customer_phone=phone_a,
+            conversation_id=_CONV,
+            brain_state=state_a,
+        )
+        assert refreshed_a is not None
+        rows_a = next(
+            fact.value
+            for fact in refreshed_a.facts
+            if fact.domain == TrustedDomain.CATALOG and fact.key == "product_candidates"
+        )
+        assert len(rows_a) == 1
+        assert rows_a[0]["product_id"] == 801
+
+        refreshed_b = refresh_trusted_context_brain_state(
+            db=None,
+            tenant_id=_TENANT,
+            customer_phone=phone_b,
+            conversation_id=_CONV,
+            brain_state=state_b,
+        )
+        assert refreshed_b is not None
+        candidate_facts_b = [
+            fact
+            for fact in refreshed_b.facts
+            if fact.domain == TrustedDomain.CATALOG and fact.key == "product_candidates"
+        ]
+        assert candidate_facts_b == []
+        assert refreshed_b.customer_phone == phone_b
+    clear_trusted_context()
