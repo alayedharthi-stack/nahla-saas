@@ -39,6 +39,8 @@ from modules.ai.brain.truth_surface.trusted_context import (  # noqa: E402
 )
 from modules.ai.brain.types import CommerceFacts, MerchantConversationState  # noqa: E402
 
+logger = logging.getLogger(__name__)
+
 GENERIC_MERCHANT = "متجر تجريبي عام"
 TENANT_ID = 1
 CONVERSATION_ID = 71001
@@ -131,7 +133,8 @@ class _AttestationLogHandler(logging.Handler):
             return
         try:
             payload = ast.literal_eval(match.group(1))
-        except Exception:
+        except Exception as exc:
+            logger.warning("Skipping unparseable attestation log payload: %s", exc)
             return
         if isinstance(payload, dict):
             self.records.append(payload)
@@ -760,8 +763,8 @@ async def run_journey(*, artifact_dir: Optional[Path] = None) -> Dict[str, Any]:
             cwd=str(Path(_HERE).parents[1]),
             text=True,
         ).strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not resolve harness git SHA: %s", exc)
 
     report = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
