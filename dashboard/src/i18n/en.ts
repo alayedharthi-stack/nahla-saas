@@ -346,7 +346,7 @@ const en: Translations = {
     },
     ecommerceTemplates: {
       title:    'E-commerce store templates',
-      subtitle: 'Marketing and order-update templates for your store — Nahla library as a source inside this type',
+      subtitle: 'Store-scoped template organization — order updates today; other store families when a real store library exists',
       filters: {
         all:          'All',
         marketing:    'Marketing',
@@ -354,18 +354,31 @@ const en: Translations = {
       },
       empty: {
         all:          'No store templates in this view yet',
-        marketing:    'No marketing templates found',
-        orderUpdates: 'No order-update templates found',
+        marketing:    'No store marketing template library is available yet. WhatsApp marketing message templates stay under WhatsApp templates.',
+        orderUpdates: 'No order-update services are available',
+        unsupportedStoreLibrary:
+          'There is no separate store-page template library yet. Only order-update services below are backed by real store order-update data. WhatsApp message templates (including Meta MARKETING) remain under WhatsApp templates.',
+        orderUpdatesOnlyHint:
+          'Only order-update services with a trusted service_key contract are listed above.',
       },
-      libraryTitle:    'Nahla store library',
-      librarySubtitle: 'Ready-made templates for this store type — organize here; send ops stay in settings',
-      openInWhatsapp:  'Open in WhatsApp templates',
+      libraryTitle:    'Store template families',
+      librarySubtitle: 'Honest availability — no WhatsApp library rows relabeled as store templates',
+      openInWhatsapp:  'Open WhatsApp templates',
       orderUpdates: {
         title:        'Order update templates',
-        description:  'Template copy and preview for confirmation and shipping updates. Only types that exist today are listed.',
+        description:  'Copy and preview for the order-update services that exist today. Classification uses ORDER_UPDATE_SERVICE_KEYS only.',
         scopeNote:    'Enablement, timing, channel, and send conditions stay in order-update settings.',
         opsLink:      'Manage order-update operations',
         opsLinkShort: 'Operations settings',
+        noPreview:    'No saved message body yet — configure in operations settings.',
+        services: {
+          order_confirmation: 'Order confirmation',
+          shipping_tracking:  'Shipping & tracking',
+        },
+        serviceDescriptions: {
+          order_confirmation: 'Notify the customer when the order is received and confirmed.',
+          shipping_tracking:  'Notify the customer when the order ships, with tracking when available.',
+        },
       },
     },
     systemStatus:     { title: 'System Status',        subtitle: 'Overall health, dependencies & events' },

@@ -177,6 +177,16 @@ assert(
   templateLibrarySource.includes('id="order-updates"'),
 )
 assert(
+  'Store templates page does not call nahlaLibrary for store cards',
+  !templateLibrarySource.includes('templatesApi.nahlaLibrary')
+    && !templateLibrarySource.includes("from '../api/templates'"),
+)
+assert(
+  'Store templates page loads order updates via ORDER_UPDATE_SERVICE_KEYS',
+  templateLibrarySource.includes('ORDER_UPDATE_SERVICE_KEYS')
+    && templateLibrarySource.includes('orderUpdatesApi.getService'),
+)
+assert(
   'Store templates page does not expose order-updates as a primary hub family key',
   !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS'),
 )

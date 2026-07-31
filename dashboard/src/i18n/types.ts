@@ -275,6 +275,8 @@ export interface Translations {
         all: string
         marketing: string
         orderUpdates: string
+        unsupportedStoreLibrary: string
+        orderUpdatesOnlyHint: string
       }
       libraryTitle: string
       librarySubtitle: string
@@ -285,6 +287,15 @@ export interface Translations {
         scopeNote: string
         opsLink: string
         opsLinkShort: string
+        noPreview: string
+        services: {
+          order_confirmation: string
+          shipping_tracking: string
+        }
+        serviceDescriptions: {
+          order_confirmation: string
+          shipping_tracking: string
+        }
       }
     }
     systemStatus:     { title: string; subtitle: string }
