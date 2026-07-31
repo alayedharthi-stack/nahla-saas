@@ -777,6 +777,59 @@ def build_trusted_context_snapshot(
     return snapshot
 
 
+def refresh_trusted_context_brain_state(
+    *,
+    db: Any,
+    tenant_id: int,
+    customer_phone: str,
+    message: str = "",
+    conversation: Any = None,
+    conversation_id: Optional[int] = None,
+    brain_state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    ai_settings: Optional[Dict[str, Any]] = None,
+) -> Optional[TrustedContextSnapshot]:
+    """
+    Rebuild trusted context after ``brain_state`` mutation on the same turn.
+
+    Initial shadow build runs before execute; browse/search persists
+    ``last_search_candidates`` post-execute. Refresh so Brain/Compose projection
+    includes ordered candidates before compose on that turn.
+    """
+    if not is_trusted_context_shadow_enabled():
+        return current_trusted_context()
+
+    scope = _turn_scope_key(
+        tenant_id,
+        customer_phone,
+        conversation_id or getattr(conversation, "id", None),
+    )
+    try:
+        snapshot = build_trusted_context_snapshot(
+            db=db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            message=message,
+            conversation=conversation,
+            conversation_id=conversation_id,
+            brain_state=brain_state,
+            inbound_metadata=inbound_metadata,
+            ai_settings=ai_settings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _last_build_error_class.set(exc.__class__.__name__)
+        logger.warning(
+            "[TRUSTED_CONTEXT_SHADOW] refresh_failed tenant=%s stage=refresh error_class=%s",
+            tenant_id,
+            exc.__class__.__name__,
+        )
+        return current_trusted_context()
+
+    set_current_trusted_context(snapshot)
+    _turn_scope.set(scope)
+    return snapshot
+
+
 def set_current_trusted_context(snapshot: Optional[TrustedContextSnapshot]) -> None:
     _current.set(snapshot)
 
@@ -977,6 +1030,7 @@ __all__ = [
     "clear_trusted_context",
     "current_trusted_context",
     "pop_shadow_build_error_class",
+    "refresh_trusted_context_brain_state",
     "run_trusted_context_shadow",
     "safe_shadow_trace_metadata",
     "set_current_trusted_context",
