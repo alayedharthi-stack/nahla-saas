@@ -2442,6 +2442,7 @@ class MerchantBrain:
                 new_state.last_search_candidates = []
 
         # ── 6b. Persist search candidates so user can pick by number ─────────
+        _search_candidates_persisted_this_turn = False
         # IMPORTANT: the source of truth is the executor (search.py returns
         # `products`). The composer tags a narrower `pending_candidates`
         # for buttons, but it runs AFTER this block — so we must NOT rely on
@@ -2496,6 +2497,7 @@ class MerchantBrain:
                 or _search_products
             )
             new_state.last_search_candidates = list(alts)[:_breadth_cap]
+            _search_candidates_persisted_this_turn = True
             logger.info(
                 "[ORDER FLOW] rejected unorderable pick — replaced candidates | "
                 "rejected=%r new_count=%d",
@@ -2551,6 +2553,7 @@ class MerchantBrain:
         elif _search_products:
             # Must match numbered list shown to the customer (breadth policy).
             new_state.last_search_candidates = list(_search_products)[:_breadth_cap]
+            _search_candidates_persisted_this_turn = True
             try:
                 from .commerce.selection_context import stamp_selection_context_from_products  # noqa: PLC0415
 
@@ -2848,6 +2851,64 @@ class MerchantBrain:
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
                 }
+
+        if _search_candidates_persisted_this_turn:
+            try:
+                from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                    current_trusted_context,
+                    refresh_trusted_context_brain_state,
+                )
+                from modules.ai.brain.truth_surface.trusted_context_brain_consumption_gate import (  # noqa: PLC0415
+                    attach_trusted_context_brain_projection,
+                    safe_trusted_context_brain_projection_trace_metadata,
+                )
+
+                _tc_refreshed = refresh_trusted_context_brain_state(
+                    db=db,
+                    tenant_id=tenant_id,
+                    customer_phone=customer_phone,
+                    message=message or "",
+                    conversation_id=conversation_id,
+                    brain_state=new_state,
+                    inbound_metadata=dict((profile or {}).get("inbound_metadata") or {}),
+                )
+                if _tc_refreshed is not None:
+                    _tc_brain_projection = attach_trusted_context_brain_projection(ctx)
+                    if _tc_brain_projection is not None:
+                        logger.info(
+                            "[TRUSTED_CONTEXT_BRAIN] refreshed_after_search_candidates %s",
+                            safe_trusted_context_brain_projection_trace_metadata(
+                                _tc_brain_projection,
+                            ),
+                        )
+                        try:
+                            from modules.ai.brain.truth_surface.model_payload_attestation import (  # noqa: PLC0415
+                                build_model_payload_attestation,
+                            )
+
+                            _brain_attestation = build_model_payload_attestation(
+                                stage="brain",
+                                snapshot=current_trusted_context(),
+                                brain_projection=_tc_brain_projection,
+                                history=ctx.history,
+                            )
+                            ctx.model_payload_attestation = _brain_attestation
+                            logger.info(
+                                "[MODEL_PAYLOAD_ATTESTATION] %s",
+                                _brain_attestation,
+                            )
+                        except Exception as _mpa_refresh_exc:  # noqa: BLE001  # noqa: silent-ok
+                            logger.debug(
+                                "[MODEL_PAYLOAD_ATTESTATION] brain refresh failed tenant=%s err=%s",
+                                tenant_id,
+                                _mpa_refresh_exc,
+                            )
+            except Exception as _tc_refresh_exc:  # noqa: BLE001  # noqa: silent-ok
+                logger.debug(
+                    "[TRUSTED_CONTEXT_BRAIN] refresh_after_search_candidates failed tenant=%s err=%s",
+                    tenant_id,
+                    _tc_refresh_exc,
+                )
 
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
