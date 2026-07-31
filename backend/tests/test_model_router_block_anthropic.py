@@ -40,7 +40,7 @@ from modules.ai.orchestrator.types import AIContext, AIOrchestrationRequest  # n
 def _router_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
     monkeypatch.setenv("NAHLA_MODEL_CHEAP_PROVIDER", "openai_compatible")
-    monkeypatch.setenv("NAHLA_MODEL_CHEAP", "gpt-4o-mini")
+    monkeypatch.setenv("NAHLA_MODEL_CHEAP", "gpt-5.6-luna")
     monkeypatch.setenv("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", "true")
 
 
@@ -70,7 +70,7 @@ def test_routine_commerce_route_blocks_anthropic_chain(
     assert route.provider_chain_override is not None
     assert "anthropic" not in route.provider_chain_override
     assert route.provider == "openai_compatible"
-    assert route.model == "gpt-4o-mini"
+    assert route.model == "gpt-5.6-luna"
 
 
 def test_should_block_anthropic_compose_result() -> None:

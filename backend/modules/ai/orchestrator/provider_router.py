@@ -14,11 +14,9 @@ Purpose:
   provider chains so the orchestrator can route and fall through providers
   deterministically inside modules.ai.orchestrator.
 
-Current active flow:
-  anthropic
-    → openai_compatible
-    → gemini
-    → safe empty-reply fallback in the caller legacy path
+Current active flow (customer conversation path):
+  openai_compatible only — no silent Anthropic or Gemini fallback.
+  Technical model escalation (Luna → Terra → gated Sol) is handled in engine.
 
 Architecture rule preserved:
   No route or service may call providers directly.
@@ -40,18 +38,15 @@ from modules.ai.orchestrator.types import AIProvider
 # This is the active priority sequence when Nahla routes between providers.
 # Lower index = higher priority.
 # Order rationale:
-#   1. anthropic          — primary provider for current production behavior
-#   2. openai_compatible  — secondary compatible fallback
-#   3. gemini             — tertiary Google fallback
-#   4. mock               — deterministic fallback for dev/testing environments
+#   1. openai_compatible  — sole production provider for customer chat
+#   2. mock               — deterministic fallback for dev/testing environments
 #
+# Anthropic and Gemini are intentionally excluded from the default chain.
 # "unknown" is intentionally absent — it signals a misconfiguration, not a
 # valid routing target.
 
 DEFAULT_PROVIDER_CHAIN: List[AIProvider] = [
-    "anthropic",
     "openai_compatible",
-    "gemini",
     "mock",
 ]
 
