@@ -324,7 +324,8 @@ def lifecycle_pg_engine_0093():
 
 @pytest.fixture(scope="module")
 def lifecycle_pg_engine(lifecycle_pg_engine_0093):
-    _upgrade_pg(lifecycle_pg_engine_0093, "0094")
+    # Lifecycle integration branch head is 0096 (0094 → 0095 send_method → 0096 revisions).
+    _upgrade_pg(lifecycle_pg_engine_0093, "0096")
     yield lifecycle_pg_engine_0093
 
 
@@ -651,7 +652,7 @@ class TestMigration0094GuardPostgres:
                         **_dispatch_kwargs(session, tenant_id=tenant_id)
                     )
                 )
-            assert result.reason_code == "migration_0094_required"
+            assert result.reason_code == "migration_0095_required"
             assert result.dispatched is False
             assert result.ledger_id is None
             assert mock_send.await_count == 0

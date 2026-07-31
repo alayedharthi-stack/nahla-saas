@@ -3281,6 +3281,273 @@ def _render_named_slots(template: str, values: Dict[str, str]) -> str:
     return out
 
 
+def _lifecycle_body_placeholder_values(
+    db: Session,
+    tenant_id: int,
+    template: Any,
+    payload: Dict[str, Any],
+    *,
+    customer_name: Optional[str] = None,
+) -> Tuple[str, List[str]]:
+    """
+    Build BODY source text and ordered placeholder values for lifecycle sends.
+
+    Uses the same variable construction as ``send_lifecycle_whatsapp_template``
+    so session text matches the Meta BODY after parameter fill. Does not
+    alter HEADER/BUTTONS definitions.
+    """
+    import re as _re
+
+    store_name = _resolve_store_name(db, tenant_id)
+    customer_stub = type(
+        "LifecycleCustomer",
+        (),
+        {"name": customer_name or "", "phone": ""},
+    )()
+    event_stub = type("LifecycleEvent", (), {"payload": dict(payload or {})})()
+    config_stub: Dict[str, Any] = {}
+    vars_map = _build_template_vars(
+        event_stub,
+        customer_stub,
+        config_stub,
+        template_name=getattr(template, "name", None),
+        store_name=store_name,
+    )
+
+    _PLACEHOLDER_RE = _re.compile(r"\{\{[^{}]+\}\}")
+
+    def _ph_count(raw: Any) -> int:
+        return len(_PLACEHOLDER_RE.findall(str(raw or "")))
+
+    body_text = ""
+    body_ph_count = 0
+    for comp in (getattr(template, "components", None) or []):
+        if str(comp.get("type", "")).upper() != "BODY":
+            continue
+        body_text = str(comp.get("text") or "")
+        body_ph_count = _ph_count(body_text)
+        break
+
+    payload_rich = dict(payload or {})
+    rich_fallback_values = [
+        (customer_name or "").strip() or "عميلنا الغالي",
+        str(
+            payload_rich.get("order_number")
+            or payload_rich.get("external_order_number")
+            or payload_rich.get("order_id")
+            or ""
+        ),
+        str(store_name or payload_rich.get("store_name") or "متجرنا"),
+        str(payload_rich.get("total") or payload_rich.get("amount") or ""),
+        str(
+            payload_rich.get("tracking_url")
+            or payload_rich.get("payment_url")
+            or payload_rich.get("checkout_url")
+            or ""
+        ),
+        str(payload_rich.get("coupon_code") or ""),
+    ]
+
+    var_values = list(vars_map.values())
+    if body_ph_count and len(var_values) > body_ph_count:
+        var_values = var_values[:body_ph_count]
+    elif body_ph_count and len(var_values) < body_ph_count:
+        gap_start = len(var_values)
+        padding = []
+        for fi in range(gap_start, gap_start + (body_ph_count - len(var_values))):
+            fv = rich_fallback_values[fi] if fi < len(rich_fallback_values) else " "
+            padding.append(fv if str(fv).strip() else " ")
+        var_values = list(var_values) + padding
+
+    return body_text, [str(v) if str(v).strip() else " " for v in var_values]
+
+
+def render_lifecycle_approved_body(
+    db: Session,
+    tenant_id: int,
+    template: Any,
+    payload: Dict[str, Any],
+    *,
+    customer_name: Optional[str] = None,
+) -> str:
+    """Render APPROVED template BODY text with the same vars as template send."""
+    body_text, var_values = _lifecycle_body_placeholder_values(
+        db,
+        tenant_id,
+        template,
+        payload,
+        customer_name=customer_name,
+    )
+    if not body_text.strip():
+        return ""
+    rendered = body_text
+    for idx, value in enumerate(var_values, start=1):
+        rendered = rendered.replace("{{" + str(idx) + "}}", value)
+    # Named placeholders from library maps ({{customer_name}}, etc.)
+    for key, value in zip(
+        list(
+            _build_template_vars(
+                type("LifecycleEvent", (), {"payload": dict(payload or {})})(),
+                type("LifecycleCustomer", (), {"name": customer_name or "", "phone": ""})(),
+                {},
+                template_name=getattr(template, "name", None),
+                store_name=_resolve_store_name(db, tenant_id),
+            ).keys()
+        ),
+        var_values,
+    ):
+        slot = str(key).strip()
+        if slot.startswith("{{") and slot.endswith("}}"):
+            rendered = rendered.replace(slot, value)
+    return rendered
+
+
+async def send_lifecycle_whatsapp_session_body(
+    db: Session,
+    tenant_id: int,
+    to_phone: str,
+    template: Any,
+    payload: Dict[str, Any],
+    *,
+    customer_name: Optional[str] = None,
+    service_key: Optional[str] = None,
+    blocked_path: str = "lifecycle_dispatch",
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    Send lifecycle BODY text as a free-form session message.
+
+    Source text is exclusively the active APPROVED template BODY rendered with
+    the same placeholder values used for Meta template sends.
+    """
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+    deny_external_egress(
+        egress_kind="automation",
+        operation="lifecycle_session_send",
+        tenant_id=tenant_id,
+    )
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+    from core.billing import has_billing_access as _has_access  # noqa: PLC0415
+
+    if not _has_access(db, tenant_id):
+        return "failed", {
+            "error_code": "billing_access_denied",
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+        }
+
+    normalized_phone = normalize_phone(to_phone)
+    if not normalized_phone:
+        return "failed", {
+            "error_code": "invalid_phone_number",
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+        }
+
+    body_text = render_lifecycle_approved_body(
+        db,
+        tenant_id,
+        template,
+        payload,
+        customer_name=customer_name,
+    ).strip()
+    if not body_text:
+        return "failed", {
+            "error_code": "empty_approved_body",
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+        }
+
+    wa_conn = (
+        db.query(WhatsAppConnection)
+        .filter(
+            WhatsAppConnection.tenant_id == tenant_id,
+            WhatsAppConnection.status == "connected",
+        )
+        .first()
+    )
+    if not wa_conn:
+        return "failed", {
+            "error_code": "no_whatsapp_connection",
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+        }
+
+    send_payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "to": normalized_phone,
+        "type": "text",
+        "text": {"preview_url": False, "body": body_text},
+    }
+
+    try:
+        from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+        from services.cart_recovery_failures import (  # noqa: PLC0415
+            classify_meta_response,
+            classify_send_exception,
+        )
+
+        response, _ctx = await provider_send_message(
+            db,
+            wa_conn,
+            tenant_id=tenant_id,
+            operation="lifecycle_session_send",
+            phone_id=wa_conn.phone_number_id,
+            payload=send_payload,
+            blocked_path=blocked_path,
+            automation_guard=False,
+        )
+
+        failure = classify_meta_response(response)
+        if failure is not None:
+            code, _label_ar, _raw_meta = failure
+            return "failed", {
+                "error_code": code,
+                "template": getattr(template, "name", None),
+                "service_key": service_key,
+                "send_method": "session_message",
+                "meta_error": _raw_meta,
+            }
+
+        wamid = (response or {}).get("messages", [{}])[0].get("id")
+        if not wamid:
+            return "ambiguous", {
+                "error_code": "provider_empty_response",
+                "template": getattr(template, "name", None),
+                "service_key": service_key,
+                "send_method": "session_message",
+            }
+
+        return "sent", {
+            "template": getattr(template, "name", None),
+            "service_key": service_key,
+            "wa_message_id": wamid,
+            "to": normalized_phone,
+            "send_method": "session_message",
+            "body_len": len(body_text),
+        }
+    except Exception as exc:
+        from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
+
+        code, _label_ar, raw = classify_send_exception(exc)
+        if code == "provider_timeout":
+            return "ambiguous", {
+                "error_code": code,
+                "template": getattr(template, "name", None),
+                "service_key": service_key,
+                "send_method": "session_message",
+                "raw": raw,
+            }
+        return "failed", {
+            "error_code": code,
+            "template": getattr(template, "name", None),
+            "service_key": service_key,
+            "send_method": "session_message",
+            "raw": raw,
+        }
+
+
 async def send_lifecycle_whatsapp_template(
     db: Session,
     tenant_id: int,

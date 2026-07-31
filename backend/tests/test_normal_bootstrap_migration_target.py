@@ -23,8 +23,8 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 )
 
 
-def test_repository_parallel_heads_0092_and_0094() -> None:
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0094"})
+def test_repository_parallel_heads_0092_and_0096() -> None:
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0096"})
 
 
 def test_migration_0094_extends_integration_branch_from_0093() -> None:
@@ -37,13 +37,16 @@ def test_migration_0094_extends_integration_branch_from_0093() -> None:
     rev_0094 = script.get_revision("0094")
     assert rev_0094 is not None
     assert rev_0094.down_revision == "0093"
-    assert set(script.get_heads()) == frozenset({"0092", "0094"})
+    rev_0095 = script.get_revision("0095")
+    assert rev_0095 is not None
+    assert rev_0095.down_revision == "0094"
+    assert set(script.get_heads()) == frozenset({"0092", "0096"})
 
 
 def test_supported_deployment_revision_states_are_explicit() -> None:
     assert NORMAL_BOOTSTRAP_REVISIONS == frozenset({"0093"})
     assert VALIDATED_STAGING_BOOTSTRAP_REVISIONS == frozenset({"0088", "0093"})
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0094"})
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0096"})
 
 
 def test_normal_bootstrap_pins_0093_not_head() -> None:

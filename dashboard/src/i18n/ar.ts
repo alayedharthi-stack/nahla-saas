@@ -1495,6 +1495,7 @@ const ar: Translations = {
       searchPlaceholder: 'ابحث عن قالب...',
       tags: {
         all:       'الكل',
+        order_updates: 'تحديثات الطلبات',
         marketing: 'التسويق',
         orders:    'الطلبات',
         shipping:  'الشحن',
