@@ -651,7 +651,7 @@ class TestMigration0094GuardPostgres:
                         **_dispatch_kwargs(session, tenant_id=tenant_id)
                     )
                 )
-            assert result.reason_code == "migration_0094_required"
+            assert result.reason_code == "migration_0095_required"
             assert result.dispatched is False
             assert result.ledger_id is None
             assert mock_send.await_count == 0

@@ -42,6 +42,7 @@ from models import (  # noqa: E402
     CommerceLifecycleNotificationLedger,
     Integration,
     Order,
+    WaConversationWindow,
     WebhookEvent,
 )
 
@@ -53,12 +54,13 @@ def _make_db() -> Tuple[Any, Any]:
         poolclass=StaticPool,
     )
     saved: list = []
-    table = CommerceLifecycleNotificationLedger.__table__
-    for col in table.columns:
-        if isinstance(col.type, JSONB):
-            saved.append((col, col.type))
-            col.type = JSON()
-    table.create(engine)
+    for model in (CommerceLifecycleNotificationLedger, WaConversationWindow):
+        table = model.__table__
+        for col in table.columns:
+            if isinstance(col.type, JSONB):
+                saved.append((col, col.type))
+                col.type = JSON()
+        table.create(engine, checkfirst=True)
     for col, orig in saved:
         col.type = orig
     Session = sessionmaker(bind=engine)

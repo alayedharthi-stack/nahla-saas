@@ -3972,6 +3972,8 @@ class CommerceLifecycleNotificationLedger(Base):
         nullable=True,
     )
     send_state = Column(String(32), nullable=True)
+    # session_message | approved_template — null for legacy / pre-decision rows
+    send_method = Column(String(32), nullable=True)
     template_name = Column(String(128), nullable=True)
     template_service_key = Column(String(64), nullable=True)
     provider_message_id = Column(String(128), nullable=True)
