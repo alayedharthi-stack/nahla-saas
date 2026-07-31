@@ -35,7 +35,7 @@ from scripts.operators.staging_migration_0088_to_0089_contract import (  # noqa:
 )
 
 MIGRATION_TENANT_ID = 890_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0094"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0096"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
@@ -175,7 +175,7 @@ def ephemeral_attach_engine() -> Iterator[Engine]:
         admin_engine.dispose()
 
 
-def test_repository_has_parallel_heads_0092_and_0094() -> None:
+def test_repository_has_parallel_heads_0092_and_0096() -> None:
     prev_cwd = os.getcwd()
     try:
         os.chdir(_DATABASE)
