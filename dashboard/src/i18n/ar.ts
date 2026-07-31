@@ -62,6 +62,7 @@ const ar: Translations = {
       manualSetup:          'دليل الربط اليدوي',
       widgets:          'أدوات زيادة المبيعات',
       nahlaTemplateLibrary: 'مكتبة قوالب نحلة',
+      ecommerceTemplates: 'قوالب المتجر',
       orderUpdates:     'إعدادات تحديثات الطلب',
       systemStatus:     'حالة النظام',
       deliveryQuality:  'جودة الإرسال',
@@ -249,19 +250,15 @@ const ar: Translations = {
     },
     templatesHub: {
       title:    'القوالب',
-      subtitle: 'مكتبة قوالب نحلة وقوالب واتساب والمتجر',
+      subtitle: 'قوالب واتساب وقوالب المتجر الإلكتروني',
       cards: {
-        nahlaLibrary: {
-          title:       'مكتبة قوالب نحلة',
-          description: 'تنظيم قوالب المتجر وواتساب',
-        },
         whatsappTemplates: {
           title:       'قوالب واتساب',
-          description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
+          description: 'مكتبة نحلة وقوالبك وحالات اعتماد Meta',
         },
         ecommerceTemplates: {
           title:       'قوالب المتجر الإلكتروني',
-          description: 'قوالب صفحات المتجر والتجربة الشرائية',
+          description: 'التسويق وتحديثات الطلبات وتجربة المتجر',
         },
       },
     },
@@ -351,34 +348,40 @@ const ar: Translations = {
         },
       },
     },
-    nahlaTemplateLibrary: {
-      title:    'مكتبة قوالب نحلة',
-      subtitle: 'تنظيم قوالب التسويق والمتجر — بدون محرك جديد',
-      sections: {
-        ecommerce: {
-          title:       'قوالب المتجر الإلكتروني',
-          description: 'قوالب صفحات المتجر والتجربة الشرائية — سطح تنظيمي فقط.',
-          comingSoon:  'قريبًا — تنظيم فقط، بدون وظائف إرسال أو تحرير هنا.',
+    ecommerceTemplates: {
+      title:    'قوالب المتجر الإلكتروني',
+      subtitle: 'تنظيم قوالب المتجر — تحديثات الطلبات اليوم؛ العائلات الأخرى عند توفر مكتبة متجر حقيقية',
+      filters: {
+        all:          'الكل',
+        marketing:    'التسويق',
+        orderUpdates: 'تحديثات الطلبات',
+      },
+      empty: {
+        all:          'لا توجد قوالب متجر في هذا العرض بعد',
+        marketing:    'لا توجد مكتبة قوالب تسويق للمتجر بعد. قوالب رسائل واتساب التسويقية تبقى ضمن قوالب واتساب.',
+        orderUpdates: 'لا تتوفر خدمات تحديثات الطلبات',
+        unsupportedStoreLibrary:
+          'لا توجد مكتبة منفصلة لقوالب صفحات المتجر بعد. فقط خدمات تحديثات الطلبات أدناه مبنية على بيانات تشغيل حقيقية. قوالب رسائل واتساب (بما فيها MARKETING في Meta) تبقى ضمن قوالب واتساب.',
+        orderUpdatesOnlyHint:
+          'تُعرض أعلاه فقط خدمات تحديثات الطلبات ذات عقد service_key موثوق.',
+      },
+      libraryTitle:    'عائلات قوالب المتجر',
+      librarySubtitle: 'توفر صادق — بلا إعادة تسمية لصفوف مكتبة واتساب كقوالب متجر',
+      openInWhatsapp:  'فتح قوالب واتساب',
+      orderUpdates: {
+        title:        'قوالب تحديثات الطلبات',
+        description:  'نص القالب ومعاينته لخدمات تحديثات الطلب الموجودة فعليًا. التصنيف يعتمد فقط على ORDER_UPDATE_SERVICE_KEYS.',
+        scopeNote:    'التفعيل والتوقيت والقناة وشروط الإرسال تبقى في إعدادات تحديثات الطلبات.',
+        opsLink:      'إدارة تشغيل تحديثات الطلبات',
+        opsLinkShort: 'إعدادات التشغيل',
+        noPreview:    'لا يوجد نص محفوظ بعد — اضبطه من إعدادات التشغيل.',
+        services: {
+          order_confirmation: 'تأكيد الطلب',
+          shipping_tracking:  'الشحن والتتبع',
         },
-        whatsapp: {
-          title:       'قوالب واتساب',
-          description: 'إدارة القوالب المعتمدة من Meta وإنشاء قوالب جديدة في السطح الحالي.',
-          linkLabel:   'فتح قوالب واتساب',
-        },
-        orderUpdates: {
-          title:       'قوالب تحديثات الطلبات',
-          description: 'قوالب إشعار تأكيد الطلب وتتبع الشحن — عرض تنظيمي فقط.',
-          editLink:    'تحرير في قوالب واتساب',
-          templates: {
-            order_confirmation: {
-              title:       'تأكيد الطلب',
-              description: 'إشعار العميل باستلام الطلب مع ملخص الطلب',
-            },
-            shipping_tracking: {
-              title:       'تتبع الشحن',
-              description: 'إبقاء العميل على اطلاع بحالة الشحنة',
-            },
-          },
+        serviceDescriptions: {
+          order_confirmation: 'إشعار العميل عند استلام الطلب وتأكيده.',
+          shipping_tracking:  'إشعار العميل عند شحن الطلب مع رابط التتبع عند توفره.',
         },
       },
     },
@@ -1494,6 +1497,8 @@ const ar: Translations = {
 
   templatesMgmt: {
     filterAll:         'الكل',
+    filterNahlaLibrary:'مكتبة نحلة',
+    filterMine:        'قوالبي',
     filterApproved:    'معتمدة',
     filterPending:     'قيد المراجعة',
     filterRejected:    'مرفوضة',

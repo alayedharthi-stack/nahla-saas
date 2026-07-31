@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from 'react-router-dom'
+import { Link, NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard,
   MessageSquare,
@@ -278,10 +278,13 @@ function SimplifiedDestinationNavLink({
   const Icon = resolveNavIcon(dest.destIcon)
   const isActive = isPathInSimplifiedDestination(location.pathname, dest)
 
+  // Use Link (not NavLink) so React Router prefix-matching cannot mark a hub
+  // active for an unrelated sibling path (e.g. /marketing vs /marketing/templates).
+  // Active state is owned entirely by isPathInSimplifiedDestination.
   return (
-    <NavLink
+    <Link
       to={link.to}
-      end={false}
+      aria-current={isActive ? 'page' : undefined}
       onClick={() => {
         trackPlatformEvent('platform_nav_click', {
           path: link.to,
@@ -290,13 +293,11 @@ function SimplifiedDestinationNavLink({
         })
         onClose()
       }}
-      className={() =>
-        `relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation w-full ${
-          isActive
-            ? 'bg-white/10 text-white'
-            : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
-        }`
-      }
+      className={`relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation w-full ${
+        isActive
+          ? 'bg-white/10 text-white'
+          : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+      }`}
     >
       {isActive && (
         <span className={`absolute start-0 inset-y-1.5 w-0.5 ${accentColor} rounded-e-full`} />
@@ -310,7 +311,7 @@ function SimplifiedDestinationNavLink({
         )}
       </span>
       {t(dest.destLabel)}
-    </NavLink>
+    </Link>
   )
 }
 

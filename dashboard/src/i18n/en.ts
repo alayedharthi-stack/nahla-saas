@@ -58,6 +58,7 @@ const en: Translations = {
       manualSetup:          'Manual Setup Guide',
       widgets:          'Sales Tools',
       nahlaTemplateLibrary: 'Nahla Template Library',
+      ecommerceTemplates: 'Store templates',
       orderUpdates:     'Order update settings',
       systemStatus:     'System Status',
       deliveryQuality:  'Delivery Quality',
@@ -245,19 +246,15 @@ const en: Translations = {
     },
     templatesHub: {
       title:    'Templates',
-      subtitle: 'Nahla library, WhatsApp templates, and store templates',
+      subtitle: 'WhatsApp templates and store templates',
       cards: {
-        nahlaLibrary: {
-          title:       'Nahla Template Library',
-          description: 'Organize store and WhatsApp templates',
-        },
         whatsappTemplates: {
           title:       'WhatsApp templates',
-          description: 'Manage Meta-approved templates in the existing surface',
+          description: 'Nahla library, your templates, and Meta approval statuses',
         },
         ecommerceTemplates: {
           title:       'E-commerce store templates',
-          description: 'Store page and shopping-experience templates',
+          description: 'Marketing, order updates, and store experience templates',
         },
       },
     },
@@ -347,34 +344,40 @@ const en: Translations = {
         },
       },
     },
-    nahlaTemplateLibrary: {
-      title:    'Nahla Template Library',
-      subtitle: 'Organize marketing and store templates — no new engine',
-      sections: {
-        ecommerce: {
-          title:       'E-commerce store templates',
-          description: 'Store page and checkout experience templates — organizational shell only.',
-          comingSoon:  'Coming soon — organization only, no send or edit flows here.',
+    ecommerceTemplates: {
+      title:    'E-commerce store templates',
+      subtitle: 'Store-scoped template organization — order updates today; other store families when a real store library exists',
+      filters: {
+        all:          'All',
+        marketing:    'Marketing',
+        orderUpdates: 'Order updates',
+      },
+      empty: {
+        all:          'No store templates in this view yet',
+        marketing:    'No store marketing template library is available yet. WhatsApp marketing message templates stay under WhatsApp templates.',
+        orderUpdates: 'No order-update services are available',
+        unsupportedStoreLibrary:
+          'There is no separate store-page template library yet. Only order-update services below are backed by real store order-update data. WhatsApp message templates (including Meta MARKETING) remain under WhatsApp templates.',
+        orderUpdatesOnlyHint:
+          'Only order-update services with a trusted service_key contract are listed above.',
+      },
+      libraryTitle:    'Store template families',
+      librarySubtitle: 'Honest availability — no WhatsApp library rows relabeled as store templates',
+      openInWhatsapp:  'Open WhatsApp templates',
+      orderUpdates: {
+        title:        'Order update templates',
+        description:  'Copy and preview for the order-update services that exist today. Classification uses ORDER_UPDATE_SERVICE_KEYS only.',
+        scopeNote:    'Enablement, timing, channel, and send conditions stay in order-update settings.',
+        opsLink:      'Manage order-update operations',
+        opsLinkShort: 'Operations settings',
+        noPreview:    'No saved message body yet — configure in operations settings.',
+        services: {
+          order_confirmation: 'Order confirmation',
+          shipping_tracking:  'Shipping & tracking',
         },
-        whatsapp: {
-          title:       'WhatsApp templates',
-          description: 'Manage Meta-approved templates and create new ones in the existing surface.',
-          linkLabel:   'Open WhatsApp templates',
-        },
-        orderUpdates: {
-          title:       'Order update templates',
-          description: 'Order confirmation and shipping tracking templates — informational shell only.',
-          editLink:    'Edit in WhatsApp templates',
-          templates: {
-            order_confirmation: {
-              title:       'Order confirmation',
-              description: 'Notify the customer that their order was received with a summary',
-            },
-            shipping_tracking: {
-              title:       'Shipping & tracking',
-              description: 'Keep the customer updated on shipment status',
-            },
-          },
+        serviceDescriptions: {
+          order_confirmation: 'Notify the customer when the order is received and confirmed.',
+          shipping_tracking:  'Notify the customer when the order ships, with tracking when available.',
         },
       },
     },
@@ -1490,6 +1493,8 @@ const en: Translations = {
 
   templatesMgmt: {
     filterAll:         'All',
+    filterNahlaLibrary:'Nahla library',
+    filterMine:        'My templates',
     filterApproved:    'Approved',
     filterPending:     'Under Review',
     filterRejected:    'Rejected',

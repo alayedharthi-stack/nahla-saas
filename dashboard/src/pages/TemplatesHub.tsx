@@ -1,19 +1,17 @@
-import { BookOpen, FileText, Store } from 'lucide-react'
+import { FileText, Store } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { HubCardGrid, type HubCardItem } from '../components/ui/HubCardGrid'
 import { useLanguage } from '../i18n/context'
 
+/**
+ * Templates Hub — two template types only.
+ * «Nahla Template Library» is a source/filter inside each type, not a third hub card.
+ */
 export default function TemplatesHub() {
   const { t } = useLanguage()
   const page = t(tr => tr.pages.templatesHub)
 
   const items: HubCardItem[] = [
-    {
-      to: '/marketing/templates',
-      icon: BookOpen,
-      title: page.cards.nahlaLibrary.title,
-      description: page.cards.nahlaLibrary.description,
-    },
     {
       to: '/templates',
       icon: FileText,
@@ -21,7 +19,7 @@ export default function TemplatesHub() {
       description: page.cards.whatsappTemplates.description,
     },
     {
-      to: '/marketing/templates#ecommerce',
+      to: '/marketing/templates',
       icon: Store,
       title: page.cards.ecommerceTemplates.title,
       description: page.cards.ecommerceTemplates.description,
