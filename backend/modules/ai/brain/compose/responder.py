@@ -2500,6 +2500,58 @@ class DefaultComposer:
                 },
             )
 
+            try:
+                from dataclasses import asdict as _asdict  # noqa: PLC0415
+
+                from modules.ai.brain.cost.model_router_audit import (  # noqa: PLC0415
+                    is_premium_model_allowed,
+                )
+                from modules.ai.brain.truth_surface.model_payload_attestation import (  # noqa: PLC0415
+                    build_model_payload_attestation,
+                )
+                from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                    current_trusted_context,
+                )
+                from modules.ai.brain.compose.prompt_state_serializer import (  # noqa: PLC0415
+                    serialize_commerce_brain_state,
+                )
+
+                _slim_state = None
+                if _slim_applied:
+                    _slim_state = serialize_commerce_brain_state(
+                        _asdict(reply_state),
+                        reply_state,
+                        kb_in_prompt_block=False,
+                    )
+                _compose_attestation = build_model_payload_attestation(
+                    stage="compose",
+                    snapshot=current_trusted_context(),
+                    brain_projection=getattr(ctx, "trusted_context_projection", None),
+                    known_facts=dict(getattr(reply_state, "known_facts", None) or {}),
+                    selected_product=getattr(reply_state, "selected_product", None),
+                    history=ctx.history,
+                    recent_turns=getattr(reply_state, "recent_turns", None),
+                    decision_action=str(
+                        (decision.action if decision is not None else "") or ""
+                    ),
+                    result_data=dict(getattr(result, "data", None) or {}),
+                    compose_route=_compose_route,
+                    premium_allowed=is_premium_model_allowed(),
+                    slim_compose_state=_slim_state,
+                )
+                ctx.model_payload_attestation = _compose_attestation
+                reply_state.model_payload_attestation = _compose_attestation
+                logger.info(
+                    "[MODEL_PAYLOAD_ATTESTATION] %s",
+                    _compose_attestation,
+                )
+            except Exception as _mpa_compose_exc:  # noqa: BLE001  # noqa: silent-ok
+                logger.debug(
+                    "[MODEL_PAYLOAD_ATTESTATION] compose stage failed tenant=%s err=%s",
+                    getattr(ctx, "tenant_id", None),
+                    _mpa_compose_exc,
+                )
+
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     generate_ai_reply,

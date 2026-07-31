@@ -961,6 +961,8 @@ class BrainReplyState:
     # Intent priority overlay for compose (primary goal, no-echo rule).
     intent_priority_focus: str = ""
     primary_customer_goal: str = ""
+    # Redacted model-input attestation (ids/counts/keys only) for architecture evidence.
+    model_payload_attestation: Optional[Dict[str, Any]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1049,6 +1051,8 @@ class BrainContext:
     merchant_operational_policy_hint: Optional[Any] = None
     # Scoped trusted-context projection for Brain/Compose (structured facts only).
     trusted_context_projection: Optional[Dict[str, Any]] = None
+    # Redacted model-input attestation (ids/counts/keys only) for architecture evidence.
+    model_payload_attestation: Optional[Dict[str, Any]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

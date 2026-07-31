@@ -1496,6 +1496,31 @@ class MerchantBrain:
                     "[TRUSTED_CONTEXT_BRAIN] %s",
                     safe_trusted_context_brain_projection_trace_metadata(_tc_brain_projection),
                 )
+                try:
+                    from modules.ai.brain.truth_surface.model_payload_attestation import (  # noqa: PLC0415
+                        build_model_payload_attestation,
+                    )
+                    from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+                        current_trusted_context,
+                    )
+
+                    _brain_attestation = build_model_payload_attestation(
+                        stage="brain",
+                        snapshot=current_trusted_context(),
+                        brain_projection=_tc_brain_projection,
+                        history=ctx.history,
+                    )
+                    ctx.model_payload_attestation = _brain_attestation
+                    logger.info(
+                        "[MODEL_PAYLOAD_ATTESTATION] %s",
+                        _brain_attestation,
+                    )
+                except Exception as _mpa_brain_exc:  # noqa: BLE001  # noqa: silent-ok
+                    logger.debug(
+                        "[MODEL_PAYLOAD_ATTESTATION] brain stage failed tenant=%s err=%s",
+                        tenant_id,
+                        _mpa_brain_exc,
+                    )
         except Exception as _tc_brain_exc:  # noqa: BLE001  # noqa: silent-ok
             logger.debug(
                 "[TRUSTED_CONTEXT_BRAIN] attach failed tenant=%s err=%s",
@@ -5478,7 +5503,7 @@ def _build_reply_state(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — pending-q clear must not block compose
         pass
 
-    return BrainReplyState(
+    _reply_state = BrainReplyState(
         store_name=ctx.facts.store_name,
         tone=effective_tone,
         stage=current_state.stage,
@@ -5564,6 +5589,37 @@ def _build_reply_state(
             )
         ),
     )
+    try:
+        from modules.ai.brain.truth_surface.model_payload_attestation import (  # noqa: PLC0415
+            build_model_payload_attestation,
+        )
+        from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
+            current_trusted_context,
+        )
+
+        _reply_attestation = build_model_payload_attestation(
+            stage="reply_state",
+            snapshot=current_trusted_context(),
+            brain_projection=getattr(ctx, "trusted_context_projection", None)
+            or _trusted_brain_projection,
+            known_facts=known_facts,
+            selected_product=selected_product,
+            history=ctx.history,
+            recent_turns=recent_turns,
+            decision_action=str(decision.action or ""),
+        )
+        _reply_state.model_payload_attestation = _reply_attestation
+        logger.info(
+            "[MODEL_PAYLOAD_ATTESTATION] %s",
+            _reply_attestation,
+        )
+    except Exception as _mpa_reply_exc:  # noqa: BLE001  # noqa: silent-ok
+        logger.debug(
+            "[MODEL_PAYLOAD_ATTESTATION] reply_state stage failed tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            _mpa_reply_exc,
+        )
+    return _reply_state
 
 
 def _compose_response_goal(
