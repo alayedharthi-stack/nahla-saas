@@ -16,6 +16,20 @@ const en: Translations = {
       adminPlatform: 'Platform',
       adminSettings: 'Settings',
     },
+    destinations: {
+      overview:  'Overview',
+      inbox:     'Conversations',
+      products:  'Products',
+      orders:    'Orders',
+      customers: 'Customers',
+      marketing: 'Marketing',
+      channels:  'Channels',
+      settings:  'Settings',
+    },
+    sections: {
+      nahlaSmart: 'Nahla Intelligence',
+      advanced:   'Advanced',
+    },
     items: {
       overview:         'Overview',
       conversations:    'Conversations',

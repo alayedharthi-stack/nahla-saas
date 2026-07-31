@@ -24,6 +24,20 @@ export interface Translations {
       adminPlatform: string
       adminSettings: string
     }
+    destinations: {
+      overview:  string
+      inbox:     string
+      products:  string
+      orders:    string
+      customers: string
+      marketing: string
+      channels:  string
+      settings:  string
+    }
+    sections: {
+      nahlaSmart: string
+      advanced:   string
+    }
     items: {
       overview:         string
       conversations:    string

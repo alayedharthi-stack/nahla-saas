@@ -20,6 +20,20 @@ const ar: Translations = {
       adminPlatform: 'المنصة',
       adminSettings: 'الإعدادات',
     },
+    destinations: {
+      overview:  'نظرة عامة',
+      inbox:     'المحادثات',
+      products:  'المنتجات',
+      orders:    'الطلبات',
+      customers: 'العملاء',
+      marketing: 'التسويق',
+      channels:  'القنوات',
+      settings:  'الإعدادات',
+    },
+    sections: {
+      nahlaSmart: 'نحلة الذكية',
+      advanced:   'متقدم',
+    },
     items: {
       overview:         'نظرة عامة',
       conversations:    'المحادثات',

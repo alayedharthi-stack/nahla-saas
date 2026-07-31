@@ -1,10 +1,10 @@
 /**
  * Platform UX feature flags (env-driven kill switches).
  *
- * These flags enable or disable future navigation / overview experiments.
  * Default is OFF — the current sidebar and overview remain the default path.
- * Do not wire into Sidebar or Overview until the gated UX PR lands.
  */
+
+const DEV_NAV_SIMPLIFIED_LS_KEY = 'nahla_platform_nav_simplified_8'
 
 function isTruthyEnv(value: string | undefined): boolean {
   if (value === undefined) return false
@@ -12,8 +12,19 @@ function isTruthyEnv(value: string | undefined): boolean {
   return normalized === 'true' || normalized === '1'
 }
 
-/** Simplified 8-destination navigation experiment (future). */
+function isFalsyEnv(value: string | undefined): boolean {
+  if (value === undefined) return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'false' || normalized === '0'
+}
+
+/** Simplified 8-destination navigation shell (P3.1). Default OFF. */
 export function isNavSimplified8Enabled(): boolean {
+  if (import.meta.env.DEV && typeof localStorage !== 'undefined') {
+    const override = localStorage.getItem(DEV_NAV_SIMPLIFIED_LS_KEY)
+    if (isTruthyEnv(override ?? undefined)) return true
+    if (isFalsyEnv(override ?? undefined)) return false
+  }
   return isTruthyEnv(import.meta.env.VITE_PLATFORM_NAV_SIMPLIFIED_8)
 }
 
