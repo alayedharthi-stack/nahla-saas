@@ -36,7 +36,7 @@ def _call_openai(model: str, api_key: str, api_base: str) -> dict:
                 {"role": "system", "content": BASELINE_PAYLOAD["system"]},
                 {"role": "user", "content": BASELINE_PAYLOAD["user"]},
             ],
-            "max_tokens": 120,
+            "max_completion_tokens": 120,
         },
         timeout=30.0,
     )
@@ -110,3 +110,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

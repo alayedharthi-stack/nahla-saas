@@ -287,6 +287,29 @@ class TestLedgerRouting:
         mock_ledger.assert_called_once()
         assert mock_ledger.call_args.kwargs["model"] == "gpt-5.6-luna"
 
+    def test_openai_provider_uses_max_completion_tokens(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import modules.ai.orchestrator.providers.openai_compatible_provider as openai_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(openai_mod, "_API_KEY", "test-key")
+        provider = openai_mod.OpenAICompatibleProvider()
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "رد"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        fake_resp.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client, patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider.record_ai_usage_from_openai_compatible",
+        ):
+            mock_client.return_value.__enter__.return_value.post.return_value = fake_resp
+            provider.call("مرحبا", "system prompt")
+        body = mock_client.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+        assert body["max_completion_tokens"] == 1024
+        assert "max_tokens" not in body
+
 
 class TestAuditLoggingSafety:
     def test_router_audit_never_logs_customer_message(

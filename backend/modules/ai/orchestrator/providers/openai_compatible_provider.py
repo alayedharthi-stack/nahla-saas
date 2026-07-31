@@ -119,7 +119,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
             body = {
                 "model": model,
                 "messages": merged_messages,
-                "max_tokens":  1024,
+                "max_completion_tokens": 1024,
                 "temperature": 0.7,
             }
             audit_extra = dict(audit_context or {})

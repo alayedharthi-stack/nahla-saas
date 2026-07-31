@@ -52,7 +52,7 @@ def main() -> int:
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": "Reply with exactly: probe-ok"}],
-                        "max_tokens": 8,
+                        "max_completion_tokens": 8,
                     },
                 )
                 resp.raise_for_status()
