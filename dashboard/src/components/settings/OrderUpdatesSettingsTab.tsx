@@ -88,8 +88,8 @@ function buildPreview(text: string, variableKeys: string[]): string {
   let out = text
   variableKeys.forEach((key, idx) => {
     const sample = PREVIEW_SAMPLES[key] ?? `[${key}]`
-    out = out.replaceAll(`{{${key}}}`, sample)
-    out = out.replaceAll(`{{${idx + 1}}}`, sample)
+    out = out.split(`{{${key}}}`).join(sample)
+    out = out.split(`{{${idx + 1}}}`).join(sample)
   })
   return out
 }
