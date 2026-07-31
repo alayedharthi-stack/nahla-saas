@@ -63,6 +63,7 @@ export interface Translations {
       catalogIntelligence:  string
       manualSetup:          string
       widgets:          string
+      nahlaTemplateLibrary: string
       systemStatus:     string
       deliveryQuality:  string
       billing:          string
@@ -175,6 +176,43 @@ export interface Translations {
     settings:         { title: string; subtitle: string }
     billing:          { title: string; subtitle: string }
     widgets:          { title: string; subtitle: string }
+    marketingHub: {
+      title: string
+      subtitle: string
+      cards: {
+        campaigns:        { title: string; description: string }
+        promotions:       { title: string; description: string }
+        coupons:          { title: string; description: string }
+        widgets:          { title: string; description: string }
+        smartAutomations: { title: string; description: string }
+        templateLibrary:  { title: string; description: string }
+      }
+    }
+    nahlaTemplateLibrary: {
+      title: string
+      subtitle: string
+      sections: {
+        ecommerce: {
+          title: string
+          description: string
+          comingSoon: string
+        }
+        whatsapp: {
+          title: string
+          description: string
+          linkLabel: string
+        }
+        orderUpdates: {
+          title: string
+          description: string
+          editLink: string
+          templates: {
+            order_confirmation: { title: string; description: string }
+            shipping_tracking:  { title: string; description: string }
+          }
+        }
+      }
+    }
     systemStatus:     { title: string; subtitle: string }
     storeIntegration: { title: string; subtitle: string }
     whatsappConnect:  { title: string; subtitle: string }
