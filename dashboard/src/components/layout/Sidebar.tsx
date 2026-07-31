@@ -281,7 +281,7 @@ function SimplifiedDestinationNavLink({
   return (
     <NavLink
       to={link.to}
-      end={dest.destKey === 'dest_overview'}
+      end={false}
       onClick={() => {
         trackPlatformEvent('platform_nav_click', {
           path: link.to,

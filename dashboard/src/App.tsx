@@ -87,6 +87,9 @@ import InboxHub from './pages/InboxHub'
 import ProductsHub from './pages/ProductsHub'
 import ChannelsHub from './pages/ChannelsHub'
 import SettingsHub from './pages/SettingsHub'
+import OrdersHub from './pages/OrdersHub'
+import AutomationHub from './pages/AutomationHub'
+import TemplatesHub from './pages/TemplatesHub'
 
 export default function App() {
   return (
@@ -157,6 +160,9 @@ export default function App() {
             <Route path="marketing"            element={<MarketingHub />} />
             <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
             <Route path="products"           element={<ProductsHub />} />
+            <Route path="orders-hub"         element={<OrdersHub />} />
+            <Route path="automation"         element={<AutomationHub />} />
+            <Route path="templates-hub"      element={<TemplatesHub />} />
             <Route path="channels"           element={<ChannelsHub />} />
             <Route path="settings-hub"       element={<SettingsHub />} />
             <Route path="templates"          element={<Templates />} />

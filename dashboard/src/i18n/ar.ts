@@ -27,7 +27,9 @@ const ar: Translations = {
       orders:    'الطلبات',
       customers: 'العملاء',
       marketing: 'التسويق',
-      channels:  'القنوات',
+      automation: 'الأتمتة',
+      templates: 'القوالب',
+      channels:  'القنوات والتكاملات',
       settings:  'الإعدادات',
     },
     sections: {
@@ -60,6 +62,7 @@ const ar: Translations = {
       manualSetup:          'دليل الربط اليدوي',
       widgets:          'أدوات زيادة المبيعات',
       nahlaTemplateLibrary: 'مكتبة قوالب نحلة',
+      orderUpdates:     'إعدادات تحديثات الطلب',
       systemStatus:     'حالة النظام',
       deliveryQuality:  'جودة الإرسال',
       billing:          'الاشتراك والفوترة',
@@ -216,13 +219,55 @@ const ar: Translations = {
         },
       },
     },
+    ordersHub: {
+      title:    'الطلبات',
+      subtitle: 'الطلبات والعملاء — نقطة دخول واحدة',
+      cards: {
+        orders: {
+          title:       'الطلبات',
+          description: 'متابعة وإدارة طلبات المتجر',
+        },
+        customers: {
+          title:       'العملاء',
+          description: 'قائمة العملاء وملفاتهم',
+        },
+      },
+    },
+    automationHub: {
+      title:    'الأتمتة',
+      subtitle: 'الأتمتة الذكية والطيار الآلي',
+      cards: {
+        smartAutomations: {
+          title:       'الأتمتة الذكية',
+          description: 'إعداد محركات الأتمتة للمبيعات والمتابعة',
+        },
+        autopilot: {
+          title:       'الطيار الآلي',
+          description: 'الطيار الآلي لتأكيد الطلب والشحن',
+        },
+      },
+    },
+    templatesHub: {
+      title:    'القوالب',
+      subtitle: 'مكتبة قوالب نحلة وقوالب واتساب',
+      cards: {
+        nahlaLibrary: {
+          title:       'مكتبة قوالب نحلة',
+          description: 'تنظيم قوالب المتجر وواتساب وتحديثات الطلبات',
+        },
+        whatsappTemplates: {
+          title:       'قوالب واتساب',
+          description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
+        },
+      },
+    },
     settingsHub: {
       title:    'الإعدادات',
-      subtitle: 'إعدادات المتجر والأمان والفوترة ونحلة الذكية والأدوات المتقدمة',
+      subtitle: 'إعدادات المتجر والأمان والفوترة وتحديثات الطلب ونحلة الذكية والأدوات المتقدمة',
       sections: {
         core: {
           title:       'المتجر والحساب',
-          description: 'الإعدادات العامة والأمان والاشتراك',
+          description: 'نظرة عامة والإعدادات العامة والأمان والاشتراك وتحديثات الطلب',
         },
         nahlaSmart: {
           title:       'نحلة الذكية',
@@ -234,6 +279,10 @@ const ar: Translations = {
         },
       },
       cards: {
+        overview: {
+          title:       'نظرة عامة',
+          description: 'الصفحة الرئيسية — أداء المتجر بنظرة سريعة',
+        },
         general: {
           title:       'الإعدادات العامة',
           description: 'ملف المتجر وصلاحيات الذكاء والتفضيلات',
@@ -245,6 +294,10 @@ const ar: Translations = {
         billing: {
           title:       'الاشتراك والفوترة',
           description: 'الخطة والفواتير والدفع',
+        },
+        orderUpdates: {
+          title:       'إعدادات تحديثات الطلب',
+          description: 'تفعيل وإدارة قوالب تأكيد الطلب والشحن',
         },
         intelligence: {
           title:       'ذكاء نحلة',
@@ -274,13 +327,7 @@ const ar: Translations = {
     },
     marketingHub: {
       title:    'التسويق',
-      subtitle: 'الحملات والعروض والأتمتة ومكتبة القوالب — نقطة دخول واحدة لأدوات التسويق',
-      sections: {
-        templates: {
-          title:       'القوالب',
-          description: 'مكتبة قوالب نحلة وقوالب واتساب',
-        },
-      },
+      subtitle: 'الحملات والعروض والكوبونات وأدوات زيادة المبيعات',
       cards: {
         campaigns: {
           title:       'الحملات',
@@ -297,18 +344,6 @@ const ar: Translations = {
         widgets: {
           title:       'أدوات زيادة المبيعات',
           description: 'ويدجت واتساب العائم وويدجتات المتجر التحويلية',
-        },
-        smartAutomations: {
-          title:       'الأتمتة',
-          description: 'إدارة الأتمتة الذكية والطيار الآلي',
-        },
-        templateLibrary: {
-          title:       'مكتبة قوالب نحلة',
-          description: 'قوالب المتجر وواتساب وتحديثات الطلبات — سطح تنظيمي',
-        },
-        whatsappTemplates: {
-          title:       'قوالب واتساب',
-          description: 'إدارة القوالب المعتمدة من Meta في السطح الحالي',
         },
       },
     },

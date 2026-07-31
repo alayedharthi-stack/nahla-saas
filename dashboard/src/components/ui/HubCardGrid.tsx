@@ -31,7 +31,7 @@ export function HubCardGrid({ items }: { items: HubCardItem[] }) {
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
       {items.map(({ to, icon: Icon, title, description, isAI }) => (
         <Link
-          key={to}
+          key={`${to}-${title}`}
           to={to}
           className="card p-5 hover:border-brand-200 hover:shadow-sm transition-all group"
         >

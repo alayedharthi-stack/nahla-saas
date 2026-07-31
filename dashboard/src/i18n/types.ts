@@ -31,6 +31,8 @@ export interface Translations {
       orders:    string
       customers: string
       marketing: string
+      automation: string
+      templates: string
       channels:  string
       settings:  string
     }
@@ -64,6 +66,7 @@ export interface Translations {
       manualSetup:          string
       widgets:          string
       nahlaTemplateLibrary: string
+      orderUpdates:     string
       systemStatus:     string
       deliveryQuality:  string
       billing:          string
@@ -203,6 +206,30 @@ export interface Translations {
         salesChannels:    { title: string; description: string }
       }
     }
+    ordersHub: {
+      title: string
+      subtitle: string
+      cards: {
+        orders:    { title: string; description: string }
+        customers: { title: string; description: string }
+      }
+    }
+    automationHub: {
+      title: string
+      subtitle: string
+      cards: {
+        smartAutomations: { title: string; description: string }
+        autopilot:        { title: string; description: string }
+      }
+    }
+    templatesHub: {
+      title: string
+      subtitle: string
+      cards: {
+        nahlaLibrary:      { title: string; description: string }
+        whatsappTemplates: { title: string; description: string }
+      }
+    }
     settingsHub: {
       title: string
       subtitle: string
@@ -212,9 +239,11 @@ export interface Translations {
         advanced:   { title: string; description: string }
       }
       cards: {
+        overview:        { title: string; description: string }
         general:         { title: string; description: string }
         security:        { title: string; description: string }
         billing:         { title: string; description: string }
+        orderUpdates:    { title: string; description: string }
         intelligence:    { title: string; description: string }
         knowledgeBase:   { title: string; description: string }
         systemStatus:    { title: string; description: string }
@@ -226,17 +255,11 @@ export interface Translations {
     marketingHub: {
       title: string
       subtitle: string
-      sections: {
-        templates: { title: string; description: string }
-      }
       cards: {
-        campaigns:         { title: string; description: string }
-        promotions:        { title: string; description: string }
-        coupons:           { title: string; description: string }
-        widgets:           { title: string; description: string }
-        smartAutomations:  { title: string; description: string }
-        templateLibrary:   { title: string; description: string }
-        whatsappTemplates: { title: string; description: string }
+        campaigns:  { title: string; description: string }
+        promotions: { title: string; description: string }
+        coupons:    { title: string; description: string }
+        widgets:    { title: string; description: string }
       }
     }
     nahlaTemplateLibrary: {

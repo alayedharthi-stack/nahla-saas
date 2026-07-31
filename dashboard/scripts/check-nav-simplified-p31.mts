@@ -113,6 +113,18 @@ assert(
   navDataSource.includes('SIMPLIFIED_SIDEBAR_LINK_COUNT = 8'),
 )
 
+assert(
+  'visual IA top-level destinations exclude overview and customers as rail links',
+  !navDataSource.match(/destKey:\s*'dest_overview'/)
+    && !navDataSource.match(/destKey:\s*'dest_customers'/),
+)
+
+assert(
+  'visual IA includes automation and templates destinations',
+  navDataSource.includes("destKey: 'dest_automation'")
+    && navDataSource.includes("destKey: 'dest_templates'"),
+)
+
 const forbiddenPaths = [
   '/post_delivery',
   '/order-updates',

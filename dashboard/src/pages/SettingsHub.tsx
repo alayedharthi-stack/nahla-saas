@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import {
+  LayoutDashboard,
   Settings,
   ShieldCheck,
   CreditCard,
+  Package,
   Brain,
   BookOpen,
   Activity,
@@ -23,6 +25,12 @@ export default function SettingsHub() {
 
   const coreItems: HubCardItem[] = [
     {
+      to: '/overview',
+      icon: LayoutDashboard,
+      title: page.cards.overview.title,
+      description: page.cards.overview.description,
+    },
+    {
       to: '/settings',
       icon: Settings,
       title: page.cards.general.title,
@@ -40,6 +48,12 @@ export default function SettingsHub() {
       title: page.cards.billing.title,
       description: page.cards.billing.description,
     },
+    {
+      to: '/settings?tab=order_updates',
+      icon: Package,
+      title: page.cards.orderUpdates.title,
+      description: page.cards.orderUpdates.description,
+    },
   ]
 
   const nahlaSmartItems: HubCardItem[] = [
@@ -48,14 +62,12 @@ export default function SettingsHub() {
       icon: Brain,
       title: page.cards.intelligence.title,
       description: page.cards.intelligence.description,
-      isAI: true,
     },
     {
       to: '/knowledge-base',
       icon: BookOpen,
       title: page.cards.knowledgeBase.title,
       description: page.cards.knowledgeBase.description,
-      isAI: true,
     },
   ]
 
@@ -77,14 +89,12 @@ export default function SettingsHub() {
       icon: BrainCircuit,
       title: page.cards.salesAgent.title,
       description: page.cards.salesAgent.description,
-      isAI: true,
     },
     {
       to: '/analytics',
       icon: BarChart2,
       title: page.cards.analytics.title,
       description: page.cards.analytics.description,
-      isAI: true,
     },
   ]
 
@@ -109,12 +119,12 @@ export default function SettingsHub() {
         <button
           type="button"
           onClick={() => setAdvancedExpanded(prev => !prev)}
-          className="flex w-full items-center gap-2 text-left mb-3 group"
+          className="flex w-full items-center gap-2 text-start mb-3 group"
           aria-expanded={advancedExpanded}
         >
           {advancedExpanded
             ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
-            : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
+            : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0 rtl:rotate-180" />}
           <div>
             <h2 className="text-sm font-semibold text-slate-900 group-hover:text-brand-600 transition-colors">
               {page.sections.advanced.title}

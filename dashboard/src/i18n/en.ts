@@ -23,7 +23,9 @@ const en: Translations = {
       orders:    'Orders',
       customers: 'Customers',
       marketing: 'Marketing',
-      channels:  'Channels',
+      automation: 'Automation',
+      templates: 'Templates',
+      channels:  'Channels & Integrations',
       settings:  'Settings',
     },
     sections: {
@@ -56,6 +58,7 @@ const en: Translations = {
       manualSetup:          'Manual Setup Guide',
       widgets:          'Sales Tools',
       nahlaTemplateLibrary: 'Nahla Template Library',
+      orderUpdates:     'Order update settings',
       systemStatus:     'System Status',
       deliveryQuality:  'Delivery Quality',
       billing:          'Billing',
@@ -212,13 +215,55 @@ const en: Translations = {
         },
       },
     },
+    ordersHub: {
+      title:    'Orders',
+      subtitle: 'Orders and customers — one entry point',
+      cards: {
+        orders: {
+          title:       'Orders',
+          description: 'Track and manage store orders',
+        },
+        customers: {
+          title:       'Customers',
+          description: 'Customer list and profiles',
+        },
+      },
+    },
+    automationHub: {
+      title:    'Automation',
+      subtitle: 'Smart automations and Autopilot',
+      cards: {
+        smartAutomations: {
+          title:       'Smart automations',
+          description: 'Configure automation engines for sales and follow-ups',
+        },
+        autopilot: {
+          title:       'Autopilot',
+          description: 'Autopilot control for order confirmation and shipping',
+        },
+      },
+    },
+    templatesHub: {
+      title:    'Templates',
+      subtitle: 'Nahla library and WhatsApp templates',
+      cards: {
+        nahlaLibrary: {
+          title:       'Nahla Template Library',
+          description: 'Organize store, WhatsApp, and order-update templates',
+        },
+        whatsappTemplates: {
+          title:       'WhatsApp templates',
+          description: 'Manage Meta-approved templates in the existing surface',
+        },
+      },
+    },
     settingsHub: {
       title:    'Settings',
-      subtitle: 'Store settings, security, billing, Nahla Intelligence, and advanced tools',
+      subtitle: 'Store settings, security, billing, order updates, Nahla Intelligence, and advanced tools',
       sections: {
         core: {
           title:       'Store & account',
-          description: 'General settings, security, and subscription',
+          description: 'Overview, general settings, security, subscription, and order updates',
         },
         nahlaSmart: {
           title:       'Nahla Intelligence',
@@ -230,6 +275,10 @@ const en: Translations = {
         },
       },
       cards: {
+        overview: {
+          title:       'Overview',
+          description: 'Dashboard home — store performance at a glance',
+        },
         general: {
           title:       'General settings',
           description: 'Store profile, AI permissions, and preferences',
@@ -241,6 +290,10 @@ const en: Translations = {
         billing: {
           title:       'Billing & subscription',
           description: 'Plan, invoices, and payment',
+        },
+        orderUpdates: {
+          title:       'Order update settings',
+          description: 'Enable and manage order confirmation and shipping templates',
         },
         intelligence: {
           title:       'Nahla Intelligence',
@@ -270,13 +323,7 @@ const en: Translations = {
     },
     marketingHub: {
       title:    'Marketing',
-      subtitle: 'Campaigns, promotions, automations, and templates — one entry point',
-      sections: {
-        templates: {
-          title:       'Templates',
-          description: 'Nahla library and WhatsApp templates',
-        },
-      },
+      subtitle: 'Campaigns, promotions, coupons, and sales tools',
       cards: {
         campaigns: {
           title:       'Campaigns',
@@ -293,18 +340,6 @@ const en: Translations = {
         widgets: {
           title:       'Sales Tools',
           description: 'Floating WhatsApp widget and store conversion widgets',
-        },
-        smartAutomations: {
-          title:       'Automations',
-          description: 'Manage smart automations and Autopilot',
-        },
-        templateLibrary: {
-          title:       'Nahla Template Library',
-          description: 'Store, WhatsApp, and order-update templates — organizational shell',
-        },
-        whatsappTemplates: {
-          title:       'WhatsApp templates',
-          description: 'Manage Meta-approved templates in the existing surface',
         },
       },
     },
