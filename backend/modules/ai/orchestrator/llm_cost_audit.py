@@ -57,13 +57,8 @@ def resolve_model_for_provider(
     """Map router tier model to a provider-native model name."""
     model = resolve_model_from_audit(audit_context, default=default)
     provider_key = str(provider or "").strip().lower()
-    if provider_key == "anthropic" and model and not model.lower().startswith("claude"):
-        cheap_fb = os.environ.get("NAHLA_MODEL_CHEAP_ANTHROPIC_FALLBACK", "").strip()
-        if cheap_fb:
-            return cheap_fb
-        return resolve_anthropic_model()
     if provider_key == "openai_compatible" and model.lower().startswith("claude"):
-        return os.environ.get("NAHLA_MODEL_CHEAP", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        return os.environ.get("NAHLA_MODEL_CHEAP", "gpt-5.6-luna").strip() or "gpt-5.6-luna"
     return model
 
 

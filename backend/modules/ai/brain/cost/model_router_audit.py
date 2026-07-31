@@ -26,9 +26,14 @@ TIER_PREMIUM = "premium"
 _AUDIT_FLAG = "NAHLA_MODEL_ROUTER_AUDIT_ENABLED"
 _PREMIUM_FLAG = "ALLOW_PREMIUM_MODEL"
 
-# Reference OpenAI gpt-4o-mini USD/1M (pricing v2 audit baseline).
-_GPT4O_MINI_REFERENCE_INPUT = Decimal("0.15")
-_GPT4O_MINI_REFERENCE_OUTPUT = Decimal("0.60")
+from modules.ai.orchestrator.customer_chat_models import (
+    MODEL_LUNA,
+    customer_chat_provider,
+)
+
+# Reference OpenAI gpt-5.6-luna USD/1M (provisional pricing v2 audit baseline).
+_LUNA_REFERENCE_INPUT = Decimal("0.015")
+_LUNA_REFERENCE_OUTPUT = Decimal("0.060")
 
 _TINY_CALL_SITES = frozenset({
     "brain.intent.slot_extractor",
@@ -104,28 +109,33 @@ def is_premium_model_allowed() -> bool:
     return os.getenv(_PREMIUM_FLAG, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def audit_gpt4o_mini_pricing_v2() -> Dict[str, Any]:
-    """Verify ledger pricing v2 entry for openai_compatible/gpt-4o-mini."""
+def audit_luna_pricing_v2() -> Dict[str, Any]:
+    """Verify ledger pricing v2 entry for openai_compatible/gpt-5.6-luna."""
     from modules.ai.orchestrator.ai_usage_pricing import (  # noqa: PLC0415
         PRICING_VERSION,
         lookup_model_pricing_v2,
     )
 
-    pricing = lookup_model_pricing_v2("openai_compatible", "gpt-4o-mini")
-    input_ok = pricing.input_per_1m == _GPT4O_MINI_REFERENCE_INPUT
-    output_ok = pricing.output_per_1m == _GPT4O_MINI_REFERENCE_OUTPUT
+    pricing = lookup_model_pricing_v2("openai_compatible", MODEL_LUNA)
+    input_ok = pricing.input_per_1m == _LUNA_REFERENCE_INPUT
+    output_ok = pricing.output_per_1m == _LUNA_REFERENCE_OUTPUT
     return {
-        "provider": "openai_compatible",
-        "model": "gpt-4o-mini",
+        "provider": customer_chat_provider(),
+        "model": MODEL_LUNA,
         "pricing_version": PRICING_VERSION,
         "input_per_1m_usd": str(pricing.input_per_1m),
         "output_per_1m_usd": str(pricing.output_per_1m),
-        "reference_input_per_1m_usd": str(_GPT4O_MINI_REFERENCE_INPUT),
-        "reference_output_per_1m_usd": str(_GPT4O_MINI_REFERENCE_OUTPUT),
+        "reference_input_per_1m_usd": str(_LUNA_REFERENCE_INPUT),
+        "reference_output_per_1m_usd": str(_LUNA_REFERENCE_OUTPUT),
         "input_matches_reference": input_ok,
         "output_matches_reference": output_ok,
         "pricing_ok": input_ok and output_ok,
     }
+
+
+def audit_gpt4o_mini_pricing_v2() -> Dict[str, Any]:
+    """Backward-compatible alias — Luna is the production cheap/default model."""
+    return audit_luna_pricing_v2()
 
 
 def _env_tier_default(tier: str) -> ModelTierSuggestion:
@@ -134,29 +144,29 @@ def _env_tier_default(tier: str) -> ModelTierSuggestion:
         return ModelTierSuggestion(
             tier=tier,
             reason="policy_tiny_call_site",
-            suggested_provider=os.getenv("NAHLA_MODEL_TINY_PROVIDER", "openai_compatible"),
-            suggested_model=os.getenv("NAHLA_MODEL_TINY", "gpt-4o-mini"),
+            suggested_provider=os.getenv("NAHLA_MODEL_TINY_PROVIDER", customer_chat_provider()),
+            suggested_model=os.getenv("NAHLA_MODEL_TINY", MODEL_LUNA),
         )
     if tier == TIER_CHEAP:
         return ModelTierSuggestion(
             tier=tier,
             reason="policy_cheap_intent",
-            suggested_provider=os.getenv("NAHLA_MODEL_CHEAP_PROVIDER", "openai_compatible"),
-            suggested_model=os.getenv("NAHLA_MODEL_CHEAP", "gpt-4o-mini"),
+            suggested_provider=os.getenv("NAHLA_MODEL_CHEAP_PROVIDER", customer_chat_provider()),
+            suggested_model=os.getenv("NAHLA_MODEL_CHEAP", MODEL_LUNA),
         )
     if tier == TIER_STANDARD:
         return ModelTierSuggestion(
             tier=tier,
             reason="policy_standard_intent",
-            suggested_provider=os.getenv("NAHLA_MODEL_STANDARD_PROVIDER", "anthropic"),
-            suggested_model=os.getenv("NAHLA_MODEL_STANDARD", "claude-sonnet-4-6"),
+            suggested_provider=os.getenv("NAHLA_MODEL_STANDARD_PROVIDER", customer_chat_provider()),
+            suggested_model=os.getenv("NAHLA_MODEL_STANDARD", "gpt-5.6-terra"),
         )
     if tier == TIER_PREMIUM:
         return ModelTierSuggestion(
             tier=tier,
             reason="policy_premium_explicit_only",
-            suggested_provider="anthropic",
-            suggested_model="claude-opus-4-6",
+            suggested_provider=customer_chat_provider(),
+            suggested_model=os.getenv("NAHLA_MODEL_PREMIUM", "gpt-5.6-sol"),
         )
     return ModelTierSuggestion(tier=TIER_NONE, reason="policy_no_llm")
 
@@ -205,7 +215,7 @@ def emit_model_router_audit(**fields: Any) -> None:
         payload.setdefault("mode", "audit_only")
         payload.setdefault("behavior_change", False)
         if payload.get("tier") in {TIER_TINY, TIER_CHEAP}:
-            payload["gpt4o_mini_pricing_check"] = audit_gpt4o_mini_pricing_v2()
+            payload["luna_pricing_check"] = audit_luna_pricing_v2()
         _log.info("[MODEL_ROUTER_AUDIT] %s", json.dumps(payload, ensure_ascii=False))
     except Exception as exc:  # noqa: BLE001 — audit must never break replies
         _log.warning(

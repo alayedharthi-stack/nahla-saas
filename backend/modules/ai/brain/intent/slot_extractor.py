@@ -49,13 +49,18 @@ logger = logging.getLogger("nahla.brain.slot_extractor")
 
 
 def _resolve_slot_model() -> str:
-    """Slot extractor model: ANTHROPIC_SLOT_MODEL override, else canonical default."""
+    """Slot extractor model: NAHLA_MODEL_TINY override, else Luna default."""
     override = os.environ.get("ANTHROPIC_SLOT_MODEL", "").strip()
     if override:
         return override
-    from modules.ai.orchestrator.llm_cost_audit import resolve_anthropic_model  # noqa: PLC0415
+    tiny = os.environ.get("NAHLA_MODEL_TINY", "").strip()
+    if tiny:
+        return tiny
+    from modules.ai.orchestrator.customer_chat_models import (  # noqa: PLC0415
+        resolve_tiny_customer_chat_model,
+    )
 
-    return resolve_anthropic_model()
+    return resolve_tiny_customer_chat_model()
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 # KEY CHANGE: instruct the model to return ONLY non-empty fields (compact mode).
@@ -121,22 +126,22 @@ async def extract_slots(
     message: str,
     history: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Call Claude Haiku to extract slots.
+    """Call OpenAI-compatible tiny model to extract slots.
 
     Returns a dict with non-empty values from _EXTRACT_SCHEMA.
     Falls back to deterministic-only on any error.
     """
     deterministic = _extract_deterministic_slots(message)
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return deterministic
 
     try:
         import asyncio
-        import anthropic  # noqa: PLC0415
 
-        # 12-second hard timeout (SDK + asyncio guard)
-        client = anthropic.AsyncAnthropic(api_key=api_key, timeout=12.0)
+        from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+            OpenAICompatibleProvider,
+        )
 
         # Last 2 turns only, each capped at 80 chars to save output budget
         context_turns = history[-4:] if history else []
@@ -159,7 +164,7 @@ async def extract_slots(
 
         emit_llm_cost_audit(
             model=_slot_model,
-            provider="anthropic",
+            provider="openai_compatible",
             messages_count=1,
             system_chars=len(_SYSTEM),
             messages_chars=len(user_content),
@@ -172,33 +177,24 @@ async def extract_slots(
 
         maybe_audit_model_router(call_site="brain.intent.slot_extractor")
 
-        # max_tokens raised from 200 → 350.
-        # With compact output, 350 is ample for even the densest response
-        # (≈ 15 filled fields × ~20 tokens each ≈ 300 tokens).
-        response = await asyncio.wait_for(
-            client.messages.create(
-                model=_slot_model,
-                max_tokens=350,
-                system=_SYSTEM,
-                messages=[{"role": "user", "content": user_content}],
+        provider = OpenAICompatibleProvider()
+        audit_context = {
+            "model_override": _slot_model,
+            "reason": "brain.intent.slot_extractor",
+            "estimated_input_tokens": (len(_SYSTEM) + len(user_content)) // 4,
+        }
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                provider.call,
+                user_content,
+                _SYSTEM,
+                audit_context=audit_context,
             ),
             timeout=12.0,
         )
-
-        from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic  # noqa: PLC0415
-
-        record_ai_usage_from_anthropic(
-            audit_extra={
-                "reason": "brain.intent.slot_extractor",
-                "estimated_input_tokens": (len(_SYSTEM) + len(user_content)) // 4,
-            },
-            model=_slot_model,
-            response=response,
-            reply_text=response.content[0].text if response.content else "",
-            total_prompt_chars=len(_SYSTEM) + len(user_content),
-        )
-
-        raw = response.content[0].text.strip()
+        raw = str(result.get("reply_text") or "").strip()
+        if not raw:
+            return deterministic
 
         # Strip markdown code fences
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -243,13 +239,9 @@ async def extract_slots(
         logger.warning("[SlotExtractor] timeout (%s) — falling back to deterministic", exc)
         return deterministic
     except Exception as exc:
-        from modules.ai.orchestrator.anthropic_exception_diagnostics import (  # noqa: PLC0415
-            anthropic_exception_diagnostics,
-        )
-
         logger.warning(
-            "[SlotExtractor] extraction failed diagnostics=%s",
-            anthropic_exception_diagnostics(exc),
+            "[SlotExtractor] extraction failed err=%s",
+            type(exc).__name__,
         )
         return deterministic
 

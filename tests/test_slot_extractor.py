@@ -14,7 +14,7 @@ import sys
 import os
 import asyncio
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +29,11 @@ from modules.ai.brain.intent.slot_extractor import (
     extract_slots,
 )
 
+_OPENAI_PROVIDER_CALL = (
+    "modules.ai.orchestrator.providers.openai_compatible_provider."
+    "OpenAICompatibleProvider.call"
+)
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,15 +43,13 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _mock_haiku_response(json_payload: Dict[str, Any]):
-    """Return an AsyncMock that mimics the Anthropic client for a given payload."""
-    content_block = MagicMock()
-    content_block.text = json.dumps(json_payload, ensure_ascii=False)
-    message = MagicMock()
-    message.content = [content_block]
-    client = MagicMock()
-    client.messages.create = AsyncMock(return_value=message)
-    return client
+def _mock_openai_slot_response(json_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a dict mimicking OpenAICompatibleProvider.call for a slot payload."""
+    return {
+        "reply_text": json.dumps(json_payload, ensure_ascii=False),
+        "model": "gpt-5.6-luna",
+        "provider": "openai_compatible",
+    }
 
 
 # ── _repair_json ──────────────────────────────────────────────────────────────
@@ -114,11 +117,11 @@ class TestDeterministicSlots:
 # ── extract_slots — integration mocks ────────────────────────────────────────
 
 class TestExtractSlots:
-    """Tests that mock the Anthropic client to verify the full pipeline."""
+    """Tests that mock OpenAI-compatible provider to verify the full pipeline."""
 
     def test_no_api_key_returns_deterministic(self):
         """Without an API key, only deterministic slots come back."""
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
             result = _run(extract_slots("اسمي محمد RIYD1234", []))
         assert result.get("short_address_code") == "RIYD1234"
         # LLM-only fields should be absent
@@ -135,10 +138,12 @@ class TestExtractSlots:
             "short_address_code": "RIAD1234",
             "intent_hint": "start_order",
         }
-        client = _mock_haiku_response(llm_payload)
 
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                return_value=_mock_openai_slot_response(llm_payload),
+            ):
                 result = _run(
                     extract_slots(
                         "اسمي محمد أحمد، من الرياض، حي النخيل، رمزي RIAD1234",
@@ -158,10 +163,12 @@ class TestExtractSlots:
             "city": "جدة",
             "intent_hint": "start_order",
         }
-        client = _mock_haiku_response(llm_payload)
 
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                return_value=_mock_openai_slot_response(llm_payload),
+            ):
                 result = _run(extract_slots("أنا من جدة", []))
 
         assert result.get("city") == "جدة"
@@ -176,10 +183,12 @@ class TestExtractSlots:
             "city": "مكة",
             "intent_hint": "start_order",
         }
-        client = _mock_haiku_response(llm_payload)
 
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                return_value=_mock_openai_slot_response(llm_payload),
+            ):
                 result = _run(extract_slots("رمزي MKAH5678 مكة", []))
 
         # Deterministic extractor found MKAH5678 — it should override LLM's WRONG123
@@ -187,18 +196,13 @@ class TestExtractSlots:
 
     def test_truncated_json_recovered_via_repair(self):
         """If LLM returns truncated JSON, _repair_json recovers partial data."""
-        # Simulate truncation mid-string
         truncated_raw = '{"customer_name": "سارة", "city": "الد'
 
-        content_block = MagicMock()
-        content_block.text = truncated_raw
-        message = MagicMock()
-        message.content = [content_block]
-        client = MagicMock()
-        client.messages.create = AsyncMock(return_value=message)
-
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                return_value={"reply_text": truncated_raw},
+            ):
                 result = _run(extract_slots("اسمي سارة من الد...", []))
 
         # customer_name was fully present before the cut
@@ -206,11 +210,8 @@ class TestExtractSlots:
 
     def test_timeout_falls_back_to_deterministic(self):
         """A TimeoutError returns deterministic slots, not an exception."""
-        client = MagicMock()
-        client.messages.create = AsyncMock(side_effect=TimeoutError("timeout"))
-
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(_OPENAI_PROVIDER_CALL, side_effect=TimeoutError("timeout")):
                 result = _run(extract_slots("ABCD1234 ارسل", []))
 
         # Deterministic should still give us the address code
@@ -218,11 +219,11 @@ class TestExtractSlots:
 
     def test_api_exception_falls_back_gracefully(self):
         """Any API error returns deterministic slots without raising."""
-        client = MagicMock()
-        client.messages.create = AsyncMock(side_effect=RuntimeError("network error"))
-
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                side_effect=RuntimeError("network error"),
+            ):
                 result = _run(extract_slots("مرحباً", []))
 
         # No exception, empty dict or partial is fine
@@ -234,10 +235,12 @@ class TestExtractSlots:
             "order_id": "12345",
             "intent_hint": "track_order",
         }
-        client = _mock_haiku_response(llm_payload)
 
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch("anthropic.AsyncAnthropic", return_value=client):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                _OPENAI_PROVIDER_CALL,
+                return_value=_mock_openai_slot_response(llm_payload),
+            ):
                 result = _run(extract_slots("ما حال طلبي رقم 12345", []))
 
         assert result.get("order_id") == "12345"

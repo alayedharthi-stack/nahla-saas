@@ -42,6 +42,7 @@ from modules.ai.brain.types import (  # noqa: E402
 )
 from modules.ai.orchestrator.pipeline import AIOrchestrationPipeline  # noqa: E402
 from modules.ai.orchestrator.provider_router import DEFAULT_PROVIDER_CHAIN  # noqa: E402
+from modules.ai.orchestrator.customer_chat_models import MODEL_LUNA, MODEL_SOL, MODEL_TERRA  # noqa: E402
 from modules.ai.orchestrator.types import AIContext, AIOrchestrationRequest  # noqa: E402
 
 
@@ -83,12 +84,13 @@ def _ctx(
 
 
 class TestResolveComposeModelRoute:
-    def test_router_disabled_keeps_legacy_anthropic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_router_disabled_uses_openai_luna(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("NAHLA_MODEL_ROUTER_ENABLED", raising=False)
         route = resolve_compose_model_route(intent_name=INTENT_ASK_PRODUCT)
         assert route.enforced is False
-        assert route.provider_hint == "anthropic"
-        assert route.provider_chain_override is None
+        assert route.provider_hint == "openai_compatible"
+        assert route.model == MODEL_LUNA
+        assert "anthropic" not in (route.provider_chain_override or ())
 
     def test_router_enabled_commerce_cheap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
@@ -97,22 +99,21 @@ class TestResolveComposeModelRoute:
             assert route.enforced is True
             assert route.tier == TIER_CHEAP
             assert route.provider == "openai_compatible"
-            assert route.model == "gpt-4o-mini"
+            assert route.model == MODEL_LUNA
             assert route.provider_hint == "openai_compatible"
             assert route.provider_chain_override[0] == "openai_compatible"
 
     def test_router_enabled_escalation_standard(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
-        monkeypatch.setenv("NAHLA_MODEL_STANDARD", "claude-sonnet-4-6")
         route = resolve_compose_model_route(
             intent_name=INTENT_TALK_HUMAN,
             decision_action=ACTION_HANDOFF,
         )
         assert route.enforced is True
         assert route.tier == TIER_STANDARD
-        assert route.provider == "anthropic"
-        assert route.model == "claude-sonnet-4-6"
-        assert route.provider_hint == "anthropic"
+        assert route.provider == "openai_compatible"
+        assert route.model == MODEL_TERRA
+        assert route.provider_hint == "openai_compatible"
 
     def test_premium_opus_only_when_explicitly_enabled(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -124,7 +125,7 @@ class TestResolveComposeModelRoute:
         monkeypatch.setenv("ALLOW_PREMIUM_MODEL", "true")
         enabled = resolve_compose_model_route(intent_name="premium_explicit")
         assert enabled.tier == TIER_PREMIUM
-        assert "opus" in enabled.model.lower()
+        assert enabled.model == MODEL_SOL
 
 
 class TestLlmComposeIntegration:
@@ -153,13 +154,13 @@ class TestLlmComposeIntegration:
             await composer._llm_compose(ctx, result, decision=decision)
         return captured
 
-    def test_llm_compose_disabled_router_uses_anthropic(
+    def test_llm_compose_disabled_router_uses_openai(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("NAHLA_MODEL_ROUTER_ENABLED", raising=False)
         ctx = _ctx(intent_name=INTENT_ASK_PRODUCT, message="هل عندكم عسل؟")
         captured = asyncio.run(self._run_llm_compose(ctx))
-        assert captured["provider_hint"] == "anthropic"
+        assert captured["provider_hint"] == "openai_compatible"
         assert "__model_router" not in captured["prompt_overrides"]
 
     def test_llm_compose_enabled_commerce_uses_cheap(
@@ -172,16 +173,15 @@ class TestLlmComposeIntegration:
         router = captured["prompt_overrides"]["__model_router"]
         assert router["tier"] == TIER_CHEAP
         assert router["provider"] == "openai_compatible"
-        assert router["model"] == "gpt-4o-mini"
+        assert router["model"] == MODEL_LUNA
         audit = captured["prompt_overrides"]["__llm_cost_audit"]
         assert audit["model_tier"] == TIER_CHEAP
-        assert audit["model_override"] == "gpt-4o-mini"
+        assert audit["model_override"] == MODEL_LUNA
 
     def test_llm_compose_enabled_escalation_uses_standard(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
-        monkeypatch.setenv("NAHLA_MODEL_STANDARD", "claude-sonnet-4-6")
         ctx = _ctx(intent_name=INTENT_TALK_HUMAN, message="أبي أتكلم مع موظف")
         captured = asyncio.run(
             self._run_llm_compose(
@@ -189,10 +189,10 @@ class TestLlmComposeIntegration:
                 decision=Decision(action=ACTION_HANDOFF, reason="handoff"),
             ),
         )
-        assert captured["provider_hint"] == "anthropic"
+        assert captured["provider_hint"] == "openai_compatible"
         router = captured["prompt_overrides"]["__model_router"]
         assert router["tier"] == TIER_STANDARD
-        assert router["model"] == "claude-sonnet-4-6"
+        assert router["model"] == MODEL_TERRA
 
 
 class TestNoLlmSocialPaths:
@@ -235,11 +235,9 @@ class TestNoLlmSocialPaths:
 
 
 class TestProviderChainGlobalUnchanged:
-    def test_default_provider_chain_unchanged(self) -> None:
+    def test_default_provider_chain_openai_only(self) -> None:
         assert DEFAULT_PROVIDER_CHAIN == [
-            "anthropic",
             "openai_compatible",
-            "gemini",
             "mock",
         ]
 
@@ -256,7 +254,7 @@ class TestProviderChainGlobalUnchanged:
         )
         chain = pipeline.resolve_provider_chain(request)
         assert chain.providers[0] == "openai_compatible"
-        assert DEFAULT_PROVIDER_CHAIN[0] == "anthropic"
+        assert DEFAULT_PROVIDER_CHAIN[0] == "openai_compatible"
 
 
 class TestLedgerRouting:
@@ -281,13 +279,64 @@ class TestLedgerRouting:
                 "system prompt",
                 audit_context={
                     "tenant_id": 7,
-                    "model_override": "gpt-4o-mini",
+                    "model_override": "gpt-5.6-luna",
                     "model_tier": TIER_CHEAP,
                     "reason": "brain.compose._llm_compose",
                 },
             )
         mock_ledger.assert_called_once()
-        assert mock_ledger.call_args.kwargs["model"] == "gpt-4o-mini"
+        assert mock_ledger.call_args.kwargs["model"] == "gpt-5.6-luna"
+
+    def test_openai_provider_uses_max_completion_tokens(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import modules.ai.orchestrator.providers.openai_compatible_provider as openai_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(openai_mod, "_API_KEY", "test-key")
+        provider = openai_mod.OpenAICompatibleProvider()
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "رد"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        fake_resp.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client, patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider.record_ai_usage_from_openai_compatible",
+        ):
+            mock_client.return_value.__enter__.return_value.post.return_value = fake_resp
+            provider.call("مرحبا", "system prompt")
+        body = mock_client.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+        assert body["max_completion_tokens"] == 1024
+        assert "max_tokens" not in body
+
+    def test_openai_provider_omits_temperature_for_gpt56(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import modules.ai.orchestrator.providers.openai_compatible_provider as openai_mod  # noqa: PLC0415
+
+        monkeypatch.setattr(openai_mod, "_API_KEY", "test-key")
+        provider = openai_mod.OpenAICompatibleProvider()
+        fake_resp = MagicMock()
+        fake_resp.json.return_value = {
+            "choices": [{"message": {"content": "رد"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        fake_resp.raise_for_status = MagicMock()
+
+        with patch("httpx.Client") as mock_client, patch(
+            "modules.ai.orchestrator.providers.openai_compatible_provider.record_ai_usage_from_openai_compatible",
+        ):
+            mock_client.return_value.__enter__.return_value.post.return_value = fake_resp
+            provider.call(
+                "مرحبا",
+                "system prompt",
+                audit_context={"model_override": "gpt-5.6-luna"},
+            )
+        body = mock_client.return_value.__enter__.return_value.post.call_args.kwargs["json"]
+        assert body["max_completion_tokens"] == 1024
+        assert "temperature" not in body
+        assert body["model"] == "gpt-5.6-luna"
 
 
 class TestAuditLoggingSafety:

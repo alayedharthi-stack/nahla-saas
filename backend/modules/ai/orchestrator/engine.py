@@ -8,16 +8,11 @@ Responsibilities:
   - delegate provider execution using provider_chain order when available
   - return a normalised AIReplyPayload
 
-Provider routing (now active):
-  When provider_chain is supplied by the pipeline, the engine attempts
-  providers in chain order:
-    anthropic → openai_compatible → gemini
-  The first provider that returns a non-empty reply wins.
-  Unconfigured providers are skipped.  If all fail, the engine falls back
-  to self._provider (Anthropic) to preserve existing fallback semantics.
-
-  When provider_chain is absent, self._provider (Anthropic) is called
-  directly — identical to the pre-activation behavior.
+Provider routing (OpenAI-only customer chat):
+  When provider_chain is supplied, the engine attempts providers in chain order
+  (default: openai_compatible only). On technical failure, escalates models
+  Luna → Terra → Sol (Sol gated by ALLOW_PREMIUM_MODEL). No silent Anthropic
+  or Gemini fallback.
 
 External API surface: unchanged.
 Webhook / runtime paths: unchanged.
@@ -39,6 +34,11 @@ from modules.ai.orchestrator.providers.registry import get_provider
 from modules.ai.orchestrator.providers.resilience import (
     DEFAULT_TIMEOUT,
     call_with_resilience,
+)
+from modules.ai.orchestrator.customer_chat_models import (
+    customer_chat_provider,
+    emit_customer_chat_model_telemetry,
+    technical_escalation_models,
 )
 from modules.ai.orchestrator.types import AIOrchestrationRequest, AIReplyPayload
 
@@ -87,13 +87,13 @@ class AIOrchestratorEngine:
     The engine no longer contains provider-specific logic and no longer
     imports concrete provider classes directly.  It resolves the active
     provider through the provider registry at initialisation time.
-    Currently "anthropic" is the only registered provider.
+    Currently resolves openai_compatible as the default provider for customer chat.
     """
 
     def __init__(self) -> None:
-        provider = get_provider("anthropic")
-        assert provider is not None, "AnthropicProvider not found in provider registry"
-        self._provider = provider   # default / fallback provider (always Anthropic)
+        provider = get_provider("openai_compatible")
+        assert provider is not None, "OpenAICompatibleProvider not found in provider registry"
+        self._provider = provider
 
     # ── Provider chain execution ───────────────────────────────────────────────
 
@@ -114,8 +114,9 @@ class AIOrchestratorEngine:
           4. If reply_text is non-empty, return immediately (success).
           5. If empty, log and continue to the next provider.
 
-        If every provider in the chain fails or is unavailable, fall back to
-        self._provider.call() (Anthropic) to preserve existing error semantics.
+        If every provider in the chain fails or is unavailable, attempt technical
+        model escalation (Luna → Terra → gated Sol) within openai_compatible.
+        Never falls back to Anthropic or Gemini.
 
         Never raises.
         """
@@ -129,6 +130,14 @@ class AIOrchestratorEngine:
             block_anthropic_fallback = True
 
         for provider_name in provider_chain.providers:
+            if provider_name in {"anthropic", "gemini"}:
+                logger.info(
+                    "[engine] provider_chain: skipping %s — "
+                    "excluded from customer chat path",
+                    provider_name,
+                )
+                observer.record_skipped(provider_name, "excluded_customer_chat")
+                continue
             if block_anthropic_fallback and provider_name == "anthropic":
                 logger.info(
                     "[engine] provider_chain: skipping anthropic — "
@@ -209,6 +218,18 @@ class AIOrchestratorEngine:
                     raw["provider_chain_primary"] = provider_chain.providers[0]
                 else:
                     raw["provider_chain_fallback_used"] = False
+                _actual_model = str(raw.get("model") or audit_context.get("model_override") or "")
+                emit_customer_chat_model_telemetry(
+                    provider=provider_name,
+                    requested_model=str(
+                        router_meta.get("model") or audit_context.get("model_override") or ""
+                    ),
+                    actual_model=_actual_model,
+                    escalation_reason="",
+                    tenant_id=audit_context.get("tenant_id"),
+                    conversation_id=audit_context.get("conversation_id"),
+                    turn_id=audit_context.get("turn_id"),
+                )
                 return raw
 
             logger.info(
@@ -217,51 +238,143 @@ class AIOrchestratorEngine:
             )
             observer.record_call(provider_name, _duration_ms, "empty_reply")
 
-        if block_anthropic_fallback:
-            logger.info(
-                "[engine] provider_chain: all providers exhausted — "
-                "anthropic fallback blocked for routine commerce"
-            )
-            observer.finalize(final_provider=None, fallback_used=False)
-            return {
-                "reply_text": "",
-                "provider": "",
-                "model": "",
-                "status": "blocked_anthropic_fallback",
-                "anthropic_fallback_blocked": True,
-            }
+        requested_model = str(
+            audit_context.get("model_override")
+            or router_meta.get("model")
+            or ""
+        ).strip()
+        escalated = self._try_technical_model_escalation(
+            request_obj=request_obj,
+            prompt=prompt,
+            observer=observer,
+            audit_context=audit_context,
+            requested_model=requested_model,
+        )
+        if escalated.get("reply_text"):
+            return escalated
 
-        # All chain providers exhausted — preserve existing fallback semantics
-        logger.debug(
+        logger.info(
             "[engine] provider_chain: all providers exhausted — "
-            "using default provider fallback (anthropic)"
+            "no cross-provider fallback (OpenAI-only path)"
+            if block_anthropic_fallback
+            else "controlled failure (no Anthropic/Gemini fallback)"
         )
-        _t0 = time.monotonic()
-        if request_obj.tool_definitions and hasattr(self._provider, "call_with_tools"):
-            result = self._provider.call_with_tools(
-                message=request_obj.message,
-                prompt=prompt,
-                tools=request_obj.tool_definitions,
-                tool_choice="auto",
-                history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
-                **_audit_kwargs(self._provider, "call_with_tools", audit_context),
+        observer.finalize(final_provider=None, fallback_used=False)
+        emit_customer_chat_model_telemetry(
+            provider=customer_chat_provider(),
+            requested_model=requested_model,
+            actual_model=requested_model or None,
+            escalation_reason="openai_chain_exhausted",
+            tenant_id=audit_context.get("tenant_id"),
+            conversation_id=audit_context.get("conversation_id"),
+            turn_id=audit_context.get("turn_id"),
+            extra={"status": "openai_chain_exhausted"},
+        )
+        exhausted: Dict[str, Any] = {
+            "reply_text": "",
+            "provider": "" if block_anthropic_fallback else self._provider.provider_name,
+            "model": requested_model,
+            "status": "openai_chain_exhausted",
+        }
+        if block_anthropic_fallback:
+            exhausted["anthropic_fallback_blocked"] = True
+        return exhausted
+
+    def _try_technical_model_escalation(
+        self,
+        *,
+        request_obj: AIOrchestrationRequest,
+        prompt: str,
+        observer: ChainObserver,
+        audit_context: Dict[str, Any],
+        requested_model: str,
+    ) -> Dict[str, Any]:
+        """Luna → Terra → gated Sol on technical failure within openai_compatible."""
+        from modules.ai.orchestrator.customer_chat_models import customer_chat_provider
+
+        if not self._provider.is_configured():
+            return {"reply_text": ""}
+
+        for escalation_model in technical_escalation_models(requested_model):
+            escalation_audit = dict(audit_context)
+            escalation_audit["model_override"] = escalation_model
+            logger.info(
+                "[engine] technical model escalation: %s → %s",
+                requested_model or "(default)",
+                escalation_model,
             )
-        else:
-            result = self._provider.call(
-                request_obj.message,
+            _t0 = time.monotonic()
+            raw = self._invoke_provider_call(
+                request_obj,
                 prompt,
-                history=[{"role": msg.role, "content": msg.content} for msg in request_obj.history],
-                **_audit_kwargs(self._provider, "call", audit_context),
+                provider=self._provider,
+                audit_context=escalation_audit,
             )
-        _duration_ms = (time.monotonic() - _t0) * 1000
-        _fallback_status = "succeeded" if result.get("reply_text") else "failed"
-        observer.record_call(f"{self._provider.provider_name}(fallback)", _duration_ms, _fallback_status)
-        observer.finalize(
-            final_provider=self._provider.provider_name if result.get("reply_text") else None,
-            fallback_used=True,
+            _duration_ms = (time.monotonic() - _t0) * 1000
+            if raw and raw.get("reply_text"):
+                observer.record_call(
+                    f"{self._provider.provider_name}({escalation_model})",
+                    _duration_ms,
+                    "succeeded",
+                )
+                observer.finalize(
+                    final_provider=self._provider.provider_name,
+                    fallback_used=True,
+                )
+                raw["provider_chain_fallback_used"] = True
+                raw["model_escalation"] = True
+                raw["requested_model"] = requested_model
+                raw["actual_model"] = str(raw.get("model") or escalation_model)
+                emit_customer_chat_model_telemetry(
+                    provider=customer_chat_provider(),
+                    requested_model=requested_model,
+                    actual_model=raw["actual_model"],
+                    escalation_reason="technical_failure",
+                    tenant_id=audit_context.get("tenant_id"),
+                    conversation_id=audit_context.get("conversation_id"),
+                    turn_id=audit_context.get("turn_id"),
+                )
+                return raw
+            observer.record_call(
+                f"{self._provider.provider_name}({escalation_model})",
+                _duration_ms,
+                "failed",
+            )
+        return {"reply_text": ""}
+
+    def _invoke_provider_call(
+        self,
+        request_obj: AIOrchestrationRequest,
+        prompt: str,
+        *,
+        provider: Any,
+        audit_context: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        _history = [
+            {"role": msg.role, "content": msg.content}
+            for msg in request_obj.history
+        ]
+        return call_with_resilience(
+            provider.provider_name,
+            (
+                lambda p=provider: p.call_with_tools(
+                    message=request_obj.message,
+                    prompt=prompt,
+                    tools=request_obj.tool_definitions,
+                    tool_choice="auto",
+                    history=_history,
+                    **_audit_kwargs(p, "call_with_tools", audit_context),
+                )
+                if request_obj.tool_definitions and hasattr(p, "call_with_tools")
+                else p.call(
+                    request_obj.message,
+                    prompt,
+                    history=_history,
+                    **_audit_kwargs(p, "call", audit_context),
+                )
+            ),
+            timeout=_PROVIDER_TIMEOUT,
         )
-        result["provider_chain_fallback_used"] = bool(result.get("reply_text"))
-        return result
 
     # ── Context adapter ───────────────────────────────────────────────────────
 

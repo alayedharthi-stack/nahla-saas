@@ -360,7 +360,7 @@ class TestPersonaComposeModelRouting:
                 route = resolve_persona_compose_model_route(bundle)
         assert route.source == "platform_default"
         assert route.provider == "openai_compatible"
-        assert route.model == "gpt-4o-mini"
+        assert route.model == "gpt-5.6-luna"
 
     def test_env_override_wins(self, monkeypatch) -> None:
         monkeypatch.setenv("NAHLA_PERSONA_COMPOSE_MODEL", "gpt-4o-mini")
@@ -371,7 +371,7 @@ class TestPersonaComposeModelRouting:
         )
         route = resolve_persona_compose_model_route(bundle)
         assert route.source == "env"
-        assert route.model == "gpt-4o-mini"
+        assert route.model == "gpt-5.6-luna"
         assert route.provider == "openai_compatible"
 
     def test_tenant_override_respected(self) -> None:
@@ -382,7 +382,7 @@ class TestPersonaComposeModelRouting:
         )
         route = resolve_persona_compose_model_route(bundle)
         assert route.source == "tenant_override"
-        assert route.model == "gpt-4o-mini"
+        assert route.model == "gpt-5.6-luna"
         assert route.provider == "openai_compatible"
 
     def test_stale_model_provider_failure_falls_back_with_reason(self) -> None:

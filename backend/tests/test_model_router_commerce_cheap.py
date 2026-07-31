@@ -62,8 +62,8 @@ _DRY_AVAILABILITY_REPLY = "متوفر عسل طلح بعدة أحجام، أي �
 def _router_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
     monkeypatch.setenv("NAHLA_MODEL_CHEAP_PROVIDER", "openai_compatible")
-    monkeypatch.setenv("NAHLA_MODEL_CHEAP", "gpt-4o-mini")
-    monkeypatch.setenv("NAHLA_MODEL_STANDARD", "claude-sonnet-4-6")
+    monkeypatch.setenv("NAHLA_MODEL_CHEAP", "gpt-5.6-luna")
+    monkeypatch.setenv("NAHLA_MODEL_STANDARD", "gpt-5.6-terra")
     monkeypatch.setenv("NAHLA_COMMERCE_PROMPT_SLIM_ENABLED", "true")
 
 
@@ -123,7 +123,7 @@ class TestRoutineCommerceCheapRoute:
             ),
         )
         assert route.tier == TIER_CHEAP
-        assert route.model == "gpt-4o-mini"
+        assert route.model == "gpt-5.6-luna"
         assert "sonnet" not in route.model.lower()
 
     def test_routine_commerce_not_upgraded_by_soft_policy(self) -> None:
