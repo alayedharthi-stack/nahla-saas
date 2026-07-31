@@ -24,7 +24,12 @@ from modules.ai.brain.commerce.selection_context import (
     stamp_selection_context_from_products,
     try_selection_context_decision,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_PROPOSE_DRAFT_ORDER
+from modules.ai.brain.decision.actions import (
+    ACTION_CLARIFY,
+    ACTION_LLM_REPLY,
+    ACTION_NARROW,
+    ACTION_PROPOSE_DRAFT_ORDER,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
 from modules.ai.brain.intent import rules
 from modules.ai.brain.intent_priority.types import GOAL_PRICE_INQUIRY, IntentPriorityVerdict
@@ -229,13 +234,37 @@ class TestNamePriceUniqueSelection:
         assert marker.get("stated_price") == 114
 
     def test_duplicate_matching_candidates_no_checkout(self) -> None:
+        """Product adjudication: clarify on duplicate matches — never draft/checkout."""
         state = _browse_state(candidates=SHIRT_DUPLICATE_PRICE)
         decision = try_selection_context_decision(_ctx(MSG_DUPLICATE, state=state))
-        assert decision is None
+        assert decision is not None
+        assert decision.action == ACTION_CLARIFY
+        assert decision.args.get("topic") == "product_price_ambiguity"
+        products = list(decision.args.get("products") or [])
+        assert len(products) >= 2
+        assert "forced_product" not in (decision.args or {})
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+        assert decision.action not in {
+            ACTION_PROPOSE_DRAFT_ORDER,
+            "create_order",
+            "create_checkout",
+            "send_payment_link",
+        }
 
     def test_mismatched_price_no_checkout(self) -> None:
+        """Product adjudication: narrow_choices on price mismatch — never draft/checkout."""
         decision = try_selection_context_decision(_ctx(MSG_MISMATCH))
-        assert decision is None
+        assert decision is not None
+        assert decision.action == ACTION_NARROW
+        assert decision.args.get("source") == "selection_context_price_no_match"
+        assert "forced_product" not in (decision.args or {})
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+        assert decision.action not in {
+            ACTION_PROPOSE_DRAFT_ORDER,
+            "create_order",
+            "create_checkout",
+            "send_payment_link",
+        }
 
     def test_no_last_search_candidates_no_checkout(self) -> None:
         state = _browse_state()

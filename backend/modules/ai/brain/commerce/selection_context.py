@@ -717,8 +717,47 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
         resolve_candidates_by_stated_price,
     )
 
+    # Name+price unique match on last_search_candidates must win over bare
+    # stated-price selection. Otherwise a message like «فستان كاجوال بـ 114»
+    # collapses to price_select without forced_product / unique marker, and
+    # turn_arbiter rewrites the draft to llm_reply (checkout_vs_discovery).
+    search_candidates = _get_last_search_candidates(state)
+    name_price = _resolve_name_price_unique_selection(norm, search_candidates)
+    if name_price is not None:
+        product, _stated_price, _name_ref = name_price
+        return SelectionResolution(
+            kind="name_price_select",
+            selected=product,
+            presentation_text=compose_selected_product(product),
+        )
+
+    # Name+price shaped messages that are not a unique trusted hit must not
+    # fall through to bare price_select (draft on price alone). Prefer safe
+    # clarify / narrow against last_search_candidates only.
+    if _NAME_PRICE_SELECTION_RE.match(norm):
+        if not search_candidates:
+            return None
+        _np_price = resolve_candidates_by_stated_price(msg, search_candidates)
+        if _np_price.kind == "clarify":
+            return SelectionResolution(
+                kind="price_ambiguous",
+                products=list(_np_price.candidates),
+            )
+        if _np_price.kind == "no_match":
+            return SelectionResolution(
+                kind="price_no_match",
+                products=list(_np_price.candidates),
+            )
+        # Name was present but no unique name+price hit and price alone is
+        # ambiguous or unsafe to auto-draft here.
+        return None
+
+    # Bare stated-price matching (no name+price shape) stays scoped to
+    # last_search_candidates only — never widen when the list is empty.
     if extract_stated_price_constraint(msg) is not None:
-        _price_pick = resolve_candidates_by_stated_price(msg, presented)
+        if not search_candidates:
+            return None
+        _price_pick = resolve_candidates_by_stated_price(msg, search_candidates)
         if _price_pick.kind == "selected" and _price_pick.selected:
             product = _price_pick.selected
             return SelectionResolution(
@@ -815,16 +854,6 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
             presentation_text="ما لقينا هذا الحجم ضمن الخيارات المعروضة — تبغى نعرض الأحجام المتوفرة؟",
         )
 
-    search_candidates = _get_last_search_candidates(state)
-    name_price = _resolve_name_price_unique_selection(norm, search_candidates)
-    if name_price is not None:
-        product, _stated_price, _name_ref = name_price
-        return SelectionResolution(
-            kind="name_price_select",
-            selected=product,
-            presentation_text=compose_selected_product(product),
-        )
-
     ordinal = _extract_ordinal_pick(norm)
     if ordinal is not None:
         product = _product_at_index(presented, ordinal)
@@ -909,6 +938,7 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
         )
 
     if resolution.kind == "price_ambiguous":
+        # Safe clarification — never pick a product or open checkout.
         return Decision(
             action=ACTION_CLARIFY,
             args={
@@ -920,6 +950,7 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
         )
 
     if resolution.kind == "price_no_match":
+        # Present options only — must not create a draft order.
         return Decision(
             action=ACTION_NARROW,
             args={
