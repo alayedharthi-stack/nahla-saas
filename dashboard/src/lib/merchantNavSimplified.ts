@@ -151,12 +151,18 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destKey: 'dest_marketing',
     destLabel: tr => tr.nav.destinations.marketing,
     destIcon: 'megaphone',
+    directLink: {
+      to: '/marketing',
+      icon: 'megaphone',
+      label: tr => tr.nav.destinations.marketing,
+    },
     children: [
       { to: '/campaigns', icon: 'megaphone', label: tr => tr.nav.items.campaigns },
       { to: '/promotions', icon: 'gift', label: tr => tr.nav.items.promotions, isAI: true },
       { to: '/coupons', icon: 'tag', label: tr => tr.nav.items.coupons, isAI: true },
       { to: '/widgets', icon: 'trending-up', label: tr => tr.nav.items.widgets },
       { to: '/smart-automations', icon: 'bot', label: tr => tr.nav.items.autopilot, isAI: true },
+      { to: '/marketing/templates', icon: 'book-open', label: tr => tr.nav.items.nahlaTemplateLibrary },
       { to: '/templates', icon: 'file-text', label: tr => tr.nav.items.templates },
     ],
   },

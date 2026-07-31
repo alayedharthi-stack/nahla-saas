@@ -55,6 +55,7 @@ const en: Translations = {
       catalogIntelligence:  'Catalog Groups',
       manualSetup:          'Manual Setup Guide',
       widgets:          'Sales Tools',
+      nahlaTemplateLibrary: 'Nahla Template Library',
       systemStatus:     'System Status',
       deliveryQuality:  'Delivery Quality',
       billing:          'Billing',
@@ -157,6 +158,67 @@ const en: Translations = {
     settings:         { title: 'Settings',             subtitle: 'Store settings, AI permissions & billing' },
     billing:          { title: 'Billing',              subtitle: 'Manage your Nahla subscription' },
     widgets:          { title: 'Sales Tools',          subtitle: 'Sales-boosting tools embedded in your store' },
+    marketingHub: {
+      title:    'Marketing',
+      subtitle: 'Campaigns, promotions, automations, and templates — one entry point',
+      cards: {
+        campaigns: {
+          title:       'Campaigns',
+          description: 'WhatsApp campaigns, cart recovery, and VIP targeting',
+        },
+        promotions: {
+          title:       'Promotions',
+          description: 'Incentive definitions used by Autopilot when launching campaigns',
+        },
+        coupons: {
+          title:       'Coupons',
+          description: 'Coupon generation rules managed by Autopilot',
+        },
+        widgets: {
+          title:       'Sales Tools',
+          description: 'Floating WhatsApp widget and store conversion widgets',
+        },
+        smartAutomations: {
+          title:       'Automations',
+          description: 'Manage smart automations and Autopilot',
+        },
+        templateLibrary: {
+          title:       'Nahla Template Library',
+          description: 'Store, WhatsApp, and order-update templates — organizational shell',
+        },
+      },
+    },
+    nahlaTemplateLibrary: {
+      title:    'Nahla Template Library',
+      subtitle: 'Organize marketing and order-update templates — no new engine',
+      sections: {
+        ecommerce: {
+          title:       'E-commerce store templates',
+          description: 'Store page and checkout experience templates — organizational shell only.',
+          comingSoon:  'Coming soon — organization only, no send or edit flows here.',
+        },
+        whatsapp: {
+          title:       'WhatsApp templates',
+          description: 'Manage Meta-approved templates and create new ones in the existing surface.',
+          linkLabel:   'Open WhatsApp templates',
+        },
+        orderUpdates: {
+          title:       'Order update templates',
+          description: 'Order confirmation and shipping tracking templates — informational shell only.',
+          editLink:    'Edit in WhatsApp templates',
+          templates: {
+            order_confirmation: {
+              title:       'Order confirmation',
+              description: 'Notify the customer that their order was received with a summary',
+            },
+            shipping_tracking: {
+              title:       'Shipping & tracking',
+              description: 'Keep the customer updated on shipment status',
+            },
+          },
+        },
+      },
+    },
     systemStatus:     { title: 'System Status',        subtitle: 'Overall health, dependencies & events' },
     storeIntegration: { title: 'Store Integration',    subtitle: 'Connect your store to Nahla' },
     whatsappConnect:  { title: 'Connect WhatsApp',     subtitle: 'Connect your WhatsApp Business number so Nahla can reply to customers automatically' },

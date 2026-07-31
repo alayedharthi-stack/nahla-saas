@@ -310,42 +310,40 @@ function SimplifiedMerchantNav({
               onClose={onClose}
             />
           ) : (
-            <>
-              <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
-                {t(dest.destLabel)}
-              </p>
-              {dest.children && renderChildLinks(dest.children, dest.destKey)}
-              {dest.sections?.map(section => {
-                if (section.sectionKey === 'advanced') {
-                  return (
-                    <div key={section.sectionKey} className="mt-2">
-                      <button
-                        type="button"
-                        onClick={() => setAdvancedExpanded(prev => !prev)}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
-                        aria-expanded={advancedExpanded}
-                      >
-                        {advancedExpanded
-                          ? <ChevronDown className="w-3 h-3 shrink-0" />
-                          : <ChevronRight className="w-3 h-3 shrink-0" />}
-                        {t(section.sectionLabel)}
-                      </button>
-                      {advancedExpanded && renderChildLinks(section.items, section.navGroupKey)}
-                    </div>
-                  )
-                }
-
-                return (
-                  <div key={section.sectionKey} className="mt-2">
-                    <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500/80">
-                      {t(section.sectionLabel)}
-                    </p>
-                    {renderChildLinks(section.items, section.navGroupKey)}
-                  </div>
-                )
-              })}
-            </>
+            <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+              {t(dest.destLabel)}
+            </p>
           )}
+          {dest.children && renderChildLinks(dest.children, dest.destKey)}
+          {dest.sections?.map(section => {
+            if (section.sectionKey === 'advanced') {
+              return (
+                <div key={section.sectionKey} className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setAdvancedExpanded(prev => !prev)}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
+                    aria-expanded={advancedExpanded}
+                  >
+                    {advancedExpanded
+                      ? <ChevronDown className="w-3 h-3 shrink-0" />
+                      : <ChevronRight className="w-3 h-3 shrink-0" />}
+                    {t(section.sectionLabel)}
+                  </button>
+                  {advancedExpanded && renderChildLinks(section.items, section.navGroupKey)}
+                </div>
+              )
+            }
+
+            return (
+              <div key={section.sectionKey} className="mt-2">
+                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500/80">
+                  {t(section.sectionLabel)}
+                </p>
+                {renderChildLinks(section.items, section.navGroupKey)}
+              </div>
+            )
+          })}
         </div>
       ))}
     </div>
