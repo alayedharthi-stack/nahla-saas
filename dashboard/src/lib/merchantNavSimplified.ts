@@ -208,8 +208,8 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
       label: tr => tr.nav.destinations.templates,
     },
     children: [
-      { to: '/marketing/templates', icon: 'book-open', label: tr => tr.nav.items.nahlaTemplateLibrary },
       { to: '/templates', icon: 'file-text', label: tr => tr.nav.items.templates },
+      { to: '/marketing/templates', icon: 'store', label: tr => tr.nav.items.ecommerceTemplates },
     ],
   },
   {
@@ -296,21 +296,33 @@ export function collectDestinationPaths(
   return [...new Set(paths)]
 }
 
+function destinationMatchLength(pathname: string, dest: SimplifiedNavDestination): number {
+  let best = -1
+  for (const path of collectDestinationPaths(dest)) {
+    if (pathname === path) best = Math.max(best, path.length)
+    else if (path !== '/' && pathname.startsWith(`${path}/`)) best = Math.max(best, path.length)
+  }
+  return best
+}
+
 /**
  * Whether the current pathname belongs to a simplified destination (parent active state).
- * Exact path match first; prefix match only for nested segments (e.g. /orders/123),
- * never across sibling destinations that share a prefix (e.g. /customers vs /customers/import is OK).
+ * Exact path match first; prefix match only for nested segments (e.g. /orders/123).
+ * When two destinations could claim the same path via prefix (e.g. /marketing vs
+ * /marketing/templates), the longer / more specific destination wins.
  */
 export function isPathInSimplifiedDestination(
   pathname: string,
   dest: SimplifiedNavDestination,
+  allDestinations: readonly SimplifiedNavDestination[] = SIMPLIFIED_NAV_DESTINATIONS,
 ): boolean {
-  const paths = collectDestinationPaths(dest)
-  return paths.some(path => {
-    if (pathname === path) return true
-    if (path === '/') return false
-    return pathname.startsWith(`${path}/`)
-  })
+  const ownLen = destinationMatchLength(pathname, dest)
+  if (ownLen < 0) return false
+  for (const other of allDestinations) {
+    if (other.destKey === dest.destKey) continue
+    if (destinationMatchLength(pathname, other) > ownLen) return false
+  }
+  return true
 }
 
 /** Sidebar shows exactly ten top-level destination links (directLink only). */

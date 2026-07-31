@@ -66,6 +66,7 @@ export interface Translations {
       manualSetup:          string
       widgets:          string
       nahlaTemplateLibrary: string
+      ecommerceTemplates: string
       orderUpdates:     string
       systemStatus:     string
       deliveryQuality:  string
@@ -226,7 +227,6 @@ export interface Translations {
       title: string
       subtitle: string
       cards: {
-        nahlaLibrary:        { title: string; description: string }
         whatsappTemplates:   { title: string; description: string }
         ecommerceTemplates:  { title: string; description: string }
       }
@@ -263,28 +263,38 @@ export interface Translations {
         widgets:    { title: string; description: string }
       }
     }
-    nahlaTemplateLibrary: {
+    ecommerceTemplates: {
       title: string
       subtitle: string
-      sections: {
-        ecommerce: {
-          title: string
-          description: string
-          comingSoon: string
+      filters: {
+        all: string
+        marketing: string
+        orderUpdates: string
+      }
+      empty: {
+        all: string
+        marketing: string
+        orderUpdates: string
+        unsupportedStoreLibrary: string
+        orderUpdatesOnlyHint: string
+      }
+      libraryTitle: string
+      librarySubtitle: string
+      openInWhatsapp: string
+      orderUpdates: {
+        title: string
+        description: string
+        scopeNote: string
+        opsLink: string
+        opsLinkShort: string
+        noPreview: string
+        services: {
+          order_confirmation: string
+          shipping_tracking: string
         }
-        whatsapp: {
-          title: string
-          description: string
-          linkLabel: string
-        }
-        orderUpdates: {
-          title: string
-          description: string
-          editLink: string
-          templates: {
-            order_confirmation: { title: string; description: string }
-            shipping_tracking:  { title: string; description: string }
-          }
+        serviceDescriptions: {
+          order_confirmation: string
+          shipping_tracking: string
         }
       }
     }
@@ -1332,6 +1342,8 @@ export interface Translations {
   /** WhatsApp Templates page strings */
   templatesMgmt: {
     filterAll:         string
+    filterNahlaLibrary: string
+    filterMine:        string
     filterApproved:    string
     filterPending:     string
     filterRejected:    string
