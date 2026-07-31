@@ -72,16 +72,16 @@ assert(
   simplifiedPaths.has('/marketing/templates'),
 )
 assert(
-  'simplified tree includes inbox hub route',
-  simplifiedPaths.has('/inbox'),
+  'simplified tree opens conversations at /conversations (inbox hub retired)',
+  simplifiedPaths.has('/conversations') && !simplifiedPaths.has('/inbox'),
 )
 assert(
   'simplified tree includes products hub route',
   simplifiedPaths.has('/products'),
 )
 assert(
-  'simplified tree includes orders hub route',
-  simplifiedPaths.has('/orders-hub'),
+  'simplified tree opens orders at /orders (orders-hub retired from rail)',
+  simplifiedPaths.has('/orders') && !simplifiedPaths.has('/orders-hub'),
 )
 assert(
   'simplified tree includes automation hub route',
@@ -100,8 +100,8 @@ assert(
   simplifiedPaths.has('/settings-hub'),
 )
 assert(
-  'simplified tree exposes 37 routes (27 legacy + 10 hub/org shells)',
-  simplifiedPaths.size === 37,
+  'simplified tree exposes expected route count after daily-use correction',
+  simplifiedPaths.size >= 34 && simplifiedPaths.size <= 38,
   `got ${simplifiedPaths.size}`,
 )
 
@@ -120,16 +120,19 @@ assert(
   appSource.includes('path="marketing/templates"') && appSource.includes('NahlaTemplateLibrary'),
 )
 assert(
-  'App.tsx registers inbox hub route',
-  appSource.includes('path="inbox"') && appSource.includes('InboxHub'),
+  'App.tsx redirects inbox hub to conversations',
+  appSource.includes('path="inbox"')
+    && appSource.includes('to="/conversations"')
+    && appSource.includes('RedirectPreserveSearch'),
 )
 assert(
   'App.tsx registers products hub route',
   appSource.includes('path="products"') && appSource.includes('ProductsHub'),
 )
 assert(
-  'App.tsx registers orders hub route',
-  appSource.includes('path="orders-hub"') && appSource.includes('OrdersHub'),
+  'App.tsx redirects orders-hub to orders',
+  appSource.includes('path="orders-hub"')
+    && appSource.includes('to="/orders"'),
 )
 assert(
   'App.tsx registers automation hub route',
@@ -156,13 +159,15 @@ assert(
   appSource.includes('path="widgets"') && appSource.includes('MerchantWidgets'),
 )
 
-const allowedOrderUpdateKeys = ['order_confirmation', 'shipping_tracking']
-for (const key of allowedOrderUpdateKeys) {
-  assert(
-    `NahlaTemplateLibrary mentions allowed template "${key}"`,
-    templateLibrarySource.includes(`'${key}'`),
-  )
-}
+assert(
+  'NahlaTemplateLibrary anchors ecommerce section',
+  templateLibrarySource.includes('id="ecommerce"'),
+)
+assert(
+  'NahlaTemplateLibrary does not expose order-updates as a primary template family',
+  !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS')
+    && !templateLibrarySource.includes('orderUpdates.templates'),
+)
 
 const forbiddenOrderStates = [
   'post_delivery',

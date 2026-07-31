@@ -245,15 +245,19 @@ const en: Translations = {
     },
     templatesHub: {
       title:    'Templates',
-      subtitle: 'Nahla library and WhatsApp templates',
+      subtitle: 'Nahla library, WhatsApp templates, and store templates',
       cards: {
         nahlaLibrary: {
           title:       'Nahla Template Library',
-          description: 'Organize store, WhatsApp, and order-update templates',
+          description: 'Organize store and WhatsApp templates',
         },
         whatsappTemplates: {
           title:       'WhatsApp templates',
           description: 'Manage Meta-approved templates in the existing surface',
+        },
+        ecommerceTemplates: {
+          title:       'E-commerce store templates',
+          description: 'Store page and shopping-experience templates',
         },
       },
     },
@@ -263,7 +267,7 @@ const en: Translations = {
       sections: {
         core: {
           title:       'Store & account',
-          description: 'Overview, general settings, security, subscription, and order updates',
+          description: 'General settings, security, subscription, and order updates',
         },
         nahlaSmart: {
           title:       'Nahla Intelligence',
@@ -345,7 +349,7 @@ const en: Translations = {
     },
     nahlaTemplateLibrary: {
       title:    'Nahla Template Library',
-      subtitle: 'Organize marketing and order-update templates — no new engine',
+      subtitle: 'Organize marketing and store templates — no new engine',
       sections: {
         ecommerce: {
           title:       'E-commerce store templates',
@@ -660,6 +664,7 @@ const en: Translations = {
     kpiConversationsToday: 'Conversations today',
     kpiMessagesToday: 'Messages today',
     kpiOrders:        'Orders',
+    kpiNewCustomers:  'New customers',
     kpiAiRate:        'AI Response Rate',
     recentConvTitle:  'Recent Conversations',
     recentOrdTitle:   'Recent Orders',
@@ -810,6 +815,7 @@ const en: Translations = {
 
   conversationsPage: {
     title:               'Conversations',
+    handoffQueueLink:    'Handoff queue',
     unreadCount:         '{count} unread',
     searchPlaceholder:   'Search conversations…',
     emptyList:           'No conversations',

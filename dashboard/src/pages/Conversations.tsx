@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { Link, useSearchParams, useNavigate } from 'react-router-dom'
 import {
   Bot, User, Send, Phone, Search, MoreVertical,
   UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
@@ -9,6 +9,7 @@ import {
 
 import { featureRealityApi, type DashboardConversation, type DashboardMessage, type MessageEventType, type AIPauseReason } from '../api/featureReality'
 import { customersApi } from '../api/customers'
+import { handoffApi } from '../api/handoff'
 import { getTenantId } from '../auth'
 import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 import EditCustomerNameModal from '../components/conversations/EditCustomerNameModal'
@@ -162,6 +163,7 @@ export default function Conversations() {
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
   const [filter, setFilter]         = useState<ConversationFilter>('all')
+  const [handoffActiveTotal, setHandoffActiveTotal] = useState<number | null>(null)
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     const cached = loadConversationListCache(getTenantId())
@@ -205,6 +207,21 @@ export default function Conversations() {
   const nextSliceOffsetRef  = useRef(0)
   const bannerRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const listBusyRef         = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    handoffApi
+      .getSessions({ status: 'active', limit: 1 })
+      .then(data => {
+        if (!cancelled && typeof data.total === 'number') {
+          setHandoffActiveTotal(data.total)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setHandoffActiveTotal(null)
+      })
+    return () => { cancelled = true }
+  }, [])
+
   // The filter the merchant has selected, mirrored in a ref so the
   // async fetch helpers always read the LATEST value rather than the
   // value captured at definition time. Without this, switching tabs
@@ -1265,9 +1282,24 @@ export default function Conversations() {
       `}>
 
         {/* List header (mobile) */}
-        <div className="flex items-center justify-between px-4 py-3 bg-brand-600 md:bg-white md:border-b md:border-slate-100">
-          <h2 className="text-base font-bold text-white md:text-slate-900">{cp.title}</h2>
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2 px-4 py-3 bg-brand-600 md:bg-white md:border-b md:border-slate-100">
+          <h2 className="text-base font-bold text-white md:text-slate-900 shrink-0">{cp.title}</h2>
+          <div className="flex items-center gap-2 min-w-0">
+            <Link
+              to="/handoff-queue"
+              className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium
+                bg-white/15 text-white hover:bg-white/25
+                md:bg-amber-50 md:text-amber-800 md:hover:bg-amber-100 md:border md:border-amber-200
+                transition-colors shrink-0"
+            >
+              <UserCheck className="w-3.5 h-3.5" />
+              <span>{cp.handoffQueueLink}</span>
+              {handoffActiveTotal !== null && (
+                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 md:bg-amber-600">
+                  {handoffActiveTotal}
+                </span>
+              )}
+            </Link>
             <span className="text-xs text-white/70 md:hidden">
               {conversations.filter(c => c.unread > 0).length > 0
                 ? cp.unreadCount.replace('{count}', String(conversations.filter(c => c.unread > 0).length))

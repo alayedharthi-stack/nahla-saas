@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import {
   DollarSign, MessageSquare, ShoppingCart, TrendingUp, Bot, User, ExternalLink,
-  Sparkles, Clock, AlertTriangle, RefreshCw, CheckCircle,
+  Sparkles, Clock, AlertTriangle, RefreshCw, CheckCircle, Users,
 } from 'lucide-react'
 
 const ArrowUp = TrendingUp
@@ -15,6 +15,7 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { apiCall } from '../api/client'
+import { customersApi } from '../api/customers'
 import { trackPlatformEvent } from '../lib/platformTelemetry'
 
 // UI_ONLY_GUARD: only static labels use t(); merchant/customer data stays as API values.
@@ -143,6 +144,7 @@ export default function Overview() {
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
+  const [newCustomers, setNewCustomers] = useState<number | null>(null)
   const [tierRefreshing, setTierRefreshing] = useState(false)
   // Single timeframe controller — every KPI card + the recent lists
   // re-fetch when this changes. We keep ``today`` as the default so the
@@ -200,6 +202,13 @@ export default function Overview() {
     // WhatsApp usage is timeframe-independent (always "this month" per
     // Meta's billing window), so we fetch it once on mount only.
     apiCall<WaUsage>('/whatsapp/usage').then(setWaUsage).catch(() => null)
+    customersApi
+      .metrics()
+      .then(m => {
+        if (typeof m.newCustomers === 'number') setNewCustomers(m.newCustomers)
+        else setNewCustomers(null)
+      })
+      .catch(() => setNewCustomers(null))
   }, [])
 
   useEffect(() => {
@@ -703,6 +712,13 @@ export default function Overview() {
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
+        />
+        <StatCard
+          label={ov.kpiNewCustomers}
+          value={newCustomers === null ? '—' : newCustomers.toLocaleString(locale)}
+          icon={Users}
+          iconColor="text-teal-600"
+          iconBg="bg-teal-50"
         />
         <StatCard
           label={ov.kpiAiRate}

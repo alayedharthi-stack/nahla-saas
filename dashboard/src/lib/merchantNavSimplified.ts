@@ -1,10 +1,12 @@
 import type { Translations } from '../i18n/types'
 
-/** Stable telemetry keys for the simplified 8-destination shell. */
+/** Stable telemetry keys for the simplified merchant nav shell. */
 export type SimplifiedNavGroupKey =
+  | 'dest_overview'
   | 'dest_inbox'
   | 'dest_products'
   | 'dest_orders'
+  | 'dest_customers'
   | 'dest_marketing'
   | 'dest_automation'
   | 'dest_templates'
@@ -98,16 +100,26 @@ export const LEGACY_MERCHANT_NAV_PATHS: readonly string[] = [
 ] as const
 
 /**
- * Visual acceptance IA — eight top-level destinations only in the sidebar.
+ * Daily-use IA — ten top-level destinations in the sidebar.
  * Nested routes remain in children/sections for hub pages + active-state matching.
  */
 export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
+  {
+    destKey: 'dest_overview',
+    destLabel: tr => tr.nav.destinations.overview,
+    destIcon: 'layout-dashboard',
+    directLink: {
+      to: '/overview',
+      icon: 'layout-dashboard',
+      label: tr => tr.nav.destinations.overview,
+    },
+  },
   {
     destKey: 'dest_inbox',
     destLabel: tr => tr.nav.destinations.inbox,
     destIcon: 'message-square',
     directLink: {
-      to: '/inbox',
+      to: '/conversations',
       icon: 'message-square',
       label: tr => tr.nav.destinations.inbox,
     },
@@ -135,12 +147,24 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destLabel: tr => tr.nav.destinations.orders,
     destIcon: 'shopping-cart',
     directLink: {
-      to: '/orders-hub',
+      to: '/orders',
       icon: 'shopping-cart',
       label: tr => tr.nav.destinations.orders,
     },
     children: [
       { to: '/orders', icon: 'shopping-cart', label: tr => tr.nav.items.orders },
+    ],
+  },
+  {
+    destKey: 'dest_customers',
+    destLabel: tr => tr.nav.destinations.customers,
+    destIcon: 'users',
+    directLink: {
+      to: '/customers',
+      icon: 'users',
+      label: tr => tr.nav.destinations.customers,
+    },
+    children: [
       { to: '/customers', icon: 'users', label: tr => tr.nav.items.customers },
     ],
   },
@@ -215,7 +239,6 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
       label: tr => tr.nav.destinations.settings,
     },
     children: [
-      { to: '/overview', icon: 'layout-dashboard', label: tr => tr.nav.items.overview },
       { to: '/settings', icon: 'settings', label: tr => tr.nav.items.settings },
       { to: '/settings/security', icon: 'shield-check', label: tr => tr.nav.items.security },
       { to: '/billing', icon: 'credit-card', label: tr => tr.nav.items.billing },
@@ -273,16 +296,22 @@ export function collectDestinationPaths(
   return [...new Set(paths)]
 }
 
-/** Whether the current pathname belongs to a simplified destination (parent active state). */
+/**
+ * Whether the current pathname belongs to a simplified destination (parent active state).
+ * Exact path match first; prefix match only for nested segments (e.g. /orders/123),
+ * never across sibling destinations that share a prefix (e.g. /customers vs /customers/import is OK).
+ */
 export function isPathInSimplifiedDestination(
   pathname: string,
   dest: SimplifiedNavDestination,
 ): boolean {
   const paths = collectDestinationPaths(dest)
-  return paths.some(
-    path => pathname === path || pathname.startsWith(`${path}/`),
-  )
+  return paths.some(path => {
+    if (pathname === path) return true
+    if (path === '/') return false
+    return pathname.startsWith(`${path}/`)
+  })
 }
 
-/** Sidebar shows exactly eight top-level destination links (directLink only). */
-export const SIMPLIFIED_SIDEBAR_LINK_COUNT = 8
+/** Sidebar shows exactly ten top-level destination links (directLink only). */
+export const SIMPLIFIED_SIDEBAR_LINK_COUNT = 10

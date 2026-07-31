@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import {
-  LayoutDashboard,
   Settings,
   ShieldCheck,
   CreditCard,
@@ -24,12 +23,6 @@ export default function SettingsHub() {
   const [advancedExpanded, setAdvancedExpanded] = useState(false)
 
   const coreItems: HubCardItem[] = [
-    {
-      to: '/overview',
-      icon: LayoutDashboard,
-      title: page.cards.overview.title,
-      description: page.cards.overview.description,
-    },
     {
       to: '/settings',
       icon: Settings,
