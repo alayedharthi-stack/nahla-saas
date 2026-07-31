@@ -83,6 +83,13 @@ import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 import MarketingHub from './pages/MarketingHub'
 import NahlaTemplateLibrary from './pages/NahlaTemplateLibrary'
+import InboxHub from './pages/InboxHub'
+import ProductsHub from './pages/ProductsHub'
+import ChannelsHub from './pages/ChannelsHub'
+import SettingsHub from './pages/SettingsHub'
+import OrdersHub from './pages/OrdersHub'
+import AutomationHub from './pages/AutomationHub'
+import TemplatesHub from './pages/TemplatesHub'
 
 export default function App() {
   return (
@@ -140,6 +147,7 @@ export default function App() {
           >
             <Route index element={<Navigate to={isPlatformOwner() ? '/admin' : '/overview'} replace />} />
             <Route path="overview"           element={<Overview />} />
+            <Route path="inbox"              element={<InboxHub />} />
             <Route path="conversations"      element={<Conversations />} />
             <Route path="orders"             element={<Orders />} />
             <Route path="orders/:orderId"    element={<OrderDetail />} />
@@ -151,6 +159,12 @@ export default function App() {
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="marketing"            element={<MarketingHub />} />
             <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
+            <Route path="products"           element={<ProductsHub />} />
+            <Route path="orders-hub"         element={<OrdersHub />} />
+            <Route path="automation"         element={<AutomationHub />} />
+            <Route path="templates-hub"      element={<TemplatesHub />} />
+            <Route path="channels"           element={<ChannelsHub />} />
+            <Route path="settings-hub"       element={<SettingsHub />} />
             <Route path="templates"          element={<Templates />} />
             <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />

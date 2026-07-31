@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard,
   MessageSquare,
@@ -34,8 +33,6 @@ import {
   Gauge,
   Package,
   ShieldCheck,
-  ChevronDown,
-  ChevronRight,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -48,9 +45,10 @@ import { trackPlatformEvent } from '../../lib/platformTelemetry'
 import { isNavSimplified8Enabled } from '../../lib/platformFeatureFlags'
 import {
   SIMPLIFIED_NAV_DESTINATIONS,
+  isPathInSimplifiedDestination,
   type MerchantNavIconKey,
   type SimplifiedNavGroupKey,
-  type SimplifiedNavLink,
+  type SimplifiedNavDestination,
 } from '../../lib/merchantNavSimplified'
 
 const MERCHANT_NAV_ICONS: Record<MerchantNavIconKey, LucideIcon> = {
@@ -260,6 +258,62 @@ function SidebarNavLink({
   )
 }
 
+function SimplifiedDestinationNavLink({
+  dest,
+  accentColor,
+  adminMode,
+  onClose,
+}: {
+  dest: SimplifiedNavDestination
+  accentColor: string
+  adminMode: boolean
+  onClose: () => void
+}) {
+  const { t } = useLanguage()
+  const location = useLocation()
+  const link = dest.directLink
+
+  if (!link) return null
+
+  const Icon = resolveNavIcon(dest.destIcon)
+  const isActive = isPathInSimplifiedDestination(location.pathname, dest)
+
+  return (
+    <NavLink
+      to={link.to}
+      end={false}
+      onClick={() => {
+        trackPlatformEvent('platform_nav_click', {
+          path: link.to,
+          nav_group: dest.destKey,
+          admin_mode: adminMode,
+        })
+        onClose()
+      }}
+      className={() =>
+        `relative flex items-center gap-3 px-3 py-3 lg:py-2.5 rounded-lg text-sm font-medium transition-all touch-manipulation w-full ${
+          isActive
+            ? 'bg-white/10 text-white'
+            : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+        }`
+      }
+    >
+      {isActive && (
+        <span className={`absolute start-0 inset-y-1.5 w-0.5 ${accentColor} rounded-e-full`} />
+      )}
+      <span className="relative shrink-0">
+        <Icon className="w-4 h-4" />
+        {link.isAI && (
+          <span className="absolute -bottom-1.5 -end-1.5 inline-flex items-center px-1 py-px rounded bg-amber-500/15 border border-amber-500/50 shadow-[0_0_6px_rgba(245,158,11,0.4)]">
+            <span className="text-[6px] font-black text-amber-400 leading-none tracking-wide">AI</span>
+          </span>
+        )}
+      </span>
+      {t(dest.destLabel)}
+    </NavLink>
+  )
+}
+
 function SimplifiedMerchantNav({
   accentColor,
   adminMode,
@@ -269,82 +323,16 @@ function SimplifiedMerchantNav({
   adminMode: boolean
   onClose: () => void
 }) {
-  const { t } = useLanguage()
-  const [advancedExpanded, setAdvancedExpanded] = useState(false)
-
-  const renderChildLinks = (
-    items: SimplifiedNavLink[],
-    navGroup: SimplifiedNavGroupKey,
-  ) => (
-    <div className="space-y-0.5">
-      {items.map(item => (
-        <SidebarNavLink
-          key={item.to}
-          to={item.to}
-          icon={resolveNavIcon(item.icon)}
-          label={item.label}
-          isAI={item.isAI}
-          navGroup={navGroup}
-          adminMode={adminMode}
-          accentColor={accentColor}
-          onClose={onClose}
-          indent
-        />
-      ))}
-    </div>
-  )
-
   return (
-    <div className="space-y-5">
+    <div className="space-y-1">
       {SIMPLIFIED_NAV_DESTINATIONS.map(dest => (
-        <div key={dest.destKey}>
-          {dest.directLink ? (
-            <SidebarNavLink
-              to={dest.directLink.to}
-              icon={resolveNavIcon(dest.directLink.icon)}
-              label={dest.destLabel}
-              isAI={dest.directLink.isAI}
-              navGroup={dest.destKey}
-              adminMode={adminMode}
-              accentColor={accentColor}
-              onClose={onClose}
-            />
-          ) : (
-            <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
-              {t(dest.destLabel)}
-            </p>
-          )}
-          {dest.children && renderChildLinks(dest.children, dest.destKey)}
-          {dest.sections?.map(section => {
-            if (section.sectionKey === 'advanced') {
-              return (
-                <div key={section.sectionKey} className="mt-2">
-                  <button
-                    type="button"
-                    onClick={() => setAdvancedExpanded(prev => !prev)}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
-                    aria-expanded={advancedExpanded}
-                  >
-                    {advancedExpanded
-                      ? <ChevronDown className="w-3 h-3 shrink-0" />
-                      : <ChevronRight className="w-3 h-3 shrink-0" />}
-                    {t(section.sectionLabel)}
-                  </button>
-                  {advancedExpanded && renderChildLinks(section.items, section.navGroupKey)}
-                </div>
-              )
-            }
-
-            return (
-              <div key={section.sectionKey} className="mt-2">
-                <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-slate-500/80">
-                  {t(section.sectionLabel)}
-                </p>
-                {renderChildLinks(section.items, section.navGroupKey)}
-              </div>
-            )
-          })}
-        </div>
+        <SimplifiedDestinationNavLink
+          key={dest.destKey}
+          dest={dest}
+          accentColor={accentColor}
+          adminMode={adminMode}
+          onClose={onClose}
+        />
       ))}
     </div>
   )

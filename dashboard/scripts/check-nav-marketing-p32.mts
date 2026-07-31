@@ -72,8 +72,36 @@ assert(
   simplifiedPaths.has('/marketing/templates'),
 )
 assert(
-  'simplified tree exposes 29 routes (27 legacy + 2 P3.2)',
-  simplifiedPaths.size === 29,
+  'simplified tree includes inbox hub route',
+  simplifiedPaths.has('/inbox'),
+)
+assert(
+  'simplified tree includes products hub route',
+  simplifiedPaths.has('/products'),
+)
+assert(
+  'simplified tree includes orders hub route',
+  simplifiedPaths.has('/orders-hub'),
+)
+assert(
+  'simplified tree includes automation hub route',
+  simplifiedPaths.has('/automation'),
+)
+assert(
+  'simplified tree includes templates hub route',
+  simplifiedPaths.has('/templates-hub'),
+)
+assert(
+  'simplified tree includes channels hub route',
+  simplifiedPaths.has('/channels'),
+)
+assert(
+  'simplified tree includes settings hub route',
+  simplifiedPaths.has('/settings-hub'),
+)
+assert(
+  'simplified tree exposes 37 routes (27 legacy + 10 hub/org shells)',
+  simplifiedPaths.size === 37,
   `got ${simplifiedPaths.size}`,
 )
 
@@ -90,6 +118,34 @@ assert(
 assert(
   'App.tsx registers /marketing/templates route',
   appSource.includes('path="marketing/templates"') && appSource.includes('NahlaTemplateLibrary'),
+)
+assert(
+  'App.tsx registers inbox hub route',
+  appSource.includes('path="inbox"') && appSource.includes('InboxHub'),
+)
+assert(
+  'App.tsx registers products hub route',
+  appSource.includes('path="products"') && appSource.includes('ProductsHub'),
+)
+assert(
+  'App.tsx registers orders hub route',
+  appSource.includes('path="orders-hub"') && appSource.includes('OrdersHub'),
+)
+assert(
+  'App.tsx registers automation hub route',
+  appSource.includes('path="automation"') && appSource.includes('AutomationHub'),
+)
+assert(
+  'App.tsx registers templates hub route',
+  appSource.includes('path="templates-hub"') && appSource.includes('TemplatesHub'),
+)
+assert(
+  'App.tsx registers channels hub route',
+  appSource.includes('path="channels"') && appSource.includes('ChannelsHub'),
+)
+assert(
+  'App.tsx registers settings hub route',
+  appSource.includes('path="settings-hub"') && appSource.includes('SettingsHub'),
 )
 assert(
   'App.tsx keeps /templates route',
