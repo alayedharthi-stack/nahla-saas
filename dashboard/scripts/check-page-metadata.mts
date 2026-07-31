@@ -20,6 +20,8 @@ const MERCHANT_PATHS = [
   '/promotions',
   '/campaigns',
   '/campaigns/manual-coupon',
+  '/marketing',
+  '/marketing/templates',
   '/templates',
   '/templates/manual-coupon',
   '/smart-automations',
