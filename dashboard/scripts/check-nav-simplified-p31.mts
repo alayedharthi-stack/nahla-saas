@@ -1,6 +1,8 @@
 /**
  * P3.1 simplified navigation shell regression checks.
  *
+ * Updated for daily-use 10-destination rail (post P3.2 correction).
+ *
  * Run: npm run check:nav-simplified-p31 (from dashboard/)
  *
  * CI-safe: reads source files as text — no imports from app modules (avoids lucide-react).
@@ -48,6 +50,7 @@ const navDataSource = source('../src/lib/merchantNavSimplified.ts')
 const flagsSource = source('../src/lib/platformFeatureFlags.ts')
 const sidebarSource = source('../src/components/layout/Sidebar.tsx')
 const arSource = source('../src/i18n/ar.ts')
+const appSource = source('../src/App.tsx')
 
 assert(
   'simplified nav data module has no lucide-react import (CI-safe)',
@@ -85,9 +88,77 @@ const destBlockEnd = navDataSource.indexOf('export function collectSimplifiedNav
 const destBlock = navDataSource.slice(destBlockStart, destBlockEnd > destBlockStart ? destBlockEnd : undefined)
 const topLevelDestCount = (destBlock.match(/^\s+destKey:/gm) ?? []).length
 assert(
-  'simplified shell defines eight top-level destinations',
-  topLevelDestCount === 8,
+  'simplified shell defines ten top-level destinations',
+  topLevelDestCount === 10,
   `got ${topLevelDestCount}`,
+)
+
+const directLinkCount = (destBlock.match(/directLink:/g) ?? []).length
+assert(
+  'every simplified destination has a directLink (sidebar shows ten only)',
+  directLinkCount === 10,
+  `got ${directLinkCount}`,
+)
+
+assert(
+  'Sidebar simplified nav does not render child links in the sidebar',
+  !sidebarSource.includes('renderChildLinks')
+    && !sidebarSource.includes('dest.children &&'),
+)
+
+assert(
+  'Sidebar uses parent destination active state',
+  sidebarSource.includes('isPathInSimplifiedDestination'),
+)
+
+assert(
+  'merchantNavSimplified exports sidebar link count constant',
+  navDataSource.includes('SIMPLIFIED_SIDEBAR_LINK_COUNT = 10'),
+)
+
+assert(
+  'daily-use rail includes overview and customers destinations',
+  !!navDataSource.match(/destKey:\s*'dest_overview'/)
+    && !!navDataSource.match(/destKey:\s*'dest_customers'/),
+)
+
+assert(
+  'conversations open via /conversations directLink (not /inbox hub)',
+  navDataSource.includes("destKey: 'dest_inbox'")
+    && navDataSource.includes("to: '/conversations'")
+    && !simplifiedPaths.has('/inbox'),
+)
+
+assert(
+  'orders open via /orders directLink (not /orders-hub)',
+  navDataSource.includes("destKey: 'dest_orders'")
+    && destBlock.includes("to: '/orders'")
+    && !simplifiedPaths.has('/orders-hub'),
+)
+
+assert(
+  'customers is not nested under orders children as the only customers rail path',
+  navDataSource.includes("destKey: 'dest_customers'")
+    && simplifiedPaths.has('/customers'),
+)
+
+assert(
+  'visual IA includes automation and templates destinations',
+  navDataSource.includes("destKey: 'dest_automation'")
+    && navDataSource.includes("destKey: 'dest_templates'"),
+)
+
+assert(
+  'App redirects /inbox → /conversations preserving search',
+  appSource.includes('path="inbox"')
+    && appSource.includes('RedirectPreserveSearch')
+    && appSource.includes('to="/conversations"'),
+)
+
+assert(
+  'App redirects /orders-hub → /orders',
+  appSource.includes('path="orders-hub"')
+    && appSource.includes('to="/orders"'),
 )
 
 const forbiddenPaths = [

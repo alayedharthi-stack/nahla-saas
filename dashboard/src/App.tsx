@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -83,6 +83,17 @@ import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 import MarketingHub from './pages/MarketingHub'
 import NahlaTemplateLibrary from './pages/NahlaTemplateLibrary'
+import ProductsHub from './pages/ProductsHub'
+import ChannelsHub from './pages/ChannelsHub'
+import SettingsHub from './pages/SettingsHub'
+import AutomationHub from './pages/AutomationHub'
+import TemplatesHub from './pages/TemplatesHub'
+
+/** Preserve search when retiring hub entry points (no redirect loops). */
+function RedirectPreserveSearch({ to }: { to: string }) {
+  const { search } = useLocation()
+  return <Navigate to={`${to}${search}`} replace />
+}
 
 export default function App() {
   return (
@@ -140,6 +151,7 @@ export default function App() {
           >
             <Route index element={<Navigate to={isPlatformOwner() ? '/admin' : '/overview'} replace />} />
             <Route path="overview"           element={<Overview />} />
+            <Route path="inbox"              element={<RedirectPreserveSearch to="/conversations" />} />
             <Route path="conversations"      element={<Conversations />} />
             <Route path="orders"             element={<Orders />} />
             <Route path="orders/:orderId"    element={<OrderDetail />} />
@@ -151,6 +163,12 @@ export default function App() {
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="marketing"            element={<MarketingHub />} />
             <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
+            <Route path="products"           element={<ProductsHub />} />
+            <Route path="orders-hub"         element={<RedirectPreserveSearch to="/orders" />} />
+            <Route path="automation"         element={<AutomationHub />} />
+            <Route path="templates-hub"      element={<TemplatesHub />} />
+            <Route path="channels"           element={<ChannelsHub />} />
+            <Route path="settings-hub"       element={<SettingsHub />} />
             <Route path="templates"          element={<Templates />} />
             <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
