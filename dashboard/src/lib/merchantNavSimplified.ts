@@ -95,7 +95,7 @@ export const LEGACY_MERCHANT_NAV_PATHS: readonly string[] = [
   '/system-status',
   '/delivery-quality',
   '/billing',
-  '/settings',
+  '/settings-hub',
   '/settings/security',
 ] as const
 
@@ -239,7 +239,7 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
       label: tr => tr.nav.destinations.settings,
     },
     children: [
-      { to: '/settings', icon: 'settings', label: tr => tr.nav.items.settings },
+      { to: '/settings-hub', icon: 'settings', label: tr => tr.nav.items.settings },
       { to: '/settings/security', icon: 'shield-check', label: tr => tr.nav.items.security },
       { to: '/billing', icon: 'credit-card', label: tr => tr.nav.items.billing },
       { to: '/settings?tab=order_updates', icon: 'package', label: tr => tr.nav.items.orderUpdates },

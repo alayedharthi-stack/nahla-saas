@@ -178,9 +178,9 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },
       { to: '/delivery-quality',           icon: Gauge,        label: tr => tr.nav.items.deliveryQuality  },
       { to: '/billing',                    icon: CreditCard,   label: tr => tr.nav.items.billing          },
-      { to: '/settings',                   icon: Settings,     label: tr => tr.nav.items.settings         },
+      { to: NAVIGATION_PATHS.merchantSettings, icon: Settings, label: tr => tr.nav.items.settings         },
       // Phase 2A Sprint 1 — TOTP 2FA enrol, recovery codes, disable.
-      { to: '/settings/security',          icon: ShieldCheck,  label: tr => tr.nav.items.security         },
+      { to: NAVIGATION_PATHS.securitySettings, icon: ShieldCheck, label: tr => tr.nav.items.security       },
     ],
   },
 ]

@@ -1,6 +1,7 @@
 export const NAVIGATION_PATHS = {
   structuredContacts: '/sales-channels/branches',
-  merchantSettings: '/settings',
+  /** Canonical merchant settings entry — modern SettingsHub (not legacy /settings). */
+  merchantSettings: '/settings-hub',
   securitySettings: '/settings/security',
 } as const
 

@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom'
 import { LanguageProvider } from './i18n/context'
 import Layout from './components/layout/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -93,6 +93,19 @@ import TemplatesHub from './pages/TemplatesHub'
 function RedirectPreserveSearch({ to }: { to: string }) {
   const { search } = useLocation()
   return <Navigate to={`${to}${search}`} replace />
+}
+
+/**
+ * Bare `/settings` was the legacy merchant settings entry.
+ * Canonical entry is `/settings-hub`. Keep `?tab=` deep-links working
+ * (general / order updates / support) so hub cards and banners still resolve.
+ */
+function LegacySettingsEntryRedirect() {
+  const [params] = useSearchParams()
+  if (params.get('tab')) {
+    return <Settings />
+  }
+  return <Navigate to="/settings-hub" replace />
 }
 
 export default function App() {
@@ -194,7 +207,7 @@ export default function App() {
             <Route path="operations-center/branches/:branchId" element={<OperationsCenterBranchDetail />} />
             <Route path="integrations"       element={<Integrations />} />
             <Route path="analytics"          element={<Analytics />} />
-            <Route path="settings"           element={<Settings />} />
+            <Route path="settings"           element={<LegacySettingsEntryRedirect />} />
             <Route path="settings/security"  element={<SecuritySettings />} />
             <Route path="ai-sales-logs"      element={<AiSalesLogs />} />
             <Route path="store-integration"  element={<StoreIntegration />} />

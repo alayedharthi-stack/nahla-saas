@@ -30,17 +30,21 @@ assert(
   NAVIGATION_PATHS.structuredContacts === '/sales-channels/branches',
 )
 assert(
+  'merchant settings entry is the modern settings hub',
+  NAVIGATION_PATHS.merchantSettings === '/settings-hub',
+)
+assert(
   'platform owner profile opens personal security settings',
   resolveProfileSettingsPath({ platformOwner: true, impersonating: false })
     === NAVIGATION_PATHS.securitySettings,
 )
 assert(
-  'impersonating platform owner stays in merchant settings',
+  'impersonating platform owner stays in merchant settings hub',
   resolveProfileSettingsPath({ platformOwner: true, impersonating: true })
     === NAVIGATION_PATHS.merchantSettings,
 )
 assert(
-  'merchant profile opens merchant settings',
+  'merchant profile opens merchant settings hub',
   resolveProfileSettingsPath({ platformOwner: false, impersonating: false })
     === NAVIGATION_PATHS.merchantSettings,
 )
@@ -67,14 +71,24 @@ const sidebarSource = source('../src/components/layout/Sidebar.tsx')
 const adminStart = sidebarSource.indexOf('const ADMIN_NAV_GROUPS')
 const merchantStart = sidebarSource.indexOf('const MERCHANT_NAV_GROUPS')
 const adminNavigation = sidebarSource.slice(adminStart, merchantStart)
+const merchantNavigation = sidebarSource.slice(merchantStart)
 assert(
   'platform owner sidebar omits merchant settings',
   !adminNavigation.includes("to: '/settings'")
+    && !adminNavigation.includes("to: '/settings-hub'")
     && !adminNavigation.includes('NAVIGATION_PATHS.merchantSettings'),
 )
 assert(
   'platform owner sidebar keeps personal security settings',
   adminNavigation.includes('NAVIGATION_PATHS.securitySettings'),
+)
+assert(
+  'legacy merchant sidebar settings item uses the hub constant',
+  merchantNavigation.includes('NAVIGATION_PATHS.merchantSettings'),
+)
+assert(
+  'legacy merchant sidebar does not hardcode bare /settings entry',
+  !merchantNavigation.includes("to: '/settings'"),
 )
 
 const headerSource = source('../src/components/layout/Header.tsx')
@@ -82,6 +96,22 @@ assert(
   'header delegates settings routing to the role-aware resolver',
   headerSource.includes('resolveProfileSettingsPath')
     && headerSource.includes('navigate(profileSettingsPath)'),
+)
+
+const appSource = source('../src/App.tsx')
+assert(
+  'bare /settings redirects to the modern settings hub',
+  appSource.includes('LegacySettingsEntryRedirect')
+    && appSource.includes('Navigate to="/settings-hub"'),
+)
+assert(
+  'settings hub remains the registered modern entry route',
+  appSource.includes('path="settings-hub"') && appSource.includes('SettingsHub'),
+)
+assert(
+  'security settings route remains available for authorized users',
+  appSource.includes('path="settings/security"')
+    && appSource.includes('SecuritySettings'),
 )
 
 const integrationsSource = source('../src/pages/Integrations.tsx')

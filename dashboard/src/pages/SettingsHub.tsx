@@ -24,7 +24,8 @@ export default function SettingsHub() {
 
   const coreItems: HubCardItem[] = [
     {
-      to: '/settings',
+      // Deep-link with ?tab= so bare /settings can redirect to this hub.
+      to: '/settings?tab=store',
       icon: Settings,
       title: page.cards.general.title,
       description: page.cards.general.description,
