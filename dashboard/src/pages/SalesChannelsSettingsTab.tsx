@@ -202,7 +202,7 @@ export default function SalesChannelsSettingsTab() {
             />
           </div>
           <Link
-            to="/settings"
+            to="/settings?tab=store"
             className="inline-flex text-sm text-brand-600 hover:text-brand-700"
           >
             {sc.showroom.mapsHint}

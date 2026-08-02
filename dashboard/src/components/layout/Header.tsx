@@ -272,8 +272,8 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
 
   // ── Display-name resolution ────────────────────────────────────────────────
   // Platform admins keep a neutral Nahla identity. Merchant-scoped sessions,
-  // including support impersonation, use the current tenant's /settings
-  // identity rather than provider or user-account values cached locally.
+  // including support impersonation, use the current tenant's store identity
+  // rather than provider or user-account values cached locally.
   const displayName = platformOwner
     ? t(tr => tr.roles.nahlaAdmin)
     : merchantIdentity.name
