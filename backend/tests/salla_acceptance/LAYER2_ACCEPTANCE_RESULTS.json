@@ -1,0 +1,1490 @@
+{
+  "base_sha": "4d2452f4f95dcaf9a97033a7744508da57d089d0",
+  "test_environment": "synthetic_sqlite_layer2_simulated_whatsapp",
+  "webhook_entry_used": "_handle_merchant_message",
+  "brain_path_verified": true,
+  "llm_compose_path_verified": true,
+  "capture_provider_verified": true,
+  "scenarios_total": 16,
+  "passed": 16,
+  "failed": 0,
+  "critical_failures": [],
+  "major_failures": [],
+  "minor_failures": [],
+  "accuracy_metrics": {
+    "product_context_pct": 100.0,
+    "multi_turn_context_pct": 100.0,
+    "knowledge_truth_pct": 100.0,
+    "usability_pct": 100.0,
+    "conversation_quality_score": "deferred_stub_llm"
+  },
+  "blocking_defects": [],
+  "recommended_fix_packages": [],
+  "ready_for_layer3_human_dialogue": true,
+  "ready_for_internal_live_test": false,
+  "ready_for_tenant1_pilot": false,
+  "recommended_next_action": "Proceed to Layer 3 human conversation review.",
+  "results": [
+    {
+      "id": "L2-1",
+      "messages": [
+        "أبغى الحذاء الأبيض",
+        "كم سعر المقاس الصغير؟",
+        "طيب الكبير؟",
+        "هل هو متوفر؟",
+        "هل يوجد منه لون أسود؟",
+        "كم سعره؟",
+        "لا، أرجع للأبيض",
+        "أرسل رابطه"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "multi-turn product context without cross-tenant leak",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "major",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "turns": [
+          {
+            "label": "أبغى الحذاء الأبيض",
+            "inbound_text": "أبغى الحذاء الأبيض",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "ask_product",
+            "decision_action": "search_products",
+            "decision_args": {
+              "query": "الحذاء الأبيض",
+              "after_search": "propose_order",
+              "discovery_mode": "direct_catalog",
+              "discovery_initial_count": 3,
+              "discovery_presentation": "discovery_list",
+              "discovery_guided_question": "",
+              "discovery_preferred_collections": [],
+              "discovery_featured_product_ids": [],
+              "discovery_strategy_evidence": {
+                "rule": "product_specific_direct",
+                "entry_type": "product_specific",
+                "commerce_objective": "selection",
+                "product_count": 5,
+                "collection_count": 1,
+                "merchant_default_mode": "-"
+              },
+              "discovery_settings": {
+                "default_mode": "",
+                "initial_product_count": 3,
+                "featured_product_ids": [],
+                "preferred_collections": [],
+                "collections": [],
+                "guided_question": "وش نوع المنتج اللي تدور عليه؟",
+                "small_catalog_threshold": 5
+              },
+              "commerce_objective": "selection",
+              "discovery_entry_type": "product_specific",
+              "presentation_mode": "discovery_list",
+              "presentation_evidence": {
+                "rule": "bare_price_ask",
+                "price_kind": "bare_price_ask"
+              },
+              "presentation_shadow": true,
+              "presentation_allowed_attachments": [
+                "interactive_buttons",
+                "none"
+              ],
+              "presentation_forbidden_attachments": [
+                "catalog",
+                "legacy_image",
+                "product_card"
+              ]
+            },
+            "compose_invoked": 0,
+            "compose_source": "",
+            "raw_composed_reply": "هذه بعض الخيارات المتوفرة:\n\n1. حذاء رياضي أبيض — 249 ريال\n\nاكتب رقم المنتج أو اسمه وأكمل طلبك.",
+            "outbound_reply": "هذه بعض الخيارات المتوفرة:\n\n1. حذاء رياضي أبيض — 249 ريال\n\nاكتب رقم المنتج أو اسمه وأكمل طلبك.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "discovery_presentation_products"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "{'type': 'button', 'body': {'text': 'هذه بعض الخيارات المتوفرة:\\n\\n1. حذاء رياضي أبيض — 249 ريال\\n\\nاكتب رقم المنتج أو اسمه وأكمل طلبك.'}, 'action': {'buttons': [{'type': 'reply', 'reply': {'id': 'pick_1', 'title': 'حذاء رياضي ابيض'}}]}}"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.1.0a9868b8",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "كم سعر المقاس الصغير؟",
+            "inbound_text": "كم سعر المقاس الصغير؟",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "ask_price",
+            "decision_action": "search_products",
+            "decision_args": {
+              "query": "مقاس الصغير",
+              "presentation_mode": "price_only",
+              "presentation_evidence": {
+                "rule": "product_price_ask_resolved",
+                "price_kind": "product_price_ask",
+                "normalized_subject": "مقاس الصغير"
+              },
+              "presentation_shadow": true,
+              "presentation_allowed_attachments": [
+                "none"
+              ],
+              "presentation_forbidden_attachments": [
+                "catalog",
+                "cta_url",
+                "legacy_image",
+                "product_card"
+              ]
+            },
+            "compose_invoked": 0,
+            "compose_source": "fallback_deterministic",
+            "raw_composed_reply": "لا يوجد تطابق مؤكد في الكتالوج حالياً.",
+            "outbound_reply": "لا يوجد تطابق مؤكد في الكتالوج حالياً.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "catalog_miss_resolved_subject"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "لا يوجد تطابق مؤكد في الكتالوج حالياً. ✨"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.2.ece5be35",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "طيب الكبير؟",
+            "inbound_text": "طيب الكبير؟",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "general",
+            "decision_action": "llm_reply",
+            "decision_args": {},
+            "compose_invoked": 1,
+            "compose_source": "",
+            "raw_composed_reply": "وصلت رسالتك: طيب الكبير؟",
+            "outbound_reply": "وصلت رسالتك: طيب الكبير؟",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "llm"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "وصلت رسالتك: طيب الكبير؟"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.3.d0fc4194",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "هل هو متوفر؟",
+            "inbound_text": "هل هو متوفر؟",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "general",
+            "decision_action": "llm_reply",
+            "decision_args": {},
+            "compose_invoked": 1,
+            "compose_source": "",
+            "raw_composed_reply": "وصلت رسالتك: هل هو متوفر؟",
+            "outbound_reply": "وصلت رسالتك: هل هو متوفر؟",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "llm"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "وصلت رسالتك: هل هو متوفر؟"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.4.0e64a52a",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "هل يوجد منه لون أسود؟",
+            "inbound_text": "هل يوجد منه لون أسود؟",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "ask_product",
+            "decision_action": "clarify",
+            "decision_args": {
+              "question": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+              "presentation_mode": "discovery_list",
+              "presentation_evidence": {
+                "rule": "bare_price_ask",
+                "price_kind": "bare_price_ask"
+              },
+              "presentation_shadow": true,
+              "presentation_allowed_attachments": [
+                "interactive_buttons",
+                "none"
+              ],
+              "presentation_forbidden_attachments": [
+                "catalog",
+                "legacy_image",
+                "product_card"
+              ]
+            },
+            "compose_invoked": 0,
+            "compose_source": "",
+            "raw_composed_reply": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+            "outbound_reply": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "rule"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج."
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.5.0663c277",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "كم سعره؟",
+            "inbound_text": "كم سعره؟",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "ask_price",
+            "decision_action": "llm_reply",
+            "decision_args": {
+              "topic": "solution_seeking_commerce",
+              "solution_axis": "general_attribute",
+              "presentation_mode": "discovery_list",
+              "presentation_evidence": {
+                "rule": "bare_price_ask",
+                "price_kind": "bare_price_ask"
+              },
+              "presentation_shadow": true,
+              "presentation_allowed_attachments": [
+                "interactive_buttons",
+                "none"
+              ],
+              "presentation_forbidden_attachments": [
+                "catalog",
+                "legacy_image",
+                "product_card"
+              ]
+            },
+            "compose_invoked": 1,
+            "compose_source": "",
+            "raw_composed_reply": "نعم، حدّد المنتج أو المقاس المطلوب ✨🛒",
+            "outbound_reply": "نعم، حدّد المنتج أو المقاس المطلوب ✨🛒",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [
+                "service_closer_guard",
+                "commerce_reply_quality_guard",
+                "commerce_reply_humanizer"
+              ],
+              "final_turn_violations": [],
+              "chosen_path": "llm"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "نعم، حدّد المنتج أو المقاس المطلوب ✨🛒"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.6.7f00ab9c",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "لا، أرجع للأبيض",
+            "inbound_text": "لا، أرجع للأبيض",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": false,
+            "intent": "",
+            "decision_action": "",
+            "decision_args": {},
+            "compose_invoked": 0,
+            "compose_source": "",
+            "raw_composed_reply": "",
+            "outbound_reply": "تقدر تكتب استفسارك هنا، ونخدمك بإذن الله.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": ""
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "تقدر تكتب استفسارك هنا، ونخدمك بإذن الله."
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.7.f8d03f0e",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "أرسل رابطه",
+            "inbound_text": "أرسل رابطه",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "general",
+            "decision_action": "catalog_navigate",
+            "decision_args": {
+              "catalog_delivery_kind": "send_catalog",
+              "commerce_entry_owner": "commerce_entry_catalog",
+              "navigator_step": "top_products_fallback",
+              "turn_owner": "commerce_entry_catalog_delivery",
+              "owner_locked": true,
+              "chosen_path": "catalog_navigation_top_products_fallback",
+              "owner_step": "top_products_fallback"
+            },
+            "compose_invoked": 0,
+            "compose_source": "fallback_deterministic",
+            "raw_composed_reply": "تعذر عرض المنتجات حالياً.",
+            "outbound_reply": "تعذر عرض المنتجات حالياً.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [],
+              "final_turn_violations": [],
+              "chosen_path": "catalog_navigation_top_products_fallback"
+            },
+            "outbound_send_count": 2,
+            "fake_outbound_bodies": [
+              "ما عندي رابط المتجر الإلكتروني محفوظ في النظام حالياً. ✨"
+            ],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.8.e010470f",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          }
+        ],
+        "brain_turns": 7,
+        "state_evolved": true,
+        "catalog_signal": true
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-2",
+      "messages": [
+        "حذا رياضي ابيض",
+        "الحذا الابيض"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "typo resolves Tenant A shoe, not Tenant B watch",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "replies": "تعذّرت صياغة الرد الآن — أعد رسالتك لو يناسبك.",
+        "turns": [
+          {
+            "label": "حذا رياضي ابيض",
+            "inbound_text": "حذا رياضي ابيض",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "general",
+            "decision_action": "llm_reply",
+            "decision_args": {
+              "topic": "product_media",
+              "product_media": true,
+              "response_goal": "product_media — Generate a short natural Saudi Arabic WhatsApp reply. The customer shared product/process media or product information (video, image, or descriptive text) — not a price/buy/track request. Respond like a warm merchant assistant on WhatsApp: acknowledge what is visible or stated, then offer ONE useful next step such as: drafting a short video caption, publish bullet points, turning details into product description, or organizing harvest/source/date facts. Persona composes wording — do NOT use support-desk hedging or CS templates. | vision_evidence=false — hints/caption only; phrase with appropriate confidence (avoid claiming you saw the clip); ask what they want to do with the media (caption, publish points, product info). | Do NOT open with or repeat «يبدو أنك تعرض» across turns — vary acknowledgment naturally. | Do NOT end with standalone «شكرًا على المعلومات» without a useful offer. | Do NOT say «لم أتمكن/لم أستطيع/لا أستطيع … مشاهدة/رؤية/شوف … الفيديو» when any vision text, caption, or product hint exists. | Do NOT pitch checkout or [PRODUCT:…] unless the customer asks to buy. | Do NOT use rigid FAQ/service closers. | active_order_evidence=false — do NOT mention طلب/شحنة/تتبع or «حول طلبك أو الشحنة».",
+              "has_vision_evidence": false,
+              "active_order_evidence": false
+            },
+            "compose_invoked": 1,
+            "compose_source": "",
+            "raw_composed_reply": "",
+            "outbound_reply": "تعذّرت صياغة الرد الآن — أعد رسالتك لو يناسبك.",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [
+                "service_closer_guard"
+              ],
+              "final_turn_violations": [],
+              "chosen_path": "llm"
+            },
+            "outbound_send_count": 1,
+            "fake_outbound_bodies": [],
+            "brain_state_before": {
+              "order_prep_keys": [],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.1.994a0fd0",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          },
+          {
+            "label": "الحذا الابيض",
+            "inbound_text": "الحذا الابيض",
+            "tenant_id": 1,
+            "customer_phone": "***0001",
+            "conversation_id": 1,
+            "brain_called": true,
+            "intent": "general",
+            "decision_action": "llm_reply",
+            "decision_args": {
+              "topic": "product_media",
+              "product_media": true,
+              "response_goal": "product_media — Generate a short natural Saudi Arabic WhatsApp reply. The customer shared product/process media or product information (video, image, or descriptive text) — not a price/buy/track request. Respond like a warm merchant assistant on WhatsApp: acknowledge what is visible or stated, then offer ONE useful next step such as: drafting a short video caption, publish bullet points, turning details into product description, or organizing harvest/source/date facts. Persona composes wording — do NOT use support-desk hedging or CS templates. | vision_evidence=false — hints/caption only; phrase with appropriate confidence (avoid claiming you saw the clip); ask what they want to do with the media (caption, publish points, product info). | Do NOT open with or repeat «يبدو أنك تعرض» across turns — vary acknowledgment naturally. | Do NOT end with standalone «شكرًا على المعلومات» without a useful offer. | Do NOT say «لم أتمكن/لم أستطيع/لا أستطيع … مشاهدة/رؤية/شوف … الفيديو» when any vision text, caption, or product hint exists. | Do NOT pitch checkout or [PRODUCT:…] unless the customer asks to buy. | Do NOT use rigid FAQ/service closers. | active_order_evidence=false — do NOT mention طلب/شحنة/تتبع or «حول طلبك أو الشحنة».",
+              "has_vision_evidence": false,
+              "active_order_evidence": false
+            },
+            "compose_invoked": 1,
+            "compose_source": "",
+            "raw_composed_reply": "",
+            "outbound_reply": "",
+            "catalog_product_ids": [],
+            "price_source": "",
+            "knowledge_source": "",
+            "kb_section_ids": [],
+            "guards": {
+              "guards_triggered": [
+                "service_closer_guard"
+              ],
+              "final_turn_violations": [],
+              "chosen_path": "llm"
+            },
+            "outbound_send_count": 0,
+            "fake_outbound_bodies": [],
+            "brain_state_before": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "brain_state_after": {
+              "order_prep_keys": [
+                "active_order_quantity_clarification",
+                "additional_number",
+                "address_line",
+                "awaiting_checkout_channel",
+                "awaiting_option_confirmation",
+                "awaiting_payment_receipt",
+                "awaiting_variant_choice",
+                "building_number",
+                "cart_deltas",
+                "catalog_checkout_currency",
+                "catalog_checkout_total",
+                "catalog_line_items_authoritative",
+                "checkout_channel",
+                "city",
+                "country",
+                "customer_email",
+                "customer_first_name",
+                "customer_last_name",
+                "customer_phone",
+                "district"
+              ],
+              "focus_product_id": null,
+              "focus_product_name": ""
+            },
+            "dedup_hit": false,
+            "dedup_msg_id": "wamid.layer2.2.60ec510d",
+            "skip_ai": false,
+            "errors": [],
+            "outcome": "unknown",
+            "severity": "major"
+          }
+        ]
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-3",
+      "messages": [
+        "كم الشحن؟",
+        "إلى الرياض"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "Tenant A Riyadh shipping KB (25), not Tenant B Jeddah (35)",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "replies": "أحتاج رقم الطلب أو معلومات أكثر للمتابعة. 🛒✨ وصلت رسالتك: إلى الرياض"
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-4",
+      "messages": [
+        "هل عندكم ضمان مدى الحياة للساعات؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "no invented warranty; no staff claim without handoff",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "label": "هل عندكم ضمان مدى الحياة للساعات؟",
+        "inbound_text": "هل عندكم ضمان مدى الحياة للساعات؟",
+        "tenant_id": 1,
+        "customer_phone": "***0001",
+        "conversation_id": 1,
+        "brain_called": true,
+        "intent": "ask_product",
+        "decision_action": "clarify",
+        "decision_args": {
+          "question": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+          "presentation_mode": "discovery_list",
+          "presentation_evidence": {
+            "rule": "bare_price_ask",
+            "price_kind": "bare_price_ask"
+          },
+          "presentation_shadow": true,
+          "presentation_allowed_attachments": [
+            "interactive_buttons",
+            "none"
+          ],
+          "presentation_forbidden_attachments": [
+            "catalog",
+            "legacy_image",
+            "product_card"
+          ]
+        },
+        "compose_invoked": 0,
+        "compose_source": "",
+        "raw_composed_reply": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+        "outbound_reply": "تقصد حاجة أو مواصفة معيّنة؟ وضّح الاستخدام أو الصفة المطلوبة وأرشّح لك الأنسب من عندنا — بدون ما تحتاج تكتب اسم منتج.",
+        "catalog_product_ids": [],
+        "price_source": "",
+        "knowledge_source": "",
+        "kb_section_ids": [],
+        "guards": {
+          "guards_triggered": [],
+          "final_turn_violations": [],
+          "chosen_path": "rule"
+        },
+        "outbound_send_count": 1,
+        "fake_outbound_bodies": [],
+        "brain_state_before": {
+          "order_prep_keys": [],
+          "focus_product_id": null,
+          "focus_product_name": ""
+        },
+        "brain_state_after": {
+          "order_prep_keys": [
+            "active_order_quantity_clarification",
+            "additional_number",
+            "address_line",
+            "awaiting_checkout_channel",
+            "awaiting_option_confirmation",
+            "awaiting_payment_receipt",
+            "awaiting_variant_choice",
+            "building_number",
+            "cart_deltas",
+            "catalog_checkout_currency",
+            "catalog_checkout_total",
+            "catalog_line_items_authoritative",
+            "checkout_channel",
+            "city",
+            "country",
+            "customer_email",
+            "customer_first_name",
+            "customer_last_name",
+            "customer_phone",
+            "district"
+          ],
+          "focus_product_id": null,
+          "focus_product_name": ""
+        },
+        "dedup_hit": false,
+        "dedup_msg_id": "wamid.layer2.1.2c3e0b7f",
+        "skip_ai": false,
+        "errors": [],
+        "outcome": "unknown",
+        "severity": "major"
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-5",
+      "messages": [
+        "كم سعر الحذاء الأبيض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "catalog price 249/269 wins over stale KB 99",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "reply": "لا يوجد تطابق مؤكد في الكتالوج حالياً.لا يوجد تطابق مؤكد في الكتالوج حالياً.",
+        "price_source": "",
+        "catalog_product_ids": []
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-6",
+      "messages": [
+        "وين طلبي؟",
+        "هل تم شحنه؟",
+        "متى يوصل؟",
+        "أرسل رقم التتبع"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "shipped order tracking with evidence; no invented ETA",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "replies": "المنتجات: عطر ورد 100ml إذا تريد أساعدك في شيء آخر بخصوص الطلب أنا حاضر أحتاج رقم الطلب أو معلومات أكثر للمتابعة. وصلت رسالتك: متى يوصل؟ المنتجات: عطر ورد 100ml إذا تريد أساعدك في شيء آخر بخصوص الطلب أنا حاضر",
+        "has_tracking": false
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-6b",
+      "messages": [
+        "وين طلبي؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "processing order — no Customer B tracking leak",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "label": "وين طلبي؟",
+        "inbound_text": "وين طلبي؟",
+        "tenant_id": 1,
+        "customer_phone": "***0001",
+        "conversation_id": 1,
+        "brain_called": true,
+        "intent": "track_order",
+        "decision_action": "track_order",
+        "decision_args": {
+          "order_id": ""
+        },
+        "compose_invoked": 0,
+        "compose_source": "",
+        "raw_composed_reply": "حالة رقم الطلب SLL-A-1001: *جاري المعالجة*\nالمنتجات: حذاء رياضي أبيض\n\nإذا تريد أساعدك في شيء آخر بخصوص الطلب أنا حاضر.",
+        "outbound_reply": "حالة رقم الطلب SLL-A-1001: *جاري المعالجة*\nالمنتجات: حذاء رياضي أبيض\n\nإذا تريد أساعدك في شيء آخر بخصوص الطلب أنا حاضر.",
+        "catalog_product_ids": [],
+        "price_source": "",
+        "knowledge_source": "",
+        "kb_section_ids": [],
+        "guards": {
+          "guards_triggered": [],
+          "final_turn_violations": [
+            "catalog_promise_without_catalog_action"
+          ],
+          "chosen_path": "track_order_status"
+        },
+        "outbound_send_count": 1,
+        "fake_outbound_bodies": [],
+        "brain_state_before": {
+          "order_prep_keys": [],
+          "focus_product_id": null,
+          "focus_product_name": ""
+        },
+        "brain_state_after": {
+          "order_prep_keys": [
+            "active_order_quantity_clarification",
+            "additional_number",
+            "address_line",
+            "awaiting_checkout_channel",
+            "awaiting_option_confirmation",
+            "awaiting_payment_receipt",
+            "awaiting_variant_choice",
+            "building_number",
+            "cart_deltas",
+            "catalog_checkout_currency",
+            "catalog_checkout_total",
+            "catalog_line_items_authoritative",
+            "checkout_channel",
+            "city",
+            "country",
+            "customer_email",
+            "customer_first_name",
+            "customer_last_name",
+            "customer_phone",
+            "district"
+          ],
+          "focus_product_id": null,
+          "focus_product_name": ""
+        },
+        "dedup_hit": false,
+        "dedup_msg_id": "wamid.layer2.1.77c7cbfb",
+        "skip_ai": false,
+        "errors": [],
+        "outcome": "unknown",
+        "severity": "major"
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-7",
+      "messages": [
+        "أبغى أتكلم مع موظف",
+        "كم سعر الحذاء الأبيض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "human-owned turn suppresses conflicting AI commerce reply",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "handoff": {
+          "label": "أبغى أتكلم مع موظف",
+          "inbound_text": "أبغى أتكلم مع موظف",
+          "tenant_id": 1,
+          "customer_phone": "***0001",
+          "conversation_id": 1,
+          "brain_called": false,
+          "intent": "",
+          "decision_action": "",
+          "decision_args": {},
+          "compose_invoked": 0,
+          "compose_source": "",
+          "raw_composed_reply": "",
+          "outbound_reply": "أرقام التصعيد غير مهيأة لهذا المتجر حالياً.",
+          "catalog_product_ids": [],
+          "price_source": "",
+          "knowledge_source": "",
+          "kb_section_ids": [],
+          "guards": {
+            "guards_triggered": [],
+            "final_turn_violations": [],
+            "chosen_path": ""
+          },
+          "outbound_send_count": 1,
+          "fake_outbound_bodies": [],
+          "brain_state_before": {
+            "order_prep_keys": [],
+            "focus_product_id": null,
+            "focus_product_name": ""
+          },
+          "brain_state_after": {
+            "order_prep_keys": [],
+            "focus_product_id": null,
+            "focus_product_name": ""
+          },
+          "dedup_hit": false,
+          "dedup_msg_id": "wamid.layer2.1.862ed221",
+          "skip_ai": false,
+          "errors": [],
+          "outcome": "unknown",
+          "severity": "major"
+        },
+        "followup": {
+          "label": "كم سعر الحذاء الأبيض؟",
+          "inbound_text": "كم سعر الحذاء الأبيض؟",
+          "tenant_id": 1,
+          "customer_phone": "***0001",
+          "conversation_id": 1,
+          "brain_called": false,
+          "intent": "",
+          "decision_action": "",
+          "decision_args": {},
+          "compose_invoked": 0,
+          "compose_source": "",
+          "raw_composed_reply": "",
+          "outbound_reply": "",
+          "catalog_product_ids": [],
+          "price_source": "",
+          "knowledge_source": "",
+          "kb_section_ids": [],
+          "guards": {
+            "guards_triggered": [],
+            "final_turn_violations": [],
+            "chosen_path": ""
+          },
+          "outbound_send_count": 0,
+          "fake_outbound_bodies": [],
+          "brain_state_before": {
+            "order_prep_keys": [],
+            "focus_product_id": null,
+            "focus_product_name": ""
+          },
+          "brain_state_after": {
+            "order_prep_keys": [],
+            "focus_product_id": null,
+            "focus_product_name": ""
+          },
+          "dedup_hit": false,
+          "dedup_msg_id": "wamid.layer2.1.fb353cbd",
+          "skip_ai": true,
+          "errors": [],
+          "outcome": "unknown",
+          "severity": "major"
+        }
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-8",
+      "messages": [
+        "السلام عليكم"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "same msg_id suppressed; different ids may both process",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "same_id_second_dedup": true,
+        "diff_ids_both_handled": false
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-9",
+      "messages": [
+        "كود خصم FAKE999"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "invalid coupon — no false applied success",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "major",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "reply": "ما قدرت أطبق هذا الكود — تحقق منه أو جرّب كوداً آخر.ما قدرت أطبق هذا الكود — تحقق منه أو جرّب كوداً آخر.",
+        "tenant_b_coupons_denied": true
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K4",
+      "messages": [
+        "أبغى أطلب حذاء"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "safe failure closed for K4",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "crashed": false,
+        "reply": "كيف تحب تكمل؟"
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K5",
+      "messages": [
+        "كم سعر الحذاء الأبيض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "safe failure closed for K5",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "crashed": false,
+        "reply": "لا يوجد تطابق مؤكد في الكتالوج حالياً."
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K6",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "safe failure closed for K6",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "crashed": false,
+        "reply": "تعذّرت صياغة الرد الآن — أعد رسالتك لو يناسبك."
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K7",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "safe failure closed for K7",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "crashed": false,
+        "reply": "وصلت رسالتك، تقدر توضّح طلبك أكثر؟"
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K9",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "safe failure closed for K9",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "critical",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "crashed": true,
+        "reply": ""
+      },
+      "metrics": {}
+    },
+    {
+      "id": "L2-10-K8",
+      "messages": [],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "tenant_id required at webhook entry — unresolved tenant simulated offline",
+      "actual": "pass",
+      "result": "pass",
+      "severity": "minor",
+      "layer": "layer2",
+      "llm_mocked": true,
+      "evidence": {
+        "note": "Layer2BrainRunner always passes tenant_id from bundle"
+      },
+      "metrics": {}
+    }
+  ]
+}
