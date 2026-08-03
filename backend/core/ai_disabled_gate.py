@@ -22,6 +22,8 @@ logger = logging.getLogger("nahla-backend")
 REASON_AI_PAUSED = "ai_paused"
 REASON_MANUAL_PAUSE = "manual_pause"
 REASON_HUMAN_SUPERVISION = "human_supervision"
+REASON_HANDOFF_SESSION = "handoff_session_active"
+REASON_HUMAN_OWNERSHIP = "human_ownership_active"
 REASON_STORE_AI_DISABLED = "store_ai_disabled"
 REASON_STORE_AI_TEST_MODE_NOT_ALLOWED = "store_ai_test_mode_not_allowed"
 
@@ -46,6 +48,13 @@ class NoAIReplyResult:
     suppressed: bool = True
     reason: str = ""
     conversation_id: Optional[int] = None
+
+
+def _is_active_handoff_session_row(row: Any) -> bool:
+    if row is None:
+        return False
+    status = getattr(row, "status", None)
+    return isinstance(status, str) and status.strip().lower() == "active"
 
 
 def disabled_reason_for_conversation(convo: Conversation | None) -> str:
@@ -205,6 +214,91 @@ def is_ai_disabled_for_conversation(
                 source=source,
             )
 
+    try:
+        from models import HandoffSession  # noqa: PLC0415
+
+        session = (
+            db.query(HandoffSession)
+            .filter(
+                HandoffSession.tenant_id == tenant_id,
+                HandoffSession.customer_phone == customer_phone,
+                HandoffSession.status == "active",
+            )
+            .first()
+        )
+        if _is_active_handoff_session_row(session):
+            anchor = conversation or (convos[0] if convos else None)
+            return AIDisabledDecision(
+                disabled=True,
+                reason=REASON_HANDOFF_SESSION,
+                conversation=anchor,
+                source=source,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AI_DISABLED_GATE] handoff_session lookup failed tenant=%s err=%s",
+            tenant_id,
+            type(exc).__name__,
+        )
+        from core.handoff_truth import (  # noqa: PLC0415
+            REASON_GATE_VERIFY_FAILED,
+            evaluate_gate_error_fail_closed,
+        )
+
+        if evaluate_gate_error_fail_closed(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            conversation=conversation or (convos[0] if convos else None),
+            gate="ai_disabled_gate_handoff_session",
+            error=exc,
+        ):
+            anchor = conversation or (convos[0] if convos else None)
+            return AIDisabledDecision(
+                disabled=True,
+                reason=REASON_GATE_VERIFY_FAILED,
+                conversation=anchor,
+                source=source,
+            )
+
+    try:
+        from core.ownership_state import conversation_handoff_active  # noqa: PLC0415
+
+        for convo in convos:
+            if conversation_handoff_active(db, convo):
+                return AIDisabledDecision(
+                    disabled=True,
+                    reason=REASON_HUMAN_OWNERSHIP,
+                    conversation=convo,
+                    source=source,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[AI_DISABLED_GATE] ownership lookup failed tenant=%s err=%s",
+            tenant_id,
+            type(exc).__name__,
+        )
+        from core.handoff_truth import (  # noqa: PLC0415
+            REASON_GATE_VERIFY_FAILED,
+            evaluate_gate_error_fail_closed,
+        )
+
+        if evaluate_gate_error_fail_closed(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            conversation=conversation or (convos[0] if convos else None),
+            gate="ai_disabled_gate_ownership",
+            error=exc,
+        ):
+            anchor = conversation or (convos[0] if convos else None)
+            return AIDisabledDecision(
+                disabled=True,
+                reason=REASON_GATE_VERIFY_FAILED,
+                conversation=anchor,
+                source=source,
+            )
+
     return AIDisabledDecision(
         disabled=False,
         conversation=convos[0],
@@ -339,6 +433,8 @@ __all__ = [
     "AIDisabledDecision",
     "NoAIReplyResult",
     "REASON_AI_PAUSED",
+    "REASON_HANDOFF_SESSION",
+    "REASON_HUMAN_OWNERSHIP",
     "REASON_HUMAN_SUPERVISION",
     "REASON_MANUAL_PAUSE",
     "REASON_STORE_AI_DISABLED",
