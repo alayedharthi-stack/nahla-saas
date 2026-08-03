@@ -122,6 +122,8 @@ class LiveMerchantBrainTurnResult:
     brain_exception: Optional[BaseException] = None
     early_return: bool = False
     brain_silent: bool = False
+    post_compose_primary_applied: bool = False
+    post_compose_guard_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _dedup_tokenise(text: str) -> set:
@@ -670,6 +672,20 @@ def _apply_outbound_dedup(
     return reply, outbound_abort_suppressor
 
 
+def _guard_events_to_dicts(events: list) -> List[Dict[str, Any]]:
+    return [
+        {
+            "guard": event.guard,
+            "acted": event.acted,
+            "modified": event.modified,
+            "suppressed_send": event.suppressed_send,
+            "reason": event.reason,
+            "layer": event.layer,
+        }
+        for event in events
+    ]
+
+
 def _apply_post_compose_truth_guards(
     *,
     db,
@@ -686,291 +702,34 @@ def _apply_post_compose_truth_guards(
     brain_persona_compose_event: Optional[Dict[str, Any]],
     persona_ownership: Any,
     live_provenance_tracker: Optional[Dict[str, Any]] = None,
-) -> str:
-    from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
+) -> tuple[str, bool, List[Dict[str, Any]]]:
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (
+        run_post_compose_truth_guards,
+    )
 
-    if not reply:
-        return reply
-    if brain_handoff:
-        return _apply_staff_truth_guard_only(
-            db=db,
-            tenant_id=tenant_id,
-            to=to,
-            text=text,
-            reply=reply,
-            convo=convo,
-            inbound_metadata=inbound_metadata,
-            br_action=br_action,
-            brain_persona_compose_event=brain_persona_compose_event,
-            live_provenance_tracker=live_provenance_tracker,
-        )
-
-    po_reply_before_guards = reply
-    try:
-        from modules.ai.brain.postprocess.service_closer_guard import apply_service_closer_guard
-
-        nc_meta = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
-        if brain_nc_category:
-            nc_meta.setdefault("non_commerce_category", brain_nc_category)
-        if brain_nc_block:
-            nc_meta.setdefault("block_commerce_escalation", True)
-        scg = apply_service_closer_guard(
-            reply,
-            inbound_text=text or "",
-            inbound_metadata=nc_meta,
-            non_commerce_block_mode=brain_nc_block,
-            block_commerce_escalation=brain_nc_block,
-            tenant_id=tenant_id,
-        )
-        if scg.stripped:
-            reply = scg.reply
-            persona_ownership.on_text_replaced(
-                layer="service_closer_guard",
-                reason=POReason.FALLBACK_REPLY,
-                before=po_reply_before_guards,
-                after=reply,
-            )
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="service_closer_guard",
-                before=po_reply_before_guards,
-                after=reply,
-            )
-    except Exception:  # noqa: silent-ok — service closer guard is fail-open
-        pass
-
-    try:
-        from core.payment_intent import rewrite_generic_reply_for_payment_context
-        from core.order_flow import _focus_summary, _load_brain_state
-
-        _, bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        summary = _focus_summary(bs)
-        rewritten = rewrite_generic_reply_for_payment_context(
-            inbound_text=text or "",
-            brain_reply=reply,
-            state_summary=summary,
-        )
-        if rewritten:
-            before_rewrite = reply
-            reply = rewritten
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="payment_context_rewrite",
-                before=before_rewrite,
-                after=reply,
-            )
-    except Exception:  # noqa: silent-ok — payment-context rewrite is fail-open
-        pass
-
-    try:
-        from modules.ai.brain.postprocess.payment_reply_guard import apply_payment_reply_guard
-        from core.order_flow import _focus_summary, _load_brain_state
-
-        _, bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        summary = _focus_summary(bs)
-        prg_meta = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
-        for key in (
-            "awaiting_payment_receipt",
-            "payment_receipt_received",
-            "selected_product",
-            "order_status",
-            "payment_method",
-        ):
-            if key in summary:
-                prg_meta[key] = summary[key]
-        prg_result = apply_payment_reply_guard(
-            reply=reply,
-            inbound_text=text or "",
-            inbound_metadata=prg_meta,
-            payment_receipt_received=bool(summary.get("payment_receipt_received")),
-            tenant_id=tenant_id,
-            conversation_id=getattr(convo, "id", None),
-        )
-        if prg_result.replaced:
-            before_guard = reply
-            reply = prg_result.reply
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="payment_reply_guard",
-                before=before_guard,
-                after=reply,
-            )
-    except Exception:  # noqa: silent-ok — payment truth guard is fail-open
-        pass
-
-    try:
-        from core.active_order_context import load_commerce_bundle
-        from modules.ai.brain.postprocess.shipment_truth_guard import apply_shipment_truth_guard
-        from core.order_flow import _focus_summary, _load_brain_state
-
-        _, bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        summary = _focus_summary(bs)
-        stg_meta = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
-        bundle = load_commerce_bundle(dict(getattr(convo, "extra_metadata", None) or {}))
-        stg_result = apply_shipment_truth_guard(
-            reply=reply,
-            commerce_bundle=bundle,
-            inbound_metadata=stg_meta,
-            payment_receipt_received=bool(summary.get("payment_receipt_received")),
-            tenant_id=tenant_id,
-            conversation_id=getattr(convo, "id", None),
-        )
-        if stg_result.replaced:
-            before_guard = reply
-            reply = stg_result.reply
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="shipment_truth_guard",
-                before=before_guard,
-                after=reply,
-            )
-    except Exception:  # noqa: silent-ok — shipment truth guard is fail-open
-        pass
-
-    try:
-        from modules.ai.brain.postprocess.staff_escalation_truth_guard import (
-            apply_staff_escalation_truth_guard,
-        )
-        from core.order_flow import _load_brain_state
-
-        setg_meta = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
-        setg_path = str(setg_meta.get("deterministic_path") or br_action or "")
-        _, setg_bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        setg_result = apply_staff_escalation_truth_guard(
-            reply=reply,
-            inbound_text=text or "",
-            inbound_metadata=setg_meta,
-            conversation_flags={
-                "needs_human": bool(getattr(convo, "needs_human", False)),
-                "handoff_active": bool(getattr(convo, "handoff_active", False)),
-                "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
-                "status": str(getattr(convo, "status", "") or ""),
-            },
-            chosen_path=setg_path,
-            brain_handoff=bool(brain_handoff),
-            tenant_id=tenant_id,
-            conversation_id=getattr(convo, "id", None),
-            state=setg_bs,
-        )
-        if (
-            setg_result.requires_grounded_compose
-            and setg_result.route_action == "track_order_need_identifiers"
-            and isinstance(brain_persona_compose_event, dict)
-            and brain_persona_compose_event.get("track_order_need_identifiers_compose_active")
-            and brain_persona_compose_event.get("llm_candidate_present")
-        ):
-            from modules.ai.brain.compose import templates as tracking_templates
-            from modules.ai.brain.compose.track_order_need_identifiers_compose import (
-                record_fallback_metadata_on_data,
-            )
-
-            record_fallback_metadata_on_data(
-                brain_persona_compose_event,
-                reason="staff_escalation_truth_guard_false_claim",
-                transformed_by_guard=True,
-                llm_candidate_present=True,
-            )
-            fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="staff_escalation_truth_guard",
-                before=reply,
-                after=fallback_reply,
-            )
-            reply = fallback_reply
-        elif setg_result.replaced and not setg_result.requires_grounded_compose:
-            before_guard = reply
-            reply = setg_result.reply
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="staff_escalation_truth_guard",
-                before=before_guard,
-                after=reply,
-            )
-    except Exception:  # noqa: silent-ok — staff truth guard is fail-open
-        pass
-
-    return reply
-
-
-def _apply_staff_truth_guard_only(
-    *,
-    db,
-    tenant_id: int,
-    to: str,
-    text: str,
-    reply: str,
-    convo: Any,
-    inbound_metadata: Optional[Dict[str, Any]],
-    br_action: str,
-    brain_persona_compose_event: Optional[Dict[str, Any]],
-    live_provenance_tracker: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Preserve the live staff-truth guard for Brain handoff candidates."""
-    try:
-        from modules.ai.brain.postprocess.staff_escalation_truth_guard import (
-            apply_staff_escalation_truth_guard,
-        )
-        from core.order_flow import _load_brain_state
-
-        metadata = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
-        chosen_path = str(metadata.get("deterministic_path") or br_action or "")
-        _, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        result = apply_staff_escalation_truth_guard(
-            reply=reply,
-            inbound_text=text or "",
-            inbound_metadata=metadata,
-            conversation_flags={
-                "needs_human": bool(getattr(convo, "needs_human", False)),
-                "handoff_active": bool(getattr(convo, "handoff_active", False)),
-                "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
-                "status": str(getattr(convo, "status", "") or ""),
-            },
-            chosen_path=chosen_path,
-            brain_handoff=True,
-            tenant_id=tenant_id,
-            conversation_id=getattr(convo, "id", None),
-            state=brain_state,
-        )
-        if (
-            result.requires_grounded_compose
-            and result.route_action == "track_order_need_identifiers"
-            and isinstance(brain_persona_compose_event, dict)
-            and brain_persona_compose_event.get(
-                "track_order_need_identifiers_compose_active"
-            )
-            and brain_persona_compose_event.get("llm_candidate_present")
-        ):
-            from modules.ai.brain.compose import templates as tracking_templates
-            from modules.ai.brain.compose.track_order_need_identifiers_compose import (
-                record_fallback_metadata_on_data,
-            )
-
-            record_fallback_metadata_on_data(
-                brain_persona_compose_event,
-                reason="staff_escalation_truth_guard_false_claim",
-                transformed_by_guard=True,
-                llm_candidate_present=True,
-            )
-            fallback_reply = tracking_templates.track_order_need_identifiers_emergency_fallback()
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="staff_escalation_truth_guard",
-                before=reply,
-                after=fallback_reply,
-            )
-            return fallback_reply
-        if result.replaced and not result.requires_grounded_compose:
-            _note_live_text_mutation(
-                live_provenance_tracker,
-                reason_token="staff_escalation_truth_guard",
-                before=reply,
-                after=result.reply,
-            )
-            return result.reply
-    except Exception:  # noqa: silent-ok — staff truth guard is fail-open
-        pass
-    return reply
+    result = run_post_compose_truth_guards(
+        db=db,
+        tenant_id=tenant_id,
+        to=to,
+        text=text,
+        reply=reply,
+        convo=convo,
+        inbound_metadata=inbound_metadata,
+        brain_handoff=brain_handoff,
+        brain_nc_block=brain_nc_block,
+        brain_nc_category=brain_nc_category,
+        br_action=br_action,
+        brain_persona_compose_event=brain_persona_compose_event,
+        mode="primary",
+        persona_ownership=persona_ownership,
+        live_provenance_tracker=live_provenance_tracker,
+        conversation_id=getattr(convo, "id", None),
+    )
+    return (
+        result.reply,
+        bool(result.primary_applied),
+        _guard_events_to_dicts(result.events),
+    )
 
 
 def _persist_live_handoff(
@@ -1380,21 +1139,23 @@ async def evaluate_live_merchant_brain_turn(
             live_provenance_tracker=live_provenance_tracker,
         )
 
-        reply = _apply_post_compose_truth_guards(
-            db=db,
-            tenant_id=explicit_tenant_id,
-            to=turn_input.customer_phone,
-            text=turn_input.text,
-            reply=reply,
-            convo=convo,
-            inbound_metadata=turn_input.inbound_metadata,
-            brain_handoff=brain_handoff,
-            brain_nc_block=parsed["brain_nc_block"],
-            brain_nc_category=parsed["brain_nc_category"],
-            br_action=br_action,
-            brain_persona_compose_event=parsed["brain_persona_compose_event"],
-            persona_ownership=persona_ownership,
-            live_provenance_tracker=live_provenance_tracker,
+        reply, post_compose_primary_applied, post_compose_guard_events = (
+            _apply_post_compose_truth_guards(
+                db=db,
+                tenant_id=explicit_tenant_id,
+                to=turn_input.customer_phone,
+                text=turn_input.text,
+                reply=reply,
+                convo=convo,
+                inbound_metadata=turn_input.inbound_metadata,
+                brain_handoff=brain_handoff,
+                brain_nc_block=parsed["brain_nc_block"],
+                brain_nc_category=parsed["brain_nc_category"],
+                br_action=br_action,
+                brain_persona_compose_event=parsed["brain_persona_compose_event"],
+                persona_ownership=persona_ownership,
+                live_provenance_tracker=live_provenance_tracker,
+            )
         )
 
         if not billing_denied and not brain_silent and (reply or "").strip():
@@ -1436,6 +1197,8 @@ async def evaluate_live_merchant_brain_turn(
             outbound_text_tracker=parsed["outbound_text_tracker"],
             native_catalog_entry=parsed["native_catalog_entry"],
             brain_silent=brain_silent,
+            post_compose_primary_applied=post_compose_primary_applied,
+            post_compose_guard_events=post_compose_guard_events,
         )
     except Exception as exc:  # noqa: BLE001
         return LiveMerchantBrainTurnResult(

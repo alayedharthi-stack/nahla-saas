@@ -9316,42 +9316,93 @@ async def _handle_merchant_message(
         # inbound is a payment-confirmation claim AND the outbound
         # matches a known generic fallback marker — so legitimate
         # replies never get touched.
-        if reply and not _brain_handoff and not _turn_eval_applied:
-            _po_reply_before_guards = reply
-            try:
-                from modules.ai.brain.postprocess.service_closer_guard import (  # noqa: PLC0415
-                    apply_service_closer_guard,
-                )
-                _nc_meta = (
-                    dict(inbound_metadata or {})
-                    if isinstance(inbound_metadata, dict)
-                    else {}
-                )
-                if _brain_nc_category:
-                    _nc_meta.setdefault("non_commerce_category", _brain_nc_category)
-                if _brain_nc_block:
-                    _nc_meta.setdefault("block_commerce_escalation", True)
-                _scg = apply_service_closer_guard(
-                    reply,
-                    inbound_text=text or "",
-                    inbound_metadata=_nc_meta,
-                    non_commerce_block_mode=_brain_nc_block,
-                    block_commerce_escalation=_brain_nc_block,
-                    tenant_id=tenant_id,
-                )
-                if _scg.stripped:
-                    reply = _scg.reply
-                    _persona_ownership.on_text_replaced(
-                        layer="service_closer_guard",
-                        reason=_POReason.FALLBACK_REPLY,
-                        before=_po_reply_before_guards,
-                        after=reply,
+        # ── Post-compose truth guards (P1-B consolidated pipeline) ────────
+        if reply:
+            from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+                run_post_compose_truth_guards,
+            )
+
+            def _webhook_staff_ack_emit(**_ack_kwargs) -> None:
+                try:
+                    from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
+                        detect_input_types,
+                        emit_ack_decision,
+                        is_generic_ack_stub,
+                        reply_acknowledges_important_input,
                     )
-            except Exception as _scg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[SERVICE_CLOSER_GUARD] webhook hook failed tenant=%s err=%s",
-                    tenant_id, _scg_exc,
+                    from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
+                        has_active_commerce_from_state,
+                    )
+
+                    _setg_meta = _ack_kwargs.get("inbound_metadata") or {}
+                    _setg_bs = _ack_kwargs.get("brain_state") or {}
+                    _setg_path = str(_ack_kwargs.get("chosen_path") or "")
+                    _ack_reply = str(_ack_kwargs.get("reply") or "")
+                    _wh_types = detect_input_types(
+                        message=text or "",
+                        inbound_metadata=_setg_meta,
+                    )
+                    _wh_important = bool(_wh_types)
+                    _wh_ack = reply_acknowledges_important_input(
+                        reply=_ack_reply,
+                        input_types=_wh_types,
+                        state=_setg_bs,
+                    )
+                    _wh_stub = is_generic_ack_stub(_ack_reply)
+                    emit_ack_decision(
+                        tenant_id=tenant_id,
+                        phone_tail=(to or "")[-4:],
+                        important_customer_input=_wh_important,
+                        input_types=_wh_types,
+                        acknowledged=_wh_ack,
+                        reason=(
+                            "webhook_belt_generic_ack_violation"
+                            if _wh_important and _wh_stub and not _wh_ack
+                            else "webhook_belt"
+                        ),
+                        outbound_preview=_ack_reply,
+                        decision_action=str(_br_action or ""),
+                        chosen_path=_setg_path,
+                        generic_ack_stub=_wh_stub,
+                        generic_ack_violation=bool(
+                            _wh_important and _wh_stub and not _wh_ack
+                        ),
+                        staff_route_detected=False,
+                        fulfillment_locked=has_active_commerce_from_state(_setg_bs),
+                    )
+                except Exception as _wh_ack_exc:  # noqa: BLE001  # noqa: silent-ok — evidence emit must not block send
+                    logger.debug(
+                        "[ACK_DECISION] webhook emit skipped tenant=%s err=%s",
+                        tenant_id,
+                        _wh_ack_exc,
+                    )
+
+            _pc_primary_already = False
+            if _turn_eval_applied:
+                _pc_primary_already = bool(
+                    getattr(_turn_eval, "post_compose_primary_applied", False)
                 )
+            _pc_mode = "last_line" if _turn_eval_applied else "primary"
+            _pc_result = run_post_compose_truth_guards(
+                db=db,
+                tenant_id=tenant_id,
+                to=to,
+                text=text,
+                reply=reply,
+                convo=convo,
+                inbound_metadata=inbound_metadata,
+                brain_handoff=bool(_brain_handoff),
+                brain_nc_block=_brain_nc_block,
+                brain_nc_category=_brain_nc_category,
+                br_action=_br_action,
+                brain_persona_compose_event=_brain_persona_compose_event,
+                mode=_pc_mode,
+                primary_already_applied=_pc_primary_already,
+                persona_ownership=_persona_ownership,
+                conversation_id=getattr(convo, "id", None),
+                on_staff_guard_complete=_webhook_staff_ack_emit,
+            )
+            reply = _pc_result.reply
 
         if reply and not _brain_handoff:
             _po_reply_before_spg = reply
@@ -9376,236 +9427,6 @@ async def _handle_merchant_message(
                 logger.debug(
                     "[SOCIAL_PHRASE_QUALITY_GUARD] webhook hook failed tenant=%s err=%s",
                     tenant_id, _spg_exc,
-                )
-
-        if reply and not _brain_handoff and not _turn_eval_applied:
-            _po_reply_before_guards = reply
-            try:
-                from core.payment_intent import (  # noqa: PLC0415
-                    rewrite_generic_reply_for_payment_context,
-                )
-                from core.order_flow import (  # noqa: PLC0415
-                    _focus_summary as _pi_focus,
-                    _load_brain_state as _pi_load,
-                )
-                _pi_conv, _pi_bs = _pi_load(db, tenant_id=tenant_id, phone=to)
-                _pi_summary = _pi_focus(_pi_bs)
-                _rewritten = rewrite_generic_reply_for_payment_context(
-                    inbound_text=text or "",
-                    brain_reply=reply,
-                    state_summary=_pi_summary,
-                )
-                if _rewritten:
-                    logger.info(
-                        "[PAYMENT_INTENT] rewrote_generic_fallback "
-                        "tenant=%s to=%s orig_len=%d new_len=%d",
-                        tenant_id, to, len(reply), len(_rewritten),
-                    )
-                    reply = _rewritten
-            except Exception as _pi_exc:  # noqa: BLE001
-                logger.debug(
-                    "[PAYMENT_INTENT] post-brain rewrite failed: %s",
-                    _pi_exc,
-                )
-
-        if reply and not _brain_handoff and not _turn_eval_applied:
-            try:
-                from modules.ai.brain.postprocess.payment_reply_guard import (  # noqa: PLC0415
-                    apply_payment_reply_guard,
-                )
-                from core.order_flow import (  # noqa: PLC0415
-                    _focus_summary as _prg_focus,
-                    _load_brain_state as _prg_load,
-                )
-                _prg_conv, _prg_bs = _prg_load(db, tenant_id=tenant_id, phone=to)
-                _prg_summary = _prg_focus(_prg_bs)
-                _prg_meta = (
-                    dict(inbound_metadata or {})
-                    if isinstance(inbound_metadata, dict)
-                    else {}
-                )
-                for _ctx_key in (
-                    "awaiting_payment_receipt",
-                    "payment_receipt_received",
-                    "selected_product",
-                    "order_status",
-                    "payment_method",
-                ):
-                    if _ctx_key in _prg_summary:
-                        _prg_meta[_ctx_key] = _prg_summary[_ctx_key]
-                _prg_result = apply_payment_reply_guard(
-                    reply=reply,
-                    inbound_text=text or "",
-                    inbound_metadata=_prg_meta,
-                    payment_receipt_received=bool(
-                        _prg_summary.get("payment_receipt_received")
-                    ),
-                    tenant_id=tenant_id,
-                    conversation_id=getattr(convo, "id", None),
-                )
-                if _prg_result.replaced:
-                    reply = _prg_result.reply
-            except Exception as _prg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[PAYMENT_REPLY_GUARD] webhook hook failed tenant=%s err=%s",
-                    tenant_id, _prg_exc,
-                )
-
-        if reply and not _brain_handoff and not _turn_eval_applied:
-            try:
-                from core.active_order_context import (  # noqa: PLC0415
-                    load_commerce_bundle as _stg_load_bundle,
-                )
-                from modules.ai.brain.postprocess.shipment_truth_guard import (  # noqa: PLC0415
-                    apply_shipment_truth_guard,
-                )
-                from core.order_flow import (  # noqa: PLC0415
-                    _focus_summary as _stg_focus,
-                    _load_brain_state as _stg_load,
-                )
-                _stg_conv, _stg_bs = _stg_load(db, tenant_id=tenant_id, phone=to)
-                _stg_summary = _stg_focus(_stg_bs)
-                _stg_meta = (
-                    dict(inbound_metadata or {})
-                    if isinstance(inbound_metadata, dict)
-                    else {}
-                )
-                _stg_bundle = _stg_load_bundle(
-                    dict(getattr(convo, "extra_metadata", None) or {})
-                )
-                _stg_result = apply_shipment_truth_guard(
-                    reply=reply,
-                    commerce_bundle=_stg_bundle,
-                    inbound_metadata=_stg_meta,
-                    payment_receipt_received=bool(
-                        _stg_summary.get("payment_receipt_received")
-                    ),
-                    tenant_id=tenant_id,
-                    conversation_id=getattr(convo, "id", None),
-                )
-                if _stg_result.replaced:
-                    reply = _stg_result.reply
-            except Exception as _stg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[SHIPMENT_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
-                    tenant_id, _stg_exc,
-                )
-
-        if reply and not _turn_eval_applied:
-            try:
-                from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
-                    apply_staff_escalation_truth_guard,
-                )
-                from core.order_flow import _load_brain_state as _setg_load  # noqa: PLC0415
-
-                _setg_meta = (
-                    dict(inbound_metadata or {})
-                    if isinstance(inbound_metadata, dict)
-                    else {}
-                )
-                _setg_path = str(
-                    _setg_meta.get("deterministic_path") or _br_action or ""
-                )
-                _, _setg_bs = _setg_load(db, tenant_id=tenant_id, phone=to)
-                _setg_result = apply_staff_escalation_truth_guard(
-                    reply=reply,
-                    inbound_text=text or "",
-                    inbound_metadata=_setg_meta,
-                    conversation_flags={
-                        "needs_human": bool(getattr(convo, "needs_human", False)),
-                        "handoff_active": bool(getattr(convo, "handoff_active", False)),
-                        "is_human_handoff": bool(getattr(convo, "is_human_handoff", False)),
-                        "status": str(getattr(convo, "status", "") or ""),
-                    },
-                    chosen_path=_setg_path,
-                    brain_handoff=bool(_brain_handoff),
-                    tenant_id=tenant_id,
-                    conversation_id=getattr(convo, "id", None),
-                    state=_setg_bs,
-                )
-                if (
-                    _setg_result.requires_grounded_compose
-                    and _setg_result.route_action == "track_order_need_identifiers"
-                ):
-                    if (
-                        isinstance(_brain_persona_compose_event, dict)
-                        and _brain_persona_compose_event.get(
-                            "track_order_need_identifiers_compose_active"
-                        )
-                        and _brain_persona_compose_event.get("llm_candidate_present")
-                    ):
-                        from modules.ai.brain.compose import templates as _tracking_templates  # noqa: PLC0415
-                        from modules.ai.brain.compose.track_order_need_identifiers_compose import (  # noqa: PLC0415
-                            record_fallback_metadata_on_data as _record_tracking_fallback_metadata,
-                        )
-
-                        _record_tracking_fallback_metadata(
-                            _brain_persona_compose_event,
-                            reason="staff_escalation_truth_guard_false_claim",
-                            transformed_by_guard=True,
-                        )
-                        reply = (
-                            _tracking_templates
-                            .track_order_need_identifiers_emergency_fallback()
-                        )
-                    else:
-                        reply = ""
-                if _setg_result.replaced:
-                    if not _setg_result.requires_grounded_compose:
-                        reply = _setg_result.reply
-                try:
-                    from modules.ai.brain.observability.order_flow_evidence import (  # noqa: PLC0415
-                        detect_input_types,
-                        emit_ack_decision,
-                        is_generic_ack_stub,
-                        reply_acknowledges_important_input,
-                    )
-                    from modules.ai.brain.postprocess.stub_reply_guard_context import (  # noqa: PLC0415
-                        has_active_commerce_from_state,
-                    )
-
-                    _wh_types = detect_input_types(
-                        message=text or "",
-                        inbound_metadata=_setg_meta,
-                    )
-                    _wh_important = bool(_wh_types)
-                    _wh_ack = reply_acknowledges_important_input(
-                        reply=reply or "",
-                        input_types=_wh_types,
-                        state=_setg_bs,
-                    )
-                    _wh_stub = is_generic_ack_stub(reply or "")
-                    emit_ack_decision(
-                        tenant_id=tenant_id,
-                        phone_tail=(to or "")[-4:],
-                        important_customer_input=_wh_important,
-                        input_types=_wh_types,
-                        acknowledged=_wh_ack,
-                        reason=(
-                            "webhook_belt_generic_ack_violation"
-                            if _wh_important and _wh_stub and not _wh_ack
-                            else "webhook_belt"
-                        ),
-                        outbound_preview=reply or "",
-                        decision_action=str(_br_action or ""),
-                        chosen_path=_setg_path,
-                        generic_ack_stub=_wh_stub,
-                        generic_ack_violation=bool(
-                            _wh_important and _wh_stub and not _wh_ack
-                        ),
-                        staff_route_detected=False,
-                        fulfillment_locked=has_active_commerce_from_state(_setg_bs),
-                    )
-                except Exception as _wh_ack_exc:  # noqa: BLE001  # noqa: silent-ok — evidence emit must not block send
-                    logger.debug(
-                        "[ACK_DECISION] webhook emit skipped tenant=%s err=%s",
-                        tenant_id,
-                        _wh_ack_exc,
-                    )
-            except Exception as _setg_exc:  # noqa: BLE001
-                logger.debug(
-                    "[STAFF_ESCALATION_TRUTH_GUARD] webhook hook failed tenant=%s err=%s",
-                    tenant_id, _setg_exc,
                 )
 
         if reply and not _brain_handoff and not _brain_active:
