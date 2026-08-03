@@ -7181,17 +7181,6 @@ async def _handle_merchant_message(
                 inbound_normalized_type=_inbound_normalized_type,
             )
             _of2_catalog_error = str(getattr(_of2_result, "reason", "") or "") == "catalog_order_v2_error"
-            if (
-                getattr(_of2_result, "state_patch", None)
-                and not _of2_result.handled
-                and getattr(_of2_result, "shadow_only", False)
-            ):
-                persist_order_flow_v2_result(
-                    db,
-                    tenant_id=tenant_id,
-                    customer_phone=to,
-                    result=_of2_result,
-                )
             if _of2_result.handled and _of2_result.reply and _trace.outbound_lock_acquired():
                 persist_order_flow_v2_result(
                     db,

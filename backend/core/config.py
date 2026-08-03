@@ -669,6 +669,10 @@ ORDER_FLOW_V2_SHADOW_ENABLED = (
     os.environ.get("ORDER_FLOW_V2_SHADOW_ENABLED", "true").lower()
     in {"1", "true", "yes", "on"}
 )
+# Per-tenant live rollout (no schema): when ORDER_FLOW_V2_ENFORCE_TENANTS is set
+# (even empty), only listed tenant IDs may go live; unset preserves legacy global
+# ORDER_FLOW_V2_ENABLED behavior. Rollback = remove ID or add to DISABLED list.
+# Parsed at runtime via modules.ai.order_flow_v2.tenant_rollout.
 ORDER_CONTEXT_SHADOW_ENABLED = _bool_env("ORDER_CONTEXT_SHADOW_ENABLED", "false")
 ORDER_CONTEXT_OPERATIONAL_PREFILL_ENABLED = _bool_env(
     "ORDER_CONTEXT_OPERATIONAL_PREFILL_ENABLED",
