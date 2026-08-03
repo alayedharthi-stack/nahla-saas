@@ -1777,10 +1777,10 @@ class MerchantBrain:
         # ── 4. Decision ───────────────────────────────────────────────────
         try:
             from .commerce.commerce_conversation_guard import (  # noqa: PLC0415
-                maybe_lock_honey_order_context,
+                maybe_lock_order_category_context,
             )
 
-            maybe_lock_honey_order_context(
+            maybe_lock_order_category_context(
                 state,
                 message or "",
                 catalog=list(getattr(facts, "top_products", None) or []),

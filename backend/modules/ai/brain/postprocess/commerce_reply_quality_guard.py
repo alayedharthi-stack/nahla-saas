@@ -412,12 +412,12 @@ def select_arabic_commerce_fallback(
         return _FALLBACK_PRODUCT_UNRESOLVED_AR, "price_product_unresolved"
     try:
         from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
-            build_short_honey_order_clarify_reply,
-            is_short_honey_order_request,
+            build_short_product_order_clarify_reply,
+            is_short_product_order_request,
         )
 
-        if is_short_honey_order_request(inbound_text):
-            return build_short_honey_order_clarify_reply(inbound_text), "short_honey_order"
+        if is_short_product_order_request(inbound_text):
+            return build_short_product_order_clarify_reply(inbound_text), "short_product_order"
     except Exception:  # noqa: silent-ok — ordering prompt must not break fallback
         pass
 
@@ -500,8 +500,8 @@ def select_arabic_commerce_fallback(
                     _has_authoritative_product,
                 )
                 from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
-                    build_short_honey_order_clarify_reply,
-                    is_short_honey_order_request,
+                    build_short_product_order_clarify_reply,
+                    is_short_product_order_request,
                 )
                 from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: PLC0415
                     is_bare_start_order_phrase,
@@ -509,8 +509,8 @@ def select_arabic_commerce_fallback(
 
                 if is_bare_start_order_phrase(inbound_text) and not _has_authoritative_product(state):
                     return "", "bare_start_order_no_product"
-                if is_short_honey_order_request(inbound_text) and _has_authoritative_product(state):
-                    return build_short_honey_order_clarify_reply(inbound_text), "order_request"
+                if is_short_product_order_request(inbound_text) and _has_authoritative_product(state):
+                    return build_short_product_order_clarify_reply(inbound_text), "order_request"
             except Exception:  # noqa: silent-ok
                 pass
 

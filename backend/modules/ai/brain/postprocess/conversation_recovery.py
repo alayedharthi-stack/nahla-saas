@@ -194,8 +194,8 @@ def try_guard_recovery_reply(
         )
         from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
             build_bare_start_order_guard_reply,
-            build_short_honey_order_clarify_reply,
-            is_short_honey_order_request,
+            build_short_product_order_clarify_reply,
+            is_short_product_order_request,
         )
 
         if is_bare_start_order_phrase(raw):
@@ -224,10 +224,10 @@ def try_guard_recovery_reply(
                 reply=build_bare_start_order_guard_reply(raw),
                 source="bare_start_order",
             )
-        if is_short_honey_order_request(raw):
+        if is_short_product_order_request(raw):
             return ConversationRecoveryResult(
-                reply=build_short_honey_order_clarify_reply(raw),
-                source="short_honey_order",
+                reply=build_short_product_order_clarify_reply(raw),
+                source="short_product_order",
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — recovery probe must not break compose
         pass

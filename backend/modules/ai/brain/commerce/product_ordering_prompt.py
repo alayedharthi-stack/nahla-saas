@@ -4,8 +4,8 @@ commerce/product_ordering_prompt.py
 Context-aware WhatsApp ordering prompts — replaces robotic catalog-menu copy.
 
 Platform-wide: uses catalog evidence and conversation state, not merchant-specific
-hardcoding. Honey-store examples in product docs are satisfied when the synced
-catalog and customer message indicate a honey/category browse or order intent.
+hardcoding. Category-specific behavior comes from synced catalog/KB, not platform
+branches keyed to honey or any single merchant vertical.
 """
 from __future__ import annotations
 
@@ -31,21 +31,23 @@ _BEST_SELLER_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
-_HONEY_RE = re.compile(r"عسل", re.UNICODE)
+_ORDER_VERB_RE = re.compile(
+    r"(?:ابي|ابغى|أبي|أبغى|اريد|أريد|بدي|اطلب|أطلب|اشتري|أشتري|order)",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _ORDER_INTENT_RE = re.compile(
     r"(?:"
     r"(?:ابي|ابغى|أبي|أبغى|اريد|أريد|بدي)\s*(?:اطلب|أطلب|اشتري|أشتري|order)"
-    r"|(?:ابي|ابغى|أبي|أبغى)\s+عسل"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
 
-_SHORT_HONEY_ORDER_RE = re.compile(
+_QUANTITY_OR_VARIANT_HINT_RE = re.compile(
     r"(?:"
-    r"(?:اب[ىي]|أب[ىي]|اريد|أريد|ابغ[ىي]|أبغ[ىي]|ابي|أبي|بدي)"
-    r".*?(?:ربع|نصف|نص|كilo|كيلo|كيلو|1\s*kg).*?عسل"
-    r"|(?:ربع|نصف|نص)\s*(?:كilo|كيلo|كيلو)?.*?(?:من\s+)?عسل"
-    r"|عسل.*?(?:ربع|نصف|نص|كilo|كيلo|كيلo)"
+    r"ربع|نصف|نص|كilo|كيلo|كيلو|1\s*kg|"
+    r"\d+\s*(?:مل|ml|جرام|g|مقاس|size|سم|cm)|"
+    r"مقاس\s*\d+"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -204,17 +206,31 @@ def _next_missing_order_field(ctx: BrainContext) -> Optional[str]:
     return None
 
 
-def _is_honey_context(ctx: BrainContext, message: str) -> bool:
-    msg = message or ""
-    if _HONEY_RE.search(msg):
+def _message_mentions_catalog_product(ctx: BrainContext, message: str) -> bool:
+    msg = _normalize(message or "")
+    if not msg:
+        return False
+    for title in _catalog_titles(ctx):
+        norm_title = _normalize(title)
+        if norm_title and norm_title in msg:
+            return True
+        for token in norm_title.split():
+            if len(token) >= 3 and token in msg:
+                return True
+    return False
+
+
+def _has_catalog_product_context(ctx: BrainContext, message: str) -> bool:
+    """True when catalog evidence or order intent indicates an active product browse."""
+    if _message_mentions_catalog_product(ctx, message):
+        return True
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if intent_name == INTENT_START_ORDER and _catalog_titles(ctx):
         return True
     slots = dict(getattr(getattr(ctx, "intent", None), "slots", None) or {})
     slot_q = str(slots.get("product_query") or slots.get("product_name") or "")
-    if _HONEY_RE.search(slot_q):
+    if slot_q.strip() and _catalog_titles(ctx):
         return True
-    for title in _catalog_titles(ctx):
-        if _HONEY_RE.search(title):
-            return True
     return False
 
 
@@ -233,33 +249,29 @@ def _is_order_intent_without_product(ctx: BrainContext, message: str) -> bool:
     return bool(_ORDER_INTENT_RE.search(message or "")) and not _resolved_product_title(ctx)
 
 
-def is_short_honey_order_request(message: str) -> bool:
-    """Bare honey order with quantity hint — route before generic retry."""
+def is_short_product_order_request(message: str) -> bool:
+    """Bare order with quantity/variant hint — route before generic retry."""
     text = message or ""
     if not text.strip():
         return False
-    if not _HONEY_RE.search(text):
+    if not _ORDER_VERB_RE.search(text):
         return False
-    return bool(_SHORT_HONEY_ORDER_RE.search(text))
+    return bool(_QUANTITY_OR_VARIANT_HINT_RE.search(text))
 
 
-def _quantity_phrase_from_message(message: str) -> str:
-    norm = _normalize(message)
-    if re.search(r"ربع", norm):
-        return "ربع كيلو"
-    if re.search(r"(?:نصف|نص)", norm):
-        return "نص كيلو"
-    if re.search(r"(?:كilo|كيلo|كيلو|1\s*kg)", norm):
-        return "كيلو"
-    return ""
+def is_short_honey_order_request(message: str) -> bool:
+    """Deprecated alias — use :func:`is_short_product_order_request`."""
+    return is_short_product_order_request(message)
+
+
+def build_short_product_order_clarify_reply(message: str) -> str:
+    """Catalog-channel guidance only — product wording owned by LLM compose."""
+    return build_bare_start_order_guard_reply(message)
 
 
 def build_short_honey_order_clarify_reply(message: str) -> str:
-    """Deterministic first-turn honey order prompt (variant/type clarification)."""
-    qty = _quantity_phrase_from_message(message)
-    if qty:
-        return f"أبشر، تبي {qty} من أي نوع عسل؟"
-    return "أبشر، وش نوع العسل اللي تبيه؟"
+    """Deprecated alias — use :func:`build_short_product_order_clarify_reply`."""
+    return build_short_product_order_clarify_reply(message)
 
 
 def next_missing_order_field(ctx: BrainContext) -> Optional[str]:
@@ -341,25 +353,13 @@ def build_product_ordering_prompt(ctx: BrainContext) -> str:
     if _is_browse_inventory(message):
         names = _catalog_titles(ctx)
         joined = _join_names(names, limit=2)
-        if _is_honey_context(ctx, message) and joined:
-            return (
-                f"المتوفر عندنا من العسل: {joined}. "
-                "تبغى أعطيك الأسعار والأحجام؟"
-            )
         if joined:
             return f"المتوفر عندنا: {joined}. تبغى أعطيك الأسعار والأحجام؟"
         return build_uncertain_catalog_reply()
 
-    if _is_order_intent_without_product(ctx, message) or _is_honey_context(ctx, message):
+    if _is_order_intent_without_product(ctx, message) or _has_catalog_product_context(ctx, message):
         names = _catalog_titles(ctx)
         joined = _join_names(names, limit=2)
-        if _is_honey_context(ctx, message):
-            if joined:
-                return (
-                    f"أبشر، المتوفر عندنا {joined}. "
-                    "تفضل أي نوع؟"
-                )
-            return build_uncertain_catalog_reply(category_hint="العسل")
         if joined:
             return f"أبشر، المتوفر عندنا {joined}. تفضل أي نوع؟"
         return "أبشر، وش المنتج اللي تبي أجهزه لك؟"
@@ -394,7 +394,9 @@ __all__ = [
     "build_ordering_clarify_args",
     "build_product_ordering_prompt",
     "build_short_honey_order_clarify_reply",
+    "build_short_product_order_clarify_reply",
     "is_short_honey_order_request",
+    "is_short_product_order_request",
     "next_missing_order_field",
     "resolve_product_clarify_question",
 ]

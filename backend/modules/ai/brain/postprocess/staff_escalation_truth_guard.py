@@ -240,16 +240,16 @@ def apply_staff_escalation_truth_guard(
                 strip_escalation_claim_sentences,
             )
             from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
-                build_short_honey_order_clarify_reply,
-                is_short_honey_order_request,
+                build_short_product_order_clarify_reply,
+                is_short_product_order_request,
             )
 
-            if is_short_honey_order_request(inbound_text):
+            if is_short_product_order_request(inbound_text):
                 return StaffEscalationTruthGuardResult(
-                    reply=build_short_honey_order_clarify_reply(inbound_text),
+                    reply=build_short_product_order_clarify_reply(inbound_text),
                     action="blocked_false_escalation_order_clarify",
                     replaced=True,
-                    reason="short_honey_order_clarify",
+                    reason="short_product_order_clarify",
                     evidence=evidence,
                     staff_escalation_claim_blocked=True,
                 )
