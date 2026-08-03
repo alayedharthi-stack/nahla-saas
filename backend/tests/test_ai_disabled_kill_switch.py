@@ -180,6 +180,11 @@ class TestBrainProcessKillSwitch:
         )
 
         with patch("core.billing.has_billing_access", return_value=True), patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(
+                allowed=True, used_total=0, limit=100, reason="", pct=0,
+            ),
+        ), patch(
             "core.ai_disabled_gate._find_conversations_for_phone",
             return_value=[convo],
         ):

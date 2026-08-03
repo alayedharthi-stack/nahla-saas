@@ -5782,6 +5782,66 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
     except Exception as _ai_gate_exc:  # noqa: BLE001  # noqa: silent-ok — gate must not open on error
+        from core.handoff_truth import (  # noqa: PLC0415
+            REASON_GATE_VERIFY_FAILED,
+            evaluate_gate_error_fail_closed,
+        )
+
+        if evaluate_gate_error_fail_closed(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=to,
+            gate="merchant_webhook_entry",
+            error=_ai_gate_exc,
+        ):
+            try:
+                from core.ai_disabled_gate import (  # noqa: PLC0415
+                    AIDisabledDecision,
+                    log_ai_disabled_gate,
+                    persist_inbound_for_suppressed_turn,
+                )
+
+                _suppressed_convo = persist_inbound_for_suppressed_turn(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    inbound_body=(inbound_persist_body or text or "").strip(),
+                    wa_msg_id=wa_msg_id,
+                    wa_message_ts=wa_message_ts,
+                    inbound_metadata=inbound_metadata,
+                )
+                log_ai_disabled_gate(
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    decision=AIDisabledDecision(
+                        disabled=True,
+                        reason=REASON_GATE_VERIFY_FAILED,
+                        conversation=_suppressed_convo,
+                        source="merchant_webhook_entry",
+                    ),
+                    source="merchant_webhook_entry",
+                )
+                try:
+                    _trace.paused = True
+                    _trace.fallback_source = "ai_gate_fail_closed"
+                    _trace.response_goal = "suppressed"
+                    _trace.reply_source = _TS.SOURCE_PAUSED
+                except Exception:  # noqa: silent-ok
+                    pass
+                try:
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                _sync_persona_observability()
+                return
+            except Exception as _fail_closed_exc:  # noqa: BLE001
+                logger.warning(
+                    "[AI_GATE_FAIL_CLOSED] persist failed tenant=%s to=%s err=%s",
+                    tenant_id, to, _fail_closed_exc,
+                )
         logger.warning(
             "[AI_DISABLED_GATE] entry check failed tenant=%s to=%s err=%s",
             tenant_id, to, _ai_gate_exc,
@@ -6836,8 +6896,23 @@ async def _handle_merchant_message(
                 inbound_text=text,
             )
         except Exception as _guard_exc:
-            logger.warning("[ai_pause] guard failed (open): %s", _guard_exc)
-            _skip, _skip_reason = False, None
+            from core.handoff_truth import (  # noqa: PLC0415
+                REASON_GATE_VERIFY_FAILED,
+                evaluate_gate_error_fail_closed,
+            )
+
+            if evaluate_gate_error_fail_closed(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                conversation=convo,
+                gate="ai_pause_guard",
+                error=_guard_exc,
+            ):
+                _skip, _skip_reason = True, REASON_GATE_VERIFY_FAILED
+            else:
+                logger.warning("[ai_pause] guard failed (open): %s", _guard_exc)
+                _skip, _skip_reason = False, None
 
         if _skip:
             logger.info(
@@ -13878,7 +13953,18 @@ async def _post_wa(
             payload if isinstance(payload, dict) else {},
             tenant_id=_tenant_id,
             recipient=_recipient,
+            db=_db,
+            skip_handoff_scrub=bool(_allow_manual),
         )
+        if isinstance(payload, dict) and payload.pop("_nahla_suppress_send", None):
+            logger.warning(
+                "[HANDOFF_PROMISE_SCRUBBED] suppressing send tenant=%s to=%s "
+                "path=%s",
+                _tenant_id,
+                _recipient,
+                _blocked_path or "post_wa",
+            )
+            return False
         if _sanitised:
             # Mark the payload so callers/observers can tell at a
             # glance that this message was rewritten. Stored under
@@ -13999,6 +14085,16 @@ async def _post_wa(
                 if _send_blocked:
                     return False
             except Exception as _send_gate_exc:  # noqa: BLE001  # noqa: silent-ok
+                from core.handoff_truth import evaluate_gate_error_fail_closed  # noqa: PLC0415
+
+                if evaluate_gate_error_fail_closed(
+                    _db,
+                    tenant_id=int(_tenant_id),
+                    customer_phone=recipient,
+                    gate=_blocked_path or "post_wa",
+                    error=_send_gate_exc,
+                ):
+                    return False
                 logger.warning(
                     "[AI_DISABLED_SEND_BLOCK] pre_send check failed tenant=%s err=%s",
                     _tenant_id,

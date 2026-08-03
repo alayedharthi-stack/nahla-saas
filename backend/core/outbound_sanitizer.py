@@ -389,11 +389,74 @@ def _extract_existing_body(payload: Dict[str, Any]) -> str:
     return ""
 
 
+def _apply_handoff_promise_scrub(
+    payload: Dict[str, Any],
+    body: str,
+    *,
+    tenant_id: Optional[int] = None,
+    recipient: Optional[str] = None,
+    db: Any = None,
+    skip_handoff_scrub: bool = False,
+) -> Tuple[Dict[str, Any], bool]:
+    """Wire-layer handoff promise scrub — final text guard before send."""
+    if skip_handoff_scrub or not body:
+        return payload, False
+
+    from core.handoff_truth import (  # noqa: PLC0415
+        log_handoff_promise_scrub_decision,
+        resolve_handoff_truth_active,
+    )
+
+    truth = resolve_handoff_truth_active(
+        db,
+        tenant_id=tenant_id,
+        customer_phone=recipient,
+    )
+    scrubbed_body, was_scrubbed = maybe_scrub_handoff_promise(
+        body,
+        handoff_state_active=truth.active,
+        tenant_id=tenant_id,
+        recipient=recipient,
+    )
+    log_handoff_promise_scrub_decision(
+        tenant_id=tenant_id,
+        recipient=recipient,
+        truth=truth,
+        scrubbed=was_scrubbed,
+    )
+    if not was_scrubbed:
+        return payload, False
+
+    if not (scrubbed_body or "").strip():
+        payload["_nahla_suppress_send"] = "handoff_promise_scrub_empty"
+        logger.warning(
+            "[HANDOFF_PROMISE_SCRUBBED] tenant=%s to=%s empty_after_scrub "
+            "— suppressing send",
+            tenant_id,
+            recipient,
+        )
+        return payload, True
+
+    if _replace_body_in_payload(payload, scrubbed_body, strip_buttons=False):
+        return payload, True
+
+    logger.warning(
+        "[HANDOFF_PROMISE_SCRUBBED] tenant=%s could not rewrite payload "
+        "type=%r — suppressing send",
+        tenant_id,
+        payload.get("type"),
+    )
+    payload["_nahla_suppress_send"] = "handoff_promise_scrub_unwritable"
+    return payload, True
+
+
 def sanitize_outbound_payload(
     payload: Dict[str, Any],
     *,
     tenant_id: Optional[int] = None,
     recipient: Optional[str] = None,
+    db: Any = None,
+    skip_handoff_scrub: bool = False,
 ) -> Tuple[Dict[str, Any], bool]:
     """Inspect & maybe-rewrite a Cloud API payload.
 
@@ -401,6 +464,9 @@ def sanitize_outbound_payload(
     whether a sanitisation occurred. Callers that care about whether
     the message was scrubbed can branch on the boolean — e.g. to
     persist the original text in a debug field for audit. Never raises.
+
+    When ``db`` + ``recipient`` are provided, a final handoff-promise
+    scrub runs after other sanitisers (``maybe_scrub_handoff_promise``).
     """
     try:
         body = _extract_existing_body(payload)
@@ -418,7 +484,16 @@ def sanitize_outbound_payload(
             if _replace_body_in_payload(
                 payload, sanitized_body, strip_buttons=strip_buttons
             ):
-                return payload, True
+                body = sanitized_body
+                payload, handoff_scrubbed = _apply_handoff_promise_scrub(
+                    payload,
+                    body,
+                    tenant_id=tenant_id,
+                    recipient=recipient,
+                    db=db,
+                    skip_handoff_scrub=skip_handoff_scrub,
+                )
+                return payload, True or handoff_scrubbed
             logger.warning(
                 "[INTERNAL_POLICY_BLOCKED] tenant=%s could not rewrite "
                 "payload type=%r — blanking body",
@@ -429,30 +504,48 @@ def sanitize_outbound_payload(
 
         # ── External-research leak (May 2026) ───────────────────
         match = contains_leakage_markers(body)
-        if not match:
-            return payload, False
-        logger.warning(
-            "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s to=%s marker=%s original_len=%d "
-            "preview=%r",
-            tenant_id,
-            recipient,
-            match,
-            len(body),
-            body[:140],
-        )
-        if _replace_body_in_payload(payload, SAFE_FALLBACK_TEXT):
+        if match:
+            logger.warning(
+                "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s to=%s marker=%s original_len=%d "
+                "preview=%r",
+                tenant_id,
+                recipient,
+                match,
+                len(body),
+                body[:140],
+            )
+            if _replace_body_in_payload(payload, SAFE_FALLBACK_TEXT):
+                body = SAFE_FALLBACK_TEXT
+                payload, handoff_scrubbed = _apply_handoff_promise_scrub(
+                    payload,
+                    body,
+                    tenant_id=tenant_id,
+                    recipient=recipient,
+                    db=db,
+                    skip_handoff_scrub=skip_handoff_scrub,
+                )
+                return payload, True or handoff_scrubbed
+            logger.warning(
+                "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s could not rewrite payload type=%r — "
+                "blanking body",
+                tenant_id, payload.get("type"),
+            )
+            _replace_body_in_payload(payload, "")
             return payload, True
-        # We detected a leak but couldn't rewrite the payload shape —
-        # fail closed by clearing the body so the message goes out
-        # empty rather than leaking. The caller will most likely
-        # surface a delivery error (preferable to the leak).
-        logger.warning(
-            "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s could not rewrite payload type=%r — "
-            "blanking body",
-            tenant_id, payload.get("type"),
+
+        # ── Handoff-promise leak (May 2026 P1) ──────────────────
+        payload, handoff_scrubbed = _apply_handoff_promise_scrub(
+            payload,
+            body,
+            tenant_id=tenant_id,
+            recipient=recipient,
+            db=db,
+            skip_handoff_scrub=skip_handoff_scrub,
         )
-        _replace_body_in_payload(payload, "")
-        return payload, True
+        if handoff_scrubbed:
+            return payload, True
+
+        return payload, False
     except Exception as exc:  # noqa: BLE001
         # The sanitiser MUST NOT take the send path down. Worst case:
         # we log the exception and let the original payload through.

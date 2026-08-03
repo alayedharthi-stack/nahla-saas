@@ -883,6 +883,31 @@ class MerchantBrain:
                     "ai_disabled_reason": _ai_disabled.reason,
                 }
         except Exception as _brain_gate_exc:  # noqa: BLE001  # noqa: silent-ok
+            from core.handoff_truth import (  # noqa: PLC0415
+                REASON_GATE_VERIFY_FAILED,
+                evaluate_gate_error_fail_closed,
+            )
+
+            if evaluate_gate_error_fail_closed(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=customer_phone,
+                gate="brain_process_entry",
+                error=_brain_gate_exc,
+            ):
+                logger.info(
+                    "[AI_GATE_FAIL_CLOSED] brain_suppressed tenant=%s phone=%s "
+                    "reason=%s",
+                    tenant_id,
+                    customer_phone,
+                    REASON_GATE_VERIFY_FAILED,
+                )
+                return {
+                    "reply": None,
+                    "skipped": True,
+                    "reason": "ai_disabled_gate",
+                    "ai_disabled_reason": REASON_GATE_VERIFY_FAILED,
+                }
             logger.warning(
                 "[AI_DISABLED_GATE] brain entry check failed tenant=%s err=%s",
                 tenant_id,
