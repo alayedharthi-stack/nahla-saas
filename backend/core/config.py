@@ -712,6 +712,13 @@ MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK = (
     os.environ.get("MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK", "false").lower() == "true"
 )
 
+# P1-B: When true (default), webhook last-line skips truth guards already applied
+# by MerchantBrain primary owner. Set POST_COMPOSE_SINGLE_OWNER=false to restore
+# dual-run webhook re-application for rollback during incidents.
+POST_COMPOSE_SINGLE_OWNER = (
+    os.environ.get("POST_COMPOSE_SINGLE_OWNER", "true").lower() == "true"
+)
+
 # ── SPL National Address API (Saudi Address Resolution) ───────────────────────
 # Used by services/address_resolution.py to resolve national short address codes
 # (e.g. RIYD1234) and GPS coordinates into city/district/street/postal_code.
