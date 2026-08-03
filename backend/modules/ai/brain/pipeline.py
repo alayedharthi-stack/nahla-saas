@@ -1449,6 +1449,10 @@ class MerchantBrain:
                     tenant_id, _cb_exc,
                 )
 
+        from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions  # noqa: PLC0415
+
+        _permission_load = load_tenant_commerce_permissions(db, tenant_id)
+
         # ── 3. Assemble context ───────────────────────────────────────────
         ctx = BrainContext(
             tenant_id      = tenant_id,
@@ -1466,6 +1470,8 @@ class MerchantBrain:
             merchant_context = merchant_context,
             human_priority = bool(human_priority),
             commerce_bundle  = commerce_bundle,
+            commerce_permissions=_permission_load.permissions,
+            permission_source=_permission_load.source,
             block_commerce_escalation=bool(_nc_match),
             non_commerce_category=(
                 str(_nc_match.category) if _nc_match else ""

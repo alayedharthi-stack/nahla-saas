@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:  # avoid runtime import cycles
+    from modules.ai.commerce.permissions import CommercePermissionSet
     from modules.ai.security import TenantContext
 
 
@@ -1053,6 +1054,9 @@ class BrainContext:
     trusted_context_projection: Optional[Dict[str, Any]] = None
     # Redacted model-input attestation (ids/counts/keys only) for architecture evidence.
     model_payload_attestation: Optional[Dict[str, Any]] = None
+    # Tenant commerce permissions — loaded once per turn from commerce_permissions.
+    commerce_permissions: Optional["CommercePermissionSet"] = None
+    permission_source: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────

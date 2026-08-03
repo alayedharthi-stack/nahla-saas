@@ -42,7 +42,7 @@ class DraftOrderHandler:
     """Handles ACTION_PROPOSE_DRAFT_ORDER."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
         # ── Product source resolution (forced_product wins) ───────────────────
         # When the engine routes from a numeric / name pick, it sets
@@ -809,13 +809,7 @@ class DraftOrderHandler:
             max(int(prep.quantity or 1), 1),
         )
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         _options_payload = _resolve_options_payload(prep)
 
         # ── FINAL CHECK — log every condition before posting to Salla ─────────
@@ -1611,7 +1605,7 @@ class TrackOrderHandler:
     """
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
         # Pull order_number from intent slots or decision args
         order_number = (
@@ -1621,13 +1615,7 @@ class TrackOrderHandler:
             or str(ctx.intent.slots.get("order_number") or "").strip()
         )
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         runtime_result = await runtime.execute(
             "track_order",
             {

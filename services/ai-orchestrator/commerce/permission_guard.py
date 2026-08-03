@@ -106,27 +106,6 @@ def load_permissions(tenant_id: int) -> CommercePermissionSet:
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
 
-    from database.models import CommercePermissions
-    from database.session import SessionLocal
+    from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions_standalone
 
-    db = SessionLocal()
-    try:
-        row = db.query(CommercePermissions).filter(
-            CommercePermissions.tenant_id == tenant_id
-        ).first()
-
-        if not row:
-            # No record — return safe defaults
-            return CommercePermissionSet(tenant_id=tenant_id)
-
-        return CommercePermissionSet(
-            tenant_id=tenant_id,
-            can_create_orders=bool(row.can_create_orders),
-            can_create_checkout_links=bool(row.can_create_checkout_links),
-            can_send_payment_links=bool(row.can_send_payment_links),
-            can_apply_coupons=bool(row.can_apply_coupons),
-            can_auto_generate_coupons=bool(row.can_auto_generate_coupons),
-            can_cancel_orders=bool(row.can_cancel_orders),
-        )
-    finally:
-        db.close()
+    return load_tenant_commerce_permissions_standalone(tenant_id).permissions
