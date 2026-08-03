@@ -26,6 +26,11 @@ from modules.ai.checkout_authority import (
     load_local_draft_evidence,
     rehydrate_order_prep_patch,
 )
+from modules.ai.commerce.permission_loader import (
+    PermissionLoadResult,
+    load_tenant_commerce_permissions,
+)
+
 from .enforcement import operational_tuple
 from .flags import is_order_flow_v2_enabled, is_order_flow_v2_shadow_enabled
 from .ingest import apply_inbound_slots
@@ -113,7 +118,95 @@ class OrderFlowV2Result:
     skip_brain: bool = False
     shadow_only: bool = False
     reason: str = ""
+    operational_reason: str = ""
+    permission_source: str = ""
     state_patch: Dict[str, Any] = field(default_factory=dict)
+
+
+_PAYMENT_LINK_REASONS = frozenset({
+    "checkout_payment_owned",
+    "checkout_payment_bank_unavailable",
+    "payment_bank_rejected",
+})
+
+
+def _needs_payment_link_permission(reason: str) -> bool:
+    text = str(reason or "")
+    return text.startswith("checkout_complete_") or text in _PAYMENT_LINK_REASONS
+
+
+def _gate_commerce_permissions(
+    *,
+    live: bool,
+    shadow_log: bool,
+    state_patch: Dict[str, Any],
+    reason: str,
+    perm_load: PermissionLoadResult,
+    operational_reason: str,
+    tenant_id: int,
+    reply: str,
+    skip_brain: bool,
+) -> Optional[OrderFlowV2Result]:
+    if not live:
+        return None
+
+    if not perm_load.ok:
+        logger.warning(
+            "[ORDER_FLOW_V2] commerce_permissions_load_failed tenant=%s source=%s",
+            tenant_id,
+            perm_load.source,
+        )
+        return OrderFlowV2Result(
+            handled=False,
+            reason="commerce_permissions_load_failed",
+            operational_reason=operational_reason,
+            permission_source=perm_load.source,
+        )
+
+    perms = perm_load.permissions
+    if state_patch and not perms.can_create_orders:
+        deny_reason = "commerce_permission_denied:create_orders"
+        if shadow_log:
+            return _finalize_result(
+                live=False,
+                shadow_log=True,
+                reply=reply,
+                reason=deny_reason,
+                state_patch=state_patch,
+                skip_brain=skip_brain,
+                tenant_id=tenant_id,
+                operational_reason=operational_reason,
+                perm_load=perm_load,
+            )
+        return OrderFlowV2Result(
+            handled=False,
+            reason=deny_reason,
+            operational_reason=operational_reason,
+            permission_source=perm_load.source,
+        )
+
+    if _needs_payment_link_permission(reason) and not perms.can_send_payment_links:
+        deny_reason = "commerce_permission_denied:send_payment_link"
+        if shadow_log:
+            return _finalize_result(
+                live=False,
+                shadow_log=True,
+                reply=reply,
+                reason=deny_reason,
+                state_patch=state_patch,
+                skip_brain=skip_brain,
+                tenant_id=tenant_id,
+                operational_reason=operational_reason,
+                perm_load=perm_load,
+            )
+        return OrderFlowV2Result(
+            handled=False,
+            reason=deny_reason,
+            operational_reason=operational_reason,
+            permission_source=perm_load.source,
+        )
+
+    return None
 
 
 def _catalog_order_patch(
@@ -222,26 +315,52 @@ def _finalize_result(
     reason: str,
     state_patch: Dict[str, Any],
     skip_brain: bool = True,
+    tenant_id: int = 0,
+    operational_reason: str = "",
+    perm_load: PermissionLoadResult | None = None,
 ) -> OrderFlowV2Result:
+    if perm_load is not None:
+        gated = _gate_commerce_permissions(
+            live=live,
+            shadow_log=shadow_log,
+            state_patch=state_patch,
+            reason=reason,
+            perm_load=perm_load,
+            operational_reason=operational_reason,
+            tenant_id=tenant_id,
+            reply=reply,
+            skip_brain=skip_brain,
+        )
+        if gated is not None:
+            return gated
+
     if not live:
+        patch_keys_ignored = sorted(state_patch.keys())
         if shadow_log:
             logger.info(
-                "[ORDER_FLOW_V2/shadow] reason=%s reply_preview=%r patch_keys=%s",
+                "[ORDER_FLOW_V2/shadow] tenant=%s op_reason=%s decision_reason=%s "
+                "would_reply_len=%s patch_keys_ignored=%s no_write=1",
+                tenant_id,
+                operational_reason,
                 reason,
-                (reply or "")[:120],
-                sorted(state_patch.keys()),
+                len(reply or ""),
+                patch_keys_ignored,
             )
         return OrderFlowV2Result(
             handled=False,
             shadow_only=shadow_log,
             reason=reason,
-            state_patch=state_patch,
+            operational_reason=operational_reason,
+            permission_source=(perm_load.source if perm_load is not None else ""),
+            state_patch={},
         )
     return OrderFlowV2Result(
         handled=True,
         reply=reply,
         skip_brain=skip_brain,
         reason=reason,
+        operational_reason=operational_reason,
+        permission_source=(perm_load.source if perm_load is not None else ""),
         state_patch=state_patch,
     )
 
@@ -280,8 +399,36 @@ def try_handle_order_flow_v2(
         customer_phone=customer_phone,
         conversation=conversation,
     )
+    perm_load = load_tenant_commerce_permissions(db, int(tenant_id))
+
+    def _finalize(
+        *,
+        live_flag: bool = live,
+        shadow_flag: bool = shadow_log,
+        reply: str,
+        reason: str,
+        state_patch: Dict[str, Any],
+        skip_brain: bool = True,
+    ) -> OrderFlowV2Result:
+        return _finalize_result(
+            live=live_flag,
+            shadow_log=shadow_flag,
+            reply=reply,
+            reason=reason,
+            state_patch=state_patch,
+            skip_brain=skip_brain,
+            tenant_id=int(tenant_id),
+            operational_reason=_op_reason,
+            perm_load=perm_load,
+        )
+
     if not live and not shadow_log:
-        return OrderFlowV2Result(handled=False, reason=_op_reason)
+        return OrderFlowV2Result(
+            handled=False,
+            reason=_op_reason,
+            operational_reason=_op_reason,
+            permission_source=perm_load.source,
+        )
 
     order_prep = prep_dict((brain_state or {}).get("order_prep") or {})
     bs = dict(brain_state or {})
@@ -444,9 +591,7 @@ def try_handle_order_flow_v2(
                     reason="catalog_order_text_extraction_incomplete",
                 ).to_patch())
                 reply = build_catalog_order_extraction_fallback_reply(order_prep=merged_prep)
-                return _finalize_result(
-                    live=live,
-                    shadow_log=shadow_log,
+                return _finalize(
                     reply=reply,
                     reason="catalog_order_extraction_incomplete",
                     state_patch=patch,
@@ -465,10 +610,8 @@ def try_handle_order_flow_v2(
                 field_modes=reply_ctx.field_modes,
                 known_previous=reply_ctx.known_previous,
             )
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="catalog_order_start",
                 state_patch=patch,
             )
@@ -489,9 +632,7 @@ def try_handle_order_flow_v2(
         and not is_greeting_message(text)
     ):
         reply = build_product_image_request_reply(order_prep=order_prep, brain_state=bs)
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="order_flow_product_image_request",
             state_patch={},
@@ -506,9 +647,7 @@ def try_handle_order_flow_v2(
         and not _checkout_active()
     ):
         reply = build_order_flow_product_keyword_reply(order_prep=order_prep)
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="order_flow_product_keyword",
             state_patch={},
@@ -529,9 +668,7 @@ def try_handle_order_flow_v2(
         ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
         reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
         patch.update(ack_patch)
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="catalog_selection_acknowledged",
             state_patch={},
@@ -570,9 +707,7 @@ def try_handle_order_flow_v2(
             first_name=first_name,
             address_on_file_claim=False,
         )
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="greeting_checkout_resume",
             state_patch=patch,
@@ -592,10 +727,8 @@ def try_handle_order_flow_v2(
                 has_pending=True,
                 first_name=first_name,
             )
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="greeting_pending_hint",
                 state_patch={},
                 skip_brain=True,
@@ -632,9 +765,7 @@ def try_handle_order_flow_v2(
             field_modes=reply_ctx.field_modes,
             known_previous=reply_ctx.known_previous,
         )
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="resume_checkout",
             state_patch=patch,
@@ -662,9 +793,7 @@ def try_handle_order_flow_v2(
             field_modes=reply_ctx.field_modes,
             known_previous=reply_ctx.known_previous,
         )
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="explicit_purchase_start",
             state_patch=patch,
@@ -683,10 +812,8 @@ def try_handle_order_flow_v2(
             active_patch: Dict[str, Any] = {}
             if not checkout_active_now(order_prep):
                 active_patch.update(activate_checkout_patch())
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="checkout_order_number",
                 state_patch=active_patch,
                 skip_brain=True,
@@ -722,9 +849,7 @@ def try_handle_order_flow_v2(
         ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
         reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
         patch.update(ack_patch)
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="delivery_continuation",
             state_patch=patch,
@@ -744,10 +869,8 @@ def try_handle_order_flow_v2(
                 field_modes=reply_ctx.field_modes,
                 known_previous=reply_ctx.known_previous,
             )
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="payment_blocked_until_address_owned",
                 state_patch=patch,
                 skip_brain=True,
@@ -765,10 +888,8 @@ def try_handle_order_flow_v2(
                 requested_bank=str(pay_patch.get("requested_bank") or ""),
             )
             patch.update(pay_patch)
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="payment_bank_rejected",
                 state_patch=patch,
                 skip_brain=True,
@@ -789,10 +910,8 @@ def try_handle_order_flow_v2(
             )
             if ref_patch:
                 patch.update(ref_patch)
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason=f"checkout_complete_{completion_suffix}",
                 state_patch=patch,
                 skip_brain=True,
@@ -806,10 +925,8 @@ def try_handle_order_flow_v2(
                 payment_method=method,
             )
             patch.update(stamp_last_field_patch(missing))
-            return _finalize_result(
-                live=live,
-                shadow_log=shadow_log,
-                reply=reply,
+            return _finalize(
+            reply=reply,
                 reason="checkout_payment_owned",
                 state_patch=patch,
                 skip_brain=True,
@@ -820,9 +937,7 @@ def try_handle_order_flow_v2(
             rejection_reason="requested_bank_not_enabled",
             requested_bank=requested_bank_brand(text),
         )
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason="checkout_payment_bank_unavailable",
             state_patch=patch,
@@ -940,10 +1055,8 @@ def try_handle_order_flow_v2(
                     requested_bank=str(pay_patch.get("requested_bank") or ""),
                 )
                 patch.update(pay_patch)
-                return _finalize_result(
-                    live=live,
-                    shadow_log=shadow_log,
-                    reply=reply,
+                return _finalize(
+            reply=reply,
                     reason="payment_bank_rejected",
                     state_patch=patch,
                 )
@@ -971,9 +1084,7 @@ def try_handle_order_flow_v2(
         )
         if ref_patch:
             patch.update(ref_patch)
-        return _finalize_result(
-            live=live,
-            shadow_log=shadow_log,
+        return _finalize(
             reply=reply,
             reason=f"checkout_complete_{completion_suffix}",
             state_patch=patch,
@@ -999,10 +1110,8 @@ def try_handle_order_flow_v2(
     ref = draft_display_reference(draft_ev) or str(merged_prep.get("draft_order_reference") or "")
     reply, ack_patch = try_attach_creation_ack_reply(reply, merged_prep, reference=ref)
     patch.update(ack_patch)
-    return _finalize_result(
-        live=live,
-        shadow_log=shadow_log,
-        reply=reply,
+    return _finalize(
+            reply=reply,
         reason="collect_next_field",
         state_patch=patch,
     )
@@ -1015,6 +1124,15 @@ def persist_order_flow_v2_result(
     customer_phone: str,
     result: OrderFlowV2Result,
 ) -> None:
+    if getattr(result, "shadow_only", False) or not result.handled:
+        logger.info(
+            "[ORDER_FLOW_V2] persist skipped tenant=%s handled=%s shadow_only=%s reason=%s no_write=1",
+            tenant_id,
+            result.handled,
+            getattr(result, "shadow_only", False),
+            result.reason,
+        )
+        return
     if not result.state_patch:
         return
     apply_state_patch(
