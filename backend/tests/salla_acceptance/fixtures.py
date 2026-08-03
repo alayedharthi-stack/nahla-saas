@@ -492,6 +492,17 @@ def query_kb_sections(db: Session, tenant_id: int, *, kind: str = "") -> List[Me
     return q.order_by(MerchantKnowledgeSection.id.asc()).all()
 
 
+def seed_stale_white_shoe_price_kb(db: Session, tenant_id: int) -> MerchantKnowledgeSection:
+    """Optional D6 fixture — stale KB price (99) vs catalog (249/269)."""
+    return seed_knowledge_section(
+        db,
+        tenant_id,
+        kind="product",
+        title="سعر الحذاء الأبيض (قديم)",
+        body="سعر الحذاء الأبيض 99 ريال",
+    )
+
+
 __all__ = [
     "DualTenantWorld",
     "TenantBundle",
@@ -504,5 +515,6 @@ __all__ = [
     "make_scenario_db",
     "seed_dual_tenant_world",
     "seed_product_rich",
+    "seed_stale_white_shoe_price_kb",
     "query_kb_sections",
 ]

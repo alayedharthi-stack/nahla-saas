@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -32,6 +33,15 @@ from modules.ai.order_flow_v2.enforcement import resolve_order_flow_v2_operation
 ACCEPTANCE_RESULTS: List[Dict[str, Any]] = []
 
 RESULTS_PATH = _HERE / "ACCEPTANCE_RESULTS.json"
+LAYER2_RESULTS_PATH = _HERE / "LAYER2_ACCEPTANCE_RESULTS.json"
+
+# Module-level Layer 2 acceptance rows (appended by layer2 E2E tests).
+LAYER2_ACCEPTANCE_RESULTS: List[Dict[str, Any]] = []
+LAYER2_SESSION_FLAGS: Dict[str, bool] = {
+    "brain_path_verified": False,
+    "llm_compose_path_verified": False,
+    "capture_provider_verified": False,
+}
 
 # Closed A–K authorization matrix from Salla Merchant AI acceptance authorization.
 AUTHORIZED_MATRIX_IDS: Tuple[str, ...] = (
@@ -461,15 +471,199 @@ def _next_action(critical: List[str], major: List[str], gaps: List[str]) -> str:
     return "Run Layer 2 simulated WhatsApp E2E, then Layer 3 human conversation quality review."
 
 
+def _git_head_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(_BACKEND),
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def record_layer2_acceptance(
+    *,
+    scenario_id: str,
+    messages: Sequence[str],
+    tenant: str,
+    expected: str,
+    actual: str,
+    result: str,
+    severity: str,
+    evidence: Optional[Dict[str, Any]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    row = {
+        "id": scenario_id,
+        "messages": list(messages),
+        "tenant": tenant,
+        "expected": expected,
+        "actual": actual,
+        "result": result,
+        "severity": severity,
+        "layer": "layer2",
+        "llm_mocked": True,
+        "evidence": evidence or {},
+        "metrics": metrics or {},
+    }
+    LAYER2_ACCEPTANCE_RESULTS.append(row)
+    return row
+
+
+def _layer2_metric_pct(rows: List[Dict[str, Any]], prefix: str) -> float:
+    scoped = [r for r in rows if str(r.get("id", "")).startswith(prefix)]
+    if not scoped:
+        return 100.0
+    passed = sum(1 for r in scoped if r.get("result") == "pass")
+    return round((passed / len(scoped)) * 100, 1)
+
+
+def write_layer2_report(
+    path: Optional[Path] = None,
+    *,
+    brain_path_verified: bool = False,
+    llm_compose_path_verified: bool = False,
+    capture_provider_verified: bool = False,
+) -> Dict[str, Any]:
+    path = path or LAYER2_RESULTS_PATH
+    flags = dict(LAYER2_SESSION_FLAGS)
+    if not brain_path_verified:
+        brain_path_verified = bool(flags.get("brain_path_verified"))
+    if not llm_compose_path_verified:
+        llm_compose_path_verified = bool(flags.get("llm_compose_path_verified"))
+    if not capture_provider_verified:
+        capture_provider_verified = bool(flags.get("capture_provider_verified"))
+    rows = list(LAYER2_ACCEPTANCE_RESULTS)
+    passed = sum(1 for r in rows if r.get("result") == "pass")
+    failed = sum(1 for r in rows if r.get("result") == "fail")
+    critical_failures = [
+        r["id"] for r in rows if r.get("result") == "fail" and r.get("severity") == "critical"
+    ]
+    major_failures = [
+        r["id"] for r in rows if r.get("result") == "fail" and r.get("severity") == "major"
+    ]
+    minor_failures = [
+        r["id"] for r in rows if r.get("result") == "fail" and r.get("severity") == "minor"
+    ]
+
+    product_score = _layer2_metric_pct(rows, "L2-1") + _layer2_metric_pct(rows, "L2-2")
+    product_score = round(product_score / 2, 1) if any(str(r.get("id", "")).startswith("L2-2") for r in rows) else _layer2_metric_pct(rows, "L2-1")
+    context_score = _layer2_metric_pct(rows, "L2-1")
+    knowledge_score = min(
+        _layer2_metric_pct(rows, "L2-3"),
+        _layer2_metric_pct(rows, "L2-4"),
+        _layer2_metric_pct(rows, "L2-5"),
+    ) if rows else 0.0
+    usability_score = round(
+        (
+            _layer2_metric_pct(rows, "L2-6")
+            + _layer2_metric_pct(rows, "L2-7")
+            + _layer2_metric_pct(rows, "L2-9")
+        )
+        / 3,
+        1,
+    )
+
+    gate_isolation = all(
+        r.get("result") == "pass"
+        for r in rows
+        if r.get("severity") == "critical"
+        and str(r.get("id", "")).startswith(("L2-1", "L2-2", "L2-6"))
+    )
+    gate_privacy = all(r.get("result") == "pass" for r in rows if str(r.get("id", "")).startswith("L2-6"))
+    gate_price_stock = all(
+        r.get("result") == "pass" for r in rows if str(r.get("id", "")).startswith(("L2-1", "L2-5"))
+    )
+    gate_handoff = all(r.get("result") == "pass" for r in rows if str(r.get("id", "")) == "L2-7")
+    gate_dedup = all(r.get("result") == "pass" for r in rows if str(r.get("id", "")) == "L2-8")
+    gate_safe_fail = all(r.get("result") == "pass" for r in rows if str(r.get("id", "")).startswith("L2-10"))
+
+    ready_layer3 = (
+        len(critical_failures) == 0
+        and gate_isolation
+        and gate_privacy
+        and gate_price_stock
+        and gate_handoff
+        and gate_dedup
+        and gate_safe_fail
+        and product_score >= 95
+        and context_score >= 90
+        and knowledge_score >= 95
+        and usability_score >= 85
+    )
+
+    blocking = list(dict.fromkeys(critical_failures + major_failures))
+    fix_packages = _suggest_fix_packages(rows)
+
+    summary = {
+        "base_sha": _git_head_sha(),
+        "test_environment": "synthetic_sqlite_layer2_simulated_whatsapp",
+        "webhook_entry_used": "_handle_merchant_message",
+        "brain_path_verified": brain_path_verified,
+        "llm_compose_path_verified": llm_compose_path_verified,
+        "capture_provider_verified": capture_provider_verified,
+        "scenarios_total": len(rows),
+        "passed": passed,
+        "failed": failed,
+        "critical_failures": critical_failures,
+        "major_failures": major_failures,
+        "minor_failures": minor_failures,
+        "accuracy_metrics": {
+            "product_context_pct": product_score,
+            "multi_turn_context_pct": context_score,
+            "knowledge_truth_pct": knowledge_score,
+            "usability_pct": usability_score,
+            "conversation_quality_score": "deferred_stub_llm",
+        },
+        "blocking_defects": blocking,
+        "recommended_fix_packages": fix_packages,
+        "ready_for_layer3_human_dialogue": ready_layer3,
+        "ready_for_internal_live_test": False,
+        "ready_for_tenant1_pilot": False,
+        "recommended_next_action": (
+            "Proceed to Layer 3 human conversation review."
+            if ready_layer3
+            else "Fix Layer 2 blocking defects and rerun simulated E2E."
+        ),
+        "results": rows,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def print_layer2_summary(summary: Dict[str, Any]) -> None:
+    print(
+        f"\n=== Salla Layer 2 MerchantBrain E2E ===\n"
+        f"Total: {summary['scenarios_total']} | "
+        f"Passed: {summary['passed']} | Failed: {summary['failed']}\n"
+        f"brain_path_verified: {summary['brain_path_verified']}\n"
+        f"llm_compose_path_verified: {summary['llm_compose_path_verified']}\n"
+        f"ready_for_layer3: {summary['ready_for_layer3_human_dialogue']}\n"
+        f"Report: {LAYER2_RESULTS_PATH}\n"
+    )
+
+
 __all__ = [
     "ACCEPTANCE_RESULTS",
     "AUTHORIZED_MATRIX_IDS",
     "AcceptanceHarness",
     "AcceptanceTurnResult",
+    "LAYER2_ACCEPTANCE_RESULTS",
+    "LAYER2_RESULTS_PATH",
+    "LAYER2_SESSION_FLAGS",
     "OutboundCapture",
     "record_acceptance",
+    "record_layer2_acceptance",
     "record_turn",
     "write_acceptance_report",
+    "write_layer2_report",
     "print_console_summary",
+    "print_layer2_summary",
     "RESULTS_PATH",
 ]
