@@ -74,8 +74,28 @@ def layer3_blocker_reason() -> str:
     )
 
 
+_PROD_DATA_CHANNEL_VARS = (
+    "DATABASE_URL",
+    "DATABASE_PUBLIC_URL",
+    "POSTGRES_URL",
+    "REDIS_URL",
+    "REDIS_PUBLIC_URL",
+    "WHATSAPP_TOKEN",
+    "WA_TOKEN",
+    "D360_API_KEY",
+    "META_WHATSAPP_TOKEN",
+)
+
+
 def apply_layer3_process_env() -> None:
-    """Test-process env only — does not change production defaults."""
+    """Test-process env only — does not change production defaults.
+
+    When launched via ``railway run`` (secret injection), strip production
+    data/channel URLs/tokens so Layer 3 stays on synthetic SQLite + Capture.
+    Keeps ``OPENAI_API_KEY`` for live compose.
+    """
+    for key in _PROD_DATA_CHANNEL_VARS:
+        os.environ.pop(key, None)
     os.environ.setdefault("NAHLA_MODEL_ROUTER_ENABLED", "true")
     os.environ.setdefault("ALLOW_PREMIUM_MODEL", "false")
     os.environ.setdefault("NAHLA_MODEL_CHEAP", MODEL_LUNA)

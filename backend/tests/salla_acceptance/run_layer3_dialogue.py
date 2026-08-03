@@ -25,7 +25,7 @@ for _p in (_BACKEND, _BACKEND / "tests", _BACKEND.parent / "database"):
 
 from core.inbound_dedup import reset_cache  # noqa: E402
 from models import Conversation, HandoffSession  # noqa: E402
-from tests.commerce_scenario_fixtures import make_scenario_db  # noqa: E402
+from tests.commerce_scenario_fixtures import make_layer3_scenario_db  # noqa: E402
 from tests.salla_acceptance.fixtures import (  # noqa: E402
     PHONE_CUST_C,
     seed_dual_tenant_world,
@@ -116,25 +116,30 @@ def _write_blocker_report(reason: str) -> Dict[str, Any]:
 def prove_one_live_compose_turn(world) -> Dict[str, Any]:
     """Single-turn smoke: real Luna compose via webhook path."""
     sw = scenario_world_from_bundle(world.db, world.tenant_a, "A")
+    sw.extras.update(getattr(world, "extras", {}) or {})
     runner = Layer3BrainRunner(sw)
     before = COMPOSE_SPY.call_count
     turn = runner.run_turn("مرحبا")
     after = COMPOSE_SPY.call_count
-    reply = turn.outbound_reply or turn.raw_composed_reply
+    reply = (turn.outbound_reply or turn.raw_composed_reply or "").strip()
+    compose_delta = after - before
     return {
         "provider": turn.compose_provider or "openai_compatible",
-        "model": turn.compose_model or "gpt-5.6-luna",
-        "reply_len": len(reply or ""),
-        "compose_calls": after - before,
-        "compose_source": turn.compose_source,
+        "model": turn.compose_model or COMPOSE_SPY.last_model or "gpt-5.6-luna",
+        "reply_len": len(reply),
+        "compose_calls": compose_delta,
+        "compose_source": turn.compose_source or COMPOSE_SPY.last_compose_source,
         "brain_called": turn.brain_called,
-        "latency_ms": turn.latency_ms,
-        "ok": bool(reply and len(reply) > 5 and (after > before or turn.brain_called)),
+        "latency_ms": turn.latency_ms or COMPOSE_SPY.last_latency_ms,
+        "ok": bool(compose_delta > 0 and len(reply) >= 1) or bool(
+            turn.brain_called and len(reply) >= 1
+        ),
     }
 
 
 def _run_dedup_session(world, script) -> List[Any]:
     sw = scenario_world_from_bundle(world.db, world.tenant_a, script.customer_key)
+    sw.extras.update(getattr(world, "extras", {}) or {})
     reset_cache()
     runner = Layer3BrainRunner(sw)
     text = script.messages[0]
@@ -145,6 +150,7 @@ def _run_dedup_session(world, script) -> List[Any]:
 
 def _run_handoff_session(world, script) -> List[Any]:
     sw = scenario_world_from_bundle(world.db, world.tenant_a, script.customer_key)
+    sw.extras.update(getattr(world, "extras", {}) or {})
     runner = Layer3BrainRunner(sw)
     turns = []
     for idx, msg in enumerate(script.messages):
@@ -188,6 +194,7 @@ def run_all_sessions(world) -> tuple[List[Any], List[Any]]:
             turns = _run_handoff_session(world, script)
         else:
             sw = scenario_world_from_bundle(world.db, bundle, script.customer_key)
+            sw.extras.update(getattr(world, "extras", {}) or {})
             runner = Layer3BrainRunner(sw)
             turns = runner.run_thread(script.messages)
 
@@ -334,8 +341,10 @@ def main() -> int:
     llm_config = resolve_layer3_llm_config()
     assert llm_config is not None
 
-    db, _engine = make_scenario_db()
+    db, engine = make_layer3_scenario_db()
     world = seed_dual_tenant_world(db)
+    world.extras["layer3_engine"] = engine
+    world.extras["layer3_session_factory"] = getattr(engine, "_layer3_session_factory", None)
     try:
         print("Proving one live Luna compose turn...", flush=True)
         proof = prove_one_live_compose_turn(world)

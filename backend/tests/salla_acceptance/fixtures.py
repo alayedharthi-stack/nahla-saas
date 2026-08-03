@@ -54,6 +54,7 @@ class DualTenantWorld:
     db: Session
     tenant_a: TenantBundle
     tenant_b: TenantBundle
+    extras: Dict[str, Any] = field(default_factory=dict)
 
 
 def seed_product_rich(

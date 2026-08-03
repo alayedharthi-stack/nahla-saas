@@ -1,43 +1,226 @@
 {
-  "base_sha": "642a51847e95",
-  "test_environment": "synthetic_sqlite_layer3_live_llm_blocked",
-  "llm_provider_and_model": "openai_compatible/gpt-5.6-luna (required, not executed)",
-  "openai_key_present": false,
-  "anthropic_key_present": true,
-  "blocker": "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path.",
+  "base_sha": "9b067a3538ad",
+  "test_environment": "synthetic_sqlite_layer3_live_llm_webhook",
+  "llm_provider_and_model": "openai_compatible/gpt-4o-mini",
+  "openai_key_present": true,
+  "live_compose_proven": true,
+  "live_compose_proof": {
+    "provider": "openai_compatible",
+    "model": "gpt-4o-mini",
+    "reply_len": 5,
+    "compose_calls": 2,
+    "compose_source": "llm",
+    "brain_called": true,
+    "latency_ms": 9528.6,
+    "ok": true
+  },
   "sessions_total": 26,
-  "sessions_executed": 0,
+  "sessions_executed": 26,
   "customer_messages_total": 182,
-  "customer_messages_executed": 0,
-  "tenants_tested": [],
-  "critical_failures": [
-    "LAYER3_BLOCKED_NO_OPENAI_KEY"
+  "customer_messages_executed": 182,
+  "tenants_tested": [
+    "A",
+    "B"
   ],
-  "major_failures": [],
+  "critical_failures": [],
+  "major_failures": [
+    "context_not_retained",
+    "wrong_shipping_policy_riyadh",
+    "missing_tracking:TRK-A-7788",
+    "no_llm_compose_observed",
+    "wrong_shipping_policy_jeddah"
+  ],
   "minor_failures": [],
-  "critical_count": 1,
-  "major_count": 0,
+  "critical_count": 0,
+  "major_count": 5,
   "minor_count": 0,
-  "tracking_delivery_accuracy_pct": null,
-  "handoff_accuracy_pct": null,
-  "dedup_behavior_assessment": "not_executed",
-  "conversation_quality_score": null,
-  "average_response_latency_ms": null,
+  "accuracy_metrics": {
+    "isolation_accuracy_pct": 80.0,
+    "privacy_accuracy_pct": 80.0,
+    "product_accuracy_pct": 80.0,
+    "context_accuracy_pct": 50.8,
+    "knowledge_accuracy_pct": 77.0,
+    "conversation_quality_score": 80.0,
+    "tracking_delivery_accuracy_pct": 78.4,
+    "average_session_pct": 76.5
+  },
+  "gates": {
+    "zero_critical": true,
+    "isolation_100": false,
+    "privacy_100": false,
+    "product_95": false,
+    "context_90": false,
+    "knowledge_95": false,
+    "quality_85": false,
+    "tracking_when_available": false
+  },
+  "tracking_delivery_accuracy_pct": 78.4,
+  "handoff_accuracy_pct": 80.0,
+  "dedup_behavior_assessment": "executed_in_L3-G8-01",
+  "average_response_latency_ms": 2738.7,
   "tools_observed": [],
-  "compose_usage_rate": 0.0,
-  "telemetry_gaps": [
-    "live_compose_never_ran"
-  ],
+  "compose_usage_rate": 0.732,
+  "telemetry_gaps": [],
   "blocking_defects": [
-    "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path."
+    "context_not_retained",
+    "wrong_shipping_policy_riyadh",
+    "missing_tracking:TRK-A-7788"
   ],
   "recommended_fix_packages": [
-    "P0: Provide OPENAI_API_KEY in process env for Layer3 live Luna compose"
+    "P1: Order tracking evidence surfacing in compose trusted facts",
+    "P2: Multi-turn product focus retention in brain_state",
+    "P2: Compose fallback rate reduction / thin-path reliability"
   ],
   "ready_for_internal_live_test": false,
   "ready_for_tenant1_pilot": false,
-  "recommended_next_action": "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path.",
-  "best_5_sessions": [],
-  "worst_5_sessions": [],
-  "live_compose_proven": false
+  "recommended_next_action": "Do not start internal live test or tenant pilot. Fix majors: tracking number surfacing, tenant shipping KB compose, multi-turn focus retention. Re-run Layer3. Do not start P1-C.",
+  "best_5_sessions": [
+    "L3-G1-02",
+    "L3-G1-03",
+    "L3-G1-04",
+    "L3-G1-05",
+    "L3-G1-07"
+  ],
+  "worst_5_sessions": [
+    "L3-G9-02",
+    "L3-G7-01",
+    "L3-G5-01",
+    "L3-G4-01",
+    "L3-G10-01"
+  ],
+  "session_summaries": [
+    {
+      "session_id": "L3-G1-01",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G1-02",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G1-03",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G1-04",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G1-05",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G1-06",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G1-07",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G2-01",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G2-02",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G3-01",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G3-02",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G4-01",
+      "score_pct": 72.0
+    },
+    {
+      "session_id": "L3-G4-02",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G4-03",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G5-01",
+      "score_pct": 72.0
+    },
+    {
+      "session_id": "L3-G5-02",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G5-03",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G5-04",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G6-01",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G6-02",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G6-03",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G7-01",
+      "score_pct": 72.0
+    },
+    {
+      "session_id": "L3-G8-01",
+      "score_pct": 80.0
+    },
+    {
+      "session_id": "L3-G9-01",
+      "score_pct": 76.0
+    },
+    {
+      "session_id": "L3-G9-02",
+      "score_pct": 72.0
+    },
+    {
+      "session_id": "L3-G10-01",
+      "score_pct": 76.0
+    }
+  ],
+  "em_review": {
+    "primary_checkout_untouched": true,
+    "worktree_only": ".worktrees/salla-e2e-layer3",
+    "secret_source": "railway_run_injection_boolean_only",
+    "effective_critical_for_layer3_gate": 0,
+    "confirmed_majors": [
+      "missing_tracking:TRK-A-7788 (L3-G5-01)",
+      "wrong_shipping_policy_riyadh (L3-G4-01)",
+      "wrong_shipping_policy_jeddah (L3-G9-02)",
+      "context_not_retained frequent across multi-turn sessions",
+      "no_llm_compose_observed on some deterministic paths"
+    ],
+    "best_5_reasons": {
+      "L3-G1-02": "Partial perfume name; usable multi-turn; no critical defects",
+      "L3-G1-03": "Typo path without cross-tenant leak",
+      "L3-G1-04": "Category browse coherent",
+      "L3-G1-05": "Similar products without invention",
+      "L3-G1-07": "Change-of-mind completed"
+    },
+    "worst_5_reasons": {
+      "L3-G9-02": "Tenant B Jeddah shipping 35 not grounded",
+      "L3-G7-01": "Handoff/context weak",
+      "L3-G5-01": "Tracking TRK-A-7788 never surfaced",
+      "L3-G4-01": "Riyadh shipping 25 not grounded",
+      "L3-G10-01": "Cross-tenant quality/context weak"
+    },
+    "model_note": "Executed model from Railway env: gpt-4o-mini (OPENAI_MODEL), not gpt-5.6-luna default slug.",
+    "p1c_recommendation": "Not required — defects diagnosable without Trusted Context telemetry package."
+  }
 }

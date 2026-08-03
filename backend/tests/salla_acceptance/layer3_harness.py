@@ -247,9 +247,35 @@ class Layer3BrainRunner:
             else nullcontext()
         )
 
+        def _session_local_factory():
+            extras = getattr(runner.world, "extras", None) or {}
+            factory = extras.get("layer3_session_factory")
+            if factory is None:
+                engine = extras.get("layer3_engine")
+                if engine is not None:
+                    factory = getattr(engine, "_layer3_session_factory", None)
+            if factory is not None:
+                return factory()
+            return runner.world.db
+
+        def _get_db_override():
+            yield _session_local_factory()
+
         with self.fake_sender.patch(), patch(
             "core.billing.has_billing_access",
             return_value=True,
+        ), patch(
+            "session.SessionLocal",
+            new=_session_local_factory,
+        ), patch(
+            "database.session.SessionLocal",
+            new=_session_local_factory,
+        ), patch(
+            "routers.whatsapp_webhook.SessionLocal",
+            new=_session_local_factory,
+        ), patch(
+            "core.database.get_db",
+            new=_get_db_override,
         ), patch(
             "modules.ai.routing.conversation_mode.resolve_conversation_mode",
             return_value=MagicMock(
