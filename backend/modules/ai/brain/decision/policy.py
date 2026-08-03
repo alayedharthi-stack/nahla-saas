@@ -82,6 +82,7 @@ class RealPolicyGate:
     def gate(self, decision: Decision, ctx: BrainContext) -> Decision:
         try:
             decision = self._block_list(decision, ctx)
+            decision = self._commerce_permission_clamp(decision, ctx)
             decision = self._non_commerce_clamp(decision, ctx)
             decision = self._working_hours(decision, ctx)
             decision = self._coupon_cap(decision, ctx)
@@ -96,6 +97,31 @@ class RealPolicyGate:
         except Exception as exc:
             logger.warning("[PolicyGate] unexpected error: %s — returning original decision", exc)
         return decision
+
+    def _commerce_permission_clamp(self, decision: Decision, ctx: BrainContext) -> Decision:
+        from ..commerce.permission_gate import deny_reason_for_brain_action
+
+        reason = deny_reason_for_brain_action(ctx, decision.action)
+        if not reason:
+            return decision
+        logger.info(
+            "[PolicyGate] commerce permission clamp tenant=%s action=%s source=%s",
+            ctx.tenant_id,
+            decision.action,
+            getattr(ctx, "permission_source", ""),
+        )
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                **(decision.args or {}),
+                "policy_reason": reason,
+                "permission_denied": True,
+                "permission_source": getattr(ctx, "permission_source", ""),
+                "blocked_action": decision.action,
+            },
+            reason=f"commerce_permission_denied:{decision.action}",
+            confidence=decision.confidence,
+        )
 
     # ── Rule 6 (LAST): human-priority clamp ───────────────────────────────────
 

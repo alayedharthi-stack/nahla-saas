@@ -89,15 +89,9 @@ class _PlatformReplyHandler:
 
 class _SendPaymentLinkHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         runtime_result = await runtime.execute(
             "send_payment_link",
             {
@@ -117,7 +111,7 @@ class _SendPaymentLinkHandler:
 
 class _SuggestCouponHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
         # Pull the product the customer is currently considering so we can
         # pass its price as cart_total to the offer engine (smarter discount).
@@ -131,13 +125,7 @@ class _SuggestCouponHandler:
             except (TypeError, ValueError):
                 pass
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         payload: dict = {
             "discount_pct": (ctx.sales_context.offer_signals or {}).get("recommended_discount_pct", 0)
             if ctx.sales_context
@@ -277,15 +265,9 @@ class _NarrowHandler:
 
 class _RecommendAddonHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         result = await runtime.execute(
             "recommend_addon",
             {
@@ -309,15 +291,9 @@ class _RecommendAddonHandler:
 
 class _WebSearchHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
-        runtime = CommerceToolRuntime(
-            ctx._db,  # type: ignore[attr-defined]
-            tenant_id=ctx.tenant_id,
-            customer_phone=ctx.customer_phone,
-            customer_id=ctx.customer_id,
-            tenant_context=ctx.tenant_context,
-        )
+        runtime = build_commerce_runtime(ctx)
         result = await runtime.execute(
             "web_search",
             {"query": decision.args.get("query") or ctx.message},
@@ -498,10 +474,24 @@ class DefaultActionExecutor:
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from modules.ai.brain.commerce.permission_gate import deny_reason_for_brain_action
+
         handler = self._handlers.get(decision.action)
         if not handler:
             logger.error("[Executor] unknown action: %s — falling back to LLM", decision.action)
             handler = self._handlers[ACTION_LLM_REPLY]
+
+        denial = deny_reason_for_brain_action(ctx, decision.action)
+        if denial:
+            return ActionResult(
+                success=False,
+                error=denial,
+                data={
+                    "permission_denied": True,
+                    "permission_source": getattr(ctx, "permission_source", ""),
+                    "action": decision.action,
+                },
+            )
 
         # INFO-level so this always appears in Railway logs regardless of
         # the log-level setting (debug is often suppressed in prod).

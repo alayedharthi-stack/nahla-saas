@@ -46,6 +46,7 @@ class CommerceToolRuntime:
         customer_phone: str = "",
         customer_id: Optional[int] = None,
         permissions: Optional[CommercePermissionSet] = None,
+        permission_source: str = "",
         tenant_context: Optional[TenantContext] = None,
     ) -> None:
         # Build a validated TenantContext eagerly so any caller that forgot
@@ -73,6 +74,7 @@ class CommerceToolRuntime:
         self.permissions = permissions or CommercePermissionSet(
             tenant_id=self.tenant_id
         )
+        self.permission_source = str(permission_source or "")
         self.catalog = CatalogContextBuilder(db, self.tenant_id)
         self.store_loader = StoreKnowledgeLoader(db, self.tenant_id)
 
@@ -138,6 +140,14 @@ class CommerceToolRuntime:
                 error=str(exc),
                 audit={"tool_name": tool_name, "status": "exception"},
             )
+
+    def _permission_denial_audit(self, action_type: str) -> Dict[str, Any]:
+        return {
+            "permission_denied": True,
+            "permission_source": self.permission_source,
+            "denied_action": action_type,
+            "tenant_id": self.tenant_id,
+        }
 
     async def _tool_search_products(self, payload: Dict[str, Any]) -> ToolExecutionResult:
         query = str(payload.get("query") or "").strip()
@@ -213,7 +223,12 @@ class CommerceToolRuntime:
         from store_integration.order_service import create_draft_order
 
         if not self.permissions.is_permitted("create_draft_order"):
-            return ToolExecutionResult(False, "create_draft_order", error=self.permissions.denial_reason("create_draft_order"))
+            return ToolExecutionResult(
+                False,
+                "create_draft_order",
+                error=self.permissions.denial_reason("create_draft_order"),
+                audit=self._permission_denial_audit("create_draft_order"),
+            )
 
         product_id = str(payload.get("product_id") or payload.get("external_id") or "").strip()
         quantity = max(int(payload.get("quantity") or 1), 1)
@@ -302,6 +317,14 @@ class CommerceToolRuntime:
     async def _tool_create_checkout(self, payload: Dict[str, Any]) -> ToolExecutionResult:
         from store_integration.payment_service import generate_payment_link
 
+        if not self.permissions.is_permitted("create_checkout_link"):
+            return ToolExecutionResult(
+                False,
+                "create_checkout",
+                error=self.permissions.denial_reason("create_checkout_link"),
+                audit=self._permission_denial_audit("create_checkout_link"),
+            )
+
         order_id = str(payload.get("order_id") or "").strip()
         amount = float(payload.get("amount") or 0.0)
         if not order_id:
@@ -324,7 +347,12 @@ class CommerceToolRuntime:
         from store_integration.payment_service import generate_payment_link
 
         if not self.permissions.is_permitted("send_payment_link"):
-            return ToolExecutionResult(False, "send_payment_link", error=self.permissions.denial_reason("send_payment_link"))
+            return ToolExecutionResult(
+                False,
+                "send_payment_link",
+                error=self.permissions.denial_reason("send_payment_link"),
+                audit=self._permission_denial_audit("send_payment_link"),
+            )
         checkout_url = str(payload.get("checkout_url") or "").strip()
         order_id = str(payload.get("order_id") or "").strip()
         if not checkout_url and order_id:
@@ -353,7 +381,12 @@ class CommerceToolRuntime:
         )
 
         if not self.permissions.is_permitted("apply_coupon"):
-            return ToolExecutionResult(False, "apply_coupon", error=self.permissions.denial_reason("apply_coupon"))
+            return ToolExecutionResult(
+                False,
+                "apply_coupon",
+                error=self.permissions.denial_reason("apply_coupon"),
+                audit=self._permission_denial_audit("apply_coupon"),
+            )
         ctx = OfferDecisionContext(
             tenant_id=self.tenant_id,
             surface=SURFACE_CHAT,

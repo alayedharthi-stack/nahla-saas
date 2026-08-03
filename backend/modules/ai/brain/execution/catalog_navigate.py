@@ -172,18 +172,13 @@ class CatalogNavigateHandler:
         presented and how an empty catalog is explained — stays LLM/persona
         owned per the natural-language rule in AGENTS.md.
         """
-        from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: PLC0415
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
         db = getattr(ctx, "_db", None)
         products: List[Dict[str, Any]] = []
         if db is not None and getattr(ctx, "tenant_id", None):
             try:
-                runtime = CommerceToolRuntime(
-                    db,
-                    tenant_id=ctx.tenant_id,
-                    customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
-                    customer_id=getattr(ctx, "customer_id", None),
-                )
+                runtime = build_commerce_runtime(ctx)
                 tool_result = await runtime.execute("search_products", {"query": "", "limit": 12})
                 if tool_result.ok:
                     products = list(tool_result.payload.get("products") or [])

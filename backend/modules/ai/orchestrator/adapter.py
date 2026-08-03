@@ -539,6 +539,9 @@ def _build_runtime(
                 return None, None
 
         db = SessionLocal()
+        from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions
+
+        perm_result = load_tenant_commerce_permissions(db, tenant_id)
         return (
             CommerceToolRuntime(
                 db,
@@ -546,6 +549,8 @@ def _build_runtime(
                 customer_phone=customer_phone,
                 customer_id=customer_id,
                 tenant_context=tenant_context,
+                permissions=perm_result.permissions,
+                permission_source=perm_result.source,
             ),
             db,
         )

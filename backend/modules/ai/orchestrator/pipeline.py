@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions
 from modules.ai.commerce.permissions import CommercePermissionSet
 from modules.ai.orchestrator.engine import AIOrchestratorEngine
 from modules.ai.orchestrator.provider_router import ProviderChainConfig, get_provider_chain
@@ -47,6 +48,7 @@ class AIOrchestrationPipeline:
 
     def __init__(self, engine: AIOrchestratorEngine | None = None) -> None:
         self.engine = engine or AIOrchestratorEngine()
+        self._last_permission_source = "defaults_missing_row"
 
     # ── Provider chain layer ───────────────────────────────────────────────────
 
@@ -82,14 +84,37 @@ class AIOrchestrationPipeline:
 
     def build_permission_snapshot(self, request: AIOrchestrationRequest) -> CommercePermissionSet:
         """
-        Build a static permission snapshot for this request's tenant.
+        Build a permission snapshot for this request's tenant from the DB.
 
-        Current behavior: uses default permission flags from CommercePermissionSet.
-        Future behavior: will load persisted tenant flags from the DB.
-
-        No DB calls here — safe for scaffolding.
+        Uses ``request.context.metadata['db']`` when provided; otherwise opens
+        a short-lived SessionLocal for the load.
         """
-        return CommercePermissionSet(tenant_id=request.context.tenant_id or 0)
+        tenant_id = int(request.context.tenant_id or 0)
+        db = request.context.metadata.get("db")
+        owns_session = False
+        if db is None:
+            from database.session import SessionLocal
+
+            db = SessionLocal()
+            owns_session = True
+        try:
+            result = load_tenant_commerce_permissions(db, tenant_id)
+            if result.source == "load_failed":
+                logger.warning(
+                    "[pipeline] permissions load_failed tenant=%s — fail-closed sensitive flags",
+                    tenant_id,
+                )
+            else:
+                logger.info(
+                    "[pipeline] permissions loaded tenant=%s source=%s",
+                    tenant_id,
+                    result.source,
+                )
+            self._last_permission_source = result.source
+            return result.permissions
+        finally:
+            if owns_session:
+                db.close()
 
     def apply_policy_validation(
         self,
@@ -155,6 +180,7 @@ class AIOrchestrationPipeline:
                 "permissions_module":    "modules.ai.commerce.permissions",
                 "prompt_module":         "modules.ai.prompts.builder",
                 "permission_snapshot":   permissions.to_dict(),
+                "permission_source":     getattr(self, "_last_permission_source", ""),
                 "tenant_id":             request.context.tenant_id,
                 "channel":               request.context.channel,
                 # Provider chain metadata — active execution metadata

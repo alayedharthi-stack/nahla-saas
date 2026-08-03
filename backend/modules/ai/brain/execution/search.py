@@ -38,7 +38,7 @@ class ProductSearchHandler:
     """Handles ACTION_SEARCH_PRODUCTS decision."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        from modules.ai.commerce.runtime import CommerceToolRuntime
+        from modules.ai.brain.execution.runtime_factory import build_commerce_runtime
 
         # Fast path: decision engine already computed alternatives for a
         # rejected (unorderable) product — skip the search entirely.
@@ -238,13 +238,7 @@ class ProductSearchHandler:
             )
             refreshed_pool = pool
             if not batch:
-                runtime = CommerceToolRuntime(
-                    ctx._db,  # type: ignore[attr-defined]
-                    tenant_id=ctx.tenant_id,
-                    customer_phone=ctx.customer_phone,
-                    customer_id=ctx.customer_id,
-                    tenant_context=ctx.tenant_context,
-                )
+                runtime = build_commerce_runtime(ctx)
                 q = str(query or getattr(state, "last_browse_query", "") or "")
                 runtime_result = await runtime.execute(
                     "search_products",
@@ -311,13 +305,7 @@ class ProductSearchHandler:
             )
             _include_catalog_facts = _qa_kind in {"price", "availability"}
 
-            runtime = CommerceToolRuntime(
-                ctx._db,  # type: ignore[attr-defined]
-                tenant_id=ctx.tenant_id,
-                customer_phone=ctx.customer_phone,
-                customer_id=ctx.customer_id,
-                tenant_context=ctx.tenant_context,
-            )
+            runtime = build_commerce_runtime(ctx)
 
             async def _run_catalog_search(search_query: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
                 tool_payload: Dict[str, Any] = {
