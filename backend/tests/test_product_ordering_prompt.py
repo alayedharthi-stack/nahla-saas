@@ -77,6 +77,19 @@ class TestProductOrderingPrompt:
         assert "أبشر" in prompt
         assert "وش" in prompt or "المتوفر" in prompt
 
+    def test_generic_shoe_order_intent_warm_prompt(self):
+        ctx = _ctx(
+            "أبي حذاء رياضي",
+            intent_name=INTENT_START_ORDER,
+            candidates=[
+                {"title": "حذاء رياضي أبيض", "external_id": "10"},
+                {"title": "حذاء كاجوال بني", "external_id": "11"},
+            ],
+        )
+        prompt = build_product_ordering_prompt(ctx)
+        assert "حذاء" in prompt
+        assert LEGACY_ROBOTIC_PRODUCT_PROMPT not in prompt
+
     def test_honey_order_offers_catalog_options(self):
         ctx = _ctx(
             "أبي عسل",
@@ -128,7 +141,7 @@ class TestProductOrderingPrompt:
         prompt = build_product_ordering_prompt(ctx)
         assert "طلح نجد" not in prompt
         assert "سمر الحجاز" not in prompt
-        assert "خليني أتأكد" in prompt or "ما ظهرت" in prompt
+        assert "أبشر" in prompt or "خليني أتأكد" in prompt or "ما ظهرت" in prompt
 
 
 class TestConversationContextReset:

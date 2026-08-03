@@ -172,6 +172,8 @@ def _resolve_product_name(text: str) -> str:
         )
         residual = _WS_RE.sub(" ", residual).strip()
         if residual:
+            if re.fullmatch(r"(?:ربع|نصف|نص)(?:\s+عسل)?", residual):
+                return "عسل"
             return ""
         return "عسل"
     for key, name in _PRODUCT_KEYWORDS.items():

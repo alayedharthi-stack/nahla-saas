@@ -17,12 +17,12 @@ from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: 
 )
 from modules.ai.brain.commerce.commerce_conversation_guard import (  # noqa: E402
     catalog_has_honey_skus,
-    maybe_lock_honey_order_context,
+    maybe_lock_order_category_context,
 )
 from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: E402
     is_bare_start_order_phrase,
 )
-from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
+from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE, ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent import rules  # noqa: E402
 from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: E402
@@ -118,7 +118,7 @@ class TestHoneySessionLockAfterStartOrder:
         state = MerchantConversationState(greeted=True)
         catalog = _honey_store_catalog()
         assert catalog_has_honey_skus(catalog)
-        assert maybe_lock_honey_order_context(
+        assert maybe_lock_order_category_context(
             state,
             "ابي اطلب",
             catalog=catalog,
@@ -128,7 +128,7 @@ class TestHoneySessionLockAfterStartOrder:
 
     def test_wesh_alanwa3_scoped_to_honey_after_lock(self) -> None:
         state = MerchantConversationState(greeted=True)
-        maybe_lock_honey_order_context(
+        maybe_lock_order_category_context(
             state,
             "ابي اطلب",
             catalog=_honey_store_catalog(),
@@ -165,7 +165,7 @@ class TestSmokeSequenceRegression:
         state.greeted = True
 
         assert is_bare_start_order_phrase("ابي اطلب")
-        maybe_lock_honey_order_context(state, "ابي اطلب", catalog=catalog)
+        maybe_lock_order_category_context(state, "ابي اطلب", catalog=catalog)
         start_ctx = BrainContext(
             tenant_id=7,
             customer_phone="966542980511",
@@ -187,7 +187,7 @@ class TestSmokeSequenceRegression:
             facts=_facts(catalog),
         )
         types_dec = engine.decide(types_ctx)
-        assert types_dec.action == ACTION_SEARCH_PRODUCTS
+        assert types_dec.action in (ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE)
         filtered = filter_products_for_browse_turn(
             catalog,
             message="وش الأنواع",

@@ -636,21 +636,21 @@ def choose_intent_aware_fallback(
 
     try:
         from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: PLC0415
-            build_short_honey_order_clarify_reply,
-            is_short_honey_order_request,
+            build_short_product_order_clarify_reply,
+            is_short_product_order_request,
         )
 
-        if is_short_honey_order_request(inbound_text or ""):
+        if is_short_product_order_request(inbound_text or ""):
             return FallbackDecision(
-                text=build_short_honey_order_clarify_reply(inbound_text or ""),
+                text=build_short_product_order_clarify_reply(inbound_text or ""),
                 kind=FALLBACK_KIND_INTENT_DETERMINISTIC,
                 response_goal=GOAL_ANSWER,
                 rationale=(
-                    "short_honey_order_request → deterministic order clarify "
+                    "short_product_order_request → catalog-channel clarify "
                     "instead of neutral_retry"
                 ),
             )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional honey order branch must not block fallback
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product order branch must not block fallback
         pass
 
     try:

@@ -333,23 +333,69 @@ def _catalog_row_is_honey_sku(row: Mapping[str, Any]) -> bool:
 
 
 def catalog_has_honey_skus(catalog: Sequence[Mapping[str, Any]]) -> bool:
-    """Platform-wide: any synced honey SKU — used to lock browse after order intent."""
+    """Platform-wide: any synced honey SKU — tenant catalog evidence only."""
     return any(
         isinstance(row, Mapping) and _catalog_row_is_honey_sku(row)
         for row in (catalog or [])
     )
 
 
-def maybe_lock_honey_order_context(
+def _dominant_catalog_category(catalog: Sequence[Mapping[str, Any]]) -> str:
+    """Pick the dominant category label from synced catalog rows."""
+    counts: Dict[str, int] = {}
+    for row in catalog or []:
+        if not isinstance(row, Mapping):
+            continue
+        cat = str(row.get("category") or "").strip()
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _first_catalog_category(catalog: Sequence[Mapping[str, Any]]) -> str:
+    """First non-empty category label on any catalog row."""
+    for row in catalog or []:
+        if not isinstance(row, Mapping):
+            continue
+        cat = str(row.get("category") or "").strip()
+        if cat:
+            return cat
+    return ""
+
+
+def _resolve_order_lock_category(catalog: Sequence[Mapping[str, Any]]) -> str:
+    """Category to lock from catalog evidence — never hardcoded to honey."""
+    counts: Dict[str, int] = {}
+    for row in catalog or []:
+        if not isinstance(row, Mapping):
+            continue
+        cat = str(row.get("category") or "").strip()
+        if cat:
+            counts[cat] = counts.get(cat, 0) + 1
+    if not counts:
+        return _first_catalog_category(catalog)
+    max_count = max(counts.values())
+    tied = [cat for cat, count in counts.items() if count == max_count]
+    if len(tied) == 1:
+        return tied[0]
+    if catalog_has_honey_skus(catalog) and "عسل" in tied:
+        return "عسل"
+    return sorted(tied)[0]
+
+
+def maybe_lock_order_category_context(
     state: Any,
     message: str,
     *,
     catalog: Sequence[Mapping[str, Any]] = (),
 ) -> bool:
     """
-    Persist honey category lock after bare order-start in honey-capable catalogs.
+    Persist order intent and optional category lock after bare order-start.
 
-    Returns True when ``commerce_session.active_category`` was set to ``عسل``.
+    Category comes from catalog evidence (dominant label), not platform defaults.
+    Returns True when ``commerce_session.active_category`` was newly set.
     """
     try:
         from .start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
@@ -358,21 +404,34 @@ def maybe_lock_honey_order_context(
 
     if not is_bare_start_order_phrase(message or ""):
         return False
-    if not catalog_has_honey_skus(catalog):
+    if not catalog:
         return False
 
     session = load_commerce_session(state)
     session.order_intent = True
     session.stage = session.stage or "order_intent"
+    locked = False
     if not str(session.active_category or "").strip():
-        session.active_category = "عسل"
-        apply_commerce_session(state, session)
-        logger.info(
-            "[COMMERCE_SESSION] locked active_category=عسل reason=bare_start_order",
-        )
-        return True
+        category = _resolve_order_lock_category(catalog)
+        if category:
+            session.active_category = category
+            locked = True
+            logger.info(
+                "[COMMERCE_SESSION] locked active_category=%s reason=bare_start_order",
+                category,
+            )
     apply_commerce_session(state, session)
-    return str(session.active_category or "").strip() == "عسل"
+    return locked
+
+
+def maybe_lock_honey_order_context(
+    state: Any,
+    message: str,
+    *,
+    catalog: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    """Deprecated alias — use :func:`maybe_lock_order_category_context`."""
+    return maybe_lock_order_category_context(state, message, catalog=catalog)
 
 
 def _product_matches_name(catalog_row: Mapping[str, Any], name_hint: str) -> bool:
@@ -646,6 +705,7 @@ __all__ = [
     "is_social_ack_message",
     "load_commerce_session",
     "maybe_lock_honey_order_context",
+    "maybe_lock_order_category_context",
     "prepare_commerce_inbound",
     "product_title_drifts_from_honey",
     "strip_quoted_bot_echo",

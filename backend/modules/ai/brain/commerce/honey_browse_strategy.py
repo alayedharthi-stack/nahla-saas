@@ -128,10 +128,30 @@ def customer_specified_size(message: str) -> bool:
 
 
 def is_generic_honey_options_browse(message: str, query: str = "") -> bool:
+    """Deprecated alias — use :func:`is_generic_options_browse`."""
+    return is_generic_options_browse(message, query)
+
+
+def is_generic_options_browse(message: str, query: str = "") -> bool:
     blob = _norm(f"{message or ''} {query or ''}")
     if not blob:
         return False
     return bool(_GENERIC_BROWSE_RE.search(blob))
+
+
+def catalog_has_honey_skus_in_products(
+    products: Sequence[Mapping[str, Any]],
+) -> bool:
+    """True when catalog rows contain honey-family SKUs (tenant evidence)."""
+    for row in products or []:
+        if not isinstance(row, Mapping):
+            continue
+        title = str(row.get("title") or "")
+        if classify_honey_type(title):
+            return True
+        if "عسل" in _norm(title):
+            return True
+    return False
 
 
 def should_collapse_to_honey_types(
@@ -140,6 +160,25 @@ def should_collapse_to_honey_types(
     query: str = "",
     active_category: str = "",
     source: str = "",
+    products: Sequence[Mapping[str, Any]] = (),
+) -> bool:
+    """Deprecated alias — use :func:`should_collapse_to_category_types`."""
+    return should_collapse_to_category_types(
+        message,
+        query=query,
+        active_category=active_category,
+        source=source,
+        products=products,
+    )
+
+
+def should_collapse_to_category_types(
+    message: str,
+    *,
+    query: str = "",
+    active_category: str = "",
+    source: str = "",
+    products: Sequence[Mapping[str, Any]] = (),
 ) -> bool:
     scope = resolve_browse_category_scope(
         message,
@@ -147,17 +186,32 @@ def should_collapse_to_honey_types(
         active_category=active_category,
         source=source,
     )
-    if scope != "عسل":
+    locked = str(active_category or "").strip()
+    if not scope and locked and locked != "عسل":
+        src = str(source or "").strip().lower()
+        if is_generic_options_browse(message, query) or src in _TYPE_BROWSE_SOURCES:
+            scope = locked
+    if scope == "عسل":
+        if products and not catalog_has_honey_skus_in_products(products):
+            return False
+        if customer_specified_honey_type(message, query):
+            return False
+        if customer_specified_size(message):
+            return False
+        src = str(source or "").strip().lower()
+        if is_generic_options_browse(message, query):
+            return True
+        if src in _TYPE_BROWSE_SOURCES and not customer_specified_honey_type(message, query):
+            return True
         return False
-    if customer_specified_honey_type(message, query):
-        return False
-    if customer_specified_size(message):
-        return False
-    src = str(source or "").strip().lower()
-    if is_generic_honey_options_browse(message, query):
-        return True
-    if src in _TYPE_BROWSE_SOURCES and not customer_specified_honey_type(message, query):
-        return True
+    if scope:
+        if customer_specified_size(message):
+            return False
+        src = str(source or "").strip().lower()
+        if is_generic_options_browse(message, query):
+            return True
+        if src in _TYPE_BROWSE_SOURCES:
+            return True
     return False
 
 
@@ -270,7 +324,54 @@ def collapse_products_to_honey_types(
     return picked or available
 
 
-def apply_honey_browse_strategy(
+def _cluster_key_from_title(title: str) -> str:
+    """First significant token cluster for generic browse representatives."""
+    norm = _norm(title or "")
+    if not norm:
+        return ""
+    without_size = _SIZE_OR_WEIGHT_RE.sub(" ", norm).strip()
+    tokens = [t for t in without_size.split() if len(t) >= 2]
+    return tokens[0] if tokens else norm[:24]
+
+
+def collapse_products_to_category_representatives(
+    products: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep one available catalog row per title cluster — category-agnostic."""
+    available = _available_products(products)
+    if not available:
+        return []
+    if len(available) <= 5:
+        return available
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for row in available:
+        key = _cluster_key_from_title(str(row.get("title") or ""))
+        if not key:
+            key = str(row.get("id") or row.get("external_id") or len(buckets))
+        buckets.setdefault(key, []).append(row)
+
+    picked: List[Dict[str, Any]] = []
+    for key in sorted(buckets.keys()):
+        items = buckets[key]
+        rep = sorted(
+            items,
+            key=lambda r: _size_rank(str(r.get("title") or "")),
+        )[0]
+        picked.append(rep)
+
+    if picked:
+        logger.info(
+            "[CATEGORY_BROWSE] collapsed in=%d available_in=%d out=%d clusters=%d",
+            len(products),
+            len(available),
+            len(picked),
+            len(buckets),
+        )
+    return picked[:8] or available
+
+
+def apply_category_browse_strategy(
     products: Sequence[Mapping[str, Any]],
     *,
     message: str = "",
@@ -283,27 +384,61 @@ def apply_honey_browse_strategy(
         return items
 
     requested_types = customer_specified_honey_types(message, query)
-    if requested_types:
+    if requested_types and catalog_has_honey_skus_in_products(items):
         filtered = filter_products_to_requested_honey_types(items, requested_types)
         if filtered:
             items = filtered
 
-    if not should_collapse_to_honey_types(
+    if not should_collapse_to_category_types(
         message,
         query=query,
         active_category=active_category,
         source=source,
+        products=items,
     ):
         return items
-    return collapse_products_to_honey_types(items)
+
+    scope = resolve_browse_category_scope(
+        message,
+        query,
+        active_category=active_category,
+        source=source,
+    )
+    if scope == "عسل" and catalog_has_honey_skus_in_products(items):
+        return collapse_products_to_honey_types(items)
+    return collapse_products_to_category_representatives(items)
+
+
+def apply_honey_browse_strategy(
+    products: Sequence[Mapping[str, Any]],
+    *,
+    message: str = "",
+    query: str = "",
+    active_category: str = "",
+    source: str = "",
+) -> List[Dict[str, Any]]:
+    """Deprecated alias — use :func:`apply_category_browse_strategy`."""
+    return apply_category_browse_strategy(
+        products,
+        message=message,
+        query=query,
+        active_category=active_category,
+        source=source,
+    )
 
 
 __all__ = [
+    "apply_category_browse_strategy",
     "apply_honey_browse_strategy",
+    "catalog_has_honey_skus_in_products",
     "classify_honey_type",
+    "collapse_products_to_category_representatives",
     "collapse_products_to_honey_types",
     "customer_specified_honey_type",
     "customer_specified_honey_types",
     "filter_products_to_requested_honey_types",
+    "is_generic_honey_options_browse",
+    "is_generic_options_browse",
+    "should_collapse_to_category_types",
     "should_collapse_to_honey_types",
 ]

@@ -11,8 +11,8 @@ for p in (str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database"
         sys.path.insert(0, p)
 
 from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: E402
-    build_short_honey_order_clarify_reply,
-    is_short_honey_order_request,
+    build_short_product_order_clarify_reply,
+    is_short_product_order_request,
 )
 from modules.ai.brain.intent.cart_intent_extractor import extract_cart_intents  # noqa: E402
 from modules.ai.brain.intent_priority.types import GOAL_ORDER_REQUEST, GOAL_SOCIAL_ONLY  # noqa: E402
@@ -78,7 +78,7 @@ class TestCommerceReplyQualityGuardRegression:
         assert not is_generic_ack_stub_text(text)
         assert kind in {"social_mirror", "social_suppressed"}
 
-    def test_short_honey_order_empty_reply_uses_order_clarify(self) -> None:
+    def test_short_product_order_empty_reply_uses_catalog_channel(self) -> None:
         msg = "ابغى ربع كيلو عسل"
         out = apply_commerce_reply_quality_guard(
             "",
@@ -87,15 +87,15 @@ class TestCommerceReplyQualityGuardRegression:
             primary_customer_goal=GOAL_ORDER_REQUEST,
         )
         assert "وصلت رسالتك" not in out.reply
-        assert "أبشر" in out.reply
-        assert "ربع كيلo" in out.reply or "ربع كيلو" in out.reply
-        assert "عسل" in out.reply
+        assert is_short_product_order_request(msg)
+        assert "كتالوج" in out.reply or "واتساب" in out.reply
 
-    def test_prefixed_honey_order_clarify(self) -> None:
+    def test_prefixed_product_order_clarify_uses_catalog_channel(self) -> None:
         msg = "اتصلت عليك قبل شوي ابغى ربع كيلو عسل"
-        assert is_short_honey_order_request(msg)
-        reply = build_short_honey_order_clarify_reply(msg)
-        assert reply == "أبشر، تبي ربع كيلو من أي نوع عسل؟"
+        assert is_short_product_order_request(msg)
+        reply = build_short_product_order_clarify_reply(msg)
+        assert "كتالوج" in reply or "واتساب" in reply
+        assert "من أي نوع عسل" not in reply
 
 
 class TestStaffEscalationGuardRegression:
@@ -111,7 +111,7 @@ class TestStaffEscalationGuardRegression:
         assert "وصلت رسالتك" not in result.reply
         assert "تحويل" not in result.reply
 
-    def test_false_escalation_on_honey_order_uses_clarify(self) -> None:
+    def test_false_escalation_on_product_order_uses_catalog_channel(self) -> None:
         msg = "ابغى ربع كيلو عسل"
         result = apply_staff_escalation_truth_guard(
             reply="سيتم تحويلك للفريق لمتابعة طلبك",
@@ -119,18 +119,18 @@ class TestStaffEscalationGuardRegression:
             conversation_flags={},
         )
         assert result.reply != SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR
-        assert "ربع كيلo" in result.reply or "ربع كيلو" in result.reply
+        assert "كتالوج" in result.reply or "واتساب" in result.reply
 
 
 class TestFallbackPolicyRegression:
-    def test_honey_order_outer_exception_not_neutral_retry(self) -> None:
+    def test_product_order_outer_exception_not_neutral_retry(self) -> None:
         msg = "اتصلت عليك قبل شوي ابغى ربع كيلo عسل"
         decision = choose_intent_aware_fallback(
             msg,
             reason=FALLBACK_REASON_OUTER_EXCEPTION,
         )
         assert "حصل خطأ مؤقت" not in decision.text
-        assert "ربع كيلo" in decision.text or "ربع كيلو" in decision.text
+        assert "كتالوج" in decision.text or "واتساب" in decision.text
         assert decision.kind == "intent_deterministic"
 
 

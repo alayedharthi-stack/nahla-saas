@@ -68,6 +68,33 @@ class TestHoneyTypeCollapse:
         assert "كريم سم النحل" not in titles
         assert len(result) == 3
 
+    def test_message_with_honey_word_but_shoe_catalog_skips_honey_collapse(self) -> None:
+        assert should_collapse_to_honey_types(
+            "ابي عسل",
+            active_category="عسل",
+            source="top_products",
+            products=[
+                _product(1, "حذاء رياضي أبيض", category="أحذية"),
+                _product(2, "حذاء كاجوال بني", category="أحذية"),
+            ],
+        ) is False
+
+    def test_generic_shoe_browse_collapses_representatives(self) -> None:
+        shoe_catalog = [
+            _product(1, "حذاء رياضي أبيض مقاس 40", category="أحذية"),
+            _product(2, "حذاء رياضي أبيض مقاس 42", category="أحذية"),
+            _product(3, "حذاء كاجوال بني مقاس 41", category="أحذية"),
+            _product(4, "صندل صيفي مقاس 40", category="أحذية"),
+        ]
+        result = apply_honey_browse_strategy(
+            shoe_catalog,
+            message="وش الخيارات؟",
+            active_category="أحذية",
+            source="top_products",
+        )
+        assert len(result) <= 4
+        assert all("حذاء" in p["title"] or "صندل" in p["title"] for p in result)
+
     def test_unavailable_type_excluded_from_type_overview(self) -> None:
         catalog = [
             _product(1, "عسل طلح 250 جرام", quantity=5),
