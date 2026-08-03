@@ -29,6 +29,8 @@ from core.ai_pause_guard import REASON_MANUAL_PAUSE  # noqa: E402
 from core.inbound_dedup import is_duplicate_inbound, reset_cache  # noqa: E402
 from core.local_order_resolver import resolve_customer_order_context  # noqa: E402
 from models import MerchantKnowledgeSection, Order  # noqa: E402
+from core.native_product_public_url import resolve_product_public_url  # noqa: E402
+from modules.ai.brain.truth_surface.coupon_offer_loader import load_coupon_promotion_facts  # noqa: E402
 from modules.ai.brain.truth_surface.product_sale_offer_loader import is_strict_product_sale  # noqa: E402
 from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions  # noqa: E402
 from modules.ai.commerce.runtime import CommerceToolRuntime  # noqa: E402
@@ -274,7 +276,7 @@ class TestGroupFOrders:
 
         _run(_go())
 
-    def test_f3_multiple_orders_customer_c(self, world) -> None:
+    def test_f2_multiple_orders_customer_c(self, world) -> None:
         ctx = resolve_customer_order_context(
             world.db,
             tenant_id=world.tenant_a.tenant_id,
@@ -284,16 +286,39 @@ class TestGroupFOrders:
         )
         ok = len(ctx.orders_by_priority) >= 2
         record_acceptance(
-            scenario_id="F3",
+            scenario_id="F2",
             messages=["طلباتي"],
             tenant=TENANT_A_NAME,
-            expected="multiple orders for customer C",
+            expected="multiple orders for customer C (F2)",
             actual="pass" if ok else "fail",
             tools=["track_order"],
             sources=["local_order_resolver"],
             result="pass" if ok else "fail",
             severity="major",
-            evidence={"count": len(ctx.orders_by_priority)},
+            evidence={"count": len(ctx.orders_by_priority), "matrix_note": "F2 multi-order"},
+        )
+        assert ok
+
+    def test_f3_no_order_customer_d(self, world) -> None:
+        ctx = resolve_customer_order_context(
+            world.db,
+            tenant_id=world.tenant_a.tenant_id,
+            customer_id=world.tenant_a.customers["D"].id,
+            phone=PHONE_CUST_D,
+            intent="track_order",
+        )
+        ok = len(ctx.orders_by_priority) == 0 and ctx.selected_order is None
+        record_acceptance(
+            scenario_id="F3",
+            messages=["طلباتي"],
+            tenant=TENANT_A_NAME,
+            expected="no order for customer D without foreign ref",
+            actual="pass" if ok else "fail",
+            tools=["track_order"],
+            sources=["local_order_resolver"],
+            result="pass" if ok else "fail",
+            severity="major",
+            evidence={"count": len(ctx.orders_by_priority), "matrix_note": "F3 no-order"},
         )
         assert ok
 
@@ -331,6 +356,29 @@ class TestGroupGHandoff:
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = None
         return db
+
+    def test_g1_handoff_scrub_with_truth(self, harness) -> None:
+        promise = "سأحوّل المحادثة لفريق المتجر الآن."
+        out, scrubbed = harness.scrub_outbound(
+            promise,
+            tenant_id=1,
+            recipient="966500100001",
+            handoff_truth_active=True,
+        )
+        ok = not scrubbed and out["text"]["body"] == promise
+        record_acceptance(
+            scenario_id="G1",
+            messages=["أبغى أكلم موظف"],
+            tenant=TENANT_A_NAME,
+            expected="handoff promise kept when truth active",
+            actual="pass" if ok else "fail",
+            tools=[],
+            sources=["outbound_sanitizer", "handoff_truth"],
+            result="pass" if ok else "fail",
+            severity="critical",
+            evidence={"scrubbed": scrubbed},
+        )
+        assert ok
 
     def test_g2_handoff_scrub_without_truth(self, harness) -> None:
         out, scrubbed = harness.scrub_outbound(
@@ -509,6 +557,42 @@ class TestGroupBCatalog:
 
         _run(_go())
 
+    def test_a3_generic_category_search(self, world, harness) -> None:
+        async def _go():
+            perfume = await harness.execute_tool(
+                world.tenant_a.tenant_id,
+                "search_products",
+                {"query": "عطر"},
+            )
+            shoes = await harness.execute_tool(
+                world.tenant_a.tenant_id,
+                "search_products",
+                {"query": "حذاء"},
+            )
+            perfume_titles = [p.get("title") for p in perfume.payload.get("products", [])]
+            shoe_titles = [p.get("title") for p in shoes.payload.get("products", [])]
+            ok = (
+                len(perfume_titles) >= 2
+                and len(shoe_titles) >= 2
+                and all("عطر" in (t or "") for t in perfume_titles)
+                and all("حذاء" in (t or "") for t in shoe_titles)
+            )
+            record_acceptance(
+                scenario_id="A3",
+                messages=["أبغى عطر", "أبغى حذاء"],
+                tenant=TENANT_A_NAME,
+                expected="multiple real catalog options per generic category",
+                actual="pass" if ok else "fail",
+                tools=["search_products"],
+                sources=["catalog"],
+                result="pass" if ok else "fail",
+                severity="major",
+                evidence={"perfume_titles": perfume_titles, "shoe_titles": shoe_titles},
+            )
+            assert ok
+
+        _run(_go())
+
     def test_a4_similar_name_disambiguation(self, world, harness) -> None:
         async def _go():
             res = await harness.execute_tool(
@@ -558,6 +642,24 @@ class TestGroupBCatalog:
             assert ok
 
         _run(_go())
+
+    def test_b6_product_url_from_metadata(self, world) -> None:
+        product = world.tenant_a.products["C"]
+        url = resolve_product_public_url(product)
+        ok = url == "https://store-a.test/products/perfume-rose"
+        record_acceptance(
+            scenario_id="B6",
+            messages=["أرسل الرابط"],
+            tenant=TENANT_A_NAME,
+            expected="product URL from seeded catalog metadata",
+            actual="pass" if ok else "fail",
+            tools=["get_product_details"],
+            sources=["catalog_metadata", "native_product_public_url"],
+            result="pass" if ok else "fail",
+            severity="major",
+            evidence={"product_url": url, "external_id": product.external_id},
+        )
+        assert ok
 
     def test_b4_stock_in_stock_variant(self, world, harness) -> None:
         async def _go():
@@ -661,6 +763,38 @@ class TestGroupCDiscount:
         )
         assert ok
 
+    def test_c3_no_coupon_invention_when_loader_empty(self, world) -> None:
+        facts, obs = load_coupon_promotion_facts(
+            db=world.db,
+            tenant_id=world.tenant_a.tenant_id,
+            customer_phone=PHONE_CUST_A,
+            message="عندكم كود خصم؟",
+        )
+        coupon_facts = [f for f in facts if f.domain.value == "coupons"]
+        invented_codes = [
+            (f.value or {}).get("code")
+            for f in coupon_facts
+            if (f.value or {}).get("code")
+        ]
+        ok = (
+            not invented_codes
+            and obs.get("coupon_count", 0) == 0
+            and any((f.value or {}).get("reason_when_unavailable") == "no_coupon_data" for f in coupon_facts)
+        )
+        record_acceptance(
+            scenario_id="C3",
+            messages=["عندكم كود خصم؟"],
+            tenant=TENANT_A_NAME,
+            expected="no invented coupon codes when offer loader empty",
+            actual="pass" if ok else "fail",
+            tools=[],
+            sources=["coupon_offer_loader"],
+            result="pass" if ok else "fail",
+            severity="critical",
+            evidence={"coupon_count": obs.get("coupon_count"), "invented_codes": invented_codes},
+        )
+        assert ok
+
 
 # ── Group D: Knowledge ──────────────────────────────────────────────────────
 
@@ -697,6 +831,24 @@ class TestGroupDKnowledge:
             sources=["merchant_knowledge_section"],
             result="pass" if ok else "fail",
             severity="major",
+        )
+        assert ok
+
+    def test_d4_refund_policy_kb(self, world) -> None:
+        sections = query_kb_sections(world.db, world.tenant_a.tenant_id, kind="policy")
+        body = " ".join(s.body for s in sections)
+        ok = "استبدال" in body or "استرجاع" in body or "7" in body
+        record_acceptance(
+            scenario_id="D4",
+            messages=["هل أقدر أرجع المنتج؟"],
+            tenant=TENANT_A_NAME,
+            expected="refund/returns policy KB present for tenant A",
+            actual="pass" if ok else "fail",
+            tools=[],
+            sources=["merchant_knowledge_section"],
+            result="pass" if ok else "fail",
+            severity="major",
+            evidence={"policy_sections": len(sections)},
         )
         assert ok
 
@@ -771,6 +923,39 @@ class TestGroupKPermissions:
             severity="critical",
         )
         assert ok
+
+    def test_k3_search_allowed_under_fail_closed(self, world) -> None:
+        async def _go():
+            with patch.object(world.db, "query", side_effect=RuntimeError("db unavailable")):
+                load = load_tenant_commerce_permissions(world.db, world.tenant_a.tenant_id)
+            runtime = CommerceToolRuntime(
+                world.db,
+                tenant_id=world.tenant_a.tenant_id,
+                permissions=load.permissions,
+                permission_source=load.source,
+            )
+            result = await runtime.execute("search_products", {"query": "حذاء"})
+            titles = [p.get("title") for p in (result.payload or {}).get("products", [])]
+            ok = (
+                load.source == "load_failed"
+                and result.ok
+                and len(titles) >= 2
+            )
+            record_acceptance(
+                scenario_id="K3",
+                messages=["حذاء"],
+                tenant=TENANT_A_NAME,
+                expected="search_products allowed under fail-closed permissions",
+                actual="pass" if ok else "fail",
+                tools=["search_products"],
+                sources=[load.source, "catalog"],
+                result="pass" if ok else "fail",
+                severity="critical",
+                evidence={"titles": titles, "permission_source": load.source},
+            )
+            assert ok
+
+        _run(_go())
 
 
 # ── OFV2 rollout (synthetic tenant only) ─────────────────────────────────────

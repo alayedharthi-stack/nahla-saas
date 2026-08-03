@@ -33,6 +33,27 @@ ACCEPTANCE_RESULTS: List[Dict[str, Any]] = []
 
 RESULTS_PATH = _HERE / "ACCEPTANCE_RESULTS.json"
 
+# Closed A–K authorization matrix from Salla Merchant AI acceptance authorization.
+AUTHORIZED_MATRIX_IDS: Tuple[str, ...] = (
+    "A1", "A2", "A3", "A4",
+    "B1", "B2", "B3", "B4", "B5", "B6",
+    "C1", "C2", "C3", "C4",
+    "D1", "D2", "D3", "D4", "D5", "D6",
+    "E1",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7",
+    "G1", "G2", "G3", "G4", "G5",
+    "H1", "H2", "H3", "H4", "H5",
+    "I1", "I2", "I3", "I4", "I5", "I6",
+    "J1",
+    "K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10",
+)
+
+# Map harness sub-IDs to canonical matrix IDs where they extend a cell.
+_MATRIX_ID_ALIASES: Dict[str, str] = {
+    "C2b": "C1",
+    "H1b": "H5",
+}
+
 
 @dataclass
 class OutboundRecord:
@@ -325,6 +346,22 @@ def record_turn(turn: AcceptanceTurnResult, *, tenant_name: str, expected: str) 
     )
 
 
+def _normalize_matrix_id(scenario_id: str) -> str:
+    sid = str(scenario_id or "").strip()
+    return _MATRIX_ID_ALIASES.get(sid, sid)
+
+
+def _matrix_coverage(rows: List[Dict[str, Any]]) -> Tuple[List[str], List[str], float]:
+    covered: set[str] = set()
+    for row in rows:
+        canonical = _normalize_matrix_id(str(row.get("id") or ""))
+        if canonical in AUTHORIZED_MATRIX_IDS:
+            covered.add(canonical)
+    gaps = [mid for mid in AUTHORIZED_MATRIX_IDS if mid not in covered]
+    pct = round((len(covered) / len(AUTHORIZED_MATRIX_IDS)) * 100, 1) if AUTHORIZED_MATRIX_IDS else 0.0
+    return sorted(covered), gaps, pct
+
+
 def write_acceptance_report(path: Optional[Path] = None) -> Dict[str, Any]:
     path = path or RESULTS_PATH
     rows = list(ACCEPTANCE_RESULTS)
@@ -339,6 +376,8 @@ def write_acceptance_report(path: Optional[Path] = None) -> Dict[str, Any]:
     minor_failures = [
         r["id"] for r in rows if r.get("result") == "fail" and r.get("severity") == "minor"
     ]
+    matrix_covered, matrix_gaps, matrix_pct = _matrix_coverage(rows)
+    layer1_green = len(critical_failures) == 0 and len(major_failures) == 0
     summary = {
         "scenarios_total": len(rows),
         "passed": passed,
@@ -346,12 +385,28 @@ def write_acceptance_report(path: Optional[Path] = None) -> Dict[str, Any]:
         "critical_failures": critical_failures,
         "major_failures": major_failures,
         "minor_failures": minor_failures,
-        "ready_for_internal_live_test": len(critical_failures) == 0,
-        "ready_for_tenant1_pilot": len(critical_failures) == 0 and len(major_failures) == 0,
+        "layers_completed": ["layer1"],
+        "layers_not_run": [
+            "layer2_simulated_whatsapp_e2e",
+            "layer3_human_conversation_quality",
+            "layer4_live_whatsapp",
+        ],
+        "matrix_ids_authorized": len(AUTHORIZED_MATRIX_IDS),
+        "matrix_ids_covered": matrix_covered,
+        "matrix_coverage_pct_estimate": matrix_pct,
+        "gaps": matrix_gaps,
+        "coverage_note": (
+            "Layer 1 deterministic tool/state probes only. "
+            f"{len(matrix_covered)}/{len(AUTHORIZED_MATRIX_IDS)} authorized A–K matrix IDs covered. "
+            "Layer 2 simulated WhatsApp E2E and Layer 3 human conversation review not run. "
+            "Readiness flags remain false until those layers pass acceptance criteria."
+        ),
+        "ready_for_internal_live_test": False,
+        "ready_for_tenant1_pilot": False,
+        "layer1_all_green": layer1_green,
         "blocking_defects": critical_failures + major_failures,
         "recommended_fix_packages": _suggest_fix_packages(rows),
-        "recommended_next_action": _next_action(critical_failures, major_failures),
-        "layers_not_run": ["layer3_human_conversation_quality", "layer4_live_whatsapp"],
+        "recommended_next_action": _next_action(critical_failures, major_failures, matrix_gaps),
         "results": rows,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,16 +448,22 @@ def _suggest_fix_packages(rows: List[Dict[str, Any]]) -> List[str]:
     return sorted(set(packages))
 
 
-def _next_action(critical: List[str], major: List[str]) -> str:
+def _next_action(critical: List[str], major: List[str], gaps: List[str]) -> str:
     if critical:
         return "Fix critical failures before internal live test."
     if major:
         return "Review major failures; rerun acceptance suite."
-    return "Proceed to Layer 3 human conversation quality review."
+    if gaps:
+        return (
+            "Layer 1 green on implemented probes; expand matrix coverage and run "
+            "Layer 2 simulated E2E + Layer 3 human review before live test."
+        )
+    return "Run Layer 2 simulated WhatsApp E2E, then Layer 3 human conversation quality review."
 
 
 __all__ = [
     "ACCEPTANCE_RESULTS",
+    "AUTHORIZED_MATRIX_IDS",
     "AcceptanceHarness",
     "AcceptanceTurnResult",
     "OutboundCapture",

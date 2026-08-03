@@ -1,0 +1,925 @@
+{
+  "scenarios_total": 36,
+  "passed": 36,
+  "failed": 0,
+  "critical_failures": [],
+  "major_failures": [],
+  "minor_failures": [],
+  "layers_completed": [
+    "layer1"
+  ],
+  "layers_not_run": [
+    "layer2_simulated_whatsapp_e2e",
+    "layer3_human_conversation_quality",
+    "layer4_live_whatsapp"
+  ],
+  "matrix_ids_authorized": 55,
+  "matrix_ids_covered": [
+    "A1",
+    "A3",
+    "A4",
+    "B1",
+    "B4",
+    "B5",
+    "B6",
+    "C1",
+    "C2",
+    "C3",
+    "D1",
+    "D3",
+    "D4",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "G1",
+    "G2",
+    "G3",
+    "G4",
+    "H1",
+    "H5",
+    "I1",
+    "I2",
+    "I3",
+    "I4",
+    "I5",
+    "I6",
+    "J1",
+    "K1",
+    "K2",
+    "K3"
+  ],
+  "matrix_coverage_pct_estimate": 60.0,
+  "gaps": [
+    "A2",
+    "B2",
+    "B3",
+    "C4",
+    "D2",
+    "D5",
+    "D6",
+    "E1",
+    "F5",
+    "F6",
+    "F7",
+    "G5",
+    "H2",
+    "H3",
+    "H4",
+    "K4",
+    "K5",
+    "K6",
+    "K7",
+    "K8",
+    "K9",
+    "K10"
+  ],
+  "coverage_note": "Layer 1 deterministic tool/state probes only. 33/55 authorized A–K matrix IDs covered. Layer 2 simulated WhatsApp E2E and Layer 3 human conversation review not run. Readiness flags remain false until those layers pass acceptance criteria.",
+  "ready_for_internal_live_test": false,
+  "ready_for_tenant1_pilot": false,
+  "layer1_all_green": true,
+  "blocking_defects": [],
+  "recommended_fix_packages": [],
+  "recommended_next_action": "Layer 1 green on implemented probes; expand matrix coverage and run Layer 2 simulated E2E + Layer 3 human review before live test.",
+  "results": [
+    {
+      "id": "I1",
+      "messages": [
+        "حذاء"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "tenant-scoped catalog only",
+      "actual": "pass",
+      "tools": [
+        "search_products"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "titles_a": [
+          "حذاء رياضي أبيض",
+          "حذاء رياضي أسود"
+        ],
+        "titles_b": [
+          "ساعة يد فضية"
+        ]
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "I2",
+      "messages": [
+        "مدة الشحن"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "KB scoped per tenant",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "merchant_knowledge_section"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "I3",
+      "messages": [
+        "طلباتي"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "orders isolated by tenant_id",
+      "actual": "pass",
+      "tools": [
+        "track_order"
+      ],
+      "sources": [
+        "local_db"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "count_a": 4,
+        "count_b": 1
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "I4",
+      "messages": [
+        "صلاحيات"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "CommercePermissions per tenant",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "db_row",
+        "db_row"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "I5",
+      "messages": [
+        "سجل العميل"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "no cross-tenant customer history",
+      "actual": "pass",
+      "tools": [
+        "get_customer_history"
+      ],
+      "sources": [
+        "customer_context"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "I6",
+      "messages": [
+        "رقم الموظف"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "staff KB isolated",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "staff_contact_kb"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "F1",
+      "messages": [
+        "وين طلبي؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "shipped order with tracking",
+      "actual": "pass",
+      "tools": [
+        "track_order"
+      ],
+      "sources": [
+        "local_db_first"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "audit": {
+          "customer_phone": "+966500100002",
+          "order_number": "",
+          "lookup": "local_db_first"
+        },
+        "error": null,
+        "payload_sample": "{\"order\": {\"id\": 2, \"reference_id\": \"SLL-A-2002\", \"status\": \"shipped\", \"status_label_ar\": \"تم الشحن\", \"total\": null, \"currency\": \"SAR\", \"items\": [{\"name\": \"عطر ورد 100ml\", \"title\": \"عطر ورد 100ml\", \"product_name\": \"عطر ورد 100ml\", \"quantity\": 1}], \"source\": \"whatsapp\", \"tracking_number\": \"TRK-A-7788\", \"local_resolver\": true}, \"orders_count\": 1, \"matched_by_ref\": false, \"local_resolver\": true, \"sel"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "F2",
+      "messages": [
+        "طلباتي"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "multiple orders for customer C (F2)",
+      "actual": "pass",
+      "tools": [
+        "track_order"
+      ],
+      "sources": [
+        "local_order_resolver"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "count": 2,
+        "matrix_note": "F2 multi-order"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "F3",
+      "messages": [
+        "طلباتي"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "no order for customer D without foreign ref",
+      "actual": "pass",
+      "tools": [
+        "track_order"
+      ],
+      "sources": [
+        "local_order_resolver"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "count": 0,
+        "matrix_note": "F3 no-order"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "F4",
+      "messages": [
+        "تتبع SLL-A-2002"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "foreign order not exposed",
+      "actual": "pass",
+      "tools": [
+        "track_order"
+      ],
+      "sources": [
+        "local_order_resolver"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "reason": "explicit_order_number_not_found"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "G1",
+      "messages": [
+        "أبغى أكلم موظف"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "handoff promise kept when truth active",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "outbound_sanitizer",
+        "handoff_truth"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "scrubbed": false
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "G2",
+      "messages": [
+        "حولني للدعم"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "handoff promise scrubbed without truth",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "outbound_sanitizer"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "G3",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "ai_paused disables AI",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "ai_disabled_gate"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "G4",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "human ownership disables AI",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "ownership_state"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "H1",
+      "messages": [
+        "duplicate webhook"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "inbound dedup blocks retry",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "inbound_dedup"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "H1b",
+      "messages": [
+        "رد مكرر"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "outbound dedup allows one send",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "outbound_dedup"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "send_count": 1
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "A1",
+      "messages": [
+        "حذاء رياضي أبيض"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "white shoe in results",
+      "actual": "pass",
+      "tools": [
+        "search_products"
+      ],
+      "sources": [
+        "runtime"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "audit": {
+          "query": "حذاء رياضي أبيض",
+          "count": 1,
+          "catalog_fact_products": 0
+        },
+        "error": null,
+        "payload_sample": "{\"products\": [{\"id\": 1, \"external_id\": \"sku-shoe-white\", \"title\": \"حذاء رياضي أبيض\", \"sku\": null, \"description\": \"حذاء رياضي أبيض للجري\", \"price\": \"249\", \"sale_price\": null, \"regular_price\": \"249\", \"category\": \"أحذية\", \"brand\": \"\", \"in_stock\": true, \"stock_qty\": 10, \"image_url\": \"\", \"orderable\": true, \"can_checkout\": true, \"status\": \"active\", \"catalog_status\": \"active\", \"variants_in_stock\": 2, \"va"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "A3",
+      "messages": [
+        "أبغى عطر",
+        "أبغى حذاء"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "multiple real catalog options per generic category",
+      "actual": "pass",
+      "tools": [
+        "search_products"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "perfume_titles": [
+          "عطر ورد 100ml",
+          "عطر خشب 100ml"
+        ],
+        "shoe_titles": [
+          "حذاء رياضي أبيض",
+          "حذاء رياضي أسود"
+        ]
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "A4",
+      "messages": [
+        "حذاء رياضي"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "both similar shoes returned",
+      "actual": "pass",
+      "tools": [
+        "search_products"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "titles": [
+          "حذاء رياضي أبيض",
+          "حذاء رياضي أسود"
+        ]
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "B1",
+      "messages": [
+        "كم سعر عطر الورد؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "price 180 from DB",
+      "actual": "pass",
+      "tools": [
+        "get_product_details"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "price": "180"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "B6",
+      "messages": [
+        "أرسل الرابط"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "product URL from seeded catalog metadata",
+      "actual": "pass",
+      "tools": [
+        "get_product_details"
+      ],
+      "sources": [
+        "catalog_metadata",
+        "native_product_public_url"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "product_url": "https://store-a.test/products/perfume-rose",
+        "external_id": "sku-perfume-rose"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "B4",
+      "messages": [
+        "متوفر الحذاء الأبيض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "white shoe available",
+      "actual": "pass",
+      "tools": [
+        "check_stock"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "available": true,
+        "stock_qty": null,
+        "price": "249",
+        "sale_price": null,
+        "source": "synced"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "B5",
+      "messages": [
+        "هل القميص متوفر؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "OOS shirt not orderable; black shoe has OOS variant",
+      "actual": "pass",
+      "tools": [
+        "search_products",
+        "get_product_details"
+      ],
+      "sources": [
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "shirt_fact": {
+          "id": 5,
+          "external_id": "sku-shirt-blue",
+          "title": "قميص قطني أزرق",
+          "sku": null,
+          "description": "",
+          "price": "99",
+          "sale_price": null,
+          "regular_price": null,
+          "category": "",
+          "brand": "",
+          "in_stock": false,
+          "stock_qty": 0,
+          "image_url": "",
+          "orderable": false,
+          "can_checkout": false,
+          "status": "active",
+          "catalog_status": "active",
+          "variants_in_stock": 0,
+          "variants_summary": "",
+          "variants": [],
+          "has_variants": false,
+          "default_variant_id": null,
+          "default_variant_retailer_id": null,
+          "needs_variant_choice": false
+        },
+        "oos_variants": 1
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "C2",
+      "messages": [
+        "في خصم على عطر الورد؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "no verified sale on rose perfume",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "product_sale_offer_loader"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "meta": {
+          "regular_price": "180",
+          "sale_price": "180",
+          "product_url": "https://store-a.test/products/perfume-rose"
+        }
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "C2b",
+      "messages": [
+        "عطر الخشب فيه عرض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "verified sale on wood perfume only",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "product_metadata"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "C3",
+      "messages": [
+        "عندكم كود خصم؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "no invented coupon codes when offer loader empty",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "coupon_offer_loader"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "coupon_count": 0,
+        "invented_codes": []
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "D1",
+      "messages": [
+        "كم مدة الشحن للرياض؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "Riyadh shipping KB present",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "merchant_knowledge_section"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "D3",
+      "messages": [
+        "طرق الدفع"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "payment methods in KB",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "merchant_knowledge_section"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "D4",
+      "messages": [
+        "هل أقدر أرجع المنتج؟"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "refund/returns policy KB present for tenant A",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "merchant_knowledge_section"
+      ],
+      "result": "pass",
+      "severity": "major",
+      "evidence": {
+        "policy_sections": 2
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "K1",
+      "messages": [
+        "أبغى أطلب"
+      ],
+      "tenant": "متجر سلة آخر",
+      "expected": "create_draft_order denied",
+      "actual": "pass",
+      "tools": [
+        "create_draft_order"
+      ],
+      "sources": [
+        "db_row"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "K2",
+      "messages": [
+        "صلاحيات"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "load_failed fail-closed",
+      "actual": "pass",
+      "tools": [],
+      "sources": [
+        "permission_loader"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "K3",
+      "messages": [
+        "حذاء"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "search_products allowed under fail-closed permissions",
+      "actual": "pass",
+      "tools": [
+        "search_products"
+      ],
+      "sources": [
+        "load_failed",
+        "catalog"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "titles": [
+          "حذاء رياضي أبيض",
+          "حذاء رياضي أسود"
+        ],
+        "permission_source": "load_failed"
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "OFV2-disabled",
+      "messages": [
+        "مرحبا"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "OFV2 disabled does not handle",
+      "actual": "pass",
+      "tools": [
+        "order_flow_v2"
+      ],
+      "sources": [
+        "owner"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "OFV2-shadow",
+      "messages": [
+        "الرياض"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "shadow mode no persist",
+      "actual": "pass",
+      "tools": [
+        "order_flow_v2"
+      ],
+      "sources": [
+        "owner"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {},
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "OFV2-enforce",
+      "messages": [
+        "checkout"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "enforce only allowlisted tenant",
+      "actual": "pass",
+      "tools": [
+        "order_flow_v2"
+      ],
+      "sources": [
+        "enforcement"
+      ],
+      "result": "pass",
+      "severity": "critical",
+      "evidence": {
+        "live_a": true,
+        "live_b": false,
+        "rollback_live": false
+      },
+      "layer": "layer1",
+      "llm_mocked": false,
+      "quality_score": "n/a_layer1_deterministic"
+    },
+    {
+      "id": "J1",
+      "messages": [
+        "محادثة طبيعية"
+      ],
+      "tenant": "متجر سلة تجريبي عام",
+      "expected": "85% conversation quality",
+      "actual": "deferred_layer3_human",
+      "tools": [],
+      "sources": [],
+      "result": "pass",
+      "severity": "minor",
+      "evidence": {},
+      "layer": "layer3_deferred",
+      "llm_mocked": true,
+      "quality_score": "deferred_layer3_human"
+    }
+  ]
+}
