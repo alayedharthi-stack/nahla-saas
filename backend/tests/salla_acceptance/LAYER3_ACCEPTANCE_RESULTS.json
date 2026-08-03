@@ -1,0 +1,43 @@
+{
+  "base_sha": "642a51847e95",
+  "test_environment": "synthetic_sqlite_layer3_live_llm_blocked",
+  "llm_provider_and_model": "openai_compatible/gpt-5.6-luna (required, not executed)",
+  "openai_key_present": false,
+  "anthropic_key_present": true,
+  "blocker": "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path.",
+  "sessions_total": 26,
+  "sessions_executed": 0,
+  "customer_messages_total": 182,
+  "customer_messages_executed": 0,
+  "tenants_tested": [],
+  "critical_failures": [
+    "LAYER3_BLOCKED_NO_OPENAI_KEY"
+  ],
+  "major_failures": [],
+  "minor_failures": [],
+  "critical_count": 1,
+  "major_count": 0,
+  "minor_count": 0,
+  "tracking_delivery_accuracy_pct": null,
+  "handoff_accuracy_pct": null,
+  "dedup_behavior_assessment": "not_executed",
+  "conversation_quality_score": null,
+  "average_response_latency_ms": null,
+  "tools_observed": [],
+  "compose_usage_rate": 0.0,
+  "telemetry_gaps": [
+    "live_compose_never_ran"
+  ],
+  "blocking_defects": [
+    "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path."
+  ],
+  "recommended_fix_packages": [
+    "P0: Provide OPENAI_API_KEY in process env for Layer3 live Luna compose"
+  ],
+  "ready_for_internal_live_test": false,
+  "ready_for_tenant1_pilot": false,
+  "recommended_next_action": "OPENAI_API_KEY absent — Layer 3 requires live OpenAI Luna compose (DefaultComposer._llm_compose -> OpenAICompatibleProvider). ANTHROPIC_API_KEY=present cannot substitute merchant chat path.",
+  "best_5_sessions": [],
+  "worst_5_sessions": [],
+  "live_compose_proven": false
+}
