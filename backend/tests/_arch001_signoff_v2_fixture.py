@@ -233,7 +233,8 @@ def write_production_fixture_tree(
     pinned_revision = _pinned_revision(app_root)
     matrix = _matrix(app_root)
     identity = _identity(manifest_digest=manifest["manifest_digest"], pinned_revision=pinned_revision)
-    start = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(hours=2)).replace(second=0, microsecond=0)
     offsets = [0, 5, 10, 30, 45, 60]
 
     phase_dir = tmp_path / "phases"
