@@ -121,6 +121,25 @@ class TestCityShippingResolution:
         res = resolve_city_shipping_policy(db, tenant_id=tenant.id, city="أبها")
         assert res.shipping_fee_sar == 22.0
 
+    def test_generalization_kb_city_outside_builtin_list(self) -> None:
+        """City label authored only in tenant KB — not hardcoded in runtime."""
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر نيوم تجريبي")
+        _seed_shipping_kb(
+            db,
+            tenant.id,
+            "الشحن لنيوم — 55 ريال خلال 2 أيام.",
+        )
+        res = resolve_city_shipping_policy(db, tenant_id=tenant.id, city="نيوم")
+        assert res.shipping_fee_sar == 55.0
+        facts = build_shipping_knowledge_facts(
+            db,
+            tenant_id=tenant.id,
+            message="كم الشحن لنيوم؟",
+        )
+        assert facts.get("fee_sar") == 55.0
+        assert facts.get("need_city") is False
+
     def test_tenant_isolation_different_fees(self, db_tenant_a, db_tenant_b) -> None:
         db_a, tenant_a = db_tenant_a
         db_b, tenant_b = db_tenant_b
@@ -130,6 +149,52 @@ class TestCityShippingResolution:
         assert dammam_b.shipping_fee_sar == 40.0
         missing_on_b = resolve_city_shipping_policy(db_b, tenant_id=tenant_b.id, city="الرياض")
         assert missing_on_b.city_not_covered is True
+
+    def test_same_city_different_fee_across_tenants(self) -> None:
+        db, _ = make_scenario_db()
+        tenant_a = seed_tenant(db, name="متجر أ")
+        tenant_b = seed_tenant(db, name="متجر ب")
+        _seed_shipping_kb(db, tenant_a.id, "الشحن للرياض — 25 ريال.")
+        _seed_shipping_kb(db, tenant_b.id, "الشحن للرياض — 40 ريال.")
+        fee_a = resolve_city_shipping_policy(db, tenant_id=tenant_a.id, city="الرياض")
+        fee_b = resolve_city_shipping_policy(db, tenant_id=tenant_b.id, city="الرياض")
+        assert fee_a.shipping_fee_sar == 25.0
+        assert fee_b.shipping_fee_sar == 40.0
+
+    def test_eta_without_fee_from_kb(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر مدة فقط")
+        _seed_shipping_kb(db, tenant.id, "الشحن للرياض خلال 2-3 أيام عمل.")
+        res = resolve_city_shipping_policy(db, tenant_id=tenant.id, city="الرياض")
+        assert res.shipping_fee_sar is None
+        assert res.eta
+        assert res.city_not_covered is False
+        facts = build_shipping_knowledge_facts(
+            db,
+            tenant_id=tenant.id,
+            message="كم مدة الشحن للرياض؟",
+        )
+        assert "fee_sar" not in facts
+        assert facts.get("eta")
+        assert facts.get("city") == "الرياض"
+        assert facts.get("need_city") is False
+
+    def test_fee_without_eta_from_kb(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر رسوم فقط")
+        _seed_shipping_kb(db, tenant.id, "الشحن لجدة — 35 ريال.")
+        res = resolve_city_shipping_policy(db, tenant_id=tenant.id, city="جدة")
+        assert res.shipping_fee_sar == 35.0
+        assert res.eta == ""
+
+    def test_does_not_treat_fee_prose_as_destination(self) -> None:
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر عام")
+        _seed_shipping_kb(db, tenant.id, "الشحن مجاني داخل المدينة.")
+        # Must not invent a destination city named after free-shipping prose.
+        rules_city = resolve_city_shipping_policy(db, tenant_id=tenant.id, city="مجاني")
+        assert rules_city.city_not_covered is True
+        assert rules_city.shipping_fee_sar is None
 
 
 class TestShippingKnowledgeComposeFacts:

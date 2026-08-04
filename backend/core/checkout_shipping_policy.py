@@ -156,8 +156,19 @@ def _fetch_shipping_kb_body(db: Any, tenant_id: int) -> str:
         )
         parts = [str(getattr(row, "body", "") or "").strip() for row in rows]
         return "\n".join(part for part in parts if part)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing KB must not break shipping resolve
         return ""
+
+
+def _normalize_city_key(text: str) -> str:
+    try:
+        from modules.ai.brain.intent.ordering_extractor import (  # noqa: PLC0415
+            _normalize_arabic,
+        )
+
+        return str(_normalize_arabic(text or "") or "").strip()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — city normalize is best-effort
+        return str(text or "").strip()
 
 
 def _detect_city_in_text(text: str) -> str:
@@ -183,8 +194,64 @@ def _detect_city_in_text(text: str) -> str:
             if bare and bare in norm_seg:
                 return city
         return ""
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — city detect is best-effort for KB parsing
         return ""
+
+
+# Generic destination capture from shipping KB prose — not a fixed city list.
+# Prefer explicit destination markers (ل / إلى) to avoid capturing fee/ETA prose.
+_KB_CITY_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?:الشحن|شحن|توصيل)\s+(?:ل(?:ـ)?|إلى|الى)\s*([^\d\-–—,،:.\n]{2,40})",
+        re.I | re.UNICODE,
+    ),
+)
+_NON_DESTINATION_TOKENS = frozenset(
+    {
+        "مجاني",
+        "مجانا",
+        "مجاناً",
+        "free",
+        "ريال",
+        "sar",
+        "خلال",
+        "يوم",
+        "ايام",
+        "أيام",
+        "ساعة",
+        "ساعات",
+        "تكلفة",
+        "سعر",
+        "قيمة",
+        "التوصيل",
+        "الشحن",
+    }
+)
+
+
+def _extract_city_label_from_segment(segment: str) -> str:
+    """Prefer known-city detect; else capture destination token from KB prose."""
+    detected = _detect_city_in_text(segment)
+    if detected:
+        return detected
+    for pattern in _KB_CITY_PATTERNS:
+        match = pattern.search(segment or "")
+        if not match:
+            continue
+        raw = str(match.group(1) or "").strip(" \t\r\n-–—:،,.")
+        raw = re.split(r"\s+خلال\s+", raw, maxsplit=1)[0]
+        raw = re.split(r"\s+في\s+", raw, maxsplit=1)[0]
+        # Drop trailing fee/ETA fragments if capture ran long.
+        raw = re.split(r"\s+\d", raw, maxsplit=1)[0].strip(" \t-–—:،,.")
+        token = raw.split()[0] if raw.split() else raw
+        if len(raw) < 2:
+            continue
+        if _normalize_city_key(token) in _NON_DESTINATION_TOKENS:
+            continue
+        if _normalize_city_key(raw) in _NON_DESTINATION_TOKENS:
+            continue
+        return raw
+    return ""
 
 
 def _kb_segments(body: str) -> List[str]:
@@ -201,7 +268,7 @@ def _kb_segments(body: str) -> List[str]:
 
 
 def _parse_segment_city_policy(segment: str) -> Optional[CityShippingResolution]:
-    city = _detect_city_in_text(segment)
+    city = _extract_city_label_from_segment(segment)
     if not city:
         return None
     policy_l = segment.lower()
@@ -231,7 +298,8 @@ def _parse_segment_city_policy(segment: str) -> Optional[CityShippingResolution]
         eta=eta,
         source="kb_shipping_policy",
         known=True,
-        city_not_covered=True,
+        # City appears in KB; fee may be absent (ETA-only policy is still known).
+        city_not_covered=not bool(eta),
     )
 
 
@@ -241,7 +309,42 @@ def _parse_kb_city_shipping_rules(body: str) -> Dict[str, CityShippingResolution
         parsed = _parse_segment_city_policy(segment)
         if parsed is not None and parsed.city:
             rules[parsed.city] = parsed
+            # Also index by normalized key for spelling variants.
+            norm = _normalize_city_key(parsed.city)
+            if norm and norm not in rules:
+                rules[norm] = parsed
     return rules
+
+
+def _match_city_rule(
+    rules: Dict[str, CityShippingResolution],
+    city: str,
+) -> Optional[CityShippingResolution]:
+    normalized_city = str(city or "").strip()
+    if not normalized_city:
+        return None
+    if normalized_city in rules:
+        return rules[normalized_city]
+    norm_query = _normalize_city_key(normalized_city)
+    if norm_query and norm_query in rules:
+        return rules[norm_query]
+    detected = _detect_city_in_text(normalized_city)
+    if detected and detected in rules:
+        return rules[detected]
+    # Match query against KB-authored city labels (including non-catalog cities).
+    for rule_city, resolution in rules.items():
+        rule_norm = _normalize_city_key(rule_city)
+        if not rule_norm:
+            continue
+        if rule_norm == norm_query:
+            return resolution
+        if norm_query and (rule_norm in norm_query or norm_query in rule_norm):
+            return resolution
+        bare_rule = rule_norm.removeprefix("ال")
+        bare_query = norm_query.removeprefix("ال")
+        if bare_rule and bare_query and bare_rule == bare_query:
+            return resolution
+    return None
 
 
 def _parse_kb_shipping_rules(body: str) -> Dict[str, CheckoutShippingResolution]:
@@ -316,21 +419,43 @@ def _effective_city(
     message: str = "",
     brain_state: Optional[Dict[str, Any]] = None,
     order_prep: Optional[Dict[str, Any]] = None,
+    kb_city_labels: Optional[Tuple[str, ...]] = None,
 ) -> str:
     for candidate in (
         str(city or "").strip(),
         str((order_prep or {}).get("city") or "").strip(),
         str((brain_state or {}).get("order_prep", {}).get("city") or "").strip(),
         _detect_city_in_text(message or ""),
+        _extract_city_label_from_segment(message or ""),
     ):
         if candidate:
             return candidate
+
+    msg_norm = _normalize_city_key(message or "")
+    if msg_norm and kb_city_labels:
+        for label in sorted(kb_city_labels, key=len, reverse=True):
+            label_norm = _normalize_city_key(label)
+            if not label_norm:
+                continue
+            if label_norm in msg_norm or msg_norm == label_norm:
+                return label
+            bare = label_norm.removeprefix("ال")
+            if bare and bare in msg_norm:
+                return label
+
     session = dict((brain_state or {}).get("commerce_session") or {})
     pending = session.get(_PENDING_SHIPPING_CITY_KEY)
     if isinstance(pending, dict) and pending.get("needs_city"):
-        detected = _detect_city_in_text(message or "")
+        detected = _detect_city_in_text(message or "") or _extract_city_label_from_segment(
+            message or ""
+        )
         if detected:
             return detected
+        if msg_norm and kb_city_labels:
+            for label in sorted(kb_city_labels, key=len, reverse=True):
+                label_norm = _normalize_city_key(label)
+                if label_norm and (msg_norm == label_norm or label_norm in msg_norm):
+                    return label
     return ""
 
 
@@ -346,13 +471,9 @@ def resolve_city_shipping_policy(
 
     kb_body = _fetch_shipping_kb_body(db, tenant_id)
     rules = _parse_kb_city_shipping_rules(kb_body)
-    if normalized_city in rules:
-        return rules[normalized_city]
-
-    # Match canonical spellings (e.g. «جده» → «جدة»).
-    for rule_city, resolution in rules.items():
-        if rule_city == normalized_city or _detect_city_in_text(normalized_city) == rule_city:
-            return resolution
+    matched = _match_city_rule(rules, normalized_city)
+    if matched is not None:
+        return matched
 
     return CityShippingResolution(
         city=normalized_city,
@@ -372,11 +493,15 @@ def build_shipping_knowledge_facts(
     order_prep: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Structured trusted shipping facts for LLM compose (ask_shipping path)."""
+    kb_body = _fetch_shipping_kb_body(db, int(tenant_id or 0))
+    rules = _parse_kb_city_shipping_rules(kb_body)
+    kb_labels = tuple(sorted({r.city for r in rules.values() if r.city}))
     effective_city = _effective_city(
         city=city,
         message=message,
         brain_state=brain_state,
         order_prep=order_prep,
+        kb_city_labels=kb_labels,
     )
     if not effective_city:
         return {"need_city": True, "source": "kb"}
@@ -407,6 +532,13 @@ def build_shipping_knowledge_facts(
             "city": effective_city,
             "fee_sar": float(resolution.shipping_fee_sar),
             "free_shipping": False,
+            "eta": resolution.eta,
+            "source": "kb",
+            "need_city": False,
+        }
+    if resolution.eta:
+        return {
+            "city": effective_city,
             "eta": resolution.eta,
             "source": "kb",
             "need_city": False,
@@ -519,11 +651,15 @@ def resolve_verified_shipping_fee(
 ) -> Tuple[Optional[float], CheckoutShippingResolution]:
     """Best-effort verified shipping fee for truth guards."""
     prep = dict(order_prep or {})
+    kb_body = _fetch_shipping_kb_body(db, int(tenant_id or 0)) if db is not None else ""
+    rules = _parse_kb_city_shipping_rules(kb_body)
+    kb_labels = tuple(sorted({r.city for r in rules.values() if r.city}))
     city = _effective_city(
         city=str(prep.get("city") or ""),
         message=message,
         brain_state=brain_state,
         order_prep=prep,
+        kb_city_labels=kb_labels,
     )
     if city and db is not None and tenant_id:
         city_res = resolve_city_shipping_policy(db, tenant_id=int(tenant_id), city=city)
