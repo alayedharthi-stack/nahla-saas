@@ -263,6 +263,26 @@ class TestShippingCostTruthGuard:
         assert result.replaced is True
         assert result.reason == "shipping_fee_mismatch"
 
+    def test_guard_fails_closed_when_db_is_none(self, db_tenant_a) -> None:
+        db, tenant = db_tenant_a
+        reply = "تكلفة الشحن للرياض 25 ريال خلال 2-3 أيام."
+        verified = apply_shipping_cost_truth_guard(
+            reply,
+            db=db,
+            tenant_id=tenant.id,
+            message="كم الشحن للرياض؟",
+        )
+        assert verified.replaced is False
+        assert "25" in verified.reply
+
+        without_db = apply_shipping_cost_truth_guard(
+            reply,
+            db=None,
+            tenant_id=tenant.id,
+            message="كم الشحن للرياض؟",
+        )
+        assert without_db.replaced is True
+
     def test_verified_fee_helper_matches_kb(self, db_tenant_a) -> None:
         db, tenant = db_tenant_a
         fee, _resolution = resolve_verified_shipping_fee(
