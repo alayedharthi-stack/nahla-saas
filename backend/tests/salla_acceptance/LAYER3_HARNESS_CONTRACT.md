@@ -15,6 +15,14 @@ defects — not harness false positives or missing telemetry.
    `major_defects` signal quality gaps; harness gaps are `major` or `notes`,
    not critical.
 
+## Score scale
+
+Each axis uses a **1–5 integer rubric** where **5 = clean / no penalty** and
+1 = critical failure on that axis. Session percentage is
+`100 × sum(axis_scores) / (5 × number_of_axes)`. Aggregate axis percentages
+divide axis averages by 5. Readiness gates that require 85–100% are only
+attainable when defect-free sessions score **100%**.
+
 ## Score axes
 
 | Axis | Measures | Primary evidence |
@@ -29,6 +37,17 @@ defects — not harness false positives or missing telemetry.
 | `handoff_truth` | Human ownership suppresses AI commerce | `handoff_active`, post-handoff brain/compose activity |
 | `dialogue_usability` | Non-trivial reply length on LLM turns | Outbound length stats |
 | `compose_quality` | Live compose usage / fallback rate | `compose_invoked`, `compose_source` |
+
+| `compose_quality` | Live compose usage / fallback rate | `compose_invoked`, `compose_source` |
+
+## Compose (`compose_quality`)
+
+- Sessions with `handoff_then_no_commerce` **do not** emit
+  `no_llm_compose_observed` when zero LLM compose turns are observed — AI
+  compose suppression during human ownership is expected operational behavior.
+- Audit note: `compose_not_expected_handoff`; `compose_quality` stays at 5.
+- Non-handoff sessions with no compose still emit `no_llm_compose_observed`
+  (major) unless `dedup_steps` applies.
 
 ## Privacy (`privacy_no_other_order`)
 
@@ -47,6 +66,14 @@ defects — not harness false positives or missing telemetry.
 - Runner resets handoff flags for the dedup customer before execution.
 
 ## Context (BQ-3)
+
+Context retention is scored **only** when the session script sets
+`expected_checks.context_retention_required: true`. Do not infer context
+requirements from message substrings or turn count alone.
+
+Sessions **without** the flag (e.g. category browse `L3-G1-04`, missing-product
+then category-only `L3-G1-06`, policy/category threads `L3-G4-03`) are not
+penalized for absent product focus.
 
 Focus identity resolution matches `product_focus_identity`:
 

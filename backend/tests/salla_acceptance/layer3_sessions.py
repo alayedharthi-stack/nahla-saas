@@ -67,7 +67,10 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "أرسل رابط المنتج",
                 "شكراً",
             ],
-            expected_checks={"no_cross_tenant_titles": TENANT_B_LEAK},
+            expected_checks={
+                "no_cross_tenant_titles": TENANT_B_LEAK,
+                "context_retention_required": True,
+            },
         ),
         Layer3SessionScript(
             session_id="L3-G1-02",
@@ -84,6 +87,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "أبغى رابطه",
                 "طيب شكراً",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         Layer3SessionScript(
             session_id="L3-G1-03",
@@ -100,7 +104,10 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "متوفر؟",
                 "أرسل اللينك",
             ],
-            expected_checks={"no_watch_leak": ("ساعة", "فضية")},
+            expected_checks={
+                "no_watch_leak": ("ساعة", "فضية"),
+                "context_retention_required": True,
+            },
         ),
         Layer3SessionScript(
             session_id="L3-G1-04",
@@ -136,6 +143,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "ممتاز",
                 "شكراً",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         Layer3SessionScript(
             session_id="L3-G1-06",
@@ -171,6 +179,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "تم",
                 "شكراً",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         # Group 2 — Price / size / stock
         Layer3SessionScript(
@@ -192,6 +201,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "شكراً",
                 "مع السلامة",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         Layer3SessionScript(
             session_id="L3-G2-02",
@@ -209,7 +219,10 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "طيب",
                 "شكراً",
             ],
-            expected_checks={"oos_product": "sku-shirt-blue"},
+            expected_checks={
+                "oos_product": "sku-shirt-blue",
+                "context_retention_required": True,
+            },
         ),
         # Group 3 — Pronouns / context
         Layer3SessionScript(
@@ -229,6 +242,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "الأبيض",
                 "شكراً",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         Layer3SessionScript(
             session_id="L3-G3-02",
@@ -248,6 +262,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "شكراً",
                 "مع السلامة",
             ],
+            expected_checks={"context_retention_required": True},
         ),
         # Group 4 — Knowledge / policies
         Layer3SessionScript(
@@ -391,7 +406,10 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "شكراً",
                 "تم",
             ],
-            expected_checks={"offer_product": "عطر خشب"},
+            expected_checks={
+                "offer_product": "عطر خشب",
+                "context_retention_required": True,
+            },
         ),
         Layer3SessionScript(
             session_id="L3-G6-02",
@@ -472,7 +490,10 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "شكراً",
                 "تم",
             ],
-            expected_checks={"no_cross_tenant_titles": TENANT_B_LEAK},
+            expected_checks={
+                "no_cross_tenant_titles": TENANT_B_LEAK,
+                "context_retention_required": True,
+            },
         ),
         Layer3SessionScript(
             session_id="L3-G9-02",
@@ -489,7 +510,11 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "جدة",
                 "شكراً",
             ],
-            expected_checks={"no_cross_tenant_titles": TENANT_A_LEAK, "shipping_jeddah": "35"},
+            expected_checks={
+                "no_cross_tenant_titles": TENANT_A_LEAK,
+                "shipping_jeddah": "35",
+                "context_retention_required": True,
+            },
         ),
         # Group 10 — Difficult mix
         Layer3SessionScript(
@@ -511,6 +536,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
                 "باي",
                 "تم",
             ],
+            expected_checks={"context_retention_required": True},
         ),
     ]
 

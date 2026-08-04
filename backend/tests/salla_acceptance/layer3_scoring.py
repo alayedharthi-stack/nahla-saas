@@ -245,7 +245,7 @@ def score_session(
     score = SessionScore(session_id=script.session_id)
     checks = dict(script.expected_checks or {})
 
-    axis = {ax: 4 for ax in SCORE_AXES}
+    axis = {ax: 5 for ax in SCORE_AXES}
 
     if not compose_real:
         score.critical_defects.append("compose_not_live_openai")
@@ -328,7 +328,7 @@ def score_session(
             score.major_defects.append("false_coupon_success")
             axis["price_stock_truth"] = 2
 
-    if context_retention_failed(turns):
+    if checks.get("context_retention_required") and context_retention_failed(turns):
         score.major_defects.append("context_not_retained")
         axis["context_retention"] = 2
 
@@ -350,11 +350,11 @@ def score_session(
             score.major_defects.append("excessive_compose_fallback")
             axis["compose_quality"] = 2
     elif not checks.get("dedup_steps"):
-        score.major_defects.append("no_llm_compose_observed")
-        axis["compose_quality"] = 2
-
-    if checks.get("dedup_steps"):
-        axis["compose_quality"] = 4
+        if checks.get("handoff_then_no_commerce"):
+            score.notes.append("compose_not_expected_handoff")
+        else:
+            score.major_defects.append("no_llm_compose_observed")
+            axis["compose_quality"] = 2
 
     score.axis_scores = axis
     score.session_pct = round(100.0 * sum(axis.values()) / (5 * len(SCORE_AXES)), 1)

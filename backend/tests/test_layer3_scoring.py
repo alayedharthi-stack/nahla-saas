@@ -135,6 +135,29 @@ class TestSessionCatalog:
         g8 = next(s for s in all_layer3_sessions() if s.session_id == "L3-G8-01")
         assert g8.customer_key == "D"
 
+    def test_context_retention_required_tagged_sessions(self) -> None:
+        required = {
+            "L3-G1-01",
+            "L3-G1-02",
+            "L3-G1-03",
+            "L3-G1-05",
+            "L3-G1-07",
+            "L3-G2-01",
+            "L3-G2-02",
+            "L3-G3-01",
+            "L3-G3-02",
+            "L3-G6-01",
+            "L3-G9-01",
+            "L3-G9-02",
+            "L3-G10-01",
+        }
+        untagged = {"L3-G1-04", "L3-G1-06", "L3-G4-03"}
+        by_id = {s.session_id: s for s in all_layer3_sessions()}
+        for sid in required:
+            assert by_id[sid].expected_checks.get("context_retention_required") is True
+        for sid in untagged:
+            assert not by_id[sid].expected_checks.get("context_retention_required")
+
 
 class TestFocusResolution:
     def test_resolve_focus_product_id_prefers_external_id(self) -> None:
@@ -149,6 +172,7 @@ class TestFocusResolution:
             customer_key="A",
             tester_role="ordinary",
             messages=["a", "b", "c"],
+            expected_checks={"context_retention_required": True},
         )
         turns = [
             _turn("a", "r1", brain_state_after={}),
