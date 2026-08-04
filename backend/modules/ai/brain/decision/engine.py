@@ -3148,9 +3148,14 @@ class DefaultDecisionEngine:
                 "(faq_shipping template disabled) | tenant=%s",
                 ctx.tenant_id,
             )
+            from ..turn_owner_contract import TOPIC_SHIPPING  # noqa: PLC0415
+
             return Decision(
                 action=ACTION_LLM_REPLY,
-                args={"topic_hint": "shipping"},
+                args={
+                    "topic": TOPIC_SHIPPING,
+                    "topic_hint": "shipping",
+                },
                 reason=(
                     "customer asked about shipping / delivery — let the "
                     "brain compose the reply (faq_shipping template "
