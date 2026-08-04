@@ -312,3 +312,144 @@ class TestStateStoreTransitionCarriesFocus:
         assert product_focus_identity(new_state.previous_product_focus) == "SKU-WHITE"
         assert product_focus_identity(new_state.current_product_focus) == "SKU-BLACK"
         assert new_state.conversation_focus == FOCUS_PRODUCT
+
+
+def _shirt_cotton() -> dict:
+    return {
+        "id": "shirt-blue-9",
+        "external_id": "SKU-SHIRT-BLUE",
+        "title": "قميص قطني أزرق",
+        "price": 89,
+        "variant_label": "M",
+    }
+
+
+def _watch_silver() -> dict:
+    return {
+        "id": "watch-silver-3",
+        "external_id": "SKU-WATCH",
+        "title": "ساعة يد فضية",
+        "price": 320,
+        "variant_label": "كبير",
+    }
+
+
+class TestGeneralizationNewCategoryAndProducts:
+    def test_new_products_not_from_layer3_fixtures(self) -> None:
+        state = MerchantConversationState(turn=2)
+        set_product_focus(state, _shirt_cotton(), reason="browse", turn=1)
+        set_product_focus(state, _watch_silver(), reason="switch", turn=2)
+        assert product_focus_identity(state.current_product_focus) == "SKU-WATCH"
+        assert product_focus_identity(state.previous_product_focus) == "SKU-SHIRT-BLUE"
+
+    def test_third_category_perfume_then_watch(self) -> None:
+        state = MerchantConversationState(turn=3)
+        set_product_focus(state, _perfume(), reason="cat3", turn=2)
+        set_product_focus(state, _watch_silver(), reason="cat_accessories", turn=3)
+        assert product_focus_identity(state.previous_product_focus) == "SKU-PERF"
+        assert product_focus_identity(state.current_product_focus) == "SKU-WATCH"
+
+
+class TestDifferentMessageOrder:
+    def test_black_first_then_white_still_chains(self) -> None:
+        state = MerchantConversationState(turn=2)
+        set_product_focus(state, _shoe_black(), reason="first", turn=1)
+        set_product_focus(state, _shoe_white(), reason="second", turn=2)
+        assert product_focus_identity(state.current_product_focus) == "SKU-WHITE"
+        assert product_focus_identity(state.previous_product_focus) == "SKU-BLACK"
+        assert revert_to_previous_product_focus(state)
+        assert product_focus_identity(state.current_product_focus) == "SKU-BLACK"
+
+
+class TestAlternateFollowupPhrasing:
+    def test_price_followup_keeps_focus_without_phrase_tree(self) -> None:
+        state = MerchantConversationState(turn=3)
+        set_product_focus(state, _watch_silver(), reason="browse", turn=2)
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="ask_price",
+            action="llm_reply",
+            message="وش سعر هالقطعة؟",
+            turn=3,
+        )
+        assert product_focus_identity(state.current_product_focus) == "SKU-WATCH"
+        assert state.conversation_focus == FOCUS_PRODUCT
+
+
+class TestProductToOrderThenReturn:
+    def test_tracking_digression_then_product_return(self) -> None:
+        state = MerchantConversationState(turn=4)
+        set_product_focus(state, _shirt_cotton(), reason="browse", turn=2)
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="track_order",
+            action="track_order",
+            message="وين طلبي؟",
+            turn=3,
+        )
+        assert state.conversation_focus == FOCUS_ORDER_TRACKING
+        assert product_focus_identity(state.suspended_product_focus) == "SKU-SHIRT-BLUE"
+
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="ask_product",
+            action="search_products",
+            message="أبغى أشوف القميص مرة ثانية",
+            turn=4,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
+        assert product_focus_identity(get_effective_product_focus(state)) == "SKU-SHIRT-BLUE"
+
+
+class TestKnowledgeToProduct:
+    def test_return_from_shipping_policy_to_product_on_ask_product(self) -> None:
+        state = MerchantConversationState(turn=5)
+        set_product_focus(state, _perfume(), reason="browse", turn=3)
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="ask_shipping",
+            action="llm_reply",
+            message="كم مدة التوصيل؟",
+            turn=4,
+        )
+        assert state.conversation_focus == FOCUS_SHIPPING_POLICY
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="ask_product",
+            action="search_products",
+            message="وريني العطر",
+            turn=5,
+        )
+        assert product_focus_identity(get_effective_product_focus(state)) == "SKU-PERF"
+
+
+class TestRepeatedUserCorrection:
+    def test_double_ordinal_correction_stays_consistent(self) -> None:
+        state = MerchantConversationState(turn=8)
+        set_product_focus(state, _shirt_cotton(), reason="first", turn=4)
+        set_product_focus(state, _watch_silver(), reason="second", turn=5)
+        assert try_ordinal_correction_focus_swap(state, "لا أقصد الثاني")
+        assert product_focus_identity(state.current_product_focus) == "SKU-SHIRT-BLUE"
+        set_product_focus(state, _perfume(), reason="third", turn=7)
+        assert try_ordinal_correction_focus_swap(state, "مو اقصد الثاني")
+        assert product_focus_identity(state.current_product_focus) == "SKU-SHIRT-BLUE"
+
+
+class TestSameVariantLabelAcrossProducts:
+    def test_shared_variant_label_does_not_keep_wrong_product(self) -> None:
+        state = MerchantConversationState(turn=3)
+        set_product_focus(state, _shoe_white(), reason="p1", turn=1)
+        bind_variant_to_focus(
+            state,
+            {"variant_id": "v-large-shoe", "variant_label": "كبير", "price": 219},
+        )
+        set_product_focus(state, _watch_silver(), reason="p2", turn=2)
+        bind_variant_to_focus(
+            state,
+            {"variant_id": "v-large-watch", "variant_label": "كبير", "price": 340},
+        )
+        assert product_focus_identity(state.current_product_focus) == "SKU-WATCH"
+        assert product_focus_identity(state.previous_product_focus) == "SKU-WHITE"
+        assert state.current_product_focus["variant_label"] == "كبير"
+        assert state.current_product_focus["price"] == 340
+        assert state.selected_variant["variant_id"] == "v-large-watch"

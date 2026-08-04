@@ -32,6 +32,8 @@ _DIGRESSION_INTENTS = frozenset({
     "order_history_count",
     "latest_order_summary",
 })
+# State-only signal: reject the later pick and restore previous_product_focus.
+# Does not compose customer text — only updates structured focus.
 _ORDINAL_REJECT_RE = re.compile(
     r"(?:لا|مو)\s*(?:أ?قصد|اقصد)?\s*(?:ال)?(?:ثاني|ثانيه|ثانية|2|٢)",
     re.UNICODE | re.IGNORECASE,
