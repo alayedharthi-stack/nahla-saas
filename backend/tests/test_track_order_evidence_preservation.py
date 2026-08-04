@@ -231,8 +231,9 @@ class TestTrackOrderPrivacyAndSelection:
                 slots={"order_id": "ORD-PRIVATE"},
             ),
         )
-        assert result.success is False or "SF-PRIVATE-ONLY" not in reply
-        assert "1Z999AA10123456784" not in reply or result.success is False
+        assert result.success is False
+        assert "SF-PRIVATE-ONLY" not in (reply or "")
+        assert "1Z999AA10123456784" not in (reply or "")
 
     def test_multi_order_returns_selected_order_tracking(self, db, tenant_ctx) -> None:
         first = seed_order(

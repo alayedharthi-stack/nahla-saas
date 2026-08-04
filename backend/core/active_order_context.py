@@ -549,7 +549,7 @@ def persist_track_evidence_to_conversation(
         db.add(conv)
         db.commit()
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — track evidence persist is best-effort for follow-up context
         logger.debug(
             "[ACTIVE_ORDER_CONTEXT] persist_track_evidence failed tenant=%s conv=%s: %s",
             tenant_id,

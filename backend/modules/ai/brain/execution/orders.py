@@ -768,7 +768,7 @@ class DraftOrderHandler:
                                 "product_id=%s count=%d | tenant=%s",
                                 external_id, len(_fetched), ctx.tenant_id,
                             )
-                except Exception as _od_exc:
+                except Exception as _od_exc:  # noqa: BLE001  # noqa: silent-ok — on-demand variant fetch must not block checkout
                     logger.debug(
                         "[ORDER VARIANT] on-demand variant fetch failed | err=%s",
                         _od_exc,
@@ -1736,7 +1736,7 @@ class TrackOrderHandler:
                 conversation_id=getattr(ctx, "conversation_id", None),
                 track_data=track_data,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — track evidence persist must not block status reply
             logger.debug(
                 "[TrackOrderHandler] track evidence persist skipped tenant=%s: %s",
                 ctx.tenant_id,
