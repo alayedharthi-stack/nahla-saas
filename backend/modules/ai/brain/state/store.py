@@ -466,6 +466,9 @@ class DefaultStateStore:
             ),
             last_intent=intent.name,
             current_product_focus=state.current_product_focus,
+            previous_product_focus=getattr(state, "previous_product_focus", None),
+            suspended_product_focus=getattr(state, "suspended_product_focus", None),
+            conversation_focus=str(getattr(state, "conversation_focus", "") or ""),
             draft_order_id=state.draft_order_id,
             checkout_url=state.checkout_url,
             customer_goal=state.customer_goal,
@@ -554,7 +557,9 @@ class DefaultStateStore:
 
         elif action == ACTION_SEARCH_PRODUCTS:
             if intent.name == INTENT_ASK_PRODUCT:
-                s.current_product_focus = None
+                from ..commerce.commerce_focus_owner import archive_current_product_focus  # noqa: PLC0415
+
+                archive_current_product_focus(s, reason="ask_product_search")
             # Browsing again is fine while exploring/discovery, but DON'T
             # demote a customer who is mid-checkout or mid-ordering.
             if state.stage not in {STAGE_ORDERING, STAGE_CHECKOUT}:
@@ -572,7 +577,14 @@ class DefaultStateStore:
             s.stage = STAGE_ORDERING
             _product = decision.args.get("product") or {}
             if _product:
-                s.current_product_focus = _product
+                from ..commerce.commerce_focus_owner import set_product_focus  # noqa: PLC0415
+
+                set_product_focus(
+                    s,
+                    _product,
+                    reason="propose_draft_order_transition",
+                    turn=int(getattr(s, "turn", 0) or 0),
+                )
                 _ext_id = str(_product.get("external_id") or "").strip()
                 if _ext_id:
                     s.order_prep.product_id = _ext_id

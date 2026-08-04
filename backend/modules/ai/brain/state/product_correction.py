@@ -123,12 +123,23 @@ def _clean_replacement(text: str) -> str:
     return t[:200]
 
 
-def clear_stale_product_state_for_correction(state: Any) -> None:
+def clear_stale_product_state_for_correction(state: Any, message: str = "") -> None:
     """Drop stale product assumptions after an explicit correction turn."""
     if state is None:
         return
 
+    try:
+        from ..commerce.commerce_focus_owner import try_ordinal_correction_focus_swap  # noqa: PLC0415
+
+        if try_ordinal_correction_focus_swap(state, message or ""):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
     state.current_product_focus = None
+    state.previous_product_focus = None
+    state.suspended_product_focus = None
+    state.conversation_focus = ""
     state.last_search_candidates = []
 
     op = getattr(state, "order_prep", None)

@@ -109,7 +109,12 @@ def try_semantic_interpretation_decision(
         return None
 
     state = ctx.state
-    focus = getattr(state, "current_product_focus", None) or {}
+    try:
+        from ..commerce.commerce_focus_owner import get_effective_product_focus  # noqa: PLC0415
+
+        focus = get_effective_product_focus(state) or {}
+    except Exception:  # noqa: BLE001
+        focus = getattr(state, "current_product_focus", None) or {}
 
     if interp.interpreted_intent == INTENT_SHOW_ALL_VARIANTS_OR_PRICES:
         if not focus:

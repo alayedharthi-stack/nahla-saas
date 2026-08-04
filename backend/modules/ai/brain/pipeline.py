@@ -2256,13 +2256,21 @@ class MerchantBrain:
                 or not new_state.current_product_focus
             )
         ):
-            new_state.current_product_focus = result.data["product"]
+            try:
+                from .commerce.commerce_focus_owner import set_product_focus  # noqa: PLC0415
+
+                set_product_focus(
+                    new_state,
+                    result.data["product"],
+                    reason=f"executor_product_{decision.action}",
+                    turn=int(getattr(new_state, "turn", 0) or 0),
+                )
+            except Exception:  # noqa: BLE001
+                new_state.current_product_focus = result.data["product"]
             try:
                 from .commerce.product_visual import (  # noqa: PLC0415
-                    stamp_product_focus_metadata,
                     stamp_visual_focus_metadata,
                 )
-                stamp_product_focus_metadata(new_state, result.data["product"])
                 if intent.name == "product_visual_request":
                     stamp_visual_focus_metadata(new_state, result.data["product"])
             except Exception:  # noqa: BLE001
@@ -2290,14 +2298,19 @@ class MerchantBrain:
             new_state.last_discovery_mode = _discovery_mode
         _variant_binding = result.data.get("variant_binding")
         if isinstance(_variant_binding, dict) and _variant_binding.get("price") is not None:
-            new_state.selected_variant = _variant_binding
-            _focus = dict(new_state.current_product_focus or {})
-            if _focus:
-                _focus["price"] = _variant_binding.get("price")
-                _focus["variant_id"] = _variant_binding.get("variant_id")
-                _focus["variant_label"] = _variant_binding.get("variant_label")
-                _focus["unit"] = _variant_binding.get("unit")
-                new_state.current_product_focus = _focus
+            try:
+                from .commerce.commerce_focus_owner import bind_variant_to_focus  # noqa: PLC0415
+
+                bind_variant_to_focus(new_state, _variant_binding)
+            except Exception:  # noqa: BLE001
+                new_state.selected_variant = _variant_binding
+                _focus = dict(new_state.current_product_focus or {})
+                if _focus:
+                    _focus["price"] = _variant_binding.get("price")
+                    _focus["variant_id"] = _variant_binding.get("variant_id")
+                    _focus["variant_label"] = _variant_binding.get("variant_label")
+                    _focus["unit"] = _variant_binding.get("unit")
+                    new_state.current_product_focus = _focus
             logger.info(
                 "[VARIANT_RESOLUTION_TRACE] tenant=%s state_bound variant_id=%s "
                 "variant_label=%r unit=%s price=%s",
@@ -2651,6 +2664,17 @@ class MerchantBrain:
                 ))
             )
             if new_state.current_product_focus and not _has_live_order:
+                try:
+                    from .commerce.commerce_focus_owner import (  # noqa: PLC0415
+                        archive_current_product_focus,
+                    )
+
+                    archive_current_product_focus(
+                        new_state,
+                        reason="product_list_display",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 logger.info(
                     "[ORDER FLOW] reset stale current_product_focus after product list display | "
                     "old_focus=%r new_candidates=%d action=%s",
@@ -2677,6 +2701,18 @@ class MerchantBrain:
             new_state.last_inbound_canonical_turn = int(state.turn or 0)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            from .commerce.commerce_focus_owner import apply_commerce_focus_lifecycle  # noqa: PLC0415
+
+            apply_commerce_focus_lifecycle(
+                new_state,
+                intent_name=intent.name,
+                action=decision.action,
+                message=ctx.message or "",
+                turn=int(getattr(new_state, "turn", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("[COMMERCE_FOCUS] lifecycle hook failed", exc_info=True)
         ctx.state = new_state
         suggestion = self._suggestion_engine.suggest(ctx, decision, result)
         new_state.recent_messages = list((history or [])[-20:])
