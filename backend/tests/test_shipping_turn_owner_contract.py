@@ -112,7 +112,9 @@ def test_shipping_contract_preserves_ungrounded_fee_reply_in_product_claim_guard
 
     assert result.replaced is False
     assert result.reply == composed
-    assert result.action in {"blocked_protected_final_reply", "allowed"}
+    assert result.action == "blocked_protected_final_reply"
+    assert result.would_rewrite is True
+    assert "ungrounded_price" in result.blocked_claims
     assert "ما ظهر عندي سعر مؤكد من الكتالوج" not in result.reply
 
 
