@@ -176,7 +176,12 @@ def prove_one_live_compose_turn(world) -> Dict[str, Any]:
         "compose_source": turn.compose_source,
         "brain_called": turn.brain_called,
         "latency_ms": turn.latency_ms,
-        "ok": bool(reply and len(reply) > 5 and (after > before or turn.brain_called)),
+        # Live proof: non-empty outbound + compose/brain activity.
+        # Do not require reply_len > 5 — short Arabic greetings (len==5) are valid.
+        "ok": bool(
+            (reply or "").strip()
+            and ((after > before) or turn.brain_called)
+        ),
     }
 
 
