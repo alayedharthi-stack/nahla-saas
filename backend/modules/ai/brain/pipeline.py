@@ -2712,7 +2712,7 @@ class MerchantBrain:
                 turn=int(getattr(new_state, "turn", 0) or 0),
             )
         except Exception:  # noqa: BLE001
-            logger.debug("[COMMERCE_FOCUS] lifecycle hook failed", exc_info=True)
+            logger.exception("[COMMERCE_FOCUS] lifecycle hook failed")
         ctx.state = new_state
         suggestion = self._suggestion_engine.suggest(ctx, decision, result)
         new_state.recent_messages = list((history or [])[-20:])

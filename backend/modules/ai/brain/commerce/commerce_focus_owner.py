@@ -98,7 +98,7 @@ def set_product_focus(
             from .product_visual import stamp_product_focus_metadata  # noqa: PLC0415
 
             stamp_product_focus_metadata(state, new_focus)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — focus metadata stamp is best-effort
             pass
     elif not getattr(state, "suspended_product_focus", None):
         if str(getattr(state, "conversation_focus", "") or "") == FOCUS_PRODUCT:

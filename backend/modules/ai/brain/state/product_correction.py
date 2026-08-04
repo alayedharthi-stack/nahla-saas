@@ -133,7 +133,7 @@ def clear_stale_product_state_for_correction(state: Any, message: str = "") -> N
 
         if try_ordinal_correction_focus_swap(state, message or ""):
             return
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ordinal revert is optional
         pass
 
     state.current_product_focus = None
