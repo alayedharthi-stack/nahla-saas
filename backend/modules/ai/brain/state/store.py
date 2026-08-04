@@ -507,6 +507,7 @@ class DefaultStateStore:
             ),
             current_selected_options=dict(getattr(state, "current_selected_options", None) or {}),
             pending_option_groups=list(getattr(state, "pending_option_groups", None) or []),
+            commerce_session=dict(getattr(state, "commerce_session", None) or {}),
         )
 
         action = decision.action
