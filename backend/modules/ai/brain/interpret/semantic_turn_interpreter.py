@@ -163,6 +163,15 @@ def _has_active_order(state: Any) -> bool:
     )
 
 
+def _resolved_product_focus(state: Any) -> Any:
+    try:
+        from ..commerce.commerce_focus_owner import get_effective_product_focus  # noqa: PLC0415
+
+        return get_effective_product_focus(state)
+    except Exception:  # noqa: BLE001
+        return getattr(state, "current_product_focus", None)
+
+
 def detect_context_anchor(
     *,
     state: Any,
@@ -190,13 +199,13 @@ def detect_context_anchor(
     if list(getattr(state, "last_search_candidates", None) or []):
         if any(tok in combined for tok in _OPTION_LIST_TOKENS) or "1." in last_asst:
             return ANCHOR_LAST_ASSISTANT_LISTED_OPTIONS
-        if getattr(state, "current_product_focus", None):
+        if _resolved_product_focus(state):
             return ANCHOR_ACTIVE_PRODUCT_FOCUS
 
     if _has_active_order(state):
         return ANCHOR_ACTIVE_ORDER_CONTEXT
 
-    if getattr(state, "current_product_focus", None):
+    if _resolved_product_focus(state):
         return ANCHOR_ACTIVE_PRODUCT_FOCUS
 
     return None
@@ -397,7 +406,7 @@ def interpret_semantic_turn(
             override_reason=f"price_for_size_{size_hint}",
         )
 
-    if _DEICTIC_PRODUCT_RE.match(norm) and getattr(state, "current_product_focus", None):
+    if _DEICTIC_PRODUCT_RE.match(norm) and _resolved_product_focus(state):
         return SemanticTurnInterpretation(
             raw_text=raw,
             canonical_text=raw,

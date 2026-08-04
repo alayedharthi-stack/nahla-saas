@@ -430,6 +430,13 @@ class MerchantConversationState:
     assistant_identity_introduced: bool = False
     last_intent: str = INTENT_GENERAL
     current_product_focus: Optional[Dict[str, Any]] = None   # {id, title, price, external_id}
+    # Prior product focus — used for return-to-first / ordinal correction without
+    # phrase-owned reply trees. Written only by commerce_focus_owner.
+    previous_product_focus: Optional[Dict[str, Any]] = None
+    # Snapshot preserved across shipping / tracking digressions.
+    suspended_product_focus: Optional[Dict[str, Any]] = None
+    # Active conversation focus mode: product | order_tracking | shipping_policy | "".
+    conversation_focus: str = ""
     draft_order_id: Optional[str] = None
     checkout_url: Optional[str] = None
     customer_goal: str = ""
@@ -578,6 +585,9 @@ class MerchantConversationState:
             "assistant_identity_introduced": self.assistant_identity_introduced,
             "last_intent": self.last_intent,
             "current_product_focus": self.current_product_focus,
+            "previous_product_focus": self.previous_product_focus,
+            "suspended_product_focus": self.suspended_product_focus,
+            "conversation_focus": self.conversation_focus,
             "draft_order_id": self.draft_order_id,
             "checkout_url": self.checkout_url,
             "customer_goal": self.customer_goal,
@@ -663,6 +673,9 @@ class MerchantConversationState:
             assistant_identity_introduced=bool(d.get("assistant_identity_introduced", False)),
             last_intent=d.get("last_intent", INTENT_GENERAL),
             current_product_focus=d.get("current_product_focus"),
+            previous_product_focus=d.get("previous_product_focus"),
+            suspended_product_focus=d.get("suspended_product_focus"),
+            conversation_focus=str(d.get("conversation_focus", "") or ""),
             draft_order_id=d.get("draft_order_id"),
             checkout_url=d.get("checkout_url"),
             customer_goal=d.get("customer_goal", ""),
