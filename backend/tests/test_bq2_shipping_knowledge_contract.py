@@ -424,9 +424,16 @@ class TestPendingShippingIntentRestore:
     ) -> None:
         db, tenant = db_tenant_a
         state = self._state_with_pending()
+        general = Intent(
+            name=INTENT_GENERAL,
+            confidence=0.55,
+            slots={"topic_hint": "follow_up"},
+            raw_message="الرياض",
+            extraction_method="llm",
+        )
 
         restored = restore_pending_shipping_city_intent(
-            self._general_intent("الرياض"),
+            general,
             db=db,
             tenant_id=tenant.id,
             message="الرياض",
@@ -435,8 +442,9 @@ class TestPendingShippingIntentRestore:
 
         assert restored.name == INTENT_ASK_SHIPPING
         assert restored.slots.get("city") == "الرياض"
+        assert restored.slots.get("topic_hint") == "follow_up"
         assert restored.raw_message == "الرياض"
-        assert restored.extraction_method == "rules+pending_shipping_city"
+        assert restored.extraction_method == "hybrid"
 
     def test_tenant_isolation_resolves_own_kb_city(
         self,

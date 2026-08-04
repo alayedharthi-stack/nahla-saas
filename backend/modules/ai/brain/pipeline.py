@@ -1817,7 +1817,7 @@ class MerchantBrain:
             )
 
             trace_commerce_discovery_shadow(ctx)
-        except Exception as _cds_exc:  # noqa: BLE001
+        except Exception as _cds_exc:  # noqa: BLE001  # noqa: silent-ok — shadow telemetry must not block the turn
             logger.debug(
                 "[COMMERCE_DISCOVERY_SHADOW] trace skipped tenant=%s err=%s",
                 tenant_id,

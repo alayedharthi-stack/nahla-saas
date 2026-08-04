@@ -73,7 +73,7 @@ def restore_pending_shipping_city_intent(
         confidence=max(float(getattr(intent, "confidence", 0) or 0), 0.9),
         slots=slots,
         raw_message=str(getattr(intent, "raw_message", "") or ""),
-        extraction_method="rules+pending_shipping_city",
+        extraction_method="hybrid",
     )
 
 
