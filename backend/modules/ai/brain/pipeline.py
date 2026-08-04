@@ -3829,7 +3829,7 @@ class MerchantBrain:
 
             _scg = apply_shipping_cost_truth_guard(
                 reply or "",
-                db=getattr(ctx, "db", None),
+                db=db,
                 tenant_id=tenant_id,
                 order_prep=_order_prep_dict,
                 brain_state=_brain_state_dict,
