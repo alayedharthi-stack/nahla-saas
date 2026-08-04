@@ -662,6 +662,23 @@ def apply_product_availability_truth_guard(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional product-knowledge probe
         pass
 
+    from modules.ai.brain.turn_owner_contract import TOPIC_SHIPPING  # noqa: PLC0415
+
+    if topic == TOPIC_SHIPPING:
+        _emit_shadow(
+            evidence_state="-",
+            conflict_type="-",
+            guard_action="allowed_shipping_inquiry",
+            would_rewrite=False,
+            reason="shipping_inquiry_bypass",
+            customer_text_changed=False,
+        )
+        return ProductAvailabilityTruthGuardResult(
+            reply=original,
+            action="allowed_shipping_inquiry",
+            reason="shipping_inquiry_bypass",
+        )
+
     try:
         if not original.strip():
             _emit_shadow(

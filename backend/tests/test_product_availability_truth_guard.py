@@ -32,6 +32,7 @@ from modules.ai.brain.postprocess.product_availability_truth_guard import (  # n
     product_availability_guard_mode,
     reply_availability_polarity,
 )
+from modules.ai.brain.turn_owner_contract import TOPIC_SHIPPING  # noqa: E402
 
 
 def _sku(
@@ -417,6 +418,48 @@ class TestInactiveCatalogLineStrip:
         )
         assert result.replaced is False
         assert result.reply == reply
+
+
+class TestShippingInquiryGuardBypass:
+    """Regression: shipping fee replies must not be rewritten as product availability."""
+
+    _SHIPPING_REPLY = (
+        "نعم، الشحن إلى جدة متوفر وتكلفته 35 ريال."
+    )
+
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def test_shipping_topic_preserves_fee_reply_with_availability_marker(self) -> None:
+        result = apply_product_availability_truth_guard(
+            reply=self._SHIPPING_REPLY,
+            availability_context=_ctx(skus=[], connected=False),
+            inbound_text="كم سعر الشحن لجدة؟",
+            decision_topic=TOPIC_SHIPPING,
+            tenant_id=99,
+        )
+        assert result.reply == self._SHIPPING_REPLY
+        assert result.replaced is False
+        assert result.action == "allowed_shipping_inquiry"
+        assert result.availability_claim_blocked is False
+
+    def test_non_shipping_topic_still_rewrites_unknown_availability_claim(self) -> None:
+        result = apply_product_availability_truth_guard(
+            reply=self._SHIPPING_REPLY,
+            availability_context=_ctx(skus=[], connected=False),
+            inbound_text="كم سعر الشحن لجدة؟",
+            tenant_id=99,
+        )
+        assert result.replaced is True
+        assert result.reply == _UNKNOWN_REPLY_AR
+        assert result.action == "rewrite_unknown"
 
 
 class TestCatalogProductFactAnswerExempt:
