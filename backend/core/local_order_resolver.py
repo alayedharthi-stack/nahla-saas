@@ -39,6 +39,9 @@ class LocalOrderSnapshot:
     customer_name: str
     line_items: List[Dict[str, Any]]
     tracking_number: str = ""
+    tracking_url: str = ""
+    carrier: str = ""
+    shipment_status: str = ""
 
     @property
     def display_reference(self) -> str:
@@ -119,7 +122,14 @@ def _order_matches_phone(order: Any, keys: Set[str]) -> bool:
     return False
 
 
-def _snapshot_from_order(order: Any, *, tracking_number: str = "") -> LocalOrderSnapshot:
+def _snapshot_from_order(
+    order: Any,
+    *,
+    tracking_number: str = "",
+    tracking_url: str = "",
+    carrier: str = "",
+    shipment_status: str = "",
+) -> LocalOrderSnapshot:
     items = list(getattr(order, "line_items", None) or [])
     if not isinstance(items, list):
         items = []
@@ -133,12 +143,20 @@ def _snapshot_from_order(order: Any, *, tracking_number: str = "") -> LocalOrder
         customer_name=str(getattr(order, "customer_name", "") or ""),
         line_items=[dict(x) for x in items if isinstance(x, dict)],
         tracking_number=str(tracking_number or ""),
+        tracking_url=str(tracking_url or ""),
+        carrier=str(carrier or ""),
+        shipment_status=str(shipment_status or ""),
     )
 
 
-def _load_shipment_tracking(db: Any, tenant_id: int, order_id: int) -> str:
+def _load_shipment_evidence(db: Any, tenant_id: int, order_id: int) -> Dict[str, str]:
     if db is None or not order_id:
-        return ""
+        return {
+            "tracking_number": "",
+            "tracking_url": "",
+            "carrier": "",
+            "shipment_status": "",
+        }
     try:
         from models import OrderShipment  # noqa: PLC0415
 
@@ -152,10 +170,35 @@ def _load_shipment_tracking(db: Any, tenant_id: int, order_id: int) -> str:
             .first()
         )
         if row is None:
-            return ""
-        return str(getattr(row, "tracking_number", "") or "").strip()
+            return {
+                "tracking_number": "",
+                "tracking_url": "",
+                "carrier": "",
+                "shipment_status": "",
+            }
+        meta = dict(getattr(row, "extra_metadata", None) or {})
+        tracking_url = str(
+            meta.get("tracking_url")
+            or getattr(row, "label_url", None)
+            or ""
+        ).strip()
+        return {
+            "tracking_number": str(getattr(row, "tracking_number", "") or "").strip(),
+            "tracking_url": tracking_url,
+            "carrier": str(getattr(row, "provider", "") or "").strip(),
+            "shipment_status": str(getattr(row, "status", "") or "").strip(),
+        }
     except Exception:  # noqa: BLE001
-        return ""
+        return {
+            "tracking_number": "",
+            "tracking_url": "",
+            "carrier": "",
+            "shipment_status": "",
+        }
+
+
+def _load_shipment_tracking(db: Any, tenant_id: int, order_id: int) -> str:
+    return _load_shipment_evidence(db, tenant_id, order_id).get("tracking_number", "")
 
 
 def _resolve_phone(
@@ -295,8 +338,8 @@ def _to_snapshots(
     out: List[LocalOrderSnapshot] = []
     for row in orders:
         oid = int(getattr(row, "id", 0) or 0)
-        tracking = _load_shipment_tracking(db, tenant_id, oid)
-        out.append(_snapshot_from_order(row, tracking_number=tracking))
+        evidence = _load_shipment_evidence(db, tenant_id, oid)
+        out.append(_snapshot_from_order(row, **evidence))
     return out
 
 
@@ -416,9 +459,14 @@ def resolve_customer_order_context(
 
     snapshots = _to_snapshots(db, int(tenant_id), merged_rows)
     active_draft = (
-        _snapshot_from_order(draft_row, tracking_number=_load_shipment_tracking(
-            db, int(tenant_id), int(getattr(draft_row, "id", 0) or 0),
-        ))
+        _snapshot_from_order(
+            draft_row,
+            **_load_shipment_evidence(
+                db,
+                int(tenant_id),
+                int(getattr(draft_row, "id", 0) or 0),
+            ),
+        )
         if draft_row is not None
         else None
     )
@@ -427,8 +475,10 @@ def resolve_customer_order_context(
     explicit = (
         _snapshot_from_order(
             explicit_row,
-            tracking_number=_load_shipment_tracking(
-                db, int(tenant_id), int(getattr(explicit_row, "id", 0) or 0),
+            **_load_shipment_evidence(
+                db,
+                int(tenant_id),
+                int(getattr(explicit_row, "id", 0) or 0),
             ),
         )
         if explicit_row is not None
@@ -479,6 +529,9 @@ def local_order_to_track_payload(snapshot: LocalOrderSnapshot) -> Dict[str, Any]
     from core.order_status_label import order_status_label_ar  # noqa: PLC0415
 
     status = str(snapshot.status or "").strip()
+    shipping_status = str(snapshot.shipment_status or "").strip()
+    if not shipping_status and snapshot.is_shipped:
+        shipping_status = "shipped"
     return {
         "id": snapshot.order_id,
         "reference_id": snapshot.display_reference,
@@ -489,6 +542,10 @@ def local_order_to_track_payload(snapshot: LocalOrderSnapshot) -> Dict[str, Any]
         "items": items,
         "source": snapshot.source,
         "tracking_number": snapshot.tracking_number,
+        "tracking_url": snapshot.tracking_url,
+        "carrier": snapshot.carrier,
+        "shipping_status": shipping_status,
+        "shipment_status": shipping_status,
         "local_resolver": True,
     }
 
