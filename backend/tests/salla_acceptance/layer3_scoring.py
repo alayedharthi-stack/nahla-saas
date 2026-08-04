@@ -31,6 +31,13 @@ SCORE_AXES: Tuple[str, ...] = (
 
 COMMERCE_FOCUS_MODES = frozenset({"product", "shipping_policy", "order_tracking"})
 
+_CANONICAL_FOCUS_KEYS = (
+    "external_id",
+    "id",
+    "product_id",
+    "sku",
+)
+
 TRACKING_TOKEN_NORA_ORDER = "TRK-A-7788"
 
 OTHER_CUSTOMER_ORDER_MARKERS = (
@@ -143,32 +150,39 @@ def dedup_session_has_activity(turns: Sequence[Layer3TurnEvidence]) -> bool:
     )
 
 
+def _canonical_product_identity(value: Any) -> str:
+    """Canonical product id from flat string or structured focus dict; empty if unresolved."""
+    if not value:
+        return ""
+    if isinstance(value, dict):
+        for key in _CANONICAL_FOCUS_KEYS:
+            resolved = str(value.get(key) or "").strip()
+            if resolved:
+                return resolved
+        return ""
+    return str(value).strip()
+
+
 def turn_has_focus_context(state: Dict[str, Any]) -> bool:
     if not state:
         return False
-    conv_focus = str(state.get("conversation_focus") or "")
-    if conv_focus in COMMERCE_FOCUS_MODES:
-        return True
     for key in (
         "focus_product_id",
-        "previous_product_focus",
         "previous_product_focus_id",
-        "suspended_product_focus",
         "suspended_product_focus_id",
     ):
-        if state.get(key):
+        if _canonical_product_identity(state.get(key)):
             return True
-    if state.get("has_previous_product_focus") or state.get("has_suspended_product_focus"):
-        return True
+    for key in ("previous_product_focus", "suspended_product_focus"):
+        if _canonical_product_identity(state.get(key)):
+            return True
     return False
 
 
 def context_retention_failed(turns: Sequence[Layer3TurnEvidence]) -> bool:
     if len(turns) < 3:
         return False
-    evolved = turns[-1].brain_state_after != turns[0].brain_state_before
-    focus = any(turn_has_focus_context(t.brain_state_after) for t in turns)
-    return not evolved and not focus
+    return not turn_has_focus_context(turns[-1].brain_state_after)
 
 
 def _structured_shipping_fee(turn: Layer3TurnEvidence) -> Optional[float]:

@@ -35,6 +35,31 @@ def _g5_04_script() -> Layer3SessionScript:
     )
 
 
+def _clean_script(**overrides) -> Layer3SessionScript:
+    base = {
+        "session_id": "L3-CLEAN",
+        "group": 2,
+        "tenant": "A",
+        "customer_key": "A",
+        "tester_role": "ordinary",
+        "messages": ["مرحبا"],
+        "expected_checks": {},
+    }
+    base.update(overrides)
+    return Layer3SessionScript(**base)
+
+
+def _llm_turn(inbound: str, reply: str, **kwargs) -> Layer3TurnEvidence:
+    return Layer3TurnEvidence(
+        inbound_text=inbound,
+        outbound_reply=reply,
+        brain_called=True,
+        compose_invoked=1,
+        compose_source="llm",
+        **kwargs,
+    )
+
+
 def test_privacy_echo_of_customer_tracking_token_passes():
     script = _g5_04_script()
     turns = [
@@ -105,7 +130,7 @@ def test_resolve_focus_product_id_prefers_external_id():
     assert resolve_focus_product_id(focus) == "sku-shoe-white"
 
 
-def test_context_retained_via_external_id_focus():
+def test_context_retained_via_external_id_focus_on_final_turn():
     state = {
         "focus_product_id": "sku-shoe-white",
         "conversation_focus": "product",
@@ -117,12 +142,85 @@ def test_context_retained_via_external_id_focus():
         Layer3TurnEvidence(
             brain_state_after={
                 "focus_product_id": "sku-shoe-white",
-                "has_suspended_product_focus": True,
-                "suspended_product_focus": "sku-shoe-white",
             }
         ),
     ]
     assert context_retention_failed(turns) is False
+
+
+def test_context_conversation_focus_without_id_fails():
+    assert turn_has_focus_context({"conversation_focus": "product"}) is False
+    assert turn_has_focus_context({"conversation_focus": "shipping_policy"}) is False
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={"conversation_focus": "product"}),
+    ]
+    assert context_retention_failed(turns) is True
+
+
+def test_context_arbitrary_state_evolution_fails_when_required():
+    script = Layer3SessionScript(
+        session_id="L3-CTX-EVOLVE",
+        group=3,
+        tenant="A",
+        customer_key="A",
+        tester_role="ordinary",
+        messages=["a", "b", "c"],
+        expected_checks={"context_retention_required": True},
+    )
+    turns = [
+        _llm_turn("a", "r1", brain_state_before={}, brain_state_after={"draft_step": 1}),
+        _llm_turn("b", "r2", brain_state_after={"draft_step": 2}),
+        _llm_turn("c", "r3", brain_state_after={"draft_step": 3}),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "context_not_retained" in scored.major_defects
+
+
+def test_context_final_previous_canonical_id_passes():
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn(
+            "c",
+            "r3",
+            brain_state_after={"previous_product_focus_id": "sku-shoe-white"},
+        ),
+    ]
+    assert context_retention_failed(turns) is False
+
+
+def test_context_final_suspended_structured_id_passes():
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn(
+            "c",
+            "r3",
+            brain_state_after={
+                "suspended_product_focus": {"external_id": "sku-shoe-white"},
+            },
+        ),
+    ]
+    assert context_retention_failed(turns) is False
+
+
+def test_context_unresolved_structured_dict_does_not_pass():
+    assert turn_has_focus_context({"previous_product_focus": {"title": "حذاء"}}) is False
+
+
+def test_context_focus_only_earlier_turn_fails_on_final():
+    turns = [
+        _llm_turn(
+            "a",
+            "r1",
+            brain_state_after={"focus_product_id": "sku-shoe-white"},
+        ),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={}),
+    ]
+    assert context_retention_failed(turns) is True
 
 
 def test_shipping_fee_verified_from_structured_evidence():
@@ -135,31 +233,6 @@ def test_shipping_fee_verified_from_structured_evidence():
     ]
     assert shipping_fee_verified(turns, "", "25") is True
     assert shipping_policy_failed(turns, "", "25") is False
-
-
-def _clean_script(**overrides) -> Layer3SessionScript:
-    base = {
-        "session_id": "L3-CLEAN",
-        "group": 2,
-        "tenant": "A",
-        "customer_key": "A",
-        "tester_role": "ordinary",
-        "messages": ["مرحبا"],
-        "expected_checks": {},
-    }
-    base.update(overrides)
-    return Layer3SessionScript(**base)
-
-
-def _llm_turn(inbound: str, reply: str, **kwargs) -> Layer3TurnEvidence:
-    return Layer3TurnEvidence(
-        inbound_text=inbound,
-        outbound_reply=reply,
-        brain_called=True,
-        compose_invoked=1,
-        compose_source="llm",
-        **kwargs,
-    )
 
 
 def test_defect_free_session_scores_100_percent():

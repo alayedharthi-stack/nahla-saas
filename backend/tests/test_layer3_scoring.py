@@ -22,7 +22,8 @@ from tests.salla_acceptance.layer3_sessions import (  # noqa: E402
     all_layer3_sessions,
 )
 from tests.salla_acceptance.run_layer3_dialogue import (  # noqa: E402
-    reset_layer3_session_isolation,
+    create_fresh_layer3_world,
+    dispose_layer3_world,
     run_all_sessions,
 )
 
@@ -164,7 +165,7 @@ class TestFocusResolution:
         focus = {"product_id": "legacy", "external_id": "sku-shoe-white", "id": 99}
         assert resolve_focus_product_id(focus) == "sku-shoe-white"
 
-    def test_context_retention_accepts_conversation_focus(self) -> None:
+    def test_context_retention_rejects_conversation_focus_without_id(self) -> None:
         script = Layer3SessionScript(
             session_id="L3-CTX",
             group=3,
@@ -184,7 +185,7 @@ class TestFocusResolution:
             ),
         ]
         scored = score_session(script, turns, compose_real=True)
-        assert "context_not_retained" not in scored.major_defects
+        assert "context_not_retained" in scored.major_defects
 
 
 class TestShippingStructuredFacts:
@@ -212,36 +213,97 @@ class TestShippingStructuredFacts:
 
 
 class TestSessionIsolation:
-    def test_reset_layer3_session_isolation_invoked_between_sessions(self) -> None:
-        from tests.commerce_scenario_fixtures import make_scenario_db  # noqa: PLC0415
-        from tests.salla_acceptance.fixtures import seed_dual_tenant_world  # noqa: PLC0415
+    def test_each_session_gets_fresh_world_and_db(self, tmp_path) -> None:
+        scripts = all_layer3_sessions()[:2]
+        world_ids: list[int] = []
+        engine_ids: list[int] = []
 
-        db, _engine = make_scenario_db()
-        world = seed_dual_tenant_world(db)
-        try:
-            with patch(
-                "tests.salla_acceptance.run_layer3_dialogue.reset_layer3_session_isolation",
-                wraps=reset_layer3_session_isolation,
-            ) as isolation_spy, patch(
-                "tests.salla_acceptance.run_layer3_dialogue.Layer3BrainRunner"
-            ) as runner_cls:
-                runner = MagicMock()
-                runner.run_thread.return_value = [
-                    Layer3TurnEvidence(
-                        inbound_text="x",
-                        outbound_reply="y",
-                        brain_called=True,
-                    )
-                ]
-                runner.run_turn.return_value = Layer3TurnEvidence(
+        def tracking_create():
+            world, db, engine = create_fresh_layer3_world()
+            world_ids.append(id(world))
+            engine_ids.append(id(engine))
+            return world, db, engine
+
+        with patch(
+            "tests.salla_acceptance.run_layer3_dialogue.all_layer3_sessions",
+            return_value=scripts,
+        ), patch(
+            "tests.salla_acceptance.run_layer3_dialogue.create_fresh_layer3_world",
+            side_effect=tracking_create,
+        ), patch(
+            "tests.salla_acceptance.run_layer3_dialogue.dispose_layer3_world",
+            wraps=dispose_layer3_world,
+        ) as dispose_spy, patch(
+            "tests.salla_acceptance.run_layer3_dialogue.Layer3BrainRunner"
+        ) as runner_cls:
+            runner = MagicMock()
+            runner.run_thread.return_value = [
+                Layer3TurnEvidence(
                     inbound_text="x",
                     outbound_reply="y",
                     brain_called=True,
                 )
-                runner_cls.return_value = runner
+            ]
+            runner.run_turn.return_value = Layer3TurnEvidence(
+                inbound_text="x",
+                outbound_reply="y",
+                brain_called=True,
+            )
+            runner_cls.return_value = runner
 
-                run_all_sessions(world)
+            run_all_sessions(sessions_dir=tmp_path)
 
-            assert isolation_spy.call_count == len(all_layer3_sessions())
-        finally:
-            db.close()
+        assert len(world_ids) == 2
+        assert len(set(world_ids)) == 2
+        assert len(set(engine_ids)) == 2
+        assert dispose_spy.call_count == 2
+        assert list(tmp_path.glob("*.json"))
+
+    def test_fresh_world_prevents_inherited_brain_state(self, tmp_path) -> None:
+        scripts = [
+            Layer3SessionScript(
+                session_id="L3-ISO-1",
+                group=1,
+                tenant="A",
+                customer_key="A",
+                tester_role="ordinary",
+                messages=["first"],
+            ),
+            Layer3SessionScript(
+                session_id="L3-ISO-2",
+                group=1,
+                tenant="A",
+                customer_key="A",
+                tester_role="ordinary",
+                messages=["second"],
+            ),
+        ]
+        first_turn_states: list[dict] = []
+
+        def run_thread(messages):
+            first_turn_states.append(
+                Layer3TurnEvidence(
+                    inbound_text=messages[0],
+                    outbound_reply="ok",
+                    brain_called=True,
+                    brain_state_before={},
+                    brain_state_after={"focus_product_id": "sku-shoe-white"},
+                )
+            )
+            return first_turn_states[-1:]
+
+        with patch(
+            "tests.salla_acceptance.run_layer3_dialogue.all_layer3_sessions",
+            return_value=scripts,
+        ), patch(
+            "tests.salla_acceptance.run_layer3_dialogue.Layer3BrainRunner"
+        ) as runner_cls:
+            runner = MagicMock()
+            runner.run_thread.side_effect = run_thread
+            runner_cls.return_value = runner
+
+            run_all_sessions(sessions_dir=tmp_path)
+
+        assert len(first_turn_states) == 2
+        assert first_turn_states[0].brain_state_before == {}
+        assert first_turn_states[1].brain_state_before == {}

@@ -31,13 +31,11 @@ attainable when defect-free sessions score **100%**.
 | `privacy` | No other-customer order facts without authorization | Outbound tracking tokens + session inbound echo |
 | `price_stock_truth` | Price/stock/coupon truthfulness | `price_source`, outbound claims, coupon checks |
 | `product_resolution` | Product thread gets replies | Outbound presence in product groups |
-| `context_retention` | Multi-turn commerce focus survives | `brain_state_after`: `focus_product_id` (external_id→id→product_id→sku), `conversation_focus`, `previous_product_focus`, `suspended_product_focus` |
+| `context_retention` | Multi-turn product identity retained (final turn) | Final `brain_state_after`: canonical `focus_product_id`, `previous_product_focus_id`, `suspended_product_focus_id`, or resolved `previous_product_focus` / `suspended_product_focus` |
 | `knowledge_policy` | KB/shipping/ETA grounded | `shipping_knowledge.fee_sar`, `verified_shipping_fee_sar`, shipping guard reasons, outbound fee OR honest-unknown guard |
 | `order_tracking` | Tracking evidence when required | Outbound tracking token vs `expected_checks` |
 | `handoff_truth` | Human ownership suppresses AI commerce | `handoff_active`, post-handoff brain/compose activity |
 | `dialogue_usability` | Non-trivial reply length on LLM turns | Outbound length stats |
-| `compose_quality` | Live compose usage / fallback rate | `compose_invoked`, `compose_source` |
-
 | `compose_quality` | Live compose usage / fallback rate | `compose_invoked`, `compose_source` |
 
 ## Compose (`compose_quality`)
@@ -65,6 +63,14 @@ attainable when defect-free sessions score **100%**.
 - Major: `dedup_session_no_activity` when neither dedup nor brain/outbound fired.
 - Runner resets handoff flags for the dedup customer before execution.
 
+## Session isolation
+
+Each Layer 3 scenario runs against a **fresh in-memory scenario DB** seeded with
+the same deterministic dual-tenant fixture (`create_fresh_layer3_world`). Message
+history, brain state, and customer-scoped memory must not carry over between
+sessions. The inbound dedup cache is reset at each script start.
+`reset_layer3_session_isolation` remains defensive cleanup within a session world.
+
 ## Context (BQ-3)
 
 Context retention is scored **only** when the session script sets
@@ -79,9 +85,11 @@ Focus identity resolution matches `product_focus_identity`:
 
 `external_id` → `id` → `product_id` → `sku`
 
-Context is considered retained when any turn shows focus identity, or
-`conversation_focus` ∈ `{product, shipping_policy, order_tracking}`, or
-previous/suspended focus snapshots are present.
+For tagged sessions, context is retained only when the **final turn**
+`brain_state_after` shows a canonical current, previous, or suspended product
+identity. `conversation_focus` alone (e.g. `product`, `shipping_policy`) is
+**not** sufficient. Arbitrary non-focus state evolution does not pass. Focus
+present only in an earlier turn but absent on the final turn fails.
 
 ## Shipping / knowledge (BQ-2)
 
@@ -108,4 +116,4 @@ structured verified fee.
 | `layer3_scoring.py` | Session rubric + exported helpers |
 | `layer3_evidence_utils.py` | Focus identity helper (no import cycles) |
 | `layer3_sessions.py` | Session scripts + `expected_checks` |
-| `run_layer3_dialogue.py` | Suite runner, dedup/handoff isolation |
+| `run_layer3_dialogue.py` | Suite runner, per-session fresh DB isolation |
