@@ -18,9 +18,18 @@ from core.checkout_shipping_policy import (  # noqa: E402
     SHIPPING_KB_KINDS,
     build_shipping_knowledge_facts,
     clear_pending_shipping_city,
+    get_pending_shipping_city,
     pin_pending_shipping_city,
     resolve_city_shipping_policy,
     resolve_verified_shipping_fee,
+)
+from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.state.store import DefaultStateStore  # noqa: E402
+from modules.ai.brain.types import (  # noqa: E402
+    Decision,
+    INTENT_ASK_SHIPPING,
+    Intent,
+    MerchantConversationState,
 )
 from modules.ai.brain.postprocess.shipping_cost_truth_guard import (  # noqa: E402
     apply_shipping_cost_truth_guard,
@@ -224,6 +233,103 @@ class TestShippingKnowledgeComposeFacts:
         assert facts["fee_sar"] == 25.0
         clear_pending_shipping_city(state)
         assert state.commerce_session.get("pending_shipping_city_inquiry") is None
+
+
+class TestPendingShippingCityStateTransition:
+    def _transition_after_ask_shipping(
+        self,
+        state: MerchantConversationState,
+    ) -> MerchantConversationState:
+        pin_pending_shipping_city(state, source="ask_shipping")
+        intent = Intent(
+            name=INTENT_ASK_SHIPPING,
+            confidence=0.9,
+            raw_message="كم تكلفة الشحن؟",
+        )
+        decision = Decision(
+            action=ACTION_LLM_REPLY,
+            args={"topic_hint": "shipping"},
+            reason="test",
+            confidence=0.9,
+        )
+        return DefaultStateStore().transition(state, intent, decision)
+
+    def test_pending_marker_survives_transition_and_resolves_city_follow_up(
+        self,
+        db_tenant_a,
+    ) -> None:
+        db, tenant = db_tenant_a
+        source = MerchantConversationState()
+        transitioned = self._transition_after_ask_shipping(source)
+
+        assert get_pending_shipping_city(transitioned) is not None
+        facts = build_shipping_knowledge_facts(
+            db,
+            tenant_id=tenant.id,
+            message="الرياض",
+            brain_state=transitioned.to_dict(),
+        )
+        assert facts["city"] == "الرياض"
+        assert facts["fee_sar"] == 25.0
+        assert facts["need_city"] is False
+
+    def test_transition_copies_commerce_session_without_aliasing(self) -> None:
+        source = MerchantConversationState()
+        source.commerce_session["probe"] = "before_transition"
+
+        transitioned = self._transition_after_ask_shipping(source)
+
+        assert transitioned.commerce_session is not source.commerce_session
+        assert transitioned.commerce_session.get("probe") == "before_transition"
+        assert get_pending_shipping_city(transitioned) is not None
+
+    def test_tenant_isolation_after_transition_city_follow_up(
+        self,
+        db_tenant_a,
+        db_tenant_b,
+    ) -> None:
+        db_a, tenant_a = db_tenant_a
+        db_b, tenant_b = db_tenant_b
+
+        state_a = self._transition_after_ask_shipping(MerchantConversationState())
+        state_b = self._transition_after_ask_shipping(MerchantConversationState())
+
+        facts_a = build_shipping_knowledge_facts(
+            db_a,
+            tenant_id=tenant_a.id,
+            message="الرياض",
+            brain_state=state_a.to_dict(),
+        )
+        facts_b = build_shipping_knowledge_facts(
+            db_b,
+            tenant_id=tenant_b.id,
+            message="الدمام",
+            brain_state=state_b.to_dict(),
+        )
+
+        assert facts_a["fee_sar"] == 25.0
+        assert facts_b["fee_sar"] == 40.0
+
+        missing_on_b = build_shipping_knowledge_facts(
+            db_b,
+            tenant_id=tenant_b.id,
+            message="الرياض",
+            brain_state=state_b.to_dict(),
+        )
+        assert missing_on_b.get("city_not_in_policy") is True
+        assert "fee_sar" not in missing_on_b
+
+    def test_clearing_pending_marker_does_not_mutate_source_state(self) -> None:
+        source = MerchantConversationState()
+        transitioned = self._transition_after_ask_shipping(source)
+
+        assert get_pending_shipping_city(source) is not None
+        assert get_pending_shipping_city(transitioned) is not None
+
+        clear_pending_shipping_city(transitioned)
+
+        assert get_pending_shipping_city(transitioned) is None
+        assert get_pending_shipping_city(source) is not None
 
 
 class TestShippingCostTruthGuard:
