@@ -27,7 +27,10 @@ from core.inbound_dedup import reset_cache  # noqa: E402
 from models import Conversation, HandoffSession  # noqa: E402
 from tests.commerce_scenario_fixtures import make_scenario_db  # noqa: E402
 from tests.salla_acceptance.fixtures import (  # noqa: E402
+    PHONE_CUST_A,
+    PHONE_CUST_B,
     PHONE_CUST_C,
+    PHONE_CUST_D,
     seed_dual_tenant_world,
 )
 from tests.salla_acceptance.layer2_harness import scenario_world_from_bundle  # noqa: E402
@@ -54,6 +57,50 @@ from tests.salla_acceptance.layer3_sessions import (  # noqa: E402
 
 RESULTS_PATH = _HERE / "LAYER3_ACCEPTANCE_RESULTS.json"
 SESSIONS_DIR = _HERE / "LAYER3_SESSIONS"
+
+_CUSTOMER_PHONES = {
+    "A": PHONE_CUST_A,
+    "B": PHONE_CUST_B,
+    "C": PHONE_CUST_C,
+    "D": PHONE_CUST_D,
+}
+
+
+def reset_layer3_session_isolation(
+    world,
+    *,
+    tenant_key: str,
+    customer_key: str,
+) -> None:
+    """
+    Clear per-session mutable harness state before each Layer3 session.
+
+    Isolation point: invoked at the start of every session in ``run_all_sessions``
+    so handoff/ownership flags on one customer (e.g. G7 customer C) cannot
+    pollute a later session on another customer (e.g. G8 customer D).
+    """
+    phone = _CUSTOMER_PHONES.get(customer_key)
+    if not phone:
+        return
+    bundle = world.tenant_a if tenant_key == "A" else world.tenant_b
+    tenant_id = bundle.tenant_id
+    conversation = bundle.conversations.get(customer_key)
+    if conversation is None:
+        return
+
+    world.db.query(HandoffSession).filter(
+        HandoffSession.tenant_id == tenant_id,
+        HandoffSession.customer_phone == phone,
+    ).delete(synchronize_session=False)
+
+    convo = world.db.query(Conversation).filter_by(id=conversation.id).one()
+    convo.is_human_handoff = False
+    convo.handoff_active = False
+    convo.needs_human = False
+    if str(convo.status or "").lower() in {"human", "handoff"}:
+        convo.status = "active"
+    world.db.add(convo)
+    world.db.commit()
 
 
 def _git_head_sha() -> str:
@@ -133,7 +180,35 @@ def prove_one_live_compose_turn(world) -> Dict[str, Any]:
     }
 
 
+def _reset_customer_handoff(db, bundle, customer_key: str) -> None:
+    """Clear G7 handoff residue so dedup sessions do not inherit human ownership."""
+    phone_map = {
+        "A": PHONE_CUST_A,
+        "B": PHONE_CUST_B,
+        "C": PHONE_CUST_C,
+        "D": PHONE_CUST_D,
+    }
+    phone = phone_map.get(customer_key, "")
+    convo = bundle.conversations.get(customer_key)
+    if convo is not None:
+        row = db.query(Conversation).filter_by(id=convo.id).one()
+        row.is_human_handoff = False
+        row.handoff_active = False
+        row.needs_human = False
+        if str(row.status or "").lower() == "human":
+            row.status = "active"
+        db.add(row)
+    if phone:
+        db.query(HandoffSession).filter_by(
+            tenant_id=bundle.tenant_id,
+            customer_phone=phone,
+            status="active",
+        ).delete(synchronize_session=False)
+    db.commit()
+
+
 def _run_dedup_session(world, script) -> List[Any]:
+    _reset_customer_handoff(world.db, world.tenant_a, script.customer_key)
     sw = scenario_world_from_bundle(world.db, world.tenant_a, script.customer_key)
     reset_cache()
     runner = Layer3BrainRunner(sw)
@@ -145,6 +220,7 @@ def _run_dedup_session(world, script) -> List[Any]:
 
 def _run_handoff_session(world, script) -> List[Any]:
     sw = scenario_world_from_bundle(world.db, world.tenant_a, script.customer_key)
+    customer_phone = _CUSTOMER_PHONES[script.customer_key]
     runner = Layer3BrainRunner(sw)
     turns = []
     for idx, msg in enumerate(script.messages):
@@ -154,7 +230,7 @@ def _run_handoff_session(world, script) -> List[Any]:
             if not (convo.is_human_handoff or convo.handoff_active):
                 hs = HandoffSession(
                     tenant_id=world.tenant_a.tenant_id,
-                    customer_phone=PHONE_CUST_C,
+                    customer_phone=customer_phone,
                     status="active",
                     handoff_reason="layer3_test",
                     last_message=msg,
@@ -181,6 +257,11 @@ def run_all_sessions(world) -> tuple[List[Any], List[Any]]:
 
     for script in all_layer3_sessions():
         print(f"  [{script.session_id}] group={script.group} tenant={script.tenant} ...", flush=True)
+        reset_layer3_session_isolation(
+            world,
+            tenant_key=script.tenant,
+            customer_key=script.customer_key,
+        )
         bundle = world.tenant_a if script.tenant == "A" else world.tenant_b
         if script.expected_checks.get("dedup_steps"):
             turns = _run_dedup_session(world, script)
