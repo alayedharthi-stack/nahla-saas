@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 from unittest.mock import MagicMock, patch
 
 from commerce_scenario_fixtures import ScenarioWorld
@@ -26,6 +26,7 @@ from tests.salla_acceptance.layer2_harness import (
     scenario_world_from_bundle,
 )
 from tests.salla_acceptance.layer3_provider import apply_layer3_process_env
+from tests.salla_acceptance.layer3_evidence_utils import resolve_focus_product_id
 
 
 @dataclass
@@ -72,11 +73,16 @@ class Layer3TurnEvidence:
     knowledge_source: str = ""
     kb_section_ids: List[Any] = field(default_factory=list)
     guards: Dict[str, Any] = field(default_factory=dict)
+    shipping_knowledge: Dict[str, Any] = field(default_factory=dict)
     handoff_active: bool = False
     outbound_send_count: int = 0
     fake_outbound_bodies: List[str] = field(default_factory=list)
     brain_state_before: Dict[str, Any] = field(default_factory=dict)
     brain_state_after: Dict[str, Any] = field(default_factory=dict)
+    conversation_focus: str = ""
+    previous_product_focus_id: str = ""
+    suspended_product_focus_id: str = ""
+    verified_shipping_fee_sar: Optional[float] = None
     dedup_hit: bool = False
     dedup_msg_id: str = ""
     skip_ai: bool = False
@@ -137,12 +143,75 @@ class Layer3BrainRunner:
         prep = dict(brain.get("order_prep") or {})
         focus = brain.get("current_product_focus") or prep.get("current_product_focus") or {}
         snapshot: Dict[str, Any] = {"order_prep_keys": sorted(prep.keys())[:20]}
-        if isinstance(focus, dict):
-            snapshot["focus_product_id"] = focus.get("product_id")
-            snapshot["focus_product_name"] = str(focus.get("name") or focus.get("title") or "")[:80]
+        resolved = resolve_focus_product_id(focus)
+        if resolved:
+            snapshot["focus_product_id"] = resolved
         elif focus:
             snapshot["focus_product_id"] = focus
+        if isinstance(focus, dict):
+            snapshot["focus_product_name"] = str(
+                focus.get("name") or focus.get("title") or ""
+            )[:80]
+        snapshot["conversation_focus"] = str(brain.get("conversation_focus") or "")
+        prev_id = resolve_focus_product_id(brain.get("previous_product_focus"))
+        if prev_id:
+            snapshot["previous_product_focus_id"] = prev_id
+            snapshot["previous_product_focus"] = prev_id
+            snapshot["has_previous_product_focus"] = True
+        else:
+            snapshot["has_previous_product_focus"] = False
+        susp_id = resolve_focus_product_id(brain.get("suspended_product_focus"))
+        if susp_id:
+            snapshot["suspended_product_focus_id"] = susp_id
+            snapshot["suspended_product_focus"] = susp_id
+            snapshot["has_suspended_product_focus"] = True
+        else:
+            snapshot["has_suspended_product_focus"] = False
         return snapshot
+
+    def _capture_shipping_facts(
+        self,
+        *,
+        intent: str,
+        decision_args: Dict[str, Any],
+        inbound_text: str,
+        brain_state: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Optional[float]]:
+        topic = str(decision_args.get("topic") or "")
+        topic_hint = str(decision_args.get("topic_hint") or "")
+        is_shipping = (
+            intent == "ask_shipping"
+            or topic_hint == "shipping"
+            or topic in {"ask_shipping", "shipping_post_order"}
+        )
+        if not is_shipping:
+            return {}, None
+        try:
+            from core.checkout_shipping_policy import (  # noqa: PLC0415
+                build_shipping_knowledge_facts,
+                resolve_verified_shipping_fee,
+            )
+
+            prep = dict(brain_state.get("order_prep") or {})
+            ship_facts = build_shipping_knowledge_facts(
+                self.world.db,
+                tenant_id=int(self.world.tenant.id),
+                city=str(prep.get("city") or ""),
+                message=str(inbound_text or ""),
+                brain_state=brain_state,
+                order_prep=prep,
+            )
+            verified_fee, _resolution = resolve_verified_shipping_fee(
+                self.world.db,
+                tenant_id=int(self.world.tenant.id),
+                order_prep=prep,
+                brain_state=brain_state,
+                message=str(inbound_text or ""),
+            )
+            return dict(ship_facts or {}), verified_fee
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"shipping_facts_capture: {exc}")
+            return {}, None
 
     @contextmanager
     def _runtime_patches(self) -> Iterator[None]:
@@ -467,9 +536,33 @@ class Layer3BrainRunner:
                 or ""
             ),
         }
+        for guard_name in evidence.guards.get("guards_triggered") or []:
+            if "shipping" in str(guard_name).lower():
+                evidence.guards["shipping_guard_reason"] = str(guard_name)
+                break
         evidence.outbound_send_count = len(new_fake) + len(out_events)
         evidence.fake_outbound_bodies = [str(r.body or "") for r in new_fake if r.body]
         evidence.brain_state_after = self._brain_state_keys()
+        evidence.conversation_focus = str(
+            evidence.brain_state_after.get("conversation_focus") or ""
+        )
+        evidence.previous_product_focus_id = str(
+            evidence.brain_state_after.get("previous_product_focus_id") or ""
+        )
+        evidence.suspended_product_focus_id = str(
+            evidence.brain_state_after.get("suspended_product_focus_id") or ""
+        )
+        full_brain = dict(
+            (convo.extra_metadata or {}).get("brain_state") or {}
+        )
+        ship_facts, verified_fee = self._capture_shipping_facts(
+            intent=evidence.intent,
+            decision_args=evidence.decision_args,
+            inbound_text=text,
+            brain_state=full_brain,
+        )
+        evidence.shipping_knowledge = ship_facts
+        evidence.verified_shipping_fee_sar = verified_fee
         evidence.skip_ai = self.should_skip_ai
         evidence.tools_observed = list(
             self._last_brain_result.get("tools_used")

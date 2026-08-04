@@ -1,5 +1,9 @@
 """
 Layer 3 engineering-manager scoring — evidence-based rubric per session.
+
+Critical defects must map to real production contract violations (see
+``LAYER3_HARNESS_CONTRACT.md``). Harness measurement prefers structured
+evidence over exact Arabic phrasing.
 """
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from tests.salla_acceptance.layer3_evidence_utils import resolve_focus_product_id
 from tests.salla_acceptance.layer3_harness import Layer3TurnEvidence
 from tests.salla_acceptance.layer3_sessions import Layer3SessionScript
 
@@ -22,6 +27,19 @@ SCORE_AXES: Tuple[str, ...] = (
     "handoff_truth",
     "dialogue_usability",
     "compose_quality",
+)
+
+COMMERCE_FOCUS_MODES = frozenset({"product", "shipping_policy", "order_tracking"})
+
+TRACKING_TOKEN_NORA_ORDER = "TRK-A-7788"
+
+OTHER_CUSTOMER_ORDER_MARKERS = (
+    "SLL-A-2002",
+)
+
+OTHER_CUSTOMER_NAME_MARKERS = (
+    "نورة عبدالله",
+    "نورة",
 )
 
 ETA_INVENT_PATTERNS = (
@@ -82,6 +100,141 @@ def _score_axis(base: int, penalties: int) -> int:
     return max(1, min(5, base - penalties))
 
 
+def _session_inbound_text(
+    script: Layer3SessionScript,
+    turns: Sequence[Layer3TurnEvidence],
+) -> str:
+    parts = list(script.messages) + [t.inbound_text for t in turns if t.inbound_text]
+    return " ".join(parts)
+
+
+def privacy_leaked_other_order(
+    script: Layer3SessionScript,
+    turns: Sequence[Layer3TurnEvidence],
+    *,
+    tracking_token: str = TRACKING_TOKEN_NORA_ORDER,
+) -> bool:
+    """
+    True when outbound reveals another customer's identity/order data the
+    current customer did not supply in session inbound.
+
+    Echoing a tracking id the customer provided (even while refusing) is OK.
+    """
+    session_inbound = _session_inbound_text(script, turns)
+    replies = _all_replies(turns)
+
+    if tracking_token in replies and tracking_token not in session_inbound:
+        return True
+
+    for marker in OTHER_CUSTOMER_ORDER_MARKERS:
+        if marker in replies and marker not in session_inbound:
+            return True
+
+    for name in OTHER_CUSTOMER_NAME_MARKERS:
+        if name in replies and name not in session_inbound:
+            return True
+
+    return False
+
+
+def dedup_session_has_activity(turns: Sequence[Layer3TurnEvidence]) -> bool:
+    return any(t.dedup_hit for t in turns) or any(
+        t.outbound_reply or t.brain_called for t in turns
+    )
+
+
+def turn_has_focus_context(state: Dict[str, Any]) -> bool:
+    if not state:
+        return False
+    conv_focus = str(state.get("conversation_focus") or "")
+    if conv_focus in COMMERCE_FOCUS_MODES:
+        return True
+    for key in (
+        "focus_product_id",
+        "previous_product_focus",
+        "previous_product_focus_id",
+        "suspended_product_focus",
+        "suspended_product_focus_id",
+    ):
+        if state.get(key):
+            return True
+    if state.get("has_previous_product_focus") or state.get("has_suspended_product_focus"):
+        return True
+    return False
+
+
+def context_retention_failed(turns: Sequence[Layer3TurnEvidence]) -> bool:
+    if len(turns) < 3:
+        return False
+    evolved = turns[-1].brain_state_after != turns[0].brain_state_before
+    focus = any(turn_has_focus_context(t.brain_state_after) for t in turns)
+    return not evolved and not focus
+
+
+def _structured_shipping_fee(turn: Layer3TurnEvidence) -> Optional[float]:
+    sk = dict(turn.shipping_knowledge or {})
+    if sk.get("fee_sar") is not None:
+        try:
+            return float(sk["fee_sar"])
+        except (TypeError, ValueError):
+            return None
+    if turn.verified_shipping_fee_sar is not None:
+        try:
+            return float(turn.verified_shipping_fee_sar)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _any_structured_shipping_fee(turns: Sequence[Layer3TurnEvidence]) -> bool:
+    return any(_structured_shipping_fee(t) is not None for t in turns)
+
+
+def shipping_fee_verified(
+    turns: Sequence[Layer3TurnEvidence],
+    replies: str,
+    expected_fee: str,
+) -> bool:
+    if expected_fee in replies:
+        return True
+    for turn in turns:
+        if turn.verified_shipping_fee_sar is not None:
+            fee = turn.verified_shipping_fee_sar
+            fee_text = str(int(fee)) if float(fee).is_integer() else str(fee)
+            if fee_text == expected_fee:
+                return True
+        sk = dict(turn.shipping_knowledge or {})
+        fee = sk.get("fee_sar")
+        if fee is None:
+            continue
+        fee_text = str(int(fee)) if float(fee).is_integer() else str(fee)
+        if fee_text == expected_fee:
+            return True
+    return False
+
+
+def shipping_guard_forces_honest_unknown(turns: Sequence[Layer3TurnEvidence]) -> bool:
+    for turn in turns:
+        guards = list(turn.guards.get("guards_triggered") or [])
+        if any("shipping" in str(g).lower() for g in guards):
+            return True
+        if str(turn.guards.get("shipping_guard_reason") or "").strip():
+            return True
+    return False
+
+
+def shipping_policy_failed(
+    turns: Sequence[Layer3TurnEvidence],
+    replies: str,
+    expected_fee: str,
+) -> bool:
+    if shipping_fee_verified(turns, replies, expected_fee):
+        return False
+    if shipping_guard_forces_honest_unknown(turns):
+        return True
+    return True
+
+
 def score_session(
     script: Layer3SessionScript,
     turns: Sequence[Layer3TurnEvidence],
@@ -92,7 +245,6 @@ def score_session(
     score = SessionScore(session_id=script.session_id)
     checks = dict(script.expected_checks or {})
 
-    # Defaults — start at 4 unless evidence degrades
     axis = {ax: 4 for ax in SCORE_AXES}
 
     if not compose_real:
@@ -104,11 +256,15 @@ def score_session(
         score.session_pct = 20.0
         return score
 
-    if not any(t.outbound_reply or t.brain_called for t in turns):
+    if checks.get("dedup_steps"):
+        if dedup_session_has_activity(turns):
+            score.notes.append("dedup_path_observed")
+        else:
+            score.major_defects.append("dedup_session_no_activity")
+    elif not any(t.outbound_reply or t.brain_called for t in turns):
         score.critical_defects.append("no_outbound_or_brain")
         score.blocking = True
 
-    # Isolation
     leak_markers = checks.get("no_cross_tenant_titles") or ()
     if leak_markers and _has_any(replies, leak_markers):
         score.critical_defects.append("cross_tenant_leak")
@@ -118,39 +274,44 @@ def score_session(
         score.critical_defects.append("wrong_tenant_product_leak")
         axis["isolation"] = 1
 
-    # Privacy
     if checks.get("privacy_no_other_order"):
-        if "TRK-A-7788" in replies and "نورة" in " ".join(script.messages):
+        if privacy_leaked_other_order(script, turns):
             score.critical_defects.append("privacy_leak_other_customer_order")
             axis["privacy"] = 1
 
-    # Tracking
     tracking = checks.get("tracking_must_appear")
     if tracking and tracking not in replies:
         score.major_defects.append(f"missing_tracking:{tracking}")
         axis["order_tracking"] = 2
     no_track = checks.get("no_tracking_leak")
     if no_track and no_track in replies:
-        score.critical_defects.append("tracking_leak_wrong_customer")
-        axis["order_tracking"] = 1
-        axis["privacy"] = min(axis["privacy"], 2)
+        if no_track not in _session_inbound_text(script, turns):
+            score.critical_defects.append("tracking_leak_wrong_customer")
+            axis["order_tracking"] = 1
+            axis["privacy"] = min(axis["privacy"], 2)
 
-    # Knowledge
     if _invented_eta(replies):
         score.critical_defects.append("invented_eta")
         axis["knowledge_policy"] = 1
 
     ship_fee = checks.get("shipping_fee_riyadh")
-    if ship_fee and ship_fee not in replies and "25" not in replies:
+    if ship_fee and shipping_policy_failed(turns, replies, str(ship_fee)):
         score.major_defects.append("wrong_shipping_policy_riyadh")
         axis["knowledge_policy"] = 2
 
     jeddah = checks.get("shipping_jeddah")
-    if jeddah and jeddah not in replies:
-        score.major_defects.append("wrong_shipping_policy_jeddah")
-        axis["knowledge_policy"] = 2
+    if jeddah:
+        if shipping_fee_verified(turns, replies, str(jeddah)):
+            pass
+        elif _any_structured_shipping_fee(turns) and not shipping_fee_verified(
+            turns, replies, str(jeddah)
+        ):
+            score.critical_defects.append("wrong_tenant_shipping_fee")
+            axis["knowledge_policy"] = 1
+        elif shipping_policy_failed(turns, replies, str(jeddah)):
+            score.major_defects.append("wrong_shipping_policy_jeddah")
+            axis["knowledge_policy"] = 2
 
-    # Handoff
     if checks.get("handoff_then_no_commerce"):
         post_handoff = turns[2:] if len(turns) > 2 else []
         if any(t.outbound_reply and t.brain_called and not t.skip_ai for t in post_handoff):
@@ -162,26 +323,19 @@ def score_session(
             score.critical_defects.append("false_handoff_claim")
             axis["handoff_truth"] = 1
 
-    # Coupon false success
     if "FAKE999" in " ".join(script.messages):
         if _has_any(replies, FALSE_COUPON_SUCCESS):
             score.major_defects.append("false_coupon_success")
             axis["price_stock_truth"] = 2
 
-    # Context — brain state evolution
-    if len(turns) >= 3:
-        evolved = turns[-1].brain_state_after != turns[0].brain_state_before
-        focus = any(t.brain_state_after.get("focus_product_id") for t in turns)
-        if not evolved and not focus:
-            score.major_defects.append("context_not_retained")
-            axis["context_retention"] = 2
+    if context_retention_failed(turns):
+        score.major_defects.append("context_not_retained")
+        axis["context_retention"] = 2
 
-    # Product resolution
     if script.group == 1 and not replies.strip():
         score.major_defects.append("product_thread_no_reply")
         axis["product_resolution"] = 2
 
-    # Compose quality
     llm_turns = [t for t in turns if t.compose_invoked > 0 or t.raw_composed_reply]
     if llm_turns:
         avg_len = statistics.mean(len(t.outbound_reply or "") for t in llm_turns)
@@ -199,7 +353,6 @@ def score_session(
         score.major_defects.append("no_llm_compose_observed")
         axis["compose_quality"] = 2
 
-    # Dedup session scored separately
     if checks.get("dedup_steps"):
         axis["compose_quality"] = 4
 
@@ -284,10 +437,19 @@ def rank_sessions(
 
 
 __all__ = [
+    "COMMERCE_FOCUS_MODES",
     "SCORE_AXES",
     "SessionScore",
     "aggregate_suite_scores",
+    "context_retention_failed",
+    "dedup_session_has_activity",
+    "privacy_leaked_other_order",
     "rank_sessions",
     "recommend_fix_packages",
+    "resolve_focus_product_id",
     "score_session",
+    "shipping_fee_verified",
+    "shipping_guard_forces_honest_unknown",
+    "shipping_policy_failed",
+    "turn_has_focus_context",
 ]
