@@ -145,6 +145,12 @@ def should_slim_general_brain_state(state: BrainReplyState) -> Tuple[bool, str]:
     if _checkout_is_active(checkout):
         return False, "active_order_flow"
 
+    shipping_knowledge = dict(
+        (getattr(state, "known_facts", None) or {}).get("shipping_knowledge") or {}
+    )
+    if shipping_knowledge:
+        return False, "shipping_knowledge"
+
     if intent == "general":
         return True, "intent_general"
 

@@ -8,6 +8,7 @@ import pytest
 
 from modules.ai.brain.compose.brain_state_slim import (
     is_slim_general_brain_state_enabled,
+    prepare_brain_state_dict_with_telemetry,
     should_slim_general_brain_state,
     slim_brain_state_dict_for_general,
 )
@@ -167,3 +168,120 @@ def test_slim_log_emitted(
     payload = json.loads(lines[-1].message.split("[BRAIN_STATE_SLIM] ", 1)[1])
     assert payload["was_slimmed"] is True
     assert payload["old_json_chars"] > payload["new_json_chars"]
+
+
+def test_gate_general_turn_without_operational_facts_remains_eligible() -> None:
+    ok, reason = should_slim_general_brain_state(
+        _heavy_state(
+            known_facts={
+                "store_name": "متجر",
+                "checkout_preparation": {"order_status": "none"},
+            },
+        ),
+    )
+    assert ok is True
+    assert reason == "intent_general"
+
+
+def test_gate_blocks_general_turn_with_structured_shipping_knowledge() -> None:
+    ok, reason = should_slim_general_brain_state(
+        _heavy_state(
+            known_facts={
+                "shipping_knowledge": {
+                    "city": "الرياض",
+                    "fee_sar": 25.0,
+                    "source": "kb",
+                    "need_city": False,
+                },
+                "checkout_preparation": {"order_status": "none"},
+            },
+        ),
+    )
+    assert ok is False
+    assert reason == "shipping_knowledge"
+
+
+def test_gate_blocks_general_turn_with_need_city_shipping_knowledge() -> None:
+    ok, reason = should_slim_general_brain_state(
+        _heavy_state(
+            known_facts={
+                "shipping_knowledge": {
+                    "need_city": True,
+                    "source": "kb",
+                },
+                "checkout_preparation": {"order_status": "none"},
+            },
+        ),
+    )
+    assert ok is False
+    assert reason == "shipping_knowledge"
+
+
+def test_prompt_retains_structured_shipping_facts_on_general_city_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_SLIM_GENERAL_BRAIN_STATE_ENABLED", "true")
+    shipping_facts = {
+        "city": "الرياض",
+        "fee_sar": 25.0,
+        "source": "kb",
+        "need_city": False,
+    }
+    state = _heavy_state(
+        known_facts={
+            "shipping_knowledge": shipping_facts,
+            "checkout_preparation": {"order_status": "none"},
+        },
+    )
+    prompt = build_brain_reply_prompt(state)
+    json_part = prompt.split("BrainStateJSON:", 1)[1]
+    assert "shipping_knowledge" in json_part
+    assert "fee_sar" in json_part
+    assert "25" in json_part
+    assert "الرياض" in json_part
+
+
+def test_prepare_brain_state_retains_shipping_facts_when_slim_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_SLIM_GENERAL_BRAIN_STATE_ENABLED", "true")
+    from dataclasses import asdict
+
+    shipping_facts = {
+        "city": "جدة",
+        "fee_sar": 35.0,
+        "source": "kb",
+        "need_city": False,
+    }
+    state = _heavy_state(
+        known_facts={
+            "shipping_knowledge": shipping_facts,
+            "checkout_preparation": {"order_status": "none"},
+        },
+    )
+    raw = asdict(state)
+    result = prepare_brain_state_dict_with_telemetry(state, raw)
+    retained = (result.get("known_facts") or {}).get("shipping_knowledge") or {}
+    assert retained.get("city") == "جدة"
+    assert retained.get("fee_sar") == 35.0
+    assert retained.get("source") == "kb"
+
+
+def test_prompt_retains_need_city_shipping_facts_when_slim_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NAHLA_SLIM_GENERAL_BRAIN_STATE_ENABLED", "true")
+    state = _heavy_state(
+        known_facts={
+            "shipping_knowledge": {
+                "need_city": True,
+                "source": "kb",
+            },
+            "checkout_preparation": {"order_status": "none"},
+        },
+    )
+    prompt = build_brain_reply_prompt(state)
+    json_part = prompt.split("BrainStateJSON:", 1)[1]
+    assert "shipping_knowledge" in json_part
+    assert "need_city" in json_part
+    assert "true" in json_part.lower()
