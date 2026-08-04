@@ -3798,6 +3798,7 @@ class MerchantBrain:
                 order_prep=_order_prep_dict,
                 brain_state=_brain_state_dict,
                 conversation_id=conversation_id,
+                message=message or "",
             )
             if _scg.replaced:
                 reply = _scg.reply
@@ -5420,6 +5421,51 @@ def _build_reply_state(
         _safe_image_facts = dict((decision.args or {}).get("safe_image_facts") or {})
         if _safe_image_facts:
             known_facts["safe_image_facts"] = _safe_image_facts
+
+    try:
+        from core.checkout_shipping_policy import (  # noqa: PLC0415
+            build_shipping_knowledge_facts,
+            clear_pending_shipping_city,
+            get_pending_shipping_city,
+            pin_pending_shipping_city,
+        )
+
+        _intent_name = str(getattr(ctx.intent, "name", "") or "")
+        _decision_topic = str((decision.args or {}).get("topic") or "")
+        _topic_hint = str((decision.args or {}).get("topic_hint") or "")
+        _pending_ship = get_pending_shipping_city(current_state)
+        _is_shipping_compose = (
+            _intent_name == "ask_shipping"
+            or _topic_hint == "shipping"
+            or _decision_topic in {"ask_shipping", "shipping_post_order"}
+            or bool(_pending_ship and _pending_ship.get("needs_city"))
+        )
+        if _is_shipping_compose:
+            _prep_obj = getattr(current_state, "order_prep", None)
+            _prep_dict = (
+                _prep_obj.to_dict()
+                if _prep_obj is not None and hasattr(_prep_obj, "to_dict")
+                else {}
+            )
+            _slots = dict(getattr(ctx.intent, "slots", None) or {})
+            _ship_facts = build_shipping_knowledge_facts(
+                db,
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                city=str(_prep_dict.get("city") or _slots.get("city") or ""),
+                message=str(ctx.message or ""),
+                brain_state=current_state.to_dict()
+                if hasattr(current_state, "to_dict")
+                else {},
+                order_prep=_prep_dict,
+            )
+            if _ship_facts:
+                known_facts["shipping_knowledge"] = _ship_facts
+                if _ship_facts.get("need_city"):
+                    pin_pending_shipping_city(current_state, source="ask_shipping")
+                elif _ship_facts.get("city"):
+                    clear_pending_shipping_city(current_state)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — shipping facts must not block compose
+        pass
 
     _commerce_navigator = None
     _merchant_sales_channels = None

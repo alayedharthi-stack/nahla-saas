@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 from core.checkout_shipping_policy import (
     CheckoutShippingResolution,
     reply_mentions_shipping_fee,
-    resolve_checkout_shipping_policy,
+    resolve_verified_shipping_fee,
 )
 
 logger = logging.getLogger("nahla.brain.postprocess.shipping_cost_truth_guard")
@@ -131,6 +131,7 @@ def apply_shipping_cost_truth_guard(
     order_prep: Optional[Dict[str, Any]] = None,
     brain_state: Optional[Dict[str, Any]] = None,
     conversation_id: Optional[int] = None,
+    message: str = "",
 ) -> ShippingCostTruthGuardResult:
     original = str(reply or "")
     if not original.strip():
@@ -140,21 +141,13 @@ def apply_shipping_cost_truth_guard(
         return ShippingCostTruthGuardResult(reply=original, replaced=False)
 
     prep = dict(order_prep or {})
-    resolution = resolve_checkout_shipping_policy(
+    verified_fee, resolution = resolve_verified_shipping_fee(
         db,
         tenant_id=int(tenant_id or 0),
         order_prep=prep,
         brain_state=brain_state,
+        message=str(message or ""),
     )
-
-    verified_fee: Optional[float] = None
-    if resolution.free_shipping:
-        verified_fee = 0.0
-    elif (
-        resolution.shipping_fee_sar is not None
-        and not resolution.merchant_review_required
-    ):
-        verified_fee = float(resolution.shipping_fee_sar)
 
     if _reply_has_unverified_shipping_amount(original, verified_fee=verified_fee):
         reason = "unknown_shipping_policy"

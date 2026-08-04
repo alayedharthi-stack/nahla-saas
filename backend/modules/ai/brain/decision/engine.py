@@ -3115,6 +3115,9 @@ class DefaultDecisionEngine:
                     bool(getattr(_op, "payment_receipt_received", False)),
                     getattr(_op, "order_status", ""),
                 )
+                from core.checkout_shipping_policy import clear_pending_shipping_city  # noqa: PLC0415
+
+                clear_pending_shipping_city(state)
                 return Decision(
                     action=ACTION_LLM_REPLY,
                     args={
@@ -3127,6 +3130,19 @@ class DefaultDecisionEngine:
                         "order present — defer to brain with order context"
                     ),
                 )
+            from core.checkout_shipping_policy import (  # noqa: PLC0415
+                clear_pending_shipping_city,
+                pin_pending_shipping_city,
+            )
+
+            _ship_city = (
+                str((intent.slots or {}).get("city") or "").strip()
+                or str(getattr(_op, "city", "") or "").strip()
+            )
+            if _ship_city:
+                clear_pending_shipping_city(state)
+            else:
+                pin_pending_shipping_city(state, source="ask_shipping")
             logger.info(
                 "[SHIPPING_INTENT] pre-order — defer to brain "
                 "(faq_shipping template disabled) | tenant=%s",
