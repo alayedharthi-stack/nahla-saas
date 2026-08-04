@@ -23,11 +23,16 @@ from core.checkout_shipping_policy import (  # noqa: E402
     resolve_city_shipping_policy,
     resolve_verified_shipping_fee,
 )
+from modules.ai.brain.commerce.pending_shipping_intent import (  # noqa: E402
+    restore_pending_shipping_city_intent,
+)
 from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
 from modules.ai.brain.state.store import DefaultStateStore  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     Decision,
+    INTENT_ASK_PRODUCT,
     INTENT_ASK_SHIPPING,
+    INTENT_GENERAL,
     Intent,
     MerchantConversationState,
 )
@@ -397,3 +402,167 @@ class TestShippingCostTruthGuard:
             message="كم الشحن للرياض؟",
         )
         assert fee == 25.0
+
+
+class TestPendingShippingIntentRestore:
+    def _general_intent(self, message: str = "الرياض") -> Intent:
+        return Intent(
+            name=INTENT_GENERAL,
+            confidence=0.55,
+            raw_message=message,
+            extraction_method="llm",
+        )
+
+    def _state_with_pending(self) -> MerchantConversationState:
+        state = MerchantConversationState()
+        pin_pending_shipping_city(state, source="ask_shipping")
+        return state
+
+    def test_pending_marker_city_follow_up_restores_ask_shipping(
+        self,
+        db_tenant_a,
+    ) -> None:
+        db, tenant = db_tenant_a
+        state = self._state_with_pending()
+        general = Intent(
+            name=INTENT_GENERAL,
+            confidence=0.55,
+            slots={"topic_hint": "follow_up"},
+            raw_message="الرياض",
+            extraction_method="llm",
+        )
+
+        restored = restore_pending_shipping_city_intent(
+            general,
+            db=db,
+            tenant_id=tenant.id,
+            message="الرياض",
+            state=state,
+        )
+
+        assert restored.name == INTENT_ASK_SHIPPING
+        assert restored.slots.get("city") == "الرياض"
+        assert restored.slots.get("topic_hint") == "follow_up"
+        assert restored.raw_message == "الرياض"
+        assert restored.extraction_method == "hybrid"
+
+    def test_tenant_isolation_resolves_own_kb_city(
+        self,
+        db_tenant_a,
+        db_tenant_b,
+    ) -> None:
+        db_a, tenant_a = db_tenant_a
+        db_b, tenant_b = db_tenant_b
+
+        restored_a = restore_pending_shipping_city_intent(
+            self._general_intent("الرياض"),
+            db=db_a,
+            tenant_id=tenant_a.id,
+            message="الرياض",
+            state=self._state_with_pending(),
+        )
+        restored_b = restore_pending_shipping_city_intent(
+            self._general_intent("الدمام"),
+            db=db_b,
+            tenant_id=tenant_b.id,
+            message="الدمام",
+            state=self._state_with_pending(),
+        )
+
+        assert restored_a.name == INTENT_ASK_SHIPPING
+        assert restored_a.slots.get("city") == "الرياض"
+        assert restored_b.name == INTENT_ASK_SHIPPING
+        assert restored_b.slots.get("city") == "الدمام"
+
+        facts_b_riyadh = build_shipping_knowledge_facts(
+            db_b,
+            tenant_id=tenant_b.id,
+            message="الرياض",
+            brain_state=self._state_with_pending().to_dict(),
+        )
+        assert facts_b_riyadh.get("city_not_in_policy") is True
+        assert "fee_sar" not in facts_b_riyadh
+
+    def test_non_city_text_remains_general(self, db_tenant_a) -> None:
+        db, tenant = db_tenant_a
+        state = self._state_with_pending()
+
+        restored = restore_pending_shipping_city_intent(
+            self._general_intent("شكراً جزيلاً"),
+            db=db,
+            tenant_id=tenant.id,
+            message="شكراً جزيلاً",
+            state=state,
+        )
+
+        assert restored.name == INTENT_GENERAL
+
+    def test_without_pending_marker_remains_general(self, db_tenant_a) -> None:
+        db, tenant = db_tenant_a
+        state = MerchantConversationState()
+
+        restored = restore_pending_shipping_city_intent(
+            self._general_intent("الرياض"),
+            db=db,
+            tenant_id=tenant.id,
+            message="الرياض",
+            state=state,
+        )
+
+        assert restored.name == INTENT_GENERAL
+
+    def test_explicit_non_general_intent_unchanged(self, db_tenant_a) -> None:
+        db, tenant = db_tenant_a
+        state = self._state_with_pending()
+        product_intent = Intent(
+            name=INTENT_ASK_PRODUCT,
+            confidence=0.88,
+            slots={"product_query": "حذاء رياضي أبيض"},
+            raw_message="الرياض",
+            extraction_method="rules",
+        )
+
+        restored = restore_pending_shipping_city_intent(
+            product_intent,
+            db=db,
+            tenant_id=tenant.id,
+            message="الرياض",
+            state=state,
+        )
+
+        assert restored.name == INTENT_ASK_PRODUCT
+        assert restored.slots.get("product_query") == "حذاء رياضي أبيض"
+        assert "city" not in restored.slots
+
+    def test_db_none_or_resolver_failure_remains_general_and_no_raise(
+        self,
+        db_tenant_a,
+        monkeypatch,
+    ) -> None:
+        state = self._state_with_pending()
+        intent = self._general_intent("الرياض")
+
+        without_db = restore_pending_shipping_city_intent(
+            intent,
+            db=None,
+            tenant_id=1,
+            message="الرياض",
+            state=state,
+        )
+        assert without_db.name == INTENT_GENERAL
+
+        def _raise_resolver(*_args, **_kwargs):
+            raise RuntimeError("resolver unavailable")
+
+        monkeypatch.setattr(
+            "core.checkout_shipping_policy.build_shipping_knowledge_facts",
+            _raise_resolver,
+        )
+        with_broken_resolver = restore_pending_shipping_city_intent(
+            intent,
+            db=db_tenant_a[0],
+            tenant_id=db_tenant_a[1].id,
+            message="الرياض",
+            state=state,
+        )
+        assert with_broken_resolver.name == INTENT_GENERAL

@@ -1176,6 +1176,25 @@ class MerchantBrain:
         if _raw_message and intent.raw_message != _raw_message:
             intent.raw_message = _raw_message
 
+        try:
+            from .commerce.pending_shipping_intent import (  # noqa: PLC0415
+                restore_pending_shipping_city_intent,
+            )
+
+            intent = restore_pending_shipping_city_intent(
+                intent,
+                db=db,
+                tenant_id=tenant_id,
+                message=_raw_message or message,
+                state=state_for_classify,
+            )
+        except Exception as _psc_exc:  # noqa: BLE001
+            logger.debug(
+                "[PENDING_SHIPPING_INTENT] restore skipped tenant=%s err=%s",
+                tenant_id,
+                _psc_exc,
+            )
+
         # ── 1a.55 Customer Intent Priority Layer (AI-ARCH-007) ─────────
         _intent_priority = None
         try:
@@ -1798,7 +1817,7 @@ class MerchantBrain:
             )
 
             trace_commerce_discovery_shadow(ctx)
-        except Exception as _cds_exc:  # noqa: BLE001
+        except Exception as _cds_exc:  # noqa: BLE001  # noqa: silent-ok — shadow telemetry must not block the turn
             logger.debug(
                 "[COMMERCE_DISCOVERY_SHADOW] trace skipped tenant=%s err=%s",
                 tenant_id,
