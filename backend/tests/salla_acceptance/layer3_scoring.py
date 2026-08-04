@@ -104,7 +104,12 @@ def score_session(
         score.session_pct = 20.0
         return score
 
-    if not any(t.outbound_reply or t.brain_called for t in turns):
+    if checks.get("dedup_steps"):
+        if any(t.dedup_hit for t in turns) or any(t.outbound_reply or t.brain_called for t in turns):
+            score.notes.append("dedup_path_observed")
+        else:
+            score.major_defects.append("dedup_session_no_activity")
+    elif not any(t.outbound_reply or t.brain_called for t in turns):
         score.critical_defects.append("no_outbound_or_brain")
         score.blocking = True
 

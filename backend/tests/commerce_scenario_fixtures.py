@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy import JSON, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
@@ -46,6 +47,28 @@ from models import (  # noqa: E402
 
 DEFAULT_PHONE = "966500000001"
 DEFAULT_PHONE_E164 = "+966500000001"
+
+
+def make_layer3_scenario_db() -> Tuple[Session, Any]:
+    """Thread-safe shared in-memory SQLite for Layer 3 (asyncio + SessionLocal)."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    saved: list = []
+    for table in Base.metadata.sorted_tables:
+        for col in table.columns:
+            if isinstance(col.type, JSONB):
+                saved.append((col, col.type))
+                col.type = JSON()
+    Base.metadata.create_all(engine)
+    for col, orig in saved:
+        col.type = orig
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    engine._layer3_session_factory = factory  # type: ignore[attr-defined]
+    return session, engine
 
 
 def make_scenario_db() -> Tuple[Session, Any]:

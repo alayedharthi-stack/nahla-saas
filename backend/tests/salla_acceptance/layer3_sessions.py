@@ -449,7 +449,7 @@ def all_layer3_sessions() -> List[Layer3SessionScript]:
             session_id="L3-G8-01",
             group=8,
             tenant="A",
-            customer_key="C",
+            customer_key="D",
             tester_role="ordinary",
             description="Dedup same msg_id",
             messages=["السلام عليكم"],
