@@ -195,3 +195,9 @@ class TestStructuredFirstResolution:
 
         bundle = _bundle("262511443")
         assert tracking_available_from_bundle(bundle) is False
+
+    def test_tracking_number_counts_without_url(self):
+        from core.active_order_context import tracking_available_from_bundle
+
+        bundle = _bundle("262511443", tracking_number="SF123456789CN")
+        assert tracking_available_from_bundle(bundle) is True

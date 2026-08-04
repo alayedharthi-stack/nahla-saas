@@ -198,6 +198,33 @@ def _resolve_order_id(brain_state: Dict[str, Any], order_prep: Dict[str, Any]) -
     return ""
 
 
+def _tracking_field(order_prep: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        val = str(order_prep.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _resolve_shipping_status(
+    order_prep: Dict[str, Any],
+    *,
+    canonical_order_status: str,
+) -> str:
+    explicit = _tracking_field(
+        order_prep,
+        "shipping_status",
+        "shipment_status",
+    )
+    if explicit:
+        return explicit
+    if canonical_order_status in SHIPPED_CANONICAL:
+        return canonical_order_status
+    if _tracking_field(order_prep, "tracking_number", "tracking_url"):
+        return "shipped"
+    return "not_shipped"
+
+
 def build_active_order_context(
     *,
     order_id: str,
@@ -226,9 +253,13 @@ def build_active_order_context(
         "external_id":        str(ext).strip() if ext else None,
         "order_status":       canonical,
         "raw_order_status":   raw_slug or None,
-        "shipping_status":    "not_shipped",
-        "tracking_url":       None,
-        "tracking_number":    None,
+        "shipping_status":    _resolve_shipping_status(
+            order_prep,
+            canonical_order_status=canonical,
+        ),
+        "tracking_url":       _tracking_field(order_prep, "tracking_url"),
+        "tracking_number":    _tracking_field(order_prep, "tracking_number"),
+        "shipping_provider":  _tracking_field(order_prep, "carrier", "shipping_provider"),
         "confirmed_at":       confirmed_at or _iso_now(),
         "product_summary":    _product_summary(brain_state, order_prep) or None,
     }
@@ -414,14 +445,118 @@ def active_order_context_source(bundle: Optional[Dict[str, Any]]) -> str:
 
 
 def tracking_available_from_bundle(bundle: Optional[Dict[str, Any]]) -> bool:
-    """Phase A: only structured ``tracking_url`` counts (no invention)."""
+    """True when structured tracking evidence exists (URL or number only)."""
     if not bundle:
         return False
     ctx = bundle.get("active_order_context")
     if not isinstance(ctx, dict):
         return False
     url = str(ctx.get("tracking_url") or "").strip()
-    return bool(url)
+    if url:
+        return True
+    number = str(ctx.get("tracking_number") or "").strip()
+    return bool(number)
+
+
+def merge_track_evidence_into_bundle(
+    bundle: Optional[Dict[str, Any]],
+    *,
+    order_id: str,
+    reference: str = "",
+    status: str = "",
+    tracking_number: str = "",
+    tracking_url: str = "",
+    carrier: str = "",
+    shipping_status: str = "",
+    shipment_status: str = "",
+) -> Dict[str, Any]:
+    """Merge grounded track-order evidence into an in-memory commerce bundle."""
+    out = dict(bundle or {})
+    ctx = dict(out.get("active_order_context") or {})
+    resolved_id = str(order_id or reference or ctx.get("order_id") or "").strip()
+    if resolved_id:
+        ctx["order_id"] = resolved_id
+        out["active_order_id"] = resolved_id
+
+    if status:
+        canonical, raw_slug = normalize_order_status(status)
+        if canonical:
+            ctx["order_status"] = canonical
+        if raw_slug:
+            ctx["raw_order_status"] = raw_slug
+
+    ship_status = str(
+        shipping_status or shipment_status or ctx.get("shipping_status") or ""
+    ).strip()
+    if ship_status:
+        ctx["shipping_status"] = ship_status
+    elif tracking_number or tracking_url:
+        if str(ctx.get("shipping_status") or "").strip() in {"", "not_shipped"}:
+            ctx["shipping_status"] = "shipped"
+
+    if tracking_number:
+        ctx["tracking_number"] = tracking_number
+    if tracking_url:
+        ctx["tracking_url"] = tracking_url
+    if carrier:
+        ctx["shipping_provider"] = carrier
+
+    if ctx:
+        out["active_order_context"] = ctx
+    return out
+
+
+def persist_track_evidence_to_conversation(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int],
+    track_data: Dict[str, Any],
+) -> bool:
+    """Persist grounded tracking evidence from a successful track_order turn."""
+    if db is None or not conversation_id:
+        return False
+    try:
+        from models import Conversation  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        conv = (
+            db.query(Conversation)
+            .filter(
+                Conversation.tenant_id == int(tenant_id),
+                Conversation.id == int(conversation_id),
+            )
+            .first()
+        )
+        if conv is None:
+            return False
+
+        meta = dict(conv.extra_metadata or {})
+        bundle = merge_track_evidence_into_bundle(
+            load_commerce_bundle(meta),
+            order_id=str(track_data.get("order_id") or track_data.get("reference") or ""),
+            reference=str(track_data.get("reference") or ""),
+            status=str(track_data.get("status") or ""),
+            tracking_number=str(track_data.get("tracking_number") or ""),
+            tracking_url=str(track_data.get("tracking_url") or ""),
+            carrier=str(track_data.get("carrier") or track_data.get("shipping_provider") or ""),
+            shipping_status=str(track_data.get("shipping_status") or ""),
+            shipment_status=str(track_data.get("shipment_status") or ""),
+        )
+        meta.update(bundle)
+        conv.extra_metadata = meta
+        flag_modified(conv, "extra_metadata")
+        db.add(conv)
+        db.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[ACTIVE_ORDER_CONTEXT] persist_track_evidence failed tenant=%s conv=%s: %s",
+            tenant_id,
+            conversation_id,
+            exc,
+        )
+        return False
 
 
 def resolve_order_reference(

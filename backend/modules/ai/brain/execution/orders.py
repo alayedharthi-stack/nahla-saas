@@ -1688,20 +1688,64 @@ class TrackOrderHandler:
             if it.get("name") or it.get("title") or it.get("product_name")
         ]
 
+        track_data = {
+            "order_id":        latest.get("id"),
+            "reference":       latest.get("reference_id") or latest.get("id"),
+            "status":          latest.get("status"),
+            "status_label_ar": status_ar,
+            "total":           latest.get("total"),
+            "currency":        latest.get("currency", "SAR"),
+            "item_titles":     item_titles,
+            "tracking_number": str(latest.get("tracking_number") or "").strip(),
+            "tracking_url":    str(latest.get("tracking_url") or "").strip(),
+            "carrier":         str(
+                latest.get("carrier") or latest.get("shipping_provider") or ""
+            ).strip(),
+            "shipping_status": str(
+                latest.get("shipping_status") or latest.get("shipment_status") or ""
+            ).strip(),
+            "shipment_status": str(
+                latest.get("shipment_status") or latest.get("shipping_status") or ""
+            ).strip(),
+            "matched_by_ref":  matched_by_ref,
+            "selected_reason": selected_reason,
+            "local_resolver":  local_resolver,
+        }
+
+        try:
+            from core.active_order_context import (  # noqa: PLC0415
+                merge_track_evidence_into_bundle,
+                persist_track_evidence_to_conversation,
+            )
+
+            ctx.commerce_bundle = merge_track_evidence_into_bundle(
+                getattr(ctx, "commerce_bundle", None),
+                order_id=str(track_data.get("order_id") or track_data.get("reference") or ""),
+                reference=str(track_data.get("reference") or ""),
+                status=str(track_data.get("status") or ""),
+                tracking_number=str(track_data.get("tracking_number") or ""),
+                tracking_url=str(track_data.get("tracking_url") or ""),
+                carrier=str(track_data.get("carrier") or ""),
+                shipping_status=str(track_data.get("shipping_status") or ""),
+                shipment_status=str(track_data.get("shipment_status") or ""),
+            )
+            db = getattr(ctx, "_db", None) or getattr(ctx, "db", None)
+            persist_track_evidence_to_conversation(
+                db,
+                tenant_id=int(ctx.tenant_id),
+                conversation_id=getattr(ctx, "conversation_id", None),
+                track_data=track_data,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "[TrackOrderHandler] track evidence persist skipped tenant=%s: %s",
+                ctx.tenant_id,
+                exc,
+            )
+
         return ActionResult(
             success=True,
-            data={
-                "order_id":        latest.get("id"),
-                "reference":       latest.get("reference_id") or latest.get("id"),
-                "status":          latest.get("status"),
-                "status_label_ar": status_ar,
-                "total":           latest.get("total"),
-                "currency":        latest.get("currency", "SAR"),
-                "item_titles":     item_titles,
-                "matched_by_ref":  matched_by_ref,
-                "selected_reason": selected_reason,
-                "local_resolver":  local_resolver,
-            },
+            data=track_data,
         )
 
 

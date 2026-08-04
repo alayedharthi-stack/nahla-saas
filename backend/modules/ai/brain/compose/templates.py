@@ -828,6 +828,11 @@ def order_status(
     total: float | str = 0,
     currency: str = "SAR",
     item_titles: list | None = None,
+    tracking_number: str = "",
+    tracking_url: str = "",
+    carrier: str = "",
+    shipping_status: str = "",
+    shipment_status: str = "",
     **_: Any,
 ) -> str:
     from core.compose_amount import format_order_total_display  # noqa: PLC0415
@@ -842,6 +847,18 @@ def order_status(
     if item_titles:
         items_str = " | ".join(item_titles)
         lines.append(f"المنتجات: {items_str}")
+    tracking_num = str(tracking_number or "").strip()
+    if tracking_num:
+        lines.append(f"رقم التتبع: {tracking_num}")
+    tracking_link = str(tracking_url or "").strip()
+    if tracking_link:
+        lines.append(f"رابط التتبع: {tracking_link}")
+    carrier_name = str(carrier or "").strip()
+    if carrier_name:
+        lines.append(f"شركة الشحن: {carrier_name}")
+    ship_status = str(shipping_status or shipment_status or "").strip()
+    if ship_status and ship_status not in {"not_shipped", status}:
+        lines.append(f"حالة الشحن: {ship_status}")
     return "\n".join(lines)
 
 
