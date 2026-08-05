@@ -2940,6 +2940,35 @@ class DefaultDecisionEngine:
             )
 
         # ── 3.8u Unified discovery entry (Phase 1) ────────────────────────
+        # Store-wide sale/offer asks must reach trusted-context offer compose
+        # (ACTION_LLM_REPLY) — not product_specific catalog search for «عروض».
+        try:
+            from ..truth_surface.product_sale_offer_loader import (  # noqa: PLC0415
+                is_store_wide_product_sale_inquiry,
+            )
+
+            if is_store_wide_product_sale_inquiry(
+                ctx.message or "",
+                brain_state=state,
+            ):
+                logger.info(
+                    "[STORE_WIDE_OFFER] route llm_reply tenant=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    (ctx.message or "")[:60],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={"topic": "trusted_context_offer"},
+                    reason="store-wide offer inquiry — trusted context compose",
+                    confidence=0.88,
+                )
+        except Exception as _swo_exc:  # noqa: BLE001  # noqa: silent-ok — offer gate must not block decide
+            logger.debug(
+                "[STORE_WIDE_OFFER] skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _swo_exc,
+            )
+
         from ..discovery.entry import (  # noqa: PLC0415
             resolve_discovery_entry,
             route_discovery_entry,

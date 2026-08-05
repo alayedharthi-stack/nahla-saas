@@ -110,6 +110,24 @@ class TestResolveDiscoveryEntry:
         assert entry.entry_type == GLOBAL_BROWSE
         assert entry.source == "top_products"
 
+    def test_store_wide_offers_not_product_specific(self) -> None:
+        msg = "عندكم عروض؟"
+        ctx = _ctx(msg)
+        assert extract_order_product_query(ctx) == ""
+        entry = resolve_discovery_entry(ctx)
+        assert entry.entry_type != PRODUCT_SPECIFIC
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert (decision.args or {}).get("topic") == "trusted_context_offer"
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+
+    def test_product_inquiry_still_product_specific(self) -> None:
+        ctx = _ctx("عندكم عطر ورد؟")
+        assert "عطر" in (extract_order_product_query(ctx) or "")
+        entry = resolve_discovery_entry(ctx)
+        assert entry.matched is True
+        assert entry.entry_type == PRODUCT_SPECIFIC
+
     def test_top_products(self) -> None:
         entry = resolve_discovery_entry(_ctx("الأكثر مبيعاً"))
         assert entry.matched is True
