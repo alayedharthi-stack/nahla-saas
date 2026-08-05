@@ -117,7 +117,11 @@ def _extract_embedded_order_product_query(message: str) -> str:
 
 
 def extract_order_product_query(ctx: BrainContext) -> str:
-    """Product name from order-start phrasing — platform-wide extraction."""
+    """Resolve a catalog product query for unified discovery entry.
+
+    Covers order-start phrasing (``ابي اطلب X``) and ``ask_product`` availability
+    inquiries (``عندكم X؟``) — the classifier reads this before late engine helpers.
+    """
     from ..commerce.catalog_query_normalization import (  # noqa: PLC0415
         extract_english_order_product_query,
     )
@@ -126,6 +130,7 @@ def extract_order_product_query(ctx: BrainContext) -> str:
         is_branch_location_order_tail,
     )
     from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
+        _has_product_substance,
         extract_start_order_product_query,
         is_bare_start_order_phrase,
     )
@@ -133,8 +138,28 @@ def extract_order_product_query(ctx: BrainContext) -> str:
     from ..product_discovery_gate import has_inquiry_phrasing  # noqa: PLC0415
 
     msg = ctx.message or ""
+    intent_name = str(getattr(ctx.intent, "name", "") or "")
     if is_bare_start_order_phrase(msg):
         return ""
+
+    def _usable_product_query(candidate: str) -> bool:
+        return bool(
+            candidate
+            and _has_product_substance(candidate)
+            and not is_order_fulfillment_product_query(candidate)
+            and not is_branch_location_order_tail(candidate)
+            and not is_branch_list_request(msg)
+        )
+
+    if intent_name == INTENT_ASK_PRODUCT:
+        try:
+            from ..commerce.commerce_inquiry_boundary import extract_inquiry_subject  # noqa: PLC0415
+
+            boundary_subject = extract_inquiry_subject(msg) or ""
+            if _usable_product_query(boundary_subject):
+                return boundary_subject
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional inquiry boundary probe
+            pass
 
     extracted = extract_start_order_product_query(msg)
     if extracted:
