@@ -641,6 +641,28 @@ def has_explicit_product_browse_intent(
     if _extract_price_subject(msg):
         return True
 
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if intent_name == INTENT_ASK_PRODUCT:
+        try:
+            from .commerce.commerce_inquiry_boundary import extract_inquiry_subject  # noqa: PLC0415
+            from .commerce.contact_escalation import (  # noqa: PLC0415
+                is_branch_list_request,
+                is_branch_location_order_tail,
+            )
+            from .order_context_gate import is_order_fulfillment_product_query  # noqa: PLC0415
+
+            inquiry_subject = extract_inquiry_subject(msg) or ""
+            if (
+                inquiry_subject
+                and _subject_has_product_substance(inquiry_subject)
+                and not is_order_fulfillment_product_query(inquiry_subject)
+                and not is_branch_location_order_tail(inquiry_subject)
+                and not is_branch_list_request(msg)
+            ):
+                return True
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional inquiry boundary probe
+            pass
+
     try:
         from .commerce.start_order_verb_guard import (  # noqa: PLC0415
             extract_start_order_product_query,

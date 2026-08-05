@@ -36,6 +36,7 @@ from modules.ai.brain.execution.search import (  # noqa: E402
 )
 from modules.ai.brain.product_discovery_gate import (  # noqa: E402
     _normalize_ar,
+    has_explicit_product_browse_intent,
     product_discovery_block_reason,
 )
 from modules.ai.brain.types import (  # noqa: E402
@@ -75,7 +76,7 @@ def _ctx(
             name=intent_name,
             confidence=0.9,
             raw_message=message,
-            slots=dict(slots or {}),
+            slots=dict(slots if slots is not None else {}),
             extraction_method="llm",
         ),
         state=MerchantConversationState(greeted=True, stage="exploring"),
@@ -84,12 +85,14 @@ def _ctx(
     )
 
 
-def _route_discovery(ctx: BrainContext, entry):
+def _route_discovery_realistic(ctx: BrainContext, entry):
     return route_discovery_entry(
         ctx,
         entry,
         facts=ctx.facts,
-        product_discovery_blocked=lambda _src: False,
+        product_discovery_blocked=lambda source: (
+            product_discovery_block_reason(ctx, source=source) is not None
+        ),
         fulfillment_locked_fallback=lambda: None,
         block_stale_resume=lambda _wf: False,
         is_commerce_blocked=lambda _ctx: False,
@@ -141,22 +144,16 @@ class TestDiscoveryEntryInquirySubjectPath:
         assert _normalize_ar(extract_inquiry_subject(message) or "") == _normalize_ar(expected)
 
     @pytest.mark.parametrize(
-        "message,expected,truncated_slot",
+        "message,expected",
         [
-            ("عندكم عطر ورد؟", "عطر ورد", "عطر"),
-            ("عندكم قميص قطني أزرق؟", "قميص قطني ازرق", "قميص"),
-            ("عندكم عطر ورد 100ml؟", "عطر ورد 100ml", "عطر"),
+            ("عندكم عطر ورد؟", "عطر ورد"),
+            ("عندكم قميص قطني أزرق؟", "قميص قطني ازرق"),
+            ("عندكم عطر ورد 100ml؟", "عطر ورد 100ml"),
         ],
     )
-    def test_extract_order_product_query_prefers_full_subject(
-        self,
-        message: str,
-        expected: str,
-        truncated_slot: str,
-    ) -> None:
-        ctx = _ctx(message, slots={"product_query": truncated_slot})
+    def test_extract_order_product_query_empty_slots(self, message: str, expected: str) -> None:
+        ctx = _ctx(message)
         assert _normalize_ar(extract_order_product_query(ctx)) == _normalize_ar(expected)
-        assert _normalize_ar(extract_order_product_query(ctx)) != _normalize_ar(truncated_slot)
 
     @pytest.mark.parametrize(
         "message,expected",
@@ -166,11 +163,29 @@ class TestDiscoveryEntryInquirySubjectPath:
         ],
     )
     def test_resolve_discovery_entry_product_specific(self, message: str, expected: str) -> None:
-        ctx = _ctx(message, slots={"product_query": expected.split()[0]})
+        ctx = _ctx(message)
         entry = resolve_discovery_entry(ctx)
         assert entry.matched is True
         assert entry.entry_type == PRODUCT_SPECIFIC
         assert _normalize_ar(entry.query or "") == _normalize_ar(expected)
+
+    @pytest.mark.parametrize(
+        "message,expected",
+        [
+            ("عندكم عطر ورد؟", "عطر ورد"),
+            ("عندكم قميص قطني أزرق؟", "قميص قطني ازرق"),
+        ],
+    )
+    def test_product_discovery_not_blocked_for_order_product_query(
+        self,
+        message: str,
+        expected: str,
+    ) -> None:
+        ctx = _ctx(message)
+        entry = resolve_discovery_entry(ctx)
+        assert entry.matched is True
+        assert has_explicit_product_browse_intent(ctx, source=entry.source) is True
+        assert product_discovery_block_reason(ctx, source=entry.source) is None
 
     @pytest.mark.parametrize(
         "message,expected",
@@ -184,9 +199,9 @@ class TestDiscoveryEntryInquirySubjectPath:
         message: str,
         expected: str,
     ) -> None:
-        ctx = _ctx(message, slots={"product_query": expected.split()[0]})
+        ctx = _ctx(message)
         entry = resolve_discovery_entry(ctx)
-        decision = _route_discovery(ctx, entry)
+        decision = _route_discovery_realistic(ctx, entry)
         assert decision is not None
         assert decision.action == ACTION_SEARCH_PRODUCTS
         assert _normalize_ar(str(decision.args.get("query") or "")) == _normalize_ar(expected)
@@ -194,6 +209,7 @@ class TestDiscoveryEntryInquirySubjectPath:
         gated = apply_catalog_search_evidence_gate(ctx, decision)
         assert gated.action == ACTION_SEARCH_PRODUCTS
         assert gated.args.get("topic") != "commerce_ambiguous"
+        assert _normalize_ar(str(gated.args.get("query") or "")) == _normalize_ar(expected)
 
     @pytest.mark.parametrize(
         "message,expected",
@@ -202,22 +218,38 @@ class TestDiscoveryEntryInquirySubjectPath:
             ("عندكم قميص قطني أزرق؟", "قميص قطني ازرق"),
         ],
     )
-    def test_decision_engine_routes_search_not_commerce_ambiguous(
+    def test_decision_engine_routes_search_not_category_browse(
         self,
         message: str,
         expected: str,
     ) -> None:
-        ctx = _ctx(message, slots={"product_query": expected.split()[0]})
+        ctx = _ctx(message)
         decision = DefaultDecisionEngine().decide(ctx)
         gated = apply_catalog_search_evidence_gate(ctx, decision)
         assert gated.action == ACTION_SEARCH_PRODUCTS
         assert _normalize_ar(str(gated.args.get("query") or "")) == _normalize_ar(expected)
         assert gated.args.get("topic") != "commerce_ambiguous"
+        assert "category price browse" not in str(decision.reason or "").lower()
 
-    def test_shipping_inquiry_does_not_resolve_product_query(self) -> None:
-        ctx = _ctx("عندكم توصيل الرياض؟", intent_name="ask_product")
+    @pytest.mark.parametrize(
+        "message,expect_browse_intent",
+        [
+            ("عندكم توصيل الرياض؟", False),
+            ("أبغى الفروع", True),
+        ],
+    )
+    def test_non_product_inquiry_empty_slots_not_product_specific(
+        self,
+        message: str,
+        expect_browse_intent: bool,
+    ) -> None:
+        ctx = _ctx(message)
         assert extract_order_product_query(ctx) == ""
-        assert resolve_discovery_entry(ctx).matched is False
+        entry = resolve_discovery_entry(ctx)
+        assert entry.matched is False
+        assert entry.entry_type != PRODUCT_SPECIFIC
+        assert has_explicit_product_browse_intent(ctx) is expect_browse_intent
+        assert _route_discovery_realistic(ctx, entry) is None
 
 
 class TestNonProductTopicsDoNotBecomeCatalogSearch:
@@ -230,7 +262,7 @@ class TestNonProductTopicsDoNotBecomeCatalogSearch:
         assert product_discovery_block_reason(ctx) == "logistics_context"
 
     def test_geo_query_rejected_by_catalog_search_evidence_gate(self) -> None:
-        ctx = _ctx("عندكم توصيل الرياض؟", intent_name="ask_product")
+        ctx = _ctx("عندكم توصيل الرياض؟")
         decision = Decision(
             action=ACTION_SEARCH_PRODUCTS,
             args={"query": "رياض", "source": "order_product_query"},
