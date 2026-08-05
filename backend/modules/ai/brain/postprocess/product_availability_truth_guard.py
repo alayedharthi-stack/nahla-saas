@@ -110,6 +110,7 @@ _POSITIVE_OPTIONS_CLAIM_RE = re.compile(
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "notify_me_back_in_stock_ack",
     "kb_availability_facts",
+    "variant_pricing",
 })
 
 _TITLE_STOP_TOKENS = frozenset({
