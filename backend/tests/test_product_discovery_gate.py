@@ -132,6 +132,11 @@ class TestProductDiscoveryGate:
         assert has_explicit_broad_browse_request(msg)
         assert allows_top_products_decision(ctx, source="top_products", message=msg)
 
+    def test_show_products_bare_imperative_is_explicit_browse(self):
+        for msg in ("عرض المنتجات", "اعرض المنتجات"):
+            assert has_explicit_broad_browse_request(msg), msg
+            assert not has_explicit_broad_browse_request("تعرض المنتجات في القائمة")
+
     def test_show_more_requires_prior_browse_context(self):
         msg = "وريني باقي الخيارات"
         ctx = BrainContext(
