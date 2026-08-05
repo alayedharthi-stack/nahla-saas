@@ -844,6 +844,16 @@ def _deterministic_commerce_subject(ctx: BrainContext, extracted: str = "") -> s
         subject = _extract_price_subject(probe)
         if subject and _subject_has_product_substance(subject):
             return subject
+        try:
+            from .commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+                extract_inquiry_subject,
+            )
+
+            boundary_subject = extract_inquiry_subject(probe) or ""
+            if boundary_subject and _subject_has_product_substance(boundary_subject):
+                return boundary_subject
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — optional inquiry boundary probe
+            pass
         inquiry = extract_inquiry_product_query(probe)
         if inquiry and _subject_has_product_substance(inquiry):
             return inquiry
