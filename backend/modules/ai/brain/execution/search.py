@@ -18,7 +18,7 @@ catalog order and is only logged at DEBUG level.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import os, sys
 
 logger = logging.getLogger("nahla.brain.execution.search")
@@ -475,6 +475,41 @@ def _apply_affinity_boost(
         return products
 
 
+def resolve_confirmed_discovery_product(
+    *,
+    entry_type: str,
+    discovery_output_kind: str,
+    presented_products: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a singular discovery product for focus pinning, else None.
+
+    Only ``product_specific`` discovery with exactly one presented product
+    carrying a canonical catalog identity qualifies. Category/global browse,
+    collections, multi-product lists, and title-only rows never pin.
+    """
+    from ..discovery.entry import PRODUCT_SPECIFIC  # noqa: PLC0415
+
+    if str(entry_type or "").strip().lower() != PRODUCT_SPECIFIC:
+        return None
+    if str(discovery_output_kind or "").strip().lower() != "products":
+        return None
+    if len(presented_products or []) != 1:
+        return None
+
+    product = presented_products[0]
+    if not isinstance(product, dict):
+        return None
+
+    has_catalog_identity = any(
+        str(product.get(key) or "").strip()
+        for key in ("external_id", "id", "product_id", "sku")
+    )
+    if not has_catalog_identity:
+        return None
+
+    return product
+
+
 def _attach_discovery_presentation(
     payload: Dict[str, Any],
     *,
@@ -700,6 +735,12 @@ def _apply_discovery_strategy(
             payload["browse_pool"] = browse_pool
             payload["browse_offset"] = 0
             payload["suggest_narrow"] = len(browse_pool) > strategy.initial_count
+
+        payload["product"] = resolve_confirmed_discovery_product(
+            entry_type=entry_type,
+            discovery_output_kind=presentation.output_kind,
+            presented_products=list(presentation.products or []),
+        )
 
         logger.info(
             "[SearchHandler] discovery_presented | tenant=%s mode=%s kind=%s count=%d",
