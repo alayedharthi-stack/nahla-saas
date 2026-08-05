@@ -375,17 +375,22 @@ class ProductSearchHandler:
                 )
 
             products = _apply_category_scope(products)
+            had_catalog_fact_products = bool(catalog_fact_products)
             if catalog_fact_products:
                 catalog_fact_products = _apply_category_scope(catalog_fact_products)
-            strategy_result = _apply_discovery_strategy(
-                products,
-                decision=decision,
-                ctx=ctx,
-                query=str(query or ""),
-                source=source,
-            )
-            if strategy_result is not None:
-                return strategy_result
+            # Fact-bearing price/availability searches keep structured facts and
+            # focus identity via _format_result — discovery presentation must not
+            # short-circuit with an empty browse payload.
+            if not had_catalog_fact_products:
+                strategy_result = _apply_discovery_strategy(
+                    products,
+                    decision=decision,
+                    ctx=ctx,
+                    query=str(query or ""),
+                    source=source,
+                )
+                if strategy_result is not None:
+                    return strategy_result
 
             # Re-rank by customer affinity before formatting lines
             products = _apply_affinity_boost(products, ctx)
@@ -487,16 +492,20 @@ def resolve_search_result_product_for_focus(
 ) -> Optional[Dict[str, Any]]:
     """Pick a singular catalog identity for pipeline focus from search results.
 
-    Orderable hits win unchanged. When there are no orderable rows, a single
-    catalog fact with canonical identity may pin focus for a specific (non-generic)
-    product query — availability truth stays in facts/guards, not here.
+    Orderable-only singularity, fact-only singularity, or no focus when channels
+    are mixed or ambiguous. Availability truth stays in facts/guards, not here.
     """
-    if len(products) == 1:
-        return products[0]
-    if products:
+    orderable = list(products or [])
+    facts = list(catalog_fact_products or [])
+
+    if orderable and facts:
         return None
 
-    facts = list(catalog_fact_products or [])
+    if len(orderable) == 1:
+        return orderable[0]
+    if orderable:
+        return None
+
     if len(facts) != 1:
         return None
 

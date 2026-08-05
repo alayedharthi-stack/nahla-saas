@@ -1,9 +1,11 @@
 """Catalog inquiry subject resolution + OOS fact focus export regressions."""
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,6 +25,7 @@ from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: E402
 from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: E402
     extract_inquiry_subject,
 )
+from modules.ai.brain.commerce.discovery_strategy import DiscoveryMode  # noqa: E402
 from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.discovery.entry import (  # noqa: E402
@@ -32,6 +35,7 @@ from modules.ai.brain.discovery.entry import (  # noqa: E402
     route_discovery_entry,
 )
 from modules.ai.brain.execution.search import (  # noqa: E402
+    ProductSearchHandler,
     resolve_search_result_product_for_focus,
 )
 from modules.ai.brain.product_discovery_gate import (  # noqa: E402
@@ -105,6 +109,16 @@ def _perfume_rose_fact() -> dict[str, Any]:
         "external_id": "SKU-PERF-ROSE-OOS",
         "title": "عطر ورد 100ml",
         "price": 149,
+        "in_stock": False,
+        "can_checkout": False,
+    }
+
+
+def _shirt_blue_oos_fact() -> dict[str, Any]:
+    return {
+        "external_id": "sku-shirt-blue",
+        "title": "قميص قطني أزرق",
+        "price": 89,
         "in_stock": False,
         "can_checkout": False,
     }
@@ -278,11 +292,21 @@ class TestResolveSearchResultProductForFocus:
         product = _watch_silver_orderable()
         resolved = resolve_search_result_product_for_focus(
             products=[product],
-            catalog_fact_products=[_perfume_rose_fact()],
+            catalog_fact_products=[],
             query="ساعة فضية",
         )
         assert resolved is product
         assert product_focus_identity(resolved) == "SKU-WATCH-SILVER"
+
+    def test_mixed_orderable_and_fact_returns_none(self) -> None:
+        assert (
+            resolve_search_result_product_for_focus(
+                products=[_watch_silver_orderable()],
+                catalog_fact_products=[_perfume_rose_fact()],
+                query="ساعة فضية",
+            )
+            is None
+        )
 
     def test_singular_oos_fact_with_specific_query_exports_product(self) -> None:
         fact = _shirt_blue_fact()
@@ -394,3 +418,182 @@ class TestPipelineFocusOwnerIsolation:
         assert product_focus_identity(tenant_a.current_product_focus) == "SKU-PERF-ROSE-OOS"
         assert product_focus_identity(tenant_b.current_product_focus) == "SKU-B-PERF"
         assert tenant_a.current_product_focus is not tenant_b.current_product_focus
+
+
+class TestProductSearchHandlerOosFactFocus:
+    def _availability_decision(self, *, query: str) -> Decision:
+        return Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": query,
+                "source": "order_product_query",
+                "discovery_mode": DiscoveryMode.DIRECT_CATALOG.value,
+                "discovery_entry_type": PRODUCT_SPECIFIC,
+                "question_kind": "availability",
+            },
+            reason="availability inquiry",
+            confidence=0.9,
+        )
+
+    async def _run_handler(
+        self,
+        *,
+        decision: Decision,
+        ctx: BrainContext,
+        runtime_payload: dict[str, Any],
+    ):
+        mock_runtime = MagicMock()
+        mock_runtime.execute = AsyncMock(
+            return_value=MagicMock(payload=runtime_payload),
+        )
+
+        with patch(
+            "modules.ai.brain.execution.runtime_factory.build_commerce_runtime",
+            return_value=mock_runtime,
+        ):
+            return await ProductSearchHandler().handle(decision, ctx)
+
+    def test_oos_fact_skips_discovery_strategy_and_exports_focus(self) -> None:
+        fact = _shirt_blue_oos_fact()
+        ctx = _ctx("عندكم قميص قطني أزرق؟")
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+        decision = self._availability_decision(query="قميص قطني ازرق")
+
+        with patch(
+            "modules.ai.brain.execution.search._apply_discovery_strategy",
+        ) as mock_strategy:
+            mock_strategy.return_value = MagicMock(
+                success=True,
+                data={"discovery_output_kind": "empty", "products": []},
+            )
+            result = asyncio.run(
+                self._run_handler(
+                    decision=decision,
+                    ctx=ctx,
+                    runtime_payload={
+                        "products": [],
+                        "catalog_fact_products": [fact],
+                    },
+                )
+            )
+
+        mock_strategy.assert_not_called()
+        assert result.success is True
+        assert result.data.get("products") == []
+        assert result.data.get("count") == 0
+        assert result.data.get("catalog_fact_products") == [fact]
+        assert result.data.get("product") is not None
+        assert product_focus_identity(result.data["product"]) == "sku-shirt-blue"
+        assert result.data.get("discovery_output_kind") is None
+        assert result.data.get("product_lines") == ""
+
+    def test_mixed_orderable_and_fact_preserves_facts_without_pin(self) -> None:
+        fact = {
+            "external_id": "sku-watch-matte-oos",
+            "title": "ساعة فضية مطفية",
+            "price": 279,
+            "in_stock": False,
+            "can_checkout": False,
+        }
+        orderable = {
+            "id": "watch-silver-1",
+            "external_id": "SKU-WATCH-SILVER",
+            "title": "ساعة فضية كلاسيك",
+            "price": 299,
+            "in_stock": True,
+            "can_checkout": True,
+        }
+        ctx = _ctx("عندكم ساعة فضية كلاسيك؟")
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+        decision = self._availability_decision(query="ساعة فضية كلاسيك")
+
+        with (
+            patch(
+                "modules.ai.brain.execution.search._apply_discovery_strategy",
+            ) as mock_strategy,
+            patch(
+                "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                side_effect=lambda products, **_kw: [dict(p) for p in products],
+            ),
+        ):
+            result = asyncio.run(
+                self._run_handler(
+                    decision=decision,
+                    ctx=ctx,
+                    runtime_payload={
+                        "products": [orderable],
+                        "catalog_fact_products": [fact],
+                    },
+                )
+            )
+
+        mock_strategy.assert_not_called()
+        assert result.success is True
+        assert len(result.data.get("products") or []) == 1
+        assert len(result.data.get("catalog_fact_products") or []) == 1
+        assert result.data.get("product") is None
+
+    def test_orderable_only_still_invokes_discovery_strategy(self) -> None:
+        orderable = _watch_silver_orderable()
+        ctx = _ctx("عندكم ساعة فضية؟")
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": "ساعة فضية",
+                "source": "order_product_query",
+                "discovery_mode": DiscoveryMode.DIRECT_CATALOG.value,
+                "discovery_entry_type": PRODUCT_SPECIFIC,
+            },
+            reason="product search",
+            confidence=0.9,
+        )
+        strategy_payload = {
+            "products": [orderable],
+            "product_lines": "presented",
+            "count": 1,
+            "query": "ساعة فضية",
+            "discovery_output_kind": "products",
+            "product": orderable,
+        }
+
+        with patch(
+            "modules.ai.brain.execution.search._apply_discovery_strategy",
+            return_value=MagicMock(success=True, data=strategy_payload),
+        ) as mock_strategy:
+            result = asyncio.run(
+                self._run_handler(
+                    decision=decision,
+                    ctx=ctx,
+                    runtime_payload={"products": [orderable]},
+                )
+            )
+
+        mock_strategy.assert_called_once()
+        assert result.success is True
+        assert result.data.get("discovery_output_kind") == "products"
+        assert result.data.get("product") is orderable
+
+
+class TestPipelineOosFactFocusOwner:
+    def test_singular_oos_fact_pins_sku_shirt_blue(self) -> None:
+        state = MerchantConversationState(greeted=True, stage="discovery", turn=5)
+        fact = _shirt_blue_oos_fact()
+        result_data = {
+            "products": [],
+            "catalog_fact_products": [fact],
+            "product": fact,
+        }
+
+        if result_data.get("product"):
+            set_product_focus(
+                state,
+                result_data["product"],
+                reason="executor_product_search",
+                turn=int(state.turn or 0),
+            )
+
+        assert state.current_product_focus is not None
+        assert product_focus_identity(state.current_product_focus) == "sku-shirt-blue"
+        assert state.current_product_focus["in_stock"] is False
+        assert state.current_product_focus["can_checkout"] is False
