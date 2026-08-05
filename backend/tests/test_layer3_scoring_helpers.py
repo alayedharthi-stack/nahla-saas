@@ -4,6 +4,7 @@ from __future__ import annotations
 from tests.salla_acceptance.layer3_evidence_utils import resolve_focus_product_id
 from tests.salla_acceptance.layer3_harness import Layer3TurnEvidence
 from tests.salla_acceptance.layer3_scoring import (
+    aggregate_suite_scores,
     context_retention_failed,
     dedup_session_has_activity,
     privacy_leaked_other_order,
@@ -31,6 +32,31 @@ def _g5_04_script() -> Layer3SessionScript:
             "شكراً",
         ],
         expected_checks={"privacy_no_other_order": True},
+    )
+
+
+def _clean_script(**overrides) -> Layer3SessionScript:
+    base = {
+        "session_id": "L3-CLEAN",
+        "group": 2,
+        "tenant": "A",
+        "customer_key": "A",
+        "tester_role": "ordinary",
+        "messages": ["مرحبا"],
+        "expected_checks": {},
+    }
+    base.update(overrides)
+    return Layer3SessionScript(**base)
+
+
+def _llm_turn(inbound: str, reply: str, **kwargs) -> Layer3TurnEvidence:
+    return Layer3TurnEvidence(
+        inbound_text=inbound,
+        outbound_reply=reply,
+        brain_called=True,
+        compose_invoked=1,
+        compose_source="llm",
+        **kwargs,
     )
 
 
@@ -104,7 +130,7 @@ def test_resolve_focus_product_id_prefers_external_id():
     assert resolve_focus_product_id(focus) == "sku-shoe-white"
 
 
-def test_context_retained_via_external_id_focus():
+def test_context_retained_via_external_id_focus_on_final_turn():
     state = {
         "focus_product_id": "sku-shoe-white",
         "conversation_focus": "product",
@@ -116,12 +142,85 @@ def test_context_retained_via_external_id_focus():
         Layer3TurnEvidence(
             brain_state_after={
                 "focus_product_id": "sku-shoe-white",
-                "has_suspended_product_focus": True,
-                "suspended_product_focus": "sku-shoe-white",
             }
         ),
     ]
     assert context_retention_failed(turns) is False
+
+
+def test_context_conversation_focus_without_id_fails():
+    assert turn_has_focus_context({"conversation_focus": "product"}) is False
+    assert turn_has_focus_context({"conversation_focus": "shipping_policy"}) is False
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={"conversation_focus": "product"}),
+    ]
+    assert context_retention_failed(turns) is True
+
+
+def test_context_arbitrary_state_evolution_fails_when_required():
+    script = Layer3SessionScript(
+        session_id="L3-CTX-EVOLVE",
+        group=3,
+        tenant="A",
+        customer_key="A",
+        tester_role="ordinary",
+        messages=["a", "b", "c"],
+        expected_checks={"context_retention_required": True},
+    )
+    turns = [
+        _llm_turn("a", "r1", brain_state_before={}, brain_state_after={"draft_step": 1}),
+        _llm_turn("b", "r2", brain_state_after={"draft_step": 2}),
+        _llm_turn("c", "r3", brain_state_after={"draft_step": 3}),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "context_not_retained" in scored.major_defects
+
+
+def test_context_final_previous_canonical_id_passes():
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn(
+            "c",
+            "r3",
+            brain_state_after={"previous_product_focus_id": "sku-shoe-white"},
+        ),
+    ]
+    assert context_retention_failed(turns) is False
+
+
+def test_context_final_suspended_structured_id_passes():
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn(
+            "c",
+            "r3",
+            brain_state_after={
+                "suspended_product_focus": {"external_id": "sku-shoe-white"},
+            },
+        ),
+    ]
+    assert context_retention_failed(turns) is False
+
+
+def test_context_unresolved_structured_dict_does_not_pass():
+    assert turn_has_focus_context({"previous_product_focus": {"title": "حذاء"}}) is False
+
+
+def test_context_focus_only_earlier_turn_fails_on_final():
+    turns = [
+        _llm_turn(
+            "a",
+            "r1",
+            brain_state_after={"focus_product_id": "sku-shoe-white"},
+        ),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={}),
+    ]
+    assert context_retention_failed(turns) is True
 
 
 def test_shipping_fee_verified_from_structured_evidence():
@@ -134,3 +233,145 @@ def test_shipping_fee_verified_from_structured_evidence():
     ]
     assert shipping_fee_verified(turns, "", "25") is True
     assert shipping_policy_failed(turns, "", "25") is False
+
+
+def test_defect_free_session_scores_100_percent():
+    script = _clean_script()
+    turns = [_llm_turn("مرحبا", "أهلاً بك، كيف أقدر أساعدك؟")]
+    scored = score_session(script, turns, compose_real=True)
+    assert scored.session_pct == 100.0
+    assert all(score == 5 for score in scored.axis_scores.values())
+    assert not scored.major_defects
+    assert not scored.critical_defects
+
+
+def test_defect_free_aggregate_axes_score_100_percent():
+    script = _clean_script()
+    turns = [_llm_turn("مرحبا", "أهلاً بك، كيف أقدر أساعدك؟")]
+    scored = score_session(script, turns, compose_real=True)
+    agg = aggregate_suite_scores([scored])
+    assert agg["average_session_pct"] == 100.0
+    assert all(avg == 5.0 for avg in agg["axis_averages"].values())
+    assert agg["isolation_accuracy_pct"] == 100.0
+    assert agg["context_accuracy_pct"] == 100.0
+    assert agg["conversation_quality_score"] == 100.0
+
+
+def test_context_retention_major_only_when_required_and_failed():
+    script = Layer3SessionScript(
+        session_id="L3-CTX-REQ",
+        group=3,
+        tenant="A",
+        customer_key="A",
+        tester_role="ordinary",
+        messages=["a", "b", "c"],
+        expected_checks={"context_retention_required": True},
+    )
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={}),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "context_not_retained" in scored.major_defects
+    assert scored.axis_scores["context_retention"] == 2
+
+
+def test_context_retention_skipped_without_required_flag():
+    script = Layer3SessionScript(
+        session_id="L3-G1-06",
+        group=1,
+        tenant="A",
+        customer_key="C",
+        tester_role="difficult",
+        messages=["a", "b", "c"],
+    )
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn("c", "r3", brain_state_after={}),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "context_not_retained" not in scored.major_defects
+    assert scored.axis_scores["context_retention"] == 5
+
+
+def test_context_retention_passes_with_focus_when_required():
+    script = Layer3SessionScript(
+        session_id="L3-CTX-FOCUS",
+        group=3,
+        tenant="A",
+        customer_key="A",
+        tester_role="ordinary",
+        messages=["a", "b", "c"],
+        expected_checks={"context_retention_required": True},
+    )
+    turns = [
+        _llm_turn("a", "r1", brain_state_after={}),
+        _llm_turn("b", "r2", brain_state_after={}),
+        _llm_turn(
+            "c",
+            "r3",
+            brain_state_after={
+                "focus_product_id": "sku-shoe-white",
+                "conversation_focus": "product",
+            },
+        ),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "context_not_retained" not in scored.major_defects
+    assert scored.axis_scores["context_retention"] == 5
+
+
+def test_handoff_zero_compose_exempt_with_audit_note():
+    script = Layer3SessionScript(
+        session_id="L3-G7-01",
+        group=7,
+        tenant="A",
+        customer_key="C",
+        tester_role="ordinary",
+        messages=["أبغى موظف", "حد يرد؟", "كم السعر؟"],
+        expected_checks={"handoff_then_no_commerce": True},
+    )
+    turns = [
+        Layer3TurnEvidence(inbound_text="أبغى موظف", outbound_reply="تم التحويل", handoff_active=True),
+        Layer3TurnEvidence(inbound_text="حد يرد؟", outbound_reply="الموظف سيرد", handoff_active=True),
+        Layer3TurnEvidence(inbound_text="كم السعر؟", outbound_reply="تحت متابعة الموظف", handoff_active=True),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "no_llm_compose_observed" not in scored.major_defects
+    assert "compose_not_expected_handoff" in scored.notes
+    assert scored.axis_scores["compose_quality"] == 5
+
+
+def test_non_handoff_zero_compose_still_major():
+    script = _clean_script(session_id="L3-NO-COMPOSE")
+    turns = [
+        Layer3TurnEvidence(
+            inbound_text="مرحبا",
+            outbound_reply="أهلاً",
+            brain_called=True,
+        )
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "no_llm_compose_observed" in scored.major_defects
+    assert scored.axis_scores["compose_quality"] == 2
+
+
+def test_dedup_compose_quality_unchanged_without_no_llm_major():
+    script = Layer3SessionScript(
+        session_id="L3-G8-01",
+        group=8,
+        tenant="A",
+        customer_key="D",
+        tester_role="ordinary",
+        messages=["السلام عليكم"],
+        expected_checks={"dedup_steps": True},
+    )
+    turns = [
+        Layer3TurnEvidence(dedup_hit=False, brain_called=True, outbound_reply="وعليكم السلام"),
+        Layer3TurnEvidence(dedup_hit=True, skip_ai=True),
+    ]
+    scored = score_session(script, turns, compose_real=True)
+    assert "no_llm_compose_observed" not in scored.major_defects
+    assert scored.axis_scores["compose_quality"] == 5

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 _BACKEND = _HERE.parent.parent
@@ -66,6 +66,20 @@ _CUSTOMER_PHONES = {
 }
 
 
+def create_fresh_layer3_world():
+    """Fresh in-memory scenario DB + dual-tenant fixture for one Layer3 session."""
+    db, engine = make_scenario_db()
+    world = seed_dual_tenant_world(db)
+    return world, db, engine
+
+
+def dispose_layer3_world(db, engine) -> None:
+    try:
+        db.close()
+    finally:
+        engine.dispose()
+
+
 def reset_layer3_session_isolation(
     world,
     *,
@@ -73,11 +87,10 @@ def reset_layer3_session_isolation(
     customer_key: str,
 ) -> None:
     """
-    Clear per-session mutable harness state before each Layer3 session.
+    Defensive cleanup of handoff/ownership flags within a session world.
 
-    Isolation point: invoked at the start of every session in ``run_all_sessions``
-    so handoff/ownership flags on one customer (e.g. G7 customer C) cannot
-    pollute a later session on another customer (e.g. G8 customer D).
+    Primary isolation is ``create_fresh_layer3_world()`` — one fresh DB per
+    Layer 3 scenario. This helper clears residual handoff state when useful.
     """
     phone = _CUSTOMER_PHONES.get(customer_key)
     if not phone:
@@ -255,54 +268,63 @@ def _run_handoff_session(world, script) -> List[Any]:
     return turns
 
 
-def run_all_sessions(world) -> tuple[List[Any], List[Any]]:
+def run_all_sessions(
+    *,
+    sessions_dir: Optional[Path] = None,
+) -> Tuple[List[Any], List[Any]]:
     session_results: List[Dict[str, Any]] = []
     session_scores = []
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = sessions_dir or SESSIONS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     for script in all_layer3_sessions():
         print(f"  [{script.session_id}] group={script.group} tenant={script.tenant} ...", flush=True)
-        reset_layer3_session_isolation(
-            world,
-            tenant_key=script.tenant,
-            customer_key=script.customer_key,
-        )
-        bundle = world.tenant_a if script.tenant == "A" else world.tenant_b
-        if script.expected_checks.get("dedup_steps"):
-            turns = _run_dedup_session(world, script)
-        elif script.expected_checks.get("handoff_then_no_commerce"):
-            turns = _run_handoff_session(world, script)
-        else:
-            sw = scenario_world_from_bundle(world.db, bundle, script.customer_key)
-            runner = Layer3BrainRunner(sw)
-            turns = runner.run_thread(script.messages)
+        world, db, engine = create_fresh_layer3_world()
+        try:
+            reset_cache()
+            reset_layer3_session_isolation(
+                world,
+                tenant_key=script.tenant,
+                customer_key=script.customer_key,
+            )
+            bundle = world.tenant_a if script.tenant == "A" else world.tenant_b
+            if script.expected_checks.get("dedup_steps"):
+                turns = _run_dedup_session(world, script)
+            elif script.expected_checks.get("handoff_then_no_commerce"):
+                turns = _run_handoff_session(world, script)
+            else:
+                sw = scenario_world_from_bundle(world.db, bundle, script.customer_key)
+                runner = Layer3BrainRunner(sw)
+                turns = runner.run_thread(script.messages)
 
-        scored = score_session(script, turns, compose_real=True)
-        session_scores.append(scored)
-        evidence = {
-            "session_id": script.session_id,
-            "group": script.group,
-            "tenant": script.tenant,
-            "customer_key": script.customer_key,
-            "tester_role": script.tester_role,
-            "description": script.description,
-            "messages": script.messages,
-            "expected_checks": script.expected_checks,
-            "score": scored.to_dict(),
-            "turns": [t.to_dict() for t in turns],
-        }
-        session_results.append(evidence)
-        (SESSIONS_DIR / f"{script.session_id}.json").write_text(
-            json.dumps(evidence, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        if scored.critical_defects:
-            print(f"    CRITICAL: {scored.critical_defects}", flush=True)
-        elif scored.major_defects:
-            print(f"    MAJOR: {scored.major_defects}", flush=True)
-        else:
-            print(f"    OK ({scored.session_pct}%)", flush=True)
-        time.sleep(0.3)
+            scored = score_session(script, turns, compose_real=True)
+            session_scores.append(scored)
+            evidence = {
+                "session_id": script.session_id,
+                "group": script.group,
+                "tenant": script.tenant,
+                "customer_key": script.customer_key,
+                "tester_role": script.tester_role,
+                "description": script.description,
+                "messages": script.messages,
+                "expected_checks": script.expected_checks,
+                "score": scored.to_dict(),
+                "turns": [t.to_dict() for t in turns],
+            }
+            session_results.append(evidence)
+            (out_dir / f"{script.session_id}.json").write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if scored.critical_defects:
+                print(f"    CRITICAL: {scored.critical_defects}", flush=True)
+            elif scored.major_defects:
+                print(f"    MAJOR: {scored.major_defects}", flush=True)
+            else:
+                print(f"    OK ({scored.session_pct}%)", flush=True)
+            time.sleep(0.3)
+        finally:
+            dispose_layer3_world(db, engine)
 
     return session_results, session_scores
 
@@ -420,11 +442,10 @@ def main() -> int:
     llm_config = resolve_layer3_llm_config()
     assert llm_config is not None
 
-    db, _engine = make_scenario_db()
-    world = seed_dual_tenant_world(db)
+    proof_world, proof_db, proof_engine = create_fresh_layer3_world()
     try:
         print("Proving one live Luna compose turn...", flush=True)
-        proof = prove_one_live_compose_turn(world)
+        proof = prove_one_live_compose_turn(proof_world)
         print(
             f"  provider={proof['provider']} model={proof['model']} "
             f"reply_len={proof['reply_len']} compose_calls={proof['compose_calls']} "
@@ -438,7 +459,7 @@ def main() -> int:
             return 2
 
         print(f"Running {len(all_layer3_sessions())} sessions...", flush=True)
-        session_results, session_scores = run_all_sessions(world)
+        session_results, session_scores = run_all_sessions()
         report = build_final_report(session_results, session_scores, llm_config, live_proof=proof)
         RESULTS_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\nDone. Report: {RESULTS_PATH}", flush=True)
@@ -449,7 +470,7 @@ def main() -> int:
         )
         return 0 if report["critical_count"] == 0 else 1
     finally:
-        db.close()
+        dispose_layer3_world(proof_db, proof_engine)
 
 
 if __name__ == "__main__":

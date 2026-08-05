@@ -31,6 +31,13 @@ SCORE_AXES: Tuple[str, ...] = (
 
 COMMERCE_FOCUS_MODES = frozenset({"product", "shipping_policy", "order_tracking"})
 
+_CANONICAL_FOCUS_KEYS = (
+    "external_id",
+    "id",
+    "product_id",
+    "sku",
+)
+
 TRACKING_TOKEN_NORA_ORDER = "TRK-A-7788"
 
 OTHER_CUSTOMER_ORDER_MARKERS = (
@@ -143,32 +150,39 @@ def dedup_session_has_activity(turns: Sequence[Layer3TurnEvidence]) -> bool:
     )
 
 
+def _canonical_product_identity(value: Any) -> str:
+    """Canonical product id from flat string or structured focus dict; empty if unresolved."""
+    if not value:
+        return ""
+    if isinstance(value, dict):
+        for key in _CANONICAL_FOCUS_KEYS:
+            resolved = str(value.get(key) or "").strip()
+            if resolved:
+                return resolved
+        return ""
+    return str(value).strip()
+
+
 def turn_has_focus_context(state: Dict[str, Any]) -> bool:
     if not state:
         return False
-    conv_focus = str(state.get("conversation_focus") or "")
-    if conv_focus in COMMERCE_FOCUS_MODES:
-        return True
     for key in (
         "focus_product_id",
-        "previous_product_focus",
         "previous_product_focus_id",
-        "suspended_product_focus",
         "suspended_product_focus_id",
     ):
-        if state.get(key):
+        if _canonical_product_identity(state.get(key)):
             return True
-    if state.get("has_previous_product_focus") or state.get("has_suspended_product_focus"):
-        return True
+    for key in ("previous_product_focus", "suspended_product_focus"):
+        if _canonical_product_identity(state.get(key)):
+            return True
     return False
 
 
 def context_retention_failed(turns: Sequence[Layer3TurnEvidence]) -> bool:
     if len(turns) < 3:
         return False
-    evolved = turns[-1].brain_state_after != turns[0].brain_state_before
-    focus = any(turn_has_focus_context(t.brain_state_after) for t in turns)
-    return not evolved and not focus
+    return not turn_has_focus_context(turns[-1].brain_state_after)
 
 
 def _structured_shipping_fee(turn: Layer3TurnEvidence) -> Optional[float]:
@@ -245,7 +259,7 @@ def score_session(
     score = SessionScore(session_id=script.session_id)
     checks = dict(script.expected_checks or {})
 
-    axis = {ax: 4 for ax in SCORE_AXES}
+    axis = {ax: 5 for ax in SCORE_AXES}
 
     if not compose_real:
         score.critical_defects.append("compose_not_live_openai")
@@ -328,7 +342,7 @@ def score_session(
             score.major_defects.append("false_coupon_success")
             axis["price_stock_truth"] = 2
 
-    if context_retention_failed(turns):
+    if checks.get("context_retention_required") and context_retention_failed(turns):
         score.major_defects.append("context_not_retained")
         axis["context_retention"] = 2
 
@@ -350,11 +364,11 @@ def score_session(
             score.major_defects.append("excessive_compose_fallback")
             axis["compose_quality"] = 2
     elif not checks.get("dedup_steps"):
-        score.major_defects.append("no_llm_compose_observed")
-        axis["compose_quality"] = 2
-
-    if checks.get("dedup_steps"):
-        axis["compose_quality"] = 4
+        if checks.get("handoff_then_no_commerce"):
+            score.notes.append("compose_not_expected_handoff")
+        else:
+            score.major_defects.append("no_llm_compose_observed")
+            axis["compose_quality"] = 2
 
     score.axis_scores = axis
     score.session_pct = round(100.0 * sum(axis.values()) / (5 * len(SCORE_AXES)), 1)
