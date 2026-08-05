@@ -25,6 +25,7 @@ import logging
 import os
 import re as _re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -250,6 +251,34 @@ def _catalog_search_query_variants(query: str) -> List[str]:
     return variants
 
 
+_ARABIC_SCRIPT_RE = _re.compile(r"[\u0600-\u06FF]")
+_CATALOG_SEARCH_AR_DIACRITICS_RE = _re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
+
+
+def _normalize_catalog_search_arabic(text: str) -> str:
+    """NFKC + orthographic fold for catalog title search (query side)."""
+    t = unicodedata.normalize("NFKC", (text or "").strip())
+    t = _CATALOG_SEARCH_AR_DIACRITICS_RE.sub("", t)
+    t = t.replace("ـ", "")
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    t = _re.sub(r"\s+", " ", t).strip().casefold()
+    return t
+
+
+def _catalog_title_arabic_norm_expr(column) -> Any:
+    """Portable SQL REPLACE chain for Arabic orthographic title matching."""
+    from sqlalchemy import func as sa_func  # noqa: PLC0415
+
+    expr = sa_func.lower(column)
+    expr = sa_func.replace(expr, "ـ", "")
+    for variant in ("أ", "إ", "آ"):
+        expr = sa_func.replace(expr, variant, "ا")
+    expr = sa_func.replace(expr, "ى", "ي")
+    expr = sa_func.replace(expr, "ة", "ه")
+    return expr
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CatalogContextBuilder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -368,6 +397,28 @@ class CatalogContextBuilder:
             if rows:
                 method = "ilike" if search_q == q_clean else "ilike_def_article_norm"
                 return _finalize(rows, source="search_ilike", method=method)
+
+        if _ARABIC_SCRIPT_RE.search(q_clean):
+            norm_q = _normalize_catalog_search_arabic(q_clean)
+            if norm_q:
+                norm_pattern = f"%{norm_q}%"
+                norm_title = _catalog_title_arabic_norm_expr(Product.title)
+                rows = (
+                    self.db.query(Product)
+                    .filter(
+                        Product.tenant_id == self.tenant_id,
+                        norm_title.like(norm_pattern),
+                    )
+                    .order_by(Product.in_stock.desc())
+                    .limit(limit)
+                    .all()
+                )
+                if rows:
+                    return _finalize(
+                        rows,
+                        source="search_ilike",
+                        method="ilike_arabic_norm",
+                    )
 
         if include_non_orderable_facts:
             return CatalogSearchProductsResult(products=[], catalog_fact_products=[])
