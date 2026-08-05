@@ -34,6 +34,7 @@ from modules.ai.brain.truth_surface.product_sale_offer_consumption_gate import (
 from modules.ai.brain.truth_surface.product_sale_offer_loader import (  # noqa: E402
     _store_wide_from_snapshot,
     classify_product_sale_question_kind,
+    is_store_wide_product_sale_inquiry,
     is_strict_product_sale,
     load_product_sale_offer_facts,
     should_load_product_sale_offer_facts,
@@ -354,6 +355,21 @@ def test_consumption_gates_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_should_load_independent_from_coupon() -> None:
     assert should_load_product_sale_offer_facts(message="عندكم عروض؟")
     assert classify_product_sale_question_kind("عندكم عروض؟") == "store_wide"
+
+
+def test_is_store_wide_product_sale_inquiry() -> None:
+    assert is_store_wide_product_sale_inquiry("عندكم عروض؟")
+    assert is_store_wide_product_sale_inquiry("في تخفيضات؟")
+    # Unclassified product inquiry — default kind is store_wide but loader gate is False.
+    assert not is_store_wide_product_sale_inquiry("عندكم عطر ورد؟")
+    # Product-scoped sale ask without focus must not claim store-wide ownership.
+    assert not is_store_wide_product_sale_inquiry("هل مخفض؟")
+    focus_state = SimpleNamespace(current_product_focus={"id": 1, "title": "عطر"})
+    assert not is_store_wide_product_sale_inquiry(
+        "هل مخفض؟",
+        brain_state=focus_state,
+    )
+    assert classify_product_sale_question_kind("هل مخفض؟") == "product_scoped"
 
 
 def test_projection_missing_record_raises() -> None:

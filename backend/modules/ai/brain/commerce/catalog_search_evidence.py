@@ -305,6 +305,19 @@ def has_catalog_search_evidence(
     decision: Optional[Decision] = None,
 ) -> bool:
     """True when catalog search is justified by operational evidence."""
+    try:
+        from ..truth_surface.product_sale_offer_loader import (  # noqa: PLC0415
+            is_store_wide_product_sale_inquiry,
+        )
+
+        if is_store_wide_product_sale_inquiry(
+            getattr(ctx, "message", "") or "",
+            brain_state=getattr(ctx, "state", None),
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — offer gate must not block evidence
+        pass
+
     args = dict(getattr(decision, "args", None) or {})
     q = (query or "").strip()
 

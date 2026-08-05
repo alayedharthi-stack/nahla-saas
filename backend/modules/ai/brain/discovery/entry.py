@@ -142,6 +142,19 @@ def extract_order_product_query(ctx: BrainContext) -> str:
     if is_bare_start_order_phrase(msg):
         return ""
 
+    try:
+        from ..truth_surface.product_sale_offer_loader import (  # noqa: PLC0415
+            is_store_wide_product_sale_inquiry,
+        )
+
+        if is_store_wide_product_sale_inquiry(
+            msg,
+            brain_state=getattr(ctx, "state", None),
+        ):
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — offer gate must not block discovery
+        pass
+
     def _usable_product_query(candidate: str) -> bool:
         return bool(
             candidate

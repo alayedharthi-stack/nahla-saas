@@ -88,6 +88,24 @@ def should_load_product_sale_offer_facts(
     return False
 
 
+def is_store_wide_product_sale_inquiry(
+    message: str = "",
+    *,
+    brain_state: Any = None,
+) -> bool:
+    """True for store-wide sale/offer asks that must not become catalog product queries.
+
+    Requires both store-wide classification and the loader gate so unclassified
+    messages (default kind ``store_wide``) do not suppress normal product search.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    if classify_product_sale_question_kind(text) != "store_wide":
+        return False
+    return should_load_product_sale_offer_facts(message=text, brain_state=brain_state)
+
+
 def _product_focus_id(brain_state: Any) -> Optional[int]:
     focus = getattr(brain_state, "current_product_focus", None) if brain_state else None
     if focus is None:
@@ -370,6 +388,7 @@ def _load_product_scoped(
 
 __all__ = [
     "classify_product_sale_question_kind",
+    "is_store_wide_product_sale_inquiry",
     "is_strict_product_sale",
     "load_product_sale_offer_facts",
     "should_load_product_sale_offer_facts",

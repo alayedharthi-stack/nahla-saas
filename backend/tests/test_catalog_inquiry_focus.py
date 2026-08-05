@@ -265,6 +265,15 @@ class TestDiscoveryEntryInquirySubjectPath:
         assert has_explicit_product_browse_intent(ctx) is expect_browse_intent
         assert _route_discovery_realistic(ctx, entry) is None
 
+    def test_store_wide_offers_not_catalog_product_query(self) -> None:
+        ctx = _ctx("عندكم عروض؟")
+        assert extract_order_product_query(ctx) == ""
+        entry = resolve_discovery_entry(ctx)
+        assert entry.entry_type != PRODUCT_SPECIFIC
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_SEARCH_PRODUCTS
+        assert (decision.args or {}).get("query") != "عروض"
+
 
 class TestNonProductTopicsDoNotBecomeCatalogSearch:
     def test_shipping_geo_blocked_by_discovery_gate(self) -> None:
