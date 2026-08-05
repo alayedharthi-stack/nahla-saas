@@ -22,7 +22,10 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from core.store_knowledge import _catalog_search_query_variants  # noqa: E402
+from core.store_knowledge import (  # noqa: E402
+    _catalog_search_arabic_feminine_plural_variants,
+    _catalog_search_query_variants,
+)
 from modules.ai.brain.commerce.candidate_price_selection import (  # noqa: E402
     extract_stated_price_constraint,
     resolve_candidates_by_stated_price,
@@ -280,6 +283,25 @@ class TestNegatedValidCandidatePriceGuard:
         guard = apply_persona_compose_guards(reply, bundle)
         assert guard.passed is False
         assert guard.failed_reason == "invented_price_amount"
+
+
+class TestCatalogSearchFemininePluralVariants:
+    def test_saaat_yields_saaah_variants(self) -> None:
+        variants = _catalog_search_arabic_feminine_plural_variants("ساعات")
+        assert variants == ["ساعة", "ساعه"]
+
+    def test_trailing_question_mark_stripped(self) -> None:
+        variants = _catalog_search_arabic_feminine_plural_variants("ساعات؟")
+        assert variants == ["ساعة", "ساعه"]
+
+    def test_multi_token_skipped(self) -> None:
+        assert _catalog_search_arabic_feminine_plural_variants("ساعات يد") == []
+
+    def test_short_token_skipped(self) -> None:
+        assert _catalog_search_arabic_feminine_plural_variants("ات") == []
+
+    def test_non_plural_unchanged(self) -> None:
+        assert _catalog_search_arabic_feminine_plural_variants("ساعة") == []
 
 
 class TestCatalogSearchDefiniteArticleNormalization:

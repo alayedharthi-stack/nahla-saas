@@ -251,6 +251,30 @@ def _catalog_search_query_variants(query: str) -> List[str]:
     return variants
 
 
+def _catalog_search_arabic_feminine_plural_variants(query: str) -> List[str]:
+    """Miss-only singular retries for a single-token Arabic feminine plural.
+
+    When the primary query is one Arabic token ending in ``ات`` (e.g. ``ساعات``),
+    return ``stem+ة`` / ``stem+ه`` (``ساعة`` / ``ساعه``). Not general morphology.
+    """
+    tok = (query or "").strip().strip("؟?!.،,")
+    if not tok or " " in tok:
+        return []
+    if not _ARABIC_SCRIPT_RE.search(tok):
+        return []
+    if not tok.endswith("ات") or len(tok) < 5:
+        return []
+    stem = tok[:-2]
+    if len(stem) < 3:
+        return []
+    out: List[str] = []
+    for suffix in ("ة", "ه"):
+        cand = stem + suffix
+        if cand and cand != tok and cand not in out:
+            out.append(cand)
+    return out
+
+
 _ARABIC_SCRIPT_RE = _re.compile(r"[\u0600-\u06FF]")
 _CATALOG_SEARCH_AR_DIACRITICS_RE = _re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 
@@ -419,6 +443,76 @@ class CatalogContextBuilder:
                         source="search_ilike",
                         method="ilike_arabic_norm",
                     )
+
+        # Miss-only: single-token feminine plural → singular (ساعات → ساعة/ساعه)
+        for search_q in _catalog_search_arabic_feminine_plural_variants(q_clean):
+            try:
+                fts_sql = sa_text("""
+                    SELECT id FROM products
+                    WHERE tenant_id = :tid
+                      AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
+                          @@ plainto_tsquery('simple', :q)
+                    ORDER BY in_stock DESC, id
+                    LIMIT :lim
+                """)
+                result = self.db.execute(
+                    fts_sql,
+                    {"tid": self.tenant_id, "q": search_q, "lim": limit},
+                )
+                ids = [row[0] for row in result]
+                if ids:
+                    rows = (
+                        self.db.query(Product)
+                        .filter(Product.id.in_(ids))
+                        .all()
+                    )
+                    return _finalize(
+                        rows,
+                        source="search",
+                        method="fts_plural_singular",
+                    )
+            except Exception:
+                pass
+
+            q_like = f"%{search_q.lower()}%"
+            rows = (
+                self.db.query(Product)
+                .filter(
+                    Product.tenant_id == self.tenant_id,
+                    Product.title.ilike(q_like),
+                )
+                .order_by(Product.in_stock.desc())
+                .limit(limit)
+                .all()
+            )
+            if rows:
+                return _finalize(
+                    rows,
+                    source="search_ilike",
+                    method="ilike_plural_singular",
+                )
+
+            if _ARABIC_SCRIPT_RE.search(search_q):
+                norm_q = _normalize_catalog_search_arabic(search_q)
+                if norm_q:
+                    norm_pattern = f"%{norm_q}%"
+                    norm_title = _catalog_title_arabic_norm_expr(Product.title)
+                    rows = (
+                        self.db.query(Product)
+                        .filter(
+                            Product.tenant_id == self.tenant_id,
+                            norm_title.like(norm_pattern),
+                        )
+                        .order_by(Product.in_stock.desc())
+                        .limit(limit)
+                        .all()
+                    )
+                    if rows:
+                        return _finalize(
+                            rows,
+                            source="search_ilike",
+                            method="ilike_plural_singular_arabic_norm",
+                        )
 
         if include_non_orderable_facts:
             return CatalogSearchProductsResult(products=[], catalog_fact_products=[])

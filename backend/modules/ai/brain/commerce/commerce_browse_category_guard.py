@@ -194,6 +194,11 @@ def _scope_variants(scope: str) -> frozenset[str]:
         variants.add(base[2:])
     elif len(base) >= 2:
         variants.add(f"ال{base}")
+    # Sound feminine plural (ساعات) → singular under module norm (ساعه).
+    if base.endswith("ات") and len(base) >= 5:
+        stem = base[:-2]
+        if len(stem) >= 3:
+            variants.add(stem + "ه")
     return frozenset(v for v in variants if v)
 
 
