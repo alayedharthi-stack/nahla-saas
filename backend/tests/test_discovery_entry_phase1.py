@@ -104,6 +104,12 @@ class TestResolveDiscoveryEntry:
         assert entry.matched is True
         assert entry.entry_type == GLOBAL_BROWSE
 
+    def test_global_browse_show_products_bare_imperative(self) -> None:
+        entry = resolve_discovery_entry(_ctx("عرض المنتجات"))
+        assert entry.matched is True
+        assert entry.entry_type == GLOBAL_BROWSE
+        assert entry.source == "top_products"
+
     def test_top_products(self) -> None:
         entry = resolve_discovery_entry(_ctx("الأكثر مبيعاً"))
         assert entry.matched is True

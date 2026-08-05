@@ -88,10 +88,23 @@ _GLOBAL_CATALOG_BROWSE_PHRASES = (
     "الاكثر طلبًا",
     "اعرض المنتجات",
     "وريني المنتجات",
+    "ورني المنتجات",
+    "ارسل الخيارات",
+    "أرسل الخيارات",
+    "ابي اشوف الانواع",
+    "أبي أشوف الأنواع",
+    "ابغى اشوف الانواع",
+    "أبغى أشوف الأنواع",
     "show products",
     "show me",
     "top products",
     "best sellers",
+)
+
+# Imperative «عرض المنتجات» with optional leading alef after _norm_ar.
+# Boundary-safe so «تعرض المنتجات …» does not match; allow trailing punctuation.
+_GLOBAL_CATALOG_BROWSE_OPTIONAL_ALEF_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:^|\s)ا?عرض\s+المنتجات(?:[\s؟?!.,؛:]|$)"),
 )
 
 _HARD_BROAD_BROWSE_PHRASES = (
@@ -173,6 +186,15 @@ def explicit_broad_browse_requested(message: str) -> bool:
     )
 
 
+def _global_catalog_browse_phrase_hit(norm: str) -> bool:
+    """True when normalized text matches a global catalog browse phrase."""
+    if not norm:
+        return False
+    if any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES):
+        return True
+    return any(pat.search(norm) for pat in _GLOBAL_CATALOG_BROWSE_OPTIONAL_ALEF_RES)
+
+
 def global_availability_browse_requested(message: str) -> bool:
     """Store-wide inventory browse — do not narrow to stale ``product_focus``.
 
@@ -183,7 +205,7 @@ def global_availability_browse_requested(message: str) -> bool:
         return False
     if explicit_broad_browse_requested(message):
         return True
-    return any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES)
+    return _global_catalog_browse_phrase_hit(norm)
 
 
 def global_catalog_browse_requested(message: str) -> bool:
@@ -193,7 +215,7 @@ def global_catalog_browse_requested(message: str) -> bool:
         return False
     if explicit_hard_browse_requested(message):
         return True
-    return any(phrase in norm for phrase in _GLOBAL_CATALOG_BROWSE_PHRASES)
+    return _global_catalog_browse_phrase_hit(norm)
 
 
 def resolve_kb_active_product_ids(

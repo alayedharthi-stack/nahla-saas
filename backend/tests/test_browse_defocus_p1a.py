@@ -52,6 +52,14 @@ class TestGlobalAvailabilityBrowseDetection:
         ):
             assert global_availability_browse_requested(msg), msg
 
+    def test_show_products_imperative_optional_alef(self):
+        assert global_availability_browse_requested("اعرض المنتجات")
+        assert global_availability_browse_requested("عرض المنتجات")
+        assert global_availability_browse_requested("عرض المنتجات؟")
+
+    def test_embedded_verb_not_show_products_browse(self):
+        assert not global_availability_browse_requested("تعرض المنتجات في القائمة")
+
     def test_specific_product_not_global_browse(self):
         assert not global_availability_browse_requested("كم سعر طلح")
         assert not global_availability_browse_requested("ابي صورة الطلح")

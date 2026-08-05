@@ -126,37 +126,19 @@ def _normalize_ar(text: str) -> str:
 
 
 def has_explicit_broad_browse_request(message: str) -> bool:
-    """Strict allowlist — ``top_products`` may run only on explicit browse."""
+    """Strict allowlist — ``top_products`` may run only on explicit browse.
+
+    Single source of truth: ``global_availability_browse_requested`` in
+    ``product_breadth_policy`` (no duplicated phrase lists here).
+    """
     try:
         from .commerce.product_breadth_policy import (  # noqa: PLC0415
             global_availability_browse_requested,
         )
 
-        if global_availability_browse_requested(message):
-            return True
+        return bool(global_availability_browse_requested(message))
     except Exception:  # noqa: BLE001
-        pass
-
-    norm = _normalize_ar(message or "")
-    if not norm:
         return False
-
-    _EXTRA_BROWSE = (
-        "وريني المنتجات",
-        "ورني المنتجات",
-        "اعرض المنتجات",
-        "أرسل الخيارات",
-        "ارسل الخيارات",
-        "ابي اشوف الانواع",
-        "أبي أشوف الأنواع",
-        "ابغى اشوف الانواع",
-        "أبغى أشوف الأنواع",
-        "الاكثر مبيعا",
-        "اكثر مبيعا",
-        "show products",
-        "top products",
-    )
-    return any(_normalize_ar(p) in norm for p in _EXTRA_BROWSE)
 
 
 def product_browse_negative_context_reason(message: str) -> str:
