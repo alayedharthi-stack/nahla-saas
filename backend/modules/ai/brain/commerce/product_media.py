@@ -200,13 +200,16 @@ def detect_product_media_turn(
         pass
 
     has_media_origin = _is_customer_media_origin(raw, meta)
-    has_product_signal = has_product_commerce_signal(raw, topic_hints=hints)
     has_pm_hints = _has_product_media_topic_hints(hints)
-
-    if not (has_media_origin or has_pm_hints or has_product_signal):
-        return ProductMediaVerdict(matched=False, reason="no_product_media_signal")
-
     has_vision, vision_preview = _vision_evidence(meta, raw)
+
+    # Media route requires inbound media evidence (origin markers, vision, or
+    # product-media topic hints). Bare commerce-keyword text must not steal
+    # discovery — e.g. color token «ابيض» falsely matching buying verb «ابي».
+    if not (has_media_origin or has_pm_hints or has_vision):
+        return ProductMediaVerdict(matched=False, reason="no_media_evidence")
+
+    has_product_signal = has_product_commerce_signal(raw, topic_hints=hints)
     has_hint_only = bool(has_pm_hints or has_product_signal) and not has_vision
 
     return ProductMediaVerdict(
