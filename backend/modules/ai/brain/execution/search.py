@@ -60,18 +60,29 @@ class ProductSearchHandler:
         if source.startswith("selection_context") and decision.args.get("products"):
             products = list(decision.args.get("products") or [])
             presentation = str(decision.args.get("selection_presentation_text") or "").strip()
-            return ActionResult(
-                success=True,
-                data={
-                    "products": products,
-                    "product_lines": presentation,
-                    "count": len(products),
-                    "query": str(decision.args.get("query") or ""),
-                    "suggest_narrow": False,
-                    "selection_presentation_text": presentation,
-                    "discovery_output_kind": "products",
-                },
-            )
+            query = str(decision.args.get("query") or "")
+            selected_product = None
+            if source == "selection_context_unique_fragment":
+                selected_product = resolve_confirmed_discovery_product(
+                    entry_type="product_specific",
+                    discovery_output_kind="products",
+                    presented_products=products,
+                )
+            payload: Dict[str, Any] = {
+                # A verified singleton is a confirmed selection, not a new
+                # browse list. Keeping it out of `products` prevents the
+                # pipeline from archiving the focus it has just bound.
+                "products": [] if selected_product is not None else products,
+                "product_lines": presentation,
+                "count": len(products),
+                "query": query,
+                "suggest_narrow": False,
+                "selection_presentation_text": presentation,
+                "discovery_output_kind": "products",
+            }
+            if selected_product is not None:
+                payload["product"] = selected_product
+            return ActionResult(success=True, data=payload)
 
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415
             _product_key,

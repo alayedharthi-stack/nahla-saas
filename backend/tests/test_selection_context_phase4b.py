@@ -1,6 +1,7 @@
 """Phase 4B — selection context follow-ups after discovery presentation."""
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -28,9 +29,10 @@ from modules.ai.brain.decision.actions import (
     ACTION_SEARCH_PRODUCTS,
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
+from modules.ai.brain.execution.search import ProductSearchHandler
 from modules.ai.brain.intent import rules
 from modules.ai.brain.product_discovery_gate import product_discovery_block_reason
-from modules.ai.brain.types import BrainContext, CommerceFacts, Intent, MerchantConversationState
+from modules.ai.brain.types import BrainContext, CommerceFacts, Decision, Intent, MerchantConversationState
 
 PRESENTED = [
     {
@@ -245,3 +247,224 @@ class TestSelectionContextIsolation:
         state = MerchantConversationState(greeted=True, stage="checkout")
         ctx = _ctx(MSG_TRACKING, state=state)
         assert try_selection_context_decision(ctx) is None
+
+
+SHOE_PRESENTED = [
+    {
+        "id": "1",
+        "external_id": "sku-shoe-white",
+        "title": "حذاء رياضي أبيض",
+        "display_label": "حذاء رياضي أبيض",
+        "price": 199,
+        "can_checkout": True,
+    },
+    {
+        "id": "2",
+        "external_id": "sku-shoe-black",
+        "title": "حذاء رياضي أسود",
+        "display_label": "حذاء رياضي أسود",
+        "price": 199,
+        "can_checkout": True,
+    },
+]
+
+PERFUME_PRESENTED = [
+    {
+        "id": "11",
+        "external_id": "sku-perfume-rose-100",
+        "title": "عطر ورد 100ml",
+        "display_label": "عطر ورد 100ml",
+        "price": 250,
+        "can_checkout": True,
+    },
+    {
+        "id": "12",
+        "external_id": "sku-perfume-jasmine-100",
+        "title": "عطر ياسمين 100ml",
+        "display_label": "عطر ياسمين 100ml",
+        "price": 260,
+        "can_checkout": True,
+    },
+]
+
+
+def _presented_state(
+    products: list,
+    *,
+    turn: int = 2,
+) -> MerchantConversationState:
+    state = MerchantConversationState(
+        greeted=True,
+        stage="discovery",
+        turn=turn,
+        commerce_objective=COMMERCE_OBJECTIVE_DISCOVERY,
+        last_browse_query="generic",
+    )
+    stamp_selection_context_from_products(state, products=products)
+    state.last_search_candidates = list(products)
+    return state
+
+
+class TestUniquePresentedFragmentSelection:
+    def test_shoe_fragment_uniquely_selects_white(self) -> None:
+        state = _presented_state(SHOE_PRESENTED)
+        ctx = _ctx("رياضي أبيض", state=state)
+        decision = try_selection_context_decision(ctx)
+        assert decision is not None
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("source") == "selection_context_unique_fragment"
+        assert decision.args.get("query") == "حذاء رياضي أبيض"
+        products = decision.args.get("products") or []
+        assert len(products) == 1
+        assert products[0]["external_id"] == "sku-shoe-white"
+        assert products[0]["id"] == "1"
+        patch = decision.args.get("selection_context_patch") or {}
+        assert patch.get("selected_product_id") == "1"
+
+    def test_perfume_fragment_uniquely_selects_rose(self) -> None:
+        state = _presented_state(PERFUME_PRESENTED)
+        ctx = _ctx("عطر ورد", state=state)
+        decision = try_selection_context_decision(ctx)
+        assert decision is not None
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("source") == "selection_context_unique_fragment"
+        assert decision.args.get("query") == "عطر ورد 100ml"
+        products = decision.args.get("products") or []
+        assert len(products) == 1
+        assert products[0]["external_id"] == "sku-perfume-rose-100"
+        patch = decision.args.get("selection_context_patch") or {}
+        assert patch.get("selected_product_id") == "11"
+
+    def test_single_token_fragment_does_not_resolve(self) -> None:
+        state = _presented_state(SHOE_PRESENTED)
+        ctx = _ctx("أبيض", state=state)
+        assert try_selection_context_decision(ctx) is None
+
+    def test_ambiguous_shared_fragment_does_not_resolve(self) -> None:
+        ambiguous = [
+            {
+                "id": "21",
+                "external_id": "sku-shirt-blue",
+                "title": "قميص قطني أزرق",
+                "display_label": "قميص قطني أزرق",
+                "price": 120,
+                "can_checkout": True,
+            },
+            {
+                "id": "22",
+                "external_id": "sku-shirt-red",
+                "title": "قميص قطني أحمر",
+                "display_label": "قميص قطني أحمر",
+                "price": 120,
+                "can_checkout": True,
+            },
+        ]
+        state = _presented_state(ambiguous)
+        ctx = _ctx("قميص قطني", state=state)
+        assert try_selection_context_decision(ctx) is None
+
+    def test_no_presented_context_does_not_resolve(self) -> None:
+        state = MerchantConversationState(greeted=True, stage="discovery", turn=2)
+        ctx = _ctx("رياضي أبيض", state=state)
+        assert try_selection_context_decision(ctx) is None
+
+    def test_repeated_single_token_does_not_resolve(self) -> None:
+        state = _presented_state(SHOE_PRESENTED)
+        ctx = _ctx("أبيض أبيض", state=state)
+        assert try_selection_context_decision(ctx) is None
+
+    def test_title_only_without_canonical_id_does_not_resolve(self) -> None:
+        title_only = [
+            {
+                "title": "حذاء رياضي أبيض",
+                "display_label": "حذاء رياضي أبيض",
+                "price": 199,
+                "can_checkout": True,
+            },
+            {
+                "id": "2",
+                "external_id": "sku-shoe-black",
+                "title": "حذاء رياضي أسود",
+                "display_label": "حذاء رياضي أسود",
+                "price": 199,
+                "can_checkout": True,
+            },
+        ]
+        state = _presented_state(title_only)
+        ctx = _ctx("رياضي أبيض", state=state)
+        assert try_selection_context_decision(ctx) is None
+
+
+class TestSelectionContextSearchExecutorFocus:
+    async def _run_search(self, decision: Decision, ctx: BrainContext):
+        return await ProductSearchHandler().handle(decision, ctx)
+
+    def test_singleton_selection_context_exports_product_focus(self) -> None:
+        state = _presented_state(SHOE_PRESENTED)
+        ctx = _ctx("رياضي أبيض", state=state)
+        decision = try_selection_context_decision(ctx)
+        assert decision is not None
+        result = asyncio.run(self._run_search(decision, ctx))
+        assert result.success is True
+        assert result.data.get("products") == []
+        assert result.data.get("product") is not None
+        assert result.data["product"]["external_id"] == "sku-shoe-white"
+        assert result.data["product"]["id"] == "1"
+
+    def test_multi_product_selection_context_does_not_export_product(self) -> None:
+        ctx = _ctx("test", state=_browse_state())
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": "category_a",
+                "source": "selection_context_unique_fragment",
+                "products": list(PRESENTED[:2]),
+                "selection_presentation_text": "options",
+            },
+            reason="selection context unique_fragment_select",
+            confidence=0.90,
+        )
+        result = asyncio.run(self._run_search(decision, ctx))
+        assert result.success is True
+        assert len(result.data.get("products") or []) == 2
+        assert result.data.get("product") is None
+
+    def test_other_singleton_selection_context_does_not_change_focus_contract(self) -> None:
+        ctx = _ctx("test", state=_browse_state())
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": "size",
+                "source": "selection_context_size_availability",
+                "products": [PRESENTED[0]],
+                "selection_presentation_text": "option",
+            },
+            reason="selection context size_availability",
+            confidence=0.90,
+        )
+        result = asyncio.run(self._run_search(decision, ctx))
+        assert result.success is True
+        assert len(result.data.get("products") or []) == 1
+        assert result.data.get("product") is None
+
+    def test_title_only_unique_fragment_result_does_not_export_product(self) -> None:
+        ctx = _ctx("رياضي أبيض", state=_browse_state())
+        title_only = {
+            "title": "حذاء رياضي أبيض",
+            "display_label": "حذاء رياضي أبيض",
+            "can_checkout": True,
+        }
+        decision = Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args={
+                "query": "حذاء رياضي أبيض",
+                "source": "selection_context_unique_fragment",
+                "products": [title_only],
+            },
+            reason="selection context unique_fragment_select",
+            confidence=0.90,
+        )
+        result = asyncio.run(self._run_search(decision, ctx))
+        assert result.success is True
+        assert result.data.get("products") == [title_only]
+        assert result.data.get("product") is None

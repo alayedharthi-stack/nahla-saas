@@ -626,6 +626,70 @@ def _product_at_index(products: Sequence[Dict[str, Any]], index: int) -> Optiona
     return products[index - 1]
 
 
+def _extract_substantive_fragment_tokens(norm: str) -> List[str]:
+    """Distinct tokens for bare multi-word fragment matching (minimum two required)."""
+    seen: set[str] = set()
+    tokens: List[str] = []
+    for raw in (norm or "").split():
+        token = raw.strip(".,؟?!")
+        if len(token) >= 2 and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def _product_label_tokens(product: Dict[str, Any]) -> set[str]:
+    parts = [
+        str(product.get("display_label") or ""),
+        str(product.get("title") or ""),
+        str(product.get("label_override") or ""),
+    ]
+    blob = _normalize_ar(" ".join(p for p in parts if p))
+    if not blob:
+        return set()
+    return {tok for tok in blob.split() if len(tok) >= 2}
+
+
+def _product_contains_all_tokens(product: Dict[str, Any], tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return False
+    label_tokens = _product_label_tokens(product)
+    if not label_tokens:
+        return False
+    return all(token in label_tokens for token in tokens)
+
+
+def _resolve_unique_presented_fragment(
+    message: str,
+    presented: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Resolve a bare multi-token fragment against the presented product list."""
+    norm = _normalize_ar(message or "")
+    if not norm:
+        return None
+    if any(
+        norm == _normalize_ar(str(product.get(key) or "")).strip()
+        for product in presented
+        for key in ("display_label", "title", "label_override")
+        if product.get(key)
+    ):
+        # Full labels belong to the established explicit-pick flow.
+        return None
+    tokens = _extract_substantive_fragment_tokens(norm)
+    if len(tokens) < 2:
+        return None
+
+    hits = [
+        product
+        for product in presented
+        if _product_contains_all_tokens(product, tokens)
+        and _product_is_checkout_eligible(product)
+    ]
+    if len(hits) != 1:
+        return None
+    return hits[0]
+
+
 def _match_product_by_name(name: str, products: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     norm = _normalize_ar(name)
     if not norm:
@@ -906,7 +970,36 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve follow-up turns against last presented discovery products."""
     if not has_active_selection_context(ctx.state):
         return None
-    if not is_selection_followup_message(ctx.message or ""):
+
+    is_explicit_followup = is_selection_followup_message(ctx.message or "")
+    if not is_explicit_followup:
+        fragment_product = _resolve_unique_presented_fragment(
+            ctx.message or "",
+            get_presented_products(ctx.state),
+        )
+        if fragment_product is not None:
+            logger.info(
+                "[SELECTION_CONTEXT] tenant=%s kind=unique_fragment_select selected=%r preview=%r",
+                getattr(ctx, "tenant_id", None),
+                (fragment_product or {}).get("title"),
+                (ctx.message or "")[:60],
+            )
+            product_title = str(
+                fragment_product.get("title") or fragment_product.get("display_label") or ""
+            ).strip()
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={
+                    "query": product_title,
+                    "source": "selection_context_unique_fragment",
+                    "products": [fragment_product],
+                    "selection_context_patch": _selection_patch_from_product(fragment_product),
+                },
+                reason="selection context unique_fragment_select",
+                confidence=0.92,
+            )
+
+    if not is_explicit_followup:
         return None
 
     resolution = resolve_selection_context(ctx)
