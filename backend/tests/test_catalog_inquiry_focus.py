@@ -487,6 +487,67 @@ class TestProductSearchHandlerOosFactFocus:
         assert result.data.get("discovery_output_kind") is None
         assert result.data.get("product_lines") == ""
 
+    def test_category_filter_drops_fact_orderable_invokes_discovery(self) -> None:
+        fact = {
+            "external_id": "sku-watch-matte-oos",
+            "title": "ساعة فضية مطفية",
+            "price": 279,
+            "in_stock": False,
+            "can_checkout": False,
+        }
+        orderable = {
+            "id": "watch-silver-1",
+            "external_id": "SKU-WATCH-SILVER",
+            "title": "ساعة فضية كلاسيك",
+            "price": 299,
+            "in_stock": True,
+            "can_checkout": True,
+        }
+        ctx = _ctx("عندكم ساعة فضية كلاسيك؟")
+        ctx._db = MagicMock()  # type: ignore[attr-defined]
+        decision = self._availability_decision(query="ساعة فضية كلاسيك")
+        strategy_payload = {
+            "products": [orderable],
+            "product_lines": "presented",
+            "count": 1,
+            "query": "ساعة فضية كلاسيك",
+            "discovery_output_kind": "products",
+            "product": orderable,
+        }
+
+        def _scope_products(products, **_kw):
+            rows = [dict(p) for p in products]
+            if any(p.get("external_id") == "sku-watch-matte-oos" for p in rows):
+                return []
+            return rows
+
+        with (
+            patch(
+                "modules.ai.brain.execution.search._apply_discovery_strategy",
+                return_value=MagicMock(success=True, data=strategy_payload),
+            ) as mock_strategy,
+            patch(
+                "modules.ai.brain.commerce.commerce_browse_category_guard.filter_products_for_browse_turn",
+                side_effect=_scope_products,
+            ),
+        ):
+            result = asyncio.run(
+                self._run_handler(
+                    decision=decision,
+                    ctx=ctx,
+                    runtime_payload={
+                        "products": [orderable],
+                        "catalog_fact_products": [fact],
+                    },
+                )
+            )
+
+        mock_strategy.assert_called_once()
+        assert result.success is True
+        assert result.data.get("discovery_output_kind") == "products"
+        assert result.data.get("catalog_fact_products") is None
+        assert result.data.get("product") is orderable
+
     def test_mixed_orderable_and_fact_preserves_facts_without_pin(self) -> None:
         fact = {
             "external_id": "sku-watch-matte-oos",

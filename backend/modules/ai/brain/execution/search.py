@@ -375,13 +375,20 @@ class ProductSearchHandler:
                 )
 
             products = _apply_category_scope(products)
-            had_catalog_fact_products = bool(catalog_fact_products)
             if catalog_fact_products:
                 catalog_fact_products = _apply_category_scope(catalog_fact_products)
+
+            if not products and not catalog_fact_products:
+                return ActionResult(
+                    success=False,
+                    error="no_products",
+                    data={"message": "no_products_in_catalog"},
+                )
+
             # Fact-bearing price/availability searches keep structured facts and
             # focus identity via _format_result — discovery presentation must not
             # short-circuit with an empty browse payload.
-            if not had_catalog_fact_products:
+            if not catalog_fact_products:
                 strategy_result = _apply_discovery_strategy(
                     products,
                     decision=decision,
