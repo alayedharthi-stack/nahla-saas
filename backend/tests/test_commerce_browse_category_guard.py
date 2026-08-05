@@ -124,6 +124,18 @@ class TestCategoryFilter:
     def test_empty_input_is_safe(self) -> None:
         assert filter_products_to_browse_category([], message=f"show {_ALPHA}") == []
 
+    def test_feminine_plural_scope_keeps_singular_title(self) -> None:
+        catalog = [
+            _product(1, "ساعة يد فضية", category=""),
+            _product(2, "حقيبة يد جلد", category=""),
+        ]
+        filtered = filter_products_to_browse_category(
+            catalog,
+            message="عندكم ساعات؟",
+            query="ساعات",
+        )
+        assert [p["id"] for p in filtered] == [1]
+
 
 class TestSmokeRegression:
     """Production-shaped leaks — description/hive bleed must not widen scope."""

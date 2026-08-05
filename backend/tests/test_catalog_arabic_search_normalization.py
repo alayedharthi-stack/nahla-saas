@@ -20,6 +20,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from core.store_knowledge import (  # noqa: E402
     CatalogContextBuilder,
     CatalogSearchProductsResult,
+    _catalog_search_arabic_feminine_plural_variants,
 )
 from models import Base, Product, Tenant  # noqa: E402
 from modules.ai.brain.execution.search import (  # noqa: E402
@@ -142,6 +143,31 @@ class TestCatalogArabicSearchNormalization:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0]["external_id"] == "sku-watch-silver"
+
+    def test_feminine_plural_miss_retries_singular_watch(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        _seed_product(
+            db,
+            tenant.id,
+            title="ساعة يد فضية",
+            external_id="sku-b-watch",
+            in_stock=True,
+            price="320",
+        )
+        _seed_product(
+            db,
+            tenant.id,
+            title="حقيبة يد بنية",
+            external_id="sku-bag-brown",
+            in_stock=True,
+            price="180",
+        )
+        builder = CatalogContextBuilder(db, tenant_id=tenant.id)
+        result = builder.search_products("ساعات")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["external_id"] == "sku-b-watch"
 
     def test_tenant_isolation_for_normalized_title(self) -> None:
         db, _ = _make_db()
