@@ -129,7 +129,11 @@ class ProductSearchHandler:
                 lines.append(line)
             after_search = decision.args.get("after_search", "")
             suggest_narrow = len(products) > breadth.display_limit and not after_search
-            selected_product = products[0] if len(products) == 1 else None
+            selected_product = resolve_search_result_product_for_focus(
+                products=products,
+                catalog_fact_products=catalog_fact_products,
+                query=query,
+            )
             payload: Dict[str, Any] = {
                 "products": products,
                 "product_lines": "\n".join(lines),
@@ -473,6 +477,46 @@ def _apply_affinity_boost(
         for p in products:
             p.setdefault("affinity_score", 0.0)
         return products
+
+
+def resolve_search_result_product_for_focus(
+    *,
+    products: List[Dict[str, Any]],
+    catalog_fact_products: List[Dict[str, Any]] | None,
+    query: str,
+) -> Optional[Dict[str, Any]]:
+    """Pick a singular catalog identity for pipeline focus from search results.
+
+    Orderable hits win unchanged. When there are no orderable rows, a single
+    catalog fact with canonical identity may pin focus for a specific (non-generic)
+    product query — availability truth stays in facts/guards, not here.
+    """
+    if len(products) == 1:
+        return products[0]
+    if products:
+        return None
+
+    facts = list(catalog_fact_products or [])
+    if len(facts) != 1:
+        return None
+
+    from ..product_discovery_gate import is_generic_category_noun  # noqa: PLC0415
+
+    if is_generic_category_noun(str(query or "")):
+        return None
+
+    product = facts[0]
+    if not isinstance(product, dict):
+        return None
+
+    has_catalog_identity = any(
+        str(product.get(key) or "").strip()
+        for key in ("external_id", "id", "product_id", "sku")
+    )
+    if not has_catalog_identity:
+        return None
+
+    return product
 
 
 def resolve_confirmed_discovery_product(
