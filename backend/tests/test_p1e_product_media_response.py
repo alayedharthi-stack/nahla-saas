@@ -76,12 +76,32 @@ class TestProductMediaDetection:
         assert v.has_hint_only
         assert not v.has_vision_evidence
 
-    def test_product_detail_text_matches(self) -> None:
+    def test_bare_product_detail_text_without_media_does_not_match(self) -> None:
+        """Text-only commerce wording is not product-media (needs media evidence)."""
         v = detect_product_media_turn(
             _PRODUCT_DETAIL_TEXT,
             intent_name="general",
         )
+        assert not v.matched
+        assert v.reason == "no_media_evidence"
+
+    def test_product_detail_text_with_topic_hints_matches(self) -> None:
+        v = detect_product_media_turn(
+            _PRODUCT_DETAIL_TEXT,
+            inbound_metadata={"topic_hints": ["نحل_أو_عسل"]},
+            intent_name="general",
+        )
         assert v.matched
+        assert v.has_hint_only
+
+    def test_bare_catalog_product_phrase_not_product_media(self) -> None:
+        """L3-G1-03: color token ابيض must not route via product_media."""
+        v = detect_product_media_turn(
+            "حذا رياضي ابيض",
+            intent_name="general",
+        )
+        assert not v.matched
+        assert v.reason == "no_media_evidence"
 
     def test_explicit_price_intent_excluded(self) -> None:
         v = detect_product_media_turn(
@@ -150,26 +170,37 @@ class TestResponseGoal:
 
 
 class TestDecisionEngineRoute:
-    def test_general_honey_video_routes_product_media(self) -> None:
+    def test_bare_catalog_phrase_not_routed_as_product_media(self) -> None:
+        """P1: text-only product phrase must not steal the product_media topic."""
         ctx = BrainContext(
             tenant_id=1,
             customer_phone="966500000000",
-            message=_HONEY_VIDEO,
+            message="حذا رياضي ابيض",
             intent=Intent(name="general", confidence=0.5, slots={}),
             state=MerchantConversationState(),
             facts=CommerceFacts(),
-            profile={
-                "inbound_metadata": {
-                    "source_type": "video",
-                    "topic_hints": ["نحل_أو_عسل"],
-                    "frame_vision_status": "ok",
-                    "frame_vision_text": "تصفية العسل",
-                },
-            },
+            profile={},
         )
         d = DefaultDecisionEngine().decide(ctx)
-        assert d.action == ACTION_LLM_REPLY
-        assert (d.args or {}).get("topic") == PRODUCT_MEDIA_TOPIC
+        assert (d.args or {}).get("topic") != PRODUCT_MEDIA_TOPIC
+        assert (d.args or {}).get("product_media") is not True
+
+    def test_honey_video_detect_still_matches_with_media_evidence(self) -> None:
+        """Media-origin inbound still qualifies for the typed product-media goal."""
+        v = detect_product_media_turn(
+            _HONEY_VIDEO,
+            inbound_metadata={
+                "source_type": "video",
+                "topic_hints": ["نحل_أو_عسل"],
+                "frame_vision_status": "ok",
+                "frame_vision_text": "تصفية العسل",
+            },
+            intent_name="general",
+        )
+        assert v.matched
+        assert v.has_vision_evidence
+        args = build_product_media_decision_args(v)
+        assert args.get("topic") == PRODUCT_MEDIA_TOPIC
 
 
 class TestProductMediaGuard:
