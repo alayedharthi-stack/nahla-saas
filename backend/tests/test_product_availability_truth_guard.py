@@ -525,3 +525,50 @@ class TestCatalogProductFactAnswerExempt:
         )
         assert result.replaced is True
         assert "الضُرم" not in result.reply
+
+
+class TestVariantPricingPathAllow:
+    """Regression: variant_pricing must not strip trusted OOS price lines."""
+
+    _OOS_SHIRT_TITLE = "قميص قطني أزرق"
+    _VARIANT_PRICE_REPLY = "قميص قطني أزرق: 99 ريال"
+
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def _oos_shirt_ctx(self) -> dict:
+        return _ctx(
+            skus=[_sku(5, self._OOS_SHIRT_TITLE, checkout=False)],
+            focus={"id": 5, "title": self._OOS_SHIRT_TITLE, "external_id": "sku-shirt-blue"},
+        )
+
+    def test_variant_pricing_preserves_oos_price_line(self) -> None:
+        result = apply_product_availability_truth_guard(
+            reply=self._VARIANT_PRICE_REPLY,
+            availability_context=self._oos_shirt_ctx(),
+            inbound_text="كم سعره؟",
+            chosen_path="variant_pricing",
+            tenant_id=99,
+        )
+        assert result.reply == self._VARIANT_PRICE_REPLY
+        assert result.action == "allowed"
+        assert result.replaced is False
+
+    def test_non_allow_path_still_strips_oos_price_line(self) -> None:
+        result = apply_product_availability_truth_guard(
+            reply=self._VARIANT_PRICE_REPLY,
+            availability_context=self._oos_shirt_ctx(),
+            inbound_text="كم سعره؟",
+            chosen_path="",
+            tenant_id=99,
+        )
+        assert result.replaced is True
+        assert result.action == "strip_inactive_catalog_lines"
+        assert result.reply == ""
