@@ -471,7 +471,7 @@ class CatalogContextBuilder:
                         source="search",
                         method="fts_plural_singular",
                     )
-            except Exception:
+            except Exception:  # noqa: silent-ok — SQLite/non-FTS engines fall through to ILIKE
                 pass
 
             q_like = f"%{search_q.lower()}%"
