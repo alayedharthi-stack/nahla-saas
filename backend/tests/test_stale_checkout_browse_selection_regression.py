@@ -21,6 +21,7 @@ from core.outbound_sanitizer import (  # noqa: E402
     maybe_scrub_unkept_asset_promise,
 )
 from modules.ai.brain.catalog.catalog_browse_turn_policy import (  # noqa: E402
+    is_catalog_browse_message,
     is_fresh_start_order_turn,
     maybe_suspend_stale_checkout_for_turn,
 )
@@ -56,6 +57,9 @@ from services.final_dispatch_guard import should_allow_product_attachment_dispat
 MSG_START = "\u0627\u0628\u064a \u0627\u0637\u0644\u0628"
 MSG_BROWSE = "\u0648\u0634 \u0639\u0646\u062f\u0643\u0645"
 MSG_PICK = "\u0627\u0644\u0637\u0644\u062d \u0627\u0644\u0628\u0644\u062f\u064a 1 \u0643\u062c\u0645"
+MSG_PRICE_FOLLOWUP = "\u0643\u0645 \u0633\u0639\u0631\u0647\u061f"
+MSG_AVAIL_FOLLOWUP = "\u0645\u062a\u0648\u0641\u0631\u061f"
+MSG_NAMED_PRODUCT = "\u0639\u0646\u062f\u0643\u0645 \u0642\u0645\u064a\u0635 \u0642\u0637\u0646\u064a \u0623\u0632\u0631\u0642\u061f"
 ADDRESS_MARKERS = (
     "google maps",
     "الرمز الوطني",
@@ -88,6 +92,19 @@ def _stale_checkout_state() -> MerchantConversationState:
     )
 
 
+def _contextual_oos_focus_state() -> MerchantConversationState:
+    return MerchantConversationState(
+        stage="exploring",
+        order_prep=OrderPreparationState(),
+        current_product_focus={
+            "external_id": "sku-shirt-blue",
+            "title": "قميص قطني أزرق",
+            "in_stock": False,
+            "can_checkout": False,
+        },
+    )
+
+
 def _ctx(
     message: str,
     *,
@@ -103,6 +120,36 @@ def _ctx(
         state=state or MerchantConversationState(),
         facts=facts or _facts(),
     )
+
+
+class TestContextualProductFocusRetention:
+    def test_price_followup_not_catalog_browse_preserves_focus(self) -> None:
+        state = _contextual_oos_focus_state()
+        ctx = _ctx(MSG_PRICE_FOLLOWUP, state=state, intent_name="ask_price")
+        assert is_catalog_browse_message(MSG_PRICE_FOLLOWUP, intent_name="ask_price") is False
+        assert maybe_suspend_stale_checkout_for_turn(ctx) is False
+        assert state.current_product_focus is not None
+        assert state.current_product_focus.get("external_id") == "sku-shirt-blue"
+        assert state.order_prep.product_id == ""
+        assert state.order_prep.missing_fields == []
+
+    def test_availability_followup_not_catalog_browse_preserves_focus(self) -> None:
+        state = _contextual_oos_focus_state()
+        ctx = _ctx(MSG_AVAIL_FOLLOWUP, state=state, intent_name="general")
+        assert is_catalog_browse_message(MSG_AVAIL_FOLLOWUP, intent_name="general") is False
+        assert maybe_suspend_stale_checkout_for_turn(ctx) is False
+        assert state.current_product_focus is not None
+        assert state.current_product_focus.get("external_id") == "sku-shirt-blue"
+        assert state.order_prep.product_id == ""
+        assert state.order_prep.missing_fields == []
+
+    def test_named_product_inquiry_routes_search_not_stale_checkout(self) -> None:
+        state = _stale_checkout_state()
+        ctx = _ctx(MSG_NAMED_PRODUCT, state=state, intent_name="ask_product")
+        assert is_catalog_browse_message(MSG_NAMED_PRODUCT, intent_name="ask_product") is False
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
 
 
 class TestFreshStartOrderStaleCheckout:
@@ -129,6 +176,14 @@ class TestFreshStartOrderStaleCheckout:
 
 
 class TestBrowseAfterStaleCheckout:
+    def test_wesh_aindakom_suspends_stale_checkout_and_clears_focus(self) -> None:
+        state = _stale_checkout_state()
+        ctx = _ctx(MSG_BROWSE, state=state, intent_name="ask_product")
+        assert is_catalog_browse_message(MSG_BROWSE, intent_name="ask_product") is True
+        assert maybe_suspend_stale_checkout_for_turn(ctx) is True
+        assert state.current_product_focus is None
+        assert state.order_prep.missing_fields == []
+
     def test_wesh_aindakom_routes_browse_not_fulfillment_lock(self) -> None:
         state = _stale_checkout_state()
         ctx = _ctx(MSG_BROWSE, state=state, intent_name="ask_product")
