@@ -31,6 +31,7 @@ from modules.ai.brain.postprocess.product_availability_evidence import (  # noqa
 )
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
     _LEGACY_CONFLICT_REPLY_AR,
+    _UNKNOWN_REPLY_AR,
     apply_product_availability_truth_guard,
     build_friendly_availability_conflict_reply,
     customer_facing_availability_reply_is_clean,
@@ -382,8 +383,8 @@ class TestFriendlyAvailabilityConflictReply:
             assert result.action.startswith("rewrite")
             assert "معلومات متعارضة" not in result.reply
             assert customer_facing_availability_reply_is_clean(result.reply)
-            assert "أي حجم" in result.reply
-            assert "عسل" in result.reply
+            assert result.reply == _UNKNOWN_REPLY_AR
+            assert "متوفر" not in result.reply
             assert _LEGACY_CONFLICT_REPLY_AR not in result.reply
         finally:
             if prev is None:
