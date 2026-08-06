@@ -1,4 +1,7 @@
-"""CARD-01 — topic-scoped surgical availability enforcement (platform-wide)."""
+"""CARD-01 — topic-scoped surgical availability enforcement (platform-wide).
+
+CI synchronize: no runtime change.
+"""
 from __future__ import annotations
 
 import os
