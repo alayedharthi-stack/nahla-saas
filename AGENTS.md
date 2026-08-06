@@ -303,6 +303,17 @@ Build for the platform, not for a single merchant.
 
 ---
 
+## Root Cause First (permanent engineering policy)
+
+Authoritative policy: `docs/engineering/root-cause-first-policy.md`  
+Agent rule: `.cursor/rules/root-cause-first.mdc`
+
+**Live-test failures must not drive MerchantBrain / Prompt / Compose / State / Memory patches** until Channel → Webhook → Tenant → Identity → Persistence → Retrieval → State → Tools → Structured Facts are proven healthy. Stop at the first failing layer. RCA must state First Divergence, Source of Truth, Provenance, and Evidence. Classify as LLM Behavior only after all lower layers pass.
+
+**Principle of Evidence:** The burden of proof is on the proposed fix, not on the observed symptom. Symptoms alone never justify modifying AI behavior.
+
+---
+
 ## Generic Commerce Regression Tests
 
 Nahla AI is a **multi-merchant** WhatsApp commerce platform. Every AI commerce fix and regression test must be **platform-wide and merchant-agnostic**.
