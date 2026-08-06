@@ -118,7 +118,7 @@ class TestPromptBuilderIdentityGating:
         base.update(kwargs)
         return BrainReplyState(**base)
 
-    def test_persona_social_prompt_has_no_identity_block(self):
+    def test_persona_social_prompt_includes_name_fact_when_assistant_name_set(self):
         prompt = build_brain_reply_prompt(
             self._state(
                 persona_expression_mode=True,
@@ -126,11 +126,39 @@ class TestPromptBuilderIdentityGating:
                 persona_kind="greeting",
                 response_goal="persona_social test",
                 non_commerce_block_mode=True,
+                merchant_context={
+                    "ai_settings": {
+                        "assistant_name": "نحلة مستشارة المبيعات",
+                        "assistant_role": _T33_ROLE_ESSAY,
+                        "owner_instructions": _T33_OWNER,
+                    },
+                },
+            )
+        )
+        assert "هوية المساعد" in prompt
+        assert "اسمك: نحلة مستشارة المبيعات" in prompt
+        assert "دورك" not in prompt
+        assert "ممنوع" in prompt and "التعريف" in prompt
+
+    def test_persona_social_prompt_omits_identity_when_no_assistant_name(self):
+        prompt = build_brain_reply_prompt(
+            self._state(
+                persona_expression_mode=True,
+                persona_topic="persona_social",
+                persona_kind="greeting",
+                response_goal="persona_social test",
+                non_commerce_block_mode=True,
+                merchant_context={
+                    "ai_settings": {
+                        "assistant_name": "",
+                        "assistant_role": _T33_ROLE_ESSAY,
+                        "owner_instructions": _T33_OWNER,
+                    },
+                },
             )
         )
         assert "هوية المساعد" not in prompt
         assert "دورك" not in prompt
-        assert "ممنوع" in prompt and "التعريف" in prompt
 
     def test_persona_social_prompt_filters_owner_intro(self):
         prompt = build_brain_reply_prompt(
@@ -140,6 +168,13 @@ class TestPromptBuilderIdentityGating:
                 persona_kind="greeting",
                 response_goal="persona_social test",
                 non_commerce_block_mode=True,
+                merchant_context={
+                    "ai_settings": {
+                        "assistant_name": "نحلة",
+                        "assistant_role": _T33_ROLE_ESSAY,
+                        "owner_instructions": _T33_OWNER,
+                    },
+                },
             )
         )
         assert "أول رسالة" not in prompt

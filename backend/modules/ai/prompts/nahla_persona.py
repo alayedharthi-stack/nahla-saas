@@ -29,6 +29,22 @@ from typing import Optional
 from core.store_display import clean_store_name
 
 
+_DEFAULT_SELF_LABEL = "نحلة 🐝"
+
+
+def _resolved_self_label(assistant_name: Optional[str]) -> str:
+    """Merchant assistant_name when set; otherwise platform default self-label.
+
+    ``DEFAULT_AI`` stores bare ``نحلة`` (no bee). Treat that — and the
+    emoji form — as the platform self-label so default tenants keep
+    «نحلة 🐝» while a true custom name replaces it.
+    """
+    name = (assistant_name or "").strip()
+    if not name or name in ("نحلة", _DEFAULT_SELF_LABEL):
+        return _DEFAULT_SELF_LABEL
+    return name
+
+
 # Canonical Nahla persona. Written as a normal Arabic-speaking
 # customer service teammate — never refers to itself as a system, bot,
 # or AI program. The bee emoji is reserved for the Nahla persona hook.
@@ -199,6 +215,7 @@ def nahla_persona_system_prompt(
     store_name: Optional[str] = None,
     store_context_text: Optional[str] = None,
     persona_expression_mode: bool = False,
+    assistant_name: Optional[str] = None,
 ) -> str:
     """Return the full system prompt: Nahla persona + (optional) merchant
     store context. Designed to be the BASE of the system prompt; tenant
@@ -208,27 +225,48 @@ def nahla_persona_system_prompt(
     ----------
     store_name:
         When provided, replaces the generic "للمتجر" with the actual
-        store name so the assistant introduces itself as «نحلة من X».
+        store name so the assistant introduces itself as «{name} من X».
     store_context_text:
         The merchant's catalog + policy context already rendered by
         `build_ai_context(...)`. Appended as a clearly-fenced block so
         the model treats it as ground-truth — never something to invent.
+    assistant_name:
+        Merchant-selected assistant name from ``ai_settings``. When set,
+        replaces the platform self-label in the opening line only — not
+        later «منصّة نحلة» SaaS references or tone examples.
     """
     intro = NAHLA_PERSONA_SOCIAL_EXPRESSION if persona_expression_mode else NAHLA_PERSONA
+    self_label = _resolved_self_label(assistant_name)
+    if self_label != _DEFAULT_SELF_LABEL:
+        if persona_expression_mode:
+            intro = intro.replace(
+                f"أنتِ «{_DEFAULT_SELF_LABEL}» — شخصية ودودة على واتساب، "
+                "تتكلمين بشكل طبيعي مع العميل.",
+                f"أنتِ «{self_label}» — شخصية ودودة على واتساب، "
+                "تتكلمين بشكل طبيعي مع العميل.",
+                1,
+            )
+        else:
+            intro = intro.replace(
+                f"أنتِ «{_DEFAULT_SELF_LABEL}»، المساعدة الذكية للمتجر.",
+                f"أنتِ «{self_label}»، المساعدة الذكية للمتجر.",
+                1,
+            )
     if store_name:
         disp = clean_store_name(store_name.strip())
         if disp:
             if persona_expression_mode:
                 intro = intro.replace(
-                    "أنتِ «نحلة 🐝» — شخصية ودودة على واتساب، تتكلمين بشكل طبيعي مع العميل.",
-                    f"أنتِ «نحلة 🐝» من متجر «{disp}» — شخصية ودودة على واتساب، "
+                    f"أنتِ «{self_label}» — شخصية ودودة على واتساب، "
+                    "تتكلمين بشكل طبيعي مع العميل.",
+                    f"أنتِ «{self_label}» من متجر «{disp}» — شخصية ودودة على واتساب، "
                     "تتكلمين بشكل طبيعي مع العميل.",
                     1,
                 )
             else:
                 intro = intro.replace(
-                    "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر.",
-                    f"أنتِ «نحلة 🐝»، المساعدة الذكية لمتجر «{disp}».",
+                    f"أنتِ «{self_label}»، المساعدة الذكية للمتجر.",
+                    f"أنتِ «{self_label}»، المساعدة الذكية لمتجر «{disp}».",
                     1,
                 )
 
