@@ -3,6 +3,7 @@
 Mandatory for every AI behavior PR. A PR cannot receive PASS or merge approval until every item is checked.
 
 Authoritative doctrine: `AGENTS.md` (Mandatory Natural Language Rule + Final customer text provenance rule).  
+Root-cause gate: `docs/engineering/root-cause-first-policy.md` (no Brain/Prompt/Compose/State/Memory patch from live tests until channel→facts layers are proven; Principle of Evidence applies).  
 Enforcement: `constitution-compliance` CI check.
 
 **Merge-blocking status:** The check runs in CI but is **not** merge-blocking until GitHub branch protection marks `constitution-compliance` as Required. Owner actions: `docs/engineering/merge-and-ci-policy.md`.

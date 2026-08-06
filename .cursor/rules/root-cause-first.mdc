@@ -1,0 +1,23 @@
+---
+description: Mandatory Root Cause First stack — no AI/Brain/Prompt/Compose/State/Memory patches from live tests until channel→facts layers are proven healthy
+alwaysApply: true
+---
+
+# Root Cause First (permanent)
+
+Before changing MerchantBrain, Prompt, Compose, State, Memory, or AI logic after a live-test failure:
+
+1. Prove the defect is not Channel, Webhook, Tenant, `phone_number_id`, Persistence, Retrieval, State, Tools, or Structured Facts.
+2. Stop at the **first** failing layer in:
+
+```text
+Channel → Webhook → Tenant → Identity → Persistence → Retrieval → State → Tools → Structured Facts → Compose → LLM
+```
+
+3. Every RCA must include: **First Divergence**, **Source of Truth**, **Provenance**, **Evidence** (logs + DB + message IDs).
+4. Do not classify as **LLM Behavior** until all lower layers are proven healthy.
+5. Reject dialogue hardcoding / prompt special-cases / per-incident exceptions as the default fix — prefer data, tools, state, retrieval.
+6. **Principle of Evidence:** The burden of proof is on the proposed fix, not on the observed symptom. Symptoms alone never justify modifying AI behavior.
+
+Full policy: `docs/engineering/root-cause-first-policy.md`.
+Doctrine companion: `AGENTS.md`.
