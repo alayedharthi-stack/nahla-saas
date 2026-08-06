@@ -128,9 +128,11 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
     _routine_social = is_routine_social_turn(state)
 
     # ── BLOCK 1: Persona ──────────────────────────────────────────────────
+    _assistant_name = str(settings_for_overlay.get("assistant_name") or "").strip()
     persona_block = nahla_persona_system_prompt(
         store_name=store_name,
         persona_expression_mode=_persona_expression_mode,
+        assistant_name=_assistant_name or None,
     )
 
     # ── BLOCK 2: HIGH PRIORITY (Style + Policy + Forbidden) ───────────────
@@ -576,8 +578,8 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
 
     # ── Assemble ──────────────────────────────────────────────────────────
     parts: list[str] = [persona_block, high_priority_block]
-    # ARCH-KB-001: identity (assistant name) only on commerce turns.
-    if identity_block and not _persona_expression_mode and not _commerce_slim:
+    # ARCH-KB-001: name-only identity fact (no role essay); omitted on commerce slim.
+    if identity_block and not _commerce_slim:
         parts.append(identity_block)
     if kb_block:
         parts.append(kb_block)
