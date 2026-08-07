@@ -175,7 +175,11 @@ def load_checkout_route_context(
     tenant_id: int,
     customer_phone: str,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Return ``(stage, order_prep_dict)`` from persisted brain state."""
+    """Return ``(stage, order_prep_dict)`` from persisted brain state.
+
+    ``order_prep`` may include ``_brain_state`` (full dict) for storefront
+    product-url resolution — not persisted back to DB.
+    """
     try:
         from core.order_flow import _load_brain_state  # noqa: PLC0415
 
@@ -185,6 +189,8 @@ def load_checkout_route_context(
             phone=str(customer_phone or ""),
         )
         bs = brain_state or {}
+        if not isinstance(bs, dict):
+            bs = {}
         stage = str(bs.get("stage") or "").strip().lower()
         op = bs.get("order_prep") or {}
         if not isinstance(op, dict):
@@ -192,6 +198,7 @@ def load_checkout_route_context(
         op = dict(op)
         op["_catalog_navigation_source"] = str(bs.get("catalog_navigation_source") or "")
         op["_native_catalog_send_failed"] = bool(bs.get("native_catalog_send_failed"))
+        op["_brain_state"] = dict(bs)
         return stage, op
     except Exception as exc:  # noqa: BLE001
         logger.debug(
@@ -677,17 +684,23 @@ def _resolve_channel_switch_decision(
             checkout_channel=target,
             awaiting_checkout_channel=False,
         )
-        return CheckoutRouteDecision(
-            reply_text=build_store_link_reply(caps),
-            reason=(
-                "store_link_delivered"
-                if caps.store_url
-                else "store_link_unavailable"
-            ),
-            checkout_channel=target,
-            clear_awaiting_channel=True,
-            cta_label="فتح المتجر الإلكتروني",
-            cta_url=caps.store_url if caps.store_url else "",
+        brain_state: Dict[str, Any] = {}
+        try:
+            _, op = load_checkout_route_context(
+                db,
+                tenant_id=int(tenant_id or 0),
+                customer_phone=customer_phone or "",
+            )
+            raw_bs = op.get("_brain_state")
+            if isinstance(raw_bs, dict):
+                brain_state = raw_bs
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — focus load must not block store delivery
+            brain_state = {}
+        return _storefront_delivery_decision(
+            db,
+            tenant_id=int(tenant_id or 0),
+            caps=caps,
+            brain_state=brain_state,
         )
 
     if target == CHECKOUT_CHANNEL_SHOWROOM:
@@ -785,6 +798,59 @@ def T_faq_store_info(store_name: str, store_url: str) -> str:
         store_name=store_name,
         store_url=store_url,
         store_description="",
+    )
+
+
+def _storefront_delivery_decision(
+    db: Any,
+    *,
+    tenant_id: int,
+    caps: CheckoutChannelCapabilities,
+    brain_state: Optional[Dict[str, Any]] = None,
+    store_url_source: str = "",
+) -> CheckoutRouteDecision:
+    """Deliver storefront completion link — product_url first, fail closed."""
+    from modules.ai.brain.commerce.storefront_product_url import (  # noqa: PLC0415
+        resolve_storefront_completion_link,
+        truncate_wa_cta_label,
+    )
+
+    resolution = resolve_storefront_completion_link(
+        db,
+        tenant_id=int(tenant_id or 0),
+        brain_state=brain_state,
+        store_url=str(caps.store_url or ""),
+        store_url_source=store_url_source or "caps.store_url",
+    )
+    cta_label = truncate_wa_cta_label(resolution.cta_label)
+    if resolution.found and resolution.url:
+        return CheckoutRouteDecision(
+            reply_text=T_faq_store_info(caps.store_name, resolution.url),
+            reason="store_link_delivered",
+            checkout_channel=CHECKOUT_CHANNEL_STORE,
+            clear_awaiting_channel=True,
+            cta_label=cta_label,
+            cta_url=resolution.url,
+        )
+    return CheckoutRouteDecision(
+        reply_text=build_store_link_reply(
+            CheckoutChannelCapabilities(
+                whatsapp_fast=caps.whatsapp_fast,
+                store_link=caps.store_link,
+                showroom_visit=caps.showroom_visit,
+                store_url="",
+                store_name=caps.store_name,
+            )
+        ),
+        reason=(
+            "store_link_product_url_unavailable"
+            if resolution.has_product_focus
+            else "store_link_unavailable"
+        ),
+        checkout_channel=CHECKOUT_CHANNEL_STORE,
+        clear_awaiting_channel=True,
+        cta_label="",
+        cta_url="",
     )
 
 
@@ -987,13 +1053,15 @@ def evaluate_checkout_route_owner(
                 checkout_channel=picked,
                 awaiting_checkout_channel=False,
             )
-            return CheckoutRouteDecision(
-                reply_text=build_store_link_reply(caps),
-                reason="store_link_delivered",
-                checkout_channel=picked,
-                clear_awaiting_channel=True,
-                cta_label="فتح المتجر الإلكتروني",
-                cta_url=caps.store_url,
+            brain_state: Dict[str, Any] = {}
+            raw_bs = order_prep.get("_brain_state")
+            if isinstance(raw_bs, dict):
+                brain_state = raw_bs
+            return _storefront_delivery_decision(
+                db,
+                tenant_id=int(tenant_id or 0),
+                caps=caps,
+                brain_state=brain_state,
             )
         if picked == CHECKOUT_CHANNEL_INQUIRY:
             persist_checkout_route_state(

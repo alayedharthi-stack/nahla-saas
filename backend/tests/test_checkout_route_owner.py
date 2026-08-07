@@ -243,7 +243,9 @@ class TestCheckoutRouteOwnerPreBrain:
         assert decision.checkout_channel == CHECKOUT_CHANNEL_STORE
         assert "https://shop.example" in decision.reply_text
         assert decision.cta_url == "https://shop.example"
-        assert decision.cta_label == "فتح المتجر الإلكتروني"
+        # WhatsApp CTA display_text max is 20; short operational label.
+        assert decision.cta_label == "فتح المتجر"
+        assert len(decision.cta_label) <= 20
 
     def test_whatsapp_fast_asks_for_product(
         self,

@@ -111,6 +111,17 @@ def _normalise_url(url: str) -> str:
         s = "https://" + s.lstrip("/")
     if not re.match(r"^https?://[^\s<]+", s, re.IGNORECASE):
         return ""
+    # Merchant storefront SoT must never accept Nahla platform pages
+    # (e.g. app.nahlah.ai/register) as a silent store URL substitute.
+    try:
+        from modules.ai.brain.commerce.storefront_product_url import (  # noqa: PLC0415
+            is_platform_non_merchant_url,
+        )
+
+        if is_platform_non_merchant_url(s):
+            return ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — hygiene import must not block resolver
+        pass
     return s
 
 
