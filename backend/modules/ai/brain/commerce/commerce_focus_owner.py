@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 logger = logging.getLogger("nahla.brain.commerce_focus_owner")
 
@@ -49,6 +49,23 @@ def product_focus_identity(product: Any) -> str:
             return val
     title = str(product.get("title") or product.get("display_label") or "").strip().lower()
     return title
+
+
+def should_preserve_focus_after_product_list_display(
+    focus: Any,
+    candidates: Sequence[Any],
+) -> bool:
+    """Preserve focus when a single displayed candidate matches the current focus identity."""
+    if not isinstance(focus, dict) or not focus:
+        return False
+    if len(candidates) != 1:
+        return False
+    candidate = candidates[0]
+    if not isinstance(candidate, dict) or not candidate:
+        return False
+    focus_id = product_focus_identity(focus)
+    candidate_id = product_focus_identity(candidate)
+    return bool(focus_id and candidate_id and focus_id == candidate_id)
 
 
 def get_effective_product_focus(state: Any) -> Optional[Dict[str, Any]]:
@@ -297,6 +314,7 @@ __all__ = [
     "restore_suspended_product_focus",
     "revert_to_previous_product_focus",
     "set_product_focus",
+    "should_preserve_focus_after_product_list_display",
     "suspend_product_focus",
     "try_ordinal_correction_focus_swap",
 ]

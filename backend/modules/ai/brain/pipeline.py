@@ -2683,25 +2683,39 @@ class MerchantBrain:
                 ))
             )
             if new_state.current_product_focus and not _has_live_order:
-                try:
-                    from .commerce.commerce_focus_owner import (  # noqa: PLC0415
-                        archive_current_product_focus,
-                    )
-
-                    archive_current_product_focus(
-                        new_state,
-                        reason="product_list_display",
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                logger.info(
-                    "[ORDER FLOW] reset stale current_product_focus after product list display | "
-                    "old_focus=%r new_candidates=%d action=%s",
-                    _old_focus_title,
-                    len(new_state.last_search_candidates),
-                    decision.action,
+                from .commerce.commerce_focus_owner import (  # noqa: PLC0415
+                    archive_current_product_focus,
+                    product_focus_identity,
+                    should_preserve_focus_after_product_list_display,
                 )
-                new_state.current_product_focus = None
+
+                if should_preserve_focus_after_product_list_display(
+                    new_state.current_product_focus,
+                    new_state.last_search_candidates,
+                ):
+                    logger.info(
+                        "[ORDER FLOW] preserving current_product_focus after single exact search hit | "
+                        "identity=%r candidates=%d action=%s",
+                        product_focus_identity(new_state.current_product_focus),
+                        len(new_state.last_search_candidates),
+                        decision.action,
+                    )
+                else:
+                    try:
+                        archive_current_product_focus(
+                            new_state,
+                            reason="product_list_display",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    logger.info(
+                        "[ORDER FLOW] reset stale current_product_focus after product list display | "
+                        "old_focus=%r new_candidates=%d action=%s",
+                        _old_focus_title,
+                        len(new_state.last_search_candidates),
+                        decision.action,
+                    )
+                    new_state.current_product_focus = None
             elif new_state.current_product_focus and _has_live_order:
                 logger.info(
                     "[ORDER FLOW] preserving current_product_focus during active order | "
