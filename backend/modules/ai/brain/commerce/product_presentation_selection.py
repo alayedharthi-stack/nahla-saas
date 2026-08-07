@@ -1,0 +1,206 @@
+"""
+Product presentation selection — multi choices vs single rich card.
+
+Platform-wide semantics only (cardinality + catalog identity).
+No merchant/platform hardcoding. No LLM/prompt instructions.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence
+
+PRESENTATION_MULTI_CHOICES = "multi_candidate_choices"
+PRESENTATION_SINGLE_RICH = "single_resolved_rich"
+PRESENTATION_NONE = "none"
+
+DISPATCH_SOURCE_SINGLE_RESOLVED = "single_resolved_presentation"
+
+
+@dataclass(frozen=True)
+class ProductPresentationDecision:
+    kind: str
+    candidate_count: int = 0
+    resolved_product: Optional[Dict[str, Any]] = None
+    reason: str = ""
+
+
+def _has_catalog_identity(product: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(product, dict) or not product:
+        return False
+    return any(
+        str(product.get(key) or "").strip()
+        for key in ("external_id", "id", "product_id", "sku")
+    )
+
+
+def resolve_product_presentation(
+    candidates: Sequence[Dict[str, Any]] | None,
+    *,
+    resolved_product: Optional[Dict[str, Any]] = None,
+) -> ProductPresentationDecision:
+    """
+    Decide outbound presentation for search/discovery product results.
+
+    * 0 candidates → none
+    * 1 candidate with catalog identity → rich product presentation
+    * 2+ candidates → reply-button choices (pick_N)
+    """
+    rows = [dict(p) for p in (candidates or []) if isinstance(p, dict)]
+    count = len(rows)
+
+    if count <= 0:
+        return ProductPresentationDecision(
+            kind=PRESENTATION_NONE,
+            candidate_count=0,
+            reason="no_candidates",
+        )
+
+    if count >= 2:
+        return ProductPresentationDecision(
+            kind=PRESENTATION_MULTI_CHOICES,
+            candidate_count=count,
+            reason="ambiguous_or_multi_candidates",
+        )
+
+    single = rows[0]
+    focus = resolved_product if isinstance(resolved_product, dict) else None
+    chosen = single
+    if focus and _has_catalog_identity(focus):
+        # Prefer the already-resolved focus when it matches the singleton.
+        focus_id = str(
+            focus.get("external_id")
+            or focus.get("id")
+            or focus.get("product_id")
+            or ""
+        ).strip()
+        single_id = str(
+            single.get("external_id")
+            or single.get("id")
+            or single.get("product_id")
+            or ""
+        ).strip()
+        if not focus_id or not single_id or focus_id == single_id:
+            chosen = {**single, **{k: v for k, v in focus.items() if v not in (None, "")}}
+
+    if not _has_catalog_identity(chosen):
+        # Title-only singleton cannot drive a trusted rich card; fall back to choices.
+        return ProductPresentationDecision(
+            kind=PRESENTATION_MULTI_CHOICES,
+            candidate_count=count,
+            resolved_product=chosen,
+            reason="singleton_missing_catalog_identity",
+        )
+
+    return ProductPresentationDecision(
+        kind=PRESENTATION_SINGLE_RICH,
+        candidate_count=1,
+        resolved_product=chosen,
+        reason="single_resolved_catalog_identity",
+    )
+
+
+def build_product_card_attachment_from_catalog(
+    product: Dict[str, Any],
+    *,
+    dispatch_source: str = DISPATCH_SOURCE_SINGLE_RESOLVED,
+) -> Dict[str, Any]:
+    """Shape a catalog product dict into the webhook product_card attachment."""
+    from services.product_resolver import (  # noqa: PLC0415
+        _dict_to_resolution,
+        format_product_card_caption,
+    )
+
+    res = _dict_to_resolution(
+        dict(product or {}),
+        matched_query=None,
+        confidence="single_resolved",
+    )
+    return {
+        "kind": "product_card",
+        "id": res.id,
+        "title": res.title,
+        "media_type": "image",
+        "file_url": res.image_url,
+        "caption": format_product_card_caption(res, include_description=False),
+        "product_url": res.product_url,
+        "price": res.price,
+        "in_stock": res.in_stock,
+        "external_id": res.external_id,
+        "confidence": res.confidence,
+        "needs_variant_choice": bool(getattr(res, "needs_variant_choice", False)),
+        "variants": list(getattr(res, "variants", []) or []),
+        "has_variants": bool(getattr(res, "has_variants", False)),
+        "default_variant_retailer_id": getattr(res, "default_variant_retailer_id", None),
+        "dispatch_source": dispatch_source,
+        "description": res.description,
+    }
+
+
+def apply_search_product_presentation(
+    result_data: Dict[str, Any],
+    *,
+    candidates: Sequence[Dict[str, Any]],
+    resolved_product: Optional[Dict[str, Any]] = None,
+    build_buttons: Optional[Any] = None,
+) -> ProductPresentationDecision:
+    """
+    Mutate compose ``result.data`` with either pick buttons or a rich card stamp.
+
+    ``build_buttons`` is a callable ``(candidates) -> list`` used only for multi.
+    """
+    decision = resolve_product_presentation(
+        candidates,
+        resolved_product=resolved_product,
+    )
+    result_data["product_presentation_kind"] = decision.kind
+    result_data["product_presentation_reason"] = decision.reason
+
+    if decision.kind == PRESENTATION_MULTI_CHOICES:
+        rows = list(candidates or [])
+        if build_buttons is not None:
+            result_data["pending_buttons"] = list(build_buttons(rows) or [])
+        result_data["pending_candidates"] = list(rows)
+        result_data.pop("pending_product_cards", None)
+        return decision
+
+    if decision.kind == PRESENTATION_SINGLE_RICH and decision.resolved_product:
+        card = build_product_card_attachment_from_catalog(decision.resolved_product)
+        result_data["pending_product_cards"] = [card]
+        result_data["pending_candidates"] = [dict(decision.resolved_product)]
+        # Explicitly clear choices — customer must not re-pick the only product.
+        result_data["pending_buttons"] = []
+        return decision
+
+    result_data.pop("pending_product_cards", None)
+    result_data["pending_buttons"] = []
+    return decision
+
+
+def build_standard_pick_buttons(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """WhatsApp reply buttons pick_1..pick_3 from candidate titles."""
+    wa_buttons: List[Dict[str, Any]] = []
+    for i, p in enumerate(list(candidates or [])[:3], 1):
+        from core.product_button_label import (  # noqa: PLC0415
+            compact_whatsapp_product_button_title,
+        )
+
+        raw_title = str((p or {}).get("title") or "")
+        title = compact_whatsapp_product_button_title(raw_title)
+        wa_buttons.append({
+            "type": "reply",
+            "reply": {"id": f"pick_{i}", "title": title or str(i)},
+        })
+    return wa_buttons
+
+
+__all__ = [
+    "DISPATCH_SOURCE_SINGLE_RESOLVED",
+    "PRESENTATION_MULTI_CHOICES",
+    "PRESENTATION_NONE",
+    "PRESENTATION_SINGLE_RICH",
+    "ProductPresentationDecision",
+    "apply_search_product_presentation",
+    "build_product_card_attachment_from_catalog",
+    "build_standard_pick_buttons",
+    "resolve_product_presentation",
+]

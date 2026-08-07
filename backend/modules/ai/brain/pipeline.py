@@ -3480,6 +3480,13 @@ class MerchantBrain:
         result.data.setdefault("chosen_path", _resolve_chosen_path(decision, result))
         self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
         pending_buttons: List[Dict[str, Any]] = list(result.data.get("pending_buttons") or [])
+        pending_product_cards: List[Dict[str, Any]] = list(
+            result.data.get("pending_product_cards") or []
+        )
+        if pending_product_cards:
+            # Rich card presentation supersedes pick_N choices.
+            pending_buttons = []
+
 
         # ── 9b. Marker scrub at the brain boundary ─────────────────
         #
@@ -4970,6 +4977,7 @@ class MerchantBrain:
         return {
             "reply": reply,
             "buttons": pending_buttons,
+            "product_cards": pending_product_cards,
             "handoff": decision.action == ACTION_HANDOFF,
             "relational_moment": _relational_moment_token,
             "persona_ownership": _persona_ownership_dict,

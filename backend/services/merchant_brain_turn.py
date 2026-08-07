@@ -101,6 +101,7 @@ class LiveMerchantBrainTurnResult:
     status: str
     reply_text: str = ""
     brain_buttons: List[Any] = field(default_factory=list)
+    brain_product_cards: List[Any] = field(default_factory=list)
     brain_handoff: bool = False
     brain_result: Optional[Dict[str, Any]] = None
     provenance: TextProvenance = field(default_factory=TextProvenance)
@@ -316,6 +317,7 @@ def _parse_brain_result(
     state: Dict[str, Any] = {
         "reply": "",
         "brain_buttons": [],
+        "brain_product_cards": [],
         "brain_handoff": False,
         "billing_denied": False,
         "relational_moment": "",
@@ -347,6 +349,7 @@ def _parse_brain_result(
     ).strip()
     state["brain_reply_candidate"] = compose_candidate
     state["brain_buttons"] = brain_result.get("buttons") or []
+    state["brain_product_cards"] = list(brain_result.get("product_cards") or [])
     state["native_catalog_entry"] = dict(brain_result.get("native_catalog_entry") or {})
     try:
         from core.native_catalog_fallback import defer_native_catalog_customer_reply
@@ -1178,6 +1181,7 @@ async def evaluate_live_merchant_brain_turn(
             status="evaluated",
             reply_text=reply or "",
             brain_buttons=parsed["brain_buttons"],
+            brain_product_cards=list(parsed.get("brain_product_cards") or []),
             brain_handoff=brain_handoff,
             brain_result=brain_result if isinstance(brain_result, dict) else None,
             provenance=provenance,
