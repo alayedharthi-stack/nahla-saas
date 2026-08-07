@@ -825,27 +825,25 @@ def _orderable_search_candidate(**fields):
     return row
 
 
-# ── Fix I: pick_list_item must bridge into the order flow ────────────────────
-# Production logs showed:
-#   intent=pick_list_item, slots={"list_index":2}, stage_before=exploring
-#   → action=llm_reply, product_focus=null, stage_after=exploring
-# The customer's selection was silently lost because:
-#   (a) the search executor returned `products` but pipeline only looked at
-#       `pending_candidates`, which was set later by the composer, so
-#       state.last_search_candidates was always empty.
-#   (b) the decision engine had no fallback when last_search_candidates was
-#       empty — it skipped the pick_list_item branch entirely and fell
-#       through to ACTION_LLM_REPLY.
+# ── Fix I: pick_list_item must bind Product Selection (not silent LLM drop)
+# Product Selection Contract: Discovery pick binds Product Focus via
+# ACTION_SEARCH_PRODUCTS (product_selection_list_pick). It must NOT start
+# Draft Order / Checkout. Checkout requires Completion Entry separately.
+# Historical production bug (still covered): empty candidates must not
+# fall through to ACTION_LLM_REPLY.
 
 
-def test_pick_list_item_with_candidates_proposes_draft_order():
+def test_pick_list_item_with_candidates_binds_product_selection():
     """
-    With a remembered candidate list, picking option N must commit to that
-    product and trigger ACTION_PROPOSE_DRAFT_ORDER (so transition advances
-    stage → ordering and sets current_product_focus).
+    With a remembered candidate list, picking option N must bind that
+    product via Product Selection (search + selected_product) — not
+    ACTION_PROPOSE_DRAFT_ORDER.
     """
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import (
+        ACTION_PROPOSE_DRAFT_ORDER,
+        ACTION_SEARCH_PRODUCTS,
+    )
     from modules.ai.brain.state.stages import STAGE_EXPLORING
     from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
 
@@ -859,18 +857,23 @@ def test_pick_list_item_with_candidates_proposes_draft_order():
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 2}))
 
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
-    assert decision.args.get("product", {}).get("id") == 12
+    assert decision.action == ACTION_SEARCH_PRODUCTS
+    assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args.get("source") == "product_selection_list_pick"
+    assert decision.args.get("selected_product", {}).get("id") == 12
 
 
 def test_pick_list_item_falls_back_to_recommended_products():
     """
     When the search candidate list is empty but a recommendation list is
     still in state, a numeric pick must resolve against the recommendations
-    instead of dropping into the LLM.
+    as Product Selection instead of dropping into the LLM or Draft Order.
     """
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import (
+        ACTION_PROPOSE_DRAFT_ORDER,
+        ACTION_SEARCH_PRODUCTS,
+    )
     from modules.ai.brain.state.stages import STAGE_EXPLORING
     from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
 
@@ -884,8 +887,10 @@ def test_pick_list_item_falls_back_to_recommended_products():
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 1}))
 
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
-    assert decision.args.get("product", {}).get("id") == 21
+    assert decision.action == ACTION_SEARCH_PRODUCTS
+    assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args.get("source") == "product_selection_list_pick"
+    assert decision.args.get("selected_product", {}).get("id") == 21
 
 
 def test_pick_list_item_without_any_candidates_clarifies_not_llm():
@@ -914,7 +919,10 @@ def test_pick_list_item_without_any_candidates_clarifies_not_llm():
 def test_pick_list_item_clamps_index_within_bounds():
     """Defensive: a too-large index picks the last available candidate."""
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
-    from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+    from modules.ai.brain.decision.actions import (
+        ACTION_PROPOSE_DRAFT_ORDER,
+        ACTION_SEARCH_PRODUCTS,
+    )
     from modules.ai.brain.state.stages import STAGE_EXPLORING
     from modules.ai.brain.types import INTENT_PICK_LIST_ITEM
 
@@ -926,8 +934,9 @@ def test_pick_list_item_clamps_index_within_bounds():
     ]
 
     decision = engine.decide(_ctx(state, INTENT_PICK_LIST_ITEM, {"list_index": 99}))
-    assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
-    assert decision.args["product"]["id"] == 2
+    assert decision.action == ACTION_SEARCH_PRODUCTS
+    assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+    assert decision.args["selected_product"]["id"] == 2
 
 
 def test_after_pick_name_message_continues_order_flow():
