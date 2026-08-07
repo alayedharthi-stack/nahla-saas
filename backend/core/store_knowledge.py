@@ -677,6 +677,11 @@ class CatalogContextBuilder:
             "in_stock":        in_stock_flag,
             "stock_qty":       stock_qty,
             "image_url":       meta.get("image_url", ""),
+            # Storefront / product-page CTA SoT — from sync metadata only.
+            # Never invent URLs here (Commerce Completion Policy).
+            "product_url":     (
+                str(meta.get("product_url") or meta.get("url") or "").strip()
+            ),
             "orderable":       orderable,
             "can_checkout":    can_checkout,
             "status":          status,

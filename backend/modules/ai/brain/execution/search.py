@@ -57,6 +57,35 @@ class ProductSearchHandler:
             )
 
         source = str(decision.args.get("source") or "").strip().lower()
+        # Discovery list pick → Product Selection (focus bind only).
+        # Must not start Draft Order / Checkout (Product Selection Contract).
+        if source == "product_selection_list_pick":
+            selected = decision.args.get("selected_product")
+            if not isinstance(selected, dict) or not selected:
+                _plist = list(decision.args.get("products") or [])
+                selected = _plist[0] if _plist and isinstance(_plist[0], dict) else None
+            if isinstance(selected, dict) and selected:
+                return ActionResult(
+                    success=True,
+                    data={
+                        # Empty browse list: avoid archive/reset of the focus
+                        # we are about to pin (same pattern as unique fragment).
+                        "products": [],
+                        "product": selected,
+                        "product_lines": "",
+                        "count": 1,
+                        "query": str(
+                            decision.args.get("query")
+                            or selected.get("title")
+                            or ""
+                        ),
+                        "suggest_narrow": False,
+                        "discovery_output_kind": "products",
+                        "product_selection": True,
+                        "list_index": decision.args.get("list_index"),
+                        "candidate_source": decision.args.get("candidate_source"),
+                    },
+                )
         if source.startswith("selection_context") and decision.args.get("products"):
             products = list(decision.args.get("products") or [])
             presentation = str(decision.args.get("selection_presentation_text") or "").strip()
