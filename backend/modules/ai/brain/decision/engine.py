@@ -1054,6 +1054,9 @@ class DefaultDecisionEngine:
             INTENT_COMPLAINT_REFUND,
             INTENT_WHO_ARE_YOU,
             INTENT_PERSONA_INTERACTION,
+            INTENT_ORDER_HISTORY_COUNT,
+            INTENT_LATEST_ORDER_SUMMARY,
+            INTENT_ORDER_REFERENCE_LIST,
         ):
             _current_social_nc = _current_turn_social_noncommerce(ctx)
         if getattr(_current_social_nc, "matched", False):
