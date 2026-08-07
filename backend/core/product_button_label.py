@@ -4,13 +4,14 @@ core/product_button_label.py
 Compact WhatsApp quick-reply button titles for catalog products.
 
 Meta caps reply-button titles at 20 characters. Long catalog titles
-(«عسل طلح نجد البري إنتاج منحلنا 1 كيلو…») truncate mid-word and
-read poorly — this helper keeps family + weight/year, drops filler.
+truncate mid-word and read poorly — this helper keeps identity tokens
+plus weight/year when present, and drops filler. Labels are derived
+only from the product/collection title string (no domain prefix).
 """
 from __future__ import annotations
 
 import re
-from typing import List, Sequence
+from typing import List
 
 WA_REPLY_BUTTON_TITLE_MAX = 20
 
@@ -87,6 +88,7 @@ def compact_whatsapp_product_button_title(
     Build a short, readable WA reply-button label from a catalog title.
 
     Price is intentionally omitted — it belongs in the message body/card.
+    No category/domain prefix is invented; tokens come from ``title`` only.
     """
     raw = (title or "").strip()
     if not raw:
@@ -101,8 +103,6 @@ def compact_whatsapp_product_button_title(
         t for t in _tokenize(stripped)
         if len(t) >= 2 and t not in _BUTTON_NOISE
     ]
-    if tokens and tokens[0] == "عسل":
-        tokens = tokens[1:]
 
     suffix_parts: List[str] = []
     if weight:
@@ -125,10 +125,6 @@ def compact_whatsapp_product_button_title(
     if not name_parts:
         fallback = re.sub(r"\s+", " ", stripped).strip() or raw
         label = fallback[:limit]
-    elif len(name_parts) == 1 and not suffix and not weight:
-        single = name_parts[0]
-        with_honey = f"عسل {single}"
-        label = with_honey if len(with_honey) <= limit else single[:limit]
     else:
         label = " ".join(name_parts)
 
