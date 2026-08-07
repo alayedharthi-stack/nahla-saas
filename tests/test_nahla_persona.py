@@ -70,9 +70,9 @@ class TestPersonaPromptBuilder:
 
     def test_store_name_replaces_generic_label(self):
         prompt = nahla_persona_system_prompt(store_name="متجر النور")
-        assert "لمتجر «متجر النور»" in prompt
+        assert "تمثّلين متجر «متجر النور»" in prompt
         # The original generic line should NOT appear.
-        assert "أنتِ «نحلة 🐝»، المساعدة الذكية للمتجر." not in prompt
+        assert "أنتِ «نحلة 🐝»، موظفة رقمية تمثّلين المتجر الحالي أمام العملاء." not in prompt
 
     def test_store_context_is_appended_as_fenced_block(self):
         ctx = "المنتج: قميص قطني\nالسعر: 99 ريال"
