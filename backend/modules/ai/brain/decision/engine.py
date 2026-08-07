@@ -397,6 +397,55 @@ def _first_turn_has_actionable_substance(message: Optional[str]) -> bool:
         return len(re.findall(r"[\w\u0600-\u06FF]", raw)) >= 8
 
 
+def _has_active_whatsapp_checkout(state: Any) -> bool:
+    """True when in-conversation checkout continuation is already active.
+
+    Used so Discovery list picks stay Product Selection, while option/slot
+    continuation under a real checkout remains ACTION_PROPOSE_DRAFT_ORDER.
+    """
+    if list(getattr(state, "pending_option_groups", None) or []):
+        return True
+    if str(getattr(state, "draft_order_id", "") or "").strip():
+        return True
+    stage = str(getattr(state, "stage", "") or "").strip().lower()
+    if stage in {STAGE_ORDERING, STAGE_CHECKOUT}:
+        prep = getattr(state, "order_prep", None)
+        if prep is None:
+            return False
+        if str(getattr(prep, "product_id", "") or "").strip():
+            return True
+        if list(getattr(prep, "missing_fields", None) or []):
+            return True
+        if list(getattr(prep, "line_items", None) or []):
+            return True
+    return False
+
+
+def _decision_product_selection_list_pick(
+    product: Dict[str, Any],
+    *,
+    list_index: int,
+    candidate_source: str,
+) -> Decision:
+    """Discovery pick_N → Product Selection (focus bind). Never Draft Order."""
+    return Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args={
+            "query": str(product.get("title") or ""),
+            "selected_product": product,
+            "products": [product],
+            "source": "product_selection_list_pick",
+            "list_index": list_index,
+            "candidate_source": candidate_source,
+        },
+        reason=(
+            f"customer picked option {list_index} from list — "
+            "product selection (bind focus, no checkout)"
+        ),
+        confidence=0.95,
+    )
+
+
 class DefaultDecisionEngine:
     """Implements DecisionMaker protocol."""
 
@@ -2487,29 +2536,20 @@ class DefaultDecisionEngine:
                             log_numeric_ownership(
                                 ctx,
                                 numeric_owner=resolve_numeric_owner(ctx, intent_name=intent.name),
-                                action="list_pick",
+                                action="list_pick_product_selection",
                                 intent_name=intent.name,
                                 candidate_source=_candidate_source,
                                 extra={"list_index": idx},
                             )
                         except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry optional
                             pass
-                        # CRITICAL: pass the FULL chosen product as
-                        # `forced_product` (not just `product`).  The
-                        # executor MUST honour `forced_product` over
-                        # `state.current_product_focus` so a stale focus
-                        # (e.g. previous بلوزة) cannot win the race.
-                        return Decision(
-                            action=ACTION_PROPOSE_DRAFT_ORDER,
-                            args={
-                                "product":        product,
-                                "forced_product": product,
-                                "source":         "list_pick",
-                                "list_index":     idx,
-                                "candidate_source": _candidate_source,
-                            },
-                            reason=f"customer picked option {idx} from list — start order (forced_product set)",
-                            confidence=0.95,
+                        # Product Selection Contract: Discovery pick binds
+                        # Product Focus only. Checkout requires Completion Entry
+                        # (explicit purchase intent or active checkout).
+                        return _decision_product_selection_list_pick(
+                            product,
+                            list_index=idx,
+                            candidate_source=_candidate_source,
                         )
                     return Decision(
                         action=ACTION_SEARCH_PRODUCTS,
@@ -2548,19 +2588,23 @@ class DefaultDecisionEngine:
                     confidence=0.75,
                 )
 
-            # ── If we already have a product focus + order_prep, the
-            # number is likely a quantity ("1") rather than a product
-            # pick — keep the order flow alive instead of breaking it.
-            if state.current_product_focus and facts.orderable:
+            # ── If we already have an ACTIVE WhatsApp checkout, the
+            # number is likely a quantity/option — keep checkout alive.
+            # Product Focus alone is NOT purchase commitment (Selection Contract).
+            if (
+                state.current_product_focus
+                and facts.orderable
+                and _has_active_whatsapp_checkout(state)
+            ):
                 logger.info(
                     "[ORDER FLOW] number interpreted as quantity-or-option | "
-                    "product=%r — continuing order (no active candidate list)",
+                    "product=%r — continuing active checkout (no candidate list)",
                     (state.current_product_focus or {}).get("title"),
                 )
                 return Decision(
                     action=ACTION_PROPOSE_DRAFT_ORDER,
                     args={"product": state.current_product_focus},
-                    reason="numeric pick + existing product focus — continue order flow",
+                    reason="numeric pick + active checkout — continue order flow",
                     confidence=0.85,
                 )
             # No candidates remembered → show top products so the customer
@@ -2734,25 +2778,13 @@ class DefaultDecisionEngine:
                     intent.name,
                 )
 
-                # ALWAYS route to draft-order from the candidate list —
-                # even if external_id is missing.  DraftOrderHandler will
-                # surface the correct "غير متوفر" message with the right
-                # product name.  NOT doing this causes fall-through to
-                # section 3.7 which uses the stale current_product_focus
-                # (بلوزة) and produces the wrong unavailable message.
+                # Discovery list pick → Product Selection (focus bind).
+                # Never Draft Order from Discovery pick alone.
                 if facts.orderable:
-                    return Decision(
-                        action=ACTION_PROPOSE_DRAFT_ORDER,
-                        args={
-                            "product":        _forced_product,
-                            "forced_product": _forced_product,
-                            "source":         "list_pick",
-                            "list_index":     _forced_idx,
-                            "candidate_source": "last_search_candidates",
-                        },
-                        reason=f"numeric pick #{_forced_idx} from active candidate list "
-                               f"(intent={intent.name} overridden to list-pick, forced_product set)",
-                        confidence=0.95,
+                    return _decision_product_selection_list_pick(
+                        _forced_product,
+                        list_index=_forced_idx,
+                        candidate_source="last_search_candidates",
                     )
                 # Store not orderable — still acknowledge the pick, don't
                 # silently fall through to an irrelevant template.
@@ -2761,6 +2793,10 @@ class DefaultDecisionEngine:
                     args={
                         "query": _forced_product.get("title", ""),
                         "selected_product": _forced_product,
+                        "source": "product_selection_list_pick",
+                        "products": [_forced_product],
+                        "list_index": _forced_idx,
+                        "candidate_source": "last_search_candidates",
                     },
                     reason=f"numeric pick #{_forced_idx} from list — store not orderable, show product",
                     confidence=0.90,
