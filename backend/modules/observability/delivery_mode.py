@@ -99,9 +99,11 @@ DeliveryAudit = Dict[str, Any]
       "first_send_failed":         bool,   # initial reply send failed
       "text_sent":                 bool,   # plain text body sent
       "interactive_buttons_sent":  bool,   # initial reply used buttons
-      "cta_url_sent_count":        int,    # cta_url interactive sends
+      "cta_url_sent_count":        int,    # cta_url interactive sends (URL-only / non-unified)
       "catalog_card_sent_count":   int,    # successful Meta catalog sends only
       "legacy_media_sent_count":   int,    # legacy image/file/video sends
+      "unified_product_card_attempted_count": int,  # Option A image+URL card attempts
+      "unified_product_card_sent_count": int,       # Option A single-payload card sends
       "variant_prompt_sent_count": int,    # post-card variant selection prompts
       "contacts_sent":             bool,   # contact-card message sent
     }
@@ -122,6 +124,8 @@ def new_delivery_audit() -> DeliveryAudit:
         "cta_url_sent_count":        0,
         "catalog_card_sent_count":   0,
         "legacy_media_sent_count":   0,
+        "unified_product_card_attempted_count": 0,
+        "unified_product_card_sent_count": 0,
         "variant_prompt_sent_count": 0,
         "contacts_sent":             False,
     }
@@ -138,7 +142,8 @@ def compute_final_delivery_mode(audit: DeliveryAudit) -> str:
 
       1. ``failed``      — initial send failed.
       2. ``catalog``     — any catalog card landed.
-      3. ``image_cta``   — image AND at least one CTA URL.
+      3. ``image_cta``   — image AND at least one CTA URL
+                           (includes unified interactive.cta_url with image header).
       4. ``media_only``  — image but no CTA URL.
       5. ``cta_only``    — CTA URL but no image.
       6. ``text_only``   — plain text or buttons-only reply.
@@ -157,8 +162,15 @@ def compute_final_delivery_mode(audit: DeliveryAudit) -> str:
     if int(audit.get("catalog_card_sent_count", 0) or 0) > 0:
         return DELIVERY_MODE_CATALOG
 
-    has_media = int(audit.get("legacy_media_sent_count", 0) or 0) > 0
-    has_cta_url = int(audit.get("cta_url_sent_count", 0) or 0) > 0
+    unified = int(audit.get("unified_product_card_sent_count", 0) or 0) > 0
+    has_media = (
+        int(audit.get("legacy_media_sent_count", 0) or 0) > 0
+        or unified
+    )
+    has_cta_url = (
+        int(audit.get("cta_url_sent_count", 0) or 0) > 0
+        or unified
+    )
 
     if has_media and has_cta_url:
         return DELIVERY_MODE_IMAGE_CTA

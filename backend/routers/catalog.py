@@ -565,32 +565,40 @@ async def _run_test_send(
     ):
         if attachment.get("file_url"):
             image_cta_block["attempted"] = True
-            try:
-                image_cta_block["image_ok"] = await _send_media_message(
-                    phone_id=phone_id, to=to,
-                    media_type="image",
-                    media_url=attachment["file_url"],
-                    filename=None,
-                    caption=attachment.get("caption"),
-                    _tenant_id=tenant_id, _db=db,
-                )
-                if image_cta_block["image_ok"]:
-                    audit_doc["legacy_media_sent_count"] = 1
-            except Exception as exc:  # noqa: BLE001
-                image_cta_block["raw_error"] = repr(exc)
-            if image_cta_block["image_ok"] and attachment.get("product_url"):
+            product_url = str(attachment.get("product_url") or "").strip()
+            factual_body = (
+                str(attachment.get("caption") or "").strip()
+                or str(attachment.get("title") or "").strip()
+                or "عرض المنتج"
+            )
+            if product_url:
                 try:
-                    image_cta_block["cta_ok"] = await _send_cta_url(
+                    image_cta_block["image_ok"] = await _send_cta_url(
                         phone_id=phone_id, to=to,
-                        body_text="اضغط زر «عرض المنتج» للمتابعة.",
+                        body_text=factual_body,
                         btn_label="عرض المنتج",
-                        btn_url=attachment["product_url"],
+                        btn_url=product_url,
+                        header_image_url=attachment["file_url"],
                         _tenant_id=tenant_id, _db=db,
                     )
-                    if image_cta_block["cta_ok"]:
-                        audit_doc["cta_url_sent_count"] = (
-                            int(audit_doc.get("cta_url_sent_count", 0)) + 1
-                        )
+                    image_cta_block["cta_ok"] = bool(image_cta_block["image_ok"])
+                    if image_cta_block["image_ok"]:
+                        audit_doc["unified_product_card_attempted_count"] = 1
+                        audit_doc["unified_product_card_sent_count"] = 1
+                except Exception as exc:  # noqa: BLE001
+                    image_cta_block["raw_error"] = repr(exc)
+            else:
+                try:
+                    image_cta_block["image_ok"] = await _send_media_message(
+                        phone_id=phone_id, to=to,
+                        media_type="image",
+                        media_url=attachment["file_url"],
+                        filename=None,
+                        caption=attachment.get("caption"),
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    if image_cta_block["image_ok"]:
+                        audit_doc["legacy_media_sent_count"] = 1
                 except Exception as exc:  # noqa: BLE001
                     image_cta_block["raw_error"] = repr(exc)
 

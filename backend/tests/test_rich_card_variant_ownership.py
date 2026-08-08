@@ -316,6 +316,21 @@ class TestTelemetryTruth:
         mode = compute_final_delivery_mode(audit)
         assert mode == "image_cta"
 
+    def test_unified_card_counts_as_single_image_cta_payload(self) -> None:
+        from modules.observability.delivery_mode import (
+            compute_final_delivery_mode,
+            new_delivery_audit,
+        )
+
+        audit = new_delivery_audit()
+        audit["text_sent"] = True
+        audit["unified_product_card_attempted_count"] = 1
+        audit["unified_product_card_sent_count"] = 1
+        audit["variant_prompt_sent_count"] = 1
+        assert compute_final_delivery_mode(audit) == "image_cta"
+        assert audit["legacy_media_sent_count"] == 0
+        assert audit["cta_url_sent_count"] == 0
+
 
 class TestTenantIsolation:
     def test_orchestrator_rejects_cross_tenant_row(self) -> None:
