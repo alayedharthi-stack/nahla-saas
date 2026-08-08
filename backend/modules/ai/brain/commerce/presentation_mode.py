@@ -393,7 +393,8 @@ def log_presentation_mode_dispatch_shadow(
     catalog = int(audit.get("catalog_card_sent_count", 0) or 0)
     legacy = int(audit.get("legacy_media_sent_count", 0) or 0)
     cta = int(audit.get("cta_url_sent_count", 0) or 0)
-    rich = catalog + legacy + cta
+    unified = int(audit.get("unified_product_card_sent_count", 0) or 0)
+    rich = catalog + legacy + cta + unified
 
     mismatch = ""
     mode = (presentation_mode or "").strip().lower()

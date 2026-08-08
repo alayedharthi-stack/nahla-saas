@@ -12830,22 +12830,93 @@ async def _handle_merchant_message(
                 # to skip cards with no image (so we don't try to
                 # send an empty link to Meta).
                 if _is_product:
-                    if not _att.get("file_url"):
+                    _image_url = str(_att.get("file_url") or "").strip()
+                    _product_url = _safe_cta_http_url(_att.get("product_url"))
+                    _factual_body = _product_card_factual_body(_att)
+
+                    # Option A: image + URL → ONE interactive.cta_url
+                    # (header image + factual body + button). No canned
+                    # «اضغط زر…» bubble and no standalone image payload.
+                    if _image_url and _product_url:
+                        if isinstance(_delivery_audit, dict):
+                            _delivery_audit["unified_product_card_attempted_count"] = (
+                                int(
+                                    _delivery_audit.get(
+                                        "unified_product_card_attempted_count", 0
+                                    )
+                                    or 0
+                                )
+                                + 1
+                            )
+                        _unified_ok = False
+                        try:
+                            _unified_ok = await _send_cta_url(
+                                phone_id=phone_id,
+                                to=to,
+                                body_text=_factual_body,
+                                btn_label="عرض المنتج",
+                                btn_url=_product_url,
+                                header_image_url=_image_url,
+                                _tenant_id=tenant_id,
+                                _db=db,
+                            )
+                        except Exception as _unified_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[ProductCard.unified] tenant=%s product_id=%s "
+                                "failed: %s",
+                                tenant_id,
+                                _att.get("id"),
+                                _unified_exc,
+                            )
+                        if _unified_ok and isinstance(_delivery_audit, dict):
+                            _delivery_audit["unified_product_card_sent_count"] = (
+                                int(
+                                    _delivery_audit.get(
+                                        "unified_product_card_sent_count", 0
+                                    )
+                                    or 0
+                                )
+                                + 1
+                            )
+                        logger.info(
+                            "[ProductCard.send] tenant=%s to=%s product_id=%s "
+                            "ext_id=%s ok=%s confidence=%s mode=unified_cta",
+                            tenant_id,
+                            to,
+                            _att.get("id"),
+                            _att.get("external_id"),
+                            _unified_ok,
+                            _att.get("confidence"),
+                        )
+                        await _maybe_send_variant_prompt_after_product_card(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            attachment=_att,
+                            delivery_audit=(
+                                _delivery_audit
+                                if isinstance(_delivery_audit, dict)
+                                else None
+                            ),
+                        )
+                        continue
+
+                    if not _image_url:
                         logger.info(
                             "[ProductCard.send] tenant=%s product_id=%s "
                             "SKIPPED reason=no_image_url url=%s",
                             tenant_id, _att.get("id"),
-                            _att.get("product_url"),
+                            bool(_product_url),
                         )
-                        # Still send the URL as a CTA-only message
-                        # so the customer at least gets the link.
-                        if _att.get("product_url"):
+                        # URL-only: CTA with factual body (no canned instruction).
+                        if _product_url:
                             try:
                                 _cta_only_ok = await _send_cta_url(
                                     phone_id=phone_id, to=to,
-                                    body_text=_att.get("title") or "عرض المنتج",
+                                    body_text=_factual_body,
                                     btn_label="عرض المنتج",
-                                    btn_url=_att.get("product_url"),
+                                    btn_url=_product_url,
                                     _tenant_id=tenant_id, _db=db,
                                 )
                                 if _cta_only_ok and isinstance(_delivery_audit, dict):
@@ -12863,6 +12934,7 @@ async def _handle_merchant_message(
                             delivery_audit=_delivery_audit if isinstance(_delivery_audit, dict) else None,
                         )
                         continue
+                    # Image-only (no usable URL): fall through to media send.
                 elif _validate_media is not None:
                     _ok, _why, _normed = _validate_media(
                         _att, expected_tenant_id=tenant_id, db=db,
@@ -13003,34 +13075,8 @@ async def _handle_merchant_message(
                     except Exception:  # noqa: BLE001
                         pass
 
-                    # After the product image lands, follow up with
-                    # a CTA-URL button to the buy page so the
-                    # customer can checkout in one tap. We do NOT
-                    # rely on the caption containing a link — Meta
-                    # won't auto-linkify image captions, and a
-                    # separate interactive message has much higher
-                    # click-through. Send only when both the send
-                    # succeeded and a product URL exists.
-                    if _is_product and _media_ok and _att.get("product_url"):
-                        try:
-                            _product_cta_ok = await _send_cta_url(
-                                phone_id=phone_id, to=to,
-                                body_text="اضغط زر «عرض المنتج» لإكمال "
-                                          "الطلب من المتجر مباشرة.",
-                                btn_label="عرض المنتج",
-                                btn_url=_att.get("product_url"),
-                                _tenant_id=tenant_id, _db=db,
-                            )
-                            if _product_cta_ok and isinstance(_delivery_audit, dict):
-                                _delivery_audit["cta_url_sent_count"] = (
-                                    int(_delivery_audit.get("cta_url_sent_count", 0)) + 1
-                                )
-                        except Exception as _cta_exc:  # noqa: BLE001  # noqa: silent-ok — product CTA append best-effort
-                            logger.debug(
-                                "[ProductCard.cta] tenant=%s product_id=%s "
-                                "cta_failed: %s",
-                                tenant_id, _att.get("id"), _cta_exc,
-                            )
+                    # Product image+URL uses unified cta_url earlier in this
+                    # loop. Image-only products intentionally skip CTA here.
                 except Exception as _media_send_exc:
                     logger.warning(
                         "[AIMedia.send] tenant=%s id=%s failed: %s",
@@ -14694,19 +14740,94 @@ async def _send_interactive_reply(
     }, _tenant_id=_tenant_id, _db=_db)
 
 
+def _safe_cta_http_url(url: Optional[str]) -> str:
+    """Return http(s) CTA URLs only — Meta forbids tel: on cta_url."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    lower = raw.lower()
+    if lower.startswith("tel:"):
+        return ""
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        return ""
+    return raw
+
+
+def build_cta_url_payload(
+    *,
+    to: str,
+    body_text: str,
+    btn_label: str,
+    btn_url: str,
+    header_image_url: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build interactive.cta_url payload; optional image header (Option A).
+
+    Returns ``None`` when ``btn_url`` is not a usable http(s) URL.
+    """
+    safe_url = _safe_cta_http_url(btn_url)
+    if not safe_url:
+        return None
+    body = str(body_text or "").strip() or "."
+    interactive: Dict[str, Any] = {
+        "type": "cta_url",
+        "body": {"text": body[:1024]},
+        "action": {
+            "name": "cta_url",
+            "parameters": {
+                "display_text": str(btn_label or "عرض المنتج")[:20],
+                "url": safe_url,
+            },
+        },
+    }
+    header_img = _safe_cta_http_url(header_image_url)
+    if header_img:
+        interactive["header"] = {
+            "type": "image",
+            "image": {"link": header_img},
+        }
+    return {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+
+def _product_card_factual_body(attachment: Dict[str, Any]) -> str:
+    """Trusted product facts for CTA body — never canned press-the-button prose."""
+    caption = str(attachment.get("caption") or "").strip()
+    if caption:
+        return caption[:1024]
+    title = str(attachment.get("title") or "").strip()
+    if title:
+        price = attachment.get("price")
+        if price is not None and str(price).strip():
+            price_text = str(price).strip()
+            if _re_signal.match(r"^\d+(\.\d+)?$", price_text):
+                price_text = f"{price_text} ر.س"
+            return f"{title}\nالسعر: {price_text}"[:1024]
+        return title[:1024]
+    return "عرض المنتج"
+
+
 async def _send_cta_url(
     phone_id: str, to: str, body_text: str,
     btn_label: str, btn_url: str,
     _tenant_id: Optional[int] = None, _db=None,
+    *,
+    header_image_url: Optional[str] = None,
 ) -> bool:
-    return await _post_wa(phone_id, {
-        "messaging_product": "whatsapp", "to": to, "type": "interactive",
-        "interactive": {
-            "type": "cta_url",
-            "body": {"text": body_text},
-            "action": {"name": "cta_url", "parameters": {"display_text": btn_label, "url": btn_url}},
-        },
-    }, _tenant_id=_tenant_id, _db=_db)
+    payload = build_cta_url_payload(
+        to=to,
+        body_text=body_text,
+        btn_label=btn_label,
+        btn_url=btn_url,
+        header_image_url=header_image_url,
+    )
+    if not payload:
+        return False
+    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _db=_db)
 
 
 # ── Staff-call contact card sender ───────────────────────────────────────────
