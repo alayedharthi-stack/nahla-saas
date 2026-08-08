@@ -140,9 +140,21 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
         has_pos_avail = bool(facts.get("has_positive_availability"))
         allow_avail = bool(facts.get("allow_availability_mention"))
         ambiguous = bool(facts.get("catalog_ambiguity"))
+        subject_scope = str(facts.get("subject_scope") or "").strip()
+        category_existence = bool(facts.get("category_existence"))
         lines.append(f"allow_price_mention: {bool(facts.get('allow_price_mention'))}")
         lines.append(f"allow_availability_mention: {allow_avail}")
         lines.append(f"has_positive_availability: {has_pos_avail}")
+        if subject_scope:
+            lines.append(f"subject_scope: {subject_scope}")
+        if "category_existence" in facts:
+            lines.append(f"category_existence: {category_existence}")
+        if facts.get("availability_evidence_kind"):
+            lines.append(
+                f"availability_evidence_kind: {facts.get('availability_evidence_kind')}"
+            )
+        if facts.get("allow_matching_set_existence_mention"):
+            lines.append("allow_matching_set_existence_mention: true")
         if ambiguous:
             lines.append("catalog_ambiguity: true")
             lines.append(
@@ -165,6 +177,8 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                     parts.append(f"variant_id={candidate.get('variant_id')}")
                 if candidate.get("price") is not None:
                     parts.append(f"price={candidate.get('price')} ريال")
+                if "orderable" in candidate:
+                    parts.append(f"orderable={candidate.get('orderable')}")
                 if "available" in candidate:
                     parts.append(f"available={candidate.get('available')}")
                 lines.append(" | ".join(parts))
@@ -182,10 +196,10 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 if catalog_price is not None:
                     parts.append(f"price={catalog_price} ريال")
             if allow_avail:
+                if "orderable" in product:
+                    parts.append(f"orderable={product.get('orderable')}")
                 if "available" in product:
                     parts.append(f"available={product.get('available')}")
-                elif "orderable" in product:
-                    parts.append(f"orderable={product.get('orderable')}")
             lines.append(" | ".join(parts))
         if not facts.get("has_catalog_products"):
             lines.append("catalog_products: none")
@@ -209,16 +223,31 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "no category drift outside scope",
             ]
             if ambiguous or facts.get("require_clarification"):
-                rule_parts.append(
-                    "multiple exact-title catalog products are non-unique; ask a concise natural "
-                    "clarification as a question using distinguishing ambiguous_candidate facts only; "
-                    "allow_price_mention is false — do not present one final selected price; "
-                    "when allow_price_differentiator is true, price concept may distinguish candidates; "
-                    "numeric amounts only when grounded in ambiguous_candidate facts and framed as a "
-                    "clarifying question (question mark); do not generalize availability across products; "
-                    "do not ask for phone/mobile/contact details; "
-                    "do not invent distinguishing details"
-                )
+                if (
+                    subject_scope == "matching_set"
+                    and category_existence
+                    and allow_avail
+                ):
+                    rule_parts.append(
+                        "matching-set existence is confirmed by category_existence/"
+                        "eligible_product_count; you may express that matching products "
+                        "exist or are orderable; still ask a concise natural clarification "
+                        "to choose among ambiguous_candidate facts; do not invent a single "
+                        "selected product identity; do not claim variant-level stock; "
+                        "orderable/eligible is not proof that every size is in inventory; "
+                        "do not ask for phone/mobile/contact details"
+                    )
+                else:
+                    rule_parts.append(
+                        "multiple exact-title catalog products are non-unique; ask a concise natural "
+                        "clarification as a question using distinguishing ambiguous_candidate facts only; "
+                        "allow_price_mention is false — do not present one final selected price; "
+                        "when allow_price_differentiator is true, price concept may distinguish candidates; "
+                        "numeric amounts only when grounded in ambiguous_candidate facts and framed as a "
+                        "clarifying question (question mark); do not generalize availability across products; "
+                        "do not ask for phone/mobile/contact details; "
+                        "do not invent distinguishing details"
+                    )
             elif qkind == "compound" or (
                 "price" in requested_facets and "availability" in requested_facets
             ):
@@ -232,9 +261,16 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                     "do not add availability or stock-status claims"
                 )
             elif qkind == "availability" or "availability" in requested_facets:
-                if has_pos_avail:
+                if subject_scope == "matching_set" and category_existence:
                     rule_parts.append(
-                        "mention positive availability only for products with available=true in facts"
+                        "express matching-set existence from category_existence/"
+                        "eligible orderable facts; do not invent variant stock"
+                    )
+                elif has_pos_avail:
+                    rule_parts.append(
+                        "mention positive availability only for products with "
+                        "available=true or orderable=true in facts; "
+                        "orderable is checkout eligibility, not variant inventory"
                     )
                 else:
                     rule_parts.append(
