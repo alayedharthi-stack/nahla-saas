@@ -220,6 +220,37 @@ class ProductSearchHandler:
         query = decision.args.get("query", ctx.message)
 
         source = str(decision.args.get("source") or "").strip().lower()
+        if source == "state_continuity_reresolve":
+            product_id = str(decision.args.get("product_id") or "").strip()
+            external_id = str(decision.args.get("external_id") or "").strip()
+            if product_id or external_id:
+                from ..commerce.state_continuity_identity import (  # noqa: PLC0415
+                    resolve_product_for_state_continuity,
+                )
+
+                db = getattr(ctx, "_db", None)
+                fresh = resolve_product_for_state_continuity(
+                    db,
+                    ctx.tenant_id,
+                    product_id=product_id,
+                    external_id=external_id,
+                )
+                if fresh:
+                    products = _apply_category_scope(_apply_affinity_boost([fresh], ctx))
+                    return _format_result(
+                        products,
+                        query=str(query or fresh.get("title") or ""),
+                        browse_pool=products,
+                        browse_offset=0,
+                    )
+                logger.info(
+                    "[SearchHandler] state_continuity_reresolve miss tenant=%s "
+                    "product_id=%s external_id=%s",
+                    ctx.tenant_id,
+                    product_id,
+                    external_id,
+                )
+
         entry_type = str((decision.args or {}).get("discovery_entry_type") or "").strip().lower()
         discovery_mode = str((decision.args or {}).get("discovery_mode") or "").strip().lower()
         query_s = str(query or "").strip()

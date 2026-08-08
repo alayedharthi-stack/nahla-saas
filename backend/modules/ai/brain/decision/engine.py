@@ -80,6 +80,52 @@ from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 
 logger = logging.getLogger("nahla.brain.decision")
 
+_VARIANT_LABEL_BLOCK_INTENTS = frozenset({
+    INTENT_ASK_PRODUCT,
+    INTENT_ASK_PRICE,
+    "product_inquiry",
+})
+
+_SIZE_LIKE_VARIANT_RE = re.compile(
+    r"^(?:"
+    r"xxs|xs|s|m|l|xl|xxl|xxxl|"
+    r"\d{1,3}|"
+    r"small|medium|large|"
+    r"كبير|وسط|صغير"
+    r")$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_PRODUCT_TALK_RE = re.compile(
+    r"(?:حدثني|حدثيني|عن\s+المنتج|وش\s+عندكم|ممكن\s+تخبرني)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _qualify_variant_pick(message: str, intent_name: str) -> Optional[dict[str, Any]]:
+    """Return a label-based variant pick only for confident short variant tokens."""
+    msg = (message or "").strip()
+    if not msg:
+        return None
+
+    intent = str(intent_name or "").strip().lower()
+    if intent in _VARIANT_LABEL_BLOCK_INTENTS:
+        return None
+
+    if _PRODUCT_TALK_RE.search(msg):
+        return None
+
+    if len(msg) > 40 or len(msg.split()) > 2:
+        return None
+
+    if " " not in msg and len(msg) <= 12:
+        return {"label": msg}
+
+    if _SIZE_LIKE_VARIANT_RE.match(msg):
+        return {"label": msg}
+
+    return None
+
 
 def _is_commerce_blocked(ctx: BrainContext) -> bool:
     """True when non-commerce safety layer forbids catalog escalation."""
@@ -629,9 +675,9 @@ class DefaultDecisionEngine:
                     _idx = 0
                 if _idx > 0:
                     _picked = {"index_one_based": _idx}
-            # Fallback: free-text match against option summary
-            if _picked is None and len(_msg) >= 1:
-                _picked = {"label": _msg}
+            if _picked is None:
+                _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+                _picked = _qualify_variant_pick(_msg, _intent_name)
             if _picked is not None:
                 logger.info(
                     "[VARIANT_PICK] tenant=%s parent_product_id=%s pick=%r",
