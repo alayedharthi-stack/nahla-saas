@@ -512,20 +512,20 @@ class DefaultComposer:
                     )
                     result.data["product_breadth"] = breadth.to_log_dict()
                     result.data["product_breadth_meta"] = breadth_meta
-                    wa_buttons = []
-                    for i, p in enumerate(candidates[:3], 1):
-                        from core.product_button_label import (  # noqa: PLC0415
-                            compact_whatsapp_product_button_title,
-                        )
+                    from ..commerce.product_presentation_selection import (  # noqa: PLC0415
+                        apply_search_product_presentation,
+                        build_standard_pick_buttons,
+                    )
 
-                        raw_title = str(p.get("title") or "")
-                        title = compact_whatsapp_product_button_title(raw_title)
-                        wa_buttons.append({
-                            "type": "reply",
-                            "reply": {"id": f"pick_{i}", "title": title or str(i)},
-                        })
-                    result.data["pending_buttons"] = wa_buttons
-                    result.data["pending_candidates"] = candidates
+                    apply_search_product_presentation(
+                        result.data,
+                        candidates=candidates,
+                        resolved_product=(
+                            data.get("product")
+                            or getattr(getattr(ctx, "state", None), "current_product_focus", None)
+                        ),
+                        build_buttons=build_standard_pick_buttons,
+                    )
                 return discovery_text
 
             if not result.success or data.get("message") == "no_products_in_catalog":
@@ -824,6 +824,26 @@ class DefaultComposer:
                 )
                 if _persist_fact_rows:
                     result.data["catalog_fact_products"] = _persist_fact_rows
+                _card_rows = list(candidates or compose_products or [])
+                if len(_card_rows) == 1:
+                    from ..commerce.product_presentation_selection import (  # noqa: PLC0415
+                        apply_search_product_presentation,
+                        build_standard_pick_buttons,
+                    )
+
+                    _resolved = data.get("product")
+                    if not _resolved and compose_products:
+                        _resolved = compose_products[0]
+                    if not _resolved:
+                        _resolved = getattr(
+                            getattr(ctx, "state", None), "current_product_focus", None,
+                        )
+                    apply_search_product_presentation(
+                        result.data,
+                        candidates=_card_rows,
+                        resolved_product=_resolved,
+                        build_buttons=build_standard_pick_buttons,
+                    )
                 return (_catalog_text or "").strip()
 
             if (_catalog_text or "").strip() and isinstance(_catalog_event, dict):
@@ -834,20 +854,43 @@ class DefaultComposer:
                     if _persist_fact_rows:
                         result.data["catalog_fact_products"] = _persist_fact_rows
                 if candidates and _question_kind not in _CATALOG_QA_QUESTION_KINDS:
-                    wa_buttons = []
-                    for i, p in enumerate(candidates[:3], 1):
-                        from core.product_button_label import (  # noqa: PLC0415
-                            compact_whatsapp_product_button_title,
+                    from ..commerce.product_presentation_selection import (  # noqa: PLC0415
+                        apply_search_product_presentation,
+                        build_standard_pick_buttons,
+                    )
+
+                    apply_search_product_presentation(
+                        result.data,
+                        candidates=candidates,
+                        resolved_product=(
+                            data.get("product")
+                            or getattr(getattr(ctx, "state", None), "current_product_focus", None)
+                        ),
+                        build_buttons=build_standard_pick_buttons,
+                    )
+                elif _question_kind in _CATALOG_QA_QUESTION_KINDS:
+                    _card_rows = list(candidates or compose_products or [])
+                    if len(_card_rows) == 1:
+                        # Single resolved product on availability/price Q&A:
+                        # platform owns card/CTA; LLM keeps the prose.
+                        from ..commerce.product_presentation_selection import (  # noqa: PLC0415
+                            apply_search_product_presentation,
+                            build_standard_pick_buttons,
                         )
 
-                        raw_title = str(p.get("title") or "")
-                        title = compact_whatsapp_product_button_title(raw_title)
-                        wa_buttons.append({
-                            "type": "reply",
-                            "reply": {"id": f"pick_{i}", "title": title or str(i)},
-                        })
-                    result.data["pending_buttons"] = wa_buttons
-                    result.data["pending_candidates"] = candidates
+                        _resolved = data.get("product")
+                        if not _resolved and compose_products:
+                            _resolved = compose_products[0]
+                        if not _resolved:
+                            _resolved = getattr(
+                                getattr(ctx, "state", None), "current_product_focus", None,
+                            )
+                        apply_search_product_presentation(
+                            result.data,
+                            candidates=_card_rows,
+                            resolved_product=_resolved,
+                            build_buttons=build_standard_pick_buttons,
+                        )
                 return (_catalog_text or "").strip()
 
             if not candidates:
@@ -881,24 +924,27 @@ class DefaultComposer:
                 return (_fallback_text or "").strip()
 
             # INVARIANT: pending_candidates = EXACTLY the products shown in
-            # the numbered list.  The customer reads "1. بنطلون" and expects
-            # sending "1" to give them بنطلون — any mismatch causes the
-            # "بلوزة غير متوفر" bug.
-            # WA quick-reply buttons are capped at 3 (platform limit).
-            wa_buttons = []
-            for i, p in enumerate(candidates[:3], 1):
-                from core.product_button_label import (  # noqa: PLC0415
-                    compact_whatsapp_product_button_title,
-                )
+            # the numbered list when multi-candidate choices are used.
+            # Single resolved product → rich card (no pick_N re-select).
+            from ..commerce.product_presentation_selection import (  # noqa: PLC0415
+                PRESENTATION_SINGLE_RICH,
+                apply_search_product_presentation,
+                build_standard_pick_buttons,
+            )
 
-                raw_title = str(p.get("title") or "")
-                title = compact_whatsapp_product_button_title(raw_title)
-                wa_buttons.append({
-                    "type": "reply",
-                    "reply": {"id": f"pick_{i}", "title": title or str(i)},
-                })
-            result.data["pending_buttons"] = wa_buttons
-            result.data["pending_candidates"] = candidates
+            _pres = apply_search_product_presentation(
+                result.data,
+                candidates=candidates,
+                resolved_product=(
+                    data.get("product")
+                    or getattr(getattr(ctx, "state", None), "current_product_focus", None)
+                ),
+                build_buttons=build_standard_pick_buttons,
+            )
+            if _pres.kind == PRESENTATION_SINGLE_RICH:
+                # Card/caption carries product facts; avoid pick_N list text.
+                title = str((_pres.resolved_product or {}).get("title") or "").strip()
+                return title
             variant = self._variant_idx(ctx)
             text = T.narrow_choices(
                 products=candidates,

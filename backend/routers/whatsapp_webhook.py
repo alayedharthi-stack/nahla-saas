@@ -7044,6 +7044,7 @@ async def _handle_merchant_message(
             _trace.extra["trusted_context_shadow_stage"] = "wireup"
 
         _brain_buttons: list = []  # populated by brain when product buttons should be sent
+        _brain_product_cards: list = []  # single-resolved rich product cards from compose
         _native_catalog_entry: dict = {}
         _outbound_text_tracker = None
         brain_result: Optional[Dict[str, Any]] = None
@@ -8805,6 +8806,9 @@ async def _handle_merchant_message(
                 _brain_reply_candidate = _turn_eval.brain_reply_candidate
                 _outbound_customer_id = _turn_eval.outbound_customer_id
                 _brain_buttons = list(_turn_eval.brain_buttons or [])
+                _brain_product_cards = list(
+                    getattr(_turn_eval, "brain_product_cards", None) or []
+                )
                 _native_catalog_entry = dict(_turn_eval.native_catalog_entry or {})
                 _brain_handoff = bool(_turn_eval.brain_handoff)
                 _relational_moment = _turn_eval.relational_moment
@@ -10274,6 +10278,41 @@ async def _handle_merchant_message(
         # (image + caption + cta_url button) lives further down in
         # the outbound dispatch loop.
         _product_attachments: List[Dict[str, Any]] = []
+
+        # Compose may stamp current-turn rich cards for a single resolved
+        # catalog product (no pick_N). Reuse the existing product_card path.
+        if _brain_product_cards:
+            for _card in _brain_product_cards:
+                if not isinstance(_card, dict):
+                    continue
+                if str(_card.get("kind") or "") != "product_card":
+                    continue
+                _product_attachments.append(dict(_card))
+            if _product_attachments:
+                # Do not also send pick_N for the same singleton.
+                _brain_buttons = []
+                logger.info(
+                    "[PRODUCT_ATTACHMENT] tenant=%s stage=resolved "
+                    "source=single_resolved_presentation count=%d ids=%s "
+                    "with_image=%d with_url=%d",
+                    tenant_id,
+                    len(_product_attachments),
+                    [a.get("id") for a in _product_attachments],
+                    sum(1 for a in _product_attachments if a.get("file_url")),
+                    sum(1 for a in _product_attachments if a.get("product_url")),
+                )
+                # Current-turn presentation from search — not recommendation
+                # escalation. Allow dispatch even when fulfillment lock would
+                # suppress browse-card safety nets.
+                if (
+                    str(_br_action or "").strip() == "search_products"
+                    or str(_br_dec_action or "").strip() == "search_products"
+                ):
+                    _allow_product_cards = True
+                    _dispatch_guard_reason = "single_resolved_presentation"
+                    _fulfillment_discovery_blocked = False
+                    _product_escalation_blocked = bool(_commerce_blocked)
+
         if (
             not _product_escalation_blocked
             and reply

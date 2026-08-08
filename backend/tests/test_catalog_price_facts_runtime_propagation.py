@@ -282,8 +282,13 @@ class TestResponderCatalogQaPersonaCompose:
             assert "catalog_deterministic_fallback" not in str(
                 result.data.get("persona_compose", {}).get("source")
             )
-            assert result.data.get("pending_buttons") is None
-            assert result.data.get("pending_candidates") is None
+            assert result.data.get("pending_buttons") in (None, [])
+            # Single resolved price Q&A may stamp a rich card; never pick_N.
+            assert not result.data.get("pending_buttons")
+            cards = result.data.get("pending_product_cards") or []
+            if cards:
+                assert cards[0].get("kind") == "product_card"
+                assert cards[0].get("title") == "جاكيت"
 
         asyncio.run(_run())
 
@@ -317,9 +322,14 @@ class TestResponderCatalogQaPersonaCompose:
                 ):
                     text = await composer.compose(decision, result, ctx)
 
-            assert "اختر رقم" in text
+            # Single resolved browse hit → rich presentation, not pick_N.
+            assert "اختر رقم" not in text
+            assert result.data.get("pending_buttons") in (None, [])
+            assert not result.data.get("pending_buttons")
+            cards = result.data.get("pending_product_cards") or []
+            assert len(cards) == 1
+            assert cards[0].get("kind") == "product_card"
             assert result.data.get("pending_candidates")
-            assert result.data.get("pending_buttons")
 
         asyncio.run(_run())
 
