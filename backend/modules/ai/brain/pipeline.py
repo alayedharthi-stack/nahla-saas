@@ -1374,7 +1374,7 @@ class MerchantBrain:
                     _vd_own.get("owner"),
                     (message or "")[:80],
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block turn
             logger.debug(
                 "[STATE_CONTINUITY] ownership_before_lock skipped tenant=%s",
                 tenant_id,
@@ -1747,7 +1747,7 @@ class MerchantBrain:
                     canonical_message=_classify_message,
                 )
                 ctx.goal_regimen_bundle = _bundle
-        except Exception as _gc_exc:  # noqa: BLE001
+        except Exception as _gc_exc:  # noqa: BLE001  # noqa: silent-ok — goal commerce prepare must not block decide
             logger.debug(
                 "[GOAL_COMMERCE] prepare skipped tenant=%s err=%s",
                 tenant_id,
