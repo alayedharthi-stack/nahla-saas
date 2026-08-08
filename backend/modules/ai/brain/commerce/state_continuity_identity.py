@@ -250,6 +250,155 @@ def _is_qualified_variant_pick(message: str, intent: Any) -> bool:
         return False
 
 
+_SIZE_INQUIRY_RE = re.compile(
+    r"(?:مقاس|مقاسات|احجام|أحجام|حجام|\bsize\b|\bsizes\b)",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def close_awaiting_variant_after_successful_pick(state: Any, *, reason: str) -> bool:
+    """Close variant-wait pin after a confirmed pick without suspending checkout."""
+    if state is None:
+        return False
+    op = getattr(state, "order_prep", None)
+    if op is None:
+        return False
+    if not bool(getattr(op, "awaiting_variant_choice", False)):
+        return False
+    op.awaiting_variant_choice = False
+    op.pending_variant_product_id = ""
+    logger.info(
+        "[STATE_CONTINUITY] close_awaiting_variant_after_pick reason=%s",
+        reason,
+    )
+    return True
+
+
+def _sellable_variants_from_product(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    variants = list(product.get("variants") or [])
+    return [
+        v for v in variants
+        if isinstance(v, dict) and v and v.get("in_stock", True) and not v.get("is_default")
+    ]
+
+
+def resolve_variant_pick_from_product(
+    product: Dict[str, Any],
+    variant_pick: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Map engine ``variant_pick`` onto a sellable catalog variant row."""
+    if not isinstance(variant_pick, dict) or not variant_pick:
+        return None
+    sellable = _sellable_variants_from_product(product)
+    if not sellable:
+        return None
+
+    idx_raw = variant_pick.get("index_one_based")
+    if idx_raw is not None:
+        try:
+            idx = int(idx_raw)
+        except (TypeError, ValueError):
+            idx = 0
+        if 1 <= idx <= len(sellable):
+            return dict(sellable[idx - 1])
+
+    label = str(variant_pick.get("label") or "").strip()
+    if not label:
+        return None
+    label_norm = _norm_product_token(label)
+    for variant in sellable:
+        for field in ("option_summary", "sku", "salla_variant_id", "name", "label"):
+            val = str(variant.get(field) or "").strip()
+            if not val:
+                continue
+            val_norm = _norm_product_token(val)
+            if val_norm == label_norm or label_norm in val_norm or val_norm in label_norm:
+                return dict(variant)
+    return None
+
+
+def variant_session_pick_succeeded(
+    *,
+    was_awaiting: bool,
+    variant_pick: Optional[Dict[str, Any]],
+    pick_applied: bool,
+    options_captured: int,
+    still_missing_option_groups: List[Any],
+) -> bool:
+    """True when a variant-wait turn produced a confirmed option selection."""
+    if not was_awaiting or not variant_pick:
+        return False
+    if pick_applied or options_captured > 0:
+        return True
+    if still_missing_option_groups:
+        return False
+    return bool(pick_applied)
+
+
+def _ordering_same_parent_context(state: Any, intent: Any) -> bool:
+    if bool(getattr(getattr(state, "order_prep", None), "awaiting_variant_choice", False)):
+        return False
+    stage = str(getattr(state, "stage", "") or "")
+    if stage not in ("ordering", "deciding", "checkout"):
+        return False
+    if not extract_identity_hint(state):
+        return False
+    if _is_explicit_different_product(state, intent):
+        return False
+    return True
+
+
+def try_ordering_same_parent_inquiry_decision(ctx: Any) -> Optional[Any]:
+    """Route same-parent catalog talk during ordering by parent identity, not FTS."""
+    state = getattr(ctx, "state", None)
+    intent = getattr(ctx, "intent", None)
+    if not _ordering_same_parent_context(state, intent):
+        return None
+
+    from ..decision.actions import (  # noqa: PLC0415
+        ACTION_SEARCH_PRODUCTS,
+        ACTION_VARIANT_PRICING,
+    )
+    from ..decision.engine import Decision  # noqa: PLC0415
+    from ..types import INTENT_ASK_PRICE, INTENT_ASK_PRODUCT  # noqa: PLC0415
+
+    msg = str(getattr(ctx, "message", "") or "")
+    intent_name = str(getattr(intent, "name", "") or "")
+
+    try:
+        from .variant_pricing import (  # noqa: PLC0415
+            is_variant_price_question,
+            try_variant_pricing_decision,
+        )
+    except Exception:  # noqa: BLE001
+        is_variant_price_question = lambda _t: False  # type: ignore[assignment,misc]
+        try_variant_pricing_decision = lambda _c: None  # type: ignore[assignment,misc]
+
+    if intent_name == INTENT_ASK_PRICE or is_variant_price_question(msg):
+        dec = try_variant_pricing_decision(ctx)
+        if dec is not None:
+            return dec
+
+    if intent_name == INTENT_ASK_PRODUCT or _SIZE_INQUIRY_RE.search(msg):
+        hint = extract_identity_hint(state) or {}
+        args: Dict[str, Any] = {
+            "query": msg,
+            "source": "state_continuity_reresolve",
+        }
+        if hint.get("id"):
+            args["product_id"] = hint["id"]
+        if hint.get("external_id"):
+            args["external_id"] = hint["external_id"]
+        return Decision(
+            action=ACTION_SEARCH_PRODUCTS,
+            args=args,
+            reason="ordering_same_parent_inquiry — hydrate by parent identity",
+            confidence=0.88,
+        )
+
+    return None
+
+
 def maybe_apply_variant_discovery_ownership_before_lock(
     state: Any,
     *,
@@ -298,10 +447,14 @@ def maybe_apply_variant_discovery_ownership_before_lock(
 
 
 __all__ = [
+    "close_awaiting_variant_after_successful_pick",
     "extract_identity_hint",
     "invalidate_pending_variant_authority",
     "maybe_apply_variant_discovery_ownership_before_lock",
     "resolve_product_for_state_continuity",
+    "resolve_variant_pick_from_product",
     "slim_identity_focus",
     "suspend_checkout_authority_retain_identity",
+    "try_ordering_same_parent_inquiry_decision",
+    "variant_session_pick_succeeded",
 ]

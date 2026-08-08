@@ -3786,6 +3786,20 @@ class DefaultDecisionEngine:
                 try_price_query_decision,
                 _resolved_product_query,
             )
+            try:
+                from ..commerce.state_continuity_identity import (  # noqa: PLC0415
+                    try_ordering_same_parent_inquiry_decision,
+                )
+
+                _same_parent_dec = try_ordering_same_parent_inquiry_decision(ctx)
+                if _same_parent_dec is not None:
+                    return _same_parent_dec
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[STATE_CONTINUITY] ordering_same_parent_inquiry skipped tenant=%s",
+                    ctx.tenant_id,
+                    exc_info=True,
+                )
             if _is_commerce_blocked(ctx):
                 return Decision(
                     action=ACTION_SOCIAL_REPLY,
