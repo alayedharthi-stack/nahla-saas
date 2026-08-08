@@ -12815,9 +12815,8 @@ async def _handle_merchant_message(
                         )
                         _catalog_sent = False
                     if _catalog_sent:
-                        # Catalog rendered the product card natively
-                        # — no need to send a separate image+CTA.
-                        # Continue to the next attachment.
+                        # True Meta catalog product message only — never count
+                        # deferred variant prompts as catalog_card_sent.
                         if isinstance(_delivery_audit, dict):
                             _delivery_audit["catalog_card_sent_count"] = (
                                 int(_delivery_audit.get("catalog_card_sent_count", 0)) + 1
@@ -12855,6 +12854,14 @@ async def _handle_merchant_message(
                                     )
                             except Exception:  # noqa: silent-ok — CTA-only fallback must not block card loop
                                 pass
+                        await _maybe_send_variant_prompt_after_product_card(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            attachment=_att,
+                            delivery_audit=_delivery_audit if isinstance(_delivery_audit, dict) else None,
+                        )
                         continue
                 elif _validate_media is not None:
                     _ok, _why, _normed = _validate_media(
@@ -13045,6 +13052,15 @@ async def _handle_merchant_message(
                         )
                     except Exception:  # noqa: BLE001
                         pass
+                if _is_product:
+                    await _maybe_send_variant_prompt_after_product_card(
+                        db=db,
+                        tenant_id=tenant_id,
+                        phone_id=phone_id,
+                        to=to,
+                        attachment=_att,
+                        delivery_audit=_delivery_audit if isinstance(_delivery_audit, dict) else None,
+                    )
 
             # ── Staff call contact cards ────────────────────────────
             # Dispatched LAST so the customer sees: (1) the main
@@ -14377,6 +14393,94 @@ async def _try_send_native_catalog_entry(
     return result
 
 
+async def _maybe_send_variant_prompt_after_product_card(
+    *,
+    db,
+    tenant_id: Optional[int],
+    phone_id: str,
+    to: str,
+    attachment: Dict[str, Any],
+    delivery_audit: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Send structured variant selection after product-level rich presentation.
+
+    Complements the product card — does not invent variants, URLs, or checkout.
+    Sets ``awaiting_variant_choice`` so draft/order paths stay fail-closed until
+    the customer pins a sellable SKU.
+    """
+    if tenant_id is None or not attachment or attachment.get("kind") != "product_card":
+        return False
+    if (attachment.get("picked_variant_retailer_id") or "").strip():
+        return False
+    if not bool(attachment.get("needs_variant_choice")):
+        return False
+    try:
+        from services.catalog_product_orchestrator import (  # noqa: PLC0415
+            variant_send_enabled,
+        )
+        if not variant_send_enabled():
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+
+    try:
+        from modules.ai.brain.compose.templates import (  # noqa: PLC0415
+            ask_product_variants as _ask_variants,
+        )
+    except Exception as imp_exc:  # noqa: BLE001
+        logger.debug(
+            "[CATALOG_VARIANT_PROMPT] tenant=%s helpers unavailable: %s",
+            tenant_id, imp_exc,
+        )
+        return False
+
+    try:
+        prompt = _ask_variants(
+            {"title": attachment.get("title")},
+            list(attachment.get("variants") or []),
+        )
+        await _send_whatsapp_message(
+            phone_id=phone_id, to=to, text=prompt,
+            _tenant_id=tenant_id, _db=db,
+        )
+        logger.info(
+            "[CATALOG_VARIANT_PROMPT] tenant=%s product_id=%s "
+            "variants=%d — sent_after_product_presentation "
+            "card_suppressed=false",
+            tenant_id,
+            attachment.get("id"),
+            len(attachment.get("variants") or []),
+        )
+        if isinstance(delivery_audit, dict):
+            delivery_audit["variant_prompt_sent_count"] = (
+                int(delivery_audit.get("variant_prompt_sent_count", 0) or 0) + 1
+            )
+        try:
+            from core.order_flow import apply_state_patch  # noqa: PLC0415
+            apply_state_patch(
+                db,
+                tenant_id=tenant_id,
+                phone=to,
+                state_patch={
+                    "awaiting_variant_choice": True,
+                    "pending_variant_product_id": str(attachment.get("id") or ""),
+                },
+            )
+        except Exception as _patch_exc:  # noqa: BLE001
+            logger.debug(
+                "[CATALOG_VARIANT_PROMPT] tenant=%s state patch "
+                "failed (non-fatal): %s",
+                tenant_id, _patch_exc,
+            )
+        return True
+    except Exception as _prompt_exc:  # noqa: BLE001
+        logger.warning(
+            "[CATALOG_VARIANT_PROMPT] tenant=%s after_card prompt failed: %s",
+            tenant_id, _prompt_exc,
+        )
+        return False
+
+
 async def _try_send_catalog_product(
     *,
     db,
@@ -14498,57 +14602,19 @@ async def _try_send_catalog_product(
         return False
 
     if decision.action == ProductCardSendAction.VARIANT_PROMPT:
-        try:
-            from modules.ai.brain.compose.templates import (  # noqa: PLC0415
-                ask_product_variants as _ask_variants,
-            )
-        except Exception as imp_exc:  # noqa: BLE001
-            logger.debug(
-                "[CATALOG_VARIANT_PROMPT] tenant=%s helpers unavailable, "
-                "falling through to legacy card: %s",
-                tenant_id, imp_exc,
-            )
-        else:
-            try:
-                prompt = _ask_variants(
-                    {"title": attachment.get("title")},
-                    list(attachment.get("variants") or []),
-                )
-                await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=prompt,
-                    _tenant_id=tenant_id, _db=db,
-                )
-                logger.info(
-                    "[CATALOG_VARIANT_PROMPT] tenant=%s product_id=%s "
-                    "variants=%d — sent variant question, suppressed card",
-                    tenant_id, attachment.get("id"),
-                    len(attachment.get("variants") or []),
-                )
-                try:
-                    from core.order_flow import apply_state_patch  # noqa: PLC0415
-                    apply_state_patch(
-                        db,
-                        tenant_id=tenant_id,
-                        phone=to,
-                        state_patch={
-                            "awaiting_variant_choice": True,
-                            "pending_variant_product_id":
-                                str(attachment.get("id") or ""),
-                        },
-                    )
-                except Exception as _patch_exc:  # noqa: BLE001
-                    logger.debug(
-                        "[CATALOG_VARIANT_PROMPT] tenant=%s state patch "
-                        "failed (non-fatal): %s",
-                        tenant_id, _patch_exc,
-                    )
-                return True
-            except Exception as _prompt_exc:  # noqa: BLE001
-                logger.warning(
-                    "[CATALOG_VARIANT_PROMPT] tenant=%s prompt path "
-                    "failed, falling through to legacy: %s",
-                    tenant_id, _prompt_exc,
-                )
+        # Meta catalog retailer binding stays blocked until a variant is
+        # picked (wrong-SKU safety). Return False so the dispatch loop can
+        # still send the product-level rich card (image + trusted URL), then
+        # `_maybe_send_variant_prompt_after_product_card` asks for the size.
+        logger.info(
+            "[CATALOG_VARIANT_PROMPT] tenant=%s product_id=%s "
+            "variants=%d — defer_after_product_presentation "
+            "meta_catalog_suppressed=true rich_card_allowed=true",
+            tenant_id,
+            attachment.get("id"),
+            len(attachment.get("variants") or []),
+        )
+        return False
 
     if not should_attempt_catalog_send(decision):
         return False
