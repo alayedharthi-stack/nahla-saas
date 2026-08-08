@@ -885,10 +885,24 @@ def evaluate_variant_pricing_turn(
     }
 
 
+def _catalog_fact_products_from_hydrated(product: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Project live catalog/variant prices into the grounding fact channel.
+
+    Parent/list price alone is insufficient when sellable variants define the
+    price SoT — include the hydrated product row (with variants[]) so
+    product_claim_grounding_evidence can ground 40/44/38-style amounts.
+    """
+    if not isinstance(product, dict) or not product:
+        return []
+    row = dict(product)
+    # Never treat a stale focus snapshot as the sole truth without variants when
+    # the hydrated row already carries live variant prices.
+    return [row]
+
+
 def try_variant_pricing_decision(ctx: Any) -> Optional[Any]:
     """Hook for product_discovery_gate — return Decision or None."""
     from ..decision.actions import (  # noqa: PLC0415
-        ACTION_CLARIFY,
         ACTION_VARIANT_PRICING,
     )
     from ..decision.engine import Decision  # noqa: PLC0415
@@ -911,17 +925,29 @@ def try_variant_pricing_decision(ctx: Any) -> Optional[Any]:
     if not evaluated:
         return None
 
+    catalog_facts = _catalog_fact_products_from_hydrated(product)
+
     if evaluated.get("action_kind") == "clarify":
+        # Keep chosen_path=variant_pricing (via ACTION_VARIANT_PRICING) so the
+        # grounding guard allowlists deterministic catalog prices instead of
+        # treating a rule-path clarify as ungrounded prose.
+        question = str(evaluated.get("question") or "").strip()
+        args = dict(evaluated)
+        args["reply_text"] = question
+        args["question"] = question
+        args["catalog_fact_products"] = catalog_facts
         return Decision(
-            action=ACTION_CLARIFY,
-            args={"question": evaluated.get("question") or ""},
+            action=ACTION_VARIANT_PRICING,
+            args=args,
             reason="variant_pricing — ambiguous variant",
             confidence=0.93,
         )
 
+    args = dict(evaluated)
+    args["catalog_fact_products"] = catalog_facts
     return Decision(
         action=ACTION_VARIANT_PRICING,
-        args=evaluated,
+        args=args,
         reason="variant-aware deterministic pricing",
         confidence=0.94,
     )

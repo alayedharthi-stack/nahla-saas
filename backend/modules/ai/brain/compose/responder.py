@@ -1459,6 +1459,10 @@ class DefaultComposer:
             reply = str(data.get("reply_text") or "").strip()
             if reply:
                 result.data["chosen_path"] = "variant_pricing"
+                # Project live variant/catalog rows into the grounding channel.
+                _vp_facts = data.get("catalog_fact_products")
+                if isinstance(_vp_facts, list) and _vp_facts:
+                    result.data["catalog_fact_products"] = list(_vp_facts)
                 return reply
             return T.clarify(question="أي خيار/حجم تقصد؟")
 

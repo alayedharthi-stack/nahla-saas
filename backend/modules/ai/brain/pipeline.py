@@ -1353,6 +1353,34 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001
             _commerce_bundle_early = {}
 
+        # Path C: settle variant-vs-discovery on state BEFORE fulfillment lock /
+        # catalog preload consume awaiting_variant_choice as a second turn-owner.
+        try:
+            from .commerce.state_continuity_identity import (  # noqa: PLC0415
+                maybe_apply_variant_discovery_ownership_before_lock,
+            )
+
+            _vd_own = maybe_apply_variant_discovery_ownership_before_lock(
+                state_for_classify,
+                message=message or "",
+                intent=intent,
+            )
+            if _vd_own.get("applied"):
+                logger.info(
+                    "[STATE_CONTINUITY] ownership_before_lock tenant=%s mode=%s "
+                    "owner=%s preview=%r",
+                    tenant_id,
+                    _vd_own.get("mode"),
+                    _vd_own.get("owner"),
+                    (message or "")[:80],
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block turn
+            logger.debug(
+                "[STATE_CONTINUITY] ownership_before_lock skipped tenant=%s",
+                tenant_id,
+                exc_info=True,
+            )
+
         _order_fulfillment_skip = False
         try:
             from .order_context_gate import (  # noqa: PLC0415
@@ -1719,7 +1747,7 @@ class MerchantBrain:
                     canonical_message=_classify_message,
                 )
                 ctx.goal_regimen_bundle = _bundle
-        except Exception as _gc_exc:  # noqa: BLE001
+        except Exception as _gc_exc:  # noqa: BLE001  # noqa: silent-ok — goal commerce prepare must not block decide
             logger.debug(
                 "[GOAL_COMMERCE] prepare skipped tenant=%s err=%s",
                 tenant_id,

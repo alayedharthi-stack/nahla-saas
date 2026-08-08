@@ -211,17 +211,18 @@ class _VariantPricingHandler:
     """Deterministic reply — variant, unit, and price stay bound."""
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         args = dict(decision.args or {})
-        return ActionResult(
-            success=True,
-            data={
-                "type": "variant_pricing",
-                "reply_text": str(args.get("reply_text") or "").strip(),
-                "variant_binding": args.get("variant_binding") or {},
-                "price_trace": args.get("price_trace") or {},
-                "variant_trace": args.get("variant_trace") or {},
-                "quantity_trace": args.get("quantity_trace") or {},
-            },
-        )
+        data = {
+            "type": "variant_pricing",
+            "reply_text": str(args.get("reply_text") or "").strip(),
+            "variant_binding": args.get("variant_binding") or {},
+            "price_trace": args.get("price_trace") or {},
+            "variant_trace": args.get("variant_trace") or {},
+            "quantity_trace": args.get("quantity_trace") or {},
+        }
+        facts = args.get("catalog_fact_products")
+        if isinstance(facts, list) and facts:
+            data["catalog_fact_products"] = list(facts)
+        return ActionResult(success=True, data=data)
 
 
 class _PaymentTransferPromiseHandler:
