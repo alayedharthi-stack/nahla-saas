@@ -118,6 +118,9 @@ class DraftOrderHandler:
         # second consecutive failure → clear address + ask to re-enter.
         prev_prep = ctx.state.order_prep or OrderPreparationState()
         prep = OrderPreparationState.from_dict(prev_prep.to_dict())
+        _was_awaiting_variant = bool(prev_prep.awaiting_variant_choice)
+        _variant_pick = dict(decision.args.get("variant_pick") or {})
+        _variant_pick_applied = False
 
         # CRITICAL: ONLY use external_id (the Salla / store-platform product
         # identifier). NEVER fall back to `id` — that is the internal Nahla
@@ -175,7 +178,7 @@ class DraftOrderHandler:
         product_changed = bool(current_product_id and previous_product_id and current_product_id != previous_product_id)
         previous_failed = bool(getattr(prev_prep, "last_order_failed", False))
 
-        if product_changed:
+        if product_changed and not (_was_awaiting_variant and _variant_pick):
             logger.info(
                 "[DraftOrderHandler] Product changed — resetting address + options | "
                 "tenant=%s old=%s new=%s",
@@ -291,6 +294,21 @@ class DraftOrderHandler:
             await _ensure_product_options_loaded(prep, ctx, external_id)
 
             _maybe_prefill_navigator_product_options(prep, product_info, decision)
+
+            _variant_pick_applied = False
+            if _was_awaiting_variant and _variant_pick:
+                _variant_pick_applied = _try_apply_variant_session_pick(
+                    prep,
+                    product_info,
+                    _variant_pick,
+                    db=getattr(ctx, "_db", None),
+                    tenant_id=int(ctx.tenant_id),
+                    pending_parent_id=str(
+                        decision.args.get("pending_variant_product_id")
+                        or prev_prep.pending_variant_product_id
+                        or ""
+                    ),
+                )
 
             if prep.product_unsyncable:
                 logger.error(
@@ -472,6 +490,35 @@ class DraftOrderHandler:
         _still_missing_after_extract = [
             g.get("name") for g in _missing_product_options(prep)
         ]
+        if _was_awaiting_variant and _variant_pick and not _variant_pick_applied:
+            # Fail-safe: stale option meta must not accept a pick when live
+            # catalog variants are missing or the mapped SKU disappeared.
+            prep.product_options = dict(_selected_before_merge)
+            prep.selected_variant_id = ""
+            prep.selected_variant_retailer_id = ""
+            _options_captured_early = 0
+            _still_missing_after_extract = [
+                g.get("name") for g in _missing_product_options(prep)
+            ]
+        if _was_awaiting_variant and _variant_pick:
+            from modules.ai.brain.commerce.state_continuity_identity import (  # noqa: PLC0415
+                close_awaiting_variant_after_successful_pick,
+                variant_session_pick_succeeded,
+            )
+
+            if variant_session_pick_succeeded(
+                was_awaiting=True,
+                variant_pick=_variant_pick,
+                pick_applied=_variant_pick_applied,
+                options_captured=_options_captured_early,
+                still_missing_option_groups=_still_missing_after_extract,
+            ):
+                close_awaiting_variant_after_successful_pick(
+                    ctx.state,
+                    reason="variant_pick_confirmed_in_draft_handler",
+                )
+                prep.awaiting_variant_choice = False
+                prep.pending_variant_product_id = ""
         _all_required = [
             g.get("name") for g in (prep.product_options_meta or [])
             if g.get("values")
@@ -2855,6 +2902,79 @@ def _merge_message_options(prep: OrderPreparationState, message: str) -> int:
         )
 
     return captured
+
+
+def _try_apply_variant_session_pick(
+    prep: OrderPreparationState,
+    product_info: Dict[str, Any],
+    variant_pick: Dict[str, Any],
+    *,
+    db: Any = None,
+    tenant_id: int = 0,
+    pending_parent_id: str = "",
+) -> bool:
+    """Apply engine variant_pick onto prep using live sellable variant rows."""
+    from modules.ai.brain.commerce.state_continuity_identity import (  # noqa: PLC0415
+        resolve_product_for_state_continuity,
+        resolve_variant_pick_from_product,
+    )
+
+    catalog_product = dict(product_info or {})
+    parent_id = str(
+        pending_parent_id
+        or catalog_product.get("id")
+        or catalog_product.get("product_id")
+        or prep.product_id
+        or ""
+    ).strip()
+    external_id = str(catalog_product.get("external_id") or "").strip()
+    if db is not None and tenant_id and (parent_id or external_id):
+        fresh = resolve_product_for_state_continuity(
+            db,
+            int(tenant_id),
+            product_id=parent_id,
+            external_id=external_id,
+        )
+        if fresh:
+            catalog_product = dict(fresh)
+
+    chosen = resolve_variant_pick_from_product(catalog_product, variant_pick)
+    if not chosen:
+        return False
+
+    prep.selected_variant_id = str(
+        chosen.get("id") or chosen.get("variant_id") or ""
+    ).strip()
+    prep.selected_variant_retailer_id = str(
+        chosen.get("retailer_id")
+        or chosen.get("salla_variant_id")
+        or chosen.get("external_id")
+        or ""
+    ).strip()
+
+    label_blob = " ".join(
+        str(chosen.get(key) or "").strip()
+        for key in (
+            "option_summary",
+            "name",
+            "label",
+            "sku",
+            "salla_variant_id",
+        )
+        if str(chosen.get(key) or "").strip()
+    )
+    if label_blob and _match_option_values_from_label(prep, label_blob=label_blob):
+        return True
+
+    for variant in prep.product_variants_raw or []:
+        if not isinstance(variant, dict):
+            continue
+        vid = str(variant.get("id") or "")
+        if vid and vid == prep.selected_variant_id:
+            if _apply_variant_options_to_prep(prep, variant):
+                return True
+
+    return bool(prep.selected_variant_id)
 
 
 def _apply_variant_options_to_prep(
