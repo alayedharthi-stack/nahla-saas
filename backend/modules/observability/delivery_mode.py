@@ -100,8 +100,9 @@ DeliveryAudit = Dict[str, Any]
       "text_sent":                 bool,   # plain text body sent
       "interactive_buttons_sent":  bool,   # initial reply used buttons
       "cta_url_sent_count":        int,    # cta_url interactive sends
-      "catalog_card_sent_count":   int,    # successful catalog sends
+      "catalog_card_sent_count":   int,    # successful Meta catalog sends only
       "legacy_media_sent_count":   int,    # legacy image/file/video sends
+      "variant_prompt_sent_count": int,    # post-card variant selection prompts
       "contacts_sent":             bool,   # contact-card message sent
     }
 """
@@ -121,6 +122,7 @@ def new_delivery_audit() -> DeliveryAudit:
         "cta_url_sent_count":        0,
         "catalog_card_sent_count":   0,
         "legacy_media_sent_count":   0,
+        "variant_prompt_sent_count": 0,
         "contacts_sent":             False,
     }
 

@@ -45,8 +45,12 @@ fallback sender, payload mutator, or delivery replacement.
 
   1. ``decision = evaluate_product_card_send(...)`` — read-only on *attachment*.
   2. ``log_product_card_decision(decision, ...)``.
-  3. ``VARIANT_PROMPT`` → delegate to the **existing** variant-question branch
-     in the webhook (unchanged transport; returns ``True`` to skip legacy).
+  3. ``VARIANT_PROMPT`` → Meta catalog send stays blocked until a variant
+     retailer id is picked (wrong-SKU safety). The webhook must still allow
+     **legacy product presentation** (image + trusted product URL) and then
+     send the existing variant-question prompt — complementary, not
+     mutually exclusive. Do **not** treat VARIANT_PROMPT as
+     ``catalog_card_sent``.
   4. ``decision.action != SEND_CATALOG`` (all other actions) → ``return False``
      so legacy image+CTA, CTA-only, delivery guards, and rescue paths run
      unchanged.
@@ -336,7 +340,11 @@ def evaluate_product_card_send(
             },
         )
 
-    # ── Variant choice short-circuit ────────────────────────────────
+    # ── Variant choice short-circuit (Meta catalog only) ───────────
+    # Product-level rich presentation (legacy image + product URL) remains
+    # allowed. This action blocks binding a Meta catalog retailer_id until
+    # the customer pins a sellable variant — it must not suppress the
+    # product card itself.
     picked_variant_rid = (attachment.get("picked_variant_retailer_id") or "").strip()
     if (
         variant_send_enabled()

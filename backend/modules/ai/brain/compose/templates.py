@@ -512,11 +512,13 @@ def ask_product_variants(
     variants: List[Dict[str, Any]] | None = None,
     **_: Any,
 ) -> str:
-    """Ask the customer to pick a sellable variant before we ship a card.
+    """Ask the customer to pin a sellable variant after product presentation.
 
-    Used by the responder when the resolver returns a parent with
+    Used when the resolver returns a parent with
     ``needs_variant_choice=True`` (Phase 3 of the catalog refactor —
-    migration 0064). Different from :func:`ask_product_options`:
+    migration 0064). Complements the rich product card — it does not
+    replace product-level image/URL presentation. Different from
+    :func:`ask_product_options`:
 
       * ``ask_product_options`` walks Salla *option groups* (one
         question per group: size, then colour, then material …) —
