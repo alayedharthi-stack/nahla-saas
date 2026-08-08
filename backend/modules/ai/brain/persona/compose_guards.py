@@ -206,6 +206,42 @@ def _catalog_ambiguity_guard_fail(
     )
 
 
+def _availability_markers_in_text(text: str) -> bool:
+    working = str(text or "").strip().lower()
+    if not working:
+        return False
+    availability_markers = (
+        "متوفر",
+        "غير متوفر",
+        "نفذ",
+        "available",
+        "out of stock",
+    )
+    return any(m in working for m in availability_markers)
+
+
+def _availability_claim_allowed(facts: dict[str, Any]) -> bool:
+    """Claim-scope gate: matching-set existence ≠ product/variant stock authority."""
+    subject_scope = str(facts.get("subject_scope") or "").strip()
+    if subject_scope == "matching_set":
+        return bool(
+            facts.get("category_existence")
+            or facts.get("allow_matching_set_existence_mention")
+            or facts.get("allow_availability_mention")
+        )
+    if subject_scope == "variant":
+        return bool(facts.get("allow_variant_availability_mention"))
+    if subject_scope == "product":
+        return bool(
+            facts.get("allow_product_availability_mention")
+            or (
+                facts.get("allow_availability_mention")
+                and not facts.get("require_clarification")
+            )
+        )
+    return bool(facts.get("allow_availability_mention"))
+
+
 def _classify_ambiguous_catalog_reply_violation(
     text: str,
     facts: dict[str, Any],
@@ -215,16 +251,8 @@ def _classify_ambiguous_catalog_reply_violation(
     if not working or not facts.get("require_clarification"):
         return ""
 
-    if not facts.get("allow_availability_mention"):
-        availability_markers = (
-            "متوفر",
-            "غير متوفر",
-            "نفذ",
-            "available",
-            "out of stock",
-        )
-        if any(m in working.lower() for m in availability_markers):
-            return "invented_availability"
+    if _availability_markers_in_text(working) and not _availability_claim_allowed(facts):
+        return "invented_availability"
 
     allowed_amounts = _ambiguous_allowed_amounts(facts)
     claimed_amounts = _ambiguous_claimed_amounts(working)
@@ -984,21 +1012,22 @@ def _apply_catalog_product_answer_guards(
                 )
 
     if not require_clarification:
-        if not facts.get("allow_availability_mention"):
-            availability_markers = (
-                "متوفر",
-                "غير متوفر",
-                "نفذ",
-                "available",
-                "out of stock",
+        if _availability_markers_in_text(working) and not _availability_claim_allowed(
+            facts
+        ):
+            return PersonaGuardResult(
+                text=working,
+                passed=False,
+                failed_reason="invented_availability",
             )
-            if any(m in working.lower() for m in availability_markers):
-                return PersonaGuardResult(
-                    text=working,
-                    passed=False,
-                    failed_reason="invented_availability",
-                )
-        elif "متوفر" in working and not facts.get("has_positive_availability"):
+        if (
+            "متوفر" in working
+            and not facts.get("has_positive_availability")
+            and not (
+                str(facts.get("subject_scope") or "").strip() == "matching_set"
+                and facts.get("category_existence")
+            )
+        ):
             return PersonaGuardResult(
                 text=working,
                 passed=False,

@@ -1167,7 +1167,7 @@ class TestCompoundCatalogFacetsSemantics:
         prompt = build_user_prompt(bundle)
         assert "requested_facets: price, availability" in prompt
         assert "answer both verified price and per-product availability" in prompt
-        assert "available=True" in prompt
+        assert "orderable=True" in prompt
 
     def test_duplicate_exact_names_with_conflicting_prices_require_clarification(
         self,
