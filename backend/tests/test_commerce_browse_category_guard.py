@@ -13,6 +13,7 @@ if _backend not in sys.path:
 
 from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: E402
     extract_browse_category_scope,
+    extract_browse_category_scopes,
     filter_products_for_browse_turn,
     filter_products_to_browse_category,
     is_category_scoped_browse,
@@ -299,3 +300,131 @@ class TestHoneySessionLockedBrowse:
 
     def test_honey_subtype_without_explicit_honey_word(self) -> None:
         assert resolve_browse_category_scope("ابي طلح") == "عسل"
+
+
+class TestArabicPluralAndMultiScopeResolution:
+    """RCA fix — plural morphology + multi-category OR/AND union.
+
+    Uses generic apparel nouns only; no merchant/SKU hardcoding in runtime.
+    """
+
+    _CATALOG = [
+        _product(1, "جاكيت"),
+        _product(2, "فستان"),
+        _product(3, "بنطلون"),
+        _product(4, "بلوزة"),
+    ]
+
+    def test_sound_plural_scope_matches_singular_title(self) -> None:
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message="وش عندكم جاكيتات؟",
+            query="",
+            source="top_products",
+        )
+        assert [p["id"] for p in filtered] == [1]
+
+    def test_broken_plural_scope_matches_singular_title(self) -> None:
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message="وش عندكم فساتين؟",
+            query="",
+            source="top_products",
+        )
+        assert [p["id"] for p in filtered] == [2]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "وش عندكم جاكيتات أو فساتين ؟",
+            "وش عندكم جاكيتات وفساتين ؟",
+            "جاكيتات و فساتين",
+        ],
+    )
+    def test_multi_category_union_keeps_both_families(self, message: str) -> None:
+        scopes = extract_browse_category_scopes(message)
+        assert set(scopes) == {"جاكيتات", "فساتين"}
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message=message,
+            query="",
+            source="top_products",
+        )
+        assert {p["id"] for p in filtered} == {1, 2}
+        assert 3 not in {p["id"] for p in filtered}
+
+    def test_unmatched_scope_stays_empty(self) -> None:
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message="وش عندكم قبعات؟",
+            query="",
+            source="top_products",
+        )
+        assert filtered == []
+
+    def test_global_browse_without_scope_is_untouched(self) -> None:
+        message = "وش عندكم؟"
+        assert extract_browse_category_scope(message) is None
+        assert is_category_scoped_browse(message, source="top_products") is False
+        filtered = filter_products_to_browse_category(
+            self._CATALOG,
+            message=message,
+            query="",
+            source="top_products",
+        )
+        assert len(filtered) == len(self._CATALOG)
+
+    def test_multi_match_stays_multi_candidate(self) -> None:
+        catalog = [
+            _product(10, "جاكيت خفيف"),
+            _product(11, "جاكيت شتوي"),
+            _product(12, "فستان"),
+        ]
+        filtered = filter_products_to_browse_category(
+            catalog,
+            message="وش عندكم جاكيتات؟",
+            source="top_products",
+        )
+        assert [p["id"] for p in filtered] == [10, 11]
+        assert len(filtered) >= 2
+
+    def test_single_resolved_candidate_ready_for_presentation_contract(self) -> None:
+        catalog = [
+            _product(20, "جاكيت", category="جاكيت"),
+            _product(21, "فستان"),
+        ]
+        filtered = filter_products_to_browse_category(
+            catalog,
+            message="اعرض الجاكيت",
+            source="top_products",
+        )
+        assert len(filtered) == 1
+        assert filtered[0]["id"] == 20
+        # Presentation (#787) requires candidate_count==1 + catalog identity —
+        # scope resolution must surface exactly one catalog row here.
+        assert filtered[0].get("title") and (
+            filtered[0].get("id") is not None or filtered[0].get("category")
+        )
+
+    def test_tenant_isolation_filter_is_list_local(self) -> None:
+        tenant_a = [_product(101, "جاكيت"), _product(102, "فستان")]
+        tenant_b = [_product(201, "جاكيت"), _product(202, "فستان")]
+        out_a = filter_products_for_browse_turn(
+            tenant_a,
+            message="وش عندكم جاكيتات أو فساتين ؟",
+            source="top_products",
+            tenant_id=1,
+        )
+        out_b = filter_products_for_browse_turn(
+            tenant_b,
+            message="وش عندكم جاكيتات أو فساتين ؟",
+            source="top_products",
+            tenant_id=2,
+        )
+        assert {p["id"] for p in out_a} == {101, 102}
+        assert {p["id"] for p in out_b} == {201, 202}
+        assert not ({p["id"] for p in out_a} & {p["id"] for p in out_b})
+
+    def test_primary_scope_api_keeps_first_for_compat(self) -> None:
+        assert extract_browse_category_scope("جاكيتات أو فساتين") == "جاكيتات"
+        assert resolve_browse_category_scope("جاكيتات أو فساتين") == "جاكيتات"
