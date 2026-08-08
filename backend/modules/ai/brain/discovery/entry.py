@@ -592,11 +592,14 @@ def _apply_catalog_group_scope(
                 )
 
                 if entry.entry_type == GLOBAL_BROWSE:
+                    # Merchant catalog-*group* miss only. Lexical category
+                    # nouns (جاكيتات / فساتين / …) remain owned by
+                    # commerce_browse_category_guard and must still filter.
                     emit_catalog_intelligence_event(
                         "global_browse",
                         tenant_id=int(tenant_id),
                         group=None,
-                        reason="no_scope_match",
+                        reason="no_merchant_group_match",
                         entry_type=entry.entry_type,
                     )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not break routing

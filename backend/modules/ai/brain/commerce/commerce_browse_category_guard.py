@@ -64,8 +64,17 @@ _SCOPE_STOPWORDS = frozenset({
     "اسعار", "أسعار", "سعر", "سعره", "سعرها", "ثمن", "تكلفة", "بكم", "كم",
     "price", "prices", "cost", "costs", "how", "much",
     "من", "from",
+    # Multi-scope connectors (never category nouns).
+    "أو", "او", "or", "and", "و",
     "؟", "?", ".", "!", ",",
 })
+
+# Split multi-category browse phrases: "X أو Y", "X و Y", "X and Y".
+# Requires a leading space before the connector so mid-word و is never split.
+_SCOPE_CONNECTOR_RE = re.compile(
+    r"\s+(?:أو|او|or|and|و)\s*|[,،]",
+    re.UNICODE | re.IGNORECASE,
+)
 
 # Price / availability lead-ins stripped before category noun extraction.
 _PRICE_LEAD_RE = re.compile(
@@ -186,6 +195,16 @@ def _is_valid_scope_token(token: str) -> bool:
 
 
 def _scope_variants(scope: str) -> frozenset[str]:
+    """Closed plural/singular variants — no open morphology / no SKU lists.
+
+    Sound ``...ات`` plurals yield:
+    - bare stem when stem length ≥ 4 (loan/masculine titles: جاكيتات → جاكيت)
+    - stem+ه for feminine singular under module norm (ساعات → ساعه)
+
+    Broken ``...اتين`` plurals yield ``...تان`` (فساتين → فستان). Reverse
+    singular→plural variants are added so a singular customer noun still
+    matches plural title tokens when present.
+    """
     base = _canonical_scope_token(scope)
     if not base:
         return frozenset()
@@ -194,11 +213,24 @@ def _scope_variants(scope: str) -> frozenset[str]:
         variants.add(base[2:])
     elif len(base) >= 2:
         variants.add(f"ال{base}")
-    # Sound feminine plural (ساعات) → singular under module norm (ساعه).
-    if base.endswith("ات") and len(base) >= 5:
+    # Sound feminine / loanword plural (...ات), not ...اتين (handled below).
+    if base.endswith("ات") and not base.endswith("اتين") and len(base) >= 5:
         stem = base[:-2]
+        if len(stem) >= 4:
+            variants.add(stem)
         if len(stem) >= 3:
             variants.add(stem + "ه")
+    elif len(base) >= 4 and not base.endswith(("ات", "ين", "ون", "ان")):
+        variants.add(base + "ات")
+    # Broken plural (...اتين ↔ ...تان), e.g. فساتين ↔ فستان.
+    if base.endswith("اتين") and len(base) >= 6:
+        stem = base[:-4]
+        if len(stem) >= 2:
+            variants.add(stem + "تان")
+    elif base.endswith("تان") and len(base) >= 4:
+        stem = base[:-3]
+        if len(stem) >= 2:
+            variants.add(stem + "اتين")
     return frozenset(v for v in variants if v)
 
 
@@ -237,6 +269,57 @@ def active_category_from_state(state: Any) -> str:
     return ""
 
 
+def resolve_browse_category_scopes(
+    message: str,
+    query: str = "",
+    *,
+    active_category: str = "",
+    source: str = "",
+) -> List[str]:
+    """Resolve all trusted lexical category scopes for this browse turn.
+
+    Ownership contract:
+    - Lexical noun scopes are owned here (``commerce_browse_category_guard``).
+    - ``CATALOG_INTELLIGENCE`` ``no_scope_match`` / ``no_merchant_group_match``
+      only means merchant *group* resolution missed — it must not suppress
+      lexical filtering, and lexical filtering must not invent a single scope
+      that empties a multi-category ask.
+    """
+    scopes = extract_browse_category_scopes(message, query)
+    if scopes:
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for scope in scopes:
+            scope_norm = _canonical_scope_token(scope)
+            if scope_norm in _HONEY_SUBTYPE_SCOPE_HINTS or scope_norm == "عسل":
+                token = "عسل"
+            else:
+                token = scope
+            key = _canonical_scope_token(token)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(token)
+        return normalized
+
+    msg_norm = _norm(message or "")
+    msg_tokens = set(_tokens(msg_norm))
+    if msg_tokens & _HONEY_SUBTYPE_SCOPE_HINTS or any(
+        hint in msg_norm for hint in _HONEY_SUBTYPE_SCOPE_HINTS
+    ):
+        return ["عسل"]
+
+    locked = _canonical_scope_token(active_category or "")
+    src = str(source or "").strip().lower()
+    if locked == "عسل":
+        if is_generic_category_browse(message, query):
+            return ["عسل"]
+        if src in _SESSION_SCOPED_SOURCES:
+            return ["عسل"]
+
+    return []
+
+
 def resolve_browse_category_scope(
     message: str,
     query: str = "",
@@ -244,45 +327,48 @@ def resolve_browse_category_scope(
     active_category: str = "",
     source: str = "",
 ) -> Optional[str]:
-    """Resolve category scope from message, query, or locked session context."""
-    scope = extract_browse_category_scope(message, query)
-    if scope:
-        scope_norm = _canonical_scope_token(scope)
-        if scope_norm in _HONEY_SUBTYPE_SCOPE_HINTS or scope_norm == "عسل":
-            return "عسل"
-        return scope
+    """Resolve primary category scope (first trusted lexical scope)."""
+    scopes = resolve_browse_category_scopes(
+        message,
+        query,
+        active_category=active_category,
+        source=source,
+    )
+    return scopes[0] if scopes else None
 
-    msg_norm = _norm(message or "")
-    msg_tokens = set(_tokens(msg_norm))
-    if msg_tokens & _HONEY_SUBTYPE_SCOPE_HINTS or any(
-        hint in msg_norm for hint in _HONEY_SUBTYPE_SCOPE_HINTS
-    ):
-        return "عسل"
 
-    locked = _canonical_scope_token(active_category or "")
-    src = str(source or "").strip().lower()
-    if locked == "عسل":
-        if is_generic_category_browse(message, query):
-            return "عسل"
-        if src in _SESSION_SCOPED_SOURCES:
-            return "عسل"
+def _strip_browse_leads(candidate: str) -> str:
+    stripped = _BROWSE_LEAD_RE.sub("", _norm(candidate)).strip(" ؟?!.")
+    stripped = _PRICE_LEAD_RE.sub("", stripped).strip(" ؟?!.")
+    stripped = re.sub(r"^(?:ال|the|من|from)\s+", "", stripped)
+    return stripped.strip(" ؟?!.")
 
+
+def _scope_token_from_segment(segment: str) -> Optional[str]:
+    for tok in _tokens(segment):
+        scope = _canonical_scope_token(tok)
+        if _is_valid_scope_token(scope):
+            return scope
     return None
 
 
-def extract_browse_category_scope(
+def extract_browse_category_scopes(
     message: str,
     query: str = "",
-) -> Optional[str]:
-    """Return the primary category noun when browse is category-scoped."""
+) -> List[str]:
+    """Return all trusted category nouns for category-scoped browse.
+
+    Multi-category asks (``X أو Y`` / ``X و Y`` / ``X and Y``) keep every
+    valid segment scope — never collapse to the first noun only.
+    """
     msg = (message or "").strip()
     q = (query or "").strip()
     if not msg and not q:
-        return None
+        return []
 
     msg_norm = _norm(msg)
     if msg_norm and _GLOBAL_ONLY_RE.search(msg_norm):
-        return None
+        return []
 
     try:
         from ..product_discovery_gate import (  # noqa: PLC0415
@@ -292,24 +378,66 @@ def extract_browse_category_scope(
 
         if has_types_overview_ask(msg, q):
             subject = extract_types_overview_query(msg) or q
+            stripped_subject = _strip_browse_leads(str(subject or ""))
+            parts = [
+                part.strip()
+                for part in _SCOPE_CONNECTOR_RE.split(stripped_subject)
+                if part and part.strip()
+            ] or ([stripped_subject] if stripped_subject else [])
+            scopes: List[str] = []
+            seen: set[str] = set()
+            for part in parts:
+                scope = _scope_token_from_segment(part)
+                if not scope:
+                    continue
+                key = _canonical_scope_token(scope)
+                if key in seen:
+                    continue
+                seen.add(key)
+                scopes.append(scope)
+            if scopes:
+                return scopes
             scope = _canonical_scope_token(subject)
             if _is_valid_scope_token(scope):
-                return scope
+                return [scope]
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] types_overview extract failed")
 
     for candidate in (q, msg):
         if not candidate:
             continue
-        stripped = _BROWSE_LEAD_RE.sub("", _norm(candidate)).strip(" ؟?!.")
-        stripped = _PRICE_LEAD_RE.sub("", stripped).strip(" ؟?!.")
-        stripped = re.sub(r"^(?:ال|the|من|from)\s+", "", stripped)
-        for tok in _tokens(stripped):
-            scope = _canonical_scope_token(tok)
-            if _is_valid_scope_token(scope):
-                return scope
+        stripped = _strip_browse_leads(candidate)
+        if not stripped:
+            continue
+        parts = [
+            part.strip()
+            for part in _SCOPE_CONNECTOR_RE.split(stripped)
+            if part and part.strip()
+        ] or [stripped]
+        scopes: List[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            scope = _scope_token_from_segment(part)
+            if not scope:
+                continue
+            key = _canonical_scope_token(scope)
+            if key in seen:
+                continue
+            seen.add(key)
+            scopes.append(scope)
+        if scopes:
+            return scopes
 
-    return None
+    return []
+
+
+def extract_browse_category_scope(
+    message: str,
+    query: str = "",
+) -> Optional[str]:
+    """Return the primary category noun when browse is category-scoped."""
+    scopes = extract_browse_category_scopes(message, query)
+    return scopes[0] if scopes else None
 
 
 def is_category_scoped_browse(
@@ -319,14 +447,14 @@ def is_category_scoped_browse(
     source: str = "",
     active_category: str = "",
 ) -> bool:
-    """True when this turn should keep catalog results inside one category."""
-    scope = resolve_browse_category_scope(
+    """True when this turn should keep catalog results inside requested scopes."""
+    scopes = resolve_browse_category_scopes(
         message,
         query,
         active_category=active_category,
         source=source,
     )
-    if not scope:
+    if not scopes:
         return False
 
     src = str(source or "").strip().lower()
@@ -338,7 +466,7 @@ def is_category_scoped_browse(
     try:
         from .product_breadth_policy import global_availability_browse_requested  # noqa: PLC0415
 
-        if global_availability_browse_requested(message or "") and not scope:
+        if global_availability_browse_requested(message or "") and not scopes:
             return False
     except Exception:  # noqa: BLE001
         logger.exception("[BROWSE_CATEGORY_GUARD] global browse check failed")
@@ -456,6 +584,23 @@ def should_exclude_cross_category_product(
     return True
 
 
+def _product_kept_for_scopes(
+    product: Mapping[str, Any],
+    *,
+    scopes: Sequence[str],
+    message: str,
+) -> bool:
+    """Union match: keep when any trusted scope accepts the product."""
+    for scope in scopes:
+        if not should_exclude_cross_category_product(
+            product,
+            scope=str(scope),
+            message=message,
+        ):
+            return True
+    return False
+
+
 def filter_products_to_browse_category(
     products: Sequence[Mapping[str, Any]],
     *,
@@ -464,7 +609,10 @@ def filter_products_to_browse_category(
     source: str = "",
     active_category: str = "",
 ) -> List[Dict[str, Any]]:
-    """Keep only in-scope products for category-scoped browse turns."""
+    """Keep only in-scope products for category-scoped browse turns.
+
+    Multi-scope asks use union matching across all trusted scopes.
+    """
     items = [dict(p) for p in (products or []) if isinstance(p, Mapping)]
     if not items:
         return items
@@ -477,27 +625,27 @@ def filter_products_to_browse_category(
     ):
         return items
 
-    scope = resolve_browse_category_scope(
+    scopes = resolve_browse_category_scopes(
         message,
         query,
         active_category=active_category,
         source=source,
     )
-    if not scope:
+    if not scopes:
         return items
 
     kept: List[Dict[str, Any]] = []
     dropped = 0
     for product in items:
-        if should_exclude_cross_category_product(product, scope=scope, message=message):
+        if _product_kept_for_scopes(product, scopes=scopes, message=message):
+            kept.append(product)
+        else:
             dropped += 1
-            continue
-        kept.append(product)
 
     if dropped:
         logger.info(
-            "[BROWSE_CATEGORY_GUARD] scope=%r in=%d out=%d dropped=%d source=%r preview=%r",
-            scope,
+            "[BROWSE_CATEGORY_GUARD] scopes=%r in=%d out=%d dropped=%d source=%r preview=%r",
+            scopes,
             len(items),
             len(kept),
             dropped,
@@ -611,11 +759,13 @@ def filter_products_for_browse_turn(
 __all__ = [
     "active_category_from_state",
     "extract_browse_category_scope",
+    "extract_browse_category_scopes",
     "filter_products_for_browse_turn",
     "filter_products_to_browse_category",
     "is_category_price_or_availability_message",
     "is_category_scoped_browse",
     "is_generic_category_browse",
     "resolve_browse_category_scope",
+    "resolve_browse_category_scopes",
     "should_exclude_cross_category_product",
 ]
