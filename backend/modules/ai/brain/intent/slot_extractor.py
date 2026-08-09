@@ -217,10 +217,10 @@ async def extract_slots(
                     ttft_available=False,
                     input_tokens=audit_context.get("estimated_input_tokens"),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
             return deterministic
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _slot_fallback = "llm_error"
             try:
                 from core.turn_latency import (  # noqa: PLC0415
@@ -240,7 +240,7 @@ async def extract_slots(
                     ttft_available=False,
                     input_tokens=audit_context.get("estimated_input_tokens"),
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
             return deterministic
         try:
@@ -271,7 +271,7 @@ async def extract_slots(
                 ),
                 cached_tokens=(_usage or {}).get("cached_tokens"),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         raw = str(result.get("reply_text") or "").strip()
         if not raw:

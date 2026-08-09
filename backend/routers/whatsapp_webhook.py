@@ -321,13 +321,13 @@ def _otp_merge_save_metadata(
         )
 
         merge_turn_latency_into_metadata(base, get_turn_latency())
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
     if tracker is None:
         return base
     try:
         return merge_policy_into_extra_metadata(base, tracker.to_metadata())
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return base
 
 
@@ -1371,7 +1371,7 @@ async def _handle_360dialog_body(
             return
         try:
             _record_webhook_event(**kwargs)
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     db = SessionLocal()
@@ -1556,7 +1556,7 @@ async def _handle_360dialog_body(
                                 "no WhatsAppConnection row matches"
                             ),
                         )
-                    except Exception as _obs_exc:  # noqa: BLE001
+                    except Exception as _obs_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     # ── W2.0.1.5: gap probe — phone_number_id known
                     # but no WhatsAppConnection row matches it. Most
@@ -1634,7 +1634,7 @@ async def _handle_360dialog_body(
                                 f"candidate_connections={connection_ids}"
                             ),
                         )
-                    except Exception as _obs_exc:  # noqa: BLE001
+                    except Exception as _obs_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     # ── W2.0.1.5: gap probe — ambiguous routing.
                     try:
@@ -1701,7 +1701,7 @@ async def _handle_360dialog_body(
                                 f"provider_on_row={wa_provider(wa_conn)!r}"
                             ),
                         )
-                    except Exception as _obs_exc:  # noqa: BLE001
+                    except Exception as _obs_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     # ── W2.0.1.5: gap probe — connection exists but
                     # provider on the row is NOT dialog360 (a Meta
@@ -1776,7 +1776,7 @@ async def _handle_360dialog_body(
                                 "X-Nahla-Coexistence-Secret header mismatch"
                             ),
                         )
-                    except Exception as _obs_exc:  # noqa: BLE001
+                    except Exception as _obs_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                         logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
                     # ── W2.0.1.5: gap probe — bad coexistence secret.
                     # Note this branch ``return``s (not ``continue``)
@@ -2248,12 +2248,12 @@ async def _handle_360dialog_body(
         )
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
     finally:
         try:
             db.close()
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
 
@@ -3114,7 +3114,7 @@ async def _dispatch_message(
             import time as _time_lat  # noqa: PLC0415
 
             _tenant_resolution_t0 = _time_lat.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _tenant_resolution_t0 = None
         wa_matches = (
             db.query(WhatsAppConnection)
@@ -3259,7 +3259,7 @@ async def _dispatch_message(
                     "tenant_resolution",
                     (_time_lat2.monotonic() - _tenant_resolution_t0) * 1000.0,
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _turn_latency = None
             _turn_latency_token = None
 
@@ -5432,15 +5432,15 @@ async def _dispatch_message(
                 try:
                     _turn_latency.snapshot(finalize_total=True)
                     _turn_latency.emit_log()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
             if _turn_latency_token is not None:
                 reset_turn_latency(_turn_latency_token)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         try:
             db.close()
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
 
@@ -5779,12 +5779,13 @@ async def _handle_merchant_message(
         message_id   = wa_msg_id or "",
         inbound_text = text or "",
     )
-    # Attach the pre-lock TurnLatency object (same turn) when present.
+    # Attach correlated turn_id on the pre-lock TurnLatency ContextVar.
+    # Do NOT store the live TurnLatency object on trace.extra (not JSON-safe).
     try:
         from core.turn_latency import (  # noqa: PLC0415
-            attach_timing_to_trace_extra,
             get_turn_latency,
             new_turn_latency,
+            bind_turn_latency,
         )
 
         _timing = get_turn_latency()
@@ -5793,13 +5794,13 @@ async def _handle_merchant_message(
                 tenant_id=int(tenant_id),
                 message_id=str(wa_msg_id or ""),
             )
+            bind_turn_latency(_timing)
         else:
             _timing.set_identity(
                 tenant_id=int(tenant_id),
                 message_id=str(wa_msg_id or ""),
             )
-        attach_timing_to_trace_extra(_trace.extra, _timing)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
     from modules.ai.brain.persona_ownership import (  # noqa: PLC0415
         PersonaBypassReason as _POReason,
@@ -6610,7 +6611,7 @@ async def _handle_merchant_message(
             )
 
             _t_inb = _time_inb.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_inb = None
         StateManager.save_message(
             db, to, _inbound_body, "inbound",
@@ -6630,7 +6631,7 @@ async def _handle_merchant_message(
             _tl_inb = get_turn_latency()
             if _tl_inb is not None:
                 _tl_inb.set_identity(conversation_id=int(convo.id))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         # ── Repeated short fragment guard (Jun 2026) ─────────────────────
@@ -9935,7 +9936,7 @@ async def _handle_merchant_message(
                 import time as _time_outp  # noqa: PLC0415
 
                 _t_outp = _time_outp.monotonic()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_outp = None
             StateManager.save_message(
                 db, to, reply, "outbound",
@@ -9960,7 +9961,7 @@ async def _handle_merchant_message(
                         "outbound_persist",
                         (_time_outp2.monotonic() - _t_outp) * 1000.0,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
 
         latency_ms = 0
@@ -9981,7 +9982,7 @@ async def _handle_merchant_message(
                 response_text=reply,
                 latency_ms=latency_ms,
             ), tenant_id=tenant_id)
-        except Exception:
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         # Phase 4 — Response Compression Layer.
@@ -12801,7 +12802,7 @@ async def _handle_merchant_message(
                     import time as _time_pres  # noqa: PLC0415
 
                     _t_presentation = _time_pres.monotonic()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     _t_presentation = None
                 try:
                     from database.models import (  # noqa: PLC0415
@@ -12812,7 +12813,7 @@ async def _handle_merchant_message(
                         .filter(_WAConn.tenant_id == tenant_id)
                         .first()
                     )
-                except Exception as _conn_lookup_exc:  # noqa: BLE001
+                except Exception as _conn_lookup_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     logger.debug(
                         "[CATALOG] tenant=%s connection lookup failed "
                         "(catalog send will be skipped, legacy path "
@@ -13244,7 +13245,7 @@ async def _handle_merchant_message(
                             "presentation",
                             (_time_pres2.monotonic() - _t_presentation) * 1000.0,
                         )
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
 
             # ── Staff call contact cards ────────────────────────────
@@ -13895,20 +13896,18 @@ async def _handle_merchant_message(
         _sync_persona_observability()
         try:
             # Finalize turn_timing snapshot onto the trace for metadata merge.
-            from core.turn_latency import (  # noqa: PLC0415
-                timing_from_trace_extra,
-            )
+            from core.turn_latency import get_turn_latency  # noqa: PLC0415
 
-            _tl = timing_from_trace_extra(_trace.extra)
+            _tl = get_turn_latency()
             if _tl is not None:
                 snap = _tl.snapshot(finalize_total=True)
                 _trace.extra["turn_timing_snapshot"] = snap
                 _tl.emit_log()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         try:
             _trace.emit()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
 
@@ -14319,9 +14318,9 @@ async def _post_wa(
 
                     if _duration is not None:
                         safe_record_ms("provider_send", _duration)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
-            except Exception as _stamp_exc:  # noqa: BLE001
+            except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 logger.warning(
                     "[WA] outbound stamp failed (non-fatal) tenant=%s err=%s",
                     _tenant_id, _stamp_exc,
@@ -14344,7 +14343,7 @@ async def _post_wa(
                     succeeded=("error" not in (resp_data or {}))
                               and bool(_wamid),
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
             if "error" in (resp_data or {}):
                 err = (resp_data.get("error") or {}) if isinstance(resp_data, dict) else {}
@@ -14429,7 +14428,7 @@ async def _post_wa(
                                     operation="send_message_retry",
                                     duration_ms=(retry_data or {}).get("_nahla_duration_ms"),
                                 )
-                            except Exception as _retry_stamp_exc:  # noqa: BLE001
+                            except Exception as _retry_stamp_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                                 logger.warning(
                                     "[WA] outbound retry-stamp failed (non-fatal) tenant=%s err=%s",
                                     _tenant_id, _retry_stamp_exc,
@@ -14450,7 +14449,7 @@ async def _post_wa(
                                     succeeded=("error" not in (retry_data or {}))
                                               and bool(_retry_wamid),
                                 )
-                            except Exception as _dedup_rec_exc:  # noqa: BLE001
+                            except Exception as _dedup_rec_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                                 logger.exception(
                                     "[OUTBOUND_DEDUP] record_outbound_result failed "
                                     "tenant=%s recipient=*%s",

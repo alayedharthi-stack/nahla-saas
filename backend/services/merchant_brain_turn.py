@@ -1151,7 +1151,7 @@ async def evaluate_live_merchant_brain_turn(
             import time as _time_mbg  # noqa: PLC0415
 
             _t_mbg = _time_mbg.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_mbg = None
         reply, post_compose_primary_applied, post_compose_guard_events = (
             _apply_post_compose_truth_guards(
@@ -1180,7 +1180,7 @@ async def evaluate_live_merchant_brain_turn(
                     "guards",
                     (_time_mbg2.monotonic() - _t_mbg) * 1000.0,
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         if not billing_denied and not brain_silent and (reply or "").strip():

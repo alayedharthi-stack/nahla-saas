@@ -189,7 +189,7 @@ class CommerceToolRuntime:
             _tl = get_turn_latency()
             if _tl is not None:
                 _tl.add_db_queries("catalog_db", 1)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         return ToolExecutionResult(
             ok=True,

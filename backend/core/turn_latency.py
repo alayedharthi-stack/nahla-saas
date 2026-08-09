@@ -68,7 +68,7 @@ _CURRENT: contextvars.ContextVar[Optional["TurnLatency"]] = contextvars.ContextV
 def get_turn_latency() -> Optional["TurnLatency"]:
     try:
         return _CURRENT.get()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return None
 
 
@@ -76,14 +76,14 @@ def bind_turn_latency(timing: Optional["TurnLatency"]) -> contextvars.Token:
     """Bind timing into the ContextVar. Always returns a reset token."""
     try:
         return _CURRENT.set(timing)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return _CURRENT.set(None)
 
 
 def reset_turn_latency(token: contextvars.Token) -> None:
     try:
         _CURRENT.reset(token)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
@@ -92,14 +92,14 @@ def _safe_int(value: Any, default: int = 0) -> int:
         if value is None:
             return default
         return int(value)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return default
 
 
 def _safe_float_ms(started: float) -> int:
     try:
         return max(0, int((time.monotonic() - started) * 1000.0))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return 0
 
 
@@ -186,7 +186,7 @@ class TurnLatency:
                 self.message_id = str(message_id or "")[:128]
             if turn_id is not None and str(turn_id).strip():
                 self.turn_id = str(turn_id).strip()[:64]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     # ── span API ──────────────────────────────────────────────────
@@ -197,7 +197,7 @@ class TurnLatency:
             if not key:
                 return
             self._open_spans[key] = time.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     def end(self, name: str) -> Optional[int]:
@@ -209,7 +209,7 @@ class TurnLatency:
             if started is None:
                 return None
             return self.record_ms(key, _safe_float_ms(started))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return None
 
     def record_ms(self, name: str, duration_ms: Any) -> Optional[int]:
@@ -226,7 +226,7 @@ class TurnLatency:
             elif key == "conversation_lock_hold":
                 self.lock_hold_ms = int(self.spans_ms[key])
             return ms
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return None
 
     def add_db_queries(self, stage: str, count: int = 1) -> None:
@@ -237,7 +237,7 @@ class TurnLatency:
             self.db_query_counts[key] = int(self.db_query_counts.get(key, 0) or 0) + max(
                 0, int(count or 0)
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     def record_lock(
@@ -254,7 +254,7 @@ class TurnLatency:
                 self.record_ms("conversation_lock_hold", hold_ms)
             if waiters_ahead is not None:
                 self.waiters_ahead = max(0, _safe_int(waiters_ahead, 0))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     def record_llm_call(self, **kwargs: Any) -> None:
@@ -279,7 +279,7 @@ class TurnLatency:
                 # Never invent TTFT — drop first_token unless explicitly available.
                 call.first_token_ms = None
             self.llm_calls.append(call)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
     @contextmanager
@@ -297,7 +297,7 @@ class TurnLatency:
             if "total_turn" in self.spans_ms:
                 return int(self.spans_ms["total_turn"])
             return _safe_float_ms(self.started_monotonic)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return 0
 
     def accounted_ms(self) -> int:
@@ -305,7 +305,7 @@ class TurnLatency:
         try:
             for name in ACCOUNTABLE_STAGES:
                 total += int(self.spans_ms.get(name, 0) or 0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return 0
         return total
 
@@ -344,7 +344,7 @@ class TurnLatency:
             self._snapshot = out
             self._finalized = True
             return out
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return {
                 "turn_id": getattr(self, "turn_id", None),
                 "total_turn_ms": 0,
@@ -380,10 +380,10 @@ class TurnLatency:
                 len(snap.get("llm_calls") or []),
                 snap.get("spans_ms"),
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             try:
                 logger.debug("[TURN_LATENCY] emit failed", exc_info=False)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
 
 
@@ -392,7 +392,7 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
     try:
         return int(value)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return None
 
 
@@ -401,7 +401,7 @@ def _optional_float(value: Any) -> Optional[float]:
         return None
     try:
         return float(value)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return None
 
 
@@ -434,7 +434,7 @@ def merge_turn_latency_into_metadata(
         snap = timing._snapshot or timing.snapshot(finalize_total=False)
         # Avoid rewriting total if caller will finalize later; still export spans.
         metadata["turn_timing"] = snap
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
@@ -446,7 +446,7 @@ def safe_span(name: str):
         timing = None
         try:
             timing = get_turn_latency()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             timing = None
         if timing is None:
             yield
@@ -455,7 +455,7 @@ def safe_span(name: str):
         try:
             timing.start(name)
             started = True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             started = False
         try:
             yield
@@ -463,7 +463,7 @@ def safe_span(name: str):
             if started:
                 try:
                     timing.end(name)
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
 
     return _cm()
@@ -475,7 +475,7 @@ def safe_record_ms(name: str, duration_ms: Any) -> None:
         if timing is None:
             return
         timing.record_ms(name, duration_ms)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
@@ -485,7 +485,7 @@ def safe_record_llm_call(**kwargs: Any) -> None:
         if timing is None:
             return
         timing.record_llm_call(**kwargs)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
@@ -495,28 +495,25 @@ def safe_record_lock(**kwargs: Any) -> None:
         if timing is None:
             return
         timing.record_lock(**kwargs)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
 def attach_timing_to_trace_extra(extra: Optional[MutableMapping[str, Any]], timing: Optional[TurnLatency]) -> None:
+    """Attach a JSON-safe timing *snapshot* only (never the live object)."""
     try:
         if extra is None or timing is None:
             return
-        extra["turn_timing"] = timing
-    except Exception:  # noqa: BLE001
+        extra["turn_timing_snapshot"] = timing.snapshot(finalize_total=False)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
 
 def timing_from_trace_extra(extra: Optional[Mapping[str, Any]]) -> Optional[TurnLatency]:
+    """Deprecated helper — live objects are not stored on trace.extra."""
     try:
-        if not isinstance(extra, Mapping):
-            return None
-        value = extra.get("turn_timing")
-        if isinstance(value, TurnLatency):
-            return value
-        return None
-    except Exception:  # noqa: BLE001
+        return get_turn_latency()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         return None
 
 

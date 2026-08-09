@@ -136,7 +136,7 @@ async def conversation_lock(
                     hold_ms=held_ms,
                     waiters_ahead=waiters_before,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
     finally:
         _WAITERS[key] = max(0, _WAITERS.get(key, 1) - 1)

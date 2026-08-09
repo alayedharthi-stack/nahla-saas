@@ -571,7 +571,7 @@ class FactBoundPersonaComposer:
                 ttft_available=False,
                 retry_count=0,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         logger.info(
             "[PERSONA_COMPOSE] surface=%s source=%s facts_hash=%s "

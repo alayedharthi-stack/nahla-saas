@@ -920,7 +920,7 @@ class MerchantBrain:
             from core.turn_latency import safe_record_ms as _tl_ms  # noqa: PLC0415
 
             _t_state = _time_state.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_state = None
             _tl_ms = None  # type: ignore[assignment]
         state_for_classify = self._state_store.load(db, tenant_id, customer_phone)
@@ -936,7 +936,7 @@ class MerchantBrain:
                 _tl_obj = _gtl()
                 if _tl_obj is not None:
                     _tl_obj.add_db_queries("state_db", 1)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         # ── 1b. Infer greeted from history (catches proactive outbounds) ─
@@ -1458,7 +1458,7 @@ class MerchantBrain:
                 from core.turn_latency import safe_record_ms as _tl_facts  # noqa: PLC0415
 
                 _t_facts = _time_facts.monotonic()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_facts = None
                 _tl_facts = None  # type: ignore[assignment]
             facts: CommerceFacts = load_minimal_commerce_facts(db, tenant_id)
@@ -1469,7 +1469,7 @@ class MerchantBrain:
                     _fd = (_time_facts2.monotonic() - _t_facts) * 1000.0
                     _tl_facts("facts_load", _fd)
                     _tl_facts("facts_db", _fd)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
             sales_context = self._sales_context_loader.load(
                 db,
@@ -1492,7 +1492,7 @@ class MerchantBrain:
                 from core.turn_latency import safe_record_ms as _tl_facts_full  # noqa: PLC0415
 
                 _t_facts_full = _time_facts_full.monotonic()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_facts_full = None
                 _tl_facts_full = None  # type: ignore[assignment]
             facts = self._facts_loader.load(db, tenant_id)
@@ -1508,7 +1508,7 @@ class MerchantBrain:
                     _o = _gtl_f()
                     if _o is not None:
                         _o.add_db_queries("facts_db", 1)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
 
             sales_context = self._sales_context_loader.load(
@@ -1528,7 +1528,7 @@ class MerchantBrain:
                 from core.turn_latency import safe_record_ms as _tl_cat  # noqa: PLC0415
 
                 _t_cat = _time_cat.monotonic()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_cat = None
                 _tl_cat = None  # type: ignore[assignment]
             try:
@@ -1544,7 +1544,7 @@ class MerchantBrain:
                 ) or {}
                 if _browse_defocus:
                     merchant_context["browse_defocus"] = True
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 logger.warning(
                     "[BrainPipeline] build_merchant_context failed tenant=%s — "
                     "falling back to legacy context: %s",
@@ -1563,7 +1563,7 @@ class MerchantBrain:
                     _oc = _gtl_c()
                     if _oc is not None:
                         _oc.add_db_queries("catalog_db", 1)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
 
             commerce_bundle = {}
@@ -1573,7 +1573,7 @@ class MerchantBrain:
                 commerce_bundle = _commerce_bundle_early or load_commerce_bundle_from_db(
                     db, tenant_id, customer_phone,
                 )
-            except Exception as _cb_exc:  # noqa: BLE001
+            except Exception as _cb_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 logger.exception(
                     "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
                     tenant_id, _cb_exc,
@@ -1586,7 +1586,7 @@ class MerchantBrain:
             from core.turn_latency import safe_record_ms as _tl_perm  # noqa: PLC0415
 
             _t_perm = _time_perm.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_perm = None
             _tl_perm = None  # type: ignore[assignment]
         _permission_load = load_tenant_commerce_permissions(db, tenant_id)
@@ -1598,7 +1598,7 @@ class MerchantBrain:
                     "permission_context_load",
                     (_time_perm2.monotonic() - _t_perm) * 1000.0,
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         # ── 3. Assemble context ───────────────────────────────────────────
@@ -2051,7 +2051,7 @@ class MerchantBrain:
             from core.turn_latency import safe_record_ms as _tl_dec  # noqa: PLC0415
 
             _t_dec = _time_dec.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_dec = None
             _tl_dec = None  # type: ignore[assignment]
         decision: Decision   = self._decision_engine.decide(ctx)
@@ -2060,7 +2060,7 @@ class MerchantBrain:
                 import time as _time_dec2  # noqa: PLC0415
 
                 _tl_dec("decision", (_time_dec2.monotonic() - _t_dec) * 1000.0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         reason_before_policy = decision.reason
         _legacy_decision_for_shadow = decision
@@ -2193,7 +2193,7 @@ class MerchantBrain:
             )
 
             decision = apply_catalog_search_evidence_gate(ctx, decision)
-        except Exception as _csg_exc:  # noqa: BLE001
+        except Exception as _csg_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             logger.exception(
                 "[CATALOG_SEARCH_GATE] apply failed tenant=%s err=%s",
                 tenant_id,
@@ -2311,7 +2311,7 @@ class MerchantBrain:
             from core.turn_latency import safe_record_ms as _tl_ex  # noqa: PLC0415
 
             _t_ex = _time_ex.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_ex = None
             _tl_ex = None  # type: ignore[assignment]
         result: ActionResult = await self._executor.execute(decision, ctx)
@@ -2321,7 +2321,7 @@ class MerchantBrain:
 
                 _ex_ms = (_time_ex2.monotonic() - _t_ex) * 1000.0
                 _tl_ex("tool_execution", _ex_ms)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         if _turn_owner_contract_meta:
@@ -3233,7 +3233,7 @@ class MerchantBrain:
             import time as _time_pc  # noqa: PLC0415
 
             _t_post_compose = _time_pc.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_post_compose = None
 
         try:
@@ -3650,14 +3650,14 @@ class MerchantBrain:
                     "post_compose",
                     (_time_pc2.monotonic() - _t_post_compose) * 1000.0,
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         try:
             import time as _time_sp  # noqa: PLC0415
             from core.turn_latency import safe_record_ms as _tl_sp  # noqa: PLC0415
 
             _t_sp = _time_sp.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_sp = None
             _tl_sp = None  # type: ignore[assignment]
         self._state_store.save(db, tenant_id, customer_phone, new_state)
@@ -3666,7 +3666,7 @@ class MerchantBrain:
                 import time as _time_sp2  # noqa: PLC0415
 
                 _tl_sp("state_persist", (_time_sp2.monotonic() - _t_sp) * 1000.0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         # ── 9. Persist trace ──────────────────────────────────────────────
@@ -4061,7 +4061,7 @@ class MerchantBrain:
             import time as _time_guards  # noqa: PLC0415
 
             _t_guards = _time_guards.monotonic()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_guards = None
 
         try:
@@ -4081,7 +4081,7 @@ class MerchantBrain:
             if _scg.replaced:
                 reply = _scg.reply
                 _guard_replaced["shipping_cost_truth_guard"] = True
-        except Exception as _scg_exc:  # noqa: BLE001
+        except Exception as _scg_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             logger.warning(
                 "[SHIPPING_COST_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _scg_exc,
@@ -4784,7 +4784,7 @@ class MerchantBrain:
                 elif _crqg.replaced:
                     reply = _crqg.reply
                     _guard_replaced["commerce_reply_quality_guard"] = True
-        except Exception as _crqg_exc:  # noqa: BLE001
+        except Exception as _crqg_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             logger.warning(
                 "[COMMERCE_REPLY_QUALITY_GUARD] pipeline hook failed tenant=%s err=%s",
                 tenant_id, _crqg_exc,
@@ -5094,7 +5094,7 @@ class MerchantBrain:
                 from core.turn_latency import safe_record_ms as _tl_guards  # noqa: PLC0415
 
                 _tl_guards("guards", (_time_guards2.monotonic() - _t_guards) * 1000.0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
         from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
@@ -5117,7 +5117,7 @@ class MerchantBrain:
                 intent=str(getattr(intent, "name", "") or ""),
                 final_text=reply or "",
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             logger.exception(
                 "[OUTBOUND_TEXT_POLICY] final reconcile failed tenant=%s",
                 tenant_id,
@@ -5304,7 +5304,7 @@ class MerchantBrain:
                 if conversation_id is not None:
                     _tl_ret.set_identity(conversation_id=int(conversation_id))
                 _out["turn_timing"] = _tl_ret.snapshot(finalize_total=False)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         return _out
 
