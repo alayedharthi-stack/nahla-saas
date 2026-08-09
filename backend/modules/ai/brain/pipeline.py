@@ -939,6 +939,13 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
+        try:
+            import time as _time_ir  # noqa: PLC0415
+
+            _t_intent_routing = _time_ir.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_intent_routing = None
+
         # ── 1b. Infer greeted from history (catches proactive outbounds) ─
         # If ANY prior outbound exists in history (cart recovery template,
         # automation push, manual agent reply, even our own previous turn
@@ -1451,6 +1458,17 @@ class MerchantBrain:
             )
 
         # ── 2. Load state + facts ─────────────────────────────────────────
+        try:
+            if _t_intent_routing is not None:
+                import time as _time_ir2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_ir  # noqa: PLC0415
+
+                _tl_ir(
+                    "intent_routing",
+                    (_time_ir2.monotonic() - _t_intent_routing) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
         state: MerchantConversationState = state_for_classify
         if _pre_commerce_shortcut:
             try:
@@ -2323,6 +2341,13 @@ class MerchantBrain:
                 _tl_ex("tool_execution", _ex_ms)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
+
+        try:
+            import time as _time_spj  # noqa: PLC0415
+
+            _t_state_projection = _time_spj.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_state_projection = None
 
         if _turn_owner_contract_meta:
             result.data["turn_owner_contract"] = dict(_turn_owner_contract_meta)
@@ -3225,6 +3250,17 @@ class MerchantBrain:
             )
 
         # ── 7. Compose reply ──────────────────────────────────────────────
+        try:
+            if _t_state_projection is not None:
+                import time as _time_spj2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_spj  # noqa: PLC0415
+
+                _tl_spj(
+                    "state_projection",
+                    (_time_spj2.monotonic() - _t_state_projection) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
         reply: str = await self._composer.compose(decision, result, ctx)
         result.data["compose_reply_candidate"] = str(reply or "").strip()
         # persona_compose span is recorded inside FactBoundPersonaComposer.
@@ -5297,13 +5333,20 @@ class MerchantBrain:
             **_track_need_ids_constitutional_meta,
         }
         try:
-            from core.turn_latency import get_turn_latency  # noqa: PLC0415
+            from core.turn_latency import (  # noqa: PLC0415
+                get_turn_latency,
+                safe_mark_brain_boundary,
+            )
 
             _tl_ret = get_turn_latency()
             if _tl_ret is not None:
                 if conversation_id is not None:
                     _tl_ret.set_identity(conversation_id=int(conversation_id))
-                _out["turn_timing"] = _tl_ret.snapshot(finalize_total=False)
+                safe_mark_brain_boundary()
+                _out["turn_timing"] = _tl_ret.snapshot(
+                    finalize_total=False,
+                    cache=False,
+                )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         return _out

@@ -1174,9 +1174,9 @@ async def evaluate_live_merchant_brain_turn(
         try:
             if _t_mbg is not None:
                 import time as _time_mbg2  # noqa: PLC0415
-                from core.turn_latency import safe_record_ms  # noqa: PLC0415
+                from core.turn_latency import safe_record_accountable_once  # noqa: PLC0415
 
-                safe_record_ms(
+                safe_record_accountable_once(
                     "guards",
                     (_time_mbg2.monotonic() - _t_mbg) * 1000.0,
                 )

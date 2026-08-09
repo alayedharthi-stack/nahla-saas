@@ -3259,6 +3259,9 @@ async def _dispatch_message(
                     "tenant_resolution",
                     (_time_lat2.monotonic() - _tenant_resolution_t0) * 1000.0,
                 )
+            from core.turn_latency import safe_mark_webhook_pre_persist_start  # noqa: PLC0415
+
+            safe_mark_webhook_pre_persist_start()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _turn_latency = None
             _turn_latency_token = None
@@ -5812,11 +5815,18 @@ async def _handle_merchant_message(
     _outbound_abort_suppressor = ""
     _outbound_abort_audited = False
     _outbound_customer_id: int | None = None
+    _t_merchant_entry_gates = None
 
     def _sync_persona_observability() -> None:
         _sync_po_trace(_trace, _persona_ownership)
 
     # ── P0 AI disabled kill switch (before ANY outbound / brain path) ───────
+    try:
+        import time as _time_meg  # noqa: PLC0415
+
+        _t_merchant_entry_gates = _time_meg.monotonic()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        _t_merchant_entry_gates = None
     try:
         from core.ai_disabled_gate import (  # noqa: PLC0415
             is_ai_disabled_for_conversation,
@@ -6392,6 +6402,19 @@ async def _handle_merchant_message(
             pass
         return
 
+    try:
+        if _t_merchant_entry_gates is not None:
+            import time as _time_meg2  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+            safe_record_ms(
+                "merchant_entry_gates",
+                (_time_meg2.monotonic() - _t_merchant_entry_gates) * 1000.0,
+            )
+            _t_merchant_entry_gates = None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
     # ── Top-k intent ranking (May 2026 #17) ─────────────────────────────────
     # Run the rule classifier ONCE at the top of the turn, capture the
     # full ranking, and stash it on the trace. The Brain pipeline will
@@ -6607,9 +6630,11 @@ async def _handle_merchant_message(
             import time as _time_inb  # noqa: PLC0415
             from core.turn_latency import (  # noqa: PLC0415
                 get_turn_latency,
+                safe_flush_webhook_pre_persist,
                 safe_record_ms,
             )
 
+            safe_flush_webhook_pre_persist()
             _t_inb = _time_inb.monotonic()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_inb = None
@@ -8728,6 +8753,14 @@ async def _handle_merchant_message(
                 profile=profile,
             )
             # Trusted-context source-order contract marker: brain.process(
+            try:
+                import time as _time_bbe  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                _t_brain_boundary = _time_bbe.monotonic()
+                safe_record_ms("brain_boundary_enter", 0)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_brain_boundary = None
             _turn_eval = await evaluate_live_merchant_brain_turn(
                 db=db,
                 tenant_id=tenant_id,
@@ -8740,6 +8773,21 @@ async def _handle_merchant_message(
                 brain_active=True,
                 skip_reason=_skip_reason,
             )
+            try:
+                if _t_brain_boundary is not None:
+                    import time as _time_bbe2  # noqa: PLC0415
+                    from core.turn_latency import (  # noqa: PLC0415
+                        safe_mark_post_brain_dispatch_start,
+                        safe_record_ms,
+                    )
+
+                    safe_record_ms(
+                        "brain_boundary_exit",
+                        (_time_bbe2.monotonic() - _t_brain_boundary) * 1000.0,
+                    )
+                    safe_mark_post_brain_dispatch_start()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             if _turn_eval.status == "brain_exception":
                 brain_exc = _turn_eval.brain_exception
                 try:
@@ -9934,7 +9982,9 @@ async def _handle_merchant_message(
         else:
             try:
                 import time as _time_outp  # noqa: PLC0415
+                from core.turn_latency import safe_flush_post_brain_dispatch  # noqa: PLC0415
 
+                safe_flush_post_brain_dispatch()
                 _t_outp = _time_outp.monotonic()
             except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_outp = None
@@ -14303,7 +14353,7 @@ async def _post_wa(
                 )
                 _wamid = (resp_data or {}).get("_nahla_wamid")
                 _duration = (resp_data or {}).get("_nahla_duration_ms")
-                stamp_outbound_send_status(
+                _stamped_id = stamp_outbound_send_status(
                     _db,
                     tenant_id=_tenant_id,
                     recipient=str(payload.get("to") or ""),
@@ -14314,10 +14364,19 @@ async def _post_wa(
                     duration_ms=_duration,
                 )
                 try:
-                    from core.turn_latency import safe_record_ms  # noqa: PLC0415
+                    from core.turn_latency import (  # noqa: PLC0415
+                        get_turn_latency,
+                        refresh_turn_latency_on_outbound_message,
+                        safe_record_ms,
+                    )
 
                     if _duration is not None:
                         safe_record_ms("provider_send", _duration)
+                    refresh_turn_latency_on_outbound_message(
+                        _db,
+                        get_turn_latency(),
+                        message_event_id=_stamped_id,
+                    )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
             except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open

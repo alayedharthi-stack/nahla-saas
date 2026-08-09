@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,7 +15,9 @@ from core.turn_latency import (
     get_turn_latency,
     merge_turn_latency_into_metadata,
     new_turn_latency,
+    refresh_turn_latency_on_outbound_message,
     reset_turn_latency,
+    safe_record_accountable_once,
     safe_record_llm_call,
     safe_record_lock,
     safe_record_ms,
@@ -154,7 +157,7 @@ def test_nested_spans_do_not_double_count_accounted() -> None:
     timing.record_ms("facts_db", 40)
     timing.record_ms("state_load", 30)
     timing.record_ms("total_turn", 6000)
-    snap = timing.snapshot(finalize_total=False)
+    snap = timing.snapshot(finalize_total=True, cache=False)
     # Only accountable stages: tool_execution + state_load
     assert snap["accounted_ms"] == 230
     assert snap["unaccounted_ms"] == 6000 - 230
@@ -233,11 +236,138 @@ def test_ttft_not_invented_when_unavailable() -> None:
     assert call["first_token_ms"] is None
 
 
-def test_merge_metadata_uses_snapshot_not_object() -> None:
+def test_merge_metadata_uses_fresh_snapshot_not_stale_cache() -> None:
     timing = new_turn_latency(tenant_id=3, conversation_id=5)
     timing.record_ms("provider_send", 9)
+    timing.snapshot(finalize_total=False, cache=True)
+    timing.record_ms("outbound_persist", 21)
     meta: dict[str, Any] = {}
     merge_turn_latency_into_metadata(meta, timing)
     assert isinstance(meta["turn_timing"], dict)
     assert meta["turn_timing"]["tenant_id"] == 3
     assert meta["turn_timing"]["spans_ms"]["provider_send"] == 9
+    assert meta["turn_timing"]["spans_ms"]["outbound_persist"] == 21
+    assert meta["turn_timing"]["snapshot_finalized"] is False
+
+
+def test_refresh_outbound_message_includes_provider_send() -> None:
+    timing = new_turn_latency(tenant_id=11, conversation_id=3)
+    timing.record_ms("persona_compose", 400)
+    timing.record_ms("outbound_persist", 30)
+    timing.record_ms("provider_send", 120)
+    row = MagicMock()
+    row.extra_metadata = {"phone": "966500000001"}
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = row
+
+    ok = refresh_turn_latency_on_outbound_message(db, timing, message_event_id=99)
+
+    assert ok is True
+    snap = row.extra_metadata["turn_timing"]
+    assert snap["spans_ms"]["provider_send"] == 120
+    assert snap["snapshot_finalized"] is True
+    assert snap["end_to_end_total_ms"] == snap["total_turn_ms"]
+
+
+def test_refresh_outbound_failure_still_finalizes_snapshot() -> None:
+    timing = new_turn_latency(tenant_id=2)
+    timing.record_ms("outbound_persist", 18)
+    timing.record_ms("provider_send", 250)
+    row = MagicMock()
+    row.extra_metadata = {
+        "provider_send": {
+            "status": "failed",
+            "classification": "provider_error_field",
+            "duration_ms": 250,
+        },
+    }
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = row
+
+    ok = refresh_turn_latency_on_outbound_message(db, timing, message_event_id=7)
+
+    assert ok is True
+    snap = row.extra_metadata["turn_timing"]
+    assert snap["spans_ms"]["provider_send"] == 250
+    assert snap["snapshot_finalized"] is True
+    assert row.extra_metadata["provider_send"]["status"] == "failed"
+
+
+def test_brain_mid_snapshot_distinguishable_from_final() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("persona_compose", 500)
+    time.sleep(0.005)
+    timing.mark_brain_boundary()
+    mid = timing.snapshot(finalize_total=False, cache=False)
+    timing.record_ms("post_brain_dispatch", 300)
+    timing.record_ms("outbound_persist", 40)
+    timing.record_ms("provider_send", 60)
+    final = timing.snapshot(finalize_total=True, cache=False)
+
+    assert mid["brain_total_ms"] >= 5
+    assert mid["snapshot_finalized"] is False
+    assert final["end_to_end_total_ms"] >= mid["brain_total_ms"]
+    assert final["spans_ms"]["post_brain_dispatch"] == 300
+
+
+def test_end_to_end_total_includes_post_brain_dispatch() -> None:
+    timing = new_turn_latency(tenant_id=4)
+    timing.mark_brain_boundary()
+    timing.record_ms("post_brain_dispatch", 800)
+    timing.record_ms("outbound_persist", 50)
+    timing.record_ms("provider_send", 150)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert snap["spans_ms"]["post_brain_dispatch"] == 800
+    assert snap["accounted_ms"] >= 1000
+
+
+def test_guards_not_double_counted_in_accounted_ms() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("guards", 200)
+    timing.record_accountable_once("guards", 150)
+    snap = timing.snapshot(finalize_total=False, cache=False)
+    assert snap["spans_ms"]["guards"] == 200
+    assert snap["accounted_ms"] == 200
+
+
+def test_safe_record_accountable_once_skips_second_pipeline_guard() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        safe_record_ms("guards", 180)
+        safe_record_accountable_once("guards", 90)
+        snap = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token)
+    assert snap["spans_ms"]["guards"] == 180
+
+
+def test_detail_spans_excluded_from_accounted_ms() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("facts_load", 30)
+    timing.record_ms("facts_db", 40)
+    timing.record_ms("catalog_search", 80)
+    timing.record_ms("conversation_lock_hold", 5000)
+    snap = timing.snapshot(finalize_total=False, cache=False)
+    assert snap["accounted_ms"] == 30
+    assert "facts_db" not in ACCOUNTABLE_STAGES
+    assert "catalog_search" not in ACCOUNTABLE_STAGES
+
+
+def test_refresh_fail_open_does_not_raise() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("provider_send", 10)
+    refresh_turn_latency_on_outbound_message(None, timing, message_event_id=1)
+    refresh_turn_latency_on_outbound_message(MagicMock(), None, message_event_id=1)
+
+
+def test_snapshot_refresh_overhead_smoke() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    for _ in range(10):
+        timing.record_ms("state_load", 1)
+        timing.record_ms("provider_send", 2)
+    t0 = time.perf_counter()
+    for _ in range(20):
+        timing.snapshot(finalize_total=True, cache=False)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 100.0

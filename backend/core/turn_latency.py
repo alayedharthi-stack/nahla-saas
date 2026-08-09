@@ -15,6 +15,19 @@ Contract
   are not double-counted.
 * TTFT is recorded only when a provider actually exposes first-token time;
   otherwise ``ttft_available=false`` (never invented).
+
+Snapshot semantics (v2)
+───────────────────────
+* ``brain_total_ms`` — wall time from turn start through the brain-return
+  boundary (first mid-turn snapshot, ``finalize_total=False``). Excludes
+  post-brain webhook dispatch, outbound persist, and provider send.
+* ``total_turn_ms`` — end-to-end wall time for the inbound turn when
+  ``finalize_total=True`` (same value as ``end_to_end_total_ms``).
+* ``merge_turn_latency_into_metadata`` always builds a **fresh** snapshot;
+  it never reuses a cached ``_snapshot`` from an earlier boundary.
+* ``refresh_turn_latency_on_outbound_message`` writes a final
+  ``finalize_total=True`` snapshot onto the persisted outbound row after
+  ``provider_send`` without re-recording spans.
 """
 from __future__ import annotations
 
@@ -30,17 +43,24 @@ logger = logging.getLogger("nahla.turn_latency")
 
 # Mutually exclusive stages summed into accounted_ms (no nesting).
 ACCOUNTABLE_STAGES: tuple[str, ...] = (
+    "webhook_dispatch_pre_persist",
     "inbound_persist",
     "tenant_resolution",
     "conversation_lock_wait",
+    "merchant_entry_gates",
+    "brain_boundary_enter",
+    "brain_boundary_exit",
+    "post_brain_dispatch",
     "state_load",
     "slot_extractor",
+    "intent_routing",
     "permission_context_load",
     "facts_load",
     "catalog_preload",
     "knowledge_retrieval",
     "decision",
     "tool_execution",
+    "state_projection",
     "persona_compose",
     "post_compose",
     "guards",
@@ -163,6 +183,10 @@ class TurnLatency:
     _open_spans: Dict[str, float] = field(default_factory=dict, repr=False)
     _finalized: bool = field(default=False, repr=False)
     _snapshot: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    _brain_boundary_monotonic: Optional[float] = field(default=None, repr=False)
+    _webhook_pre_persist_start: Optional[float] = field(default=None, repr=False)
+    _post_brain_dispatch_start: Optional[float] = field(default=None, repr=False)
+    _accountable_once: set[str] = field(default_factory=set, repr=False)
 
     # ── identity ──────────────────────────────────────────────────
 
@@ -228,6 +252,74 @@ class TurnLatency:
             return ms
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return None
+
+    def record_accountable_once(self, name: str, duration_ms: Any) -> Optional[int]:
+        """Record an accountable span only if not already present (first wins)."""
+        try:
+            key = str(name or "").strip()
+            if not key:
+                return None
+            if key in ACCOUNTABLE_STAGES and (
+                key in self._accountable_once
+                or int(self.span_counts.get(key, 0) or 0) > 0
+            ):
+                return int(self.spans_ms.get(key, 0) or 0)
+            recorded = self.record_ms(key, duration_ms)
+            if recorded is not None and key in ACCOUNTABLE_STAGES:
+                self._accountable_once.add(key)
+            return recorded
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            return None
+
+    def mark_webhook_pre_persist_start(self) -> None:
+        try:
+            self._webhook_pre_persist_start = time.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def flush_webhook_pre_persist(self) -> None:
+        """Record ``webhook_dispatch_pre_persist`` once at inbound_persist entry."""
+        try:
+            started = self._webhook_pre_persist_start
+            if started is None:
+                return
+            self._webhook_pre_persist_start = None
+            self.record_ms("webhook_dispatch_pre_persist", _safe_float_ms(started))
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def mark_brain_boundary(self) -> None:
+        """Freeze brain-return wall clock for mid-turn ``brain_total_ms``."""
+        try:
+            self._brain_boundary_monotonic = time.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def mark_post_brain_dispatch_start(self) -> None:
+        try:
+            self._post_brain_dispatch_start = time.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def flush_post_brain_dispatch(self) -> None:
+        """Record ``post_brain_dispatch`` once at outbound_persist entry."""
+        try:
+            started = self._post_brain_dispatch_start
+            if started is None:
+                return
+            self._post_brain_dispatch_start = None
+            self.record_ms("post_brain_dispatch", _safe_float_ms(started))
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def brain_total_ms(self) -> int:
+        try:
+            boundary = self._brain_boundary_monotonic
+            if boundary is not None:
+                return max(0, int((boundary - self.started_monotonic) * 1000.0))
+            return _safe_float_ms(self.started_monotonic)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            return 0
 
     def add_db_queries(self, stage: str, count: int = 1) -> None:
         try:
@@ -309,12 +401,21 @@ class TurnLatency:
             return 0
         return total
 
-    def snapshot(self, *, finalize_total: bool = True) -> Dict[str, Any]:
+    def snapshot(
+        self,
+        *,
+        finalize_total: bool = True,
+        cache: bool = True,
+    ) -> Dict[str, Any]:
         """Build a JSON-safe timing dict. Fail-open; never raises."""
         try:
-            if finalize_total and "total_turn" not in self.spans_ms:
-                self.record_ms("total_turn", self.total_turn_ms())
-            total = int(self.spans_ms.get("total_turn") or self.total_turn_ms() or 0)
+            brain_ms = self.brain_total_ms()
+            if finalize_total:
+                if "total_turn" not in self.spans_ms:
+                    self.record_ms("total_turn", self.total_turn_ms())
+                total = int(self.spans_ms.get("total_turn") or self.total_turn_ms() or 0)
+            else:
+                total = brain_ms
             accounted = self.accounted_ms()
             unaccounted = max(0, total - accounted)
             percent = round((100.0 * accounted / total), 1) if total > 0 else 0.0
@@ -334,15 +435,20 @@ class TurnLatency:
                 "lock_hold_ms": self.lock_hold_ms,
                 "waiters_ahead": self.waiters_ahead,
                 "llm_calls": [c.to_dict() for c in self.llm_calls],
+                "brain_total_ms": brain_ms,
                 "total_turn_ms": total,
                 "accounted_ms": accounted,
                 "unaccounted_ms": unaccounted,
                 "accounted_percent": percent,
                 "accountable_stages": list(ACCOUNTABLE_STAGES),
                 "ttft_available": any(bool(c.ttft_available) for c in self.llm_calls),
+                "snapshot_finalized": bool(finalize_total),
             }
-            self._snapshot = out
-            self._finalized = True
+            if finalize_total:
+                out["end_to_end_total_ms"] = total
+            if cache:
+                self._snapshot = out
+                self._finalized = bool(finalize_total)
             return out
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return {
@@ -426,16 +532,53 @@ def new_turn_latency(
 def merge_turn_latency_into_metadata(
     metadata: Optional[MutableMapping[str, Any]],
     timing: Optional[TurnLatency],
+    *,
+    finalize_total: bool = False,
 ) -> None:
-    """Attach ``turn_timing`` snapshot into message_events metadata. Fail-open."""
+    """Attach a fresh ``turn_timing`` snapshot into message metadata. Fail-open."""
     try:
         if metadata is None or timing is None:
             return
-        snap = timing._snapshot or timing.snapshot(finalize_total=False)
-        # Avoid rewriting total if caller will finalize later; still export spans.
-        metadata["turn_timing"] = snap
+        metadata["turn_timing"] = timing.snapshot(
+            finalize_total=finalize_total,
+            cache=False,
+        )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
+
+
+def refresh_turn_latency_on_outbound_message(
+    db: Any,
+    timing: Optional[TurnLatency],
+    *,
+    message_event_id: Optional[int] = None,
+) -> bool:
+    """Write final turn_timing onto a persisted outbound MessageEvent. Fail-open."""
+    try:
+        if db is None or timing is None or not message_event_id:
+            return False
+        snap = timing.snapshot(finalize_total=True, cache=True)
+        from models import MessageEvent  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        row = (
+            db.query(MessageEvent)
+            .filter(MessageEvent.id == int(message_event_id))
+            .first()
+        )
+        if row is None:
+            return False
+        meta = dict(row.extra_metadata or {})
+        meta["turn_timing"] = snap
+        row.extra_metadata = meta
+        flag_modified(row, "extra_metadata")
+        db.add(row)
+        db.flush()
+        return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        # Never rollback the ambient session here — that would undo outbound
+        # persist / send stamps. Fail-open means abandon the refresh only.
+        return False
 
 
 def safe_span(name: str):
@@ -475,6 +618,66 @@ def safe_record_ms(name: str, duration_ms: Any) -> None:
         if timing is None:
             return
         timing.record_ms(name, duration_ms)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_record_accountable_once(name: str, duration_ms: Any) -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.record_accountable_once(name, duration_ms)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_mark_webhook_pre_persist_start() -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.mark_webhook_pre_persist_start()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_flush_webhook_pre_persist() -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.flush_webhook_pre_persist()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_mark_brain_boundary() -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.mark_brain_boundary()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_mark_post_brain_dispatch_start() -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.mark_post_brain_dispatch_start()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_flush_post_brain_dispatch() -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.flush_post_brain_dispatch()
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
 
@@ -527,7 +730,14 @@ __all__ = [
     "get_turn_latency",
     "merge_turn_latency_into_metadata",
     "new_turn_latency",
+    "refresh_turn_latency_on_outbound_message",
     "reset_turn_latency",
+    "safe_flush_post_brain_dispatch",
+    "safe_flush_webhook_pre_persist",
+    "safe_mark_brain_boundary",
+    "safe_mark_post_brain_dispatch_start",
+    "safe_mark_webhook_pre_persist_start",
+    "safe_record_accountable_once",
     "safe_record_llm_call",
     "safe_record_lock",
     "safe_record_ms",
