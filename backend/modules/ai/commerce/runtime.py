@@ -150,6 +150,9 @@ class CommerceToolRuntime:
         }
 
     async def _tool_search_products(self, payload: Dict[str, Any]) -> ToolExecutionResult:
+        import time as _time_cs  # noqa: PLC0415
+
+        _t_cs = _time_cs.monotonic()
         query = str(payload.get("query") or "").strip()
         limit = int(payload.get("limit") or 8)
         include_facts = bool(payload.get("include_non_orderable_facts"))
@@ -176,6 +179,18 @@ class CommerceToolRuntime:
         }
         if catalog_fact_products:
             result_payload["catalog_fact_products"] = catalog_fact_products
+        try:
+            from core.turn_latency import get_turn_latency, safe_record_ms  # noqa: PLC0415
+
+            _cs_ms = (_time_cs.monotonic() - _t_cs) * 1000.0
+            # Detail-only span (excluded from accounted_ms).
+            safe_record_ms("catalog_search", _cs_ms)
+            safe_record_ms("catalog_db", _cs_ms)
+            _tl = get_turn_latency()
+            if _tl is not None:
+                _tl.add_db_queries("catalog_db", 1)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
         return ToolExecutionResult(
             ok=True,
             tool_name="search_products",

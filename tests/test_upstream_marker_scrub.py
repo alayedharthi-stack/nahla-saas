@@ -89,7 +89,11 @@ class TestBrainBoundaryScrub:
         # produces the {"reply": ...} return, NOT in some unrelated
         # helper. We assert ordering with a simple substring index.
         scrub_idx  = src.find("scrub_internal_markers(reply or")
+        # Accept either a direct return dict or an assigned `_out` dict
+        # that is returned after optional observability enrichment.
         return_idx = src.find('return {\n            "reply": reply,')
+        if return_idx == -1:
+            return_idx = src.find('_out = {\n            "reply": reply,')
         assert scrub_idx != -1, "brain-boundary scrub call removed"
         assert return_idx != -1, "brain return dict signature changed"
         assert scrub_idx < return_idx, (
