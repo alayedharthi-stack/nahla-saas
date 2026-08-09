@@ -24,6 +24,11 @@ _LLM_COMPOSE_SOURCES = frozenset({"llm", "persona_llm"})
 BRAIN_REPLY_METADATA_EXPORT_KEYS: Tuple[str, ...] = (
     *REQUIRED_REPLY_METADATA_KEYS,
     "final_customer_text_source",
+    "product_presentation_kind",
+    "product_presentation_reason",
+    "presentation_candidate_count",
+    "pending_product_card_count",
+    "pending_product_card_ids",
 )
 
 PERSONA_ROUTE_PROVENANCE_FIELDS: Tuple[str, ...] = (
@@ -54,6 +59,11 @@ PERSONA_INTEGRATION_PASS_THROUGH_KEYS: Tuple[str, ...] = (
     "catalog_fact_product_ids",
     "catalog_fact_price_values",
     "catalog_fact_rebuild_source",
+    "product_presentation_kind",
+    "product_presentation_reason",
+    "presentation_candidate_count",
+    "pending_product_card_count",
+    "pending_product_card_ids",
     *BRAIN_REPLY_METADATA_EXPORT_KEYS,
     "trusted_coupon_offer_compose_active",
     "customer_conditional_coupon_compose_active",

@@ -33,6 +33,108 @@ def _has_catalog_identity(product: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def _product_identity_tokens(product: Optional[Dict[str, Any]]) -> set[str]:
+    if not isinstance(product, dict) or not product:
+        return set()
+    tokens: set[str] = set()
+    for key in ("external_id", "id", "product_id", "sku"):
+        raw = str(product.get(key) or "").strip()
+        if raw:
+            tokens.add(raw)
+    return tokens
+
+
+def resolve_browse_presentation_candidates(
+    *,
+    display_candidates: Sequence[Dict[str, Any]] | None,
+    compose_products: Sequence[Dict[str, Any]] | None = None,
+    executor_products: Sequence[Dict[str, Any]] | None = None,
+    resolved_product: Optional[Dict[str, Any]] = None,
+    catalog_product_ids: Sequence[Any] | None = None,
+) -> List[Dict[str, Any]]:
+    """
+    Resolve the product rows used for browse presentation cardinality.
+
+    Contract:
+    * Prefer identity-bearing display/compose rows (drop title-only junk for count).
+    * Never invent a card from an id alone.
+    * If the display slice is empty but executor still has a single identified
+      product (or ``resolved_product``) matching a singleton catalog id, recover
+      that row so persona-success cannot skip SINGLE_RICH by accident.
+    * If 2+ identified products remain → keep MULTI (do not collapse to one id).
+    """
+    display_rows = [
+        dict(p) for p in (display_candidates or []) if isinstance(p, dict)
+    ]
+    compose_rows = [
+        dict(p) for p in (compose_products or []) if isinstance(p, dict)
+    ]
+    executor_rows = [
+        dict(p) for p in (executor_products or []) if isinstance(p, dict)
+    ]
+
+    pool = display_rows or compose_rows
+    identified = [p for p in pool if _has_catalog_identity(p)]
+    if len(identified) >= 2:
+        return identified
+    if len(identified) == 1:
+        return identified
+
+    # Title-only / empty display — attempt singleton recovery from executor truth.
+    id_hints = [
+        str(x).strip()
+        for x in (catalog_product_ids or [])
+        if str(x or "").strip()
+    ]
+    singleton_hint = id_hints[0] if len(id_hints) == 1 else ""
+
+    focus = resolved_product if isinstance(resolved_product, dict) else None
+    if focus and _has_catalog_identity(focus):
+        focus_tokens = _product_identity_tokens(focus)
+        if not singleton_hint or singleton_hint in focus_tokens:
+            return [dict(focus)]
+
+    if singleton_hint:
+        for row in list(executor_rows) + list(compose_rows) + list(display_rows):
+            if singleton_hint in _product_identity_tokens(row):
+                return [dict(row)]
+
+    # Preserve title-only singleton so presentation can emit
+    # singleton_missing_catalog_identity (no invented card).
+    if len(pool) == 1:
+        return [dict(pool[0])]
+    return [dict(p) for p in pool]
+
+
+def stamp_presentation_observability(
+    result_data: Dict[str, Any],
+    *,
+    candidate_count: Optional[int] = None,
+) -> None:
+    """Narrow audit fields for production: kind/reason/counts/ids."""
+    if not isinstance(result_data, dict):
+        return
+    cards = [
+        dict(c)
+        for c in (result_data.get("pending_product_cards") or [])
+        if isinstance(c, dict)
+    ]
+    if candidate_count is not None:
+        result_data["presentation_candidate_count"] = int(candidate_count)
+    elif "presentation_candidate_count" not in result_data:
+        pending_candidates = [
+            dict(c)
+            for c in (result_data.get("pending_candidates") or [])
+            if isinstance(c, dict)
+        ]
+        result_data["presentation_candidate_count"] = len(pending_candidates)
+    result_data["pending_product_card_count"] = len(cards)
+    result_data["pending_product_card_ids"] = [
+        c.get("id") or c.get("external_id") or c.get("product_id")
+        for c in cards
+    ]
+
+
 def resolve_product_presentation(
     candidates: Sequence[Dict[str, Any]] | None,
     *,
@@ -148,19 +250,24 @@ def apply_search_product_presentation(
 
     ``build_buttons`` is a callable ``(candidates) -> list`` used only for multi.
     """
+    rows = [dict(p) for p in (candidates or []) if isinstance(p, dict)]
     decision = resolve_product_presentation(
-        candidates,
+        rows,
         resolved_product=resolved_product,
     )
     result_data["product_presentation_kind"] = decision.kind
     result_data["product_presentation_reason"] = decision.reason
+    result_data["presentation_candidate_count"] = int(decision.candidate_count or len(rows))
 
     if decision.kind == PRESENTATION_MULTI_CHOICES:
-        rows = list(candidates or [])
         if build_buttons is not None:
             result_data["pending_buttons"] = list(build_buttons(rows) or [])
         result_data["pending_candidates"] = list(rows)
         result_data.pop("pending_product_cards", None)
+        stamp_presentation_observability(
+            result_data,
+            candidate_count=int(decision.candidate_count or len(rows)),
+        )
         return decision
 
     if decision.kind == PRESENTATION_SINGLE_RICH and decision.resolved_product:
@@ -169,10 +276,19 @@ def apply_search_product_presentation(
         result_data["pending_candidates"] = [dict(decision.resolved_product)]
         # Explicitly clear choices — customer must not re-pick the only product.
         result_data["pending_buttons"] = []
+        stamp_presentation_observability(
+            result_data,
+            candidate_count=int(decision.candidate_count or 1),
+        )
         return decision
 
     result_data.pop("pending_product_cards", None)
     result_data["pending_buttons"] = []
+    result_data["pending_candidates"] = list(rows)
+    stamp_presentation_observability(
+        result_data,
+        candidate_count=int(decision.candidate_count or len(rows)),
+    )
     return decision
 
 
@@ -202,5 +318,7 @@ __all__ = [
     "apply_search_product_presentation",
     "build_product_card_attachment_from_catalog",
     "build_standard_pick_buttons",
+    "resolve_browse_presentation_candidates",
     "resolve_product_presentation",
+    "stamp_presentation_observability",
 ]
