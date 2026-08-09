@@ -5242,9 +5242,12 @@ class MerchantBrain:
         try:
             if _t_guards is not None:
                 import time as _time_guards2  # noqa: PLC0415
-                from core.turn_latency import safe_record_ms as _tl_guards  # noqa: PLC0415
+                from core.turn_latency import (  # noqa: PLC0415
+                    safe_record_guards_exclusive as _tl_guards_excl,
+                )
 
-                _tl_guards("guards", (_time_guards2.monotonic() - _t_guards) * 1000.0)
+                # Exclusive of nested quality_recompose (same wall counted once).
+                _tl_guards_excl((_time_guards2.monotonic() - _t_guards) * 1000.0)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 

@@ -27,8 +27,14 @@ Three explicit sets control what is summed into ``accounted_ms``:
    envelope-only; no exclusive-subtract math.
 
 3. **DETAIL_STAGES** — nested detail spans (``catalog_search``,
-   ``facts_db``, ``lock_hold``, …) for diagnosis only; excluded from
-   ``accounted_ms``.
+   ``facts_db``, ``lock_hold``, ``guards_wall``, …) for diagnosis only;
+   excluded from ``accounted_ms``.
+
+Nested exclusive exception (mechanical, not envelope demotion):
+``quality_recompose`` runs inside the ``guards`` wall on recompose turns.
+Both remain ACCOUNTABLE and independently observable; ``guards`` is recorded
+as exclusive wall only (``guards_wall − quality_recompose``). Full wall is
+kept as DETAIL ``guards_wall``.
 
 Accounting math::
 
@@ -158,6 +164,7 @@ DETAIL_STAGES: tuple[str, ...] = (
     "truth_guards_detail",
     "memory_summary_llm",
     "memory_summary_db",
+    "guards_wall",
 )
 
 _CURRENT: contextvars.ContextVar[Optional["TurnLatency"]] = contextvars.ContextVar(
@@ -414,6 +421,21 @@ class TurnLatency:
             if recorded is not None and key in ACCOUNTABLE_LEAF:
                 self._accountable_once.add(key)
             return recorded
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            return None
+
+    def record_guards_exclusive(self, wall_ms: Any) -> Optional[int]:
+        """Record guards exclusive of nested quality_recompose (same wall once).
+
+        Keeps both leaves observable: full wall as DETAIL ``guards_wall``,
+        exclusive remainder as ACCOUNTABLE ``guards``.
+        """
+        try:
+            wall = max(0, _safe_int(wall_ms, 0))
+            self.record_ms("guards_wall", wall)
+            nested = max(0, int(self.spans_ms.get("quality_recompose", 0) or 0))
+            exclusive = max(0, wall - nested)
+            return self.record_ms("guards", exclusive)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return None
 
@@ -822,6 +844,17 @@ def safe_record_ms(name: str, duration_ms: Any) -> None:
         pass
 
 
+def safe_record_guards_exclusive(wall_ms: Any) -> None:
+    """Record guards exclusive of nested quality_recompose; fail-open."""
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.record_guards_exclusive(wall_ms)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
 def safe_record_accountable_once(name: str, duration_ms: Any) -> None:
     try:
         timing = get_turn_latency()
@@ -968,6 +1001,7 @@ __all__ = [
     "safe_mark_webhook_pre_persist_start",
     "safe_record_memory_summary_timing",
     "safe_record_accountable_once",
+    "safe_record_guards_exclusive",
     "safe_set_memory_update_mode",
     "safe_record_llm_call",
     "safe_record_lock",

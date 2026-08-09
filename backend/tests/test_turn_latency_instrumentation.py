@@ -26,6 +26,7 @@ from core.turn_latency import (
     reset_turn_latency,
     safe_compose_role_scope,
     safe_record_accountable_once,
+    safe_record_guards_exclusive,
     safe_record_llm_call,
     safe_record_lock,
     safe_record_memory_summary_timing,
@@ -745,3 +746,56 @@ def test_pre_brain_remaining_prep_in_pre_brain_reconciliation() -> None:
     snap = timing.snapshot(finalize_total=False, cache=False)
     assert "pre_brain_remaining_prep" in PRE_BRAIN_ACCOUNTABLE
     assert snap["pre_brain_total_ms"] == 60 + 110 + 30
+
+
+def test_guards_exclusive_of_nested_quality_recompose_no_double_count() -> None:
+    """t19-class: quality_recompose nested in guards wall must count once."""
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        # Prior persona compose remains independently accountable.
+        safe_record_ms("persona_compose", 1065)
+        with safe_compose_role_scope("quality_recompose"):
+            safe_record_ms("quality_recompose", 997)
+            safe_record_llm_call(
+                purpose="quality_recompose",
+                llm_call_role="quality_recompose",
+                model="gpt-5.6-luna",
+                provider="openai_compatible",
+                duration_ms=997,
+                ttft_available=False,
+            )
+        # Full guards wall includes nested recompose (1056 = 59 exclusive + 997).
+        safe_record_guards_exclusive(1056)
+        timing.record_ms("total_turn", 6058)
+        snap = timing.snapshot(finalize_total=True, cache=False)
+    finally:
+        reset_turn_latency(token)
+
+    assert snap["spans_ms"]["quality_recompose"] == 997
+    assert snap["spans_ms"]["guards_wall"] == 1056
+    assert snap["spans_ms"]["guards"] == 59  # exclusive only
+    assert "guards_wall" in DETAIL_STAGES
+    assert "guards_wall" not in ACCOUNTABLE_LEAF
+    assert "quality_recompose" in ACCOUNTABLE_LEAF
+    assert "guards" in ACCOUNTABLE_LEAF
+    # Both leaves observable; wall ms counted once in accounted_ms.
+    assert snap["accounted_ms"] == 1065 + 997 + 59
+    assert snap["accounted_percent"] <= 100.0
+    assert snap["accounted_ms"] <= snap["total_turn_ms"]
+    roles = {c["llm_call_role"] for c in snap["llm_calls"]}
+    assert "quality_recompose" in roles
+
+
+def test_guards_exclusive_without_recompose_keeps_full_wall() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        safe_record_guards_exclusive(180)
+        snap = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token)
+
+    assert snap["spans_ms"]["guards_wall"] == 180
+    assert snap["spans_ms"]["guards"] == 180
+    assert snap["accounted_ms"] == 180
