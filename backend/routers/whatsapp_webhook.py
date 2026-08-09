@@ -7120,13 +7120,67 @@ async def _handle_merchant_message(
                 )
 
         # Keep a lightweight state row in sync with the same phone key used by history.
+        try:
+            import time as _time_csl  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_csl  # noqa: PLC0415
+
+            _t_csl = _time_csl.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_csl = None
+            _tl_csl = None  # type: ignore[assignment]
         state = StateManager.load(db, phone=to, tenant_id=tenant_id)
+        try:
+            if _t_csl is not None and _tl_csl is not None:
+                import time as _time_csl2  # noqa: PLC0415
+
+                _tl_csl(
+                    "conversation_state_load",
+                    (_time_csl2.monotonic() - _t_csl) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
         state.turn += 1
         state.stage = "active"
+        try:
+            import time as _time_css  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_css  # noqa: PLC0415
+
+            _t_css = _time_css.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_css = None
+            _tl_css = None  # type: ignore[assignment]
         StateManager.save(db, state, tenant_id=tenant_id)
+        try:
+            if _t_css is not None and _tl_css is not None:
+                import time as _time_css2  # noqa: PLC0415
+
+                _tl_css(
+                    "conversation_state_save",
+                    (_time_css2.monotonic() - _t_css) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
 
         # Load recent conversation history for both paths
+        try:
+            import time as _time_hist  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_hist  # noqa: PLC0415
+
+            _t_hist = _time_hist.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_hist = None
+            _tl_hist = None  # type: ignore[assignment]
         history = StateManager.load_history(db, phone=to, tenant_id=tenant_id)
+        try:
+            if _t_hist is not None and _tl_hist is not None:
+                import time as _time_hist2  # noqa: PLC0415
+
+                _tl_hist(
+                    "history_load",
+                    (_time_hist2.monotonic() - _t_hist) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
 
         # ── Trusted Context shadow (telemetry only — no prompt/Brain wiring) ──
         try:
@@ -8698,6 +8752,14 @@ async def _handle_merchant_message(
                 from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
 
                 svc = CustomerIntelligenceService(db, tenant_id)
+                try:
+                    import time as _time_ci  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms as _tl_ci  # noqa: PLC0415
+
+                    _t_ci = _time_ci.monotonic()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    _t_ci = None
+                    _tl_ci = None  # type: ignore[assignment]
                 customer = svc.upsert_lead_customer(
                     phone=to,
                     source="whatsapp_inbound",
@@ -8707,6 +8769,16 @@ async def _handle_merchant_message(
                     },
                     commit=False,
                 )
+                try:
+                    if _t_ci is not None and _tl_ci is not None:
+                        import time as _time_ci2  # noqa: PLC0415
+
+                        _tl_ci(
+                            "customer_intelligence_upsert",
+                            (_time_ci2.monotonic() - _t_ci) * 1000.0,
+                        )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
                 profile = {
                     "name": getattr(customer, "name", None) or "",
                     "email": getattr(customer, "email", None) or "",
@@ -8714,7 +8786,25 @@ async def _handle_merchant_message(
                     "inbound_metadata": dict(inbound_metadata or {}),
                 }
                 if customer is not None:
+                    try:
+                        import time as _time_prof  # noqa: PLC0415
+                        from core.turn_latency import safe_record_ms as _tl_prof  # noqa: PLC0415
+
+                        _t_prof = _time_prof.monotonic()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                        _t_prof = None
+                        _tl_prof = None  # type: ignore[assignment]
                     full_profile = svc.ensure_profile(customer)
+                    try:
+                        if _t_prof is not None and _tl_prof is not None:
+                            import time as _time_prof2  # noqa: PLC0415
+
+                            _tl_prof(
+                                "customer_profile_ensure",
+                                (_time_prof2.monotonic() - _t_prof) * 1000.0,
+                            )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                        pass
                     profile.update({
                         "segment": getattr(full_profile, "segment", "") or "",
                         "customer_status": getattr(full_profile, "customer_status", "") or "",

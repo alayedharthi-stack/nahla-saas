@@ -11,14 +11,18 @@ import pytest
 from core.turn_latency import (
     ACCOUNTABLE_LEAF,
     ACCOUNTABLE_STAGES,
+    DETAIL_STAGES,
     ENVELOPE_STAGES,
     TurnLatency,
+    bind_compose_role,
     bind_turn_latency,
     get_turn_latency,
     merge_turn_latency_into_metadata,
     new_turn_latency,
     refresh_turn_latency_on_outbound_message,
+    reset_compose_role,
     reset_turn_latency,
+    safe_compose_role_scope,
     safe_record_accountable_once,
     safe_record_llm_call,
     safe_record_lock,
@@ -451,3 +455,176 @@ def test_snapshot_refresh_overhead_smoke() -> None:
         timing.snapshot(finalize_total=True, cache=False)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert elapsed_ms < 100.0
+
+
+def test_default_compose_span_and_llm_call_role() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        safe_record_ms("default_compose", 2954)
+        safe_record_llm_call(
+            purpose="default_compose",
+            llm_call_role="default_compose",
+            model="gpt-5.6-luna",
+            provider="openai_compatible",
+            duration_ms=2954,
+            input_tokens=120,
+            output_tokens=45,
+            ttft_available=False,
+        )
+        snap = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token)
+
+    assert snap["spans_ms"]["default_compose"] == 2954
+    assert snap["llm_calls"][0]["llm_call_role"] == "default_compose"
+    assert "default_compose" in snap["llm_call_roles"]
+    assert "default_compose" in ACCOUNTABLE_LEAF
+
+
+def test_quality_recompose_avoids_double_count_with_persona_compose() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    compose_token = bind_compose_role("quality_recompose")
+    try:
+        safe_record_ms("persona_compose", 400)
+        safe_record_llm_call(
+            purpose="persona_compose",
+            llm_call_role="persona_compose",
+            model="gpt-5.6-luna",
+            provider="openai_compatible",
+            duration_ms=400,
+            ttft_available=False,
+        )
+        safe_record_ms("quality_recompose", 350)
+        safe_record_llm_call(
+            purpose="quality_recompose",
+            llm_call_role="quality_recompose",
+            model="gpt-5.6-luna",
+            provider="openai_compatible",
+            duration_ms=350,
+            ttft_available=False,
+        )
+        snap = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_compose_role(compose_token)
+        reset_turn_latency(token)
+
+    assert snap["spans_ms"]["persona_compose"] == 400
+    assert snap["spans_ms"]["quality_recompose"] == 350
+    assert snap["accounted_ms"] == 750
+    roles = {c["llm_call_role"] for c in snap["llm_calls"]}
+    assert roles == {"persona_compose", "quality_recompose"}
+
+
+def test_compose_role_scope_routes_span_name() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        with safe_compose_role_scope("quality_recompose"):
+            from core.turn_latency import get_compose_role
+
+            assert get_compose_role() == "quality_recompose"
+            safe_record_ms(get_compose_role() or "persona_compose", 120)
+        snap = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token)
+
+    assert snap["spans_ms"]["quality_recompose"] == 120
+
+
+def test_pre_brain_spans_and_reconciliation_fields() -> None:
+    timing = new_turn_latency(tenant_id=3)
+    timing.record_ms("inbound_persist", 15)
+    timing.record_ms("history_load", 80)
+    timing.record_ms("conversation_state_load", 25)
+    timing.record_ms("conversation_state_save", 12)
+    timing.record_ms("customer_intelligence_upsert", 40)
+    timing.record_ms("customer_profile_ensure", 30)
+    timing.record_ms("total_turn", 500)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+
+    assert snap["spans_ms"]["history_load"] == 80
+    assert snap["spans_ms"]["customer_profile_ensure"] == 30
+    assert snap["pre_brain_total_ms"] == 15 + 80 + 25 + 12 + 40 + 30
+    assert "pre_brain_total_ms" in snap
+    assert "post_brain_total_ms" in snap
+
+
+def test_brain_loader_spans_emitted() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("sales_context_load", 210)
+    timing.record_ms("commerce_bundle_load", 95)
+    timing.record_ms("memory_update", 55)
+    snap = timing.snapshot(finalize_total=False, cache=False)
+
+    assert snap["spans_ms"]["sales_context_load"] == 210
+    assert snap["spans_ms"]["commerce_bundle_load"] == 95
+    assert snap["spans_ms"]["memory_update"] == 55
+    assert "sales_context_load" in ACCOUNTABLE_LEAF
+
+
+def test_merchant_brain_turn_post_process_spans_accountable() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("silent_welcome_handling", 18)
+    timing.record_ms("outbound_dedup", 22)
+    timing.record_ms("truth_guards_detail", 65)
+    timing.record_ms("truth_guards", 65)
+    timing.record_ms("post_brain_dispatch", 40)
+    timing.record_ms("provider_send", 90)
+    timing.record_ms("total_turn", 400)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+
+    assert snap["spans_ms"]["silent_welcome_handling"] == 18
+    assert snap["spans_ms"]["outbound_dedup"] == 22
+    assert snap["spans_ms"]["truth_guards_detail"] == 65
+    assert "truth_guards_detail" in DETAIL_STAGES
+    assert snap["post_brain_total_ms"] == 18 + 22 + 65 + 40 + 90
+
+
+def test_accounted_percent_at_most_100_with_v3_leaves() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("webhook_dispatch_pre_persist", 10)
+    timing.record_ms("inbound_persist", 15)
+    timing.record_ms("history_load", 80)
+    timing.record_ms("conversation_state_load", 20)
+    timing.record_ms("customer_intelligence_upsert", 35)
+    timing.record_ms("brain_boundary_exit", 850)
+    timing.record_ms("sales_context_load", 120)
+    timing.record_ms("commerce_bundle_load", 60)
+    timing.record_ms("default_compose", 350)
+    timing.record_ms("memory_update", 25)
+    timing.record_ms("guards", 15)
+    timing.record_ms("silent_welcome_handling", 10)
+    timing.record_ms("outbound_dedup", 8)
+    timing.record_ms("post_brain_dispatch", 50)
+    timing.record_ms("outbound_persist", 12)
+    timing.record_ms("provider_send", 90)
+    timing.record_ms("total_turn", 1200)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+
+    assert snap["accounted_percent"] <= 100.0
+    assert snap["accounted_ms"] <= snap["total_turn_ms"]
+
+
+def test_llm_calls_include_role_without_raw_prompt() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        safe_record_llm_call(
+            purpose="slot_extractor",
+            llm_call_role="slot_extractor",
+            model="gpt-5.6-luna",
+            provider="openai_compatible",
+            duration_ms=45,
+            input_tokens=10,
+            output_tokens=5,
+            ttft_available=False,
+        )
+        snap = timing.snapshot()
+    finally:
+        reset_turn_latency(token)
+    blob = str(snap)
+    assert snap["llm_calls"][0]["llm_call_role"] == "slot_extractor"
+    for forbidden in ("system_prompt", "user_content", "raw_prompt", "OPENAI_API_KEY"):
+        assert forbidden not in blob

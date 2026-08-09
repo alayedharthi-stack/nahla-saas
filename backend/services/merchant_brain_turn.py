@@ -1092,6 +1092,12 @@ async def evaluate_live_merchant_brain_turn(
             except Exception:  # noqa: silent-ok — handoff rule promotion is best-effort
                 pass
 
+        try:
+            import time as _time_mbg_silent  # noqa: PLC0415
+
+            _t_mbg_silent = _time_mbg_silent.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_mbg_silent = None
         reply, brain_silent = _apply_brain_silent_and_welcome_guards(
             db=db,
             tenant_id=explicit_tenant_id,
@@ -1105,6 +1111,17 @@ async def evaluate_live_merchant_brain_turn(
             persona_ownership=persona_ownership,
             live_provenance_tracker=live_provenance_tracker,
         )
+        try:
+            if _t_mbg_silent is not None:
+                import time as _time_mbg_silent2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                safe_record_ms(
+                    "silent_welcome_handling",
+                    (_time_mbg_silent2.monotonic() - _t_mbg_silent) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
 
         if brain_handoff:
             try:
@@ -1130,6 +1147,12 @@ async def evaluate_live_merchant_brain_turn(
         except Exception:  # noqa: BLE001
             br_action = ""
 
+        try:
+            import time as _time_mbg_dedup  # noqa: PLC0415
+
+            _t_mbg_dedup = _time_mbg_dedup.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_mbg_dedup = None
         reply, outbound_abort_suppressor = _apply_outbound_dedup(
             db=db,
             tenant_id=explicit_tenant_id,
@@ -1146,6 +1169,17 @@ async def evaluate_live_merchant_brain_turn(
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
             live_provenance_tracker=live_provenance_tracker,
         )
+        try:
+            if _t_mbg_dedup is not None:
+                import time as _time_mbg_dedup2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                safe_record_ms(
+                    "outbound_dedup",
+                    (_time_mbg_dedup2.monotonic() - _t_mbg_dedup) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
 
         try:
             import time as _time_mbg  # noqa: PLC0415
@@ -1174,12 +1208,21 @@ async def evaluate_live_merchant_brain_turn(
         try:
             if _t_mbg is not None:
                 import time as _time_mbg2  # noqa: PLC0415
-                from core.turn_latency import safe_record_accountable_once  # noqa: PLC0415
-
-                safe_record_accountable_once(
-                    "guards",
-                    (_time_mbg2.monotonic() - _t_mbg) * 1000.0,
+                from core.turn_latency import (  # noqa: PLC0415
+                    get_turn_latency,
+                    safe_record_accountable_once,
+                    safe_record_ms,
                 )
+
+                _truth_ms = (_time_mbg2.monotonic() - _t_mbg) * 1000.0
+                safe_record_ms("truth_guards_detail", _truth_ms)
+                _tl_truth = get_turn_latency()
+                if _tl_truth is not None and int(
+                    _tl_truth.span_counts.get("guards", 0) or 0
+                ) == 0:
+                    safe_record_accountable_once("truth_guards", _truth_ms)
+                else:
+                    safe_record_accountable_once("guards", _truth_ms)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 

@@ -556,13 +556,16 @@ class FactBoundPersonaComposer:
         )
         try:
             from core.turn_latency import (  # noqa: PLC0415
+                get_compose_role,
                 safe_record_llm_call,
                 safe_record_ms,
             )
 
-            safe_record_ms("persona_compose", latency_ms)
+            _compose_role = get_compose_role() or "persona_compose"
+            safe_record_ms(_compose_role, latency_ms)
             safe_record_llm_call(
-                purpose="persona_compose",
+                purpose=_compose_role,
+                llm_call_role=_compose_role,
                 model=str(model or route_metadata.get("route_model") or ""),
                 provider=str(route_metadata.get("route_provider") or "openai_compatible"),
                 duration_ms=latency_ms,

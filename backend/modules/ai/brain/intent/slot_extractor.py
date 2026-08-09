@@ -209,6 +209,7 @@ async def extract_slots(
                 safe_record_ms("slot_extractor", _slot_ms)
                 safe_record_llm_call(
                     purpose="slot_extractor",
+                    llm_call_role="slot_extractor",
                     model=_slot_model,
                     provider="openai_compatible",
                     duration_ms=_slot_ms,
@@ -232,6 +233,7 @@ async def extract_slots(
                 safe_record_ms("slot_extractor", _slot_ms)
                 safe_record_llm_call(
                     purpose="slot_extractor",
+                    llm_call_role="slot_extractor",
                     model=_slot_model,
                     provider="openai_compatible",
                     duration_ms=_slot_ms,
@@ -254,6 +256,7 @@ async def extract_slots(
             _usage = result.get("usage") if isinstance(result, dict) else None
             safe_record_llm_call(
                 purpose="slot_extractor",
+                llm_call_role="slot_extractor",
                 model=_slot_model,
                 provider="openai_compatible",
                 duration_ms=_slot_ms,
