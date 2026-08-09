@@ -2734,7 +2734,7 @@ class MerchantBrain:
                             new_state,
                             reason="product_list_display",
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — archive focus is best-effort
                         pass
                     logger.info(
                         "[ORDER FLOW] reset stale current_product_focus after product list display | "
@@ -4472,7 +4472,7 @@ class MerchantBrain:
                                     result.data.get("presentation_candidate_count") or 1
                                 ),
                             )
-                        except Exception:  # noqa: BLE001
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — observability restore must not block reply
                             pass
                         logger.info(
                             "[PRESENTATION_STAMP] restored SINGLE_RICH cards after "
