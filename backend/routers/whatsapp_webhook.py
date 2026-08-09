@@ -12181,6 +12181,7 @@ async def _handle_merchant_message(
 
         _send_ok = False
         _social_send_suppressed = False
+        _outbound_wire_boundary_done = False
         try:
             from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
                 should_suppress_competing_social_outbound,
@@ -12196,6 +12197,7 @@ async def _handle_merchant_message(
             _social_send_suppressed = False
 
         if _social_send_suppressed:
+            _outbound_wire_boundary_done = True
             if not _outbound_abort_audited:
                 _maybe_log_outbound_candidate_abort(
                     tenant_id=tenant_id,
@@ -12224,6 +12226,7 @@ async def _handle_merchant_message(
                 + (_media_attachments or [])
             ),
         ):
+            _outbound_wire_boundary_done = True
             if not _outbound_abort_audited:
                 _maybe_log_outbound_candidate_abort(
                     tenant_id=tenant_id,
@@ -12244,6 +12247,7 @@ async def _handle_merchant_message(
                 reason="skip_wire_send",
             )
         elif _native_catalog_entry.get("thumbnail_product_retailer_id"):
+            _outbound_wire_boundary_done = True
             _native_send_result = await _try_send_native_catalog_entry(
                 db=db,
                 tenant_id=tenant_id,
@@ -12409,6 +12413,7 @@ async def _handle_merchant_message(
                         except Exception:  # noqa: BLE001  # noqa: silent-ok — dashboard sync must not block send
                             pass
         elif _brain_buttons and reply:
+            _outbound_wire_boundary_done = True
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
                 body_text=reply,
@@ -12419,6 +12424,7 @@ async def _handle_merchant_message(
                 _delivery_audit["interactive_buttons_sent"] = True
                 _delivery_audit["text_sent"] = True
         else:
+            _outbound_wire_boundary_done = True
             # ── URL → CTA-button normaliser ─────────────────────────
             # The reply may carry 0, 1 or >1 URLs. WhatsApp's
             # ``cta_url`` interactive only supports ONE button per
@@ -12634,6 +12640,24 @@ async def _handle_merchant_message(
                 str(_loop_replaced_with_recovery).lower(),
                 len(_brain_buttons or []), len(reply or ""),
             )
+
+        # Deferred memory summarise — after outbound wire-send boundary
+        # (attempted send, success or failure, or intentional silent/empty
+        # suppress). Customer path must not await summary LLM.
+        if _outbound_wire_boundary_done and isinstance(brain_result, dict):
+            _mem_sum_payload = brain_result.get("memory_summarise_deferred")
+            if isinstance(_mem_sum_payload, dict) and _mem_sum_payload:
+                try:
+                    from modules.ai.brain.memory.updater import (  # noqa: PLC0415
+                        schedule_deferred_memory_summarise,
+                    )
+
+                    schedule_deferred_memory_summarise(
+                        dict(_mem_sum_payload),
+                        request_id=str(getattr(_trace, "message_id", "") or "") or None,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — deferred summarise fail-open
+                    pass
 
         if _send_ok or _product_attachments or _media_attachments:
             # Dispatch any media library attachments now that the text /

@@ -5445,6 +5445,7 @@ class MerchantBrain:
                     name for name, fired in (_guard_replaced or {}).items() if fired
                 ],
             ),
+            "memory_summarise_deferred": result.data.get("memory_summarise_deferred"),
             **_tc_coupon_constitutional_meta,
             **_cc_coupon_constitutional_meta,
             **_ps_offer_constitutional_meta,

@@ -332,6 +332,7 @@ class TurnLatency:
     memory_update_mode: Optional[str] = None
     memory_summary_llm_ms: Optional[int] = None
     memory_summary_db_ms: Optional[int] = None
+    memory_summarise_deferred_scheduled: Optional[bool] = None
 
     _open_spans: Dict[str, float] = field(default_factory=dict, repr=False)
     _finalized: bool = field(default=False, repr=False)
@@ -485,8 +486,14 @@ class TurnLatency:
     def set_memory_update_mode(self, mode: str) -> None:
         try:
             key = str(mode or "").strip().lower()
-            if key in ("normal", "summarise"):
+            if key in ("normal", "summarise", "summarise_deferred"):
                 self.memory_update_mode = key
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def set_memory_summarise_deferred_scheduled(self, scheduled: bool) -> None:
+        try:
+            self.memory_summarise_deferred_scheduled = bool(scheduled)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
@@ -666,6 +673,10 @@ class TurnLatency:
                 out["memory_summary_llm_ms"] = int(self.memory_summary_llm_ms)
             if self.memory_summary_db_ms is not None:
                 out["memory_summary_db_ms"] = int(self.memory_summary_db_ms)
+            if self.memory_summarise_deferred_scheduled is not None:
+                out["memory_summarise_deferred_scheduled"] = bool(
+                    self.memory_summarise_deferred_scheduled
+                )
             if finalize_total:
                 out["end_to_end_total_ms"] = total
             if cache:
@@ -925,6 +936,16 @@ def safe_set_memory_update_mode(mode: str) -> None:
         pass
 
 
+def safe_set_memory_summarise_deferred_scheduled(scheduled: bool) -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.set_memory_summarise_deferred_scheduled(scheduled)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
 def safe_record_memory_summary_timing(**kwargs: Any) -> None:
     try:
         timing = get_turn_latency()
@@ -1002,6 +1023,7 @@ __all__ = [
     "safe_record_memory_summary_timing",
     "safe_record_accountable_once",
     "safe_record_guards_exclusive",
+    "safe_set_memory_summarise_deferred_scheduled",
     "safe_set_memory_update_mode",
     "safe_record_llm_call",
     "safe_record_lock",

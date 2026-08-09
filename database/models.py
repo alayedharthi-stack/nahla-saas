@@ -1489,6 +1489,7 @@ class ConversationHistorySummary(Base):
     escalation_count = Column(Integer, default=0)
     last_escalation_reason = Column(Text, nullable=True)
     total_conversations = Column(Integer, default=0)
+    summary_source_turn = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     customer = relationship('Customer')
     tenant = relationship('Tenant')

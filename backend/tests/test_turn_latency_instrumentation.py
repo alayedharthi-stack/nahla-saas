@@ -31,6 +31,7 @@ from core.turn_latency import (
     safe_record_lock,
     safe_record_memory_summary_timing,
     safe_record_ms,
+    safe_set_memory_summarise_deferred_scheduled,
     safe_set_memory_update_mode,
     safe_span,
 )
@@ -694,12 +695,27 @@ def test_memory_update_mode_and_summary_timing_fields() -> None:
         snap_normal = timing.snapshot(finalize_total=False, cache=False)
         assert snap_normal["memory_update_mode"] == "normal"
 
-        safe_set_memory_update_mode("summarise")
-        safe_record_memory_summary_timing(llm_ms=240, db_ms=18)
-        timing.record_ms("memory_update", 300)
-        snap_summarise = timing.snapshot(finalize_total=False, cache=False)
+        safe_set_memory_update_mode("summarise_deferred")
+        safe_set_memory_summarise_deferred_scheduled(True)
+        timing.record_ms("memory_update", 25)
+        snap_deferred = timing.snapshot(finalize_total=False, cache=False)
     finally:
         reset_turn_latency(token)
+
+    assert snap_deferred["memory_update_mode"] == "summarise_deferred"
+    assert snap_deferred.get("memory_summarise_deferred_scheduled") is True
+    assert snap_deferred.get("memory_summary_llm_ms") is None
+    assert snap_deferred["accounted_ms"] == 25
+
+    timing2 = new_turn_latency(tenant_id=1)
+    token2 = bind_turn_latency(timing2)
+    try:
+        safe_set_memory_update_mode("summarise")
+        safe_record_memory_summary_timing(llm_ms=240, db_ms=18)
+        timing2.record_ms("memory_update", 300)
+        snap_summarise = timing2.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token2)
 
     assert snap_summarise["memory_update_mode"] == "summarise"
     assert snap_summarise["memory_summary_llm_ms"] == 240
