@@ -10,11 +10,31 @@ Contract
 * One ``TurnLatency`` per inbound turn, correlated by tenant_id /
   conversation_id / turn_id / message_event_id.
 * Stage timers are monotonic; exceptions inside telemetry are swallowed.
-* Nested detail spans (``catalog_search``, ``llm_calls``, ``lock_hold``)
-  are recorded for diagnosis but excluded from ``accounted_ms`` so totals
-  are not double-counted.
 * TTFT is recorded only when a provider actually exposes first-token time;
   otherwise ``ttft_available=false`` (never invented).
+
+Stage taxonomy (accounting contract)
+────────────────────────────────────
+Three explicit sets control what is summed into ``accounted_ms``:
+
+1. **ACCOUNTABLE_LEAF** — mutually exclusive leaf stages summed into
+   ``accounted_ms``. Each represents real work that should not overlap
+   siblings in the sum.
+
+2. **ENVELOPE** — diagnostic parent/checkpoint spans recorded in
+   ``spans_ms`` but **never** summed into ``accounted_ms``. Overlapping
+   parents (e.g. ``intent_routing`` wrapping ``slot_extractor``) stay
+   envelope-only; no exclusive-subtract math.
+
+3. **DETAIL_STAGES** — nested detail spans (``catalog_search``,
+   ``facts_db``, ``lock_hold``, …) for diagnosis only; excluded from
+   ``accounted_ms``.
+
+Accounting math::
+
+    accounted_ms = sum(ACCOUNTABLE_LEAF spans only)
+    unaccounted_ms = max(0, end_to_end_total_ms - accounted_ms)
+    accounted_percent = 100 * accounted_ms / total when total > 0
 
 Snapshot semantics (v2)
 ───────────────────────
@@ -41,19 +61,16 @@ from typing import Any, Dict, Iterator, List, Mapping, MutableMapping, Optional
 
 logger = logging.getLogger("nahla.turn_latency")
 
-# Mutually exclusive stages summed into accounted_ms (no nesting).
-ACCOUNTABLE_STAGES: tuple[str, ...] = (
+# Mutually exclusive leaf stages summed into accounted_ms (no nesting).
+ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "webhook_dispatch_pre_persist",
     "inbound_persist",
     "tenant_resolution",
     "conversation_lock_wait",
     "merchant_entry_gates",
-    "brain_boundary_enter",
-    "brain_boundary_exit",
     "post_brain_dispatch",
     "state_load",
     "slot_extractor",
-    "intent_routing",
     "permission_context_load",
     "facts_load",
     "catalog_preload",
@@ -69,6 +86,16 @@ ACCOUNTABLE_STAGES: tuple[str, ...] = (
     "outbound_persist",
     "provider_send",
 )
+
+# Envelope/checkpoint spans — diagnostic only, never summed into accounted_ms.
+ENVELOPE_STAGES: tuple[str, ...] = (
+    "brain_boundary_enter",
+    "brain_boundary_exit",
+    "intent_routing",
+)
+
+# Backward-compatible alias (accounting uses ACCOUNTABLE_LEAF only).
+ACCOUNTABLE_STAGES: tuple[str, ...] = ACCOUNTABLE_LEAF
 
 # Detail-only (not summed into accounted_ms).
 DETAIL_STAGES: tuple[str, ...] = (
@@ -259,13 +286,13 @@ class TurnLatency:
             key = str(name or "").strip()
             if not key:
                 return None
-            if key in ACCOUNTABLE_STAGES and (
+            if key in ACCOUNTABLE_LEAF and (
                 key in self._accountable_once
                 or int(self.span_counts.get(key, 0) or 0) > 0
             ):
                 return int(self.spans_ms.get(key, 0) or 0)
             recorded = self.record_ms(key, duration_ms)
-            if recorded is not None and key in ACCOUNTABLE_STAGES:
+            if recorded is not None and key in ACCOUNTABLE_LEAF:
                 self._accountable_once.add(key)
             return recorded
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
@@ -395,7 +422,7 @@ class TurnLatency:
     def accounted_ms(self) -> int:
         total = 0
         try:
-            for name in ACCOUNTABLE_STAGES:
+            for name in ACCOUNTABLE_LEAF:
                 total += int(self.spans_ms.get(name, 0) or 0)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             return 0
@@ -440,7 +467,8 @@ class TurnLatency:
                 "accounted_ms": accounted,
                 "unaccounted_ms": unaccounted,
                 "accounted_percent": percent,
-                "accountable_stages": list(ACCOUNTABLE_STAGES),
+                "accountable_stages": list(ACCOUNTABLE_LEAF),
+                "envelope_stages": list(ENVELOPE_STAGES),
                 "ttft_available": any(bool(c.ttft_available) for c in self.llm_calls),
                 "snapshot_finalized": bool(finalize_total),
             }
@@ -721,8 +749,10 @@ def timing_from_trace_extra(extra: Optional[Mapping[str, Any]]) -> Optional[Turn
 
 
 __all__ = [
+    "ACCOUNTABLE_LEAF",
     "ACCOUNTABLE_STAGES",
     "DETAIL_STAGES",
+    "ENVELOPE_STAGES",
     "LlmCallTiming",
     "TurnLatency",
     "attach_timing_to_trace_extra",
