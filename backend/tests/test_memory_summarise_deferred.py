@@ -178,6 +178,119 @@ def test_write_summary_sql_includes_tenant_isolation() -> None:
     source = inspect.getsource(updater._write_summary_atomic)
     assert "tenant_id = EXCLUDED.tenant_id" in source
     assert "summary_source_turn" in source
+    assert "conversation_history_summaries.tenant_id = EXCLUDED.tenant_id" in source
+
+
+def _simulate_summary_upsert(
+    store: dict[int, dict],
+    *,
+    tenant_id: int,
+    customer_id: int,
+    turn: int,
+    summary_text: str,
+) -> bool:
+    """Mirror _write_summary_atomic newer-wins + tenant WHERE semantics."""
+    existing = store.get(customer_id)
+    if existing is None:
+        store[customer_id] = {
+            "tenant_id": tenant_id,
+            "summary_source_turn": turn,
+            "summary_text": summary_text,
+        }
+        return True
+    if int(existing["tenant_id"]) != int(tenant_id):
+        return False
+    if not should_apply_summary_source_turn(existing.get("summary_source_turn"), turn):
+        return False
+    store[customer_id] = {
+        "tenant_id": tenant_id,
+        "summary_source_turn": turn,
+        "summary_text": summary_text,
+    }
+    return True
+
+
+def test_multi_tenant_summary_isolation_and_newer_wins() -> None:
+    """Tenant A/B stay isolated; older deferred write cannot overwrite newer."""
+    store: dict[int, dict] = {}
+    # Same-shaped customer identifiers across tenants (globally distinct PKs).
+    customer_a = 9001
+    customer_b = 9001 + 1  # similar identifier, different tenant row
+
+    assert _simulate_summary_upsert(
+        store, tenant_id=101, customer_id=customer_a, turn=10, summary_text="A10"
+    )
+    assert _simulate_summary_upsert(
+        store, tenant_id=202, customer_id=customer_b, turn=11, summary_text="B11"
+    )
+    assert store[customer_a]["summary_text"] == "A10"
+    assert store[customer_b]["summary_text"] == "B11"
+
+    # Older A must not overwrite newer A.
+    assert _simulate_summary_upsert(
+        store, tenant_id=101, customer_id=customer_a, turn=15, summary_text="A15"
+    )
+    assert not _simulate_summary_upsert(
+        store, tenant_id=101, customer_id=customer_a, turn=10, summary_text="A10-stale"
+    )
+    assert store[customer_a]["summary_text"] == "A15"
+    assert store[customer_a]["summary_source_turn"] == 15
+
+    # A must never overwrite B (tenant mismatch on same customer_id key).
+    assert not _simulate_summary_upsert(
+        store, tenant_id=101, customer_id=customer_b, turn=99, summary_text="A-hijack-B"
+    )
+    assert store[customer_b]["summary_text"] == "B11"
+    assert store[customer_b]["tenant_id"] == 202
+
+    # B must never overwrite A.
+    assert not _simulate_summary_upsert(
+        store, tenant_id=202, customer_id=customer_a, turn=99, summary_text="B-hijack-A"
+    )
+    assert store[customer_a]["summary_text"] == "A15"
+    assert store[customer_a]["tenant_id"] == 101
+
+    # Payload contract always carries tenant_id (immutable capture).
+    payload_a = build_summarise_payload(_ctx(turn=10, customer_id=customer_a))
+    assert payload_a is not None
+    assert payload_a["tenant_id"] == 7
+    assert payload_a["customer_id"] == customer_a
+    assert "history_lines" in payload_a
+    assert set(payload_a.keys()) >= {
+        "tenant_id",
+        "customer_id",
+        "turn",
+        "stage",
+        "history_lines",
+        "message_id",
+    }
+
+
+def test_write_summary_atomic_binds_tenant_scoped_params() -> None:
+    captured: dict = {}
+
+    class _DB:
+        def execute(self, _stmt, params):
+            captured.update(params)
+
+        def commit(self):
+            return None
+
+    from modules.ai.brain.memory.updater import _write_summary_atomic
+
+    _write_summary_atomic(
+        _DB(),
+        {
+            "tenant_id": 303,
+            "customer_id": 44001,
+            "turn": 20,
+            "stage": "checkout",
+        },
+        {"summary": "ملخص عام", "last_intent": "order", "sentiment": "neutral"},
+    )
+    assert captured["tenant_id"] == 303
+    assert captured["customer_id"] == 44001
+    assert captured["summary_source_turn"] == 20
 
 
 def test_schedule_uses_spawn_background() -> None:
