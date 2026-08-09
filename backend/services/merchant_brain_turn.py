@@ -1147,6 +1147,12 @@ async def evaluate_live_merchant_brain_turn(
             live_provenance_tracker=live_provenance_tracker,
         )
 
+        try:
+            import time as _time_mbg  # noqa: PLC0415
+
+            _t_mbg = _time_mbg.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_mbg = None
         reply, post_compose_primary_applied, post_compose_guard_events = (
             _apply_post_compose_truth_guards(
                 db=db,
@@ -1165,6 +1171,17 @@ async def evaluate_live_merchant_brain_turn(
                 live_provenance_tracker=live_provenance_tracker,
             )
         )
+        try:
+            if _t_mbg is not None:
+                import time as _time_mbg2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                safe_record_ms(
+                    "guards",
+                    (_time_mbg2.monotonic() - _t_mbg) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         if not billing_denied and not brain_silent and (reply or "").strip():
             from services import turn_trace as TS

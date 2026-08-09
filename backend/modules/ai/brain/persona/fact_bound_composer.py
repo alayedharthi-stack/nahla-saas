@@ -554,6 +554,25 @@ class FactBoundPersonaComposer:
             model=model,
             metadata=dict(route_metadata),
         )
+        try:
+            from core.turn_latency import (  # noqa: PLC0415
+                safe_record_llm_call,
+                safe_record_ms,
+            )
+
+            safe_record_ms("persona_compose", latency_ms)
+            safe_record_llm_call(
+                purpose="persona_compose",
+                model=str(model or route_metadata.get("route_model") or ""),
+                provider=str(route_metadata.get("route_provider") or "openai_compatible"),
+                duration_ms=latency_ms,
+                timeout_seconds=float(getattr(self, "_timeout_seconds", 0) or 0) or None,
+                fallback_reason=str(fallback_reason or ""),
+                ttft_available=False,
+                retry_count=0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         logger.info(
             "[PERSONA_COMPOSE] surface=%s source=%s facts_hash=%s "
             "guard_passed=%s fallback_reason=%s latency_ms=%s tenant=%s",

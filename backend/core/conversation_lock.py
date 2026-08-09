@@ -127,6 +127,17 @@ async def conversation_lock(
                 "msg_id=%s wait_ms=%.0f held_ms=%.0f",
                 tenant_id, phone, msg_id, wait_ms, held_ms,
             )
+            # Observability-only: correlate lock wait vs hold with turn latency.
+            try:
+                from core.turn_latency import safe_record_lock  # noqa: PLC0415
+
+                safe_record_lock(
+                    wait_ms=wait_ms,
+                    hold_ms=held_ms,
+                    waiters_ahead=waiters_before,
+                )
+            except Exception:  # noqa: BLE001
+                pass
     finally:
         _WAITERS[key] = max(0, _WAITERS.get(key, 1) - 1)
         # Trim the registry once a lock has no current owner and no

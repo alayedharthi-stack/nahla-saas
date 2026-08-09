@@ -313,6 +313,16 @@ def _otp_merge_save_metadata(
         dict(persona_meta or {}),
         persona_compose_event,
     )
+    # Measurement-only: attach turn_timing snapshot (never the live object).
+    try:
+        from core.turn_latency import (  # noqa: PLC0415
+            get_turn_latency,
+            merge_turn_latency_into_metadata,
+        )
+
+        merge_turn_latency_into_metadata(base, get_turn_latency())
+    except Exception:  # noqa: BLE001
+        pass
     if tracker is None:
         return base
     try:
@@ -3092,9 +3102,20 @@ async def _dispatch_message(
     # safely test / release them, regardless of how far we got.
     _conv_lock_cm = None
     _conv_lock_active = False
+    # Latency observability (measurement-only). Bound before lock so wait/hold
+    # can correlate; reset in finally. Never affects reply behavior.
+    _turn_latency = None
+    _turn_latency_token = None
+    _tenant_resolution_t0 = None
 
     try:
         # ── Resolve tenant from phone_number_id (must be exactly 1 match) ────────
+        try:
+            import time as _time_lat  # noqa: PLC0415
+
+            _tenant_resolution_t0 = _time_lat.monotonic()
+        except Exception:  # noqa: BLE001
+            _tenant_resolution_t0 = None
         wa_matches = (
             db.query(WhatsAppConnection)
             .filter(WhatsAppConnection.phone_number_id == phone_number_id)
@@ -3218,6 +3239,29 @@ async def _dispatch_message(
             used_pid, resolved_tenant_id, wa_conn.status,
             wa_conn.id, _runtime_waba_id or "missing", _runtime_provider or "unknown",
         )
+        # Measurement-only: bind turn latency before conversation_lock so
+        # wait_ms / held_ms land on the same correlated object.
+        try:
+            from core.turn_latency import (  # noqa: PLC0415
+                bind_turn_latency,
+                new_turn_latency,
+                safe_record_ms,
+            )
+            import time as _time_lat2  # noqa: PLC0415
+
+            _turn_latency = new_turn_latency(
+                tenant_id=int(resolved_tenant_id),
+                message_id=str(msg_id or ""),
+            )
+            _turn_latency_token = bind_turn_latency(_turn_latency)
+            if _tenant_resolution_t0 is not None:
+                safe_record_ms(
+                    "tenant_resolution",
+                    (_time_lat2.monotonic() - _tenant_resolution_t0) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001
+            _turn_latency = None
+            _turn_latency_token = None
 
         # Loud warning when runtime resolved a record with NO waba_id — this
         # is the exact mismatch tenant 33 hit. Webhook routing still works
@@ -5380,6 +5424,20 @@ async def _dispatch_message(
                     locals().get("resolved_tenant_id"), sender, _lock_exc,
                 )
             _conv_lock_active = False
+        # Measurement-only: finalize + unbind turn latency ContextVar.
+        try:
+            from core.turn_latency import reset_turn_latency  # noqa: PLC0415
+
+            if _turn_latency is not None:
+                try:
+                    _turn_latency.snapshot(finalize_total=True)
+                    _turn_latency.emit_log()
+                except Exception:  # noqa: BLE001
+                    pass
+            if _turn_latency_token is not None:
+                reset_turn_latency(_turn_latency_token)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             db.close()
         except Exception:
@@ -5721,6 +5779,28 @@ async def _handle_merchant_message(
         message_id   = wa_msg_id or "",
         inbound_text = text or "",
     )
+    # Attach the pre-lock TurnLatency object (same turn) when present.
+    try:
+        from core.turn_latency import (  # noqa: PLC0415
+            attach_timing_to_trace_extra,
+            get_turn_latency,
+            new_turn_latency,
+        )
+
+        _timing = get_turn_latency()
+        if _timing is None:
+            _timing = new_turn_latency(
+                tenant_id=int(tenant_id),
+                message_id=str(wa_msg_id or ""),
+            )
+        else:
+            _timing.set_identity(
+                tenant_id=int(tenant_id),
+                message_id=str(wa_msg_id or ""),
+            )
+        attach_timing_to_trace_extra(_trace.extra, _timing)
+    except Exception:  # noqa: BLE001
+        pass
     from modules.ai.brain.persona_ownership import (  # noqa: PLC0415
         PersonaBypassReason as _POReason,
         PersonaOwnershipRecord as _PORecord,
@@ -6522,12 +6602,36 @@ async def _handle_merchant_message(
         if wa_message_ts:
             _live_in_meta["whatsapp_timestamp"] = wa_message_ts.isoformat()
         _inbound_body = (inbound_persist_body or text or "").strip()
+        try:
+            import time as _time_inb  # noqa: PLC0415
+            from core.turn_latency import (  # noqa: PLC0415
+                get_turn_latency,
+                safe_record_ms,
+            )
+
+            _t_inb = _time_inb.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_inb = None
         StateManager.save_message(
             db, to, _inbound_body, "inbound",
             conversation_id=convo.id,
             tenant_id=tenant_id,
             extra_metadata=_live_in_meta,
         )
+        try:
+            import time as _time_inb2  # noqa: PLC0415
+            from core.turn_latency import get_turn_latency, safe_record_ms  # noqa: PLC0415
+
+            if _t_inb is not None:
+                safe_record_ms(
+                    "inbound_persist",
+                    (_time_inb2.monotonic() - _t_inb) * 1000.0,
+                )
+            _tl_inb = get_turn_latency()
+            if _tl_inb is not None:
+                _tl_inb.set_identity(conversation_id=int(convo.id))
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── Repeated short fragment guard (Jun 2026) ─────────────────────
         # Same short text repeated within a brief window must not each spawn
@@ -9827,6 +9931,12 @@ async def _handle_merchant_message(
                 reason="skip_persist",
             )
         else:
+            try:
+                import time as _time_outp  # noqa: PLC0415
+
+                _t_outp = _time_outp.monotonic()
+            except Exception:  # noqa: BLE001
+                _t_outp = None
             StateManager.save_message(
                 db, to, reply, "outbound",
                 conversation_id=convo.id, tenant_id=tenant_id,
@@ -9841,6 +9951,17 @@ async def _handle_merchant_message(
                     ),
                 ),
             )
+            try:
+                if _t_outp is not None:
+                    import time as _time_outp2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                    safe_record_ms(
+                        "outbound_persist",
+                        (_time_outp2.monotonic() - _t_outp) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
 
         latency_ms = 0
         try:
@@ -12677,6 +12798,12 @@ async def _handle_merchant_message(
             _cached_wa_conn = None
             if _product_attachments:
                 try:
+                    import time as _time_pres  # noqa: PLC0415
+
+                    _t_presentation = _time_pres.monotonic()
+                except Exception:  # noqa: BLE001
+                    _t_presentation = None
+                try:
                     from database.models import (  # noqa: PLC0415
                         WhatsAppConnection as _WAConn,
                     )
@@ -13107,6 +13234,18 @@ async def _handle_merchant_message(
                         attachment=_att,
                         delivery_audit=_delivery_audit if isinstance(_delivery_audit, dict) else None,
                     )
+
+                try:
+                    if _t_presentation is not None:
+                        import time as _time_pres2  # noqa: PLC0415
+                        from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                        safe_record_ms(
+                            "presentation",
+                            (_time_pres2.monotonic() - _t_presentation) * 1000.0,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
 
             # ── Staff call contact cards ────────────────────────────
             # Dispatched LAST so the customer sees: (1) the main
@@ -13755,6 +13894,19 @@ async def _handle_merchant_message(
             pass
         _sync_persona_observability()
         try:
+            # Finalize turn_timing snapshot onto the trace for metadata merge.
+            from core.turn_latency import (  # noqa: PLC0415
+                timing_from_trace_extra,
+            )
+
+            _tl = timing_from_trace_extra(_trace.extra)
+            if _tl is not None:
+                snap = _tl.snapshot(finalize_total=True)
+                _trace.extra["turn_timing_snapshot"] = snap
+                _tl.emit_log()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             _trace.emit()
         except Exception:  # noqa: BLE001
             pass
@@ -14162,6 +14314,13 @@ async def _post_wa(
                     operation="send_message",
                     duration_ms=_duration,
                 )
+                try:
+                    from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                    if _duration is not None:
+                        safe_record_ms("provider_send", _duration)
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception as _stamp_exc:  # noqa: BLE001
                 logger.warning(
                     "[WA] outbound stamp failed (non-fatal) tenant=%s err=%s",

@@ -183,15 +183,96 @@ async def extract_slots(
             "reason": "brain.intent.slot_extractor",
             "estimated_input_tokens": (len(_SYSTEM) + len(user_content)) // 4,
         }
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                provider.call,
-                user_content,
-                _SYSTEM,
-                audit_context=audit_context,
-            ),
-            timeout=12.0,
-        )
+        import time as _time_slot  # noqa: PLC0415
+
+        _t_slot = _time_slot.monotonic()
+        _slot_fallback = ""
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    provider.call,
+                    user_content,
+                    _SYSTEM,
+                    audit_context=audit_context,
+                ),
+                timeout=12.0,
+            )
+        except TimeoutError:
+            _slot_fallback = "timeout"
+            try:
+                from core.turn_latency import (  # noqa: PLC0415
+                    safe_record_llm_call,
+                    safe_record_ms,
+                )
+
+                _slot_ms = int((_time_slot.monotonic() - _t_slot) * 1000)
+                safe_record_ms("slot_extractor", _slot_ms)
+                safe_record_llm_call(
+                    purpose="slot_extractor",
+                    model=_slot_model,
+                    provider="openai_compatible",
+                    duration_ms=_slot_ms,
+                    timeout_seconds=12.0,
+                    fallback_reason="timeout",
+                    ttft_available=False,
+                    input_tokens=audit_context.get("estimated_input_tokens"),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return deterministic
+        except Exception:
+            _slot_fallback = "llm_error"
+            try:
+                from core.turn_latency import (  # noqa: PLC0415
+                    safe_record_llm_call,
+                    safe_record_ms,
+                )
+
+                _slot_ms = int((_time_slot.monotonic() - _t_slot) * 1000)
+                safe_record_ms("slot_extractor", _slot_ms)
+                safe_record_llm_call(
+                    purpose="slot_extractor",
+                    model=_slot_model,
+                    provider="openai_compatible",
+                    duration_ms=_slot_ms,
+                    timeout_seconds=12.0,
+                    fallback_reason=_slot_fallback,
+                    ttft_available=False,
+                    input_tokens=audit_context.get("estimated_input_tokens"),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return deterministic
+        try:
+            from core.turn_latency import (  # noqa: PLC0415
+                safe_record_llm_call,
+                safe_record_ms,
+            )
+
+            _slot_ms = int((_time_slot.monotonic() - _t_slot) * 1000)
+            safe_record_ms("slot_extractor", _slot_ms)
+            _usage = result.get("usage") if isinstance(result, dict) else None
+            safe_record_llm_call(
+                purpose="slot_extractor",
+                model=_slot_model,
+                provider="openai_compatible",
+                duration_ms=_slot_ms,
+                timeout_seconds=12.0,
+                fallback_reason="",
+                ttft_available=False,
+                input_tokens=(
+                    (_usage or {}).get("input_tokens")
+                    or (_usage or {}).get("prompt_tokens")
+                    or audit_context.get("estimated_input_tokens")
+                ),
+                output_tokens=(
+                    (_usage or {}).get("output_tokens")
+                    or (_usage or {}).get("completion_tokens")
+                ),
+                cached_tokens=(_usage or {}).get("cached_tokens"),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         raw = str(result.get("reply_text") or "").strip()
         if not raw:
             return deterministic

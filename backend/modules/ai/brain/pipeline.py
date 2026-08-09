@@ -915,7 +915,29 @@ class MerchantBrain:
             )
 
         # ── 1. Intent ────────────────────────────────────────────────────
+        try:
+            import time as _time_state  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_ms  # noqa: PLC0415
+
+            _t_state = _time_state.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_state = None
+            _tl_ms = None  # type: ignore[assignment]
         state_for_classify = self._state_store.load(db, tenant_id, customer_phone)
+        try:
+            if _t_state is not None and _tl_ms is not None:
+                import time as _time_state2  # noqa: PLC0415
+
+                _dur = (_time_state2.monotonic() - _t_state) * 1000.0
+                _tl_ms("state_load", _dur)
+                _tl_ms("state_db", _dur)
+                from core.turn_latency import get_turn_latency as _gtl  # noqa: PLC0415
+
+                _tl_obj = _gtl()
+                if _tl_obj is not None:
+                    _tl_obj.add_db_queries("state_db", 1)
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── 1b. Infer greeted from history (catches proactive outbounds) ─
         # If ANY prior outbound exists in history (cart recovery template,
@@ -1431,7 +1453,24 @@ class MerchantBrain:
         # ── 2. Load state + facts ─────────────────────────────────────────
         state: MerchantConversationState = state_for_classify
         if _pre_commerce_shortcut:
+            try:
+                import time as _time_facts  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_facts  # noqa: PLC0415
+
+                _t_facts = _time_facts.monotonic()
+            except Exception:  # noqa: BLE001
+                _t_facts = None
+                _tl_facts = None  # type: ignore[assignment]
             facts: CommerceFacts = load_minimal_commerce_facts(db, tenant_id)
+            try:
+                if _t_facts is not None and _tl_facts is not None:
+                    import time as _time_facts2  # noqa: PLC0415
+
+                    _fd = (_time_facts2.monotonic() - _t_facts) * 1000.0
+                    _tl_facts("facts_load", _fd)
+                    _tl_facts("facts_db", _fd)
+            except Exception:  # noqa: BLE001
+                pass
             sales_context = self._sales_context_loader.load(
                 db,
                 tenant_id=tenant_id,
@@ -1448,7 +1487,29 @@ class MerchantBrain:
             merchant_context: Dict[str, Any] = {}
             commerce_bundle: Dict[str, Any] = {}
         else:
+            try:
+                import time as _time_facts_full  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_facts_full  # noqa: PLC0415
+
+                _t_facts_full = _time_facts_full.monotonic()
+            except Exception:  # noqa: BLE001
+                _t_facts_full = None
+                _tl_facts_full = None  # type: ignore[assignment]
             facts = self._facts_loader.load(db, tenant_id)
+            try:
+                if _t_facts_full is not None and _tl_facts_full is not None:
+                    import time as _time_facts_full2  # noqa: PLC0415
+
+                    _fd = (_time_facts_full2.monotonic() - _t_facts_full) * 1000.0
+                    _tl_facts_full("facts_load", _fd)
+                    _tl_facts_full("facts_db", _fd)
+                    from core.turn_latency import get_turn_latency as _gtl_f  # noqa: PLC0415
+
+                    _o = _gtl_f()
+                    if _o is not None:
+                        _o.add_db_queries("facts_db", 1)
+            except Exception:  # noqa: BLE001
+                pass
 
             sales_context = self._sales_context_loader.load(
                 db,
@@ -1462,6 +1523,14 @@ class MerchantBrain:
             )
 
             merchant_context = {}
+            try:
+                import time as _time_cat  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_cat  # noqa: PLC0415
+
+                _t_cat = _time_cat.monotonic()
+            except Exception:  # noqa: BLE001
+                _t_cat = None
+                _tl_cat = None  # type: ignore[assignment]
             try:
                 from core.store_knowledge import build_merchant_context  # noqa: PLC0415
                 merchant_context = build_merchant_context(
@@ -1482,6 +1551,20 @@ class MerchantBrain:
                     tenant_id, exc,
                 )
                 merchant_context = {}
+            try:
+                if _t_cat is not None and _tl_cat is not None:
+                    import time as _time_cat2  # noqa: PLC0415
+
+                    _cd = (_time_cat2.monotonic() - _t_cat) * 1000.0
+                    _tl_cat("catalog_preload", _cd)
+                    _tl_cat("catalog_db", _cd)
+                    from core.turn_latency import get_turn_latency as _gtl_c  # noqa: PLC0415
+
+                    _oc = _gtl_c()
+                    if _oc is not None:
+                        _oc.add_db_queries("catalog_db", 1)
+            except Exception:  # noqa: BLE001
+                pass
 
             commerce_bundle = {}
             try:
@@ -1498,7 +1581,25 @@ class MerchantBrain:
 
         from modules.ai.commerce.permission_loader import load_tenant_commerce_permissions  # noqa: PLC0415
 
+        try:
+            import time as _time_perm  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_perm  # noqa: PLC0415
+
+            _t_perm = _time_perm.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_perm = None
+            _tl_perm = None  # type: ignore[assignment]
         _permission_load = load_tenant_commerce_permissions(db, tenant_id)
+        try:
+            if _t_perm is not None and _tl_perm is not None:
+                import time as _time_perm2  # noqa: PLC0415
+
+                _tl_perm(
+                    "permission_context_load",
+                    (_time_perm2.monotonic() - _t_perm) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── 3. Assemble context ───────────────────────────────────────────
         ctx = BrainContext(
@@ -1945,7 +2046,22 @@ class MerchantBrain:
                 _cbt_exc,
             )
 
+        try:
+            import time as _time_dec  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_dec  # noqa: PLC0415
+
+            _t_dec = _time_dec.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_dec = None
+            _tl_dec = None  # type: ignore[assignment]
         decision: Decision   = self._decision_engine.decide(ctx)
+        try:
+            if _t_dec is not None and _tl_dec is not None:
+                import time as _time_dec2  # noqa: PLC0415
+
+                _tl_dec("decision", (_time_dec2.monotonic() - _t_dec) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
         reason_before_policy = decision.reason
         _legacy_decision_for_shadow = decision
         _enforce_result = None
@@ -2190,7 +2306,23 @@ class MerchantBrain:
             )
 
         # ── 5. Execute ────────────────────────────────────────────────────
+        try:
+            import time as _time_ex  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_ex  # noqa: PLC0415
+
+            _t_ex = _time_ex.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_ex = None
+            _tl_ex = None  # type: ignore[assignment]
         result: ActionResult = await self._executor.execute(decision, ctx)
+        try:
+            if _t_ex is not None and _tl_ex is not None:
+                import time as _time_ex2  # noqa: PLC0415
+
+                _ex_ms = (_time_ex2.monotonic() - _t_ex) * 1000.0
+                _tl_ex("tool_execution", _ex_ms)
+        except Exception:  # noqa: BLE001
+            pass
 
         if _turn_owner_contract_meta:
             result.data["turn_owner_contract"] = dict(_turn_owner_contract_meta)
@@ -3095,6 +3227,14 @@ class MerchantBrain:
         # ── 7. Compose reply ──────────────────────────────────────────────
         reply: str = await self._composer.compose(decision, result, ctx)
         result.data["compose_reply_candidate"] = str(reply or "").strip()
+        # persona_compose span is recorded inside FactBoundPersonaComposer.
+        # post_compose starts after compose returns (provenance / audits).
+        try:
+            import time as _time_pc  # noqa: PLC0415
+
+            _t_post_compose = _time_pc.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_post_compose = None
 
         try:
             from modules.ai.brain.persona.trusted_coupon_offer_provenance import (  # noqa: PLC0415
@@ -3500,7 +3640,34 @@ class MerchantBrain:
             logger.warning("[WELCOME_GATE] prepend skipped: %s", _wg_exc)
 
         # ── 8. Persist state ───────────────────────────────────────────────
+        try:
+            if _t_post_compose is not None:
+                import time as _time_pc2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_pc  # noqa: PLC0415
+
+                # Rough post_compose wall until state persist (includes mid-pipeline work).
+                _tl_pc(
+                    "post_compose",
+                    (_time_pc2.monotonic() - _t_post_compose) * 1000.0,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import time as _time_sp  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_sp  # noqa: PLC0415
+
+            _t_sp = _time_sp.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_sp = None
+            _tl_sp = None  # type: ignore[assignment]
         self._state_store.save(db, tenant_id, customer_phone, new_state)
+        try:
+            if _t_sp is not None and _tl_sp is not None:
+                import time as _time_sp2  # noqa: PLC0415
+
+                _tl_sp("state_persist", (_time_sp2.monotonic() - _t_sp) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
 
         # ── 9. Persist trace ──────────────────────────────────────────────
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -3889,6 +4056,13 @@ class MerchantBrain:
             )
             if k in _brain_state_dict
         }
+
+        try:
+            import time as _time_guards  # noqa: PLC0415
+
+            _t_guards = _time_guards.monotonic()
+        except Exception:  # noqa: BLE001
+            _t_guards = None
 
         try:
             from modules.ai.brain.postprocess.shipping_cost_truth_guard import (  # noqa: PLC0415
@@ -4914,6 +5088,15 @@ class MerchantBrain:
             _ps_offer_constitutional_meta = {}
             _track_need_ids_constitutional_meta = {}
 
+        try:
+            if _t_guards is not None:
+                import time as _time_guards2  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_guards  # noqa: PLC0415
+
+                _tl_guards("guards", (_time_guards2.monotonic() - _t_guards) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
+
         from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
             extract_reply_metadata_export,
             finalize_post_guard_compose_provenance,
@@ -5048,7 +5231,7 @@ class MerchantBrain:
         if pending_product_cards:
             pending_buttons = []
 
-        return {
+        _out = {
             "reply": reply,
             "buttons": pending_buttons,
             "product_cards": pending_product_cards,
@@ -5113,6 +5296,17 @@ class MerchantBrain:
             **_ps_offer_constitutional_meta,
             **_track_need_ids_constitutional_meta,
         }
+        try:
+            from core.turn_latency import get_turn_latency  # noqa: PLC0415
+
+            _tl_ret = get_turn_latency()
+            if _tl_ret is not None:
+                if conversation_id is not None:
+                    _tl_ret.set_identity(conversation_id=int(conversation_id))
+                _out["turn_timing"] = _tl_ret.snapshot(finalize_total=False)
+        except Exception:  # noqa: BLE001
+            pass
+        return _out
 
 
 # ── Brain state helpers ────────────────────────────────────────────────────────
