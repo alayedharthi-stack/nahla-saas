@@ -2734,7 +2734,7 @@ class MerchantBrain:
                             new_state,
                             reason="product_list_display",
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — archive focus is best-effort
                         pass
                     logger.info(
                         "[ORDER FLOW] reset stale current_product_focus after product list display | "
@@ -4440,7 +4440,46 @@ class MerchantBrain:
                 )
                 if _crqg.requires_grounded_recompose:
                     result.data["quality_guard_recompose_attempted"] = True
+                    _cards_before_recompose = list(
+                        result.data.get("pending_product_cards") or []
+                    )
+                    _pres_kind_before = str(
+                        result.data.get("product_presentation_kind") or ""
+                    ).strip()
                     recomposed_reply = await self._composer.compose(decision, result, ctx)
+                    # Persona/quality recompose must not erase a valid SINGLE_RICH stamp.
+                    if (
+                        _cards_before_recompose
+                        and not (result.data.get("pending_product_cards") or [])
+                        and _pres_kind_before == "single_resolved_rich"
+                    ):
+                        result.data["pending_product_cards"] = list(
+                            _cards_before_recompose
+                        )
+                        result.data["product_presentation_kind"] = _pres_kind_before
+                        result.data["product_presentation_reason"] = str(
+                            result.data.get("product_presentation_reason")
+                            or "restored_after_recompose"
+                        )
+                        try:
+                            from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: PLC0415
+                                stamp_presentation_observability,
+                            )
+
+                            stamp_presentation_observability(
+                                result.data,
+                                candidate_count=int(
+                                    result.data.get("presentation_candidate_count") or 1
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — observability restore must not block reply
+                            pass
+                        logger.info(
+                            "[PRESENTATION_STAMP] restored SINGLE_RICH cards after "
+                            "quality recompose tenant=%s count=%d",
+                            tenant_id,
+                            len(_cards_before_recompose),
+                        )
                     if (recomposed_reply or "").strip():
                         result.data["compose_reply_candidate"] = (
                             recomposed_reply or ""
@@ -5001,6 +5040,13 @@ class MerchantBrain:
             )
         except Exception:
             pass   # trace logging must never break the reply path
+
+        # Refresh presentation exports after quality/alignment recomposes so a
+        # late SINGLE_RICH stamp (or restore) is not dropped by the earlier snapshot.
+        pending_product_cards = list(result.data.get("pending_product_cards") or [])
+        pending_buttons = list(result.data.get("pending_buttons") or [])
+        if pending_product_cards:
+            pending_buttons = []
 
         return {
             "reply": reply,

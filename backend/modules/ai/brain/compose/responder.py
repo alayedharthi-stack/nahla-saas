@@ -853,21 +853,35 @@ class DefaultComposer:
                     )
                     if _persist_fact_rows:
                         result.data["catalog_fact_products"] = _persist_fact_rows
-                if candidates and _question_kind not in _CATALOG_QA_QUESTION_KINDS:
+                if _question_kind not in _CATALOG_QA_QUESTION_KINDS:
                     from ..commerce.product_presentation_selection import (  # noqa: PLC0415
                         apply_search_product_presentation,
                         build_standard_pick_buttons,
+                        resolve_browse_presentation_candidates,
                     )
 
-                    apply_search_product_presentation(
-                        result.data,
-                        candidates=candidates,
-                        resolved_product=(
-                            data.get("product")
-                            or getattr(getattr(ctx, "state", None), "current_product_focus", None)
-                        ),
-                        build_buttons=build_standard_pick_buttons,
+                    _resolved = (
+                        data.get("product")
+                        or getattr(getattr(ctx, "state", None), "current_product_focus", None)
                     )
+                    _stamp_rows = resolve_browse_presentation_candidates(
+                        display_candidates=candidates,
+                        compose_products=compose_products,
+                        executor_products=list(data.get("products") or []),
+                        resolved_product=_resolved if isinstance(_resolved, dict) else None,
+                        catalog_product_ids=list(
+                            result.data.get("catalog_product_ids") or []
+                        ),
+                    )
+                    if _stamp_rows:
+                        apply_search_product_presentation(
+                            result.data,
+                            candidates=_stamp_rows,
+                            resolved_product=(
+                                _resolved if isinstance(_resolved, dict) else None
+                            ),
+                            build_buttons=build_standard_pick_buttons,
+                        )
                 elif _question_kind in _CATALOG_QA_QUESTION_KINDS:
                     _card_rows = list(candidates or compose_products or [])
                     if len(_card_rows) == 1:
@@ -930,15 +944,24 @@ class DefaultComposer:
                 PRESENTATION_SINGLE_RICH,
                 apply_search_product_presentation,
                 build_standard_pick_buttons,
+                resolve_browse_presentation_candidates,
             )
 
+            _resolved = (
+                data.get("product")
+                or getattr(getattr(ctx, "state", None), "current_product_focus", None)
+            )
+            _stamp_rows = resolve_browse_presentation_candidates(
+                display_candidates=candidates,
+                compose_products=compose_products,
+                executor_products=list(data.get("products") or []),
+                resolved_product=_resolved if isinstance(_resolved, dict) else None,
+                catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
+            )
             _pres = apply_search_product_presentation(
                 result.data,
-                candidates=candidates,
-                resolved_product=(
-                    data.get("product")
-                    or getattr(getattr(ctx, "state", None), "current_product_focus", None)
-                ),
+                candidates=_stamp_rows or list(candidates or []),
+                resolved_product=_resolved if isinstance(_resolved, dict) else None,
                 build_buttons=build_standard_pick_buttons,
             )
             if _pres.kind == PRESENTATION_SINGLE_RICH:
