@@ -1732,7 +1732,25 @@ class MerchantBrain:
                 safe_trusted_context_brain_projection_trace_metadata,
             )
 
+            try:
+                import time as _time_tcp  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_tcp  # noqa: PLC0415
+
+                _t_tcp = _time_tcp.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_tcp = None
+                _tl_tcp = None  # type: ignore[assignment]
             _tc_brain_projection = attach_trusted_context_brain_projection(ctx)
+            try:
+                if _t_tcp is not None and _tl_tcp is not None:
+                    import time as _time_tcp2  # noqa: PLC0415
+
+                    _tl_tcp(
+                        "trusted_context_projection",
+                        (_time_tcp2.monotonic() - _t_tcp) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             if _tc_brain_projection is not None:
                 logger.info(
                     "[TRUSTED_CONTEXT_BRAIN] %s",
@@ -1904,12 +1922,30 @@ class MerchantBrain:
                 is not None
             )
             if _advisory_turn and not getattr(ctx, "block_commerce_escalation", False):
+                try:
+                    import time as _time_kb  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms as _tl_kb  # noqa: PLC0415
+
+                    _t_kb = _time_kb.monotonic()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    _t_kb = None
+                    _tl_kb = None  # type: ignore[assignment]
                 _bundle, _, _kb_hits = prepare_goal_regimen_bundle(
                     db,
                     tenant_id,
                     message,
                     canonical_message=_classify_message,
                 )
+                try:
+                    if _t_kb is not None and _tl_kb is not None:
+                        import time as _time_kb2  # noqa: PLC0415
+
+                        _tl_kb(
+                            "knowledge_retrieval",
+                            (_time_kb2.monotonic() - _t_kb) * 1000.0,
+                        )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
                 ctx.goal_regimen_bundle = _bundle
         except Exception as _gc_exc:  # noqa: BLE001  # noqa: silent-ok — goal commerce prepare must not block decide
             logger.debug(
@@ -2054,7 +2090,25 @@ class MerchantBrain:
 
             _log_commerce_turn_contract_divergence = _log_ctc_divergence_fn
             _enforce_commerce_turn_contract_decision = maybe_enforce_commerce_turn_contract_decision
+            try:
+                import time as _time_ctc  # noqa: PLC0415
+                from core.turn_latency import safe_record_ms as _tl_ctc  # noqa: PLC0415
+
+                _t_ctc = _time_ctc.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_ctc = None
+                _tl_ctc = None  # type: ignore[assignment]
             _commerce_turn_contract = build_commerce_turn_contract(ctx, db=db)
+            try:
+                if _t_ctc is not None and _tl_ctc is not None:
+                    import time as _time_ctc2  # noqa: PLC0415
+
+                    _tl_ctc(
+                        "commerce_turn_contract",
+                        (_time_ctc2.monotonic() - _t_ctc) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             attach_commerce_turn_contract(ctx, _commerce_turn_contract)
             logger.info(
                 "[COMMERCE_TURN_CONTRACT] pre_decide tenant=%s state=%s goal=%s "

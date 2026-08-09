@@ -50,6 +50,13 @@ class DefaultMemoryUpdater:
         stage_before: str,
         latency_ms: int,
     ) -> None:
+        summarise_turn = ctx.state.turn % SUMMARISE_EVERY_N == 0
+        try:
+            from core.turn_latency import safe_set_memory_update_mode  # noqa: PLC0415
+
+            safe_set_memory_update_mode("summarise" if summarise_turn else "normal")
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
         self._write_trace(db, ctx, decision, result, reply, stage_before, latency_ms)
         self._bump_affinity(db, ctx, decision, result)
         self._nudge_price_sensitivity(db, ctx)
@@ -61,7 +68,7 @@ class DefaultMemoryUpdater:
         # cross-merchant store (or even a database outage on that table)
         # never breaks the customer reply path.
         self._emit_anonymous_signal(db, ctx, decision, result, stage_before, latency_ms)
-        if ctx.state.turn % SUMMARISE_EVERY_N == 0:
+        if summarise_turn:
             self._summarise(db, ctx)
 
     # ── 1. ConversationTrace ──────────────────────────────────────────────────
@@ -454,6 +461,12 @@ class DefaultMemoryUpdater:
                 tenant_id=ctx.tenant_id,
                 turn_id=getattr(ctx.state, "turn", None),
             )
+            try:
+                import time as _time_sum_llm  # noqa: PLC0415
+
+                _t_sum_llm = _time_sum_llm.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_sum_llm = None
             provider = OpenAICompatibleProvider()
             result = provider.call(
                 prompt,
@@ -466,6 +479,16 @@ class DefaultMemoryUpdater:
                     "estimated_input_tokens": len(prompt) // 4,
                 },
             )
+            try:
+                if _t_sum_llm is not None:
+                    import time as _time_sum_llm2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
+
+                    safe_record_memory_summary_timing(
+                        llm_ms=(_time_sum_llm2.monotonic() - _t_sum_llm) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             raw = str(result.get("reply_text") or "").strip()
             if not raw:
                 return
@@ -477,6 +500,12 @@ class DefaultMemoryUpdater:
 
             from database.models import ConversationHistorySummary
             now = datetime.now(timezone.utc)
+            try:
+                import time as _time_sum_db  # noqa: PLC0415
+
+                _t_sum_db = _time_sum_db.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_sum_db = None
             row = (
                 db.query(ConversationHistorySummary)
                 .filter(
@@ -507,6 +536,16 @@ class DefaultMemoryUpdater:
                 db.add(row)
 
             db.commit()
+            try:
+                if _t_sum_db is not None:
+                    import time as _time_sum_db2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
+
+                    safe_record_memory_summary_timing(
+                        db_ms=(_time_sum_db2.monotonic() - _t_sum_db) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             logger.info(
                 "[MemoryUpdater] summary written for customer=%s turn=%s",
                 ctx.customer_id, ctx.state.turn,

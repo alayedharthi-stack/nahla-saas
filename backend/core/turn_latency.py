@@ -62,6 +62,11 @@ from typing import Any, Dict, Iterator, List, Mapping, MutableMapping, Optional
 logger = logging.getLogger("nahla.turn_latency")
 
 # Mutually exclusive leaf stages summed into accounted_ms (no nesting).
+# Post-brain taxonomy (v4): ``post_brain_dispatch`` is ENVELOPE-only (mark→flush
+# diagnostic wall). Accountable siblings under that wall: ``post_brain_remaining_prep``
+# (webhook dispatch body before outbound_persist) plus ``reply_normalization``,
+# ``presentation``, ``outbound_persist``, ``provider_send`` — no overlap with the
+# envelope wall in accounted_ms.
 ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "webhook_dispatch_pre_persist",
     "inbound_persist",
@@ -74,7 +79,7 @@ ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "customer_intelligence_upsert",
     "customer_profile_ensure",
     "store_ai_mode_lookup",
-    "post_brain_dispatch",
+    "pre_brain_remaining_prep",
     "state_load",
     "slot_extractor",
     "permission_context_load",
@@ -83,6 +88,8 @@ ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "commerce_bundle_load",
     "catalog_preload",
     "knowledge_retrieval",
+    "commerce_turn_contract",
+    "trusted_context_projection",
     "decision",
     "tool_execution",
     "state_projection",
@@ -98,6 +105,7 @@ ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "outbound_dedup",
     "truth_guards",
     "reply_normalization",
+    "post_brain_remaining_prep",
     "outbound_persist",
     "provider_send",
 )
@@ -115,6 +123,7 @@ PRE_BRAIN_ACCOUNTABLE: tuple[str, ...] = (
     "customer_intelligence_upsert",
     "customer_profile_ensure",
     "store_ai_mode_lookup",
+    "pre_brain_remaining_prep",
 )
 
 POST_BRAIN_ACCOUNTABLE: tuple[str, ...] = (
@@ -122,7 +131,7 @@ POST_BRAIN_ACCOUNTABLE: tuple[str, ...] = (
     "outbound_dedup",
     "truth_guards",
     "reply_normalization",
-    "post_brain_dispatch",
+    "post_brain_remaining_prep",
     "outbound_persist",
     "presentation",
     "provider_send",
@@ -133,6 +142,7 @@ ENVELOPE_STAGES: tuple[str, ...] = (
     "brain_boundary_enter",
     "brain_boundary_exit",
     "intent_routing",
+    "post_brain_dispatch",
 )
 
 # Backward-compatible alias (accounting uses ACCOUNTABLE_LEAF only).
@@ -146,6 +156,8 @@ DETAIL_STAGES: tuple[str, ...] = (
     "catalog_db",
     "state_db",
     "truth_guards_detail",
+    "memory_summary_llm",
+    "memory_summary_db",
 )
 
 _CURRENT: contextvars.ContextVar[Optional["TurnLatency"]] = contextvars.ContextVar(
@@ -310,6 +322,10 @@ class TurnLatency:
     lock_hold_ms: Optional[int] = None
     waiters_ahead: Optional[int] = None
 
+    memory_update_mode: Optional[str] = None
+    memory_summary_llm_ms: Optional[int] = None
+    memory_summary_db_ms: Optional[int] = None
+
     _open_spans: Dict[str, float] = field(default_factory=dict, repr=False)
     _finalized: bool = field(default=False, repr=False)
     _snapshot: Optional[Dict[str, Any]] = field(default=None, repr=False)
@@ -432,13 +448,41 @@ class TurnLatency:
             pass
 
     def flush_post_brain_dispatch(self) -> None:
-        """Record ``post_brain_dispatch`` once at outbound_persist entry."""
+        """Record envelope ``post_brain_dispatch`` + leaf ``post_brain_remaining_prep`` at outbound_persist entry."""
         try:
             started = self._post_brain_dispatch_start
             if started is None:
                 return
             self._post_brain_dispatch_start = None
-            self.record_ms("post_brain_dispatch", _safe_float_ms(started))
+            ms = _safe_float_ms(started)
+            self.record_ms("post_brain_dispatch", ms)
+            self.record_ms("post_brain_remaining_prep", ms)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def set_memory_update_mode(self, mode: str) -> None:
+        try:
+            key = str(mode or "").strip().lower()
+            if key in ("normal", "summarise"):
+                self.memory_update_mode = key
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
+    def record_memory_summary_timing(
+        self,
+        *,
+        llm_ms: Any = None,
+        db_ms: Any = None,
+    ) -> None:
+        try:
+            if llm_ms is not None:
+                ms = max(0, _safe_int(llm_ms, 0))
+                self.memory_summary_llm_ms = ms
+                self.record_ms("memory_summary_llm", ms)
+            if db_ms is not None:
+                ms = max(0, _safe_int(db_ms, 0))
+                self.memory_summary_db_ms = ms
+                self.record_ms("memory_summary_db", ms)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
@@ -594,6 +638,12 @@ class TurnLatency:
                 "ttft_available": any(bool(c.ttft_available) for c in self.llm_calls),
                 "snapshot_finalized": bool(finalize_total),
             }
+            if self.memory_update_mode is not None:
+                out["memory_update_mode"] = self.memory_update_mode
+            if self.memory_summary_llm_ms is not None:
+                out["memory_summary_llm_ms"] = int(self.memory_summary_llm_ms)
+            if self.memory_summary_db_ms is not None:
+                out["memory_summary_db_ms"] = int(self.memory_summary_db_ms)
             if finalize_total:
                 out["end_to_end_total_ms"] = total
             if cache:
@@ -832,6 +882,26 @@ def safe_flush_post_brain_dispatch() -> None:
         pass
 
 
+def safe_set_memory_update_mode(mode: str) -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.set_memory_update_mode(mode)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+def safe_record_memory_summary_timing(**kwargs: Any) -> None:
+    try:
+        timing = get_turn_latency()
+        if timing is None:
+            return
+        timing.record_memory_summary_timing(**kwargs)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
 def safe_record_llm_call(**kwargs: Any) -> None:
     try:
         timing = get_turn_latency()
@@ -896,7 +966,9 @@ __all__ = [
     "safe_mark_brain_boundary",
     "safe_mark_post_brain_dispatch_start",
     "safe_mark_webhook_pre_persist_start",
+    "safe_record_memory_summary_timing",
     "safe_record_accountable_once",
+    "safe_set_memory_update_mode",
     "safe_record_llm_call",
     "safe_record_lock",
     "safe_record_ms",

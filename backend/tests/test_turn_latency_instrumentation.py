@@ -13,6 +13,8 @@ from core.turn_latency import (
     ACCOUNTABLE_STAGES,
     DETAIL_STAGES,
     ENVELOPE_STAGES,
+    POST_BRAIN_ACCOUNTABLE,
+    PRE_BRAIN_ACCOUNTABLE,
     TurnLatency,
     bind_compose_role,
     bind_turn_latency,
@@ -26,7 +28,9 @@ from core.turn_latency import (
     safe_record_accountable_once,
     safe_record_llm_call,
     safe_record_lock,
+    safe_record_memory_summary_timing,
     safe_record_ms,
+    safe_set_memory_update_mode,
     safe_span,
 )
 
@@ -307,6 +311,7 @@ def test_brain_mid_snapshot_distinguishable_from_final() -> None:
     timing.mark_brain_boundary()
     mid = timing.snapshot(finalize_total=False, cache=False)
     timing.record_ms("post_brain_dispatch", 300)
+    timing.record_ms("post_brain_remaining_prep", 300)
     timing.record_ms("outbound_persist", 40)
     timing.record_ms("provider_send", 60)
     final = timing.snapshot(finalize_total=True, cache=False)
@@ -315,16 +320,20 @@ def test_brain_mid_snapshot_distinguishable_from_final() -> None:
     assert mid["snapshot_finalized"] is False
     assert final["end_to_end_total_ms"] >= mid["brain_total_ms"]
     assert final["spans_ms"]["post_brain_dispatch"] == 300
+    assert final["spans_ms"]["post_brain_remaining_prep"] == 300
+    assert final["accounted_ms"] == 500 + 300 + 40 + 60
 
 
 def test_end_to_end_total_includes_post_brain_dispatch() -> None:
     timing = new_turn_latency(tenant_id=4)
     timing.mark_brain_boundary()
     timing.record_ms("post_brain_dispatch", 800)
+    timing.record_ms("post_brain_remaining_prep", 800)
     timing.record_ms("outbound_persist", 50)
     timing.record_ms("provider_send", 150)
     snap = timing.snapshot(finalize_total=True, cache=False)
     assert snap["spans_ms"]["post_brain_dispatch"] == 800
+    assert "post_brain_dispatch" in ENVELOPE_STAGES
     assert snap["accounted_ms"] >= 1000
 
 
@@ -426,6 +435,7 @@ def test_accounted_percent_at_most_100_on_synthetic_normal_turn() -> None:
     timing.record_ms("guards", 15)
     timing.record_ms("state_persist", 20)
     timing.record_ms("post_brain_dispatch", 50)
+    timing.record_ms("post_brain_remaining_prep", 50)
     timing.record_ms("outbound_persist", 12)
     timing.record_ms("provider_send", 90)
     timing.record_ms("total_turn", 1000)
@@ -571,6 +581,7 @@ def test_merchant_brain_turn_post_process_spans_accountable() -> None:
     timing.record_ms("truth_guards_detail", 65)
     timing.record_ms("truth_guards", 65)
     timing.record_ms("post_brain_dispatch", 40)
+    timing.record_ms("post_brain_remaining_prep", 40)
     timing.record_ms("provider_send", 90)
     timing.record_ms("total_turn", 400)
     snap = timing.snapshot(finalize_total=True, cache=False)
@@ -580,6 +591,7 @@ def test_merchant_brain_turn_post_process_spans_accountable() -> None:
     assert snap["spans_ms"]["truth_guards_detail"] == 65
     assert "truth_guards_detail" in DETAIL_STAGES
     assert snap["post_brain_total_ms"] == 18 + 22 + 65 + 40 + 90
+    assert "post_brain_dispatch" not in POST_BRAIN_ACCOUNTABLE
 
 
 def test_accounted_percent_at_most_100_with_v3_leaves() -> None:
@@ -598,6 +610,7 @@ def test_accounted_percent_at_most_100_with_v3_leaves() -> None:
     timing.record_ms("silent_welcome_handling", 10)
     timing.record_ms("outbound_dedup", 8)
     timing.record_ms("post_brain_dispatch", 50)
+    timing.record_ms("post_brain_remaining_prep", 50)
     timing.record_ms("outbound_persist", 12)
     timing.record_ms("provider_send", 90)
     timing.record_ms("total_turn", 1200)
@@ -628,3 +641,107 @@ def test_llm_calls_include_role_without_raw_prompt() -> None:
     assert snap["llm_calls"][0]["llm_call_role"] == "slot_extractor"
     for forbidden in ("system_prompt", "user_content", "raw_prompt", "OPENAI_API_KEY"):
         assert forbidden not in blob
+
+
+def test_v4_gap_closure_leaves_in_accounted_sum() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("pre_brain_remaining_prep", 120)
+    timing.record_ms("knowledge_retrieval", 85)
+    timing.record_ms("commerce_turn_contract", 35)
+    timing.record_ms("trusted_context_projection", 22)
+    timing.record_ms("reply_normalization", 18)
+    timing.record_ms("post_brain_remaining_prep", 55)
+    timing.record_ms("total_turn", 500)
+    snap = timing.snapshot(finalize_total=False, cache=False)
+
+    for leaf in (
+        "pre_brain_remaining_prep",
+        "knowledge_retrieval",
+        "commerce_turn_contract",
+        "trusted_context_projection",
+        "reply_normalization",
+        "post_brain_remaining_prep",
+    ):
+        assert leaf in ACCOUNTABLE_LEAF
+        assert snap["spans_ms"][leaf] > 0
+    assert snap["accounted_ms"] == 120 + 85 + 35 + 22 + 18 + 55
+
+
+def test_post_brain_dispatch_envelope_not_double_counted_with_reply_normalization() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.mark_post_brain_dispatch_start()
+    time.sleep(0.002)
+    timing.flush_post_brain_dispatch()
+    timing.record_ms("reply_normalization", 30)
+    timing.record_ms("total_turn", 200)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+
+    assert snap["spans_ms"]["post_brain_dispatch"] >= 2
+    assert snap["spans_ms"]["post_brain_remaining_prep"] == snap["spans_ms"]["post_brain_dispatch"]
+    assert snap["spans_ms"]["reply_normalization"] == 30
+    assert "post_brain_dispatch" in ENVELOPE_STAGES
+    assert "post_brain_dispatch" not in ACCOUNTABLE_LEAF
+    assert snap["accounted_ms"] == snap["spans_ms"]["post_brain_remaining_prep"] + 30
+    assert snap["accounted_percent"] <= 100.0
+
+
+def test_memory_update_mode_and_summary_timing_fields() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    token = bind_turn_latency(timing)
+    try:
+        safe_set_memory_update_mode("normal")
+        snap_normal = timing.snapshot(finalize_total=False, cache=False)
+        assert snap_normal["memory_update_mode"] == "normal"
+
+        safe_set_memory_update_mode("summarise")
+        safe_record_memory_summary_timing(llm_ms=240, db_ms=18)
+        timing.record_ms("memory_update", 300)
+        snap_summarise = timing.snapshot(finalize_total=False, cache=False)
+    finally:
+        reset_turn_latency(token)
+
+    assert snap_summarise["memory_update_mode"] == "summarise"
+    assert snap_summarise["memory_summary_llm_ms"] == 240
+    assert snap_summarise["memory_summary_db_ms"] == 18
+    assert snap_summarise["spans_ms"]["memory_summary_llm"] == 240
+    assert snap_summarise["spans_ms"]["memory_summary_db"] == 18
+    assert "memory_summary_llm" in DETAIL_STAGES
+    assert snap_summarise["accounted_ms"] == 300
+
+
+def test_accounted_percent_at_most_100_with_v4_leaves_and_envelopes() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("webhook_dispatch_pre_persist", 10)
+    timing.record_ms("inbound_persist", 15)
+    timing.record_ms("history_load", 70)
+    timing.record_ms("pre_brain_remaining_prep", 90)
+    timing.record_ms("brain_boundary_exit", 850)
+    timing.record_ms("intent_routing", 120)
+    timing.record_ms("knowledge_retrieval", 40)
+    timing.record_ms("commerce_turn_contract", 25)
+    timing.record_ms("trusted_context_projection", 15)
+    timing.record_ms("persona_compose", 350)
+    timing.record_ms("memory_update", 25)
+    timing.record_ms("post_brain_dispatch", 50)
+    timing.record_ms("post_brain_remaining_prep", 50)
+    timing.record_ms("reply_normalization", 12)
+    timing.record_ms("outbound_persist", 12)
+    timing.record_ms("provider_send", 90)
+    timing.record_ms("total_turn", 1200)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+
+    assert snap["accounted_percent"] <= 100.0
+    assert snap["accounted_ms"] <= snap["total_turn_ms"]
+    envelope_ms = sum(int(snap["spans_ms"].get(name, 0) or 0) for name in ENVELOPE_STAGES)
+    assert envelope_ms > 0
+    assert snap["accounted_ms"] < envelope_ms + snap["accounted_ms"]
+
+
+def test_pre_brain_remaining_prep_in_pre_brain_reconciliation() -> None:
+    timing = new_turn_latency(tenant_id=2)
+    timing.record_ms("history_load", 60)
+    timing.record_ms("pre_brain_remaining_prep", 110)
+    timing.record_ms("customer_intelligence_upsert", 30)
+    snap = timing.snapshot(finalize_total=False, cache=False)
+    assert "pre_brain_remaining_prep" in PRE_BRAIN_ACCOUNTABLE
+    assert snap["pre_brain_total_ms"] == 60 + 110 + 30
