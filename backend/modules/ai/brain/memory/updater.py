@@ -7,17 +7,22 @@ Writes after every turn:
   1. ConversationTrace row (always — observability)
   2. ProductAffinity bump (when search or order action)
   3. PriceSensitivity nudge (when hesitation intent)
-  4. ConversationHistorySummary (Haiku call every 5 turns)
+  4. ConversationHistorySummary (LLM every 5 turns; deferred off
+     customer critical path after outbound wire-send boundary)
 
 All writes are fire-and-forget — failures are logged but never
-propagate to the reply path.
+propagate to the reply path. Summarise LLM must not delay WhatsApp send.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import text
 
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
@@ -35,6 +40,18 @@ logger = logging.getLogger("nahla.brain.memory_updater")
 
 # Produce a history summary every N turns
 SUMMARISE_EVERY_N = 5
+
+_SUMMARY_SYSTEM_PROMPT = "أنت مساعد تلخيص محادثات. أجب بـ JSON فقط."
+
+_SUMMARY_PROMPT_PREFIX = (
+    "لخّص هذه المحادثة بين عميل ومساعد متجر إلكتروني في جملتين أو ثلاث باللغة العربية:\n\n"
+)
+_SUMMARY_PROMPT_SUFFIX = (
+    "\n\n"
+    "أيضاً أجب بـ JSON بالحقول التالية فقط:\n"
+    '{{ "summary": "...", "last_intent": "browse|order|complaint|inquiry", '
+    '"sentiment": "positive|neutral|negative|frustrated" }}'
+)
 
 
 class DefaultMemoryUpdater:
@@ -54,7 +71,10 @@ class DefaultMemoryUpdater:
         try:
             from core.turn_latency import safe_set_memory_update_mode  # noqa: PLC0415
 
-            safe_set_memory_update_mode("summarise" if summarise_turn else "normal")
+            if summarise_turn:
+                safe_set_memory_update_mode("summarise_deferred")
+            else:
+                safe_set_memory_update_mode("normal")
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         self._write_trace(db, ctx, decision, result, reply, stage_before, latency_ms)
@@ -69,7 +89,17 @@ class DefaultMemoryUpdater:
         # never breaks the customer reply path.
         self._emit_anonymous_signal(db, ctx, decision, result, stage_before, latency_ms)
         if summarise_turn:
-            self._summarise(db, ctx)
+            payload = build_summarise_payload(ctx)
+            if payload:
+                result.data["memory_summarise_deferred"] = payload
+                try:
+                    from core.turn_latency import (  # noqa: PLC0415
+                        safe_set_memory_summarise_deferred_scheduled,
+                    )
+
+                    safe_set_memory_summarise_deferred_scheduled(True)
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
 
     # ── 1. ConversationTrace ──────────────────────────────────────────────────
 
@@ -403,160 +433,314 @@ class DefaultMemoryUpdater:
     # ── 4. ConversationHistorySummary ─────────────────────────────────────────
 
     def _summarise(self, db: Any, ctx: BrainContext) -> None:
-        """Call OpenAI tiny model to write a rolling summary of the conversation."""
-        if not ctx.customer_id:
+        """Legacy sync entry — retained for tests; production uses deferred path."""
+        payload = build_summarise_payload(ctx)
+        if not payload:
             return
+        _summarise_from_payload(db, payload, record_turn_latency=True)
 
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
-            return
 
+def build_history_lines(history: List[Dict[str, Any]]) -> List[str]:
+    """Build formatted history lines from the last 10 turns (same as sync path)."""
+    history_lines: List[str] = []
+    for turn in (history or [])[-10:]:
+        direction = turn.get("direction", "in")
+        body = (turn.get("body") or "").strip()
+        if not body:
+            continue
+        role = "عميل" if direction == "in" else "مساعد"
+        history_lines.append(f"{role}: {body}")
+    return history_lines
+
+
+def build_summarise_payload(
+    ctx: BrainContext,
+    *,
+    message_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Immutable payload for deferred (or sync) summary generation."""
+    if not ctx.customer_id:
+        return None
+    history_lines = build_history_lines(list(ctx.history or []))
+    if not history_lines:
+        return None
+    return {
+        "tenant_id": int(ctx.tenant_id),
+        "customer_id": int(ctx.customer_id),
+        "turn": int(getattr(ctx.state, "turn", 0) or 0),
+        "stage": str(getattr(ctx.state, "stage", "") or ""),
+        "history_lines": list(history_lines),
+        "message_id": str(message_id or "")[:128] or None,
+    }
+
+
+def build_summary_prompt(history_lines: List[str]) -> str:
+    history_text = "\n".join(history_lines)
+    return f"{_SUMMARY_PROMPT_PREFIX}{history_text}{_SUMMARY_PROMPT_SUFFIX}"
+
+
+def should_apply_summary_source_turn(
+    stored_turn: Optional[int],
+    incoming_turn: int,
+) -> bool:
+    """True when an incoming deferred write should replace the stored summary."""
+    if stored_turn is None:
+        return True
+    try:
+        return int(stored_turn) < int(incoming_turn)
+    except (TypeError, ValueError):
+        return False
+
+
+def _call_summary_llm(payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], int]:
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return None, 0
+
+    from modules.ai.orchestrator.customer_chat_models import (  # noqa: PLC0415
+        resolve_tiny_customer_chat_model,
+    )
+    from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
+        OpenAICompatibleProvider,
+    )
+
+    prompt = build_summary_prompt(list(payload.get("history_lines") or []))
+    _summary_model = resolve_tiny_customer_chat_model()
+    from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
+
+    emit_llm_cost_audit(
+        tenant_id=payload.get("tenant_id"),
+        turn_id=payload.get("turn"),
+        model=_summary_model,
+        provider="openai_compatible",
+        messages_count=1,
+        messages_chars=len(prompt),
+        total_prompt_chars=len(prompt),
+        estimated_input_tokens=len(prompt) // 4,
+        reason="brain.memory.updater._summarise",
+    )
+    from modules.ai.brain.cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
+
+    maybe_audit_model_router(
+        call_site="brain.memory.updater._summarise",
+        tenant_id=payload.get("tenant_id"),
+        turn_id=payload.get("turn"),
+    )
+
+    t0 = time.monotonic()
+    provider = OpenAICompatibleProvider()
+    result = provider.call(
+        prompt,
+        _SUMMARY_SYSTEM_PROMPT,
+        audit_context={
+            "tenant_id": payload.get("tenant_id"),
+            "turn_id": payload.get("turn"),
+            "model_override": _summary_model,
+            "reason": "brain.memory.updater._summarise",
+            "estimated_input_tokens": len(prompt) // 4,
+        },
+    )
+    llm_ms = int((time.monotonic() - t0) * 1000.0)
+
+    raw = str(result.get("reply_text") or "").strip()
+    if not raw:
+        return None, llm_ms
+
+    import json
+    import re
+
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None, llm_ms
+    if not isinstance(parsed, dict):
+        return None, llm_ms
+    return parsed, llm_ms
+
+
+def _write_summary_atomic(
+    db: Any,
+    payload: Dict[str, Any],
+    parsed: Dict[str, Any],
+) -> int:
+    now = datetime.now(timezone.utc)
+    escalation_inc = 1 if str(payload.get("stage") or "") == "support" else 0
+    t0 = time.monotonic()
+    stmt = text(
+        """
+        INSERT INTO conversation_history_summaries (
+            customer_id,
+            tenant_id,
+            summary_text,
+            last_intent,
+            sentiment,
+            total_conversations,
+            escalation_count,
+            updated_at,
+            summary_source_turn
+        ) VALUES (
+            :customer_id,
+            :tenant_id,
+            :summary_text,
+            :last_intent,
+            :sentiment,
+            1,
+            :escalation_inc,
+            :updated_at,
+            :summary_source_turn
+        )
+        ON CONFLICT (customer_id) DO UPDATE SET
+            summary_text = EXCLUDED.summary_text,
+            last_intent = EXCLUDED.last_intent,
+            sentiment = EXCLUDED.sentiment,
+            total_conversations = conversation_history_summaries.total_conversations + 1,
+            escalation_count = conversation_history_summaries.escalation_count + :escalation_inc,
+            updated_at = EXCLUDED.updated_at,
+            summary_source_turn = EXCLUDED.summary_source_turn,
+            tenant_id = EXCLUDED.tenant_id
+        WHERE (
+            conversation_history_summaries.summary_source_turn IS NULL
+            OR conversation_history_summaries.summary_source_turn < EXCLUDED.summary_source_turn
+        )
+        AND conversation_history_summaries.tenant_id = EXCLUDED.tenant_id
+        """
+    )
+    db.execute(
+        stmt,
+        {
+            "customer_id": int(payload["customer_id"]),
+            "tenant_id": int(payload["tenant_id"]),
+            "summary_text": str(parsed.get("summary") or ""),
+            "last_intent": str(parsed.get("last_intent") or "browse"),
+            "sentiment": str(parsed.get("sentiment") or "neutral"),
+            "escalation_inc": escalation_inc,
+            "updated_at": now,
+            "summary_source_turn": int(payload.get("turn") or 0),
+        },
+    )
+    db.commit()
+    return int((time.monotonic() - t0) * 1000.0)
+
+
+def _summarise_from_payload(
+    db: Any,
+    payload: Dict[str, Any],
+    *,
+    record_turn_latency: bool = False,
+) -> bool:
+    """Run summary LLM + atomic write for a deferred payload."""
+    try:
+        parsed, llm_ms = _call_summary_llm(payload)
+        if record_turn_latency:
+            try:
+                from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
+
+                safe_record_memory_summary_timing(llm_ms=llm_ms)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
+        if not parsed:
+            return False
+
+        db_ms = _write_summary_atomic(db, payload, parsed)
+        if record_turn_latency:
+            try:
+                from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
+
+                safe_record_memory_summary_timing(db_ms=db_ms)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
+        logger.info(
+            "[MemoryUpdater] summary written for customer=%s turn=%s",
+            payload.get("customer_id"),
+            payload.get("turn"),
+        )
+        return True
+    except Exception as exc:
         try:
-            from modules.ai.orchestrator.customer_chat_models import (  # noqa: PLC0415
-                resolve_tiny_customer_chat_model,
-            )
-            from modules.ai.orchestrator.providers.openai_compatible_provider import (  # noqa: PLC0415
-                OpenAICompatibleProvider,
-            )
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug("[MemoryUpdater] summarise failed: %s", exc)
+        return False
 
-            # Build history text from last 10 turns
-            history_lines = []
-            for turn in ctx.history[-10:]:
-                direction = turn.get("direction", "in")
-                body      = (turn.get("body") or "").strip()
-                if not body:
-                    continue
-                role = "عميل" if direction == "in" else "مساعد"
-                history_lines.append(f"{role}: {body}")
 
-            if not history_lines:
-                return
+async def run_deferred_memory_summarise(payload: Dict[str, Any]) -> None:
+    """Background worker — never holds conversation_lock; fresh DB session."""
+    tenant_id = payload.get("tenant_id")
+    turn = payload.get("turn")
+    logger.info(
+        "[MemoryUpdater/deferred] started tenant=%s customer=%s turn=%s message_id=%s",
+        tenant_id,
+        payload.get("customer_id"),
+        turn,
+        payload.get("message_id"),
+    )
+    t0 = time.monotonic()
+    llm_ms = 0
+    db_ms = 0
+    ok = False
+    try:
+        parsed, llm_ms = await asyncio.to_thread(_call_summary_llm, payload)
+        if parsed:
+            from session import SessionLocal  # noqa: PLC0415
 
-            history_text = "\n".join(history_lines)
-            prompt = (
-                f"لخّص هذه المحادثة بين عميل ومساعد متجر إلكتروني في جملتين أو ثلاث باللغة العربية:\n\n"
-                f"{history_text}\n\n"
-                f"أيضاً أجب بـ JSON بالحقول التالية فقط:\n"
-                f'{{ "summary": "...", "last_intent": "browse|order|complaint|inquiry", "sentiment": "positive|neutral|negative|frustrated" }}'
-            )
-
-            _summary_model = resolve_tiny_customer_chat_model()
-            from modules.ai.orchestrator.llm_cost_audit import emit_llm_cost_audit  # noqa: PLC0415
-
-            emit_llm_cost_audit(
-                tenant_id=ctx.tenant_id,
-                turn_id=getattr(ctx.state, "turn", None),
-                model=_summary_model,
-                provider="openai_compatible",
-                messages_count=1,
-                messages_chars=len(prompt),
-                total_prompt_chars=len(prompt),
-                estimated_input_tokens=len(prompt) // 4,
-                reason="brain.memory.updater._summarise",
-            )
-            from modules.ai.brain.cost.model_router_audit import maybe_audit_model_router  # noqa: PLC0415
-
-            maybe_audit_model_router(
-                call_site="brain.memory.updater._summarise",
-                tenant_id=ctx.tenant_id,
-                turn_id=getattr(ctx.state, "turn", None),
-            )
+            db = SessionLocal()
             try:
-                import time as _time_sum_llm  # noqa: PLC0415
+                db_ms = await asyncio.to_thread(_write_summary_atomic, db, payload, parsed)
+                ok = True
+            finally:
+                db.close()
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — deferred summarise fail-open
+        logger.info(
+            "[MemoryUpdater/deferred] failed tenant=%s customer=%s turn=%s err=%s",
+            tenant_id,
+            payload.get("customer_id"),
+            turn,
+            exc,
+        )
+        return
 
-                _t_sum_llm = _time_sum_llm.monotonic()
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                _t_sum_llm = None
-            provider = OpenAICompatibleProvider()
-            result = provider.call(
-                prompt,
-                "أنت مساعد تلخيص محادثات. أجب بـ JSON فقط.",
-                audit_context={
-                    "tenant_id": ctx.tenant_id,
-                    "turn_id": getattr(ctx.state, "turn", None),
-                    "model_override": _summary_model,
-                    "reason": "brain.memory.updater._summarise",
-                    "estimated_input_tokens": len(prompt) // 4,
-                },
-            )
-            try:
-                if _t_sum_llm is not None:
-                    import time as _time_sum_llm2  # noqa: PLC0415
-                    from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
+    status = "completed" if ok else "failed"
+    logger.info(
+        "[MemoryUpdater/deferred] %s tenant=%s customer=%s turn=%s llm_ms=%s db_ms=%s elapsed_ms=%s",
+        status,
+        tenant_id,
+        payload.get("customer_id"),
+        turn,
+        llm_ms,
+        db_ms,
+        int((time.monotonic() - t0) * 1000.0),
+    )
 
-                    safe_record_memory_summary_timing(
-                        llm_ms=(_time_sum_llm2.monotonic() - _t_sum_llm) * 1000.0,
-                    )
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                pass
-            raw = str(result.get("reply_text") or "").strip()
-            if not raw:
-                return
 
-            import json, re
-            raw = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            parsed = json.loads(raw)
+def schedule_deferred_memory_summarise(
+    payload: Dict[str, Any],
+    *,
+    request_id: Optional[str] = None,
+) -> bool:
+    """Schedule deferred summary after outbound boundary; fail-open."""
+    if not isinstance(payload, dict) or not payload:
+        return False
+    try:
+        from core.runtime_perf import spawn_background  # noqa: PLC0415
 
-            from database.models import ConversationHistorySummary
-            now = datetime.now(timezone.utc)
-            try:
-                import time as _time_sum_db  # noqa: PLC0415
-
-                _t_sum_db = _time_sum_db.monotonic()
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                _t_sum_db = None
-            row = (
-                db.query(ConversationHistorySummary)
-                .filter(
-                    ConversationHistorySummary.tenant_id   == ctx.tenant_id,
-                    ConversationHistorySummary.customer_id == ctx.customer_id,
-                )
-                .first()
-            )
-            if row:
-                row.summary_text           = parsed.get("summary", row.summary_text)
-                row.last_intent            = parsed.get("last_intent", row.last_intent)
-                row.sentiment              = parsed.get("sentiment", row.sentiment)
-                row.total_conversations    = (row.total_conversations or 0) + 1
-                row.updated_at             = now
-                if ctx.state.stage == "support":
-                    row.escalation_count   = (row.escalation_count or 0) + 1
-            else:
-                row = ConversationHistorySummary(
-                    customer_id          = ctx.customer_id,
-                    tenant_id            = ctx.tenant_id,
-                    summary_text         = parsed.get("summary", ""),
-                    last_intent          = parsed.get("last_intent", "browse"),
-                    sentiment            = parsed.get("sentiment", "neutral"),
-                    total_conversations  = 1,
-                    escalation_count     = 1 if ctx.state.stage == "support" else 0,
-                    updated_at           = now,
-                )
-                db.add(row)
-
-            db.commit()
-            try:
-                if _t_sum_db is not None:
-                    import time as _time_sum_db2  # noqa: PLC0415
-                    from core.turn_latency import safe_record_memory_summary_timing  # noqa: PLC0415
-
-                    safe_record_memory_summary_timing(
-                        db_ms=(_time_sum_db2.monotonic() - _t_sum_db) * 1000.0,
-                    )
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                pass
-            logger.info(
-                "[MemoryUpdater] summary written for customer=%s turn=%s",
-                ctx.customer_id, ctx.state.turn,
-            )
-
-        except Exception as exc:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            logger.debug("[MemoryUpdater] summarise failed: %s", exc)
+        spawn_background(
+            run_deferred_memory_summarise(dict(payload)),
+            name="memory_summarise",
+            request_id=request_id,
+        )
+        logger.info(
+            "[MemoryUpdater/deferred] scheduled tenant=%s customer=%s turn=%s",
+            payload.get("tenant_id"),
+            payload.get("customer_id"),
+            payload.get("turn"),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — scheduling fail-open
+        logger.debug("[MemoryUpdater/deferred] schedule failed: %s", exc)
+        return False
 
 
 # ── Phase 1.6 helpers ────────────────────────────────────────────────────────
