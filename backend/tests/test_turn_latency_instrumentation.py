@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.turn_latency import (
+    ACCOUNTABLE_LEAF,
     ACCOUNTABLE_STAGES,
+    ENVELOPE_STAGES,
     TurnLatency,
     bind_turn_latency,
     get_turn_latency,
@@ -68,7 +70,8 @@ def test_catalog_search_detail_does_not_double_count_accounted() -> None:
     snap = timing.snapshot(finalize_total=False)
     assert snap["spans_ms"]["catalog_search"] == 80
     assert snap["accounted_ms"] == 150  # tool + persona only
-    assert "catalog_search" not in ACCOUNTABLE_STAGES
+    assert "catalog_search" not in ACCOUNTABLE_LEAF
+    assert ACCOUNTABLE_STAGES is ACCOUNTABLE_LEAF
 
 
 def test_llm_timeout_fallback_fields_recordable() -> None:
@@ -350,8 +353,8 @@ def test_detail_spans_excluded_from_accounted_ms() -> None:
     timing.record_ms("conversation_lock_hold", 5000)
     snap = timing.snapshot(finalize_total=False, cache=False)
     assert snap["accounted_ms"] == 30
-    assert "facts_db" not in ACCOUNTABLE_STAGES
-    assert "catalog_search" not in ACCOUNTABLE_STAGES
+    assert "facts_db" not in ACCOUNTABLE_LEAF
+    assert "catalog_search" not in ACCOUNTABLE_LEAF
 
 
 def test_refresh_fail_open_does_not_raise() -> None:
@@ -359,6 +362,83 @@ def test_refresh_fail_open_does_not_raise() -> None:
     timing.record_ms("provider_send", 10)
     refresh_turn_latency_on_outbound_message(None, timing, message_event_id=1)
     refresh_turn_latency_on_outbound_message(MagicMock(), None, message_event_id=1)
+
+
+def test_envelope_and_leaf_no_double_count_accounted() -> None:
+    """Envelope parent + accountable leaf must not inflate accounted_ms."""
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("brain_boundary_exit", 900)
+    timing.record_ms("intent_routing", 200)
+    timing.record_ms("slot_extractor", 50)
+    timing.record_ms("state_load", 100)
+    timing.record_ms("total_turn", 1000)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert snap["spans_ms"]["brain_boundary_exit"] == 900
+    assert snap["spans_ms"]["intent_routing"] == 200
+    assert snap["spans_ms"]["slot_extractor"] == 50
+    assert snap["accounted_ms"] == 150  # slot_extractor + state_load only
+    assert snap["accounted_percent"] <= 100.0
+
+
+def test_brain_boundary_exit_excluded_from_accounted_ms() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("brain_boundary_exit", 500)
+    timing.record_ms("persona_compose", 300)
+    timing.record_ms("total_turn", 600)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert "brain_boundary_exit" in ENVELOPE_STAGES
+    assert "brain_boundary_exit" not in ACCOUNTABLE_LEAF
+    assert snap["accounted_ms"] == 300
+
+
+def test_intent_routing_excluded_slot_extractor_included() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("intent_routing", 180)
+    timing.record_ms("slot_extractor", 45)
+    timing.record_ms("decision", 120)
+    timing.record_ms("total_turn", 400)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert "intent_routing" in ENVELOPE_STAGES
+    assert "intent_routing" not in ACCOUNTABLE_LEAF
+    assert "slot_extractor" in ACCOUNTABLE_LEAF
+    assert snap["accounted_ms"] == 165  # slot_extractor + decision
+
+
+def test_accounted_percent_at_most_100_on_synthetic_normal_turn() -> None:
+    """Synthetic turn with envelopes + leaves should not exceed 100%."""
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("webhook_dispatch_pre_persist", 10)
+    timing.record_ms("inbound_persist", 15)
+    timing.record_ms("tenant_resolution", 5)
+    timing.record_ms("conversation_lock_wait", 20)
+    timing.record_ms("brain_boundary_enter", 0)
+    timing.record_ms("brain_boundary_exit", 850)
+    timing.record_ms("intent_routing", 120)
+    timing.record_ms("slot_extractor", 40)
+    timing.record_ms("state_load", 30)
+    timing.record_ms("facts_load", 25)
+    timing.record_ms("decision", 80)
+    timing.record_ms("persona_compose", 350)
+    timing.record_ms("guards", 15)
+    timing.record_ms("state_persist", 20)
+    timing.record_ms("post_brain_dispatch", 50)
+    timing.record_ms("outbound_persist", 12)
+    timing.record_ms("provider_send", 90)
+    timing.record_ms("total_turn", 1000)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert snap["accounted_percent"] <= 100.0
+    assert snap["accounted_ms"] <= snap["total_turn_ms"]
+
+
+def test_unaccounted_residual_visible_when_leaves_dont_cover_total() -> None:
+    timing = new_turn_latency(tenant_id=1)
+    timing.record_ms("brain_boundary_exit", 500)
+    timing.record_ms("persona_compose", 200)
+    timing.record_ms("total_turn", 1000)
+    snap = timing.snapshot(finalize_total=True, cache=False)
+    assert snap["accounted_ms"] == 200
+    assert snap["unaccounted_ms"] == 800
+    assert snap["unaccounted_ms"] > 0
 
 
 def test_snapshot_refresh_overhead_smoke() -> None:
