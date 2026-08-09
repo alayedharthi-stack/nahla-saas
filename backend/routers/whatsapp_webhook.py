@@ -7181,6 +7181,12 @@ async def _handle_merchant_message(
                 )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
+        try:
+            import time as _time_pbr  # noqa: PLC0415
+
+            _t_pre_brain_remaining = _time_pbr.monotonic()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            _t_pre_brain_remaining = None
 
         # ── Trusted Context shadow (telemetry only — no prompt/Brain wiring) ──
         try:
@@ -8749,6 +8755,18 @@ async def _handle_merchant_message(
 
             profile = {}
             try:
+                try:
+                    if _t_pre_brain_remaining is not None:
+                        import time as _time_pbr_ci  # noqa: PLC0415
+                        from core.turn_latency import safe_record_ms as _tl_pbr  # noqa: PLC0415
+
+                        _tl_pbr(
+                            "pre_brain_remaining_prep",
+                            (_time_pbr_ci.monotonic() - _t_pre_brain_remaining) * 1000.0,
+                        )
+                        _t_pre_brain_remaining = None
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
                 from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
 
                 svc = CustomerIntelligenceService(db, tenant_id)
@@ -8805,6 +8823,12 @@ async def _handle_merchant_message(
                             )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                         pass
+                    try:
+                        import time as _time_pbr2  # noqa: PLC0415
+
+                        _t_pre_brain_remaining = _time_pbr2.monotonic()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                        _t_pre_brain_remaining = None
                     profile.update({
                         "segment": getattr(full_profile, "segment", "") or "",
                         "customer_status": getattr(full_profile, "customer_status", "") or "",
@@ -8843,6 +8867,18 @@ async def _handle_merchant_message(
                 profile=profile,
             )
             # Trusted-context source-order contract marker: brain.process(
+            try:
+                if _t_pre_brain_remaining is not None:
+                    import time as _time_pbr3  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms as _tl_pbr2  # noqa: PLC0415
+
+                    _tl_pbr2(
+                        "pre_brain_remaining_prep",
+                        (_time_pbr3.monotonic() - _t_pre_brain_remaining) * 1000.0,
+                    )
+                    _t_pre_brain_remaining = None
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             try:
                 import time as _time_bbe  # noqa: PLC0415
                 from core.turn_latency import safe_record_ms  # noqa: PLC0415
@@ -10136,6 +10172,12 @@ async def _handle_merchant_message(
         # back to the original reply.
         if reply:
             try:
+                import time as _time_rn  # noqa: PLC0415
+
+                _t_reply_norm = _time_rn.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_reply_norm = None
+            try:
                 from modules.ai.postprocess.compression import (  # noqa: PLC0415
                     compress_for_whatsapp as _compress_reply,
                 )
@@ -10182,6 +10224,17 @@ async def _handle_merchant_message(
                     "[COMPRESSION] skipped tenant=%s err=%s",
                     tenant_id, _comp_exc,
                 )
+            try:
+                if _t_reply_norm is not None:
+                    import time as _time_rn2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms  # noqa: PLC0415
+
+                    safe_record_ms(
+                        "reply_normalization",
+                        (_time_rn2.monotonic() - _t_reply_norm) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
 
         # Phase 3 — Marker resolution metrics.
         # Capture the LLM's reply BEFORE any marker extraction strips
