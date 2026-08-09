@@ -68,22 +68,63 @@ ACCOUNTABLE_LEAF: tuple[str, ...] = (
     "tenant_resolution",
     "conversation_lock_wait",
     "merchant_entry_gates",
+    "history_load",
+    "conversation_state_load",
+    "conversation_state_save",
+    "customer_intelligence_upsert",
+    "customer_profile_ensure",
+    "store_ai_mode_lookup",
     "post_brain_dispatch",
     "state_load",
     "slot_extractor",
     "permission_context_load",
     "facts_load",
+    "sales_context_load",
+    "commerce_bundle_load",
     "catalog_preload",
     "knowledge_retrieval",
     "decision",
     "tool_execution",
     "state_projection",
     "persona_compose",
+    "default_compose",
+    "quality_recompose",
     "post_compose",
     "guards",
     "presentation",
     "state_persist",
+    "memory_update",
+    "silent_welcome_handling",
+    "outbound_dedup",
+    "truth_guards",
+    "reply_normalization",
     "outbound_persist",
+    "provider_send",
+)
+
+# Pre/post brain reconciliation subsets (computed in snapshot; not summed twice).
+PRE_BRAIN_ACCOUNTABLE: tuple[str, ...] = (
+    "webhook_dispatch_pre_persist",
+    "inbound_persist",
+    "tenant_resolution",
+    "conversation_lock_wait",
+    "merchant_entry_gates",
+    "history_load",
+    "conversation_state_load",
+    "conversation_state_save",
+    "customer_intelligence_upsert",
+    "customer_profile_ensure",
+    "store_ai_mode_lookup",
+)
+
+POST_BRAIN_ACCOUNTABLE: tuple[str, ...] = (
+    "silent_welcome_handling",
+    "outbound_dedup",
+    "truth_guards",
+    "reply_normalization",
+    "post_brain_dispatch",
+    "outbound_persist",
+    "presentation",
     "provider_send",
 )
 
@@ -104,10 +145,16 @@ DETAIL_STAGES: tuple[str, ...] = (
     "facts_db",
     "catalog_db",
     "state_db",
+    "truth_guards_detail",
 )
 
 _CURRENT: contextvars.ContextVar[Optional["TurnLatency"]] = contextvars.ContextVar(
     "nahla_turn_latency",
+    default=None,
+)
+
+_COMPOSE_ROLE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "nahla_compose_role",
     default=None,
 )
 
@@ -132,6 +179,59 @@ def reset_turn_latency(token: contextvars.Token) -> None:
         _CURRENT.reset(token)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         pass
+
+
+def get_compose_role() -> Optional[str]:
+    try:
+        return _COMPOSE_ROLE.get()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        return None
+
+
+def bind_compose_role(role: Optional[str]) -> contextvars.Token:
+    try:
+        return _COMPOSE_ROLE.set(str(role).strip() if role else None)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        return _COMPOSE_ROLE.set(None)
+
+
+def reset_compose_role(token: contextvars.Token) -> None:
+    try:
+        _COMPOSE_ROLE.reset(token)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+
+
+@contextmanager
+def compose_role_scope(role: str) -> Iterator[None]:
+    """Bind compose accounting role for nested compose/LLM calls."""
+    token = bind_compose_role(role)
+    try:
+        yield
+    finally:
+        reset_compose_role(token)
+
+
+def safe_compose_role_scope(role: str):
+    """Context manager bound to compose role (no-op on failure)."""
+
+    @contextmanager
+    def _cm() -> Iterator[None]:
+        token = None
+        try:
+            token = bind_compose_role(role)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            token = None
+        try:
+            yield
+        finally:
+            if token is not None:
+                try:
+                    reset_compose_role(token)
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
+
+    return _cm()
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -166,12 +266,15 @@ class LlmCallTiming:
     fallback_reason: str = ""
     ttft_available: bool = False
     purpose: str = ""
+    llm_call_role: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        role = self.llm_call_role or self.purpose or None
         return {
             "model": self.model or None,
             "provider": self.provider or None,
             "purpose": self.purpose or None,
+            "llm_call_role": role,
             "request_start_ms": self.request_start_ms,
             "request_end_ms": self.request_end_ms,
             "first_token_ms": self.first_token_ms if self.ttft_available else None,
@@ -378,10 +481,13 @@ class TurnLatency:
 
     def record_llm_call(self, **kwargs: Any) -> None:
         try:
+            _purpose = str(kwargs.get("purpose") or "")
+            _role = str(kwargs.get("llm_call_role") or _purpose or "")
             call = LlmCallTiming(
                 model=str(kwargs.get("model") or ""),
                 provider=str(kwargs.get("provider") or ""),
-                purpose=str(kwargs.get("purpose") or ""),
+                purpose=_purpose,
+                llm_call_role=_role,
                 request_start_ms=_optional_int(kwargs.get("request_start_ms")),
                 request_end_ms=_optional_int(kwargs.get("request_end_ms")),
                 first_token_ms=_optional_int(kwargs.get("first_token_ms")),
@@ -446,6 +552,19 @@ class TurnLatency:
             accounted = self.accounted_ms()
             unaccounted = max(0, total - accounted)
             percent = round((100.0 * accounted / total), 1) if total > 0 else 0.0
+            pre_brain_total = sum(
+                int(self.spans_ms.get(name, 0) or 0) for name in PRE_BRAIN_ACCOUNTABLE
+            )
+            post_brain_total = sum(
+                int(self.spans_ms.get(name, 0) or 0) for name in POST_BRAIN_ACCOUNTABLE
+            )
+            llm_call_roles = sorted(
+                {
+                    str(c.llm_call_role or c.purpose or "").strip()
+                    for c in self.llm_calls
+                    if str(c.llm_call_role or c.purpose or "").strip()
+                }
+            )
             out: Dict[str, Any] = {
                 "tenant_id": int(self.tenant_id or 0) or None,
                 "conversation_id": self.conversation_id,
@@ -463,10 +582,13 @@ class TurnLatency:
                 "waiters_ahead": self.waiters_ahead,
                 "llm_calls": [c.to_dict() for c in self.llm_calls],
                 "brain_total_ms": brain_ms,
+                "pre_brain_total_ms": pre_brain_total,
+                "post_brain_total_ms": post_brain_total,
                 "total_turn_ms": total,
                 "accounted_ms": accounted,
                 "unaccounted_ms": unaccounted,
                 "accounted_percent": percent,
+                "llm_call_roles": llm_call_roles,
                 "accountable_stages": list(ACCOUNTABLE_LEAF),
                 "envelope_stages": list(ENVELOPE_STAGES),
                 "ttft_available": any(bool(c.ttft_available) for c in self.llm_calls),
@@ -753,15 +875,22 @@ __all__ = [
     "ACCOUNTABLE_STAGES",
     "DETAIL_STAGES",
     "ENVELOPE_STAGES",
+    "POST_BRAIN_ACCOUNTABLE",
+    "PRE_BRAIN_ACCOUNTABLE",
     "LlmCallTiming",
     "TurnLatency",
     "attach_timing_to_trace_extra",
+    "bind_compose_role",
     "bind_turn_latency",
+    "compose_role_scope",
+    "get_compose_role",
     "get_turn_latency",
     "merge_turn_latency_into_metadata",
     "new_turn_latency",
     "refresh_turn_latency_on_outbound_message",
+    "reset_compose_role",
     "reset_turn_latency",
+    "safe_compose_role_scope",
     "safe_flush_post_brain_dispatch",
     "safe_flush_webhook_pre_persist",
     "safe_mark_brain_boundary",

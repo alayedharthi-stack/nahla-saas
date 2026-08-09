@@ -2285,9 +2285,61 @@ class DefaultComposer:
         the new path fails unexpectedly, not as the default path.
         """
         import asyncio  # noqa: PLC0415
+        import time as _time_dc  # noqa: PLC0415
 
         _TIMEOUT = 25  # seconds
         reply_state = None
+        _compose_role = "default_compose"
+        _compose_span = "default_compose"
+        _t_llm_compose = None
+        _llm_compose_recorded = False
+        try:
+            from core.turn_latency import (  # noqa: PLC0415
+                get_compose_role,
+                safe_record_llm_call,
+                safe_record_ms,
+            )
+
+            _compose_role = get_compose_role() or "default_compose"
+            _compose_span = _compose_role
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            get_compose_role = None  # type: ignore[assignment,misc]
+            safe_record_llm_call = None  # type: ignore[assignment,misc]
+            safe_record_ms = None  # type: ignore[assignment,misc]
+
+        def _record_default_compose_llm(
+            *,
+            duration_ms: int,
+            model: str = "",
+            provider: str = "",
+            fallback_reason: str = "",
+            input_tokens: Any = None,
+            output_tokens: Any = None,
+            cached_tokens: Any = None,
+            retry_count: int = 0,
+        ) -> None:
+            nonlocal _llm_compose_recorded
+            if _llm_compose_recorded or safe_record_ms is None or safe_record_llm_call is None:
+                return
+            _llm_compose_recorded = True
+            try:
+                safe_record_ms(_compose_span, duration_ms)
+                safe_record_llm_call(
+                    purpose=_compose_role,
+                    llm_call_role=_compose_role,
+                    model=model,
+                    provider=provider,
+                    duration_ms=duration_ms,
+                    timeout_seconds=float(_TIMEOUT),
+                    fallback_reason=fallback_reason,
+                    ttft_available=False,
+                    retry_count=retry_count,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_tokens=cached_tokens,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
         try:
             from core.outbound_text_policy import mark_compose_llm  # noqa: PLC0415
 
@@ -2630,6 +2682,7 @@ class DefaultComposer:
                     _mpa_compose_exc,
                 )
 
+            _t_llm_compose = _time_dc.monotonic()
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     generate_ai_reply,
@@ -2649,6 +2702,29 @@ class DefaultComposer:
                     provider_hint=_provider_hint,
                 ),
                 timeout=_TIMEOUT,
+            )
+            _payload_meta = getattr(payload, "metadata", None) or {}
+            _usage = (
+                _payload_meta.get("usage")
+                if isinstance(_payload_meta.get("usage"), dict)
+                else {}
+            )
+            _record_default_compose_llm(
+                duration_ms=int(
+                    (_time_dc.monotonic() - (_t_llm_compose or _time_dc.monotonic()))
+                    * 1000.0
+                ),
+                model=str(_payload_meta.get("model") or ""),
+                provider=str(getattr(payload, "provider_used", "") or ""),
+                input_tokens=(
+                    _usage.get("input_tokens") or _usage.get("prompt_tokens")
+                ),
+                output_tokens=(
+                    _usage.get("output_tokens") or _usage.get("completion_tokens")
+                ),
+                cached_tokens=(
+                    _usage.get("cached_tokens") or _usage.get("cache_read_tokens")
+                ),
             )
 
             reply_text = (payload.reply_text or "").strip()
@@ -2735,6 +2811,11 @@ class DefaultComposer:
                 ctx, result, timeout_seconds=15, reply_state=reply_state,
             )
         except asyncio.TimeoutError:
+            if _t_llm_compose is not None:
+                _record_default_compose_llm(
+                    duration_ms=int((_time_dc.monotonic() - _t_llm_compose) * 1000.0),
+                    fallback_reason="timeout",
+                )
             logger.warning(
                 "[Composer._llm_compose] thin LLM timed out after %ds | tenant=%s",
                 _TIMEOUT, ctx.tenant_id,
@@ -2753,6 +2834,11 @@ class DefaultComposer:
                 "هل يمكنك إعادة سؤالك؟ أو يمكنني مساعدتك في البحث عن منتج أو إنشاء طلب."
             )
         except Exception as exc:
+            if _t_llm_compose is not None:
+                _record_default_compose_llm(
+                    duration_ms=int((_time_dc.monotonic() - _t_llm_compose) * 1000.0),
+                    fallback_reason="error",
+                )
             logger.error("[Composer._llm_compose] thin path error: %s", exc)
             return await self._legacy_llm_compose(
                 ctx,

@@ -1489,6 +1489,12 @@ class MerchantBrain:
                     _tl_facts("facts_db", _fd)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
+            try:
+                import time as _time_sc  # noqa: PLC0415
+
+                _t_sc = _time_sc.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_sc = None
             sales_context = self._sales_context_loader.load(
                 db,
                 tenant_id=tenant_id,
@@ -1500,6 +1506,17 @@ class MerchantBrain:
                 tenant_context=tenant_ctx,
                 pre_commerce_shortcut=True,
             )
+            try:
+                if _t_sc is not None:
+                    import time as _time_sc2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms as _tl_sc  # noqa: PLC0415
+
+                    _tl_sc(
+                        "sales_context_load",
+                        (_time_sc2.monotonic() - _t_sc) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
             if sales_context is None:
                 sales_context = SalesContextSnapshot()
             merchant_context: Dict[str, Any] = {}
@@ -1529,6 +1546,12 @@ class MerchantBrain:
             except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
 
+            try:
+                import time as _time_sc_full  # noqa: PLC0415
+
+                _t_sc_full = _time_sc_full.monotonic()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                _t_sc_full = None
             sales_context = self._sales_context_loader.load(
                 db,
                 tenant_id=tenant_id,
@@ -1539,6 +1562,17 @@ class MerchantBrain:
                 customer_id=customer_id,
                 tenant_context=tenant_ctx,
             )
+            try:
+                if _t_sc_full is not None:
+                    import time as _time_sc_full2  # noqa: PLC0415
+                    from core.turn_latency import safe_record_ms as _tl_sc_full  # noqa: PLC0415
+
+                    _tl_sc_full(
+                        "sales_context_load",
+                        (_time_sc_full2.monotonic() - _t_sc_full) * 1000.0,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                pass
 
             merchant_context = {}
             try:
@@ -1586,11 +1620,22 @@ class MerchantBrain:
 
             commerce_bundle = {}
             try:
+                import time as _time_cb  # noqa: PLC0415
                 from core.active_order_context import load_commerce_bundle_from_db  # noqa: PLC0415
 
+                _t_cb = _time_cb.monotonic()
                 commerce_bundle = _commerce_bundle_early or load_commerce_bundle_from_db(
                     db, tenant_id, customer_phone,
                 )
+                try:
+                    from core.turn_latency import safe_record_ms as _tl_cb  # noqa: PLC0415
+
+                    _tl_cb(
+                        "commerce_bundle_load",
+                        (_time_cb.monotonic() - _t_cb) * 1000.0,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                    pass
             except Exception as _cb_exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 logger.exception(
                     "[ACTIVE_ORDER_CONTEXT] pipeline load failed tenant=%s: %s",
@@ -3709,7 +3754,15 @@ class MerchantBrain:
         latency_ms = int((time.monotonic() - t0) * 1000)
         ctx.state = new_state
         result.data.setdefault("chosen_path", _resolve_chosen_path(decision, result))
-        self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
+        try:
+            import time as _time_mem  # noqa: PLC0415
+            from core.turn_latency import safe_record_ms as _tl_mem  # noqa: PLC0415
+
+            _t_mem = _time_mem.monotonic()
+            self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
+            _tl_mem("memory_update", (_time_mem.monotonic() - _t_mem) * 1000.0)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            self._memory_updater.update(db, ctx, decision, result, reply, stage_before, latency_ms)
         pending_buttons: List[Dict[str, Any]] = list(result.data.get("pending_buttons") or [])
         pending_product_cards: List[Dict[str, Any]] = list(
             result.data.get("pending_product_cards") or []
@@ -4656,7 +4709,15 @@ class MerchantBrain:
                     _pres_kind_before = str(
                         result.data.get("product_presentation_kind") or ""
                     ).strip()
-                    recomposed_reply = await self._composer.compose(decision, result, ctx)
+                    try:
+                        from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
+
+                        with safe_compose_role_scope("quality_recompose"):
+                            recomposed_reply = await self._composer.compose(
+                                decision, result, ctx,
+                            )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                        recomposed_reply = await self._composer.compose(decision, result, ctx)
                     # Persona/quality recompose must not erase a valid SINGLE_RICH stamp.
                     if (
                         _cards_before_recompose
