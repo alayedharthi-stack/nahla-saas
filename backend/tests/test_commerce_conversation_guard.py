@@ -154,7 +154,10 @@ class TestCodQuestion:
         )
         reply = build_cod_policy_reply(evidence)
         assert "غير متاح" in reply.reply_text
-        assert "الراجحي" in reply.reply_text
+        # Must not invent runtime bank/wallet defaults.
+        assert "الراجحي" not in reply.reply_text
+        assert "STC Pay" not in reply.reply_text
+        assert evidence.available_methods == []
 
 
 class TestDuaMustNotBecomeProduct:

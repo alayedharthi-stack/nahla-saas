@@ -499,6 +499,19 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
     for key in ("availability", "product_focus", "payment_flags", "fulfillment_flags"):
         if key in raw and raw[key]:
             out[key] = raw[key]
+    # Pack B storefront capability facts must survive commerce slim turns.
+    for key in (
+        "payment_methods",
+        "payment_methods_source",
+        "shipping_methods",
+        "shipping_methods_source",
+        "salla_payments_status",
+        "salla_shipping_companies_status",
+        "merchant_capabilities",
+        "merchant_capability_answer",
+    ):
+        if key in raw and raw[key] not in (None, "", [], {}):
+            out[key] = raw[key]
     tc_facts = raw.get("trusted_coupon_offer_facts")
     if isinstance(tc_facts, dict) and tc_facts:
         out["trusted_coupon_offer_facts"] = tc_facts

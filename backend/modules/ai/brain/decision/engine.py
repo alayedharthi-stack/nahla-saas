@@ -3209,6 +3209,10 @@ class DefaultDecisionEngine:
             # product-in-focus + known city) gets a sharper hint so the
             # brain frames the reply as order tracking rather than a
             # shipping-policy answer — without injecting any new copy.
+            from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+                is_merchant_shipping_companies_question,
+            )
+
             _op = getattr(state, "order_prep", None)
             _post_order = bool(
                 getattr(_op, "payment_receipt_received", False)
@@ -3221,6 +3225,27 @@ class DefaultDecisionEngine:
                 or bool(getattr(state, "current_product_focus", None))
                 and bool(getattr(_op, "city", None))
             )
+            if (
+                is_merchant_shipping_companies_question(ctx.message or "")
+                and not _post_order
+            ):
+                from core.checkout_shipping_policy import clear_pending_shipping_city  # noqa: PLC0415
+                from ..turn_owner_contract import TOPIC_SHIPPING  # noqa: PLC0415
+
+                clear_pending_shipping_city(state)
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": TOPIC_SHIPPING,
+                        "topic_hint": "shipping_companies",
+                        "capability_surface": "salla_merchant_enabled",
+                        "question_kind": "shipping_companies",
+                    },
+                    reason=(
+                        "customer asked which shipping companies the store "
+                        "uses — compose from MERCHANT_ENABLED carriers"
+                    ),
+                )
             if _post_order:
                 logger.info(
                     "[SHIPPING_INTENT] post-order context — defer to brain "
@@ -3347,12 +3372,18 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_COD:
+            # Pack B: COD general support is Salla MERCHANT_ENABLED truth.
+            # Persona owns wording; FAQ helper must not invent payment lists.
             return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "cash_on_delivery"},
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "cash_on_delivery",
+                    "topic_hint": "cash_on_delivery",
+                    "capability_surface": "salla_merchant_enabled",
+                },
                 reason=(
                     "customer asked about cash on delivery — "
-                    "answer from tenant payment policy evidence"
+                    "compose from merchant_capabilities COD evidence"
                 ),
             )
 
@@ -3361,7 +3392,28 @@ class DefaultDecisionEngine:
                 PAYMENT_BARCODE_IMAGE_REQUEST,
                 is_payment_barcode_image_request,
             )
+            from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+                is_merchant_payment_methods_question,
+            )
+
             _barcode_image = is_payment_barcode_image_request(ctx.message)
+            _methods_list = (
+                not _barcode_image
+                and is_merchant_payment_methods_question(ctx.message)
+            )
+            if _methods_list:
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "merchant_payment_methods",
+                        "topic_hint": "payment_methods",
+                        "capability_surface": "salla_merchant_enabled",
+                    },
+                    reason=(
+                        "customer asked which payment methods the store "
+                        "supports — compose from MERCHANT_ENABLED facts"
+                    ),
+                )
             return Decision(
                 action=ACTION_LLM_REPLY,
                 args={
