@@ -523,6 +523,65 @@ def _load_capability_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
     return facts
 
 
+def _load_merchant_capability_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
+    """Salla MERCHANT_ENABLED shipping/payment facts from checkout_profile."""
+    facts: List[TrustedFact] = []
+    try:
+        from core.salla_merchant_capabilities import (  # noqa: PLC0415
+            KIND_MERCHANT_ENABLED,
+            load_checkout_profile_for_tenant,
+            project_merchant_capabilities,
+        )
+
+        profile = load_checkout_profile_for_tenant(db, tenant_id)
+        if not profile:
+            return facts
+        projection = project_merchant_capabilities(profile)
+        payload = projection.to_dict()
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_CAPABILITIES,
+            key="surface",
+            value=payload.get("surface"),
+            source=TruthSource.INTEGRATION_CONFIG,
+            path="checkout_profile.surface",
+        ))
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_CAPABILITIES,
+            key="kind",
+            value=KIND_MERCHANT_ENABLED,
+            source=TruthSource.INTEGRATION_CONFIG,
+            path="checkout_profile.kind",
+        ))
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_CAPABILITIES,
+            key="payments",
+            value=payload.get("payments") or {},
+            source=TruthSource.INTEGRATION_CONFIG,
+            path="checkout_profile.payments",
+        ))
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_CAPABILITIES,
+            key="shipping",
+            value=payload.get("shipping") or {},
+            source=TruthSource.INTEGRATION_CONFIG,
+            path="checkout_profile.shipping",
+        ))
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_CAPABILITIES,
+            key="freshness",
+            value=payload.get("freshness") or {},
+            source=TruthSource.INTEGRATION_CONFIG,
+            path="checkout_profile.freshness",
+        ))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[TRUSTED_CONTEXT] merchant_capabilities failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+    return facts
+
+
 def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
     facts: List[TrustedFact] = []
     try:
@@ -638,6 +697,12 @@ def build_trusted_context_snapshot(
         facts.extend(cap_facts)
         loaded_domains.append(TrustedDomain.CAPABILITIES.value)
         sources.append("capability_resolver")
+
+    merchant_cap_facts = _load_merchant_capability_facts(db, tenant_id)
+    if merchant_cap_facts:
+        facts.extend(merchant_cap_facts)
+        loaded_domains.append(TrustedDomain.MERCHANT_CAPABILITIES.value)
+        sources.append("salla_checkout_profile")
 
     policy_facts = _load_merchant_policy_facts(db, tenant_id)
     if policy_facts:

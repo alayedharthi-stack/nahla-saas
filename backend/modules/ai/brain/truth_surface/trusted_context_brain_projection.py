@@ -69,6 +69,14 @@ _CUSTOMER_KEYS: Tuple[str, ...] = (
     "accepted_delivery_address",
 )
 
+_MERCHANT_CAPABILITY_KEYS: Tuple[str, ...] = (
+    "surface",
+    "kind",
+    "payments",
+    "shipping",
+    "freshness",
+)
+
 _CATALOG_BUNDLE_KEYS: Tuple[str, ...] = (
     "catalog:product_sale_offer",
 )
@@ -210,6 +218,7 @@ def _has_projection_payload(payload: Dict[str, Any]) -> bool:
         "shipment",
         "payment",
         "customer",
+        "merchant_capabilities",
     ):
         value = payload.get(key)
         if isinstance(value, dict) and value:
@@ -267,6 +276,11 @@ def project_trusted_context_brain_facts(
         TrustedDomain.CUSTOMER,
         allowed_keys=_CUSTOMER_KEYS,
     )
+    merchant_capabilities = _domain_scalar_map(
+        snapshot,
+        TrustedDomain.MERCHANT_CAPABILITIES,
+        allowed_keys=_MERCHANT_CAPABILITY_KEYS,
+    )
 
     payload: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -290,6 +304,8 @@ def project_trusted_context_brain_facts(
         payload["payment"] = payment
     if customer:
         payload["customer"] = customer
+    if merchant_capabilities:
+        payload["merchant_capabilities"] = merchant_capabilities
 
     if not _has_projection_payload(payload):
         raise TrustedContextBrainProjectionError("empty_projection")

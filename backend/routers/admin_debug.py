@@ -1218,8 +1218,10 @@ async def salla_sync_checkout_profile(
         return {"success": False, "error": str(exc)}
 
     # Persist into Integration.config so it survives process restarts
-    new_config = dict(cfg)
-    new_config["checkout_profile"] = profile
+    from core.salla_merchant_capabilities import (  # noqa: PLC0415
+        merge_checkout_profile_into_config,
+    )
+    new_config = merge_checkout_profile_into_config(cfg, profile)
     db.execute(
         _sa.update(_Integration)
         .where(_Integration.id == intg.id)

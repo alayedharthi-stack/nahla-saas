@@ -5748,6 +5748,22 @@ def _build_reply_state(
         "shipping_policy": ctx.facts.shipping_policy,
         "shipping_methods": ctx.facts.shipping_methods,
         "shipping_notes": ctx.facts.shipping_notes,
+        "shipping_methods_source": getattr(
+            ctx.facts, "shipping_methods_source", "",
+        ) or "",
+        "payment_methods": list(getattr(ctx.facts, "payment_methods", None) or []),
+        "payment_methods_source": getattr(
+            ctx.facts, "payment_methods_source", "",
+        ) or "",
+        "salla_payments_status": getattr(
+            ctx.facts, "salla_payments_status", "",
+        ) or "",
+        "salla_shipping_companies_status": getattr(
+            ctx.facts, "salla_shipping_companies_status", "",
+        ) or "",
+        "merchant_capabilities": dict(
+            getattr(ctx.facts, "merchant_capabilities", None) or {},
+        ),
         "support_hours": ctx.facts.support_hours,
         "contact_phone": ctx.facts.store_contact_phone,
         "contact_email": ctx.facts.store_contact_email,

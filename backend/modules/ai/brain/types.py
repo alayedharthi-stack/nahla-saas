@@ -837,6 +837,12 @@ class CommerceFacts:
     shipping_policy: str = ""
     support_hours: str = ""
     payment_methods: List[str] = field(default_factory=list)
+    # Pack B — Salla merchant-enabled capability provenance (not Nahla-native).
+    payment_methods_source: str = ""
+    shipping_methods_source: str = ""
+    salla_payments_status: str = ""
+    salla_shipping_companies_status: str = ""
+    merchant_capabilities: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

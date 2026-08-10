@@ -179,6 +179,50 @@ class DefaultFactsLoader:
             elif raw_payment_methods:
                 facts.payment_methods = [str(raw_payment_methods)]
 
+        # ── 4b. Salla MERCHANT_ENABLED capabilities (Pack B) ──────────────
+        # Separate surface from Nahla-native payment flags / dashboard lore.
+        # When Salla status is known/empty, it owns storefront method lists.
+        # When UNKNOWN/FORBIDDEN, do not invent COD or keep stale dashboard
+        # lists as if they were Salla merchant-enabled truth.
+        try:
+            from core.salla_merchant_capabilities import (  # noqa: PLC0415
+                STATUS_EMPTY,
+                STATUS_KNOWN,
+                load_checkout_profile_for_tenant,
+                payment_codes,
+                project_merchant_capabilities,
+                shipping_company_names,
+            )
+
+            checkout_profile = load_checkout_profile_for_tenant(db, tenant_id)
+            if checkout_profile:
+                projection = project_merchant_capabilities(checkout_profile)
+                facts.salla_payments_status = projection.payments_status
+                facts.salla_shipping_companies_status = (
+                    projection.shipping_companies_status
+                )
+                if projection.payments_status in (STATUS_KNOWN, STATUS_EMPTY):
+                    facts.payment_methods = payment_codes(checkout_profile)
+                    facts.payment_methods_source = "salla_merchant_enabled"
+                elif facts.integration_platform == "salla":
+                    # Fail closed for Salla storefront payment questions.
+                    facts.payment_methods = []
+                    facts.payment_methods_source = "salla_unknown"
+                if projection.shipping_companies_status in (
+                    STATUS_KNOWN,
+                    STATUS_EMPTY,
+                ):
+                    facts.shipping_methods = shipping_company_names(
+                        checkout_profile,
+                    )
+                    facts.shipping_methods_source = "salla_merchant_enabled"
+                elif facts.integration_platform == "salla":
+                    facts.shipping_methods = []
+                    facts.shipping_methods_source = "salla_unknown"
+                facts.merchant_capabilities = projection.to_dict()
+        except Exception:  # noqa: silent-ok — Pack B facts must not break turns
+            pass
+
         # ── 5. Working hours + assistant persona (Phase 2) ────────────────
         # Both pulled from the same TenantSettings row so we make a single
         # query. Failures are non-fatal — neither field is critical to a

@@ -126,6 +126,19 @@ def _initial_registry() -> Tuple[DomainDefinition, ...]:
             freshness_policy=FreshnessPolicy.VERSIONED_CACHE,
         ),
         DomainDefinition(
+            domain_id=TrustedDomain.MERCHANT_CAPABILITIES,
+            schema_version=SCHEMA_VERSION,
+            official_source=TruthSource.INTEGRATION_CONFIG,
+            loader_id="trusted_context._load_merchant_capability_facts",
+            relevance_triggers=(
+                "payment_query",
+                "shipping_query",
+                "checkout_active",
+            ),
+            scope=("tenant",),
+            freshness_policy=FreshnessPolicy.VERSIONED_CACHE,
+        ),
+        DomainDefinition(
             domain_id=TrustedDomain.MERCHANT_POLICY,
             schema_version=SCHEMA_VERSION,
             official_source=TruthSource.MERCHANT_KNOWLEDGE_SECTIONS,
