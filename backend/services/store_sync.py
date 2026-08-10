@@ -2454,6 +2454,69 @@ class StoreSyncService:
 
         return len(pages)
 
+    # ── Checkout profile sync (Pack B merchant-enabled shipping/payment) ───────
+
+    async def sync_checkout_profile(self) -> bool:
+        """Fetch merchant-enabled Salla shipping/payment capabilities.
+
+        Persists into Integration.config['checkout_profile'] (tenant-scoped).
+        Non-fatal: failures leave prior profile untouched and return False.
+        """
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        from core.salla_merchant_capabilities import (  # noqa: PLC0415
+            merge_checkout_profile_into_config,
+        )
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
+        adapter = self._get_adapter()
+        if not adapter or not hasattr(adapter, "sync_store_checkout_profile"):
+            logger.info(
+                "tenant=%s checkout_profile sync skipped — no Salla adapter",
+                self.tenant_id,
+            )
+            return False
+
+        intg = pick_active_salla_integration(self.db, self.tenant_id)
+        if not intg:
+            return False
+
+        try:
+            profile = await adapter.sync_store_checkout_profile()
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s checkout_profile fetch failed (non-fatal): %s",
+                self.tenant_id, exc,
+            )
+            return False
+
+        try:
+            new_config = merge_checkout_profile_into_config(
+                intg.config if isinstance(intg.config, dict) else {},
+                profile,
+            )
+            intg.config = new_config
+            flag_modified(intg, "config")
+            self.db.commit()
+            logger.info(
+                "tenant=%s checkout_profile persisted | payments=%s "
+                "companies=%s zones=%s",
+                self.tenant_id,
+                (profile.get("payments") or {}).get("status"),
+                ((profile.get("shipping") or {}).get("companies") or {}).get("status"),
+                ((profile.get("shipping") or {}).get("zones") or {}).get("status"),
+            )
+            return True
+        except Exception as db_exc:
+            logger.error(
+                "tenant=%s failed to persist checkout_profile: %s",
+                self.tenant_id, db_exc,
+            )
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: silent-ok
+                pass
+            return False
+
     # ── Customers sync ─────────────────────────────────────────────────────────
 
     def _upsert_legacy_customer_from_salla_sync_payload(
@@ -2747,6 +2810,15 @@ class StoreSyncService:
                 )
                 pages_n = 0
 
+            try:
+                checkout_profile_ok = await self.sync_checkout_profile()
+            except Exception as checkout_exc:
+                logger.warning(
+                    "tenant=%s checkout_profile sync raised (non-fatal): %s",
+                    self.tenant_id, checkout_exc,
+                )
+                checkout_profile_ok = False
+
             self._rebuild_snapshot(products_n, orders_n, coupons_n)
             self._finish_job(
                 job,
@@ -2778,6 +2850,7 @@ class StoreSyncService:
                 "profiles_updated":         profiles_n,
                 "abandoned_carts_synced":   abandoned_n,
                 "abandoned_carts_detail":   carts_result,
+                "checkout_profile_synced":  bool(checkout_profile_ok),
                 "job_id":                   job.id,
             }
             if total_items == 0:

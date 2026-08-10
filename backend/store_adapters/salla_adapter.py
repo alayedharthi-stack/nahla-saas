@@ -2195,12 +2195,15 @@ class SallaAdapter(BaseStoreAdapter):
             )
 
         _prof = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id) or {}
-        logger.error(
+        _pay_codes = list(_prof.get("payment_methods") or [])
+        _pay_status = ((_prof.get("payments") or {}).get("status") if isinstance(_prof.get("payments"), dict) else None)
+        logger.info(
             "[CHECKOUT PROFILE] selected | delivery_method=%s "
-            "shipping_company_id=%s payment_method=%s tenant=%s",
+            "shipping_company_id=%s payments_status=%s payment_method=%s tenant=%s",
             _prof.get("default_delivery_method", "(resolving)"),
             shipping_company_id,
-            (_prof.get("payment_methods") or ["cod"])[0],
+            _pay_status or "legacy",
+            (_pay_codes[0] if _pay_codes else None),
             self._tenant_id,
         )
 
@@ -2546,91 +2549,146 @@ class SallaAdapter(BaseStoreAdapter):
         return None
 
     async def sync_store_checkout_profile(self) -> Dict[str, Any]:
-        """Fetch checkout capabilities from Salla and return a profile dict.
+        """Fetch merchant-enabled checkout capabilities from Salla.
 
-        Calls (in order, best-effort — failures are logged and skipped):
-          GET /shipping/companies/   → shipping companies list
-          GET /shipping/zones        → shipping zones list
-          GET /shipping/methods      → delivery method slugs
-          GET /delivery-methods      → alternative delivery slugs endpoint
+        Official sources (Pack B):
+          GET /shipping/companies/              → MERCHANT_ENABLED carriers
+          GET /shipping/zones                   → thin zone summaries (id/name)
+          GET /payment/methods?status=enabled   → MERCHANT_ENABLED payments
+          GET /shipping/methods|/delivery-methods → delivery method slugs (order create)
 
-        Returns a dict with the shape::
-
-            {
-              "delivery_methods":            ["home_delivery", "shipping"],
-              "shipping_companies":          [{"id": 123, "name": "Aramex", "active": True}],
-              "shipping_zones":              [{"id": 456, "name": "Riyadh"}],
-              "payment_methods":             ["cod"],
-              "pickup_branches":             [],
-              "default_delivery_method":     "home_delivery",
-              "default_shipping_company_id": 123,
-              "requires_national_address":   True,
-              "country":                     "SA",
-              "last_synced_at":              "2026-05-03T10:00:00Z",
-            }
+        Failure semantics: NEVER invent payment methods (including COD).
+        UNKNOWN/FORBIDDEN stay empty for capability truth.
 
         Also populates ``_CHECKOUT_PROFILE_CACHE[tenant_id]`` and
-        ``_DELIVERY_METHOD_CACHE[tenant_id]`` so subsequent order calls reuse
-        the resolved values without hitting Salla again.
+        ``_DELIVERY_METHOD_CACHE[tenant_id]`` for subsequent order calls.
         """
         from datetime import datetime, timezone as _tz
-        import json as _json
+        from core.salla_merchant_capabilities import (  # noqa: PLC0415
+            PAYMENT_ENDPOINT,
+            SHIPPING_COMPANIES_ENDPOINT,
+            SHIPPING_ZONES_ENDPOINT,
+            STATUS_EMPTY,
+            STATUS_FORBIDDEN,
+            STATUS_KNOWN,
+            STATUS_UNKNOWN,
+            classify_http_capability_error,
+            normalize_payment_method_entry,
+            normalize_shipping_company_entry,
+            normalize_zone_summary,
+            resource_block,
+        )
 
+        synced_at = datetime.now(_tz.utc).isoformat()
         profile: Dict[str, Any] = {
-            "delivery_methods":            [],
-            "shipping_companies":          [],
-            "shipping_zones":              [],
-            "payment_methods":             ["cod"],   # safe Salla universal default
-            "pickup_branches":             [],
-            "default_delivery_method":     None,
+            "schema_version": 1,
+            "source": "salla",
+            "surface": "salla_storefront",
+            "delivery_methods": [],
+            "shipping_companies": [],
+            "shipping_zones": [],
+            # Capability truth: empty until proven. Never default to COD.
+            "payment_methods": [],
+            "pickup_branches": [],
+            "default_delivery_method": None,
             "default_shipping_company_id": None,
-            "requires_national_address":   True,
-            "country":                     "SA",
-            "last_synced_at":              datetime.now(_tz.utc).isoformat(),
+            "requires_national_address": True,
+            "country": "SA",
+            "last_synced_at": synced_at,
+            "payments": resource_block(
+                status=STATUS_UNKNOWN,
+                endpoint=PAYMENT_ENDPOINT,
+                scope="payments.read",
+                items=[],
+            ),
+            "shipping": {
+                "companies": resource_block(
+                    status=STATUS_UNKNOWN,
+                    endpoint=SHIPPING_COMPANIES_ENDPOINT,
+                    scope="shipping.read",
+                    items=[],
+                ),
+                "zones": resource_block(
+                    status=STATUS_UNKNOWN,
+                    endpoint=SHIPPING_ZONES_ENDPOINT,
+                    scope="shipping.read",
+                    items=[],
+                ),
+            },
         }
 
-        # ── 1. Shipping companies ──────────────────────────────────────────────
+        # ── 1. Shipping companies (merchant-enabled / active for store) ────────
         try:
-            data = await self._get("/shipping/companies/")
+            data = await self._get(SHIPPING_COMPANIES_ENDPOINT)
             companies_raw = (data.get("data") or []) if isinstance(data, dict) else []
-            companies = [
-                {
-                    "id":     c.get("id"),
-                    "name":   c.get("name") or c.get("courier_name") or "",
-                    "active": bool(c.get("is_active", True)),
-                    "type":   c.get("type") or c.get("delivery_type") or "shipping",
-                }
-                for c in companies_raw if isinstance(c, dict) and c.get("id")
-            ]
+            companies: List[Dict[str, Any]] = []
+            for raw in companies_raw:
+                norm = normalize_shipping_company_entry(raw)
+                if norm:
+                    companies.append(norm)
             profile["shipping_companies"] = companies
-            logger.error(
-                "[CHECKOUT PROFILE] shipping_companies fetched | count=%d tenant=%s raw_keys=%s",
-                len(companies), self._tenant_id,
-                ([list(c.keys()) for c in companies_raw[:1]] if companies_raw else []),
+            company_status = STATUS_KNOWN if companies else STATUS_EMPTY
+            profile["shipping"]["companies"] = resource_block(
+                status=company_status,
+                endpoint=SHIPPING_COMPANIES_ENDPOINT,
+                scope="shipping.read",
+                items=companies,
+            )
+            logger.info(
+                "[CHECKOUT PROFILE] shipping_companies fetched | count=%d "
+                "status=%s tenant=%s",
+                len(companies), company_status, self._tenant_id,
             )
         except Exception as _exc:
+            status = classify_http_capability_error(_exc)
+            profile["shipping"]["companies"] = resource_block(
+                status=status,
+                endpoint=SHIPPING_COMPANIES_ENDPOINT,
+                scope="shipping.read",
+                items=[],
+                error=str(_exc)[:240],
+            )
             logger.warning(
-                "[CHECKOUT PROFILE] /shipping/companies/ failed | err=%s tenant=%s",
-                _exc, self._tenant_id,
+                "[CHECKOUT PROFILE] /shipping/companies/ failed | "
+                "status=%s err=%s tenant=%s",
+                status, _exc, self._tenant_id,
             )
 
-        # ── 2. Shipping zones ──────────────────────────────────────────────────
+        # ── 2. Shipping zones (thin summaries only — fees via zone detail) ─────
         try:
-            data = await self._get("/shipping/zones")
+            data = await self._get(SHIPPING_ZONES_ENDPOINT)
             zones_raw = (data.get("data") or []) if isinstance(data, dict) else []
-            zones = [
-                {"id": z.get("id"), "name": z.get("name") or ""}
-                for z in zones_raw if isinstance(z, dict) and z.get("id")
-            ]
+            zones: List[Dict[str, Any]] = []
+            for raw in zones_raw:
+                summary = normalize_zone_summary(raw)
+                if summary:
+                    zones.append(summary)
             profile["shipping_zones"] = zones
-            logger.error(
-                "[CHECKOUT PROFILE] shipping_zones fetched | count=%d tenant=%s",
-                len(zones), self._tenant_id,
+            zone_status = STATUS_KNOWN if zones else STATUS_EMPTY
+            profile["shipping"]["zones"] = resource_block(
+                status=zone_status,
+                endpoint=SHIPPING_ZONES_ENDPOINT,
+                scope="shipping.read",
+                items=zones,
+            )
+            logger.info(
+                "[CHECKOUT PROFILE] shipping_zones fetched | count=%d "
+                "status=%s tenant=%s",
+                len(zones), zone_status, self._tenant_id,
             )
         except Exception as _exc:
+            status = classify_http_capability_error(_exc)
+            profile["shipping"]["zones"] = resource_block(
+                status=status,
+                endpoint=SHIPPING_ZONES_ENDPOINT,
+                scope="shipping.read",
+                items=[],
+                error=str(_exc)[:240],
+            )
             logger.warning(
-                "[CHECKOUT PROFILE] /shipping/zones failed | err=%s tenant=%s",
-                _exc, self._tenant_id,
+                "[CHECKOUT PROFILE] /shipping/zones failed | "
+                "status=%s err=%s tenant=%s",
+                status, _exc, self._tenant_id,
             )
 
         # ── 3. Delivery methods (try two endpoints) ────────────────────────────
@@ -2729,37 +2787,92 @@ class SallaAdapter(BaseStoreAdapter):
         if active_companies:
             profile["default_shipping_company_id"] = active_companies[0]["id"]
 
-        # ── 5. Payment methods — infer from store info when available ──────────
+        # ── 5. Payment methods — official merchant-enabled list ────────────────
+        # Official: GET /payment/methods?status=enabled (scope payments.read).
+        # NEVER default to COD on failure — UNKNOWN stays UNKNOWN.
         try:
-            data = await self._get("/store/settings")
-            pay_raw = data.get("data", data) if isinstance(data, dict) else {}
-            methods = pay_raw.get("payment_methods") or pay_raw.get("accepted_methods") or []
-            if methods:
-                profile["payment_methods"] = [
-                    m.get("code") or m.get("type") or m
-                    for m in methods
-                    if isinstance(m, (dict, str))
-                ]
-        except Exception:
-            pass   # payment methods stay as ["cod"]
+            data = await self._get(
+                PAYMENT_ENDPOINT,
+                {"status": "enabled", "per_page": 60},
+            )
+            pay_raw = (data.get("data") or []) if isinstance(data, dict) else []
+            if not isinstance(pay_raw, list):
+                pay_raw = []
+            methods: List[Dict[str, Any]] = []
+            for raw in pay_raw:
+                norm = normalize_payment_method_entry(raw)
+                if norm:
+                    methods.append(norm)
+            codes = [m["code"] for m in methods if m.get("code")]
+            pay_status = STATUS_KNOWN if codes else STATUS_EMPTY
+            profile["payment_methods"] = codes
+            profile["payments"] = resource_block(
+                status=pay_status,
+                endpoint=PAYMENT_ENDPOINT,
+                scope="payments.read",
+                items=methods,
+                extra={"query": {"status": "enabled"}},
+            )
+            logger.info(
+                "[CHECKOUT PROFILE] payment_methods fetched | count=%d "
+                "status=%s codes=%s tenant=%s",
+                len(codes), pay_status, codes, self._tenant_id,
+            )
+        except Exception as _exc:
+            pay_status = classify_http_capability_error(_exc)
+            profile["payment_methods"] = []
+            profile["payments"] = resource_block(
+                status=pay_status,
+                endpoint=PAYMENT_ENDPOINT,
+                scope="payments.read",
+                items=[],
+                error=str(_exc)[:240],
+                extra={"query": {"status": "enabled"}},
+            )
+            logger.warning(
+                "[CHECKOUT PROFILE] /payment/methods failed — "
+                "capability=UNKNOWN (no COD invent) | status=%s err=%s tenant=%s",
+                pay_status, _exc, self._tenant_id,
+            )
 
         # ── 6. Populate in-memory caches ──────────────────────────────────────
         _CHECKOUT_PROFILE_CACHE[self._tenant_id] = profile
         _DELIVERY_METHOD_CACHE[self._tenant_id] = profile["default_delivery_method"]
 
-        logger.error(
+        logger.info(
             "[CHECKOUT PROFILE] synced | tenant=%s delivery_methods=%s "
-            "shipping_companies=%d shipping_zones=%d payment_methods=%s "
+            "shipping_companies=%d shipping_zones=%d "
+            "payments_status=%s payment_methods=%s "
             "default_delivery_method=%s default_shipping_company_id=%s",
             self._tenant_id,
             profile["delivery_methods"],
             len(profile["shipping_companies"]),
             len(profile["shipping_zones"]),
+            (profile.get("payments") or {}).get("status"),
             profile["payment_methods"],
             profile["default_delivery_method"],
             profile["default_shipping_company_id"],
         )
         return profile
+
+    async def get_shipping_zone_detail(self, zone_id: Any) -> Optional[Dict[str, Any]]:
+        """On-demand zone detail for ELIGIBLE_NOW (fees/duration/COD).
+
+        Never use company lists to answer city fee/duration questions.
+        """
+        if zone_id in (None, ""):
+            return None
+        try:
+            data = await self._get(f"/shipping/zones/{zone_id}")
+            raw = data.get("data") if isinstance(data, dict) else None
+            return dict(raw) if isinstance(raw, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "[CHECKOUT PROFILE] zone detail failed | zone_id=%s "
+                "tenant=%s err=%s",
+                zone_id, self._tenant_id, exc,
+            )
+            return None
 
     async def _resolve_delivery_method(self) -> Optional[str]:
         """Return the correct delivery_method slug, or ``None`` if this store
@@ -3020,19 +3133,49 @@ class SallaAdapter(BaseStoreAdapter):
                 _last = " ".join(_parts[1:]) if len(_parts) > 1 else ""
 
         # ── Payment — Salla Admin API v2:
-        #   `payment.accepted_methods` is REQUIRED by Salla (422 otherwise:
-        #   "حقل وسائل الدفع المتاحة مطلوب"). The slugs must be a subset of
-        #   the methods the merchant has enabled in Salla. The only slug
-        #   that is guaranteed to be enabled on every store is `cod` (cash
-        #   on delivery), so that is the safe default. Operators who want
-        #   online payment can override via env (comma-separated):
-        #     SALLA_DEFAULT_PAYMENT_METHODS=mada,cod,credit_card
+        #   `payment.accepted_methods` is REQUIRED by Salla (422 otherwise).
+        #   Prefer MERCHANT_ENABLED methods from checkout_profile when known.
+        #   Env override remains an operator escape hatch.
+        #   Do NOT treat a hard-coded COD list as capability truth for the AI.
         import os as _os
+        from core.salla_merchant_capabilities import (  # noqa: PLC0415
+            STATUS_KNOWN,
+            payment_codes,
+        )
+
         _methods_env = (_os.environ.get("SALLA_DEFAULT_PAYMENT_METHODS") or "").strip()
+        _prof_for_pay = _CHECKOUT_PROFILE_CACHE.get(self._tenant_id) or {}
+        _pay_status = (
+            (_prof_for_pay.get("payments") or {}).get("status")
+            if isinstance(_prof_for_pay.get("payments"), dict)
+            else None
+        )
+        _enabled_codes = payment_codes(_prof_for_pay)
         if _methods_env:
             _accepted_methods = [m.strip() for m in _methods_env.split(",") if m.strip()]
+            _pay_source = "env_override"
+        elif _pay_status == STATUS_KNOWN and _enabled_codes:
+            _accepted_methods = list(_enabled_codes)
+            _pay_source = "checkout_profile.merchant_enabled"
+        elif _enabled_codes:
+            # Legacy profile without payments.status
+            _accepted_methods = list(_enabled_codes)
+            _pay_source = "checkout_profile.legacy_list"
         else:
+            # Operational residual for Salla POST requirement only — NOT AI SoT.
+            # Capability projection remains UNKNOWN/empty when fetch failed.
             _accepted_methods = ["cod"]
+            _pay_source = "operational_post_fallback_not_capability_truth"
+            logger.warning(
+                "[SallaAdapter] payment accepted_methods using operational "
+                "POST fallback (not capability truth) | tenant=%s "
+                "payments_status=%s",
+                self._tenant_id, _pay_status or "missing",
+            )
+        logger.info(
+            "[SallaAdapter] payment accepted_methods source=%s methods=%s tenant=%s",
+            _pay_source, _accepted_methods, self._tenant_id,
+        )
         payment_block: Dict[str, Any] = {
             "status": "pending_payment",
             "accepted_methods": _accepted_methods,

@@ -54,6 +54,7 @@ REGISTERED_DOMAIN_IDS: FrozenSet[str] = frozenset({
     "shipment",
     "catalog",
     "capabilities",
+    "merchant_capabilities",
     "merchant_policy",
     "coupons",
     "promotions",
