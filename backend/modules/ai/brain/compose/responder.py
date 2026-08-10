@@ -311,22 +311,42 @@ class DefaultComposer:
                     result=result,
                 )
             if topic == "cash_on_delivery":
+                # Pack B: do not emit settings-default payment invention.
+                # Structured evidence is attached for persona compose; this
+                # FAQ branch must not be the primary customer wording path.
                 from ..commerce.cod_policy_evidence import (  # noqa: PLC0415
-                    build_cod_policy_reply,
                     load_cod_policy_evidence,
-                )
-                from ..commerce.commerce_conversation_guard import (  # noqa: PLC0415
-                    load_commerce_session,
+                    merchant_capability_facts_for_compose,
                 )
 
                 mc = getattr(ctx, "merchant_context", None) or {}
-                evidence = load_cod_policy_evidence(merchant_context=mc)
-                session = load_commerce_session(getattr(ctx, "state", None))
-                cod = build_cod_policy_reply(
-                    evidence,
-                    continue_order=bool(session.order_intent),
+                facts = getattr(ctx, "facts", None)
+                evidence = load_cod_policy_evidence(
+                    merchant_context=mc if isinstance(mc, dict) else {},
+                    merchant_capabilities=dict(
+                        getattr(facts, "merchant_capabilities", None) or {}
+                    ),
+                    payment_methods=list(
+                        getattr(facts, "payment_methods", None) or []
+                    ),
+                    payment_methods_source=str(
+                        getattr(facts, "payment_methods_source", "") or ""
+                    ),
+                    salla_payments_status=str(
+                        getattr(facts, "salla_payments_status", "") or ""
+                    ),
                 )
-                return self._with_follow_up(cod.reply_text, ctx, result=result)
+                result.data["cod_policy_evidence"] = {
+                    "status": evidence.status,
+                    "cash_on_delivery_enabled": evidence.cash_on_delivery_enabled,
+                    "available_methods": list(evidence.available_methods),
+                    "source": evidence.source,
+                }
+                result.data["merchant_capability_facts"] = (
+                    merchant_capability_facts_for_compose(evidence)
+                )
+                # Empty string → fall through to persona/LLM compose with facts.
+                return ""
             return T.generic_fallback(variant=self._variant_idx(ctx))
 
         # ── Catalog Navigator (owned presentation) ───────────────────────

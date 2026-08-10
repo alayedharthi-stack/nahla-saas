@@ -114,32 +114,88 @@ def test_payment_info_beats_owner_contact_in_mixed_request():
 # 2. Decision routing — payment intent goes to LLM, not FAQ template
 # ─────────────────────────────────────────────────────────────────────────
 
+def _decide_payment_info(message: str):
+    """Run DefaultDecisionEngine for a payment-info style customer message."""
+    from modules.ai.brain.decision.engine import DefaultDecisionEngine
+    from modules.ai.brain.types import (
+        BrainContext,
+        CommerceFacts,
+        MerchantConversationState,
+    )
+
+    intent = _classify_rules(message)
+    assert intent is not None, f"no intent matched for {message!r}"
+    assert intent.name == "ask_payment_info", (
+        f"expected ask_payment_info for {message!r}, got {intent.name}"
+    )
+    facts = CommerceFacts(
+        payment_methods=["cod", "bank"],
+        payment_methods_source="salla_merchant_enabled",
+        salla_payments_status="known",
+        merchant_capabilities={
+            "source": "salla",
+            "kind": "merchant_enabled",
+            "payments": {
+                "status": "known",
+                "methods": [
+                    {"code": "cod", "label": "cod", "enabled": True},
+                    {"code": "bank", "label": "bank", "enabled": True},
+                ],
+            },
+            "shipping": {
+                "companies_status": "known",
+                "companies": [],
+                "zones_status": "known",
+                "zones": [],
+            },
+        },
+    )
+    ctx = BrainContext(
+        tenant_id=1,
+        customer_phone="966500000001",
+        message=message,
+        history=[],
+        profile={},
+        intent=intent,
+        state=MerchantConversationState(stage="browsing", greeted=True),
+        facts=facts,
+    )
+    return DefaultDecisionEngine().decide(ctx)
+
+
 def test_decision_engine_routes_payment_info_to_llm_not_faq():
     """The bug was: ASK_PAYMENT_INFO (or its precursor in OWNER_CONTACT)
     routed to ACTION_FAQ_REPLY{owner_contact} which short-circuited the
-    media library. Lock the LLM route so GPT can attach [MEDIA:<id>]."""
+    media library. Lock the LLM route so GPT can attach [MEDIA:<id>].
+
+    Assert the live decision contract (not source layout / char windows).
+    """
     from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
 
-    src = (BACKEND_DIR / "modules" / "ai" / "brain" / "decision" / "engine.py").read_text(
-        encoding="utf-8",
+    # Classic bank-account / payment-info path (media attach contract).
+    payment_info = _decide_payment_info("ارسل لي حساب الراجحي")
+    assert payment_info.action == ACTION_LLM_REPLY, (
+        "INTENT_ASK_PAYMENT_INFO must use ACTION_LLM_REPLY so the media "
+        "library can attach a barcode — not ACTION_FAQ_REPLY which would "
+        "re-introduce the static contact-owner fallback bug."
     )
-    # Hard-coded source check: the routing line must be present and
-    # MUST NOT be ACTION_FAQ_REPLY for payment_info.
-    assert 'INTENT_ASK_PAYMENT_INFO' in src
-    # Find the payment_info branch and confirm it uses ACTION_LLM_REPLY.
-    idx = src.find("intent.name == INTENT_ASK_PAYMENT_INFO")
-    assert idx != -1, "decision engine missing INTENT_ASK_PAYMENT_INFO branch"
-    # Look ahead a few lines for the action.
-    snippet = src[idx: idx + 600]
-    assert "ACTION_LLM_REPLY" in snippet, (
-        "INTENT_ASK_PAYMENT_INFO branch must use ACTION_LLM_REPLY so the "
-        "media library can attach a barcode — not ACTION_FAQ_REPLY which "
-        "would re-introduce the static contact-owner fallback bug."
-    )
-    # Belt-and-braces: the next FAQ branch (owner_contact) is unaffected.
-    assert "INTENT_ASK_OWNER_CONTACT" in src
+    assert payment_info.action != ACTION_FAQ_REPLY
+    assert payment_info.args.get("topic") == "payment_info"
 
-    # And one runtime sanity check via the public engine constants:
+    # Barcode image request stays on LLM path.
+    barcode = _decide_payment_info("ارسل باركود التحويل")
+    assert barcode.action == ACTION_LLM_REPLY
+    assert barcode.action != ACTION_FAQ_REPLY
+    assert barcode.args.get("topic") == "payment_barcode_image"
+
+    # Pack B merchant payment-methods FAQ also stays on LLM path with
+    # MERCHANT_CAPABILITIES ownership (must not fall back to FAQ).
+    methods = _decide_payment_info("وش طرق الدفع عندكم؟")
+    assert methods.action == ACTION_LLM_REPLY
+    assert methods.action != ACTION_FAQ_REPLY
+    assert methods.args.get("topic") == "merchant_payment_methods"
+    assert methods.args.get("capability_surface") == "salla_merchant_enabled"
+
     assert ACTION_LLM_REPLY != ACTION_FAQ_REPLY
 
 

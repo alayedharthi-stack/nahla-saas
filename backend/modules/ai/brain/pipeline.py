@@ -4122,6 +4122,38 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.postprocess.merchant_capability_truth_guard import (  # noqa: PLC0415
+                apply_merchant_capability_truth_guard,
+            )
+
+            _mc_guard = apply_merchant_capability_truth_guard(
+                reply or "",
+                known_facts=dict(
+                    getattr(getattr(ctx, "reply_state", None), "known_facts", None)
+                    or {}
+                ),
+                decision_topic=str((decision.args or {}).get("topic") or ""),
+            )
+            if _mc_guard.scrubbed:
+                reply = _mc_guard.text
+                _guard_replaced["merchant_capability_truth_guard"] = True
+                result.data["merchant_capability_truth_guard"] = {
+                    "scrubbed": True,
+                    "reasons": list(_mc_guard.reasons),
+                    "invented_payment_methods": list(
+                        _mc_guard.invented_payment_methods
+                    ),
+                    "invented_carriers": list(_mc_guard.invented_carriers),
+                }
+        except Exception as _mcg_exc:  # noqa: BLE001
+            logger.warning(
+                "[MERCHANT_CAPABILITY_TRUTH_GUARD] pipeline hook failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                _mcg_exc,
+            )
+
+        try:
             from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
                 apply_payment_credential_guard,
             )
@@ -5769,6 +5801,55 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    try:
+        from .commerce.cod_policy_evidence import (  # noqa: PLC0415
+            load_cod_policy_evidence,
+            merchant_capability_facts_for_compose,
+        )
+        from .commerce.merchant_capability_faq import (  # noqa: PLC0415
+            is_merchant_payment_methods_question,
+            is_merchant_shipping_companies_question,
+        )
+
+        _decision_topic = str((decision.args or {}).get("topic") or "")
+        _capability_turn = _decision_topic in {
+            "cash_on_delivery",
+            "merchant_payment_methods",
+        } or is_merchant_payment_methods_question(ctx.message or "")
+        _shipping_carriers_turn = is_merchant_shipping_companies_question(
+            ctx.message or ""
+        )
+        if _capability_turn or _shipping_carriers_turn:
+            _cod_ev = load_cod_policy_evidence(
+                merchant_capabilities=dict(
+                    getattr(ctx.facts, "merchant_capabilities", None) or {}
+                ),
+                payment_methods=list(
+                    getattr(ctx.facts, "payment_methods", None) or []
+                ),
+                payment_methods_source=str(
+                    getattr(ctx.facts, "payment_methods_source", "") or ""
+                ),
+                salla_payments_status=str(
+                    getattr(ctx.facts, "salla_payments_status", "") or ""
+                ),
+            )
+            _cap_answer = merchant_capability_facts_for_compose(_cod_ev)
+            _cap_answer["shipping_companies_status"] = str(
+                getattr(ctx.facts, "salla_shipping_companies_status", "") or ""
+            )
+            _cap_answer["shipping_companies"] = list(
+                getattr(ctx.facts, "shipping_methods", None) or []
+            )
+            if _shipping_carriers_turn:
+                _cap_answer["question_kind"] = "shipping_companies"
+            elif _decision_topic == "cash_on_delivery":
+                _cap_answer["question_kind"] = "cash_on_delivery"
+            else:
+                _cap_answer["question_kind"] = "payment_methods"
+            known_facts["merchant_capability_answer"] = _cap_answer
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — capability facts must not block compose
+        pass
     try:
         from .commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
             is_store_link_compose_turn,

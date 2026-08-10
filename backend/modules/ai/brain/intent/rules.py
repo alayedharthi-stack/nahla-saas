@@ -194,7 +194,9 @@ _register(RuleSet(
 _register(RuleSet(
     intent=INTENT_PAY_NOW,
     patterns=[
-        r"(ادفع|أدفع|دفع|سدد|أسدد|إتمام الدفع|الدفع الآن|أكمل الدفع|دفع الآن|تحصيل)",
+        # Do NOT match bare "دفع" — steals "طرق الدفع" FAQ into checkout.
+        # Merchant payment-method list FAQ is INTENT_ASK_PAYMENT_INFO (0.97).
+        r"(ادفع|أدفع|سدد|أسدد|إتمام الدفع|الدفع الآن|أكمل الدفع|دفع الآن|تحصيل)",
         r"(رابط الدفع|رابط الطلب|وين الرابط|ارسل الرابط|أرسل الرابط|ابعث الرابط)",
         r"(pay|payment link|checkout link)",
         # "هل أنشأت الطلب؟" / "هل تم الطلب؟" → retry order/payment
@@ -253,6 +255,9 @@ _register(RuleSet(
         r"(وشلون|شلون|كيف|كيفية).{0,15}(الشحن|التوصيل|توصلون|توصيل|تشحنون|الشحنات|شحنكم|التوصيلات)",
         # Method / area — singular AND plural now covered ("طريقة" vs "طرق").
         r"((طريقة|طرق).{0,8}(الشحن|التوصيل|توصيل|توصيلكم|شحنكم|التوصيلات)|سياسة.{0,5}(الشحن|التوصيل)|شحن مجاني|توصيل مجاني|مناطق.{0,5}(الشحن|التوصيل))",
+        # Merchant-enabled carrier list ("وش شركات الشحن عندكم؟").
+        r"(شركات\s*(?:الشحن|التوصيل)|شركة\s*(?:الشحن|التوصيل)|ناقل(?:ين)?\s*(?:الشحن|التوصيل))",
+        r"(shipping\s*compan(?:y|ies)|which\s*carrier|couriers?)",
         # Existence / "do you have"
         r"(هل.{0,8}(تشحنون|توصلون|توصيل|عندكم.{0,5}(توصيل|شحن|مندوب))|عندكم.{0,5}(توصيل|شحن|مندوب|مناديب))",
         # Carrier-by-name question — "توصيلكم عن طريق مين؟" / "الشحن
@@ -399,6 +404,12 @@ _register(RuleSet(
 _register(RuleSet(
     intent=INTENT_ASK_PAYMENT_INFO,
     patterns=[
+        # General merchant-enabled payment methods FAQ (beats PAY_NOW).
+        # "وش طرق الدفع عندكم؟" must NOT route to catalog/pay_now.
+        r"(طرق\s*الدفع|وسائل\s*الدفع|طريقة\s*الدفع|خيارات\s*الدفع)",
+        r"(وش\s*(?:طرق|وسائل)\s*الدفع|ما\s*(?:هي\s*)?(?:طرق|وسائل)\s*الدفع)",
+        r"(كيف\s*(?:أ?دفع|الدفع)\s*(?:عندكم|لديكم|بالمتجر)?)",
+        r"(payment\s*methods?|how\s*(?:can|do)\s*i\s*pay|ways?\s*to\s*pay)",
         # Bank account / transfer phrasings — Saudi & GCC dialects.
         r"(حساب الراجحي|حساب راجحي|راجحي|الراجحي|الأهلي|أهلي|بنك\s*الرياض|الرياض\s*بنك|"
         r"حساب البنك|حساب بنك|حساب بنكي|رقم الحساب|رقم حساب|"
@@ -420,7 +431,7 @@ _register(RuleSet(
         r"((?:فلوس|مبلغ|حوال(?:ه|ة))\s*(?:معاي|معي|عندي|لك|ليك|معاك))",
         r"^\s*(?:فلوس|مبلغ|تحويل|حوال(?:ه|ة))\s*[\?؟]?\s*$",
     ],
-    confidence=0.95,
+    confidence=0.97,
 ))
 
 # ── Cash on delivery (COD) ───────────────────────────────────────────────────
