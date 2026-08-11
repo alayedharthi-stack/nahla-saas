@@ -963,8 +963,11 @@ def faq_store_info(
     # Pack A2: when called for about (no URL, description present), reuse
     # this existing FAQ surface instead of a new template function.
     name = store_name or "متجرنا"
-    if store_url:
-        return f"هذا رابط المتجر الإلكتروني: {store_url}"
+    url = str(store_url or "").strip()
+    if url:
+        # Known domain is the single factual outcome — never pair with
+        # MSG_STORE_LINK_NOT_CONFIGURED / negative URL prose.
+        return f"هذا رابط المتجر الإلكتروني: {url}"
     if store_description:
         return f"هذا {name} 🌷\n{store_description}"
     return MSG_STORE_LINK_NOT_CONFIGURED
