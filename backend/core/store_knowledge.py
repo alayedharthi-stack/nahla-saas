@@ -1246,14 +1246,34 @@ def build_merchant_context(
         "autopilot_enabled": autopilot_enabled,
     }
 
-    # Pages — synced from Salla via StoreSyncService.sync_pages() which writes to
-    # store_settings["pages"] and snapshots them into StoreKnowledgeSnapshot.store_profile["pages"].
-    # Primary source: store_settings (written directly by sync_pages after each full sync).
-    # Fallback: snapshot store_profile (populated by _rebuild_snapshot, same underlying data).
-    # Both are empty until the first full sync completes successfully.
-    pages: List[Dict[str, Any]] = (
+    # Pages — legacy index only (bodies live in MerchantKnowledgeSection).
+    # Pack A1 does NOT refresh this from Salla /pages (unproven Merchant API).
+    # Retained for backward-compatible merchant_context shape if manually set.
+    raw_pages: List[Dict[str, Any]] = (
         list(store_settings.get("pages") or [])
         or list((loader.store_profile() or {}).get("pages") or [])
+    )
+    pages: List[Dict[str, Any]] = []
+    for pg in raw_pages:
+        if not isinstance(pg, dict):
+            continue
+        pages.append({
+            "id": pg.get("id") or pg.get("page_id") or "",
+            "page_id": pg.get("page_id") or pg.get("id") or "",
+            "title": pg.get("title") or "",
+            "slug": pg.get("slug") or "",
+            "kind": pg.get("kind") or "",
+            "active": bool(pg.get("active", True)),
+            "content_hash": pg.get("content_hash") or "",
+            "doc_ref": pg.get("doc_ref"),
+            "knowledge_section_id": pg.get("knowledge_section_id"),
+            # Legacy truncated content keys intentionally dropped from context.
+        })
+
+    salla_store_info: Dict[str, Any] = dict(
+        store_settings.get("salla_store_info")
+        or (loader.store_profile() or {}).get("salla_store_info")
+        or {}
     )
 
     orderable_count = sum(1 for p in formatted_rows if p.get("orderable"))
@@ -1366,6 +1386,7 @@ def build_merchant_context(
             "approved_only": True,
         },
         "pages": pages,
+        "salla_store_info": salla_store_info,
         "insights": insights,
         "brain_profile": brain_profile,
         "manual_coupons": manual_coupons_active,

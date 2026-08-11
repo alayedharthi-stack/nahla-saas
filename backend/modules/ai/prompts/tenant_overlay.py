@@ -287,6 +287,7 @@ def build_structured_facts_block(
         from models import MerchantKnowledgeSection  # noqa: PLC0415
         from core.knowledge import (  # noqa: PLC0415
             apply_ai_visible_kb_query_filters,
+            is_long_form_document_section,
             section_has_catalog_active_product,
         )
         from services.knowledge_section_kinds import (  # noqa: PLC0415
@@ -316,6 +317,15 @@ def build_structured_facts_block(
     if not rows:
         return ""
 
+    # ── Pack A1: long-form document kinds are retrieval-only ────────────
+    # Policies / store story / terms / privacy / FAQ must NOT dump into every
+    # turn via the always-on facts overlay. Reachable only via capped retrieval.
+    long_form_dropped = 0
+    pre_long_form_total = len(rows)
+    queried_rows_all = list(rows)
+    rows = [r for r in rows if not is_long_form_document_section(r)]
+    long_form_dropped = pre_long_form_total - len(rows)
+
     # ── KB-2 behavioral filter ──────────────────────────────────────────
     # Behavioral sections (group 7) are deliberately excluded from the
     # facts block. They are surfaced through ``build_behavioral_overlay_
@@ -324,12 +334,11 @@ def build_structured_facts_block(
     # silently swallowing knowledge rows.
     behavioral_dropped = 0
     pre_behavioral_total = len(rows)
-    queried_rows_all = list(rows)
     rows = [r for r in rows if not is_behavioral_kind(getattr(r, "kind", None))]
     behavioral_dropped = pre_behavioral_total - len(rows)
 
     if not rows:
-        # Only behavioral rows existed — facts bucket is empty by design.
+        # Only behavioral/long-form rows existed — facts bucket is empty by design.
         _emit_kb_runtime_trace(
             tenant_id=tenant_id,
             channel="facts",
@@ -338,9 +347,9 @@ def build_structured_facts_block(
             dropped_behavioral=behavioral_dropped,
         )
         logger.info(
-            "[KB.facts] tenant=%s only behavioral rows present "
-            "(dropped=%d); facts bucket empty.",
-            tenant_id, behavioral_dropped,
+            "[KB.facts] tenant=%s only behavioral/long-form rows present "
+            "(behavioral_dropped=%d long_form_dropped=%d); facts bucket empty.",
+            tenant_id, behavioral_dropped, long_form_dropped,
         )
         return ""
 

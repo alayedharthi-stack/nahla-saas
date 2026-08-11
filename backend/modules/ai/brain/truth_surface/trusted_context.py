@@ -595,6 +595,9 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             source=TruthSource.STORE_SNAPSHOT,
             path="commerce_facts.store_name",
         ))
+        # Pre-existing prose shipping_policy fact — known Pack A debt.
+        # Pack A1 adds namespaced policy_* PRESENT/UNKNOWN facts below and
+        # does not expand this prose path into trusted long-form content.
         _append(facts, _fact(
             domain=TrustedDomain.MERCHANT_POLICY,
             key="shipping_policy",
@@ -615,6 +618,47 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             tenant_id,
             exc,
         )
+
+    # Pack A1 — policy existence PRESENT/UNKNOWN + doc_ref (no policy prose).
+    # KNOWN_ABSENT is deferred until a completeness-bearing source exists.
+    try:
+        from services.merchant_policy_existence import (  # noqa: PLC0415
+            build_policy_existence_map,
+        )
+
+        policy_map = build_policy_existence_map(db, tenant_id)
+        for kind, payload in policy_map.items():
+            status = str((payload or {}).get("status") or "UNKNOWN")
+            if status == "KNOWN_ABSENT":
+                # Defensive: profile-only A1 must never emit ABSENT.
+                status = "UNKNOWN"
+            doc_ref = (payload or {}).get("doc_ref")
+            _append(facts, _fact(
+                domain=TrustedDomain.MERCHANT_POLICY,
+                key=f"policy_{kind}.status",
+                value=status,
+                source=TruthSource.MERCHANT_KNOWLEDGE_SECTIONS,
+                path=f"pack_a1.policy_{kind}.status",
+            ))
+            if doc_ref and status == "KNOWN_PRESENT":
+                _append(facts, _fact(
+                    domain=TrustedDomain.MERCHANT_POLICY,
+                    key=f"policy_{kind}.doc_ref",
+                    value=str(doc_ref),
+                    source=TruthSource.MERCHANT_KNOWLEDGE_SECTIONS,
+                    path=f"pack_a1.policy_{kind}.doc_ref",
+                ))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[TRUSTED_CONTEXT] pack_a1 policy map failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+
+    # Pack A1 store profile facts live in snapshot/merchant_context
+    # ``salla_store_info`` (namespaced). They are intentionally NOT emitted
+    # under MERCHANT_POLICY — contact/identity need MERCHANT_PROFILE +
+    # disclosure gates before TrustedFact projection (Sol micro-correction).
     return facts
 
 

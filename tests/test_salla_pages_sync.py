@@ -84,6 +84,7 @@ class _FakeAdapter:
         self._pages = pages
 
     async def get_pages(self) -> List[Dict[str, Any]]:
+        # Legacy list return still accepted by sync_pages (ok=True wrap).
         return self._pages
 
 
@@ -104,13 +105,24 @@ def _make_sync_service(adapter, store_settings: Dict | None = None):
     fake_db.query.return_value.filter_by.return_value.first.return_value = fake_settings
     fake_db.commit = MagicMock()
     fake_db.rollback = MagicMock()
+    fake_db.add = MagicMock()
+    fake_db.flush = MagicMock()
     svc.db = fake_db
 
     return svc, fake_settings
 
 
 class TestSyncPages:
-    def test_active_pages_are_normalised(self) -> None:
+    """Pack A1 profile-only: sync_pages is a deferred no-op (no /pages)."""
+
+    def test_sync_pages_is_noop_does_not_call_get_pages(self) -> None:
+        called = {"n": 0}
+
+        class _CountingAdapter(_FakeAdapter):
+            async def get_pages(self):
+                called["n"] += 1
+                return await super().get_pages()
+
         raw = [
             {
                 "id": 1,
@@ -118,34 +130,17 @@ class TestSyncPages:
                 "slug": "about",
                 "status": "active",
                 "content": "<p>محتوى الصفحة</p>",
-                "seo_description": "نبذة",
             }
         ]
-        svc, saved = _make_sync_service(_FakeAdapter(raw))
-        count = _run(svc.sync_pages())
-        assert count == 1
-        pages = saved.store_settings["pages"]
-        assert len(pages) == 1
-        assert pages[0]["title"] == "عن المتجر"
-        assert "<p>" not in pages[0]["content"]
-
-    def test_inactive_pages_are_excluded(self) -> None:
-        raw = [
-            {"id": 2, "title": "مسودة", "slug": "draft", "status": "disabled",
-             "content": "<p>...</p>", "seo_description": ""},
-            {"id": 3, "title": "سياسة الإرجاع", "slug": "return", "status": "active",
-             "content": "<p>نص</p>", "seo_description": ""},
-        ]
-        svc, saved = _make_sync_service(_FakeAdapter(raw))
-        count = _run(svc.sync_pages())
-        assert count == 1
-        assert saved.store_settings["pages"][0]["title"] == "سياسة الإرجاع"
-
-    def test_empty_pages_from_salla_writes_empty_list(self) -> None:
-        svc, saved = _make_sync_service(_FakeAdapter([]))
+        prior = [{"title": "صفحة يدوية", "kind": "custom"}]
+        svc, saved = _make_sync_service(
+            _CountingAdapter(raw),
+            store_settings={"pages": prior},
+        )
         count = _run(svc.sync_pages())
         assert count == 0
-        assert saved.store_settings["pages"] == []
+        assert called["n"] == 0
+        assert saved.store_settings["pages"] == prior
 
     def test_no_adapter_returns_zero(self) -> None:
         svc, _ = _make_sync_service(None)
@@ -160,17 +155,18 @@ class TestSyncPages:
         count = _run(svc.sync_pages())
         assert count == 0
 
-    def test_adapter_exception_returns_zero_preserves_existing(self) -> None:
+    def test_adapter_exception_never_reached_preserves_existing(self) -> None:
         class _FailingAdapter:
             platform = "salla"
 
             async def get_pages(self):
                 raise RuntimeError("network error")
 
-        existing_pages = [{"title": "صفحة يدوية", "content": "نص"}]
-        svc, saved = _make_sync_service(_FailingAdapter(), store_settings={"pages": existing_pages})
+        existing_pages = [{"title": "صفحة يدوية", "kind": "custom"}]
+        svc, saved = _make_sync_service(
+            _FailingAdapter(), store_settings={"pages": existing_pages},
+        )
         count = _run(svc.sync_pages())
-        # Should return 0 (failure) but existing pages must be untouched.
         assert count == 0
         assert saved.store_settings["pages"] == existing_pages
 

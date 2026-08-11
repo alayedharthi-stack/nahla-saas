@@ -20,6 +20,55 @@ def kb_row_is_ai_visible(row: Any) -> bool:
     return bool(getattr(row, "is_active", True))
 
 
+def is_imported_document_section(row: Any) -> bool:
+    """True for deferred Salla CMS imported documents (not used by A1 runtime).
+
+    Kept for deferred CMS helpers / historical rows. Pack A1 overlay exclusion
+    uses ``is_long_form_document_section`` (source-agnostic by kind).
+    """
+    if str(getattr(row, "source", "") or "").strip().lower() != "imported":
+        return False
+    meta = getattr(row, "metadata_json", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    origin = str(meta.get("origin") or "").strip().lower()
+    source_type = str(meta.get("source_type") or "").strip().lower()
+    if origin == "salla" and source_type in {"cms_page", "salla_cms_page"}:
+        return True
+    if str(meta.get("imported_from") or "").strip().lower() in {
+        "salla_page",
+        "salla_cms_page",
+    }:
+        return True
+    return False
+
+
+def is_long_form_document_section(row: Any) -> bool:
+    """True when the section kind is long-form document/policy content.
+
+    Source-agnostic: manual and future imports are excluded from always-on
+    overlay and retrieved via capped relevance retrieval instead.
+    """
+    try:
+        from services.merchant_document_retrieval import (  # noqa: PLC0415
+            is_long_form_document_kind,
+        )
+        return is_long_form_document_kind(getattr(row, "kind", None))
+    except Exception:  # noqa: BLE001
+        kind = str(getattr(row, "kind", "") or "").strip().lower()
+        return kind in {
+            "store_story",
+            "return_policy",
+            "refund_policy",
+            "exchange_policy",
+            "shipping_policy",
+            "terms_policy",
+            "privacy_policy",
+            "warranty",
+            "faq",
+        }
+
+
 def apply_visible_kb_query_filters(query: Any, *, include_deleted: bool = False) -> Any:
     """Exclude soft-deleted rows unless ``include_deleted`` is True."""
     if include_deleted:
