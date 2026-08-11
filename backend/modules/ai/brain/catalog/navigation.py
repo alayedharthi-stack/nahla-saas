@@ -250,6 +250,28 @@ def _try_native_catalog_entry_decision(
 
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve owned catalog navigation turns before discovery/search/product_media."""
+    # Specific merchant-capability FAQ outranks generic browse heuristics
+    # ("وش" + "عندكم"). Yield before any ownership lock.
+    try:
+        from ..commerce.merchant_capability_faq import (  # noqa: PLC0415
+            should_yield_catalog_navigator_for_capability,
+        )
+
+        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+        if should_yield_catalog_navigator_for_capability(
+            intent_name=_intent_name,
+            message=str(getattr(ctx, "message", "") or ""),
+        ):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="merchant_capability_faq",
+                extra={"intent": _intent_name or "-"},
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — capability yield probe is best-effort
+        pass
+
     try:
         from ..commerce.payment_evidence_turn_route import (  # noqa: PLC0415
             current_turn_has_payment_evidence,

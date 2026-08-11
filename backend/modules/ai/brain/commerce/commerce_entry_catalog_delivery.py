@@ -730,6 +730,27 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     state = getattr(ctx, "state", None)
 
     try:
+        from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+            should_yield_catalog_navigator_for_capability,
+        )
+
+        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+        if should_yield_catalog_navigator_for_capability(
+            intent_name=_intent_name,
+            message=message,
+        ):
+            logger.info(
+                "[COMMERCE_ENTRY_CATALOG] yield merchant_capability_faq "
+                "tenant=%s intent=%s preview=%r",
+                getattr(ctx, "tenant_id", None),
+                _intent_name or "-",
+                message[:60],
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — capability yield is best-effort
+        pass
+
+    try:
         from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
             current_turn_has_payment_evidence,
         )

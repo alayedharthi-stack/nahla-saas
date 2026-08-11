@@ -254,3 +254,178 @@ class TestTruthGuard:
         assert result.invented_payment_methods
         assert "alrajhi" in result.invented_payment_methods or "stc_pay" in result.invented_payment_methods
         assert "الراجحي" not in result.text
+
+
+class TestCatalogNavigatorYieldsToCapability:
+    """Production-equivalent: has_products + navigator enabled must still yield."""
+
+    def _facts(self, **kwargs: Any) -> CommerceFacts:
+        return CommerceFacts(
+            store_name="متجر تجريبي عام",
+            has_products=True,
+            payment_methods=kwargs.get("payment_codes", ["cod", "bank"]),
+            payment_methods_source="salla_merchant_enabled",
+            salla_payments_status=STATUS_KNOWN,
+            shipping_methods=kwargs.get("shipping", ["Carrier A"]),
+            shipping_methods_source="salla_merchant_enabled",
+            salla_shipping_companies_status=STATUS_KNOWN,
+            merchant_capabilities=_caps(
+                payments_status=STATUS_KNOWN,
+                payment_codes=kwargs.get("payment_codes", ["cod", "bank"]),
+                companies=[
+                    {"id": 1, "name": c, "enabled": True}
+                    for c in kwargs.get("shipping", ["Carrier A"])
+                ],
+            ),
+        )
+
+    def test_payment_methods_not_catalog_top_fallback(self, monkeypatch: Any) -> None:
+        from modules.ai.brain.catalog import navigation as nav
+        from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE
+
+        calls = {"groups": 0}
+
+        def _fake_groups(ctx: Any) -> list:
+            calls["groups"] += 1
+            return []
+
+        monkeypatch.setattr(nav, "_load_catalog_groups", _fake_groups)
+
+        msg = "وش طرق الدفع عندكم؟"
+        intent = rules_match(msg)
+        assert intent is not None
+        ctx = _ctx(msg, intent, self._facts())
+        ctx._db = object()  # enable navigator DB path
+        # Direct navigator call must yield.
+        assert nav.try_catalog_navigation_decision(ctx) is None
+        assert calls["groups"] == 0  # yielded before group load
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("topic") == "merchant_payment_methods"
+        assert "catalog_navigation_top_products_fallback" not in str(
+            decision.args.get("chosen_path") or ""
+        )
+
+    def test_shipping_companies_not_catalog_top_fallback(self, monkeypatch: Any) -> None:
+        from modules.ai.brain.catalog import navigation as nav
+        from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE
+
+        monkeypatch.setattr(nav, "_load_catalog_groups", lambda ctx: [])
+        msg = "وش شركات الشحن عندكم؟"
+        intent = rules_match(msg)
+        assert intent is not None
+        ctx = _ctx(msg, intent, self._facts(shipping=["Dev Company"]))
+        ctx._db = object()
+        assert nav.try_catalog_navigation_decision(ctx) is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("question_kind") == "shipping_companies"
+
+    def test_genuine_browse_still_reaches_catalog_navigator(self, monkeypatch: Any) -> None:
+        from modules.ai.brain.catalog import navigation as nav
+        from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE
+        from modules.ai.brain.types import INTENT_GREETING
+
+        monkeypatch.setattr(nav, "_load_catalog_groups", lambda ctx: [])
+        msg = "وش عندكم؟"
+        intent = Intent(name=INTENT_GREETING, confidence=0.9, slots={}, raw_message=msg)
+        # Prefer browse intent naming used by navigator signals.
+        intent = Intent(name="general", confidence=0.5, slots={}, raw_message=msg)
+        ctx = _ctx(msg, intent, self._facts())
+        ctx._db = object()
+        decision = nav.try_catalog_navigation_decision(ctx)
+        assert decision is not None
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("chosen_path") == nav.PATH_TOP_FALLBACK
+
+
+class TestCodComposeGrounding:
+    def test_cod_known_true_response_goal(self) -> None:
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import Decision, SuggestionSnapshot
+
+        goal = _compose_base_response_goal(
+            Decision(
+                action=ACTION_LLM_REPLY,
+                args={"topic": "cash_on_delivery"},
+                reason="test",
+            ),
+            SuggestionSnapshot(),
+        )
+        assert "cash_on_delivery" in goal
+        assert "product stock" in goal.lower() or "stock/availability" in goal.lower()
+        assert "MERCHANT_CAPABILITIES" in goal or "merchant_capability_answer" in goal
+
+    def test_cod_evidence_known_true_false_unknown(self) -> None:
+        yes = load_cod_policy_evidence(
+            merchant_capabilities=_caps(
+                payments_status=STATUS_KNOWN, payment_codes=["cod", "bank"]
+            )
+        )
+        no = load_cod_policy_evidence(
+            merchant_capabilities=_caps(
+                payments_status=STATUS_KNOWN,
+                payment_codes=["mahally_customer_wallet"],
+            )
+        )
+        unk = load_cod_policy_evidence(
+            merchant_capabilities=_caps(
+                payments_status=STATUS_UNKNOWN, payment_codes=[]
+            )
+        )
+        assert yes.cash_on_delivery_enabled is True
+        assert no.cash_on_delivery_enabled is False
+        assert unk.cash_on_delivery_enabled is None
+        assert "الراجحي" not in build_cod_policy_reply(no).reply_text
+        assert "الراجحي" not in build_cod_policy_reply(unk).reply_text
+
+    def test_capability_compose_turn_helper(self) -> None:
+        from modules.ai.brain.commerce.merchant_capability_faq import (
+            is_merchant_capability_compose_turn,
+        )
+
+        assert is_merchant_capability_compose_turn(
+            decision_topic="cash_on_delivery", message="هل عندكم دفع عند الاستلام؟"
+        )
+        assert is_merchant_capability_compose_turn(
+            message="وش طرق الدفع عندكم؟"
+        )
+        assert not is_merchant_capability_compose_turn(
+            decision_topic="", message="وش عندكم؟"
+        )
+
+
+class TestDualTenantShippingIsolation:
+    def test_shipping_companies_isolated_across_tenants(self) -> None:
+        caps_a = _caps(
+            payments_status=STATUS_KNOWN,
+            payment_codes=["cod", "bank"],
+            companies=[{"id": 1, "name": "Carrier A", "enabled": True}],
+        )
+        caps_b = _caps(
+            payments_status=STATUS_KNOWN,
+            payment_codes=["mahally_customer_wallet"],
+            companies=[{"id": 2, "name": "Carrier B", "enabled": True}],
+        )
+        ships_a = [
+            c.get("name")
+            for c in caps_a["shipping"]["companies"]
+            if isinstance(c, dict)
+        ]
+        ships_b = [
+            c.get("name")
+            for c in caps_b["shipping"]["companies"]
+            if isinstance(c, dict)
+        ]
+        assert ships_a == ["Carrier A"]
+        assert ships_b == ["Carrier B"]
+        assert "Carrier B" not in ships_a
+        assert "Carrier A" not in ships_b
+        assert "cod" in [
+            m["code"] for m in caps_a["payments"]["methods"]
+        ]
+        assert "cod" not in [
+            m["code"] for m in caps_b["payments"]["methods"]
+        ]
