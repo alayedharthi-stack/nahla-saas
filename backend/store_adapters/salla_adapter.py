@@ -1325,19 +1325,10 @@ class SallaAdapter(BaseStoreAdapter):
             raise
 
     async def get_pages(self) -> Dict[str, Any]:
-        """Fetch all store pages from Salla CMS (GET /pages).
+        """DEFERRED — Salla Merchant API has no proven GET /pages route (live 404).
 
-        Pack A1 outcome contract (failure ≠ empty):
-          {
-            "ok": bool,
-            "pages": list,
-            "http_status": int | None,
-            "error_class": str | None,
-            "partial": bool,
-          }
-
-        Deactivation of missing pages must run only when ok=True and partial=False.
-        401/403/5xx/timeout → ok=False; callers preserve prior truth as UNKNOWN.
+        Kept for historical/deferred CMS work only. Pack A1 runtime must NOT call
+        this method. See sync_pages() no-op in StoreSyncService.
         """
         pages: List[Dict[str, Any]] = []
         page = 1
@@ -1571,7 +1562,7 @@ class SallaAdapter(BaseStoreAdapter):
         plan = raw.get("plan") or {}
         plan_name = _s(plan.get("name") if isinstance(plan, dict) else plan)
 
-        return {
+        return_profile: Dict[str, Any] = {
             "store_id": _s(raw.get("id") or raw.get("store_id")),
             "name": _s(raw.get("name") or raw.get("store_name")),
             "username": _s(raw.get("username")),
@@ -1579,10 +1570,6 @@ class SallaAdapter(BaseStoreAdapter):
             "domain": domain,
             "logo_url": logo_url,
             "email": email,
-            "phone": phone,
-            "location": location_out,
-            "default_branch": branch_out,
-            "working_hours": branch_out.get("working_hours") or raw.get("working_hours") or [],
             "social_links": social_out,
             "currency": currency_code,
             "store_status": status,
@@ -1591,6 +1578,25 @@ class SallaAdapter(BaseStoreAdapter):
             "source": "salla",
             "source_endpoint": "/store/info",
         }
+        # Preserve absence — do not invent phone/location/branch/hours.
+        if phone:
+            return_profile["phone"] = phone
+        if location_out and any(
+            location_out.get(k) not in (None, "")
+            for k in ("lat", "lng", "address", "city", "country")
+        ):
+            return_profile["location"] = location_out
+        if branch_out and any(
+            branch_out.get(k) not in (None, "", [], {})
+            for k in ("id", "name", "address", "city", "contacts", "working_hours")
+        ):
+            return_profile["default_branch"] = branch_out
+        hours = branch_out.get("working_hours") if branch_out else None
+        if not hours:
+            hours = raw.get("working_hours") or []
+        if hours:
+            return_profile["working_hours"] = hours
+        return return_profile
 
     async def get_product(self, product_id: str) -> Optional[NormalizedProduct]:
         try:

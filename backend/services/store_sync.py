@@ -1255,13 +1255,12 @@ class StoreSyncService:
             "description":   store_cfg.get("store_description", ""),
             "contact_phone": wa_cfg.get("owner_whatsapp_number", ""),
             "contact_email": store_cfg.get("contact_email", ""),
-            # Populated by sync_pages() which runs before _rebuild_snapshot()
-            # in full_sync(). Index-only — no long-form page bodies.
+            # Legacy pages index (if any). Pack A1 does NOT refresh this from
+            # Salla /pages — that Merchant API route is unproven (404).
             "pages":         pages_index,
             # Pack A1 namespaced Salla profile (source of truth for Salla-owned facts).
             # Manual fields above remain the Nahla override surface — no silent merge.
             "salla_store_info": salla_store_info,
-            "salla_pages_sync": dict(store_cfg.get("salla_pages_sync") or {}),
         }
         snap.catalog_summary = {
             "total_products": products_count,
@@ -2494,238 +2493,22 @@ class StoreSyncService:
         )
         return bool(outcome.get("ok"))
 
-    # ── Pages sync ─────────────────────────────────────────────────────────────
+    # ── Pages sync (DEFERRED — Salla Merchant API has no proven /pages source) ─
 
     async def sync_pages(self) -> int:
-        """Fetch Salla CMS pages into MerchantKnowledgeSection + index-only pages list.
+        """No-op for Pack A1 profile-only.
 
-        Pack A1 contracts:
-          - Full body → MerchantKnowledgeSection (source=imported, origin=salla)
-          - store_settings['pages'] / snapshot pages → index only (no long-form body)
-          - Deactivate missing pages only on ok=True and not partial
-          - Failed fetch preserves prior truth (failure ≠ empty)
+        Source gate (2026-08): Salla GET /pages is not an official Merchant API
+        route (live 404). Automatic CMS import / reconcile is deferred until a
+        proven source exists. Long-form knowledge is merchant-authored via
+        MerchantKnowledgeSection; structured profile uses GET /store/info.
         """
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        from services.salla_cms_page_classifier import classify_salla_cms_page  # noqa: PLC0415
-        from services.salla_cms_knowledge_import import (  # noqa: PLC0415
-            deactivate_missing_salla_pages,
-            page_index_entry_from_section,
-            upsert_salla_cms_page_section,
-        )
-
-        adapter = self._get_adapter()
-        if not adapter:
-            return 0
-
-        if not hasattr(adapter, "get_pages"):
-            logger.info(
-                "tenant=%s adapter does not support get_pages — skipping page sync",
-                self.tenant_id,
-            )
-            return 0
-
-        try:
-            raw_outcome = await adapter.get_pages()
-        except Exception as exc:
-            logger.warning(
-                "tenant=%s pages sync failed (non-fatal, existing pages preserved): %s",
-                self.tenant_id, exc,
-            )
-            self._record_pages_sync_status(
-                ok=False,
-                error_class="fetch_error",
-                http_status=None,
-                partial=False,
-            )
-            return 0
-
-        # Backward-compatible: legacy adapters may still return a bare list.
-        if isinstance(raw_outcome, list):
-            outcome = {
-                "ok": True,
-                "pages": raw_outcome,
-                "http_status": 200,
-                "error_class": None,
-                "partial": False,
-            }
-        elif isinstance(raw_outcome, dict):
-            outcome = raw_outcome
-        else:
-            outcome = {
-                "ok": False,
-                "pages": [],
-                "http_status": None,
-                "error_class": "invalid_outcome",
-                "partial": False,
-            }
-
-        if not outcome.get("ok"):
-            logger.warning(
-                "tenant=%s pages sync not ok — preserving prior truth error_class=%s status=%s",
-                self.tenant_id,
-                outcome.get("error_class"),
-                outcome.get("http_status"),
-            )
-            self._record_pages_sync_status(
-                ok=False,
-                error_class=str(outcome.get("error_class") or "fetch_error"),
-                http_status=outcome.get("http_status"),
-                partial=False,
-            )
-            return 0
-
-        raw_pages = list(outcome.get("pages") or [])
-        partial = bool(outcome.get("partial"))
-
-        _ACTIVE_STATUSES = {"active", "published", "مفعّل", "مفعل"}
-        index_pages: List[Dict[str, Any]] = []
-        seen_ids: set = set()
-        upserted = 0
-
-        for raw in raw_pages:
-            status = str(raw.get("status") or "active").strip().lower()
-            if status not in _ACTIVE_STATUSES:
-                continue
-            title = str(raw.get("title") or "").strip()
-            if not title:
-                continue
-            page_id = str(raw.get("id") or "").strip()
-            slug = str(raw.get("slug") or "").strip()
-            kind = classify_salla_cms_page(title=title, slug=slug)
-            full_body = _strip_html(str(raw.get("content") or ""), max_length=None)
-            source_url = str(
-                raw.get("url") or raw.get("permalink") or raw.get("link") or ""
-            ).strip()
-            source_updated_at = None
-            for key in ("updated_at", "updated_at_timestamp", "created_at"):
-                if raw.get(key):
-                    source_updated_at = str(raw.get(key))
-                    break
-
-            section, _created, _rewritten = upsert_salla_cms_page_section(
-                self.db,
-                tenant_id=self.tenant_id,
-                page_id=page_id,
-                title=title,
-                slug=slug,
-                kind=kind,
-                body=full_body,
-                source_url=source_url,
-                source_updated_at=source_updated_at,
-                page_status=status,
-            )
-            if page_id:
-                seen_ids.add(page_id)
-            meta = getattr(section, "metadata_json", None) or {}
-            index_pages.append(
-                page_index_entry_from_section(
-                    page_id=page_id,
-                    title=title,
-                    slug=slug,
-                    kind=kind,
-                    active=True,
-                    content_hash=str(meta.get("content_hash") or ""),
-                    section_id=getattr(section, "id", None),
-                )
-            )
-            upserted += 1
-
-        deactivated = 0
-        if not partial:
-            deactivated = deactivate_missing_salla_pages(
-                self.db,
-                tenant_id=self.tenant_id,
-                seen_page_ids=seen_ids,
-            )
-        else:
-            logger.warning(
-                "tenant=%s pages sync partial — skip deactivation (seen=%d)",
-                self.tenant_id, len(seen_ids),
-            )
-
-        page_titles = [pg.get("title") for pg in index_pages]
         logger.info(
-            "tenant=%s pages_synced=%d deactivated=%d partial=%s titles=%r",
-            self.tenant_id, upserted, deactivated, partial, page_titles,
+            "tenant=%s sync_pages deferred — Salla CMS auto-import not in Pack A1 "
+            "(no proven Merchant API /pages source)",
+            self.tenant_id,
         )
-
-        try:
-            settings = (
-                self.db.query(TenantSettings)
-                .filter_by(tenant_id=self.tenant_id)
-                .first()
-            )
-            if settings:
-                current = dict(settings.store_settings or {})
-                current["pages"] = index_pages
-                current["salla_pages_sync"] = {
-                    "ok": True,
-                    "partial": partial,
-                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                    "error_class": "partial_pagination" if partial else None,
-                    "http_status": outcome.get("http_status") or 200,
-                    "page_count": len(index_pages),
-                }
-                settings.store_settings = current
-                flag_modified(settings, "store_settings")
-                self.db.commit()
-                logger.info(
-                    "tenant=%s store_settings[pages] index updated — %d pages",
-                    self.tenant_id, len(index_pages),
-                )
-        except Exception as db_exc:
-            logger.error(
-                "tenant=%s failed to persist pages index: %s",
-                self.tenant_id, db_exc,
-            )
-            try:
-                self.db.rollback()
-            except Exception:  # noqa: silent-ok
-                pass
-
-        return upserted
-
-    def _record_pages_sync_status(
-        self,
-        *,
-        ok: bool,
-        error_class: Optional[str],
-        http_status: Any,
-        partial: bool,
-    ) -> None:
-        """Persist pages sync freshness without wiping prior page index/bodies."""
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-
-        try:
-            settings = (
-                self.db.query(TenantSettings)
-                .filter_by(tenant_id=self.tenant_id)
-                .first()
-            )
-            if not settings:
-                return
-            current = dict(settings.store_settings or {})
-            prior = dict(current.get("salla_pages_sync") or {})
-            current["salla_pages_sync"] = {
-                **prior,
-                "ok": bool(ok),
-                "partial": bool(partial),
-                "error_class": error_class,
-                "http_status": http_status,
-                "last_error_at": datetime.now(timezone.utc).isoformat() if not ok else prior.get("last_error_at"),
-            }
-            settings.store_settings = current
-            flag_modified(settings, "store_settings")
-            self.db.commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "tenant=%s failed to record pages sync status: %s",
-                self.tenant_id, exc,
-            )
-            try:
-                self.db.rollback()
-            except Exception:  # noqa: silent-ok
-                pass
+        return 0
 
     # ── Checkout profile sync (Pack B merchant-enabled shipping/payment) ───────
 

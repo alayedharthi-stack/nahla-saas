@@ -1,27 +1,41 @@
 """
-Pack A1 — relevance-gated retrieval for imported long-form merchant documents.
+Pack A1 — relevance-gated retrieval for merchant long-form knowledge.
 
-Contract:
+Contract (profile-only / source-agnostic):
   - tenant_id filter mandatory
   - active + not deleted only
-  - imported Salla CMS documents only (source=imported, origin=salla)
+  - source-agnostic (manual, merchant-entered, future authorized import)
+  - eligible by kind (document/policy kinds), not by Salla CMS provenance
   - max 1–2 sections per turn
   - hard character cap
-  - custom pages are never treated as policy truth
-  - Pack B capability questions (payment methods / shipping companies / COD)
-    do not trigger document retrieval
+  - custom kind is never treated as policy truth
+  - Pack B capability questions do not trigger document retrieval
 """
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 MAX_SECTIONS_PER_TURN = 2
 HARD_CHARACTER_CAP = 3500
+
+# Long-form document kinds excluded from always-on structured facts overlay
+# and eligible for capped retrieval.
+DOCUMENT_KINDS = frozenset({
+    "store_story",
+    "return_policy",
+    "refund_policy",
+    "exchange_policy",
+    "shipping_policy",
+    "terms_policy",
+    "privacy_policy",
+    "warranty",
+    "faq",
+})
 
 _STORY_RE = re.compile(
     r"("
@@ -89,7 +103,16 @@ _WARRANTY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Structured profile questions — prefer /store/info facts, skip long-form.
+_FAQ_RE = re.compile(
+    r"("
+    r"أسئلة\s*شائعة|"
+    r"الاسئلة\s*الشائعة|"
+    r"\bfaq\b|"
+    r"frequently\s*asked"
+    r")",
+    re.IGNORECASE,
+)
+
 _STRUCTURED_PROFILE_RE = re.compile(
     r"("
     r"وين\s*(?:موقعكم|الموقع)|"
@@ -130,13 +153,17 @@ class MerchantDocumentRetrievalResult:
     truncated: bool
 
 
+def is_long_form_document_kind(kind: Optional[str]) -> bool:
+    """True when kind is a long-form document/policy kind (retrieval-owned)."""
+    return str(kind or "").strip().lower() in DOCUMENT_KINDS
+
+
 def detect_document_retrieval_intent(message: str) -> Optional[str]:
     """Return retrieval intent key, or None when long-form retrieval is skipped."""
     text = str(message or "").strip()
     if not text:
         return None
 
-    # Pack B domain separation — capability FAQ owns these turns.
     try:
         from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
             is_merchant_payment_methods_question,
@@ -146,7 +173,7 @@ def detect_document_retrieval_intent(message: str) -> Optional[str]:
             return None
         if is_merchant_shipping_companies_question(text):
             return None
-    except Exception:  # noqa: silent-ok — Pack B FAQ detectors are optional; fall through to Pack A intent matching
+    except Exception:  # noqa: silent-ok — Pack B FAQ detectors optional; fall through to Pack A matching
         pass
 
     if _STRUCTURED_PROFILE_RE.search(text):
@@ -162,6 +189,8 @@ def detect_document_retrieval_intent(message: str) -> Optional[str]:
         return "return_family"
     if _WARRANTY_RE.search(text):
         return "warranty"
+    if _FAQ_RE.search(text):
+        return "faq"
     if _STORY_RE.search(text):
         return "store_story"
     return None
@@ -180,6 +209,8 @@ def _kinds_for_intent(intent: str) -> Tuple[str, ...]:
         return ("privacy_policy",)
     if intent == "warranty":
         return ("warranty",)
+    if intent == "faq":
+        return ("faq",)
     return ()
 
 
@@ -191,7 +222,7 @@ def retrieve_merchant_documents(
     max_sections: int = MAX_SECTIONS_PER_TURN,
     hard_character_cap: int = HARD_CHARACTER_CAP,
 ) -> MerchantDocumentRetrievalResult:
-    """Retrieve 0–N relevant imported document sections for one turn."""
+    """Retrieve 0–N relevant long-form MKS sections for one turn (source-agnostic)."""
     empty = MerchantDocumentRetrievalResult(
         sections=(),
         total_chars=0,
@@ -211,10 +242,7 @@ def retrieve_merchant_documents(
 
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
-        from core.knowledge import (  # noqa: PLC0415
-            apply_ai_visible_kb_query_filters,
-            is_imported_document_section,
-        )
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PackA1.retrieval] import failed: %s", exc)
         return empty
@@ -227,7 +255,6 @@ def retrieve_merchant_documents(
             .filter(
                 MerchantKnowledgeSection.tenant_id == int(tenant_id),
                 MerchantKnowledgeSection.kind.in_(kinds),
-                MerchantKnowledgeSection.source == "imported",
             )
             .order_by(
                 MerchantKnowledgeSection.priority.asc(),
@@ -243,10 +270,10 @@ def retrieve_merchant_documents(
         )
         return empty
 
-    # custom is never policy truth; also require salla origin provenance.
+    # custom is never policy/document truth for this path.
     eligible = [
         r for r in rows
-        if is_imported_document_section(r)
+        if is_long_form_document_kind(getattr(r, "kind", None))
         and str(getattr(r, "kind", "") or "").strip().lower() != "custom"
     ]
 
@@ -279,10 +306,7 @@ def retrieve_merchant_documents(
                 body=body,
                 content_hash=content_hash,
                 provenance={
-                    "source": "imported",
-                    "origin": meta.get("origin") or "salla",
-                    "source_type": meta.get("source_type") or "cms_page",
-                    "external_page_id": meta.get("salla_page_id") or meta.get("external_page_id"),
+                    "source": str(getattr(row, "source", "") or "manual"),
                     "tenant_id": int(tenant_id),
                     "doc_ref": f"mks:{getattr(row, 'id', None)}",
                 },

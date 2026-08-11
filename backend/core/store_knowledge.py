@@ -1246,9 +1246,9 @@ def build_merchant_context(
         "autopilot_enabled": autopilot_enabled,
     }
 
-    # Pages — Pack A1 index only (bodies live in MerchantKnowledgeSection).
-    # Primary source: store_settings (written directly by sync_pages after each full sync).
-    # Fallback: snapshot store_profile (populated by _rebuild_snapshot, same underlying data).
+    # Pages — legacy index only (bodies live in MerchantKnowledgeSection).
+    # Pack A1 does NOT refresh this from Salla /pages (unproven Merchant API).
+    # Retained for backward-compatible merchant_context shape if manually set.
     raw_pages: List[Dict[str, Any]] = (
         list(store_settings.get("pages") or [])
         or list((loader.store_profile() or {}).get("pages") or [])

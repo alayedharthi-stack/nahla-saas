@@ -596,8 +596,8 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             path="commerce_facts.store_name",
         ))
         # Pre-existing prose shipping_policy fact — known Pack A debt.
-        # Pack A1 adds namespaced page_* tri-state facts below and does not
-        # expand this prose path into trusted long-form content.
+        # Pack A1 adds namespaced policy_* PRESENT/UNKNOWN facts below and
+        # does not expand this prose path into trusted long-form content.
         _append(facts, _fact(
             domain=TrustedDomain.MERCHANT_POLICY,
             key="shipping_policy",
@@ -619,59 +619,34 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             exc,
         )
 
-    # Pack A1 — policy existence tri-state + doc_ref (no policy prose).
+    # Pack A1 — policy existence PRESENT/UNKNOWN + doc_ref (no policy prose).
+    # KNOWN_ABSENT is deferred until a completeness-bearing source exists.
     try:
-        from models import TenantSettings, StoreKnowledgeSnapshot  # noqa: PLC0415
-        from services.salla_cms_knowledge_import import (  # noqa: PLC0415
+        from services.merchant_policy_existence import (  # noqa: PLC0415
             build_policy_existence_map,
         )
 
-        pages_sync_ok: Optional[bool] = None
-        settings = (
-            db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
-            if db is not None else None
-        )
-        store_cfg = (settings.store_settings or {}) if settings else {}
-        pages_sync = store_cfg.get("salla_pages_sync") or {}
-        if not pages_sync:
-            snap = (
-                db.query(StoreKnowledgeSnapshot)
-                .filter_by(tenant_id=tenant_id)
-                .first()
-                if db is not None else None
-            )
-            pages_sync = ((snap.store_profile or {}) if snap else {}).get(
-                "salla_pages_sync"
-            ) or {}
-        if isinstance(pages_sync, dict) and "ok" in pages_sync:
-            # Partial reconcile must not claim KNOWN_ABSENT.
-            if pages_sync.get("ok") and not pages_sync.get("partial"):
-                pages_sync_ok = True
-            elif pages_sync.get("ok") is False:
-                pages_sync_ok = False
-            else:
-                pages_sync_ok = None
-
-        policy_map = build_policy_existence_map(
-            db, tenant_id, pages_sync_ok=pages_sync_ok,
-        )
+        policy_map = build_policy_existence_map(db, tenant_id)
         for kind, payload in policy_map.items():
             status = str((payload or {}).get("status") or "UNKNOWN")
+            if status == "KNOWN_ABSENT":
+                # Defensive: profile-only A1 must never emit ABSENT.
+                status = "UNKNOWN"
             doc_ref = (payload or {}).get("doc_ref")
             _append(facts, _fact(
                 domain=TrustedDomain.MERCHANT_POLICY,
-                key=f"page_{kind}.status",
+                key=f"policy_{kind}.status",
                 value=status,
-                source=TruthSource.STORE_SNAPSHOT,
-                path=f"pack_a1.page_{kind}.status",
+                source=TruthSource.MERCHANT_KNOWLEDGE_SECTIONS,
+                path=f"pack_a1.policy_{kind}.status",
             ))
-            if doc_ref:
+            if doc_ref and status == "KNOWN_PRESENT":
                 _append(facts, _fact(
                     domain=TrustedDomain.MERCHANT_POLICY,
-                    key=f"page_{kind}.doc_ref",
+                    key=f"policy_{kind}.doc_ref",
                     value=str(doc_ref),
-                    source=TruthSource.STORE_SNAPSHOT,
-                    path=f"pack_a1.page_{kind}.doc_ref",
+                    source=TruthSource.MERCHANT_KNOWLEDGE_SECTIONS,
+                    path=f"pack_a1.policy_{kind}.doc_ref",
                 ))
     except Exception as exc:  # noqa: BLE001
         logger.exception(

@@ -1,8 +1,8 @@
 """
-Deterministic Salla CMS page classifier (Pack A1).
+DEFERRED — Deterministic Salla CMS page classifier (NOT Pack A1 runtime).
 
-No LLM. Title/slug lexical matching only. Uncertain → ``custom``.
-Platform-wide patterns (Arabic + English). No merchant-specific titles.
+Preserved for a future CMS-import pack. Pack A1 kinds registry remains
+source-independent in ``knowledge_section_kinds`` / retrieval DOCUMENT_KINDS.
 """
 from __future__ import annotations
 

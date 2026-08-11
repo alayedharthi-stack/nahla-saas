@@ -1,8 +1,9 @@
 """
-Pack A1 helpers: import Salla CMS pages into MerchantKnowledgeSection.
+DEFERRED — Salla CMS page import helpers (NOT in Pack A1 mergeable runtime).
 
-Upserts by tenant_id + metadata_json.salla_page_id (no unique DB constraint).
-Bodies live here; snapshots keep index-only refs.
+Source gate: Salla Merchant API does not expose GET /pages (live 404).
+These helpers are preserved for a future Pack when a proven CMS source exists.
+Pack A1 uses merchant-authored MerchantKnowledgeSection + GET /store/info only.
 """
 from __future__ import annotations
 
@@ -231,105 +232,14 @@ def build_policy_existence_map(
     db: Any,
     tenant_id: int,
     *,
-    pages_sync_ok: Optional[bool],
+    pages_sync_ok: Optional[bool] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build MERCHANT_POLICY tri-state map for Pack A1 policy kinds.
+    """Deprecated wrapper — Pack A1 uses PRESENT/UNKNOWN only.
 
-    KNOWN_ABSENT means no active policy section of that kind exists for the
-    tenant from ANY source (manual or imported). It must never mean merely
-    "no Salla CMS page".
+    CMS completeness-based KNOWN_ABSENT is deferred. Prefer
+    ``services.merchant_policy_existence.build_policy_existence_map``.
     """
-    from services.salla_cms_page_classifier import POLICY_KIND_KEYS  # noqa: PLC0415
-    from models import MerchantKnowledgeSection  # noqa: PLC0415
-    from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
-
-    out: Dict[str, Dict[str, Any]] = {}
-    for kind in POLICY_KIND_KEYS:
-        out[kind] = {
-            "status": "UNKNOWN",
-            "doc_ref": None,
-            "provenance": {
-                "source": "merchant_knowledge",
-                "tenant_id": int(tenant_id),
-            },
-        }
-
-    # When sync status is unknown (never reconciled), keep UNKNOWN unless a
-    # section already exists (then PRESENT without claiming ABSENT).
-    try:
-        rows = (
-            apply_ai_visible_kb_query_filters(
-                db.query(MerchantKnowledgeSection)
-            )
-            .filter(
-                MerchantKnowledgeSection.tenant_id == int(tenant_id),
-                MerchantKnowledgeSection.kind.in_(list(POLICY_KIND_KEYS)),
-            )
-            .all()
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[PackA1.policy_map] query failed tenant=%s: %s",
-            tenant_id, exc,
-        )
-        return out
-
-    present: Dict[str, Any] = {}
-    for row in rows:
-        kind = str(getattr(row, "kind", "") or "").strip().lower()
-        if kind not in out:
-            continue
-        if kind not in present:
-            present[kind] = row
-
-    if pages_sync_ok is None:
-        for kind, row in present.items():
-            out[kind] = {
-                "status": "KNOWN_PRESENT",
-                "doc_ref": f"mks:{getattr(row, 'id', None)}",
-                "provenance": {
-                    "source": str(getattr(row, "source", "") or "unknown"),
-                    "tenant_id": int(tenant_id),
-                    "freshness": "unknown_sync",
-                },
-            }
-        return out
-
-    if pages_sync_ok is False:
-        # Failed fetch: never claim ABSENT; expose PRESENT for known docs.
-        for kind, row in present.items():
-            out[kind] = {
-                "status": "KNOWN_PRESENT",
-                "doc_ref": f"mks:{getattr(row, 'id', None)}",
-                "provenance": {
-                    "source": str(getattr(row, "source", "") or "unknown"),
-                    "tenant_id": int(tenant_id),
-                    "freshness": "stale_or_unknown",
-                },
-            }
-        return out
-
-    # Successful complete reconcile — ABSENT only when no section of kind exists.
-    for kind in POLICY_KIND_KEYS:
-        row = present.get(kind)
-        if row is not None:
-            out[kind] = {
-                "status": "KNOWN_PRESENT",
-                "doc_ref": f"mks:{getattr(row, 'id', None)}",
-                "provenance": {
-                    "source": str(getattr(row, "source", "") or "unknown"),
-                    "tenant_id": int(tenant_id),
-                    "freshness": "reconciled",
-                },
-            }
-        else:
-            out[kind] = {
-                "status": "KNOWN_ABSENT",
-                "doc_ref": None,
-                "provenance": {
-                    "source": "salla_cms_reconcile",
-                    "tenant_id": int(tenant_id),
-                    "freshness": "reconciled",
-                },
-            }
-    return out
+    from services.merchant_policy_existence import (  # noqa: PLC0415
+        build_policy_existence_map as _safe_map,
+    )
+    return _safe_map(db, tenant_id, pages_sync_ok=pages_sync_ok)
