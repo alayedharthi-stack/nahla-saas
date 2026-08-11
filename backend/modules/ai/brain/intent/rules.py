@@ -307,10 +307,12 @@ _register(RuleSet(
         r"(متى\s+دوام(?:كم|ك|نا)?|وقت\s+الدوام|أوقات\s+ال(?:عمل|دوام)|"
         r"ساعات\s+(?:ال)?(?:عمل|دوام|الدعم))",
         r"(متى\s+(?:تفتح|تفتحون|تقفل|تقفلون|يفتح|يفتحون|يقفل|يقفلون))",
-        r"(هل\s+(?:أ?نتم|انتم|المحل|المتجر)\s+(?:فاتح|مفتوح|مقفل|مسكر))",
+        r"(هل\s+(?:أ?نتم|انتم|المحل|المتجر)\s+(?:فاتح|مفتوح|مقفل|مسكر|شغال))",
+        r"(هل\s*(?:المتجر\s*)?(?:شغال|مفتوح|فاتح))",
         r"(فاتح(?:ين)?\s+(?:ال(?:حين|آن|ان)|الآن|الان|اليوم))",
+        r"(شغال(?:ين)?\s+(?:ال(?:حين|آن|ان)|الآن|الان|اليوم)?)",
         r"(working\s+hours|business\s+hours|opening\s+hours|when\s+do\s+you\s+open|"
-        r"are\s+you\s+open)",
+        r"are\s+you\s+open|is\s+(?:the\s+)?store\s+open)",
     ],
     confidence=0.93,
 ))
@@ -357,8 +359,14 @@ _register(RuleSet(
         r"(رابط الموقع|رابط موقع(?:كم|ك|نا)|رابط الشراء|(?:^|\s)(?:ال)?ويب(?:\s|$)|website|web site|الويب\s*سايت)",
         r"(رابط الطلب|(?:ا|أ)?(?:بي|بغى)\s+(?:أ?)?(?:طلب|اطلب)\s+من\s+الموقع|(?:^|\s)(?:ا|أ)?(?:ون)?(?:لاين)(?:\s|$))",
         r"(store link|store url|website link|online store|where is your store online|about the store)",
+        # Pack A2 — structured profile about / currency / account status.
+        # Open-now (شغال/مفتوح) stays on INTENT_ASK_WORKING_HOURS.
+        r"(حدثني\s*عن\s*(?:المتجر|الشركة)|من\s*أنتم|تعريف\s*(?:المتجر|الشركة))",
+        r"(عمل(?:ة|تكم|ة\s*المتجر)|بأي\s*عملة|currency)",
+        r"(هل\s*(?:المتجر\s*)?نشط|حالة\s*المتجر|store\s*status)",
+        r"(حسابات\s*(?:تواصل|التواصل)|سوشيال|social\s*accounts?)",
     ],
-    confidence=0.92,
+    confidence=0.94,
 ))
 
 
@@ -458,8 +466,11 @@ _register(RuleSet(
         r"(رقمكم|رقم التواصل|رقم خدمة العملاء|كيف أتواصل|كيف اتواصل|وسيلة التواصل|رقم الواتساب)",
         r"(تواصل المالك|التواصل مع المالك|أبغى رقمكم|أرسل رقمكم|ابغى اكلمكم)",
         r"(contact number|contact info|customer service number|whatsapp number)",
+        # Pack A2 — email / social contact channels (no phone invention).
+        r"(وش\s*(?:إ|ا)?يميل(?:كم|ك)?|ما\s*(?:إ|ا)?يميل(?:كم|ك)?|بريد(?:كم|ك)?)",
+        r"(انستقرام|إنستغرام|instagram|تويتر|twitter|سناب|snapchat|تيك\s*توك|tiktok)",
     ],
-    confidence=0.92,
+    confidence=0.93,
 ))
 
 # ── Hesitation ────────────────────────────────────────────────────────────────

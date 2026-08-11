@@ -38,6 +38,16 @@ for _p in (_THIS, _DB):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+
+def _s_public_phone(merchant_profile: Dict[str, Any]) -> str:
+    """Public profile phone only — never invent from WhatsApp owner number."""
+    if not isinstance(merchant_profile, dict):
+        return ""
+    phone = str(merchant_profile.get("phone") or "").strip()
+    if phone and merchant_profile.get("phone_status") == "UNKNOWN":
+        return ""
+    return phone
+
 from models import (  # noqa: E402
     Coupon,
     Customer,
@@ -1276,6 +1286,31 @@ def build_merchant_context(
         or {}
     )
 
+    # Pack A2 — single customer-facing resolved profile (no WA-owner phone).
+    merchant_profile: Dict[str, Any] = {}
+    try:
+        from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
+
+        merchant_profile = resolve_merchant_profile(db, int(tenant_id)).to_public_dict()
+    except Exception as _mp_exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[MerchantContext] merchant_profile resolve failed tenant=%s err=%s",
+            tenant_id,
+            _mp_exc,
+        )
+
+    # Sanitize legacy tenant_profile phone so prompts never see WA owner number
+    # or nested raw salla_store_info.
+    public_phone = _s_public_phone(merchant_profile)
+    if isinstance(store_profile, dict):
+        store_profile = dict(store_profile)
+        store_profile.pop("salla_store_info", None)
+        if public_phone:
+            store_profile["contact_phone"] = public_phone
+        else:
+            store_profile["contact_phone"] = ""
+
+
     orderable_count = sum(1 for p in formatted_rows if p.get("orderable"))
     excluded_count = unavailable_count
     policies_count = sum(1 for v in policy_presence.values() if v)
@@ -1386,6 +1421,9 @@ def build_merchant_context(
             "approved_only": True,
         },
         "pages": pages,
+        # Pack A2: resolved customer-facing profile is the prompt owner.
+        # Raw salla_store_info retained for sync/debug only — not model payload.
+        "merchant_profile": merchant_profile,
         "salla_store_info": salla_store_info,
         "insights": insights,
         "brain_profile": brain_profile,
@@ -1426,17 +1464,38 @@ def build_ai_context(
     loader  = StoreKnowledgeLoader(db, tenant_id)
     parts: List[str] = []
 
-    # 1. Store identity
+    # 1. Store identity — Pack A2: public profile phone only (never WA owner).
     if "store_profile" in include:
         profile = loader.store_profile()
         disp = clean_store_name(str(profile.get("store_name") or ""))
+        public_phone = ""
+        public_email = ""
+        public_url = ""
+        public_desc = ""
+        try:
+            from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
+
+            resolved = resolve_merchant_profile(db, int(tenant_id))
+            if resolved.name:
+                disp = clean_store_name(resolved.name) or disp
+            public_url = resolved.domain or ""
+            public_desc = resolved.description or ""
+            public_email = resolved.email or ""
+            public_phone = resolved.phone or ""
+        except Exception:  # noqa: silent-ok — fall back to sanitized snapshot fields
+            public_url = str(profile.get("store_url") or "")
+            public_desc = str(profile.get("description") or "")
+            public_email = str(profile.get("contact_email") or "")
+            # Never emit snapshot contact_phone (historically WA owner).
+            public_phone = ""
         if disp:
             parts.append(
                 f"### المتجر:\n"
                 f"- الاسم: {disp}\n"
-                + (f"- الرابط: {profile['store_url']}\n" if profile.get("store_url") else "")
-                + (f"- الوصف: {profile['description']}\n" if profile.get("description") else "")
-                + (f"- للتواصل: {profile['contact_phone']}\n" if profile.get("contact_phone") else "")
+                + (f"- الرابط: {public_url}\n" if public_url else "")
+                + (f"- الوصف: {public_desc}\n" if public_desc else "")
+                + (f"- البريد: {public_email}\n" if public_email else "")
+                + (f"- للتواصل: {public_phone}\n" if public_phone else "")
             )
 
     # 2. Catalog — track whether real products exist

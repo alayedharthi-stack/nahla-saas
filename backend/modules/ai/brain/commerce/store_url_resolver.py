@@ -255,6 +255,30 @@ def resolve_store_url(db: Any, tenant_id: int) -> StoreUrlResolution:
 
     tenant_id = int(tenant_id)
 
+    # 0) Pack A2 resolved merchant profile (Salla domain / manual override)
+    try:
+        from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
+
+        profile = resolve_merchant_profile(db, tenant_id)
+        url = _normalise_url(profile.domain)
+        if url:
+            source = profile.field_sources.get("domain") or "merchant_profile"
+            logger.info(
+                "[STORE_URL_RESOLVER] tenant_id=%s source=%s url_len=%d",
+                tenant_id,
+                source,
+                len(url),
+            )
+            return StoreUrlResolution(
+                found=True, url=url, source=f"merchant_profile:{source}",
+            )
+    except Exception as exc:  # noqa: silent-ok — resolver layer must not block next source
+        logger.debug(
+            "store_url_resolver.merchant_profile_failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+
     # 1) Synced merchant profile (StoreKnowledgeSnapshot)
     try:
         from core.store_knowledge import StoreKnowledgeLoader  # noqa: PLC0415

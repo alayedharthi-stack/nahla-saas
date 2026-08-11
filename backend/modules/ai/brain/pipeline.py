@@ -40,6 +40,30 @@ from .types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
 )
+
+
+def _sanitize_tenant_profile_for_prompt(
+    tenant_profile: Any,
+    merchant_profile: Any,
+) -> Dict[str, Any]:
+    """Strip WA-owner phone and nested raw Salla blobs; prefer MERCHANT_PROFILE."""
+    out = dict(tenant_profile) if isinstance(tenant_profile, dict) else {}
+    # Competing raw surface — never send nested Salla blob to the model.
+    out.pop("salla_store_info", None)
+    mp = merchant_profile if isinstance(merchant_profile, dict) else {}
+    public_phone = str(mp.get("phone") or "").strip()
+    if mp.get("phone_status") == "UNKNOWN":
+        public_phone = ""
+    out["contact_phone"] = public_phone
+    if mp.get("domain"):
+        out["store_url"] = mp.get("domain")
+    if mp.get("description"):
+        out["description"] = mp.get("description")
+    if mp.get("email"):
+        out["contact_email"] = mp.get("email")
+    if mp.get("name"):
+        out["store_name"] = mp.get("name")
+    return out
 from .decision.actions import (
     ACTION_CATALOG_NAVIGATE,
     ACTION_GREET,
@@ -3236,8 +3260,11 @@ class MerchantBrain:
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
                     "retrieved_documents_block": _retrieved_docs_block,
-                    "tenant_profile":    mc.get("tenant_profile") or {},
-                    "salla_store_info":  mc.get("salla_store_info") or {},
+                    "tenant_profile":    _sanitize_tenant_profile_for_prompt(
+                        mc.get("tenant_profile") or {},
+                        mc.get("merchant_profile") or {},
+                    ),
+                    "merchant_profile":  mc.get("merchant_profile") or {},
                     "customer":          mc.get("customer") or {},
                     "conversation":      mc.get("conversation") or {},
                     "products":          list((mc.get("products") or []))[:8],

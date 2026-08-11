@@ -655,10 +655,74 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             exc,
         )
 
-    # Pack A1 store profile facts live in snapshot/merchant_context
-    # ``salla_store_info`` (namespaced). They are intentionally NOT emitted
-    # under MERCHANT_POLICY — contact/identity need MERCHANT_PROFILE +
-    # disclosure gates before TrustedFact projection (Sol micro-correction).
+    return facts
+
+
+def _load_merchant_profile_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
+    """Pack A2 — structured customer-facing merchant profile facts."""
+    facts: List[TrustedFact] = []
+    if db is None or not tenant_id:
+        return facts
+    try:
+        from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
+
+        profile = resolve_merchant_profile(db, int(tenant_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[TRUSTED_CONTEXT] merchant_profile failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return facts
+
+    def _emit(key: str, value: Any, *, status_key: Optional[str] = None) -> None:
+        status = "KNOWN_VALUE" if value not in (None, "", [], {}) else "UNKNOWN"
+        src = (profile.field_sources or {}).get(status_key or key) or "absent"
+        if src == "salla_store_info":
+            truth_src = TruthSource.INTEGRATION_CONFIG
+        elif src == "manual_override":
+            truth_src = TruthSource.TENANT_SETTINGS
+        elif src == "legacy_fallback":
+            truth_src = TruthSource.STORE_SNAPSHOT
+        else:
+            truth_src = TruthSource.STORE_SNAPSHOT
+        _append(facts, _fact(
+            domain=TrustedDomain.MERCHANT_PROFILE,
+            key=f"{key}.status",
+            value=status,
+            source=truth_src,
+            path=f"merchant_profile.{key}.status",
+        ))
+        if status == "KNOWN_VALUE":
+            _append(facts, _fact(
+                domain=TrustedDomain.MERCHANT_PROFILE,
+                key=key,
+                value=value,
+                source=truth_src,
+                path=f"merchant_profile.{key}",
+            ))
+        if src:
+            _append(facts, _fact(
+                domain=TrustedDomain.MERCHANT_PROFILE,
+                key=f"{key}.source",
+                value=src,
+                source=truth_src,
+                path=f"merchant_profile.{key}.source",
+            ))
+
+    _emit("name", profile.name)
+    _emit("description", profile.description)
+    _emit("email", profile.email)
+    _emit("domain", profile.domain)
+    _emit("logo_url", profile.logo_url)
+    _emit("social_links", profile.social_links)
+    _emit("currency", profile.currency)
+    _emit("status", profile.status)
+    # Contact disclosure: phone only when present on profile (never WA owner).
+    _emit("phone", profile.phone)
+    _emit("location", profile.location)
+    _emit("working_hours", profile.working_hours)
+    _emit("default_branch", profile.default_branch)
     return facts
 
 
@@ -747,6 +811,12 @@ def build_trusted_context_snapshot(
         facts.extend(merchant_cap_facts)
         loaded_domains.append(TrustedDomain.MERCHANT_CAPABILITIES.value)
         sources.append("salla_checkout_profile")
+
+    profile_facts = _load_merchant_profile_facts(db, tenant_id)
+    if profile_facts:
+        facts.extend(profile_facts)
+        loaded_domains.append(TrustedDomain.MERCHANT_PROFILE.value)
+        sources.append("merchant_profile")
 
     policy_facts = _load_merchant_policy_facts(db, tenant_id)
     if policy_facts:

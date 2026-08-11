@@ -1621,6 +1621,34 @@ class DefaultDecisionEngine:
             )
             from ..execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
+            # Pack A2 — structured profile ownership before catalog / link steal.
+            # Must not steal Pack B capability turns or open-now working-hours.
+            try:
+                from ..commerce.merchant_capability_faq import (  # noqa: PLC0415
+                    should_yield_catalog_navigator_for_capability,
+                )
+                from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                    build_merchant_profile_decision,
+                    is_open_now_question,
+                )
+
+                if (
+                    not should_yield_catalog_navigator_for_capability(
+                        intent_name=getattr(intent, "name", "") or "",
+                        message=ctx.message or "",
+                    )
+                    and not is_open_now_question(ctx.message or "")
+                ):
+                    _early_profile = build_merchant_profile_decision(
+                        message=ctx.message or "",
+                        db=ctx.db,
+                        tenant_id=int(ctx.tenant_id or 0),
+                    )
+                    if _early_profile is not None:
+                        return _early_profile
+            except Exception:  # noqa: silent-ok — profile gate must not block decide
+                pass
+
             _link_intent = resolve_inbound_link_intent(ctx.message or "")
             if _link_intent == LinkIntentType.WEBSITE_URL:
                 logger.info(
@@ -3307,6 +3335,9 @@ class DefaultDecisionEngine:
                 is_media_framed_inbound_message,
                 link_intent_message,
             )
+            from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                build_merchant_profile_decision,
+            )
 
             _store_msg = ctx.message or ""
             if is_media_framed_inbound_message(_store_msg) and not link_intent_message(
@@ -3317,11 +3348,23 @@ class DefaultDecisionEngine:
                     ctx.tenant_id,
                 )
             else:
-                return Decision(
-                    action=ACTION_FAQ_REPLY,
-                    args={"topic": "store_info"},
-                    reason="customer asked for the e-commerce store link",
+                _profile_decision = build_merchant_profile_decision(
+                    message=_store_msg,
+                    db=ctx.db,
+                    tenant_id=int(ctx.tenant_id or 0),
                 )
+                if _profile_decision is not None:
+                    # ONLINE_STORE_INQUIRY defaults to URL when classifier
+                    # returned about without description (decision None) —
+                    # already handled by build helper. Force URL for bare
+                    # online-store inquiry when classifier returned store_info.
+                    return _profile_decision
+                if intent.name == INTENT_ONLINE_STORE_INQUIRY:
+                    return Decision(
+                        action=ACTION_FAQ_REPLY,
+                        args={"topic": "store_info"},
+                        reason="online store inquiry — store URL FAQ",
+                    )
 
         if intent.name == INTENT_ASK_LOCATION:
             try:
@@ -3833,6 +3876,28 @@ class DefaultDecisionEngine:
 
         # ── 7. Ask about product or price ─────────────────────────────────
         if intent.name in (INTENT_ASK_PRODUCT, INTENT_ASK_PRICE):
+            # Pack A2: profile FAQ must not be stolen by catalog product browse.
+            try:
+                from ..commerce.merchant_capability_faq import (  # noqa: PLC0415
+                    should_yield_catalog_navigator_for_capability,
+                )
+                from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                    build_merchant_profile_decision,
+                )
+
+                if not should_yield_catalog_navigator_for_capability(
+                    intent_name=intent.name,
+                    message=ctx.message or "",
+                ):
+                    _profile_over_catalog = build_merchant_profile_decision(
+                        message=ctx.message or "",
+                        db=ctx.db,
+                        tenant_id=int(ctx.tenant_id or 0),
+                    )
+                    if _profile_over_catalog is not None:
+                        return _profile_over_catalog
+            except Exception:  # noqa: silent-ok
+                pass
             from ..product_discovery_gate import (  # noqa: PLC0415
                 clarify_instead_of_top_products,
                 try_price_query_decision,

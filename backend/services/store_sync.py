@@ -1221,7 +1221,6 @@ class StoreSyncService:
             .first()
         )
         store_cfg  = (settings.store_settings or {}) if settings else {}
-        wa_cfg     = (settings.whatsapp_settings or {}) if settings else {}
 
         # Pack A1: Salla /store/info lands namespaced — never silently flatten
         # into manual store_settings fields without provenance.
@@ -1253,7 +1252,13 @@ class StoreSyncService:
             "maps_url":      store_cfg.get("google_maps_location", ""),
             "logo_url":      store_cfg.get("logo_url", ""),
             "description":   store_cfg.get("store_description", ""),
-            "contact_phone": wa_cfg.get("owner_whatsapp_number", ""),
+            # Pack A2: public profile phone only — never WhatsApp owner number.
+            "contact_phone": (
+                store_cfg.get("store_phone")
+                or store_cfg.get("public_phone")
+                or store_cfg.get("contact_phone_public")
+                or ""
+            ),
             "contact_email": store_cfg.get("contact_email", ""),
             # Legacy pages index (if any). Pack A1 does NOT refresh this from
             # Salla /pages — that Merchant API route is unproven (404).
