@@ -750,6 +750,28 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — capability yield is best-effort
         pass
 
+    # Pack A2: MERCHANT_PROFILE about/url/contact/currency/status outrank CE2.
+    try:
+        from modules.ai.brain.commerce.merchant_profile_intents import (  # noqa: PLC0415
+            should_yield_catalog_for_merchant_profile,
+        )
+
+        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+        if should_yield_catalog_for_merchant_profile(
+            intent_name=_intent_name,
+            message=message,
+        ):
+            logger.info(
+                "[COMMERCE_ENTRY_CATALOG] yield merchant_profile "
+                "tenant=%s intent=%s preview=%r",
+                getattr(ctx, "tenant_id", None),
+                _intent_name or "-",
+                message[:60],
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — profile yield is best-effort
+        pass
+
     try:
         from modules.ai.brain.commerce.payment_evidence_turn_route import (  # noqa: PLC0415
             current_turn_has_payment_evidence,

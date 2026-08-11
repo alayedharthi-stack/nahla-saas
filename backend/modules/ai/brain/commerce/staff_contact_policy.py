@@ -326,6 +326,33 @@ def evaluate_staff_contact_policy(
             )
             return None
 
+        # Pack A2: when MERCHANT_PROFILE has structured contact channels,
+        # yield to brain FAQ owner_contact (do not emit channel-only prose).
+        try:
+            from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
+
+            _profile = resolve_merchant_profile(db, int(tenant_id or 0))
+            _has_structured = bool(
+                str(getattr(_profile, "email", "") or "").strip()
+                or str(getattr(_profile, "phone", "") or "").strip()
+                or (
+                    isinstance(getattr(_profile, "social_links", None), dict)
+                    and any(
+                        str(v or "").strip()
+                        for v in (getattr(_profile, "social_links", None) or {}).values()
+                    )
+                )
+            )
+            if _has_structured:
+                logger.info(
+                    "[STAFF_CONTACT_POLICY] tenant=%s defer=true "
+                    "reason=merchant_profile_contact_channels",
+                    tenant_id,
+                )
+                return None
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — profile yield best-effort
+            pass
+
         from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: PLC0415
             general_contact_reply_for_message,
         )

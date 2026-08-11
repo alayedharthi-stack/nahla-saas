@@ -17,8 +17,16 @@ from modules.ai.brain.types import (
     INTENT_ONLINE_STORE_INQUIRY,
 )
 
-# Canonical no-URL operational claims (PR #274) — detection only, not output.
+# Canonical no-URL operational claims — detection only, not output.
+# Include MSG_STORE_LINK_NOT_CONFIGURED stem plus residual LLM/FAQ negatives
+# that must not coexist with a known MERCHANT_PROFILE.domain.
 _NO_URL_CLAIM_FRAGMENT = "ما عندي رابط المتجر الإلكتروني محفوظ في النظام"
+_NO_URL_CLAIM_RES = (
+    re.compile(re.escape(_NO_URL_CLAIM_FRAGMENT)),
+    re.compile(r"لا\s*يوجد\s*رابط\s*(?:متجر|المتجر)?(?:\s*متاح)?", re.UNICODE),
+    re.compile(r"ما\s*عند[يى]\s*رابط\s*(?:ال)?متجر", re.UNICODE),
+    re.compile(r"رابط\s*(?:ال)?متجر\s*(?:غير\s*متاح|مو\s*متاح|غير\s*موجود)", re.UNICODE),
+)
 
 # Product/size slot bleed — must not ride on a store-link turn.
 _SIZE_BLEED_LINE_RE = re.compile(
@@ -36,6 +44,8 @@ _WARM_ACK_ONLY_RE = re.compile(
     r"^(?:حاضر|أبشر|أبشري|تمام|يا\s+هلا|أكيد|تام)[،,.\s]*$",
     re.UNICODE | re.IGNORECASE,
 )
+
+_URL_IN_TEXT_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -85,8 +95,22 @@ def should_skip_order_resume_hint(
     }
 
 
+def _line_claims_no_store_url(line: str) -> bool:
+    text = str(line or "")
+    if not text.strip():
+        return False
+    if _NO_URL_CLAIM_FRAGMENT in text:
+        return True
+    return any(pat.search(text) for pat in _NO_URL_CLAIM_RES)
+
+
 def body_claims_no_store_url(text: str) -> bool:
-    return _NO_URL_CLAIM_FRAGMENT in str(text or "")
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    if _NO_URL_CLAIM_FRAGMENT in raw:
+        return True
+    return any(pat.search(raw) for pat in _NO_URL_CLAIM_RES)
 
 
 def body_has_order_size_bleed(text: str) -> bool:
@@ -113,17 +137,26 @@ def strip_store_inquiry_contradictions(text: str) -> tuple[str, bool, bool]:
         raw = line.strip()
         if not raw:
             continue
-        if _NO_URL_CLAIM_FRAGMENT in raw:
+        if _line_claims_no_store_url(raw):
             stripped_no_url = True
-            remainder = raw.replace(_NO_URL_CLAIM_FRAGMENT, "").strip(" ،,.")
+            remainder = raw
+            for pat in _NO_URL_CLAIM_RES:
+                remainder = pat.sub("", remainder)
+            remainder = remainder.replace(_NO_URL_CLAIM_FRAGMENT, "").strip(" ،,.:")
             remainder = re.sub(
-                r"^(?:حاضر|أبشر|أبشري|تمام|يا\s+هلا|أكيد|تام)[،,.\s]*",
+                r"^(?:حاضر|أبشر|أبشري|تمام|يا\s+هلا|أكيد|تام|هذا\s*هو\s*رابط\s*(?:ال)?متجر)[،,.\s:]*",
                 "",
                 remainder,
                 flags=re.UNICODE | re.IGNORECASE,
-            ).strip(" ،,.")
-            if remainder and not _WARM_ACK_ONLY_RE.match(remainder):
-                kept.append(remainder)
+            ).strip(" ،,.:")
+            if remainder and not _WARM_ACK_ONLY_RE.match(remainder) and not _URL_IN_TEXT_RE.search(remainder):
+                # Drop residual intro-only lines; URL is reattached by reconcile.
+                if not re.fullmatch(
+                    r"(?:هذا\s*)?(?:هو\s*)?رابط\s*(?:ال)?متجر(?:\s*الإلكتروني)?",
+                    remainder,
+                    flags=re.UNICODE | re.IGNORECASE,
+                ):
+                    kept.append(remainder)
             continue
         if _SIZE_BLEED_LINE_RE.search(raw):
             stripped_size = True
@@ -192,9 +225,6 @@ def reconcile_store_link_body_when_url_found(
         store_url=url,
         action="append_url",
     )
-
-
-_URL_IN_TEXT_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def apply_store_url_to_facts(
