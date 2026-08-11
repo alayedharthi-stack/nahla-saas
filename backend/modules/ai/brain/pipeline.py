@@ -4411,43 +4411,61 @@ class MerchantBrain:
                 product_availability_guard_mode,
             )
             if product_availability_guard_mode() != "off":
-                from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
-                    build_availability_context,
+                from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+                    is_merchant_capability_compose_turn,
                 )
-                _pavg_rec_ids: list = []
-                for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
-                    _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
-                    if isinstance(_rid, int):
-                        _pavg_rec_ids.append(_rid)
-                _availability_ctx = build_availability_context(
-                    db,
-                    tenant_id,
-                    focus_product=getattr(new_state, "current_product_focus", None),
-                    recommended_product_ids=_pavg_rec_ids,
-                )
-                _pavg_pc = dict(result.data.get("persona_compose") or {})
-                _pavg = apply_product_availability_truth_guard(
-                    reply=reply or "",
-                    availability_context=_availability_ctx,
-                    inbound_text=message or "",
-                    chosen_path=_chosen_path,
+
+                if is_merchant_capability_compose_turn(
                     decision_topic=str((decision.args or {}).get("topic") or ""),
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    question_kind=str(result.data.get("question_kind") or ""),
-                    catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
-                    checkout_pressure_allowed=result.data.get("checkout_pressure_allowed"),
-                    surface=str(_pavg_pc.get("surface") or ""),
-                    invocation_site="pipeline",
-                    turn_token=str(getattr(new_state, "turn", None) or ""),
-                )
-                if _pavg.replaced:
-                    reply = _pavg.reply
-                    _guard_replaced["product_availability_truth_guard"] = True
-                if _pavg.availability_claim_blocked:
-                    result.data["availability_claim_blocked"] = True
-                    if _pavg.reason:
-                        result.data["availability_guard_reason"] = _pavg.reason
+                    question_kind=str(
+                        (decision.args or {}).get("question_kind")
+                        or result.data.get("question_kind")
+                        or ""
+                    ),
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    message=message or "",
+                ):
+                    result.data["merchant_capability_guard_bypass"] = (
+                        "product_availability_truth"
+                    )
+                else:
+                    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+                        build_availability_context,
+                    )
+                    _pavg_rec_ids: list = []
+                    for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                        _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                        if isinstance(_rid, int):
+                            _pavg_rec_ids.append(_rid)
+                    _availability_ctx = build_availability_context(
+                        db,
+                        tenant_id,
+                        focus_product=getattr(new_state, "current_product_focus", None),
+                        recommended_product_ids=_pavg_rec_ids,
+                    )
+                    _pavg_pc = dict(result.data.get("persona_compose") or {})
+                    _pavg = apply_product_availability_truth_guard(
+                        reply=reply or "",
+                        availability_context=_availability_ctx,
+                        inbound_text=message or "",
+                        chosen_path=_chosen_path,
+                        decision_topic=str((decision.args or {}).get("topic") or ""),
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        question_kind=str(result.data.get("question_kind") or ""),
+                        catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
+                        checkout_pressure_allowed=result.data.get("checkout_pressure_allowed"),
+                        surface=str(_pavg_pc.get("surface") or ""),
+                        invocation_site="pipeline",
+                        turn_token=str(getattr(new_state, "turn", None) or ""),
+                    )
+                    if _pavg.replaced:
+                        reply = _pavg.reply
+                        _guard_replaced["product_availability_truth_guard"] = True
+                    if _pavg.availability_claim_blocked:
+                        result.data["availability_claim_blocked"] = True
+                        if _pavg.reason:
+                            result.data["availability_guard_reason"] = _pavg.reason
         except Exception as _pavg_exc:  # noqa: BLE001
             logger.warning(
                 "[PRODUCT_AVAILABILITY_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -4460,114 +4478,132 @@ class MerchantBrain:
                 product_claim_grounding_guard_mode,
             )
             if product_claim_grounding_guard_mode() != "off" and not _navigator_owner_locked:
-                if _availability_ctx is None:
-                    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
-                        build_availability_context,
-                    )
-                    _pcgg_rec_ids: list = []
-                    for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
-                        _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
-                        if isinstance(_rid, int):
-                            _pcgg_rec_ids.append(_rid)
-                    _availability_ctx = build_availability_context(
-                        db,
-                        tenant_id,
-                        focus_product=getattr(new_state, "current_product_focus", None),
-                        recommended_product_ids=_pcgg_rec_ids,
-                    )
-                _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
-                _pcgg_meta["inbound_text"] = message or ""
-                _pcgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
-                if _turn_owner_contract_meta:
-                    _pcgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
-                for _flag in (
-                    "block_catalog_push",
-                    "block_staff_contact",
-                    "block_showroom_location",
-                    "pause_order_slot_collection",
-                ):
-                    if _flag in (decision.args or {}):
-                        _pcgg_meta[_flag] = bool((decision.args or {}).get(_flag))
-                try:
-                    from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
-                        active_catalog_group_slug_from_state,
-                        resolve_catalog_category_scope,
-                    )
-                    from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-                        active_category_from_state,
-                        extract_browse_category_scope,
-                    )
+                from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+                    is_merchant_capability_compose_turn,
+                )
 
-                    _cat_subject = extract_browse_category_scope(message or "", "")
-                    if _cat_subject:
-                        _cat_scope = resolve_catalog_category_scope(
+                if is_merchant_capability_compose_turn(
+                    decision_topic=str((decision.args or {}).get("topic") or ""),
+                    question_kind=str(
+                        (decision.args or {}).get("question_kind")
+                        or result.data.get("question_kind")
+                        or ""
+                    ),
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    message=message or "",
+                ):
+                    result.data["merchant_capability_guard_bypass"] = (
+                        "product_claim_grounding"
+                    )
+                else:
+                    if _availability_ctx is None:
+                        from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+                            build_availability_context,
+                        )
+                        _pcgg_rec_ids: list = []
+                        for _rec in (getattr(new_state, "last_recommended_products", None) or [])[:5]:
+                            _rid = (_rec or {}).get("id") if isinstance(_rec, dict) else None
+                            if isinstance(_rid, int):
+                                _pcgg_rec_ids.append(_rid)
+                        _availability_ctx = build_availability_context(
                             db,
                             tenant_id,
-                            message or "",
-                            _cat_subject,
-                            active_group_slug=active_catalog_group_slug_from_state(new_state),
-                            active_category=active_category_from_state(new_state),
+                            focus_product=getattr(new_state, "current_product_focus", None),
+                            recommended_product_ids=_pcgg_rec_ids,
                         )
-                        if _cat_scope.must_filter_by_category and not _cat_scope.specific_product:
-                            _pcgg_meta["category_browse"] = True
-                            _pcgg_meta["specific_product"] = False
-                            _pcgg_meta["use_catalog_prices_only"] = True
-                            if _cat_scope.matched_category:
-                                _pcgg_meta["active_category"] = _cat_scope.matched_category
-                except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
-                    pass
-                try:
-                    from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
-                        detect_price_objection_topic_shift,
-                    )
+                    _pcgg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                    _pcgg_meta["inbound_text"] = message or ""
+                    _pcgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                    if _turn_owner_contract_meta:
+                        _pcgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                    for _flag in (
+                        "block_catalog_push",
+                        "block_staff_contact",
+                        "block_showroom_location",
+                        "pause_order_slot_collection",
+                    ):
+                        if _flag in (decision.args or {}):
+                            _pcgg_meta[_flag] = bool((decision.args or {}).get(_flag))
+                    try:
+                        from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: PLC0415
+                            active_catalog_group_slug_from_state,
+                            resolve_catalog_category_scope,
+                        )
+                        from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+                            active_category_from_state,
+                            extract_browse_category_scope,
+                        )
 
-                    if detect_price_objection_topic_shift(message or ""):
-                        _pcgg_meta["price_objection"] = True
-                except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
-                    pass
-                for _compose_meta_key in (
-                    "chosen_path",
-                    "question_kind",
-                    "price_source",
-                    "checkout_pressure_allowed",
-                    "catalog_product_ids",
-                    "catalog_fact_products",
-                    "persona_compose",
-                ):
-                    _compose_meta_val = result.data.get(_compose_meta_key)
-                    if _compose_meta_val is not None:
-                        _pcgg_meta[_compose_meta_key] = _compose_meta_val
-                _pcgg_chosen_path = str(
-                    result.data.get("chosen_path") or _chosen_path or ""
-                ).strip()
-                if _resolved_catalog_facts := _resolve_catalog_price_guard_fact_rows(
-                    result.data,
-                    db=db,
-                    tenant_id=tenant_id,
-                ):
-                    _pcgg_meta["catalog_fact_products"] = _resolved_catalog_facts
-                _pcgg_catalog_facts = list(result.data.get("catalog_fact_products") or [])
-                _pcgg = apply_product_claim_grounding_guard(
-                    reply=reply or "",
-                    db=db,
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    availability_context=_availability_ctx,
-                    executor_products=list(result.data.get("products") or []),
-                    catalog_fact_products=_pcgg_catalog_facts,
-                    chosen_path=_pcgg_chosen_path,
-                    history=history,
-                    order_state=new_state,
-                    inbound_metadata=_pcgg_meta,
-                )
-                if _pcgg.replaced:
-                    reply = _pcgg.reply
-                    _guard_replaced["product_claim_grounding_guard"] = True
-                if _pcgg.blocked_claims:
-                    result.data["product_claim_blocked"] = True
-                    result.data["product_claim_blocked_kinds"] = list(_pcgg.blocked_claims)
-                    if _pcgg.reason:
-                        result.data["product_claim_guard_reason"] = _pcgg.reason
+                        _cat_subject = extract_browse_category_scope(message or "", "")
+                        if _cat_subject:
+                            _cat_scope = resolve_catalog_category_scope(
+                                db,
+                                tenant_id,
+                                message or "",
+                                _cat_subject,
+                                active_group_slug=active_catalog_group_slug_from_state(new_state),
+                                active_category=active_category_from_state(new_state),
+                            )
+                            if _cat_scope.must_filter_by_category and not _cat_scope.specific_product:
+                                _pcgg_meta["category_browse"] = True
+                                _pcgg_meta["specific_product"] = False
+                                _pcgg_meta["use_catalog_prices_only"] = True
+                                if _cat_scope.matched_category:
+                                    _pcgg_meta["active_category"] = _cat_scope.matched_category
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
+                        pass
+                    try:
+                        from modules.ai.brain.state.price_objection_topic import (  # noqa: PLC0415
+                            detect_price_objection_topic_shift,
+                        )
+
+                        if detect_price_objection_topic_shift(message or ""):
+                            _pcgg_meta["price_objection"] = True
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — metadata enrich must not block guard
+                        pass
+                    for _compose_meta_key in (
+                        "chosen_path",
+                        "question_kind",
+                        "price_source",
+                        "checkout_pressure_allowed",
+                        "catalog_product_ids",
+                        "catalog_fact_products",
+                        "persona_compose",
+                    ):
+                        _compose_meta_val = result.data.get(_compose_meta_key)
+                        if _compose_meta_val is not None:
+                            _pcgg_meta[_compose_meta_key] = _compose_meta_val
+                    _pcgg_chosen_path = str(
+                        result.data.get("chosen_path") or _chosen_path or ""
+                    ).strip()
+                    if _resolved_catalog_facts := _resolve_catalog_price_guard_fact_rows(
+                        result.data,
+                        db=db,
+                        tenant_id=tenant_id,
+                    ):
+                        _pcgg_meta["catalog_fact_products"] = _resolved_catalog_facts
+                    _pcgg_catalog_facts = list(result.data.get("catalog_fact_products") or [])
+                    _pcgg = apply_product_claim_grounding_guard(
+                        reply=reply or "",
+                        db=db,
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        availability_context=_availability_ctx,
+                        executor_products=list(result.data.get("products") or []),
+                        catalog_fact_products=_pcgg_catalog_facts,
+                        chosen_path=_pcgg_chosen_path,
+                        history=history,
+                        order_state=new_state,
+                        inbound_metadata=_pcgg_meta,
+                    )
+                    if _pcgg.replaced:
+                        reply = _pcgg.reply
+                        _guard_replaced["product_claim_grounding_guard"] = True
+                    if _pcgg.blocked_claims:
+                        result.data["product_claim_blocked"] = True
+                        result.data["product_claim_blocked_kinds"] = list(_pcgg.blocked_claims)
+                        if _pcgg.reason:
+                            result.data["product_claim_guard_reason"] = _pcgg.reason
         except Exception as _pcgg_exc:  # noqa: BLE001
             logger.warning(
                 "[PRODUCT_CLAIM_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -4580,49 +4616,67 @@ class MerchantBrain:
                 catalog_product_grounding_guard_mode,
             )
             if catalog_product_grounding_guard_mode() != "off" and not _navigator_owner_locked:
-                _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
-                _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
-                if _turn_owner_contract_meta:
-                    _cpgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
-                for _flag in (
-                    "block_catalog_push",
-                    "block_staff_contact",
-                    "block_showroom_location",
-                    "pause_order_slot_collection",
-                ):
-                    if _flag in (decision.args or {}):
-                        _cpgg_meta[_flag] = bool((decision.args or {}).get(_flag))
-                _cpgg_category = str((decision.args or {}).get("category_hint") or "").strip()
-                if not _cpgg_category:
-                    from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
-                        extract_inquiry_product_query,
-                        extract_types_overview_query,
-                    )
-                    _cpgg_category = (
-                        extract_types_overview_query(message or "")
-                        or extract_inquiry_product_query(message or "")
-                    )
-                _cpgg = apply_catalog_product_grounding_guard(
-                    reply=reply or "",
-                    inbound_text=message or "",
-                    category_hint=_cpgg_category,
-                    availability_context=_availability_ctx,
-                    executor_products=list(result.data.get("products") or []),
-                    chosen_path=_chosen_path,
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                    order_state=new_state,
-                    inbound_metadata=_cpgg_meta,
-                    intent=intent,
+                from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
+                    is_merchant_capability_compose_turn,
                 )
-                if _cpgg.replaced:
-                    reply = _cpgg.reply
-                    _guard_replaced["catalog_product_grounding_guard"] = True
-                if _cpgg.ungrounded_mentions:
-                    result.data["catalog_product_grounding_blocked"] = True
-                    result.data["ungrounded_product_mentions"] = list(_cpgg.ungrounded_mentions)
-                    if _cpgg.reason:
-                        result.data["catalog_product_grounding_reason"] = _cpgg.reason
+
+                if is_merchant_capability_compose_turn(
+                    decision_topic=str((decision.args or {}).get("topic") or ""),
+                    question_kind=str(
+                        (decision.args or {}).get("question_kind")
+                        or result.data.get("question_kind")
+                        or ""
+                    ),
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    message=message or "",
+                ):
+                    result.data["merchant_capability_guard_bypass"] = (
+                        "catalog_product_grounding"
+                    )
+                else:
+                    _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                    _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                    if _turn_owner_contract_meta:
+                        _cpgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                    for _flag in (
+                        "block_catalog_push",
+                        "block_staff_contact",
+                        "block_showroom_location",
+                        "pause_order_slot_collection",
+                    ):
+                        if _flag in (decision.args or {}):
+                            _cpgg_meta[_flag] = bool((decision.args or {}).get(_flag))
+                    _cpgg_category = str((decision.args or {}).get("category_hint") or "").strip()
+                    if not _cpgg_category:
+                        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+                            extract_inquiry_product_query,
+                            extract_types_overview_query,
+                        )
+                        _cpgg_category = (
+                            extract_types_overview_query(message or "")
+                            or extract_inquiry_product_query(message or "")
+                        )
+                    _cpgg = apply_catalog_product_grounding_guard(
+                        reply=reply or "",
+                        inbound_text=message or "",
+                        category_hint=_cpgg_category,
+                        availability_context=_availability_ctx,
+                        executor_products=list(result.data.get("products") or []),
+                        chosen_path=_chosen_path,
+                        tenant_id=tenant_id,
+                        conversation_id=conversation_id,
+                        order_state=new_state,
+                        inbound_metadata=_cpgg_meta,
+                        intent=intent,
+                    )
+                    if _cpgg.replaced:
+                        reply = _cpgg.reply
+                        _guard_replaced["catalog_product_grounding_guard"] = True
+                    if _cpgg.ungrounded_mentions:
+                        result.data["catalog_product_grounding_blocked"] = True
+                        result.data["ungrounded_product_mentions"] = list(_cpgg.ungrounded_mentions)
+                        if _cpgg.reason:
+                            result.data["catalog_product_grounding_reason"] = _cpgg.reason
         except Exception as _cpgg_exc:  # noqa: BLE001
             logger.warning(
                 "[CATALOG_PRODUCT_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
@@ -6796,6 +6850,41 @@ def _compose_base_response_goal(
             "If reaching the branch might be difficult, briefly offer "
             "to connect them with the right staff member."
         )
+
+    if decision.action == ACTION_LLM_REPLY:
+        _cap_topic = str((decision.args or {}).get("topic") or "").strip()
+        _cap_kind = str((decision.args or {}).get("question_kind") or "").strip()
+        if _cap_topic == "cash_on_delivery":
+            return (
+                "cash_on_delivery — merchant-level COD capability question. "
+                "Ground ONLY from merchant_capability_answer / "
+                "MERCHANT_CAPABILITIES (cash_on_delivery_enabled, "
+                "payments_status). If cash_on_delivery_enabled=true, "
+                "affirm COD is available at store level. If false, say "
+                "COD is not available. If null/unknown, say you cannot "
+                "confirm. Do NOT answer as product stock/availability. "
+                "Do NOT invent alternate banks/wallets. Persona owns wording only."
+            )
+        if _cap_topic == "merchant_payment_methods":
+            return (
+                "merchant_payment_methods — list enabled store payment "
+                "methods from merchant_capability_answer / "
+                "MERCHANT_CAPABILITIES payment_methods only. Do NOT invent "
+                "methods. If payments_status is unknown, say you cannot "
+                "confirm. Do NOT route to catalog/products."
+            )
+        if _cap_kind == "shipping_companies" or (
+            _cap_topic in {"shipping_inquiry", "ask_shipping"}
+            and _cap_kind == "shipping_companies"
+        ):
+            return (
+                "shipping_companies — list enabled merchant shipping "
+                "carriers from merchant_capability_answer.shipping_companies "
+                "/ MERCHANT_CAPABILITIES only. Do NOT invent carriers. "
+                "Do NOT claim a specific order will be delivered by a "
+                "carrier unless ORDER_ACTUAL evidence exists. If status "
+                "unknown, say you cannot confirm."
+            )
 
     if (
         decision.action == ACTION_LLM_REPLY
