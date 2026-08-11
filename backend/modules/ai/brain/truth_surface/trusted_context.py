@@ -595,6 +595,9 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             source=TruthSource.STORE_SNAPSHOT,
             path="commerce_facts.store_name",
         ))
+        # Pre-existing prose shipping_policy fact — known Pack A debt.
+        # Pack A1 adds namespaced page_* tri-state facts below and does not
+        # expand this prose path into trusted long-form content.
         _append(facts, _fact(
             domain=TrustedDomain.MERCHANT_POLICY,
             key="shipping_policy",
@@ -615,6 +618,72 @@ def _load_merchant_policy_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
             tenant_id,
             exc,
         )
+
+    # Pack A1 — policy existence tri-state + doc_ref (no policy prose).
+    try:
+        from models import TenantSettings, StoreKnowledgeSnapshot  # noqa: PLC0415
+        from services.salla_cms_knowledge_import import (  # noqa: PLC0415
+            build_policy_existence_map,
+        )
+
+        pages_sync_ok: Optional[bool] = None
+        settings = (
+            db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+            if db is not None else None
+        )
+        store_cfg = (settings.store_settings or {}) if settings else {}
+        pages_sync = store_cfg.get("salla_pages_sync") or {}
+        if not pages_sync:
+            snap = (
+                db.query(StoreKnowledgeSnapshot)
+                .filter_by(tenant_id=tenant_id)
+                .first()
+                if db is not None else None
+            )
+            pages_sync = ((snap.store_profile or {}) if snap else {}).get(
+                "salla_pages_sync"
+            ) or {}
+        if isinstance(pages_sync, dict) and "ok" in pages_sync:
+            # Partial reconcile must not claim KNOWN_ABSENT.
+            if pages_sync.get("ok") and not pages_sync.get("partial"):
+                pages_sync_ok = True
+            elif pages_sync.get("ok") is False:
+                pages_sync_ok = False
+            else:
+                pages_sync_ok = None
+
+        policy_map = build_policy_existence_map(
+            db, tenant_id, pages_sync_ok=pages_sync_ok,
+        )
+        for kind, payload in policy_map.items():
+            status = str((payload or {}).get("status") or "UNKNOWN")
+            doc_ref = (payload or {}).get("doc_ref")
+            _append(facts, _fact(
+                domain=TrustedDomain.MERCHANT_POLICY,
+                key=f"page_{kind}.status",
+                value=status,
+                source=TruthSource.STORE_SNAPSHOT,
+                path=f"pack_a1.page_{kind}.status",
+            ))
+            if doc_ref:
+                _append(facts, _fact(
+                    domain=TrustedDomain.MERCHANT_POLICY,
+                    key=f"page_{kind}.doc_ref",
+                    value=str(doc_ref),
+                    source=TruthSource.STORE_SNAPSHOT,
+                    path=f"pack_a1.page_{kind}.doc_ref",
+                ))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[TRUSTED_CONTEXT] pack_a1 policy map failed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+
+    # Pack A1 store profile facts live in snapshot/merchant_context
+    # ``salla_store_info`` (namespaced). They are intentionally NOT emitted
+    # under MERCHANT_POLICY — contact/identity need MERCHANT_PROFILE +
+    # disclosure gates before TrustedFact projection (Sol micro-correction).
     return facts
 
 

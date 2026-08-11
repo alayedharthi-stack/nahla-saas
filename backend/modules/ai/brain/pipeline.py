@@ -3096,6 +3096,7 @@ class MerchantBrain:
         _ai_settings_for_prompt: Dict[str, Any] = {}
         _structured_facts_block: str = ""
         _structured_behavior_block: str = ""
+        _retrieved_docs_block: str = ""
         _resolver_overlay_text = ""
 
         if _pre_commerce_shortcut:
@@ -3162,6 +3163,29 @@ class MerchantBrain:
                 _structured_facts_block = ""
                 _structured_behavior_block = ""
 
+            # Pack A1 — relevance-gated long-form document retrieval (capped).
+            # Kept as a DISTINCT block so it never replaces legacy manual KB
+            # via structured_facts_block replacement semantics.
+            try:
+                from services.merchant_document_retrieval import (  # noqa: PLC0415
+                    format_retrieved_documents_for_prompt,
+                    retrieve_merchant_documents,
+                )
+                _doc_retrieval = retrieve_merchant_documents(
+                    db,
+                    tenant_id,
+                    _raw_message or message or "",
+                )
+                _retrieved_docs_block = format_retrieved_documents_for_prompt(
+                    _doc_retrieval
+                ) or ""
+            except Exception as _doc_exc:  # noqa: BLE001
+                logger.warning(
+                    "[BrainPipeline] pack_a1 document retrieval failed tenant=%s: %s",
+                    tenant_id, _doc_exc,
+                )
+                _retrieved_docs_block = ""
+
             # Phase 3 — Product/Media resolver overlay for the Brain prompt.
             try:
                 from services import media_resolver as _media_res  # noqa: PLC0415
@@ -3211,7 +3235,9 @@ class MerchantBrain:
                     "resolver_overlay":  _resolver_overlay_text,
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
+                    "retrieved_documents_block": _retrieved_docs_block,
                     "tenant_profile":    mc.get("tenant_profile") or {},
+                    "salla_store_info":  mc.get("salla_store_info") or {},
                     "customer":          mc.get("customer") or {},
                     "conversation":      mc.get("conversation") or {},
                     "products":          list((mc.get("products") or []))[:8],
@@ -3234,6 +3260,7 @@ class MerchantBrain:
                     "resolver_overlay":  _resolver_overlay_text,
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
+                    "retrieved_documents_block": _retrieved_docs_block,
                 }
 
         if _search_candidates_persisted_this_turn:

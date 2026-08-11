@@ -20,6 +20,30 @@ def kb_row_is_ai_visible(row: Any) -> bool:
     return bool(getattr(row, "is_active", True))
 
 
+def is_imported_document_section(row: Any) -> bool:
+    """True for Pack A1 long-form imported documents (Salla CMS pages).
+
+    These must NOT enter the always-on structured facts overlay. They are
+    reachable only through capped relevance retrieval.
+    """
+    if str(getattr(row, "source", "") or "").strip().lower() != "imported":
+        return False
+    meta = getattr(row, "metadata_json", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    origin = str(meta.get("origin") or "").strip().lower()
+    source_type = str(meta.get("source_type") or "").strip().lower()
+    if origin == "salla" and source_type in {"cms_page", "salla_cms_page"}:
+        return True
+    # Legacy / alternate provenance key used during A1 sync.
+    if str(meta.get("imported_from") or "").strip().lower() in {
+        "salla_page",
+        "salla_cms_page",
+    }:
+        return True
+    return False
+
+
 def apply_visible_kb_query_filters(query: Any, *, include_deleted: bool = False) -> Any:
     """Exclude soft-deleted rows unless ``include_deleted`` is True."""
     if include_deleted:

@@ -1324,27 +1324,273 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_products", exc)
             raise
 
-    async def get_pages(self) -> List[Dict[str, Any]]:
+    async def get_pages(self) -> Dict[str, Any]:
         """Fetch all store pages from Salla CMS (GET /pages).
 
-        Returns raw page dicts. Failures are logged and an empty list is
-        returned so callers can treat this as a non-fatal, best-effort fetch.
-        Each page dict contains at minimum: id, title, slug, status, content (HTML).
+        Pack A1 outcome contract (failure ≠ empty):
+          {
+            "ok": bool,
+            "pages": list,
+            "http_status": int | None,
+            "error_class": str | None,
+            "partial": bool,
+          }
+
+        Deactivation of missing pages must run only when ok=True and partial=False.
+        401/403/5xx/timeout → ok=False; callers preserve prior truth as UNKNOWN.
         """
+        pages: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 50
+        total_pages_hint = None
+        partial = False
+        last_http_status: Optional[int] = 200
+
         try:
-            raw_list = await self._get_all_pages("/pages", label="pages", per_page=50)
+            while True:
+                params: Dict[str, Any] = {"per_page": per_page, "page": page}
+                try:
+                    data = await self._get("/pages", params)
+                    last_http_status = 200
+                except SallaTokenRevokedException:
+                    return {
+                        "ok": False,
+                        "pages": [],
+                        "http_status": 401,
+                        "error_class": "token_revoked",
+                        "partial": False,
+                    }
+                except httpx.HTTPStatusError as exc:
+                    status = int(getattr(exc.response, "status_code", 0) or 0)
+                    error_class = "http_error"
+                    if status in (401, 403):
+                        error_class = "scope_denied" if status == 403 else "unauthorized"
+                    if page == 1:
+                        self._log_error("get_pages", exc)
+                        return {
+                            "ok": False,
+                            "pages": [],
+                            "http_status": status or None,
+                            "error_class": error_class,
+                            "partial": False,
+                        }
+                    # Mid-pagination failure → partial truth; do not deactivate.
+                    partial = True
+                    last_http_status = status or None
+                    logger.error(
+                        "[Salla] get_pages partial stop page=%d status=%s tenant=%s",
+                        page, status, self._tenant_id,
+                    )
+                    break
+                except Exception as exc:
+                    self._log_error("get_pages", exc)
+                    if page == 1:
+                        error_class = "timeout" if "timeout" in str(exc).lower() else "fetch_error"
+                        return {
+                            "ok": False,
+                            "pages": [],
+                            "http_status": None,
+                            "error_class": error_class,
+                            "partial": False,
+                        }
+                    partial = True
+                    logger.error(
+                        "[Salla] get_pages partial stop page=%d tenant=%s err=%s",
+                        page, self._tenant_id, exc,
+                    )
+                    break
+
+                items = data.get("data") or []
+                pages.extend(items)
+                pagination = data.get("pagination") or data.get("meta") or {}
+                total_pages_hint = pagination.get(
+                    "totalPages",
+                    pagination.get("last_page", pagination.get("total_pages", None)),
+                )
+                if not items:
+                    break
+                if total_pages_hint and page >= total_pages_hint:
+                    break
+                if len(items) < per_page:
+                    break
+                page += 1
+
             logger.info(
-                "[Salla] get_pages: fetched %d pages | tenant=%s",
-                len(raw_list), self._tenant_id,
+                "[Salla] get_pages: fetched %d pages partial=%s | tenant=%s",
+                len(pages), partial, self._tenant_id,
             )
-            return raw_list
+            return {
+                "ok": True,
+                "pages": pages,
+                "http_status": last_http_status,
+                "error_class": "partial_pagination" if partial else None,
+                "partial": partial,
+            }
         except Exception as exc:
             self._log_error("get_pages", exc)
             logger.warning(
                 "[Salla] get_pages failed (non-fatal) | tenant=%s error=%s",
                 self._tenant_id, exc,
             )
-            return []
+            return {
+                "ok": False,
+                "pages": [],
+                "http_status": None,
+                "error_class": "fetch_error",
+                "partial": False,
+            }
+
+    async def get_store_info_profile(self) -> Dict[str, Any]:
+        """Fetch customer-facing store profile from GET /store/info.
+
+        Returns Pack A1 outcome:
+          {ok, profile, http_status, error_class, fetched_at}
+        """
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        try:
+            data = await self._get("/store/info")
+            raw = data.get("data") if isinstance(data, dict) else {}
+            if not isinstance(raw, dict):
+                raw = {}
+            profile = self._normalize_store_info_profile(raw)
+            return {
+                "ok": True,
+                "profile": profile,
+                "http_status": 200,
+                "error_class": None,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except SallaTokenRevokedException:
+            return {
+                "ok": False,
+                "profile": {},
+                "http_status": 401,
+                "error_class": "token_revoked",
+                "fetched_at": None,
+            }
+        except httpx.HTTPStatusError as exc:
+            status = int(getattr(exc.response, "status_code", 0) or 0)
+            error_class = "scope_denied" if status == 403 else "http_error"
+            if status == 401:
+                error_class = "unauthorized"
+            self._log_error("get_store_info_profile", exc)
+            return {
+                "ok": False,
+                "profile": {},
+                "http_status": status or None,
+                "error_class": error_class,
+                "fetched_at": None,
+            }
+        except Exception as exc:
+            self._log_error("get_store_info_profile", exc)
+            error_class = "timeout" if "timeout" in str(exc).lower() else "fetch_error"
+            return {
+                "ok": False,
+                "profile": {},
+                "http_status": None,
+                "error_class": error_class,
+                "fetched_at": None,
+            }
+
+    @staticmethod
+    def _normalize_store_info_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract customer-facing Pack A1 fields from Salla /store/info."""
+        def _s(value: Any) -> str:
+            return str(value or "").strip()
+
+        about = _s(raw.get("about") or raw.get("description") or raw.get("store_description"))
+        email = _s(raw.get("email"))
+        phone = _s(raw.get("mobile") or raw.get("phone") or raw.get("store_phone"))
+        avatar = raw.get("avatar") or raw.get("logo") or {}
+        logo_url = ""
+        if isinstance(avatar, dict):
+            logo_url = _s(avatar.get("url") or avatar.get("original") or avatar.get("image"))
+        elif isinstance(avatar, str):
+            logo_url = _s(avatar)
+
+        location = raw.get("store_location") or raw.get("location") or {}
+        location_out: Dict[str, Any] = {}
+        if isinstance(location, dict):
+            location_out = {
+                "lat": location.get("lat") or location.get("latitude"),
+                "lng": location.get("lng") or location.get("longitude"),
+                "address": _s(
+                    location.get("address")
+                    or location.get("street_address")
+                    or location.get("formatted_address")
+                ),
+                "city": _s(location.get("city") or location.get("city_name")),
+                "country": _s(location.get("country") or location.get("country_name")),
+            }
+
+        default_branch = raw.get("default_branch") or {}
+        branch_out: Dict[str, Any] = {}
+        if isinstance(default_branch, dict):
+            branch_contacts = default_branch.get("contacts") or default_branch.get("contact") or {}
+            branch_loc = default_branch.get("location")
+            branch_loc_dict = branch_loc if isinstance(branch_loc, dict) else {}
+            branch_out = {
+                "id": _s(default_branch.get("id")),
+                "name": _s(default_branch.get("name")),
+                "address": _s(
+                    default_branch.get("address") or branch_loc_dict.get("address")
+                ),
+                "city": _s(default_branch.get("city") or branch_loc_dict.get("city")),
+                "contacts": branch_contacts if isinstance(branch_contacts, dict) else {},
+                "working_hours": default_branch.get("working_hours")
+                or default_branch.get("hours")
+                or [],
+            }
+
+        social = raw.get("social") or raw.get("social_media") or raw.get("social_links") or {}
+        social_out: Dict[str, str] = {}
+        if isinstance(social, dict):
+            for key, val in social.items():
+                if isinstance(val, dict):
+                    link = _s(val.get("url") or val.get("link") or val.get("value"))
+                else:
+                    link = _s(val)
+                if link:
+                    social_out[_s(key)] = link
+
+        domain = _s(
+            raw.get("domain")
+            or raw.get("store_url")
+            or raw.get("url")
+            or ((raw.get("domains") or [None])[0] if isinstance(raw.get("domains"), list) else "")
+        )
+        currency = raw.get("currency") or {}
+        currency_code = ""
+        if isinstance(currency, dict):
+            currency_code = _s(currency.get("code") or currency.get("name"))
+        else:
+            currency_code = _s(currency)
+
+        status = _s(raw.get("status") or raw.get("store_status"))
+        plan = raw.get("plan") or {}
+        plan_name = _s(plan.get("name") if isinstance(plan, dict) else plan)
+
+        return {
+            "store_id": _s(raw.get("id") or raw.get("store_id")),
+            "name": _s(raw.get("name") or raw.get("store_name")),
+            "username": _s(raw.get("username")),
+            "description": about,
+            "domain": domain,
+            "logo_url": logo_url,
+            "email": email,
+            "phone": phone,
+            "location": location_out,
+            "default_branch": branch_out,
+            "working_hours": branch_out.get("working_hours") or raw.get("working_hours") or [],
+            "social_links": social_out,
+            "currency": currency_code,
+            "store_status": status,
+            "plan": plan_name,
+            "verified": bool(raw.get("verified") or raw.get("is_verified") or False),
+            "source": "salla",
+            "source_endpoint": "/store/info",
+        }
 
     async def get_product(self, product_id: str) -> Optional[NormalizedProduct]:
         try:

@@ -33,20 +33,23 @@ _HTML_TAG_RE     = _re.compile(r"<[^>]+>", _re.DOTALL)
 _WHITESPACE_RE   = _re.compile(r"\s+")
 
 
-def _strip_html(html: str, max_length: int = 500) -> str:
+def _strip_html(html: str, max_length: Optional[int] = 500) -> str:
     """Strip HTML tags and collapse whitespace into a plain-text summary.
 
     Designed for Salla CMS page content:
       1. Removes entire <script> and <style> blocks (tags + inner code).
       2. Strips remaining HTML tags.
       3. Collapses whitespace so the AI sees clean prose.
-    Capped at max_length characters to keep prompts lean.
+    When ``max_length`` is None or <= 0, the full normalized body is kept
+    (Pack A1 long-form MerchantKnowledgeSection path).
     """
     if not html:
         return ""
     text = _SCRIPT_BLOCK_RE.sub(" ", html)
     text = _HTML_TAG_RE.sub(" ", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
+    if max_length is None or max_length <= 0:
+        return text
     return text[:max_length]
 
 from sqlalchemy import func
@@ -1220,6 +1223,26 @@ class StoreSyncService:
         store_cfg  = (settings.store_settings or {}) if settings else {}
         wa_cfg     = (settings.whatsapp_settings or {}) if settings else {}
 
+        # Pack A1: Salla /store/info lands namespaced — never silently flatten
+        # into manual store_settings fields without provenance.
+        salla_store_info = dict(store_cfg.get("salla_store_info") or {})
+        # Pages index only (bodies live in MerchantKnowledgeSection).
+        pages_index = []
+        for pg in list(store_cfg.get("pages") or []):
+            if not isinstance(pg, dict):
+                continue
+            pages_index.append({
+                "id": pg.get("id") or pg.get("page_id") or "",
+                "page_id": pg.get("page_id") or pg.get("id") or "",
+                "title": pg.get("title") or "",
+                "slug": pg.get("slug") or "",
+                "kind": pg.get("kind") or "custom",
+                "active": bool(pg.get("active", True)),
+                "content_hash": pg.get("content_hash") or "",
+                "doc_ref": pg.get("doc_ref"),
+                "knowledge_section_id": pg.get("knowledge_section_id"),
+            })
+
         snap.store_profile = {
             "store_name":    store_cfg.get("store_name", ""),
             "store_url":     store_cfg.get("store_url", ""),
@@ -1233,8 +1256,12 @@ class StoreSyncService:
             "contact_phone": wa_cfg.get("owner_whatsapp_number", ""),
             "contact_email": store_cfg.get("contact_email", ""),
             # Populated by sync_pages() which runs before _rebuild_snapshot()
-            # in full_sync(). Falls back to [] when pages have not been synced yet.
-            "pages":         list(store_cfg.get("pages") or []),
+            # in full_sync(). Index-only — no long-form page bodies.
+            "pages":         pages_index,
+            # Pack A1 namespaced Salla profile (source of truth for Salla-owned facts).
+            # Manual fields above remain the Nahla override surface — no silent merge.
+            "salla_store_info": salla_store_info,
+            "salla_pages_sync": dict(store_cfg.get("salla_pages_sync") or {}),
         }
         snap.catalog_summary = {
             "total_products": products_count,
@@ -2366,19 +2393,125 @@ class StoreSyncService:
         )
         return created + updated
 
+    # ── Store profile sync (Pack A1 — Salla /store/info) ───────────────────────
+
+    async def sync_store_info(self) -> bool:
+        """Fetch customer-facing store profile from Salla GET /store/info.
+
+        Persists under store_settings['salla_store_info'] with provenance.
+        Failure preserves prior profile and records source_error (failure ≠ empty).
+        """
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        adapter = self._get_adapter()
+        if not adapter:
+            return False
+        if not hasattr(adapter, "get_store_info_profile"):
+            logger.info(
+                "tenant=%s adapter does not support get_store_info_profile — skipping",
+                self.tenant_id,
+            )
+            return False
+
+        try:
+            outcome = await adapter.get_store_info_profile()
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s store_info sync failed (non-fatal, prior preserved): %s",
+                self.tenant_id, exc,
+            )
+            outcome = {
+                "ok": False,
+                "profile": {},
+                "http_status": None,
+                "error_class": "fetch_error",
+                "fetched_at": None,
+            }
+
+        if not isinstance(outcome, dict):
+            outcome = {"ok": False, "profile": {}, "error_class": "invalid_outcome"}
+
+        settings = (
+            self.db.query(TenantSettings)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        if not settings:
+            return False
+
+        current = dict(settings.store_settings or {})
+        prior = dict(current.get("salla_store_info") or {})
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if outcome.get("ok"):
+            profile = dict(outcome.get("profile") or {})
+            profile["fetched_at"] = outcome.get("fetched_at") or now_iso
+            profile["sync_ok"] = True
+            profile["error_class"] = None
+            profile["http_status"] = outcome.get("http_status") or 200
+            profile["provenance"] = {
+                "source": "salla",
+                "endpoint": "/store/info",
+                "tenant_id": int(self.tenant_id),
+                "precedence": (
+                    "For Salla-connected tenants, salla_store_info owns "
+                    "Salla-sourced profile facts. Manual store_settings remain "
+                    "a separate Nahla override surface — no silent contradictory merge."
+                ),
+            }
+            current["salla_store_info"] = profile
+        else:
+            # Preserve prior profile body; mark freshness/source error.
+            preserved = dict(prior) if prior else {}
+            preserved["sync_ok"] = False
+            preserved["error_class"] = outcome.get("error_class") or "fetch_error"
+            preserved["http_status"] = outcome.get("http_status")
+            preserved["last_error_at"] = now_iso
+            if prior:
+                preserved.setdefault("fetched_at", prior.get("fetched_at"))
+            current["salla_store_info"] = preserved
+
+        settings.store_settings = current
+        flag_modified(settings, "store_settings")
+        try:
+            self.db.commit()
+        except Exception as db_exc:
+            logger.error(
+                "tenant=%s failed to persist salla_store_info: %s",
+                self.tenant_id, db_exc,
+            )
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: silent-ok
+                pass
+            return False
+
+        logger.info(
+            "tenant=%s store_info sync ok=%s error_class=%s",
+            self.tenant_id,
+            bool(outcome.get("ok")),
+            outcome.get("error_class"),
+        )
+        return bool(outcome.get("ok"))
+
     # ── Pages sync ─────────────────────────────────────────────────────────────
 
     async def sync_pages(self) -> int:
-        """Fetch static CMS pages from Salla and persist to store_settings["pages"].
+        """Fetch Salla CMS pages into MerchantKnowledgeSection + index-only pages list.
 
-        The result is intentionally non-fatal: if Salla does not expose the
-        /pages endpoint, or the token lacks the required scope, we log a warning
-        and leave the existing store_settings["pages"] value untouched so that
-        any pages the merchant entered manually are preserved.
-
-        Returns the number of pages successfully persisted (0 on any failure).
+        Pack A1 contracts:
+          - Full body → MerchantKnowledgeSection (source=imported, origin=salla)
+          - store_settings['pages'] / snapshot pages → index only (no long-form body)
+          - Deactivate missing pages only on ok=True and not partial
+          - Failed fetch preserves prior truth (failure ≠ empty)
         """
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        from services.salla_cms_page_classifier import classify_salla_cms_page  # noqa: PLC0415
+        from services.salla_cms_knowledge_import import (  # noqa: PLC0415
+            deactivate_missing_salla_pages,
+            page_index_entry_from_section,
+            upsert_salla_cms_page_section,
+        )
 
         adapter = self._get_adapter()
         if not adapter:
@@ -2392,17 +2525,63 @@ class StoreSyncService:
             return 0
 
         try:
-            raw_pages = await adapter.get_pages()
+            raw_outcome = await adapter.get_pages()
         except Exception as exc:
             logger.warning(
                 "tenant=%s pages sync failed (non-fatal, existing pages preserved): %s",
                 self.tenant_id, exc,
             )
+            self._record_pages_sync_status(
+                ok=False,
+                error_class="fetch_error",
+                http_status=None,
+                partial=False,
+            )
             return 0
 
-        # Normalise: keep only active pages with a non-empty title.
+        # Backward-compatible: legacy adapters may still return a bare list.
+        if isinstance(raw_outcome, list):
+            outcome = {
+                "ok": True,
+                "pages": raw_outcome,
+                "http_status": 200,
+                "error_class": None,
+                "partial": False,
+            }
+        elif isinstance(raw_outcome, dict):
+            outcome = raw_outcome
+        else:
+            outcome = {
+                "ok": False,
+                "pages": [],
+                "http_status": None,
+                "error_class": "invalid_outcome",
+                "partial": False,
+            }
+
+        if not outcome.get("ok"):
+            logger.warning(
+                "tenant=%s pages sync not ok — preserving prior truth error_class=%s status=%s",
+                self.tenant_id,
+                outcome.get("error_class"),
+                outcome.get("http_status"),
+            )
+            self._record_pages_sync_status(
+                ok=False,
+                error_class=str(outcome.get("error_class") or "fetch_error"),
+                http_status=outcome.get("http_status"),
+                partial=False,
+            )
+            return 0
+
+        raw_pages = list(outcome.get("pages") or [])
+        partial = bool(outcome.get("partial"))
+
         _ACTIVE_STATUSES = {"active", "published", "مفعّل", "مفعل"}
-        pages: List[Dict[str, Any]] = []
+        index_pages: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+        upserted = 0
+
         for raw in raw_pages:
             status = str(raw.get("status") or "active").strip().lower()
             if status not in _ACTIVE_STATUSES:
@@ -2410,22 +2589,66 @@ class StoreSyncService:
             title = str(raw.get("title") or "").strip()
             if not title:
                 continue
-            pages.append({
-                "id":              str(raw.get("id") or ""),
-                "title":           title,
-                "slug":            str(raw.get("slug") or ""),
-                "status":          status,
-                "content":         _strip_html(str(raw.get("content") or ""), max_length=500),
-                "seo_description": str(raw.get("seo_description") or "")[:200],
-            })
+            page_id = str(raw.get("id") or "").strip()
+            slug = str(raw.get("slug") or "").strip()
+            kind = classify_salla_cms_page(title=title, slug=slug)
+            full_body = _strip_html(str(raw.get("content") or ""), max_length=None)
+            source_url = str(
+                raw.get("url") or raw.get("permalink") or raw.get("link") or ""
+            ).strip()
+            source_updated_at = None
+            for key in ("updated_at", "updated_at_timestamp", "created_at"):
+                if raw.get(key):
+                    source_updated_at = str(raw.get(key))
+                    break
 
-        page_titles = [pg["title"] for pg in pages]
+            section, _created, _rewritten = upsert_salla_cms_page_section(
+                self.db,
+                tenant_id=self.tenant_id,
+                page_id=page_id,
+                title=title,
+                slug=slug,
+                kind=kind,
+                body=full_body,
+                source_url=source_url,
+                source_updated_at=source_updated_at,
+                page_status=status,
+            )
+            if page_id:
+                seen_ids.add(page_id)
+            meta = getattr(section, "metadata_json", None) or {}
+            index_pages.append(
+                page_index_entry_from_section(
+                    page_id=page_id,
+                    title=title,
+                    slug=slug,
+                    kind=kind,
+                    active=True,
+                    content_hash=str(meta.get("content_hash") or ""),
+                    section_id=getattr(section, "id", None),
+                )
+            )
+            upserted += 1
+
+        deactivated = 0
+        if not partial:
+            deactivated = deactivate_missing_salla_pages(
+                self.db,
+                tenant_id=self.tenant_id,
+                seen_page_ids=seen_ids,
+            )
+        else:
+            logger.warning(
+                "tenant=%s pages sync partial — skip deactivation (seen=%d)",
+                self.tenant_id, len(seen_ids),
+            )
+
+        page_titles = [pg.get("title") for pg in index_pages]
         logger.info(
-            "tenant=%s pages_synced=%d titles=%r",
-            self.tenant_id, len(pages), page_titles,
+            "tenant=%s pages_synced=%d deactivated=%d partial=%s titles=%r",
+            self.tenant_id, upserted, deactivated, partial, page_titles,
         )
 
-        # Persist to TenantSettings.store_settings["pages"].
         try:
             settings = (
                 self.db.query(TenantSettings)
@@ -2434,25 +2657,75 @@ class StoreSyncService:
             )
             if settings:
                 current = dict(settings.store_settings or {})
-                current["pages"] = pages
+                current["pages"] = index_pages
+                current["salla_pages_sync"] = {
+                    "ok": True,
+                    "partial": partial,
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                    "error_class": "partial_pagination" if partial else None,
+                    "http_status": outcome.get("http_status") or 200,
+                    "page_count": len(index_pages),
+                }
                 settings.store_settings = current
                 flag_modified(settings, "store_settings")
                 self.db.commit()
                 logger.info(
-                    "tenant=%s store_settings[pages] updated — %d pages written",
-                    self.tenant_id, len(pages),
+                    "tenant=%s store_settings[pages] index updated — %d pages",
+                    self.tenant_id, len(index_pages),
                 )
         except Exception as db_exc:
             logger.error(
-                "tenant=%s failed to persist pages to store_settings: %s",
+                "tenant=%s failed to persist pages index: %s",
                 self.tenant_id, db_exc,
             )
             try:
                 self.db.rollback()
-            except Exception:  # noqa: silent-ok — best-effort rollback after pages persist failure
+            except Exception:  # noqa: silent-ok
                 pass
 
-        return len(pages)
+        return upserted
+
+    def _record_pages_sync_status(
+        self,
+        *,
+        ok: bool,
+        error_class: Optional[str],
+        http_status: Any,
+        partial: bool,
+    ) -> None:
+        """Persist pages sync freshness without wiping prior page index/bodies."""
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        try:
+            settings = (
+                self.db.query(TenantSettings)
+                .filter_by(tenant_id=self.tenant_id)
+                .first()
+            )
+            if not settings:
+                return
+            current = dict(settings.store_settings or {})
+            prior = dict(current.get("salla_pages_sync") or {})
+            current["salla_pages_sync"] = {
+                **prior,
+                "ok": bool(ok),
+                "partial": bool(partial),
+                "error_class": error_class,
+                "http_status": http_status,
+                "last_error_at": datetime.now(timezone.utc).isoformat() if not ok else prior.get("last_error_at"),
+            }
+            settings.store_settings = current
+            flag_modified(settings, "store_settings")
+            self.db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tenant=%s failed to record pages sync status: %s",
+                self.tenant_id, exc,
+            )
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: silent-ok
+                pass
 
     # ── Checkout profile sync (Pack B merchant-enabled shipping/payment) ───────
 
@@ -2800,6 +3073,14 @@ class StoreSyncService:
                 commit=True,
                 emit_event=True,
             )
+
+            try:
+                await self.sync_store_info()
+            except Exception as store_info_exc:
+                logger.warning(
+                    "tenant=%s store_info sync raised unexpectedly (non-fatal): %s",
+                    self.tenant_id, store_info_exc,
+                )
 
             try:
                 pages_n = await self.sync_pages()

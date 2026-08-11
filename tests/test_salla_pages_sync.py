@@ -84,6 +84,7 @@ class _FakeAdapter:
         self._pages = pages
 
     async def get_pages(self) -> List[Dict[str, Any]]:
+        # Legacy list return still accepted by sync_pages (ok=True wrap).
         return self._pages
 
 
@@ -104,6 +105,8 @@ def _make_sync_service(adapter, store_settings: Dict | None = None):
     fake_db.query.return_value.filter_by.return_value.first.return_value = fake_settings
     fake_db.commit = MagicMock()
     fake_db.rollback = MagicMock()
+    fake_db.add = MagicMock()
+    fake_db.flush = MagicMock()
     svc.db = fake_db
 
     return svc, fake_settings
@@ -122,12 +125,23 @@ class TestSyncPages:
             }
         ]
         svc, saved = _make_sync_service(_FakeAdapter(raw))
-        count = _run(svc.sync_pages())
+        section = MagicMock()
+        section.id = 5
+        section.metadata_json = {"content_hash": "x"}
+        with patch(
+            "services.salla_cms_knowledge_import.upsert_salla_cms_page_section",
+            return_value=(section, True, True),
+        ), patch(
+            "services.salla_cms_knowledge_import.deactivate_missing_salla_pages",
+            return_value=0,
+        ):
+            count = _run(svc.sync_pages())
         assert count == 1
         pages = saved.store_settings["pages"]
         assert len(pages) == 1
         assert pages[0]["title"] == "عن المتجر"
-        assert "<p>" not in pages[0]["content"]
+        assert "content" not in pages[0]
+        assert pages[0]["kind"] == "store_story"
 
     def test_inactive_pages_are_excluded(self) -> None:
         raw = [
@@ -137,13 +151,27 @@ class TestSyncPages:
              "content": "<p>نص</p>", "seo_description": ""},
         ]
         svc, saved = _make_sync_service(_FakeAdapter(raw))
-        count = _run(svc.sync_pages())
+        section = MagicMock()
+        section.id = 9
+        section.metadata_json = {"content_hash": "y"}
+        with patch(
+            "services.salla_cms_knowledge_import.upsert_salla_cms_page_section",
+            return_value=(section, True, True),
+        ), patch(
+            "services.salla_cms_knowledge_import.deactivate_missing_salla_pages",
+            return_value=0,
+        ):
+            count = _run(svc.sync_pages())
         assert count == 1
         assert saved.store_settings["pages"][0]["title"] == "سياسة الإرجاع"
 
     def test_empty_pages_from_salla_writes_empty_list(self) -> None:
         svc, saved = _make_sync_service(_FakeAdapter([]))
-        count = _run(svc.sync_pages())
+        with patch(
+            "services.salla_cms_knowledge_import.deactivate_missing_salla_pages",
+            return_value=0,
+        ):
+            count = _run(svc.sync_pages())
         assert count == 0
         assert saved.store_settings["pages"] == []
 
@@ -167,7 +195,7 @@ class TestSyncPages:
             async def get_pages(self):
                 raise RuntimeError("network error")
 
-        existing_pages = [{"title": "صفحة يدوية", "content": "نص"}]
+        existing_pages = [{"title": "صفحة يدوية", "kind": "custom"}]
         svc, saved = _make_sync_service(_FailingAdapter(), store_settings={"pages": existing_pages})
         count = _run(svc.sync_pages())
         # Should return 0 (failure) but existing pages must be untouched.

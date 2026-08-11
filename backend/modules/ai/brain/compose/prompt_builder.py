@@ -202,6 +202,15 @@ def build_brain_reply_prompt(state: BrainReplyState) -> str:
         structured_kb=_structured_kb,
         overlay_facts=overlay_buckets.get("facts", ""),
     )
+    # Pack A1 — additive retrieved documents (never replace structured/legacy KB).
+    if isinstance(_mc, dict):
+        _retrieved_docs = str(_mc.get("retrieved_documents_block") or "").strip()
+        if _retrieved_docs:
+            kb_block = (
+                f"{kb_block}\n\n{_retrieved_docs}".strip()
+                if kb_block
+                else _retrieved_docs
+            )
     if _platform_mode:
         excerpt = str(getattr(state, "platform_kb_excerpt", "") or "").strip()
         _ptopic = str(getattr(state, "platform_topic", "") or "").strip()
