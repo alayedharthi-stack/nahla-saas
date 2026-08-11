@@ -260,6 +260,10 @@ class DefaultComposer:
                 mark_compose_template(result, layer="faq_template")
             except Exception:  # noqa: BLE001  # noqa: silent-ok — policy tag must not block FAQ compose
                 pass
+            # FAQReplyHandler stores structured facts on result.data["payload"].
+            # This bind was removed in 91462b70 and caused NameError on FAQ topics.
+            raw_payload = data.get("payload")
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
             topic = data.get("topic", "")
             if topic == TOPIC_IDENTITY:
                 return self._with_follow_up(
