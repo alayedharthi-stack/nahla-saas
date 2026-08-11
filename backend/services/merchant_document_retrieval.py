@@ -146,7 +146,7 @@ def detect_document_retrieval_intent(message: str) -> Optional[str]:
             return None
         if is_merchant_shipping_companies_question(text):
             return None
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: silent-ok — Pack B FAQ detectors are optional; fall through to Pack A intent matching
         pass
 
     if _STRUCTURED_PROFILE_RE.search(text):
