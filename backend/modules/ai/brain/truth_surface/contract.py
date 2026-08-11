@@ -141,6 +141,7 @@ class TrustedDomain(str, Enum):
     CATALOG = "catalog"
     CAPABILITIES = "capabilities"
     MERCHANT_CAPABILITIES = "merchant_capabilities"
+    MERCHANT_PROFILE = "merchant_profile"
     MERCHANT_POLICY = "merchant_policy"
     COUPONS = "coupons"
     PROMOTIONS = "promotions"

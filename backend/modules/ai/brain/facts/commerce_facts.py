@@ -223,6 +223,20 @@ class DefaultFactsLoader:
         except Exception:  # noqa: silent-ok — Pack B facts must not break turns
             pass
 
+        # ── 4c. Pack A2 structured merchant profile projection ────────────
+        # Overlay namespaced Salla / manual profile with documented precedence.
+        # Public phone only — never WhatsApp owner number.
+        try:
+            from core.merchant_profile import (  # noqa: PLC0415
+                apply_resolved_profile_to_commerce_facts,
+                resolve_merchant_profile,
+            )
+
+            profile = resolve_merchant_profile(db, tenant_id)
+            apply_resolved_profile_to_commerce_facts(facts, profile)
+        except Exception:  # noqa: silent-ok — profile overlay must not break turns
+            pass
+
         # ── 5. Working hours + assistant persona (Phase 2) ────────────────
         # Both pulled from the same TenantSettings row so we make a single
         # query. Failures are non-fatal — neither field is critical to a

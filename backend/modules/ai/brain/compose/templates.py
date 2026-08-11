@@ -960,6 +960,8 @@ def faq_store_info(
     # We deliberately DROP the trailing "أرسل اسم المنتج" follow-up
     # the merchant flagged as bad UX — when the customer asked for the
     # store link they want the link, not a sales nudge.
+    # Pack A2: when called for about (no URL, description present), reuse
+    # this existing FAQ surface instead of a new template function.
     name = store_name or "متجرنا"
     if store_url:
         return f"هذا رابط المتجر الإلكتروني: {store_url}"
@@ -1025,21 +1027,29 @@ def faq_owner_contact(
     contact_phone: str = "",
     contact_email: str = "",
     store_url: str = "",
+    social_links: Any = None,
     **_: Any,
 ) -> str:
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
         MSG_CS_NOT_CONFIGURED,
     )
 
-    if contact_phone:
-        return f"تقدر تتواصل معنا على: {contact_phone}"
     lines = []
+    if contact_phone:
+        lines.append(f"الجوال: {contact_phone}")
     if contact_email:
         lines.append(f"البريد: {contact_email}")
-    if store_url:
+    links = social_links if isinstance(social_links, dict) else {}
+    for key, val in links.items():
+        url = str(val or "").strip()
+        if url:
+            lines.append(f"{key}: {url}")
+    if store_url and not lines:
+        lines.append(f"رابط المتجر: {store_url}")
+    elif store_url:
         lines.append(f"رابط المتجر: {store_url}")
     if lines:
-        return "\n".join(lines)
+        return "تقدر تتواصل معنا عبر:\n" + "\n".join(lines)
     return MSG_CS_NOT_CONFIGURED
 
 

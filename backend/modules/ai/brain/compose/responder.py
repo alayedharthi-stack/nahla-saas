@@ -89,6 +89,7 @@ from ..execution.faq import (
     TOPIC_LOCATION,
     TOPIC_OWNER_CONTACT,
     TOPIC_SHIPPING,
+    TOPIC_STORE_ABOUT,
     TOPIC_STORE_INFO,
 )
 from . import templates as T
@@ -290,6 +291,17 @@ class DefaultComposer:
                     ctx,
                     result=result,
                 )
+            if topic == TOPIC_STORE_ABOUT:
+                # Reuse existing faq_store_info surface (no new prose template).
+                return self._with_follow_up(
+                    T.faq_store_info(
+                        store_name=payload.get("store_name", ""),
+                        store_url="",
+                        store_description=payload.get("store_description", ""),
+                    ),
+                    ctx,
+                    result=result,
+                )
             if topic == TOPIC_LOCATION:
                 return self._with_follow_up(
                     T.faq_location(
@@ -306,6 +318,7 @@ class DefaultComposer:
                         contact_phone=payload.get("contact_phone", ""),
                         contact_email=payload.get("contact_email", ""),
                         store_url=payload.get("store_url", ""),
+                        social_links=payload.get("social_links", {}) or {},
                     ),
                     ctx,
                     result=result,
