@@ -1641,8 +1641,8 @@ class DefaultDecisionEngine:
                 ):
                     _early_profile = build_merchant_profile_decision(
                         message=ctx.message or "",
-                        db=ctx.db,
-                        tenant_id=int(ctx.tenant_id or 0),
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
                     )
                     if _early_profile is not None:
                         return _early_profile
@@ -3350,8 +3350,8 @@ class DefaultDecisionEngine:
             else:
                 _profile_decision = build_merchant_profile_decision(
                     message=_store_msg,
-                    db=ctx.db,
-                    tenant_id=int(ctx.tenant_id or 0),
+                    facts=getattr(ctx, "facts", None),
+                    merchant_context=getattr(ctx, "merchant_context", None),
                 )
                 if _profile_decision is not None:
                     # ONLINE_STORE_INQUIRY defaults to URL when classifier
@@ -3891,8 +3891,8 @@ class DefaultDecisionEngine:
                 ):
                     _profile_over_catalog = build_merchant_profile_decision(
                         message=ctx.message or "",
-                        db=ctx.db,
-                        tenant_id=int(ctx.tenant_id or 0),
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
                     )
                     if _profile_over_catalog is not None:
                         return _profile_over_catalog

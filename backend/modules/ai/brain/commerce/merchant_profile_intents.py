@@ -159,13 +159,39 @@ def classify_store_profile_topic(message: str) -> Optional[str]:
     return None
 
 
+def prepared_store_description(
+    *,
+    facts: Any = None,
+    merchant_context: Any = None,
+    store_description: str = "",
+) -> str:
+    """Read structured description from prepared turn facts (no DB)."""
+    desc = str(store_description or "").strip()
+    if desc:
+        return desc
+    if facts is not None:
+        desc = str(getattr(facts, "store_description", "") or "").strip()
+        if desc:
+            return desc
+    mc = merchant_context if isinstance(merchant_context, dict) else {}
+    mp = mc.get("merchant_profile") if isinstance(mc, dict) else None
+    if isinstance(mp, dict):
+        return str(mp.get("description") or "").strip()
+    return ""
+
+
 def build_merchant_profile_decision(
     *,
     message: str,
-    db: Any = None,
-    tenant_id: int = 0,
+    store_description: str = "",
+    facts: Any = None,
+    merchant_context: Any = None,
 ) -> Optional[Any]:
-    """Build a Decision for a profile FAQ/LLM turn, or None if not owned."""
+    """Build a Decision for a profile FAQ/LLM turn, or None if not owned.
+
+    Decision consumes prepared CommerceFacts / merchant_context only.
+    Do NOT pass or open a DB session here.
+    """
     from modules.ai.brain.decision.actions import (  # noqa: PLC0415
         ACTION_FAQ_REPLY,
         ACTION_LLM_REPLY,
@@ -177,16 +203,14 @@ def build_merchant_profile_decision(
         return None
 
     if topic == "store_about":
-        if db is not None and tenant_id:
-            try:
-                from core.merchant_profile import resolve_merchant_profile  # noqa: PLC0415
-
-                prof = resolve_merchant_profile(db, int(tenant_id))
-                if not (prof.description or "").strip():
-                    # Structured description absent — allow MKS store_story / persona.
-                    return None
-            except Exception:  # noqa: silent-ok
-                return None
+        desc = prepared_store_description(
+            facts=facts,
+            merchant_context=merchant_context,
+            store_description=store_description,
+        )
+        if not desc:
+            # Structured description absent — allow MKS store_story / persona.
+            return None
         return Decision(
             action=ACTION_FAQ_REPLY,
             args={"topic": "store_about"},
@@ -270,5 +294,6 @@ __all__ = [
     "build_merchant_profile_decision",
     "classify_store_profile_topic",
     "is_open_now_question",
+    "prepared_store_description",
     "should_yield_catalog_for_merchant_profile",
 ]
