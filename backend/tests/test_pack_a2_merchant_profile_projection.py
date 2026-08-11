@@ -237,38 +237,23 @@ class TestProfileIntents:
         )
         from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
 
-        db = _db_with_settings({
-            "salla_store_info": {
-                "description": "Description A",
-                "domain": "https://a.example",
-                "currency": "SAR",
-                "store_status": "active",
-            },
-        })
-        with patch(
-            "core.merchant_profile._load_snapshot_profile",
-            return_value={},
-        ):
-            about = build_merchant_profile_decision(
-                message="حدثني عن المتجر", db=db, tenant_id=11,
-            )
-            url = build_merchant_profile_decision(
-                message="وش رابط المتجر؟", db=db, tenant_id=11,
-            )
-            contact = build_merchant_profile_decision(
-                message="كيف أتواصل معكم؟", db=db, tenant_id=11,
-            )
-            currency = build_merchant_profile_decision(
-                message="وش عملة المتجر؟", db=db, tenant_id=11,
-            )
-            status = build_merchant_profile_decision(
-                message="هل المتجر نشط؟", db=db, tenant_id=11,
-            )
-            open_now = build_merchant_profile_decision(
-                message="هل المتجر شغال؟", db=db, tenant_id=11,
-            )
+        about = build_merchant_profile_decision(
+            message="حدثني عن المتجر",
+            store_description="Description A",
+        )
+        about_missing = build_merchant_profile_decision(
+            message="حدثني عن المتجر",
+            store_description="",
+        )
+        url = build_merchant_profile_decision(message="وش رابط المتجر؟")
+        contact = build_merchant_profile_decision(message="كيف أتواصل معكم؟")
+        currency = build_merchant_profile_decision(message="وش عملة المتجر؟")
+        status = build_merchant_profile_decision(message="هل المتجر نشط؟")
+        open_now = build_merchant_profile_decision(message="هل المتجر شغال؟")
+
         assert about is not None and about.action == ACTION_FAQ_REPLY
         assert about.args["topic"] == "store_about"
+        assert about_missing is None
         assert url is not None and url.args["topic"] == "store_info"
         assert contact is not None and contact.args["topic"] == "owner_contact"
         assert currency is not None and currency.action == ACTION_LLM_REPLY
@@ -276,6 +261,31 @@ class TestProfileIntents:
         assert status is not None and status.action == ACTION_LLM_REPLY
         assert status.args["question_kind"] == "account_status"
         assert open_now is None
+
+    def test_decision_uses_prepared_facts_not_ctx_db(self):
+        from modules.ai.brain.commerce.merchant_profile_intents import (
+            build_merchant_profile_decision,
+        )
+        from modules.ai.brain.types import CommerceFacts
+
+        prepared = CommerceFacts()
+        prepared.store_description = "Description A"
+        prepared.store_url = "https://a.example"
+
+        class _Ctx:
+            message = "حدثني عن المتجر"
+            merchant_context = {"merchant_profile": {"description": "Description A"}}
+
+        ctx = _Ctx()
+        ctx.facts = prepared
+        assert not hasattr(ctx, "db")
+        decision = build_merchant_profile_decision(
+            message=ctx.message,
+            facts=ctx.facts,
+            merchant_context=ctx.merchant_context,
+        )
+        assert decision is not None
+        assert decision.args["topic"] == "store_about"
 
 
 class TestFaqGrounding:
