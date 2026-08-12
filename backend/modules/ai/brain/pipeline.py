@@ -3336,21 +3336,20 @@ class MerchantBrain:
                     "retrieval_rules":   mc.get("retrieval_rules") or {},
                 }
                 # Pack A3 — store_story turns must not receive A2 description
-                # as substitute narrative fuel.
-                try:
-                    from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
-                        scope_merchant_profiles_for_knowledge_turn,
-                    )
+                # as substitute narrative fuel. Fail-safe: never broaden surface.
+                from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+                    safe_scope_merchant_profiles_for_knowledge_turn,
+                )
 
-                    _scoped_mp, _scoped_tp = scope_merchant_profiles_for_knowledge_turn(
-                        slim_merchant_ctx.get("merchant_profile"),
-                        slim_merchant_ctx.get("tenant_profile"),
-                        decision.args,
-                    )
-                    slim_merchant_ctx["merchant_profile"] = _scoped_mp
-                    slim_merchant_ctx["tenant_profile"] = _scoped_tp
-                except Exception:  # noqa: BLE001  # noqa: silent-ok
-                    pass
+                _scoped_mp, _scoped_tp = safe_scope_merchant_profiles_for_knowledge_turn(
+                    slim_merchant_ctx.get("merchant_profile"),
+                    slim_merchant_ctx.get("tenant_profile"),
+                    decision.args,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                slim_merchant_ctx["merchant_profile"] = _scoped_mp
+                slim_merchant_ctx["tenant_profile"] = _scoped_tp
                 if _faq_approved:
                     slim_merchant_ctx["faq_approved"] = _faq_approved
             except Exception as exc:
@@ -6319,14 +6318,17 @@ def _build_reply_state(
         pass
 
     # Pack A3 — per-turn omit neighboring capability/profile substitutes.
-    try:
-        from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
-            apply_knowledge_turn_fact_scope,
-        )
+    # Fail-safe: never restore Pack B / description substitutes on knowledge turns.
+    from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+        safe_apply_knowledge_turn_fact_scope,
+    )
 
-        known_facts = apply_knowledge_turn_fact_scope(known_facts, decision.args)
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — scoping must not block compose
-        pass
+    known_facts = safe_apply_knowledge_turn_fact_scope(
+        known_facts,
+        decision.args,
+        tenant_id=getattr(ctx, "tenant_id", None),
+        conversation_id=getattr(ctx, "conversation_id", None),
+    )
 
     _commerce_navigator = None
     _merchant_sales_channels = None
@@ -6654,16 +6656,14 @@ def _compose_response_goal(
     if persona_topic_from_decision_args(decision.args):
         return _prepend_intent_priority_directive(base_goal, intent_priority)
     # Pack A3 — do not append commerce-navigator / sales funnel framing onto
-    # UNKNOWN honesty or PRESENT knowledge goals.
-    try:
-        from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
-            is_merchant_knowledge_surface,
-        )
-
-        if is_merchant_knowledge_surface(decision.args):
-            return _prepend_intent_priority_directive(base_goal, intent_priority)
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — fall through
-        pass
+    # knowledge goals. Deterministic topic/surface check (no unsafe fallthrough).
+    _a3_args = decision.args or {}
+    _a3_topic = str(_a3_args.get("topic") or "")
+    _a3_surface = str(_a3_args.get("policy_surface") or "")
+    if _a3_surface == "merchant_knowledge_section" or _a3_topic.startswith(
+        "merchant_knowledge_"
+    ):
+        return _prepend_intent_priority_directive(base_goal, intent_priority)
     goal_with_stance = _prepend_stance_directive(base_goal, stance)
     goal_with_priority = _prepend_intent_priority_directive(goal_with_stance, intent_priority)
     return _prepend_commerce_navigator_directive(goal_with_priority, commerce_navigator)
@@ -6710,17 +6710,16 @@ def _compose_base_response_goal(
     Pulled into its own function so the stance enrichment can wrap it
     without re-implementing every branch."""
     # Pack A3 — knowledge honesty goal MUST outrank checkout next_goal hijack.
-    # Place before all checkout early-returns.
-    try:
-        from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
-            merchant_knowledge_response_goal,
-        )
-
-        _mk_goal = merchant_knowledge_response_goal(decision.args)
-        if _mk_goal:
-            return _mk_goal
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — fall through to legacy goals
-        pass
+    # Deterministic args read: never fall through to checkout on knowledge turns.
+    _mk_args = decision.args or {}
+    _mk_topic = str(_mk_args.get("topic") or "")
+    _mk_surface = str(_mk_args.get("policy_surface") or "")
+    _mk_goal = str(_mk_args.get("response_goal") or "").strip()
+    if _mk_goal and (
+        _mk_surface == "merchant_knowledge_section"
+        or _mk_topic.startswith("merchant_knowledge_")
+    ):
+        return _mk_goal
 
     _checkout = dict(checkout_facts or {})
     if _checkout.get("customer_asks_known_phone") and _checkout.get("known_phone"):

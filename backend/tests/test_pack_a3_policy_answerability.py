@@ -574,6 +574,130 @@ class TestUnknownHonestyFactScope:
         assert get_pending_shipping_city(state) is not None
 
 
+class TestTruthHookFailureContracts:
+    def test_shipping_scope_failure_does_not_restore_pack_b_neighbors(self):
+        from modules.ai.brain.commerce import merchant_knowledge_fact_scope as scope_mod
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+
+        dec = build_merchant_policy_decision(
+            message="وش سياسة الشحن عندكم؟",
+            facts=_facts(merchant_policy={"shipping_policy": {"status": "UNKNOWN"}}),
+        )
+        assert dec is not None
+        fuel = {
+            "shipping_methods": ["Dev Company"],
+            "shipping_knowledge": {"need_city": True},
+            "shipping_policy": "legacy prose",
+            "merchant_capability_answer": {"shipping_companies": ["Dev Company"]},
+            "merchant_capabilities": {"shipping": {"companies": ["Dev Company"]}},
+            "merchant_policy": {"shipping_policy": {"status": "UNKNOWN"}},
+            "store_name": "متجر تجريبي عام",
+        }
+        with patch.object(
+            scope_mod,
+            "apply_knowledge_turn_fact_scope",
+            side_effect=RuntimeError("simulated_scope_failure"),
+        ):
+            scoped = scope_mod.safe_apply_knowledge_turn_fact_scope(fuel, dec.args)
+        assert "shipping_methods" not in scoped
+        assert "shipping_knowledge" not in scoped
+        assert "shipping_policy" not in scoped
+        assert "merchant_capability_answer" not in scoped
+        assert "shipping" not in (scoped.get("merchant_capabilities") or {})
+        assert scoped["merchant_policy"]["shipping_policy"]["status"] == "UNKNOWN"
+
+    def test_story_scope_failure_strips_description(self):
+        from modules.ai.brain.commerce import merchant_knowledge_fact_scope as scope_mod
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+
+        dec = build_merchant_policy_decision(
+            message="وش قصة المتجر؟",
+            facts=_facts(store_story_status="UNKNOWN"),
+        )
+        assert dec is not None
+        with patch.object(
+            scope_mod,
+            "scope_merchant_profiles_for_knowledge_turn",
+            side_effect=RuntimeError("simulated_story_scope_failure"),
+        ):
+            mp, tp = scope_mod.safe_scope_merchant_profiles_for_knowledge_turn(
+                {"description": "وصف متجر تجريبي عام", "name": "متجر"},
+                {"description": "وصف متجر تجريبي عام"},
+                dec.args,
+            )
+        assert "description" not in mp
+        assert "description" not in tp
+        assert mp.get("name") == "متجر"
+
+    def test_response_goal_deterministic_beats_checkout_without_helper(self):
+        """Authoritative args read — no helper fallthrough to checkout."""
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import Decision, SuggestionSnapshot
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+
+        dec = Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "merchant_knowledge_shipping_policy",
+                "policy_surface": "merchant_knowledge_section",
+                "knowledge_kind": "shipping_policy",
+                "merchant_policy_status": "UNKNOWN",
+                "response_goal": (
+                    "No authoritative shipping_policy document is confirmed. "
+                    "Do NOT invent fees or conditions."
+                ),
+            },
+            reason="test",
+        )
+        goal = _compose_base_response_goal(
+            dec,
+            SuggestionSnapshot(),
+            checkout_facts={
+                "next_goal": "confirm_customer_and_shipping_details_once",
+            },
+        )
+        assert "Do NOT invent" in goal
+        assert "confirm_customer_and_shipping_details_once" not in goal
+
+    def test_pack_b_control_not_scoped(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            apply_conservative_knowledge_fact_scope_failsafe,
+            safe_apply_knowledge_turn_fact_scope,
+        )
+
+        facts = {
+            "shipping_methods": ["Dev Company"],
+            "merchant_capability_answer": {
+                "question_kind": "shipping_companies",
+                "shipping_companies": ["Dev Company"],
+            },
+        }
+        args = {"topic": "ask_shipping", "topic_hint": "shipping_companies"}
+        assert safe_apply_knowledge_turn_fact_scope(facts, args)["shipping_methods"] == [
+            "Dev Company"
+        ]
+        assert apply_conservative_knowledge_fact_scope_failsafe(facts, args)[
+            "shipping_methods"
+        ] == ["Dev Company"]
+
+    def test_pack_a2_about_control_keeps_description(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            safe_scope_merchant_profiles_for_knowledge_turn,
+        )
+
+        mp, tp = safe_scope_merchant_profiles_for_knowledge_turn(
+            {"description": "وصف متجر تجريبي عام"},
+            {"description": "وصف متجر تجريبي عام"},
+            {"topic": "store_about"},
+        )
+        assert mp["description"] == "وصف متجر تجريبي عام"
+        assert tp["description"] == "وصف متجر تجريبي عام"
+
+
 class TestUnknownTruthGuard:
     def test_scrubs_live_shipping_invention(self):
         from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (
