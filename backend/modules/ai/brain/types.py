@@ -843,6 +843,10 @@ class CommerceFacts:
     salla_payments_status: str = ""
     salla_shipping_companies_status: str = ""
     merchant_capabilities: Dict[str, Any] = field(default_factory=dict)
+    # Pack A3 — MERCHANT_POLICY existence map (status + doc_ref; no prose bodies).
+    merchant_policy: Dict[str, Any] = field(default_factory=dict)
+    store_story_status: str = "UNKNOWN"
+    store_story_doc_ref: str = ""
 
 
 @dataclass

@@ -3203,6 +3203,46 @@ class MerchantBrain:
                 _retrieved_docs_block = format_retrieved_documents_for_prompt(
                     _doc_retrieval
                 ) or ""
+                # Pack A3 observability — counts/refs only, no full bodies.
+                try:
+                    ctx._pack_a3_retrieval_meta = {  # type: ignore[attr-defined]
+                        "retrieval_attempted": True,
+                        "retrieval_count": len(_doc_retrieval.sections or ()),
+                        "matched_intent": str(_doc_retrieval.matched_intent or ""),
+                        "doc_refs": [
+                            str((s.provenance or {}).get("doc_ref") or "")
+                            for s in (_doc_retrieval.sections or ())
+                            if (s.provenance or {}).get("doc_ref")
+                        ],
+                        "knowledge_kinds": [
+                            str(s.kind or "")
+                            for s in (_doc_retrieval.sections or ())
+                            if s.kind
+                        ],
+                    }
+                    _a3_topic = str((decision.args or {}).get("topic") or "")
+                    if _a3_topic.startswith("merchant_knowledge_"):
+                        _a3_args = dict(decision.args or {})
+                        _a3_meta = ctx._pack_a3_retrieval_meta  # type: ignore[attr-defined]
+                        _a3_args["retrieval_attempted"] = True
+                        _a3_args["retrieval_count"] = int(
+                            _a3_meta.get("retrieval_count") or 0
+                        )
+                        _refs = list(_a3_meta.get("doc_refs") or [])
+                        if _refs and not _a3_args.get("doc_ref"):
+                            _a3_args["doc_ref"] = _refs[0]
+                        decision.args = _a3_args
+                        logger.info(
+                            "[PACK_A3_KNOWLEDGE] tenant=%s topic=%s status=%s "
+                            "retrieval_count=%s doc_ref=%s",
+                            tenant_id,
+                            _a3_topic,
+                            _a3_args.get("merchant_policy_status"),
+                            _a3_args.get("retrieval_count"),
+                            _a3_args.get("doc_ref"),
+                        )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — meta stamp optional
+                    pass
             except Exception as _doc_exc:  # noqa: BLE001
                 logger.warning(
                     "[BrainPipeline] pack_a1 document retrieval failed tenant=%s: %s",
@@ -5903,6 +5943,9 @@ def _build_reply_state(
         ) or "",
         "merchant_capabilities": dict(
             getattr(ctx.facts, "merchant_capabilities", None) or {},
+        ),
+        "merchant_policy": dict(
+            getattr(ctx.facts, "merchant_policy", None) or {},
         ),
         "support_hours": ctx.facts.support_hours,
         "contact_phone": ctx.facts.store_contact_phone,

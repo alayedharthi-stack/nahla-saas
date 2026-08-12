@@ -39,14 +39,10 @@ DOCUMENT_KINDS = frozenset({
 
 _STORY_RE = re.compile(
     r"("
-    r"قص[ةه]\s*(?:المتجر|الشركة)|"
-    r"من\s*أنتم|"
-    r"حدثني\s*عن\s*(?:المتجر|الشركة)|"
-    r"عن\s*(?:المتجر|الشركة)|"
-    r"who\s*are\s*you|"
-    r"about\s*(?:the\s*)?(?:store|shop|brand)|"
+    r"قص[ةه]\s*(?:المتجر|الشركة|البراند)|"
+    r"كيف\s*بدأ(?:ت)?\s*(?:قص[ةه]|المتجر)|"
     r"our\s*story|"
-    r"tell\s*me\s*about\s*(?:the\s*)?(?:store|shop)"
+    r"how\s*(?:did\s*)?(?:you|the\s*store)\s*start"
     r")",
     re.IGNORECASE,
 )
@@ -77,6 +73,8 @@ _SHIPPING_POLICY_RE = re.compile(
 
 _TERMS_RE = re.compile(
     r"("
+    r"شروط\s*(?:و|وال)?أ?حكام|"
+    r"الشروط\s*(?:و|وال)?أ?حكام|"
     r"شروط\s*(?:المتجر|الاستخدام|الخدمة)|"
     r"أحكام|"
     r"terms|"
@@ -96,9 +94,23 @@ _PRIVACY_RE = re.compile(
 
 _WARRANTY_RE = re.compile(
     r"("
-    r"ضمان|"
-    r"warranty|"
-    r"guarantee"
+    r"سياس[ةه]\s*(?:ال)?ضمان|"
+    r"هل\s*عند(?:كم|ك)\s*(?:سياس[ةه]\s*)?ضمان|"
+    r"warranty\s*polic|"
+    r"do\s*you\s*(?:have\s*)?(?:a\s*)?warranty"
+    r")",
+    re.IGNORECASE,
+)
+
+# Product-specific warranty must not retrieve merchant-wide warranty prose.
+_PRODUCT_WARRANTY_RE = re.compile(
+    r"("
+    r"هذا\s*(?:ال)?منتج|"
+    r"هالمنتج|"
+    r"عليه\s*ضمان|"
+    r"ضمان\s*(?:على|لهذا)|"
+    r"this\s*product|"
+    r"product\s*warranty"
     r")",
     re.IGNORECASE,
 )
@@ -176,7 +188,23 @@ def detect_document_retrieval_intent(message: str) -> Optional[str]:
     except Exception:  # noqa: silent-ok — Pack B FAQ detectors optional; fall through to Pack A matching
         pass
 
+    # Operational complaint/refund owns the turn — do not inject policy prose.
+    try:
+        from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
+            classify_complaint_refund,
+        )
+
+        if classify_complaint_refund(text):
+            return None
+    except Exception:  # noqa: silent-ok — complaint probe optional
+        pass
+
     if _STRUCTURED_PROFILE_RE.search(text):
+        return None
+
+    # Pack A3: FAQ customer exposure deferred — no audience/visibility contract.
+    # Detect FAQ asks so callers can avoid catalog steal, but do not retrieve.
+    if _FAQ_RE.search(text):
         return None
 
     if _PRIVACY_RE.search(text):
@@ -186,11 +214,11 @@ def detect_document_retrieval_intent(message: str) -> Optional[str]:
     if _SHIPPING_POLICY_RE.search(text):
         return "shipping_policy"
     if _RETURN_RE.search(text):
+        # Prefer informational policy framing; bare refund tokens still map to
+        # return_family only when not operational (guarded above).
         return "return_family"
-    if _WARRANTY_RE.search(text):
+    if _WARRANTY_RE.search(text) and not _PRODUCT_WARRANTY_RE.search(text):
         return "warranty"
-    if _FAQ_RE.search(text):
-        return "faq"
     if _STORY_RE.search(text):
         return "store_story"
     return None
@@ -209,8 +237,7 @@ def _kinds_for_intent(intent: str) -> Tuple[str, ...]:
         return ("privacy_policy",)
     if intent == "warranty":
         return ("warranty",)
-    if intent == "faq":
-        return ("faq",)
+    # faq intentionally omitted — Pack A3 deferred customer exposure
     return ()
 
 
@@ -271,11 +298,24 @@ def retrieve_merchant_documents(
         return empty
 
     # custom is never policy/document truth for this path.
-    eligible = [
-        r for r in rows
-        if is_long_form_document_kind(getattr(r, "kind", None))
-        and str(getattr(r, "kind", "") or "").strip().lower() != "custom"
-    ]
+    eligible = []
+    for r in rows:
+        kind = str(getattr(r, "kind", "") or "").strip().lower()
+        if not is_long_form_document_kind(kind) or kind == "custom":
+            continue
+        # Pack A3: FAQ rows are never customer-retrieved (visibility deferred).
+        if kind == "faq":
+            continue
+        # Merchant-wide warranty must not use product-linked sections.
+        if intent == "warranty":
+            try:
+                from core.knowledge import section_product_ids  # noqa: PLC0415
+
+                if section_product_ids(r):
+                    continue
+            except Exception:  # noqa: silent-ok — product-link probe optional
+                pass
+        eligible.append(r)
 
     cap = max(1, min(int(max_sections or MAX_SECTIONS_PER_TURN), MAX_SECTIONS_PER_TURN))
     char_cap = max(200, int(hard_character_cap or HARD_CHARACTER_CAP))

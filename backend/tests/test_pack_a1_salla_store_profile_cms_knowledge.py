@@ -213,7 +213,7 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "حدثني عن المتجر")
+            result = retrieve_merchant_documents(db, 1, "وش قصة المتجر؟")
         assert result.matched_intent == "store_story"
         assert len(result.sections) == 1
         assert result.sections[0].provenance["source"] == "manual"
@@ -252,8 +252,12 @@ class TestMerchantDocumentRetrieval:
         assert result.matched_intent == "shipping_policy"
         assert result.sections[0].kind == "shipping_policy"
 
-    def test_manual_faq_retrievable(self):
-        from services.merchant_document_retrieval import retrieve_merchant_documents
+    def test_manual_faq_not_customer_retrieved_pack_a3_deferred(self):
+        """Pack A3: FAQ rows are AI-visible but not customer-retrieved yet."""
+        from services.merchant_document_retrieval import (
+            detect_document_retrieval_intent,
+            retrieve_merchant_documents,
+        )
 
         faq = _fake_section(
             section_id=4, tenant_id=1, kind="faq",
@@ -266,8 +270,9 @@ class TestMerchantDocumentRetrieval:
             side_effect=lambda query: query,
         ):
             result = retrieve_merchant_documents(db, 1, "أسئلة شائعة؟")
-        assert result.matched_intent == "faq"
-        assert result.sections[0].kind == "faq"
+        assert detect_document_retrieval_intent("أسئلة شائعة؟") is None
+        assert result.matched_intent == ""
+        assert len(result.sections) == 0
 
     def test_does_not_require_imported_or_salla_origin(self):
         from services.merchant_document_retrieval import retrieve_merchant_documents
@@ -345,10 +350,10 @@ class TestMerchantDocumentRetrieval:
             side_effect=lambda query: query,
         ):
             self._query_returns(db, [story_a])
-            a = retrieve_merchant_documents(db, 10, "حدثني عن المتجر")
+            a = retrieve_merchant_documents(db, 10, "وش قصة المتجر؟")
             assert a.sections[0].body == "Story Tenant A"
             self._query_returns(db, [story_b])
-            b = retrieve_merchant_documents(db, 20, "حدثني عن المتجر")
+            b = retrieve_merchant_documents(db, 20, "وش قصة المتجر؟")
             assert b.sections[0].body == "Story Tenant B"
 
     def test_dual_tenant_return_policy_no_cross_leak(self):

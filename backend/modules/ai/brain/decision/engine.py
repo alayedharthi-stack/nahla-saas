@@ -755,6 +755,40 @@ class DefaultDecisionEngine:
                 _pp_feedback_exc,
             )
 
+        # ── -0.46 Pack A3 informational merchant knowledge (policy/story) ──
+        # Must outrank sticky/broad complaint heuristics for explicit
+        # informational policy questions. Does not weaken genuine operational
+        # complaint/refund (classifier returns None for those).
+        try:
+            from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
+                build_merchant_policy_decision,
+            )
+
+            _a3_facts = getattr(ctx, "facts", None)
+            _a3_proj = getattr(ctx, "trusted_context_projection", None)
+            if (
+                isinstance(_a3_proj, dict)
+                and isinstance(_a3_proj.get("merchant_policy"), dict)
+                and _a3_facts is not None
+                and not getattr(_a3_facts, "merchant_policy", None)
+            ):
+                try:
+                    _a3_facts.merchant_policy = dict(_a3_proj.get("merchant_policy") or {})
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — projection overlay optional
+                    pass
+            _a3_dec = build_merchant_policy_decision(
+                message=ctx.message or "",
+                facts=_a3_facts,
+                merchant_context=getattr(ctx, "merchant_context", None),
+            )
+            if _a3_dec is not None:
+                return _a3_dec
+        except Exception as _a3_exc:  # noqa: BLE001  # noqa: silent-ok — Pack A3 policy route must not block decide
+            logger.debug(
+                "[PACK_A3_POLICY] routing skipped err=%s",
+                _a3_exc,
+            )
+
         # ── -0.45 Complaint / refund / fraud (P0 — beats order mis-route) ──
         try:
             from ..commerce.complaint_refund_topic_guard import (  # noqa: PLC0415
@@ -3274,6 +3308,29 @@ class DefaultDecisionEngine:
                         "uses — compose from MERCHANT_ENABLED carriers"
                     ),
                 )
+            # Pack A3: shipping-policy prose ≠ Pack B carrier list.
+            # Fork after carrier check, before post-order / generic shipping.
+            try:
+                from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
+                    build_merchant_policy_decision,
+                    classify_merchant_policy_topic,
+                )
+
+                if classify_merchant_policy_topic(ctx.message or "") == "shipping_policy":
+                    _ship_pol = build_merchant_policy_decision(
+                        message=ctx.message or "",
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
+                    )
+                    if _ship_pol is not None:
+                        from core.checkout_shipping_policy import (  # noqa: PLC0415
+                            clear_pending_shipping_city,
+                        )
+
+                        clear_pending_shipping_city(state)
+                        return _ship_pol
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — A3 shipping-policy fork optional
+                pass
             if _post_order:
                 logger.info(
                     "[SHIPPING_INTENT] post-order context — defer to brain "
@@ -3359,6 +3416,21 @@ class DefaultDecisionEngine:
                     # already handled by build helper. Force URL for bare
                     # online-store inquiry when classifier returned store_info.
                     return _profile_decision
+                # Pack A3: explicit store_story when A2 about declines.
+                try:
+                    from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
+                        build_merchant_policy_decision,
+                    )
+
+                    _story_dec = build_merchant_policy_decision(
+                        message=_store_msg,
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
+                    )
+                    if _story_dec is not None:
+                        return _story_dec
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — A3 story fallback optional
+                    pass
                 if intent.name == INTENT_ONLINE_STORE_INQUIRY:
                     return Decision(
                         action=ACTION_FAQ_REPLY,
@@ -3881,6 +3953,10 @@ class DefaultDecisionEngine:
                 from ..commerce.merchant_capability_faq import (  # noqa: PLC0415
                     should_yield_catalog_navigator_for_capability,
                 )
+                from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
+                    build_merchant_policy_decision,
+                    should_yield_catalog_for_merchant_policy,
+                )
                 from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
                     build_merchant_profile_decision,
                 )
@@ -3889,6 +3965,17 @@ class DefaultDecisionEngine:
                     intent_name=intent.name,
                     message=ctx.message or "",
                 ):
+                    if not should_yield_catalog_for_merchant_policy(
+                        intent_name=intent.name,
+                        message=ctx.message or "",
+                    ):
+                        _policy_over_catalog = build_merchant_policy_decision(
+                            message=ctx.message or "",
+                            facts=getattr(ctx, "facts", None),
+                            merchant_context=getattr(ctx, "merchant_context", None),
+                        )
+                        if _policy_over_catalog is not None:
+                            return _policy_over_catalog
                     _profile_over_catalog = build_merchant_profile_decision(
                         message=ctx.message or "",
                         facts=getattr(ctx, "facts", None),
@@ -3911,7 +3998,7 @@ class DefaultDecisionEngine:
                 _same_parent_dec = try_ordering_same_parent_inquiry_decision(ctx)
                 if _same_parent_dec is not None:
                     return _same_parent_dec
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — same-parent inquiry probe must not block decide
                 logger.debug(
                     "[STATE_CONTINUITY] ordering_same_parent_inquiry skipped tenant=%s",
                     ctx.tenant_id,

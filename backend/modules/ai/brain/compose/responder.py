@@ -1846,6 +1846,26 @@ class DefaultComposer:
 
                 result.data["chosen_path"] = "support_complaint_refund"
                 return COMPLAINT_INTAKE_REPLY_AR
+            if _topic.startswith("merchant_knowledge_"):
+                result.data["chosen_path"] = _topic
+                result.data["knowledge_kind"] = str(
+                    (decision.args or {}).get("knowledge_kind") or ""
+                )
+                result.data["merchant_policy_status"] = str(
+                    (decision.args or {}).get("merchant_policy_status") or "UNKNOWN"
+                )
+                if (decision.args or {}).get("doc_ref"):
+                    result.data["doc_ref"] = str((decision.args or {}).get("doc_ref"))
+                result.data["retrieval_count"] = int(
+                    (decision.args or {}).get("retrieval_count") or 0
+                )
+                result.data["retrieval_attempted"] = bool(
+                    (decision.args or {}).get("retrieval_attempted")
+                )
+                if (decision.args or {}).get("faq_visibility"):
+                    result.data["faq_visibility"] = str(
+                        (decision.args or {}).get("faq_visibility")
+                    )
             if _topic == "product_knowledge_facts":
                 from ..persona.kb_product_answer import try_compose_kb_product_answer  # noqa: PLC0415
                 from ..persona.integration import _ai_settings_from_ctx  # noqa: PLC0415

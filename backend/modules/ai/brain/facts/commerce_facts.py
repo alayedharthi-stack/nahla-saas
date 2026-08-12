@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict
 
 from core.catalog import apply_active_catalog_query_filters
 from core.store_display import clean_store_name
@@ -235,6 +235,54 @@ class DefaultFactsLoader:
             profile = resolve_merchant_profile(db, tenant_id)
             apply_resolved_profile_to_commerce_facts(facts, profile)
         except Exception:  # noqa: silent-ok — profile overlay must not break turns
+            pass
+
+        # ── 4d. Pack A3 MERCHANT_POLICY existence + store_story presence ───
+        # Existence only (KNOWN_PRESENT / UNKNOWN + doc_ref). Bodies stay on
+        # capped MKS retrieval — never flatten prose into always-on facts.
+        try:
+            from services.merchant_policy_existence import (  # noqa: PLC0415
+                build_policy_existence_map,
+            )
+
+            policy_map = build_policy_existence_map(db, tenant_id)
+            cleaned: Dict[str, Any] = {}
+            for kind, payload in (policy_map or {}).items():
+                status = str((payload or {}).get("status") or "UNKNOWN")
+                if status == "KNOWN_ABSENT":
+                    status = "UNKNOWN"
+                if status not in {"KNOWN_PRESENT", "UNKNOWN"}:
+                    status = "UNKNOWN"
+                row: Dict[str, Any] = {"status": status}
+                doc_ref = (payload or {}).get("doc_ref")
+                if doc_ref and status == "KNOWN_PRESENT":
+                    row["doc_ref"] = str(doc_ref)
+                cleaned[str(kind)] = row
+            facts.merchant_policy = cleaned
+        except Exception:  # noqa: silent-ok — policy map must not break turns
+            pass
+        try:
+            from models import MerchantKnowledgeSection  # noqa: PLC0415
+            from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+
+            story_row = (
+                apply_ai_visible_kb_query_filters(
+                    db.query(MerchantKnowledgeSection)
+                )
+                .filter(
+                    MerchantKnowledgeSection.tenant_id == int(tenant_id),
+                    MerchantKnowledgeSection.kind == "store_story",
+                )
+                .order_by(MerchantKnowledgeSection.updated_at.desc())
+                .first()
+            )
+            if story_row is not None and str(getattr(story_row, "body", "") or "").strip():
+                facts.store_story_status = "KNOWN_PRESENT"
+                facts.store_story_doc_ref = f"mks:{getattr(story_row, 'id', None)}"
+            else:
+                facts.store_story_status = "UNKNOWN"
+                facts.store_story_doc_ref = ""
+        except Exception:  # noqa: silent-ok — story presence must not break turns
             pass
 
         # ── 5. Working hours + assistant persona (Phase 2) ────────────────

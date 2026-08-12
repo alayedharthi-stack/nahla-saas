@@ -294,6 +294,28 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — profile yield probe is best-effort
         pass
 
+    # Pack A3: merchant-wide policy / story / deferred FAQ outrank catalog.
+    try:
+        from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
+            should_yield_catalog_for_merchant_policy,
+        )
+
+        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+        _message = str(getattr(ctx, "message", "") or "")
+        if not should_yield_catalog_for_merchant_policy(
+            intent_name=_intent_name,
+            message=_message,
+        ):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="merchant_policy_knowledge",
+                extra={"intent": _intent_name or "-"},
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy yield probe is best-effort
+        pass
+
     try:
         from ..commerce.payment_evidence_turn_route import (  # noqa: PLC0415
             current_turn_has_payment_evidence,
