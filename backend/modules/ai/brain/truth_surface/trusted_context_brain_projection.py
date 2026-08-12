@@ -81,6 +81,17 @@ _CATALOG_BUNDLE_KEYS: Tuple[str, ...] = (
     "catalog:product_sale_offer",
 )
 
+# Pack A3 — policy existence only (status + doc_ref). Never project prose bodies.
+_POLICY_KIND_KEYS: Tuple[str, ...] = (
+    "return_policy",
+    "refund_policy",
+    "exchange_policy",
+    "shipping_policy",
+    "terms_policy",
+    "privacy_policy",
+    "warranty",
+)
+
 
 class TrustedContextBrainProjectionError(ValueError):
     """Schema or scope validation failure for brain projection."""
@@ -210,6 +221,48 @@ def _conversational_reference_for_candidates(
     }
 
 
+def _merchant_policy_from_snapshot(
+    snapshot: TrustedContextSnapshot,
+) -> Dict[str, Dict[str, Any]]:
+    """Project MERCHANT_POLICY existence facts (status + doc_ref only).
+
+    Skips legacy prose ``shipping_policy`` and non-existence keys.
+    Never emits KNOWN_ABSENT — defensive remap to UNKNOWN.
+    """
+    statuses: Dict[str, str] = {}
+    doc_refs: Dict[str, str] = {}
+    for fact in snapshot.facts_for_domain(TrustedDomain.MERCHANT_POLICY):
+        key = str(fact.key or "")
+        if key.startswith("policy_") and key.endswith(".status"):
+            kind = key[len("policy_") : -len(".status")]
+            if kind not in _POLICY_KIND_KEYS:
+                continue
+            status = str(fact.value or "UNKNOWN")
+            if status == "KNOWN_ABSENT":
+                status = "UNKNOWN"
+            if status not in {"KNOWN_PRESENT", "UNKNOWN"}:
+                status = "UNKNOWN"
+            statuses[kind] = status
+        elif key.startswith("policy_") and key.endswith(".doc_ref"):
+            kind = key[len("policy_") : -len(".doc_ref")]
+            if kind not in _POLICY_KIND_KEYS:
+                continue
+            if fact.value not in (None, "", [], {}):
+                doc_refs[kind] = str(fact.value)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for kind in _POLICY_KIND_KEYS:
+        if kind not in statuses and kind not in doc_refs:
+            continue
+        row: Dict[str, Any] = {
+            "status": statuses.get(kind, "UNKNOWN"),
+        }
+        if row["status"] == "KNOWN_PRESENT" and doc_refs.get(kind):
+            row["doc_ref"] = doc_refs[kind]
+        out[kind] = row
+    return out
+
+
 def _has_projection_payload(payload: Dict[str, Any]) -> bool:
     for key in (
         "product_identity",
@@ -220,6 +273,7 @@ def _has_projection_payload(payload: Dict[str, Any]) -> bool:
         "customer",
         "merchant_capabilities",
         "merchant_profile",
+        "merchant_policy",
     ):
         value = payload.get(key)
         if isinstance(value, dict) and value:
@@ -311,6 +365,7 @@ def project_trusted_context_brain_facts(
             "default_branch.status",
         ),
     )
+    merchant_policy = _merchant_policy_from_snapshot(snapshot)
 
     payload: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -338,6 +393,8 @@ def project_trusted_context_brain_facts(
         payload["merchant_capabilities"] = merchant_capabilities
     if merchant_profile:
         payload["merchant_profile"] = merchant_profile
+    if merchant_policy:
+        payload["merchant_policy"] = merchant_policy
 
     if not _has_projection_payload(payload):
         raise TrustedContextBrainProjectionError("empty_projection")

@@ -20,10 +20,20 @@ _ABOUT_RE = re.compile(
     r"وش\s*متجر(?:كم|ك|نا)?|"
     r"عن\s*(?:المتجر|الشركة)|"
     r"تعريف\s*(?:المتجر|الشركة)|"
-    r"قصة\s*(?:المتجر|الشركة)|"
     r"who\s*are\s*you|"
     r"about\s*(?:the\s*)?(?:store|shop|brand)|"
     r"tell\s*me\s*about"
+    r")",
+    re.IGNORECASE,
+)
+
+# Explicit long-form story — Pack A3 MKS store_story owns these (not A2 about).
+_EXPLICIT_STORY_RE = re.compile(
+    r"("
+    r"قص[ةه]\s*(?:المتجر|الشركة|البراند)|"
+    r"كيف\s*بدأ(?:ت)?\s*(?:قص[ةه]|المتجر)|"
+    r"our\s*story|"
+    r"how\s*(?:did\s*)?(?:you|the\s*store)\s*start"
     r")",
     re.IGNORECASE,
 )
@@ -155,6 +165,9 @@ def classify_store_profile_topic(message: str) -> Optional[str]:
         return "owner_contact"
     if _URL_RE.search(text):
         return "store_info"
+    # Explicit story questions are Pack A3 MKS — do not claim as A2 about.
+    if _EXPLICIT_STORY_RE.search(text):
+        return None
     if _ABOUT_RE.search(text):
         return "store_about"
     return None

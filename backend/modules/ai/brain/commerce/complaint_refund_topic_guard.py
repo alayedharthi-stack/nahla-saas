@@ -29,19 +29,60 @@ COMPLAINT_INTAKE_REPLY_AR = (
     "فضلاً أرسل رقم الطلب أو صورة المنتج أو الفاتورة حتى نراجع الحالة."
 )
 
-_COMPLAINT_REFUND_RE = re.compile(
+# Affect / harm / fraud — fire unconditionally (not topic words).
+_GRIEVANCE_AFFECT_RE = re.compile(
     r"(?:"
     r"خدعت|خداع|محتال|نصاب|نصب|احتيال|مغش(?:وش|وش)?|"
-    r"استرجاع|استرجع|ارجع(?:وا|و)?|ارجع(?:وا|و)?\s*(?:لي|ل)?\s*(?:نقود|فلوس|مال|مبلغ)?|"
-    r"فلوس(?:ي|ك)?|نقود(?:ي|ك)?|"
-    r"ارج(?:ع|و)(?:وا|و)?\s*(?:لي|ل)?\s*(?:نقود|فلوس|مال|مبلغ)?|"
     r"جود(?:ة)?\s*سي(?:ئ|ء)|"
     r"(?:مو|مش|ما\s*هو)\s*عسل|(?:ليس|مو)\s*عسل(?:اً|ا)?|العسل\s*(?:ليس|مو|مش)\s*عسل|"
     r"شكو(?:ى|ي)|ت(?:ع|ق)ويض|"
     r"مريض(?:ة|ه)?|حساس(?:ية|يه)?|"
-    r"رد\s*(?:ال)?(?:فلوس|نقود|مال|مبلغ)|"
-    r"refund|scam|fraud|complaint"
+    r"scam|fraud|complaint"
     r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Refund/return topic tokens — require operational qualifier (Pack A3).
+# Patterns match against _norm()'d text (hamza folded to ا).
+_REFUND_TOPIC_RE = re.compile(
+    r"(?:"
+    r"استرجاع|استرجع|استرداد|استرد|ارجاع|استبدال|استبدل|"
+    r"ارجع(?:وا|و)?|"
+    r"فلوس(?:ي|ك)?|نقود(?:ي|ك)?|"
+    r"رد\s*(?:ال)?(?:فلوس|نقود|مال|مبلغ)|"
+    r"refund|return|exchange"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_SELF_OR_ORDER_REF_RE = re.compile(
+    r"(?:"
+    r"طلب(?:ي|نا|تي)|شحن(?:تي|تي)|"
+    r"فلوسي|نقودي|"
+    r"المنتج\s*(?:اللي|الذي)\s*(?:وصل|طلب)|"
+    r"رقم\s*(?:ال)?طلب|"
+    r"ابي\s*(?:ارجع|استرد|استبدل)|ابغى\s*(?:ارجع|استرد|استبدل)|"
+    r"اريد\s*(?:ارجع|استرداد|استبدال)|"
+    r"my\s*order|refund\s*me|return\s*my"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+_POLICY_ARTIFACT_RE = re.compile(
+    r"(?:"
+    r"سياس[ةه]|شروط|أحكام|كيف\s*(?:نظام|تتم|يصير)|كم\s*(?:سياس[ةه]|مدة)|"
+    r"\bpolic(?:y|ies)\b|\bterms\b"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Legacy combined pattern kept for reference/tests that import the name.
+_COMPLAINT_REFUND_RE = re.compile(
+    r"(?:"
+    + _GRIEVANCE_AFFECT_RE.pattern[3:-1]
+    + r"|"
+    + _REFUND_TOPIC_RE.pattern[3:-1]
+    + r")",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -62,15 +103,56 @@ def _norm(text: str) -> str:
     return _WS_RE.sub(" ", t).strip()
 
 
-def classify_complaint_refund(message: str) -> bool:
-    """Return True when the inbound message is a complaint/refund/fraud signal."""
+def classify_complaint_refund_kind(message: str) -> str:
+    """Typed complaint classification for Pack A3 ownership.
+
+    Returns one of:
+      grievance | operational_refund | informational_policy | none
+    """
     raw = (message or "").strip()
     if not raw:
-        return False
+        return "none"
     norm = _norm(raw)
     if not norm:
+        return "none"
+    if _GRIEVANCE_AFFECT_RE.search(norm):
+        return "grievance"
+    if _REFUND_TOPIC_RE.search(norm):
+        # Informational policy artifact without self/order reference → not complaint.
+        if _POLICY_ARTIFACT_RE.search(norm) and not _SELF_OR_ORDER_REF_RE.search(norm):
+            return "informational_policy"
+        if _SELF_OR_ORDER_REF_RE.search(norm):
+            return "operational_refund"
+        # Bare topic token alone is insufficient for complaint ownership.
+        if _POLICY_ARTIFACT_RE.search(norm):
+            return "informational_policy"
+        # "أبغى أرجع طلبي" matched via self-ref; bare "استرجاع" alone → not complaint.
+        return "none"
+    return "none"
+
+
+def classify_complaint_refund(message: str) -> bool:
+    """Return True when the inbound message is an operational complaint/refund signal.
+
+    Boolean contract preserved for existing call sites. Informational policy
+    questions (e.g. «وش سياسة الاسترجاع؟») return False.
+    """
+    kind = classify_complaint_refund_kind(message)
+    return kind in {"grievance", "operational_refund"}
+
+
+def policy_information_turn_yields_complaint(message: str) -> bool:
+    """True when current turn is informational policy/story and must suspend complaint ownership."""
+    if classify_complaint_refund_kind(message) == "informational_policy":
+        return True
+    try:
+        from .merchant_policy_intents import (  # noqa: PLC0415
+            is_informational_policy_or_story_question,
+        )
+
+        return bool(is_informational_policy_or_story_question(message))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional Pack A3 probe
         return False
-    return bool(_COMPLAINT_REFUND_RE.search(norm))
 
 
 def is_complaint_refund_active(state: Any) -> bool:
@@ -141,11 +223,16 @@ def should_block_order_draft_injection(
         pass
     if classify_complaint_refund(customer_message or ""):
         return True
-    if is_complaint_refund_active(brain_state) and not _current_turn_exits_complaint_session(
-        brain_state,
-        customer_message or "",
-    ):
-        return True
+    # Sticky complaint: yield ownership for explicit informational policy/story
+    # turns WITHOUT clearing the session flag (Pack A3).
+    if is_complaint_refund_active(brain_state):
+        if policy_information_turn_yields_complaint(customer_message or ""):
+            pass
+        elif not _current_turn_exits_complaint_session(
+            brain_state,
+            customer_message or "",
+        ):
+            return True
     args = getattr(decision, "args", None) or {}
     if str(args.get("topic") or "") == "support_complaint_refund":
         return True
@@ -213,6 +300,10 @@ def apply_complaint_refund_session_flags(
 
 def try_complaint_refund_decision(ctx: Any) -> Optional[Decision]:
     msg = str(getattr(ctx, "message", "") or "")
+    # Pack A3: informational policy/story turns suspend complaint ownership
+    # for THIS turn only (do not clear sticky session here).
+    if policy_information_turn_yields_complaint(msg):
+        return None
     if not classify_complaint_refund(msg):
         return None
     logger.info(
@@ -236,8 +327,10 @@ __all__ = [
     "COMPLAINT_INTAKE_REPLY_AR",
     "apply_complaint_refund_session_flags",
     "classify_complaint_refund",
+    "classify_complaint_refund_kind",
     "is_complaint_refund_active",
     "mark_complaint_refund_active",
+    "policy_information_turn_yields_complaint",
     "should_block_order_draft_injection",
     "try_complaint_refund_decision",
 ]
