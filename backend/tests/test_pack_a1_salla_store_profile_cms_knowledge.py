@@ -393,7 +393,9 @@ class TestPolicyExistenceMap:
             body="policy body", title="returns",
         )
         db = MagicMock()
-        db.query.return_value.filter.return_value.all.return_value = [row]
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [
+            row
+        ]
         with patch(
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
@@ -407,7 +409,7 @@ class TestPolicyExistenceMap:
         from services.merchant_policy_existence import build_policy_existence_map
 
         db = MagicMock()
-        db.query.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
         with patch(
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
@@ -420,7 +422,7 @@ class TestPolicyExistenceMap:
         from services.merchant_policy_existence import build_policy_existence_map
 
         db = MagicMock()
-        db.query.return_value.filter.return_value.all.return_value = []
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
         with patch(
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
@@ -495,8 +497,9 @@ class TestNoSallaCmsRuntimeDependency:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "حدثني عن المتجر")
+            result = retrieve_merchant_documents(db, 1, "وش قصة المتجر؟")
         assert len(result.sections) == 1
+        assert result.sections[0].body == "Merchant authored story"
 
 
 # ── Overlay: long-form excluded from always-on ───────────────────────────────

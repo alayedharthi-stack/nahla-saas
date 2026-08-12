@@ -171,8 +171,12 @@ class TestPackA3PresentFullPathNoBillingBypass:
         assert "MerchantKnowledgeSection" in (captured.get("response_goal") or "")
         assert captured.get("shipping_knowledge_present") is False
 
-    def test_placeholder_body_observability_not_treated_as_clean_fact(self):
+    def test_placeholder_body_excluded_from_customer_retrieval(self):
         from services.merchant_document_retrieval import retrieve_merchant_documents
+        from services.merchant_knowledge_customer_readiness import (
+            assess_mks_customer_readiness,
+        )
+        from services.merchant_policy_existence import build_policy_existence_map
 
         db, _engine = make_scenario_db()
         tenant = seed_tenant(db, name="متجر تجريبي عام")
@@ -184,11 +188,12 @@ class TestPackA3PresentFullPathNoBillingBypass:
             body=_PLACEHOLDER_BODY,
             priority=100,
         )
+        verdict = assess_mks_customer_readiness(_PLACEHOLDER_BODY)
+        assert verdict.is_ready is False
+        assert verdict.status == "INCOMPLETE_AUTHORING_TEMPLATE"
         result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
-        assert len(result.sections) >= 1
-        body = str(result.sections[0].body or "")
-        placeholder_detected = "[" in body and ("أضف" in body or "مثلاً" in body)
-        assert placeholder_detected is True
-        customer_safe_document = not placeholder_detected
-        assert customer_safe_document is False
-        assert "[أضف المدة" in body
+        assert len(result.sections) == 0
+        assert result.sections_skipped_incomplete >= 1
+        existence = build_policy_existence_map(db, tenant.id)
+        assert existence["return_policy"]["status"] == "UNKNOWN"
+        assert existence["return_policy"]["doc_ref"] is None
