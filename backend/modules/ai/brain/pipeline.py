@@ -3231,7 +3231,29 @@ class MerchantBrain:
                         _refs = list(_a3_meta.get("doc_refs") or [])
                         if _refs and not _a3_args.get("doc_ref"):
                             _a3_args["doc_ref"] = _refs[0]
+                        # Observability only — placeholder-bearing MKS bodies.
+                        _placeholder_n = 0
+                        for _sec in (_doc_retrieval.sections or ()):
+                            _body = str(getattr(_sec, "body", "") or "")
+                            if "[" in _body and (
+                                "أضف" in _body
+                                or "مثلاً" in _body
+                                or "TODO" in _body.upper()
+                                or "PLACEHOLDER" in _body.upper()
+                            ):
+                                _placeholder_n += 1
+                        if _placeholder_n:
+                            _a3_args["placeholder_bearing_sections"] = _placeholder_n
+                            _a3_meta["placeholder_bearing_sections"] = _placeholder_n
+                            logger.info(
+                                "[PACK_A3_PLACEHOLDER_OBS] tenant=%s count=%s "
+                                "doc_refs=%s",
+                                tenant_id,
+                                _placeholder_n,
+                                _refs[:3],
+                            )
                         decision.args = _a3_args
+                        ctx._pack_a3_retrieval_meta = _a3_meta  # type: ignore[attr-defined]
                         logger.info(
                             "[PACK_A3_KNOWLEDGE] tenant=%s topic=%s status=%s "
                             "retrieval_count=%s doc_ref=%s",
@@ -3313,6 +3335,21 @@ class MerchantBrain:
                     "brain_profile":     mc.get("brain_profile") or {},
                     "retrieval_rules":   mc.get("retrieval_rules") or {},
                 }
+                # Pack A3 — store_story turns must not receive A2 description
+                # as substitute narrative fuel. Fail-safe: never broaden surface.
+                from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+                    safe_scope_merchant_profiles_for_knowledge_turn,
+                )
+
+                _scoped_mp, _scoped_tp = safe_scope_merchant_profiles_for_knowledge_turn(
+                    slim_merchant_ctx.get("merchant_profile"),
+                    slim_merchant_ctx.get("tenant_profile"),
+                    decision.args,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                slim_merchant_ctx["merchant_profile"] = _scoped_mp
+                slim_merchant_ctx["tenant_profile"] = _scoped_tp
                 if _faq_approved:
                     slim_merchant_ctx["faq_approved"] = _faq_approved
             except Exception as exc:
@@ -4245,6 +4282,43 @@ class MerchantBrain:
                 "tenant=%s err=%s",
                 tenant_id,
                 _mcg_exc,
+            )
+
+        # Pack A3 — UNKNOWN knowledge honesty backstop (specificity, not phrase ban).
+        try:
+            from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (  # noqa: PLC0415
+                apply_merchant_knowledge_unknown_truth_guard,
+            )
+
+            _mk_guard = apply_merchant_knowledge_unknown_truth_guard(
+                reply or "",
+                decision_args=dict(decision.args or {}),
+                known_facts=dict(
+                    getattr(getattr(ctx, "reply_state", None), "known_facts", None)
+                    or {}
+                ),
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+            )
+            if _mk_guard.scrubbed or _mk_guard.replaced_with_fallback:
+                reply = _mk_guard.reply
+                _guard_replaced["merchant_knowledge_unknown_truth_guard"] = True
+                result.data["merchant_knowledge_unknown_truth_guard"] = {
+                    "scrubbed": bool(_mk_guard.scrubbed),
+                    "replaced_with_fallback": bool(_mk_guard.replaced_with_fallback),
+                    "reasons": list(_mk_guard.reasons),
+                    "claim_kinds": list(_mk_guard.claim_kinds),
+                }
+                if _mk_guard.replaced_with_fallback:
+                    result.data["compose_source"] = _mk_guard.compose_source
+                    result.data["fallback_reason"] = _mk_guard.fallback_reason
+                    result.data["fallback_action_type"] = _mk_guard.fallback_action_type
+        except Exception as _mkg_exc:  # noqa: BLE001
+            logger.warning(
+                "[MERCHANT_KNOWLEDGE_UNKNOWN_TRUTH_GUARD] pipeline hook failed "
+                "tenant=%s err=%s",
+                tenant_id,
+                _mkg_exc,
             )
 
         try:
@@ -5952,6 +6026,18 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    # Pack A3 UNKNOWN honesty — stamp retrieval_count into known_facts early
+    # so post-compose guard + compose metadata share one source.
+    try:
+        _a3_ret = getattr(ctx, "_pack_a3_retrieval_meta", None)
+        if isinstance(_a3_ret, dict) and "retrieval_count" in _a3_ret:
+            known_facts["retrieval_count"] = int(_a3_ret.get("retrieval_count") or 0)
+        elif (decision.args or {}).get("retrieval_count") is not None:
+            known_facts["retrieval_count"] = int(
+                (decision.args or {}).get("retrieval_count") or 0
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — observability only
+        pass
     try:
         from .commerce.cod_policy_evidence import (  # noqa: PLC0415
             load_cod_policy_evidence,
@@ -6189,7 +6275,16 @@ def _build_reply_state(
         _decision_topic = str((decision.args or {}).get("topic") or "")
         _topic_hint = str((decision.args or {}).get("topic_hint") or "")
         _pending_ship = get_pending_shipping_city(current_state)
-        _is_shipping_compose = (
+        from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+            should_inject_shipping_knowledge_facts,
+        )
+
+        # Pack A3: shipping-policy knowledge turns must NOT inject checkout
+        # ``shipping_knowledge`` (neighboring capability/city-fee fuel). Do not
+        # clear a live pending-city checkout pin when skipping this block.
+        _is_shipping_compose = should_inject_shipping_knowledge_facts(
+            decision.args
+        ) and (
             _intent_name == "ask_shipping"
             or _topic_hint == "shipping"
             or _decision_topic in {"ask_shipping", "shipping_post_order"}
@@ -6221,6 +6316,19 @@ def _build_reply_state(
                     clear_pending_shipping_city(current_state)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — shipping facts must not block compose
         pass
+
+    # Pack A3 — per-turn omit neighboring capability/profile substitutes.
+    # Fail-safe: never restore Pack B / description substitutes on knowledge turns.
+    from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+        safe_apply_knowledge_turn_fact_scope,
+    )
+
+    known_facts = safe_apply_knowledge_turn_fact_scope(
+        known_facts,
+        decision.args,
+        tenant_id=getattr(ctx, "tenant_id", None),
+        conversation_id=getattr(ctx, "conversation_id", None),
+    )
 
     _commerce_navigator = None
     _merchant_sales_channels = None
@@ -6547,6 +6655,15 @@ def _compose_response_goal(
 
     if persona_topic_from_decision_args(decision.args):
         return _prepend_intent_priority_directive(base_goal, intent_priority)
+    # Pack A3 — do not append commerce-navigator / sales funnel framing onto
+    # knowledge goals. Deterministic topic/surface check (no unsafe fallthrough).
+    _a3_args = decision.args or {}
+    _a3_topic = str(_a3_args.get("topic") or "")
+    _a3_surface = str(_a3_args.get("policy_surface") or "")
+    if _a3_surface == "merchant_knowledge_section" or _a3_topic.startswith(
+        "merchant_knowledge_"
+    ):
+        return _prepend_intent_priority_directive(base_goal, intent_priority)
     goal_with_stance = _prepend_stance_directive(base_goal, stance)
     goal_with_priority = _prepend_intent_priority_directive(goal_with_stance, intent_priority)
     return _prepend_commerce_navigator_directive(goal_with_priority, commerce_navigator)
@@ -6592,6 +6709,18 @@ def _compose_base_response_goal(
 
     Pulled into its own function so the stance enrichment can wrap it
     without re-implementing every branch."""
+    # Pack A3 — knowledge honesty goal MUST outrank checkout next_goal hijack.
+    # Deterministic args read: never fall through to checkout on knowledge turns.
+    _mk_args = decision.args or {}
+    _mk_topic = str(_mk_args.get("topic") or "")
+    _mk_surface = str(_mk_args.get("policy_surface") or "")
+    _mk_goal = str(_mk_args.get("response_goal") or "").strip()
+    if _mk_goal and (
+        _mk_surface == "merchant_knowledge_section"
+        or _mk_topic.startswith("merchant_knowledge_")
+    ):
+        return _mk_goal
+
     _checkout = dict(checkout_facts or {})
     if _checkout.get("customer_asks_known_phone") and _checkout.get("known_phone"):
         return (
