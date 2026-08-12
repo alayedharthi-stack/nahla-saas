@@ -151,6 +151,19 @@ _LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _ARABIC_CHAR_RE = re.compile(r"[\u0600-\u06FF]")
 _EMOJI_CHECK_RE = re.compile(r"[✅✔️]\s*")
 
+# Presentation-only: exclude structured factual token FORMS from English-prose
+# scoring. Does not validate/authorize truth — upstream compose/grounding owns that.
+_STRUCTURED_FACT_TOKEN_RE = re.compile(
+    r"(?:"
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"  # email
+    r"|https?://[^\s<>\"']+"  # absolute URL
+    r"|wa\.me/[^\s<>\"']*"  # WhatsApp short links
+    r"|@[A-Za-z0-9._]{2,40}"  # @handle
+    r"|(?<![A-Za-z0-9@])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s<>\"']*)?"  # domain[/path]
+    r"|(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9_]{0,40}\s*:\s*\S+"  # latin key:value contact lines
+    r")"
+)
+
 
 @dataclass(frozen=True)
 class CommerceReplyQualityGuardResult:
@@ -183,12 +196,21 @@ def inbound_is_arabic(inbound_text: str, *, locale: str = "ar") -> bool:
     return not _LATIN_WORD_RE.search(text)
 
 
+def _mask_structured_fact_tokens_for_language_scoring(text: str) -> str:
+    """Replace structured fact token forms with spaces for prose scoring only."""
+    if not text:
+        return ""
+    return _STRUCTURED_FACT_TOKEN_RE.sub(" ", text)
+
+
 def _segment_is_primarily_english(segment: str) -> bool:
     raw = (segment or "").strip()
     if not raw:
         return False
-    latin = len(_LATIN_WORD_RE.findall(raw))
-    arabic = len(_ARABIC_CHAR_RE.findall(raw))
+    # Score remaining natural-language prose after excluding structured tokens.
+    scored = _mask_structured_fact_tokens_for_language_scoring(raw)
+    latin = len(_LATIN_WORD_RE.findall(scored))
+    arabic = len(_ARABIC_CHAR_RE.findall(scored))
     if latin >= 3 and latin >= arabic:
         return True
     if latin >= 8 and latin > arabic:
