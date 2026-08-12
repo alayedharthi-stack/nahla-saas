@@ -264,8 +264,11 @@ class DefaultFactsLoader:
         try:
             from models import MerchantKnowledgeSection  # noqa: PLC0415
             from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+            from services.merchant_knowledge_customer_readiness import (  # noqa: PLC0415
+                mks_section_customer_ready,
+            )
 
-            story_row = (
+            story_rows = (
                 apply_ai_visible_kb_query_filters(
                     db.query(MerchantKnowledgeSection)
                 )
@@ -273,10 +276,25 @@ class DefaultFactsLoader:
                     MerchantKnowledgeSection.tenant_id == int(tenant_id),
                     MerchantKnowledgeSection.kind == "store_story",
                 )
-                .order_by(MerchantKnowledgeSection.updated_at.desc())
-                .first()
+                .order_by(
+                    MerchantKnowledgeSection.priority.asc(),
+                    MerchantKnowledgeSection.updated_at.desc(),
+                )
+                .limit(20)
+                .all()
             )
-            if story_row is not None and str(getattr(story_row, "body", "") or "").strip():
+            story_row = None
+            for _cand in story_rows or ():
+                if not str(getattr(_cand, "body", "") or "").strip():
+                    continue
+                try:
+                    if not mks_section_customer_ready(_cand).is_ready:
+                        continue
+                except Exception:  # noqa: BLE001 — fail closed
+                    continue
+                story_row = _cand
+                break
+            if story_row is not None:
                 facts.store_story_status = "KNOWN_PRESENT"
                 facts.store_story_doc_ref = f"mks:{getattr(story_row, 'id', None)}"
             else:

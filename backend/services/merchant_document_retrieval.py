@@ -163,6 +163,9 @@ class MerchantDocumentRetrievalResult:
     total_chars: int
     matched_intent: str
     truncated: bool
+    sections_skipped_incomplete: int = 0
+    doc_refs_skipped: Tuple[str, ...] = ()
+    skip_reason_codes: Tuple[str, ...] = ()
 
 
 def is_long_form_document_kind(kind: Optional[str]) -> bool:
@@ -270,6 +273,9 @@ def retrieve_merchant_documents(
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+        from services.merchant_knowledge_customer_readiness import (  # noqa: PLC0415
+            mks_section_customer_ready,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PackA1.retrieval] import failed: %s", exc)
         return empty
@@ -299,6 +305,8 @@ def retrieve_merchant_documents(
 
     # custom is never policy/document truth for this path.
     eligible = []
+    skipped_refs: List[str] = []
+    skip_reasons: List[str] = []
     for r in rows:
         kind = str(getattr(r, "kind", "") or "").strip().lower()
         if not is_long_form_document_kind(kind) or kind == "custom":
@@ -315,6 +323,31 @@ def retrieve_merchant_documents(
                     continue
             except Exception:  # noqa: silent-ok — product-link probe optional
                 pass
+        try:
+            verdict = mks_section_customer_ready(r)
+        except Exception:  # noqa: BLE001 — fail closed: exclude on detector failure
+            doc_ref = f"mks:{getattr(r, 'id', None)}"
+            skipped_refs.append(doc_ref)
+            skip_reasons.append("detector_error")
+            continue
+        if not verdict.is_ready:
+            doc_ref = f"mks:{getattr(r, 'id', None)}"
+            skipped_refs.append(doc_ref)
+            reason = str(verdict.reason_code or "incomplete")
+            skip_reasons.append(reason)
+            try:
+                logger.info(
+                    "merchant_knowledge_incomplete_skipped "
+                    "surface=customer_retrieval knowledge_kind=%s source=%s "
+                    "doc_ref=%s reason_code=%s",
+                    kind,
+                    str(getattr(r, "source", "") or "unknown"),
+                    doc_ref,
+                    reason,
+                )
+            except Exception:  # noqa: BLE001 — telemetry must not affect eligibility
+                pass
+            continue
         eligible.append(r)
 
     cap = max(1, min(int(max_sections or MAX_SECTIONS_PER_TURN), MAX_SECTIONS_PER_TURN))
@@ -361,6 +394,9 @@ def retrieve_merchant_documents(
         total_chars=total,
         matched_intent=intent,
         truncated=truncated,
+        sections_skipped_incomplete=len(skipped_refs),
+        doc_refs_skipped=tuple(skipped_refs),
+        skip_reason_codes=tuple(skip_reasons),
     )
 
 

@@ -3,6 +3,9 @@ Pack A1 policy existence map — PRESENT / UNKNOWN only.
 
 Without a Salla CMS completeness signal, KNOWN_ABSENT must not be inferred
 from missing MerchantKnowledgeSection rows alone.
+
+KNOWN_PRESENT requires at least one ACTIVE + AI-visible + customer-ready
+authoritative section (shared readiness contract with retrieval).
 """
 from __future__ import annotations
 
@@ -32,10 +35,11 @@ def build_policy_existence_map(
     """Build policy existence map for Pack A1.
 
     Status values:
-      KNOWN_PRESENT — active AI-visible MKS row of that kind exists
-      UNKNOWN — no authoritative section established
+      KNOWN_PRESENT — active AI-visible customer-ready MKS row of that kind exists
+      UNKNOWN — no authoritative complete section established
 
     KNOWN_ABSENT is never emitted in profile-only A1.
+    Incomplete authoring/template sections do not establish PRESENT.
     """
     del pages_sync_ok  # completeness reconcile deferred with CMS auto-import
 
@@ -53,6 +57,9 @@ def build_policy_existence_map(
     try:
         from models import MerchantKnowledgeSection  # noqa: PLC0415
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+        from services.merchant_knowledge_customer_readiness import (  # noqa: PLC0415
+            mks_section_customer_ready,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PackA1.policy_map] import failed: %s", exc)
         return out
@@ -65,6 +72,10 @@ def build_policy_existence_map(
             .filter(
                 MerchantKnowledgeSection.tenant_id == int(tenant_id),
                 MerchantKnowledgeSection.kind.in_(list(POLICY_KIND_KEYS)),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
             )
             .all()
         )
@@ -80,8 +91,27 @@ def build_policy_existence_map(
         kind = str(getattr(row, "kind", "") or "").strip().lower()
         if kind not in out:
             continue
-        if kind not in present:
-            present[kind] = row
+        if kind in present:
+            continue
+        try:
+            verdict = mks_section_customer_ready(row)
+        except Exception:  # noqa: BLE001 — fail closed: do not treat as PRESENT
+            continue
+        if not verdict.is_ready:
+            try:
+                logger.info(
+                    "merchant_knowledge_incomplete_skipped "
+                    "surface=policy_existence knowledge_kind=%s source=%s "
+                    "doc_ref=mks:%s reason_code=%s",
+                    kind,
+                    str(getattr(row, "source", "") or "unknown"),
+                    getattr(row, "id", None),
+                    verdict.reason_code or "incomplete",
+                )
+            except Exception:  # noqa: BLE001 — telemetry must not affect eligibility
+                pass
+            continue
+        present[kind] = row
 
     for kind, row in present.items():
         out[kind] = {
