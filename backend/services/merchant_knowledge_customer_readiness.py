@@ -7,6 +7,7 @@ Pure, IO-free verdict shared by:
 
 Incomplete authoring/template content must not become customer policy truth.
 Brackets alone are never sufficient — authoring/template intent is required.
+A non-empty substantive body is required; title alone never establishes readiness.
 """
 from __future__ import annotations
 
@@ -14,10 +15,15 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-ReadinessStatus = Literal["READY", "INCOMPLETE_AUTHORING_TEMPLATE"]
+ReadinessStatus = Literal[
+    "READY",
+    "INCOMPLETE_AUTHORING_TEMPLATE",
+    "EMPTY_CONTENT",
+]
 
 READY: ReadinessStatus = "READY"
 INCOMPLETE_AUTHORING_TEMPLATE: ReadinessStatus = "INCOMPLETE_AUTHORING_TEMPLATE"
+EMPTY_CONTENT: ReadinessStatus = "EMPTY_CONTENT"
 
 # Explicit unfinished markers (Latin / common generator vocabulary).
 _EXPLICIT_MARKER_RE = re.compile(
@@ -93,35 +99,26 @@ class MksCustomerReadinessVerdict:
     def is_incomplete(self) -> bool:
         return self.status == INCOMPLETE_AUTHORING_TEMPLATE
 
+    @property
+    def is_empty(self) -> bool:
+        return self.status == EMPTY_CONTENT
 
-def assess_mks_customer_readiness(
-    body: Optional[str],
-    *,
-    title: Optional[str] = None,
-) -> MksCustomerReadinessVerdict:
-    """Return READY or INCOMPLETE_AUTHORING_TEMPLATE for MKS text.
 
-    Source-agnostic and IO-free. Does not treat literal brackets alone as incomplete.
-    """
-    text = f"{str(title or '').strip()}\n{str(body or '').strip()}".strip()
+def _authoring_template_verdict(text: str) -> Optional[MksCustomerReadinessVerdict]:
+    """Return incomplete verdict when authoring/template markers are present."""
     if not text:
-        # Empty sections are not customer-grounding evidence; existence callers
-        # already require a body for story, and retrieval skips empty bodies.
-        return MksCustomerReadinessVerdict(READY)
-
+        return None
     if _EXPLICIT_MARKER_RE.search(text):
         return MksCustomerReadinessVerdict(
             INCOMPLETE_AUTHORING_TEMPLATE,
             reason_code="template_marker",
         )
-
     for match in _BRACKET_CHUNK_RE.finditer(text):
         chunk = match.group(0)
         inner = chunk[1:-1].strip()
         if not inner:
             continue
         if _BRACKET_AUTHORING_RE.search(inner):
-            # Prefer a specific observability code for the known generator shape.
             if re.search(r"أضف", inner) and re.search(r"مثلاً|مثلا", inner):
                 return MksCustomerReadinessVerdict(
                     INCOMPLETE_AUTHORING_TEMPLATE,
@@ -136,6 +133,40 @@ def assess_mks_customer_readiness(
                 INCOMPLETE_AUTHORING_TEMPLATE,
                 reason_code="example_placeholder",
             )
+    return None
+
+
+def assess_mks_customer_readiness(
+    body: Optional[str],
+    *,
+    title: Optional[str] = None,
+) -> MksCustomerReadinessVerdict:
+    """Return customer-readiness verdict for MKS text.
+
+    Source-agnostic and IO-free.
+    READY requires a non-empty substantive body. Title alone never rescues.
+    Title may still contribute template-marker detection, but never eligibility.
+    """
+    title_text = str(title or "").strip()
+    body_text = str(body or "").strip()
+
+    # Title may expose unfinished authoring markers even when body is empty,
+    # but empty/whitespace body is never customer-groundable.
+    scan_text = f"{title_text}\n{body_text}".strip()
+    incomplete = _authoring_template_verdict(scan_text)
+    if incomplete is not None:
+        return incomplete
+
+    if not body_text:
+        reason = "empty_body"
+        if title_text:
+            reason = "title_only_empty_body"
+        elif body is not None and str(body) != "" and not str(body).strip():
+            reason = "whitespace_body"
+        return MksCustomerReadinessVerdict(
+            EMPTY_CONTENT,
+            reason_code=reason,
+        )
 
     return MksCustomerReadinessVerdict(READY)
 

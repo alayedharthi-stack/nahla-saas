@@ -21,6 +21,7 @@ from services.merchant_document_retrieval import (  # noqa: E402
     retrieve_merchant_documents,
 )
 from services.merchant_knowledge_customer_readiness import (  # noqa: E402
+    EMPTY_CONTENT,
     INCOMPLETE_AUTHORING_TEMPLATE,
     READY,
     assess_mks_customer_readiness,
@@ -161,6 +162,21 @@ class TestReadinessDetector:
                 source=source,
             )
             assert mks_section_customer_ready(row).is_ready is False, source
+
+    def test_empty_body_not_ready(self):
+        for body in (None, "", "   ", "\n\t"):
+            v = assess_mks_customer_readiness(body)
+            assert v.is_ready is False, repr(body)
+            assert v.status == EMPTY_CONTENT, repr(body)
+
+    def test_title_only_not_ready(self):
+        v = assess_mks_customer_readiness(
+            "",
+            title="سياسة الاسترجاع",
+        )
+        assert v.is_ready is False
+        assert v.status == EMPTY_CONTENT
+        assert v.reason_code == "title_only_empty_body"
 
 
 # ── Existence ────────────────────────────────────────────────────────────────
@@ -462,3 +478,191 @@ class TestKnownRowShapeFixture:
         m = _map_with_rows(33, [row])
         assert m["return_policy"]["status"] == "UNKNOWN"
         assert m["return_policy"]["doc_ref"] is None
+
+
+# ── Empty / title-only coherence gate ────────────────────────────────────────
+
+
+class TestEmptyBodyCoherenceGate:
+    def test_empty_only_unknown_and_zero_retrieval(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body="",
+        )
+        existence = build_policy_existence_map(db, tenant.id)
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        assert existence["return_policy"]["status"] == "UNKNOWN"
+        assert existence["return_policy"]["doc_ref"] is None
+        assert len(retrieval.sections) == 0
+
+    def test_whitespace_only_unknown_and_zero_retrieval(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body="   \n\t  ",
+        )
+        existence = build_policy_existence_map(db, tenant.id)
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        assert existence["return_policy"]["status"] == "UNKNOWN"
+        assert existence["return_policy"]["doc_ref"] is None
+        assert len(retrieval.sections) == 0
+
+    def test_empty_plus_complete_present_on_complete(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body="",
+            priority=1,
+        )
+        good = seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body=_COMPLETE_RETURN,
+            priority=2,
+        )
+        existence = build_policy_existence_map(db, tenant.id)
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
+        assert existence["return_policy"]["doc_ref"] == f"mks:{good.id}"
+        assert len(retrieval.sections) == 1
+        assert retrieval.sections[0].section_id == good.id
+
+    def test_placeholder_empty_complete_present_complete_only(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            body=_CANONICAL_PLACEHOLDER,
+            priority=1,
+        )
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body="",
+            priority=2,
+        )
+        good = seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            body=_COMPLETE_RETURN,
+            priority=3,
+        )
+        existence = build_policy_existence_map(db, tenant.id)
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
+        assert existence["return_policy"]["doc_ref"] == f"mks:{good.id}"
+        assert len(retrieval.sections) == 1
+        assert retrieval.sections[0].section_id == good.id
+        assert _CANONICAL_PLACEHOLDER not in retrieval.sections[0].body
+
+    def test_all_non_ready_unknown_zero_retrieval(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            body=_CANONICAL_PLACEHOLDER,
+            priority=1,
+        )
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="return_policy",
+            title="سياسة الاسترجاع",
+            body="",
+            priority=2,
+        )
+        existence = build_policy_existence_map(db, tenant.id)
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        assert existence["return_policy"]["status"] == "UNKNOWN"
+        assert existence["return_policy"]["doc_ref"] is None
+        assert len(retrieval.sections) == 0
+
+    def test_present_implies_direct_policy_retrieval_nonzero(self):
+        """KNOWN_PRESENT must not coexist with zero eligible bodies for same kind."""
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        for kind, body, msg in (
+            ("return_policy", _COMPLETE_RETURN, "وش سياسة الاسترجاع؟"),
+            ("shipping_policy", _COMPLETE_SHIPPING, "وش سياسة الشحن؟"),
+            ("warranty", "الضمان سنة واحدة على عيوب التصنيع.", "هل عندكم سياسة ضمان؟"),
+            ("terms_policy", "باستخدام المتجر فإنك توافق على الشروط التالية.", "ما شروط الاستخدام؟"),
+            ("privacy_policy", "نحترم خصوصيتك ولا نبيع بياناتك.", "ما سياسة الخصوصية؟"),
+        ):
+            seed_knowledge_section(db, tenant.id, kind=kind, body=body)
+            existence = build_policy_existence_map(db, tenant.id)
+            retrieval = retrieve_merchant_documents(db, tenant.id, msg)
+            assert existence[kind]["status"] == "KNOWN_PRESENT", kind
+            assert len(retrieval.sections) >= 1, kind
+            assert existence[kind]["doc_ref"] == retrieval.sections[0].provenance.get(
+                "doc_ref"
+            ), kind
+
+
+class TestStoreStoryTitleOnly:
+    def test_title_only_story_not_ready_not_retrieved(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="store_story",
+            title="قصة المتجر",
+            body="",
+        )
+        verdict = assess_mks_customer_readiness("", title="قصة المتجر")
+        assert verdict.is_ready is False
+        assert verdict.status == EMPTY_CONTENT
+        retrieval = retrieve_merchant_documents(db, tenant.id, "وش قصة المتجر؟")
+        assert len(retrieval.sections) == 0
+
+    def test_title_only_story_does_not_establish_presence(self):
+        from models import MerchantKnowledgeSection
+        from core.knowledge import apply_ai_visible_kb_query_filters
+
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="store_story",
+            title="قصة المتجر",
+            body="",
+        )
+        rows = (
+            apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant.id,
+                MerchantKnowledgeSection.kind == "store_story",
+            )
+            .all()
+        )
+        ready = [r for r in rows if mks_section_customer_ready(r).is_ready]
+        assert ready == []
+        # Mirror commerce_facts selection rule: no ready body ⇒ story not PRESENT.
+        assert not any(
+            str(getattr(r, "body", "") or "").strip()
+            and mks_section_customer_ready(r).is_ready
+            for r in rows
+        )
