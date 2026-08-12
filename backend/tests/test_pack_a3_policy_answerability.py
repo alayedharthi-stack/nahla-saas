@@ -433,3 +433,228 @@ class TestTermsPrivacyExchangeRefund:
         assert classify_merchant_policy_topic("وش سياسة الخصوصية؟") == "privacy_policy"
         assert classify_merchant_policy_topic("وش شروط الاستبدال؟") == "exchange_policy"
         assert classify_merchant_policy_topic("كم سياسة الاسترداد؟") == "refund_policy"
+
+
+class TestUnknownHonestyFactScope:
+    def test_shipping_policy_suppresses_pack_b_neighbors(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            apply_knowledge_turn_fact_scope,
+            knowledge_turn_suppressed_fact_keys,
+            should_inject_shipping_knowledge_facts,
+        )
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+
+        dec = build_merchant_policy_decision(
+            message="وش سياسة الشحن عندكم؟",
+            facts=_facts(merchant_policy={"shipping_policy": {"status": "UNKNOWN"}}),
+        )
+        assert dec is not None
+        assert not should_inject_shipping_knowledge_facts(dec.args)
+        keys = knowledge_turn_suppressed_fact_keys(dec.args)
+        assert "shipping_methods" in keys
+        assert "shipping_knowledge" in keys
+        assert "shipping_policy" in keys
+        assert "merchant_capability_answer" in keys
+        scoped = apply_knowledge_turn_fact_scope(
+            {
+                "shipping_methods": ["Dev Company"],
+                "shipping_knowledge": {"need_city": True},
+                "shipping_policy": "legacy prose",
+                "merchant_capability_answer": {"shipping_companies": ["Dev Company"]},
+                "merchant_capabilities": {
+                    "payments": {"status": "known"},
+                    "shipping": {"companies": ["Dev Company"]},
+                },
+                "merchant_policy": {"shipping_policy": {"status": "UNKNOWN"}},
+                "store_name": "متجر تجريبي عام",
+            },
+            dec.args,
+        )
+        assert "shipping_methods" not in scoped
+        assert "shipping_knowledge" not in scoped
+        assert "shipping_policy" not in scoped
+        assert "merchant_capability_answer" not in scoped
+        assert "shipping" not in (scoped.get("merchant_capabilities") or {})
+        assert scoped["merchant_policy"]["shipping_policy"]["status"] == "UNKNOWN"
+        assert scoped["store_name"] == "متجر تجريبي عام"
+
+    def test_shipping_companies_not_suppressed(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            knowledge_turn_suppressed_fact_keys,
+            should_inject_shipping_knowledge_facts,
+        )
+
+        args = {"topic": "ask_shipping", "topic_hint": "shipping_companies"}
+        assert should_inject_shipping_knowledge_facts(args)
+        assert knowledge_turn_suppressed_fact_keys(args) == frozenset()
+
+    def test_store_story_strips_profile_description(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            scope_merchant_profiles_for_knowledge_turn,
+        )
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+
+        dec = build_merchant_policy_decision(
+            message="وش قصة المتجر؟",
+            facts=_facts(store_story_status="UNKNOWN"),
+        )
+        assert dec is not None
+        mp, tp = scope_merchant_profiles_for_knowledge_turn(
+            {"description": "وصف متجر تجريبي عام", "name": "متجر تجريبي عام"},
+            {"description": "وصف متجر تجريبي عام", "store_name": "متجر تجريبي عام"},
+            dec.args,
+        )
+        assert "description" not in mp
+        assert "description" not in tp
+        assert mp.get("name") == "متجر تجريبي عام"
+
+    def test_about_keeps_description(self):
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            scope_merchant_profiles_for_knowledge_turn,
+        )
+
+        mp, tp = scope_merchant_profiles_for_knowledge_turn(
+            {"description": "وصف متجر تجريبي عام"},
+            {"description": "وصف متجر تجريبي عام"},
+            {"topic": "store_about"},
+        )
+        assert mp["description"] == "وصف متجر تجريبي عام"
+        assert tp["description"] == "وصف متجر تجريبي عام"
+
+    def test_response_goal_outranks_checkout_next_goal(self):
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import SuggestionSnapshot
+
+        dec = build_merchant_policy_decision(
+            message="وش سياسة الشحن عندكم؟",
+            facts=_facts(merchant_policy={"shipping_policy": {"status": "UNKNOWN"}}),
+        )
+        assert dec is not None
+        goal = _compose_base_response_goal(
+            dec,
+            SuggestionSnapshot(),
+            checkout_facts={
+                "next_goal": "confirm_customer_and_shipping_details_once",
+            },
+        )
+        assert "Do NOT invent" in goal
+        assert "confirm_customer_and_shipping_details_once" not in goal
+
+    def test_pending_city_survives_shipping_policy_skip(self):
+        """Skipping A3 shipping_knowledge inject must not clear pending city."""
+        from core.checkout_shipping_policy import (
+            get_pending_shipping_city,
+            pin_pending_shipping_city,
+        )
+        from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (
+            should_inject_shipping_knowledge_facts,
+        )
+        from modules.ai.brain.commerce.merchant_policy_intents import (
+            build_merchant_policy_decision,
+        )
+        from modules.ai.brain.types import MerchantConversationState
+
+        dec = build_merchant_policy_decision(
+            message="وش سياسة الشحن عندكم؟",
+            facts=_facts(merchant_policy={"shipping_policy": {"status": "UNKNOWN"}}),
+        )
+        assert dec is not None
+        assert not should_inject_shipping_knowledge_facts(dec.args)
+        state = MerchantConversationState(stage="browsing", greeted=True)
+        pin_pending_shipping_city(state, source="ask_shipping")
+        assert get_pending_shipping_city(state) is not None
+        # Simulate A3 skip path: do not call clear/pin when knowledge surface owns turn.
+        assert get_pending_shipping_city(state) is not None
+
+
+class TestUnknownTruthGuard:
+    def test_scrubs_live_shipping_invention(self):
+        from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (
+            apply_merchant_knowledge_unknown_truth_guard,
+            detect_unsupported_specificity_kinds,
+        )
+
+        invented = (
+            "الشحن متوفر للمدن والمناطق المدعومة عبر شركات الشحن المتاحة. "
+            "تكلفة الشحن تعتمد على المدينة، وتظهر قبل إتمام الطلب"
+        )
+        kinds = detect_unsupported_specificity_kinds(invented)
+        assert "coverage_or_availability_assertion" in kinds
+        assert "fee_or_cost_rule" in kinds
+        result = apply_merchant_knowledge_unknown_truth_guard(
+            invented,
+            decision_args={
+                "topic": "merchant_knowledge_shipping_policy",
+                "policy_surface": "merchant_knowledge_section",
+                "merchant_policy_status": "UNKNOWN",
+                "retrieval_count": 0,
+            },
+        )
+        assert result.scrubbed or result.replaced_with_fallback
+        assert "تكلفة الشحن" not in result.reply
+        assert "متوفر للمدن" not in result.reply
+
+    def test_scrubs_fabricated_store_story(self):
+        from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (
+            apply_merchant_knowledge_unknown_truth_guard,
+        )
+
+        invented = (
+            "متجر تجريبي هو منصة متخصصة في تقديم مجموعة متنوعة من المنتجات. "
+            "نحن هنا لتلبية احتياجات العملاء وتقديم تجربة تسوق مميزة."
+        )
+        result = apply_merchant_knowledge_unknown_truth_guard(
+            invented,
+            decision_args={
+                "topic": "merchant_knowledge_store_story",
+                "policy_surface": "merchant_knowledge_section",
+                "merchant_policy_status": "UNKNOWN",
+                "retrieval_count": 0,
+            },
+        )
+        assert result.scrubbed or result.replaced_with_fallback
+        assert "منصة متخصصة" not in result.reply
+
+    def test_honest_unknown_passes(self):
+        from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (
+            apply_merchant_knowledge_unknown_truth_guard,
+        )
+
+        honest = "ما عندي معلومات دقيقة عن سياسة الشحن حاليًا."
+        result = apply_merchant_knowledge_unknown_truth_guard(
+            honest,
+            decision_args={
+                "topic": "merchant_knowledge_shipping_policy",
+                "policy_surface": "merchant_knowledge_section",
+                "merchant_policy_status": "UNKNOWN",
+                "retrieval_count": 0,
+            },
+        )
+        assert not result.scrubbed
+        assert result.reply == honest
+
+    def test_present_path_not_guarded(self):
+        from modules.ai.brain.postprocess.merchant_knowledge_unknown_truth_guard import (
+            apply_merchant_knowledge_unknown_truth_guard,
+        )
+
+        body_grounded = "يمكن الاسترجاع خلال 7 أيام وفق شروط المتجر التجريبي العام."
+        result = apply_merchant_knowledge_unknown_truth_guard(
+            body_grounded,
+            decision_args={
+                "topic": "merchant_knowledge_return_policy",
+                "policy_surface": "merchant_knowledge_section",
+                "merchant_policy_status": "KNOWN_PRESENT",
+                "retrieval_count": 1,
+                "doc_ref": "mks:122",
+            },
+        )
+        assert not result.scrubbed
+        assert "7 أيام" in result.reply
