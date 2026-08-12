@@ -783,7 +783,7 @@ class DefaultDecisionEngine:
             )
             if _a3_dec is not None:
                 return _a3_dec
-        except Exception as _a3_exc:  # noqa: BLE001
+        except Exception as _a3_exc:  # noqa: BLE001  # noqa: silent-ok — Pack A3 policy route must not block decide
             logger.debug(
                 "[PACK_A3_POLICY] routing skipped err=%s",
                 _a3_exc,
@@ -3998,7 +3998,7 @@ class DefaultDecisionEngine:
                 _same_parent_dec = try_ordering_same_parent_inquiry_decision(ctx)
                 if _same_parent_dec is not None:
                     return _same_parent_dec
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — same-parent inquiry probe must not block decide
                 logger.debug(
                     "[STATE_CONTINUITY] ordering_same_parent_inquiry skipped tenant=%s",
                     ctx.tenant_id,
