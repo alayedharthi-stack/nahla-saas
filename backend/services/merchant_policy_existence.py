@@ -108,7 +108,7 @@ def build_policy_existence_map(
                     getattr(row, "id", None),
                     verdict.reason_code or "incomplete",
                 )
-            except Exception:  # noqa: BLE001 — telemetry must not affect eligibility
+            except Exception:  # noqa: silent-ok — telemetry must not affect eligibility
                 pass
             continue
         present[kind] = row

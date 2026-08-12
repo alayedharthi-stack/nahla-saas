@@ -345,7 +345,7 @@ def retrieve_merchant_documents(
                     doc_ref,
                     reason,
                 )
-            except Exception:  # noqa: BLE001 — telemetry must not affect eligibility
+            except Exception:  # noqa: silent-ok — telemetry must not affect eligibility
                 pass
             continue
         eligible.append(r)
