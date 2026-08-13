@@ -327,13 +327,27 @@ def should_restore_brain_reply_after_dedup_silence(
     candidate_reply: str,
     previous_outbound: str = "",
 ) -> bool:
-    """True when hard dedup would silence a commerce inquiry that already composed."""
+    """True when hard dedup would silence a distinct customer turn that already composed.
+
+    Dedup may still collapse duplicate webhook / same-inbound-id retries.
+    It must not drop a new inbound solely because assistant wording resembles
+    a previous UNKNOWN / fact-answer reply.
+    """
     if not (candidate_reply or "").strip():
         return False
     # Bare/labeled order-reference turns (including same-ref retries after
     # track_order_not_found) must not end in zero outbound when brain composed.
     if is_local_order_status_inquiry(current_inbound):
         return True
+    try:
+        from modules.ai.brain.commerce.fact_answer import (  # noqa: PLC0415
+            fact_answer_owns_non_catalog_turn,
+        )
+
+        if fact_answer_owns_non_catalog_turn(current_inbound):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — restore probe is fail-closed
+        pass
     if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
         return False
     if should_bypass_hard_dedup_repeat_availability(current_inbound, previous_outbound):

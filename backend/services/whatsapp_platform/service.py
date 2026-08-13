@@ -648,6 +648,7 @@ async def provider_send_message(
         tenant_id=tenant_id,
     )
     send_payload = dict(payload or {})
+    send_payload.pop("_nahla_inbound_id", None)
     raw_to = str(send_payload.get("to") or "").strip()
     if raw_to:
         from utils.phone_utils import (  # noqa: PLC0415

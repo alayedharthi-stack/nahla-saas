@@ -201,9 +201,15 @@ def _payload_signature(payload: Dict[str, Any]) -> str:
           flattened parameter values
         * ``interactive.body.text`` + button labels
         * ``contacts[]`` — wa_id, phone, display name (sorted)
+        * ``_nahla_inbound_id`` when present — distinct customer inbound
+          events with similar bodies must not collapse into one POST.
+          Same inbound id + same body still collide (webhook replay).
     """
     try:
         canon: Dict[str, Any] = {"type": payload.get("type")}
+        inbound_id = str(payload.get("_nahla_inbound_id") or "").strip()
+        if inbound_id:
+            canon["inbound_id"] = inbound_id
 
         t = payload.get("type")
         if t == "text":

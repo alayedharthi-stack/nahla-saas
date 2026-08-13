@@ -10082,7 +10082,8 @@ async def _handle_merchant_message(
                 reply,
                 native_catalog_entry=_native_catalog_entry,
             )
-            _brain_reply_candidate = (reply or "").strip()
+            if not (_brain_reply_candidate or "").strip():
+                _brain_reply_candidate = (reply or "").strip()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — defer must not block persist gate
             pass
         if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
@@ -12381,6 +12382,7 @@ async def _handle_merchant_message(
                                 text=reply,
                                 _tenant_id=tenant_id,
                                 _db=db,
+                                _inbound_message_id=wa_msg_id,
                             )
                     else:
                         _send_ok = await _send_whatsapp_message(
@@ -12389,6 +12391,7 @@ async def _handle_merchant_message(
                             text=reply,
                             _tenant_id=tenant_id,
                             _db=db,
+                            _inbound_message_id=wa_msg_id,
                         )
                     if _send_ok and isinstance(_delivery_audit, dict):
                         _delivery_audit["text_sent"] = True
@@ -12485,6 +12488,7 @@ async def _handle_merchant_message(
                             _ok_one = await _send_whatsapp_message(
                                 phone_id=phone_id, to=to, text=_msg.body,
                                 _tenant_id=tenant_id, _db=db,
+                                _inbound_message_id=wa_msg_id,
                             )
                             if _ok_one and isinstance(_delivery_audit, dict):
                                 _delivery_audit["text_sent"] = True
@@ -12590,6 +12594,7 @@ async def _handle_merchant_message(
                     _send_ok = await _send_whatsapp_message(
                         phone_id=phone_id, to=to, text=reply,
                         _tenant_id=tenant_id, _db=db,
+                        _inbound_message_id=wa_msg_id,
                     )
                     if _send_ok and isinstance(_delivery_audit, dict):
                         _delivery_audit["text_sent"] = True
@@ -12600,6 +12605,7 @@ async def _handle_merchant_message(
                 _send_ok = await _send_whatsapp_message(
                     phone_id=phone_id, to=to, text=reply,
                     _tenant_id=tenant_id, _db=db,
+                    _inbound_message_id=wa_msg_id,
                 )
                 if _send_ok and isinstance(_delivery_audit, dict):
                     _delivery_audit["text_sent"] = True
@@ -15102,11 +15108,16 @@ async def _send_whatsapp_message(
     _tenant_id: Optional[int] = None, _store_name: str = "unknown", _db=None,
     _allow_manual: bool = False,
     _blocked_path: str = "send_whatsapp_message",
+    _inbound_message_id: Optional[str] = None,
 ) -> bool:
-    return await _post_wa(phone_id, {
+    payload = {
         "messaging_product": "whatsapp", "to": to, "type": "text",
         "text": {"body": text},
-    }, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db,
+    }
+    inbound_id = str(_inbound_message_id or "").strip()
+    if inbound_id:
+        payload["_nahla_inbound_id"] = inbound_id
+    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db,
        _allow_manual=_allow_manual, _blocked_path=_blocked_path)
 
 
