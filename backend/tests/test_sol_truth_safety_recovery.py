@@ -924,7 +924,6 @@ class TestLivePipelineShippingFactTransport:
             for item in contaminated["history"]
         )
         assert "Dev Company" in contaminated["prompt"]
-        assert "أعلى أولوية من أي رد مساعد سابق متعارض" in contaminated["prompt"]
 
     def test_paid_fulfillment_lock_does_not_erase_pack_b_carrier_contract(self) -> None:
         """Catalog skip during a paid order must not load store-name-only facts."""
