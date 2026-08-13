@@ -1297,6 +1297,47 @@ class DefaultDecisionEngine:
         if _resume_dec is not None:
             return _resume_dec
 
+        # ── 0a.508b Order-actual shipping outranks generic fact-answer ──
+        # Customer-specific shipment/order questions (origin, carrier,
+        # delivery time of THIS order) must reach the existing
+        # shipping_post_order owner. Generic merchant facts stay at 0a.509.
+        try:
+            from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                conversation_has_post_order_context,
+                is_order_actual_shipping_question,
+            )
+
+            if conversation_has_post_order_context(state) and is_order_actual_shipping_question(
+                ctx.message or "",
+            ):
+                from core.checkout_shipping_policy import clear_pending_shipping_city  # noqa: PLC0415
+
+                clear_pending_shipping_city(state)
+                logger.info(
+                    "[SHIPPING_INTENT] order-actual post-order — before fact-answer "
+                    "| tenant=%s preview=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:80],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "shipping_post_order",
+                        "topic_hint": "shipping",
+                        "intent_hint": "order_tracking",
+                    },
+                    reason=(
+                        "order-actual shipping/origin/carrier outranks "
+                        "generic merchant fact-answer"
+                    ),
+                )
+        except Exception as _order_actual_exc:  # noqa: BLE001  # noqa: silent-ok — must not block decide
+            logger.debug(
+                "[SHIPPING_INTENT] order-actual probe skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _order_actual_exc,
+            )
+
         # ── 0a.509 Authoritative fact-answer ownership (before catalog) ──
         # Operational/policy/capability/hours/certification questions must
         # not fall through to CatalogNavigator as a universal fallback.
@@ -1309,6 +1350,7 @@ class DefaultDecisionEngine:
                 facts=getattr(ctx, "facts", None),
                 merchant_context=getattr(ctx, "merchant_context", None),
                 history=getattr(ctx, "history", None),
+                state=state,
             )
             if _fact_dec is not None:
                 return _fact_dec
@@ -3318,19 +3360,12 @@ class DefaultDecisionEngine:
             from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
                 is_merchant_shipping_companies_question,
             )
+            from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                conversation_has_post_order_context,
+            )
 
             _op = getattr(state, "order_prep", None)
-            _post_order = bool(
-                getattr(_op, "payment_receipt_received", False)
-                or str(getattr(_op, "order_status", "") or "").lower()
-                in (
-                    "under_review", "processing", "preparing",
-                    "ready", "shipped", "in_transit", "out_for_delivery",
-                    "delivered", "payment_pending",
-                )
-                or bool(getattr(state, "current_product_focus", None))
-                and bool(getattr(_op, "city", None))
-            )
+            _post_order = conversation_has_post_order_context(state)
             if (
                 is_merchant_shipping_companies_question(ctx.message or "")
                 and not _post_order

@@ -43,6 +43,7 @@ from modules.ai.brain.types import (
     INTENT_ASK_PRODUCT,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_WORKING_HOURS,
+    INTENT_COMPLAINT_REFUND,
     INTENT_START_ORDER,
     BrainContext,
     CommerceFacts,
@@ -99,6 +100,12 @@ def _ctx(message: str, intent_name: str, facts: Optional[CommerceFacts] = None) 
         state=MerchantConversationState(stage="browsing", greeted=True),
         facts=facts or _facts(),
     )
+
+
+def _paid_ctx(message: str, intent_name: str, facts: Optional[CommerceFacts] = None) -> BrainContext:
+    ctx = _ctx(message, intent_name, facts=facts)
+    ctx.state.order_prep.payment_receipt_received = True
+    return ctx
 
 
 class TestSemanticFactKind:
@@ -338,3 +345,76 @@ class TestPackRegressionSurface:
         assert dec.action == ACTION_LLM_REPLY
         assert dec.args["answer_contract"]["status"] == STATUS_UNKNOWN
         assert dec.args["answer_contract"]["fact_kind"] == KIND_SHIPPING_FEE
+
+
+class TestTransactionalOutranksGenericFact:
+    """Customer-specific order/shipment truth outranks generic merchant facts."""
+
+    def test_paid_order_branch_origin_is_shipping_post_order(self) -> None:
+        engine = DefaultDecisionEngine()
+        for message in (
+            "اي فرع ارسلتو طلبي في سمسا",
+            "طلبي انرسل من أي فرع؟",
+            "الشحنة هذي طلعت من وين؟",
+        ):
+            d = engine.decide(_paid_ctx(message, INTENT_ASK_SHIPPING))
+            assert d.action == ACTION_LLM_REPLY, message
+            assert d.args.get("topic") == "shipping_post_order", message
+            assert (d.args.get("answer_contract") or {}).get("fact_kind") not in {
+                KIND_BRANCH_EXISTENCE,
+                "location",
+            }
+
+    def test_actual_order_carrier_not_merchant_capability(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_paid_ctx("طلبي مع أي شركة شحن؟", INTENT_ASK_SHIPPING))
+        assert d.args.get("topic") == "shipping_post_order"
+        assert d.args.get("question_kind") != "shipping_companies"
+
+    def test_generic_carrier_stays_pack_b(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_ctx("أي شركة توصلون معها؟", INTENT_ASK_SHIPPING))
+        assert d.args.get("question_kind") == "shipping_companies"
+        assert d.args.get("topic") != "shipping_post_order"
+
+    def test_generic_branch_stays_location_fact(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_ctx("عندكم فرع في جدة؟", INTENT_ASK_LOCATION))
+        assert d.args.get("question_kind") == KIND_BRANCH_EXISTENCE
+        assert d.args.get("topic") == "location_delivery"
+        assert d.args.get("topic") != "shipping_post_order"
+
+    def test_generic_eta_stays_merchant_fact(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_ctx("كم يستغرق الشحن؟", INTENT_ASK_SHIPPING))
+        assert d.args.get("question_kind") == KIND_SHIPPING_ETA
+        assert d.args.get("answer_contract", {}).get("status") == STATUS_UNKNOWN
+        assert d.args.get("topic") != "shipping_post_order"
+
+    def test_actual_order_eta_not_generic_merchant_eta(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_paid_ctx("طلبي متى يوصل؟", INTENT_ASK_SHIPPING))
+        assert d.args.get("topic") == "shipping_post_order"
+        assert (d.args.get("answer_contract") or {}).get("fact_kind") != KIND_SHIPPING_ETA
+
+    def test_warranty_and_return_boundaries_preserved(self) -> None:
+        engine = DefaultDecisionEngine()
+        warranty = engine.decide(_paid_ctx("عندكم ضمان؟", INTENT_ASK_PRODUCT))
+        assert warranty.args.get("question_kind") == KIND_WARRANTY
+        informational = engine.decide(_ctx("عندكم إرجاع؟", INTENT_ASK_PRODUCT))
+        assert informational.args.get("question_kind") == KIND_RETURN_POLICY
+        operational = engine.decide(_paid_ctx("أبي أرجع طلبي", INTENT_COMPLAINT_REFUND))
+        assert operational.args.get("topic") == "support_complaint_refund"
+
+    def test_certification_not_suppressed_by_paid_order(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_paid_ctx("هل المنتج معتمد من هيئة الغذاء؟", INTENT_ASK_PRODUCT))
+        assert d.args.get("question_kind") == KIND_CERTIFICATION
+        assert d.args.get("answer_contract", {}).get("status") == STATUS_UNKNOWN
+        assert d.args.get("topic") != "shipping_post_order"
+
+    def test_generic_branch_still_owned_during_paid_order(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_paid_ctx("عندكم فرع في جدة؟", INTENT_ASK_LOCATION))
+        assert d.args.get("question_kind") == KIND_BRANCH_EXISTENCE
+        assert d.args.get("topic") != "shipping_post_order"

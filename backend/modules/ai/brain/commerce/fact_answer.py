@@ -63,6 +63,18 @@ _POLICY_KINDS = frozenset({
     "store_story",
 })
 
+# Generic merchant facts that must NOT yield to post-order shipping even when
+# a paid order exists in state (hours, warranty, certification, payments).
+_TRANSACTIONAL_YIELD_KINDS = frozenset({
+    KIND_LOCATION,
+    KIND_BRANCH_EXISTENCE,
+    KIND_SHIPPING_COMPANIES,
+    KIND_SHIPPING_ETA,
+    KIND_SHIPPING_FEE,
+    KIND_SHIPPING_COVERAGE,
+    "shipping_policy",
+})
+
 
 def _norm(text: str) -> str:
     t = (text or "").strip().lower()
@@ -266,14 +278,6 @@ def classify_fact_answer(
             reason="payment_capability_shape",
         )
 
-    if intent == INTENT_ASK_PAYMENT_INFO:
-        return FactAnswerRequest(
-            domain=DOMAIN_CAPABILITIES,
-            fact_kind=KIND_PAYMENT_METHODS,
-            catalog_allowed=False,
-            reason="payment_intent",
-        )
-
     if _WARRANTY_CONCEPT.search(norm) and not _PRODUCT_BOUND_POLICY.search(norm):
         return FactAnswerRequest(
             domain=DOMAIN_POLICY,
@@ -341,6 +345,38 @@ def classify_fact_answer(
         pass
 
     return None
+
+
+def fact_answer_yields_to_transactional(
+    message: str,
+    *,
+    intent_name: str = "",
+    state: Any = None,
+    fact_kind: str = "",
+) -> bool:
+    """Customer-specific order/shipment truth outranks generic merchant facts.
+
+    Certification, hours, warranty, return-policy, and payment facts stay
+    fact-answer owned even when a paid order exists. Only shipping/origin/
+    carrier/location fact-kinds yield, and only when the inbound is
+    order-referential (طلبي / شحنتي / …).
+    """
+    if fact_kind and fact_kind not in _TRANSACTIONAL_YIELD_KINDS:
+        return False
+    try:
+        from .order_tracking_intent_guard import (  # noqa: PLC0415
+            is_order_actual_shipping_question,
+        )
+
+        if not is_order_actual_shipping_question(message):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — yield probe must not block fact-answer
+        return False
+    # ``state`` / ``intent_name`` are accepted so the engine can pass the
+    # same context the later ASK_SHIPPING owner uses; message semantics
+    # decide the yield so generic facts remain owned during post-order.
+    _ = (intent_name, state)
+    return True
 
 
 def catalog_must_yield_to_fact_owner(
@@ -669,12 +705,20 @@ def build_fact_answer_decision(
     facts: Any = None,
     merchant_context: Any = None,
     history: Optional[Sequence[Any]] = None,
+    state: Any = None,
 ) -> Optional[Any]:
     """Decision for an authoritative fact question, or None if catalog/other owners apply."""
     req = classify_fact_answer(
         message, intent_name=intent_name, history=history,
     )
     if req is None:
+        return None
+    if fact_answer_yields_to_transactional(
+        message,
+        intent_name=intent_name,
+        state=state,
+        fact_kind=req.fact_kind,
+    ):
         return None
     if req.fact_kind == KIND_GIFT_RECOMMENDATION and req.catalog_allowed:
         # Still own compose so recommendations stay inside catalog evidence.
@@ -750,6 +794,8 @@ def build_fact_answer_decision(
             args["topic"] = "shipping_inquiry"
             args["topic_hint"] = "shipping_companies"
             args["question_kind"] = "shipping_companies"
+    if req.fact_kind in {KIND_SHIPPING_FEE, KIND_SHIPPING_ETA, KIND_SHIPPING_COVERAGE}:
+        args.setdefault("topic_hint", "shipping")
     if req.fact_kind in {KIND_WORKING_HOURS, KIND_OPEN_NOW, KIND_BRANCH_EXISTENCE, KIND_LOCATION}:
         args["profile_surface"] = "merchant_profile"
     return Decision(
@@ -770,4 +816,5 @@ __all__ = [
     "build_fact_answer_decision",
     "catalog_must_yield_to_fact_owner",
     "classify_fact_answer",
+    "fact_answer_yields_to_transactional",
 ]
