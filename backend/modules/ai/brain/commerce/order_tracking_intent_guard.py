@@ -894,6 +894,65 @@ def is_post_order_shipping_brain_defer(message: str) -> bool:
     return bool(_POST_ORDER_SHIPPING_BRAIN_DEFER_RE.search(norm))
 
 
+_POST_ORDER_STATUSES = frozenset({
+    "under_review",
+    "processing",
+    "preparing",
+    "ready",
+    "shipped",
+    "in_transit",
+    "out_for_delivery",
+    "delivered",
+    "payment_pending",
+})
+
+# Origin / carrier / delivery-time of THIS customer's shipment — not merchant
+# capability ("أي شركة توصلون معها؟") or generic branch ("عندكم فرع في جدة؟").
+_ORDER_ACTUAL_SHIPPING_TOPIC_RE = re.compile(
+    r"(?:"
+    r"فرع|فروع|branch|"
+    r"شرك[ةه]|ناقل|carrier|courier|"
+    r"سمسا|smsa|aramex|ارامكس|\bdhl\b|"
+    r"انرسل|ارسل|طلع|"
+    r"متي\s*(?:يوصل|توصل|يجي)|متى\s*(?:يوصل|توصل|يجي)"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def conversation_has_post_order_context(state: Any) -> bool:
+    """Same post-order signals the ASK_SHIPPING owner already uses."""
+    if state is None:
+        return False
+    if _order_prep_field(state, "payment_receipt_received", False):
+        return True
+    status = str(_order_prep_field(state, "order_status", "") or "").lower()
+    if status in _POST_ORDER_STATUSES:
+        return True
+    focus = _brain_state_field(state, "current_product_focus", None)
+    city = _order_prep_field(state, "city", None)
+    return bool(focus) and bool(city)
+
+
+def is_order_actual_shipping_question(message: str) -> bool:
+    """Customer-specific shipment/order question, not a generic merchant fact.
+
+    Requires an order/shipment anchor plus origin, carrier, or delivery-time
+    semantics. Does not blacklist ``فرع`` and does not match generic
+    branch/capability asks that lack an order reference.
+    """
+    if is_pre_order_shipping_inquiry(message):
+        return False
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    if not _ORDER_ANCHOR_RE.search(norm):
+        return False
+    if is_post_order_shipping_brain_defer(message):
+        return True
+    return bool(_ORDER_ACTUAL_SHIPPING_TOPIC_RE.search(norm))
+
+
 def is_explicit_order_tracking_request(
     message: str,
     *,
@@ -1021,6 +1080,8 @@ __all__ = [
     "is_general_shipping_duration_inquiry",
     "is_order_support_operational_follow_up",
     "is_order_tracking_follow_up",
+    "conversation_has_post_order_context",
+    "is_order_actual_shipping_question",
     "is_post_order_shipping_brain_defer",
     "is_pre_order_shipping_inquiry",
     "is_shipping_tracking_non_product_label",

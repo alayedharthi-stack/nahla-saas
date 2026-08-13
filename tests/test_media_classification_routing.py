@@ -475,6 +475,7 @@ class TestShippingIntentDefersToBrainAfterOrder:
         order_status: str = "",
         product_focus: bool = False,
         city: str = "",
+        message: str = "اي فرع ارسلتو طلبي في سمسا",
     ):
         """Build a minimal BrainContext that satisfies the engine
         check. Avoids importing every collaborator the real
@@ -502,13 +503,13 @@ class TestShippingIntentDefersToBrainAfterOrder:
             name=INTENT_ASK_SHIPPING,
             confidence=0.90,
             slots={},
-            raw_message="اي فرع ارسلتو طلبي في سمسا",
+            raw_message=message,
             extraction_method="rules",
         )
         return BrainContext(
             tenant_id=1,
             customer_phone="+966500000099",
-            message="اي فرع ارسلتو طلبي في سمسا",
+            message=message,
             intent=intent,
             state=state,
             facts=CommerceFacts(),
@@ -596,6 +597,27 @@ class TestShippingIntentDefersToBrainAfterOrder:
         )
         d = DefaultDecisionEngine().decide(ctx)
         assert d.action == ACTION_LLM_REPLY
+
+    def test_paid_order_shipping_origin_semantic_variants(self) -> None:
+        """Order-referential origin/carrier asks stay post-order owned."""
+        from modules.ai.brain.decision.engine import DefaultDecisionEngine
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+
+        engine = DefaultDecisionEngine()
+        for message in (
+            "طلبي انرسل من أي فرع؟",
+            "الشحنة هذي طلعت من وين؟",
+            "طلبي مع أي شركة؟",
+        ):
+            ctx = self._build_post_order_ctx(
+                payment_receipt_received=True,
+                message=message,
+            )
+            d = engine.decide(ctx)
+            assert d.action == ACTION_LLM_REPLY, message
+            assert d.args.get("topic") == "shipping_post_order", (
+                f"{message!r} → topic={d.args.get('topic')!r}"
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────

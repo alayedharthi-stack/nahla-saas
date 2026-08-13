@@ -28,6 +28,8 @@ _RETURN_POLICY_RE = re.compile(
     r"شروط\s*(?:ال)?(?:استرجاع|إرجاع|ارجاع|استرداد|استبدال)|"
     r"كيف\s*(?:نظام|تتم|يصير)\s*(?:ال)?(?:استرجاع|إرجاع|الاسترداد|الاستبدال)|"
     r"كم\s*(?:سياس[ةه]|مدة)\s*(?:ال)?(?:استرجاع|الاسترداد)|"
+    r"(?:هل\s*)?عند(?:كم|ك)\s*(?:إرجاع|ارجاع|استرجاع|استرداد|استبدال)|"
+    r"فيه\s*(?:إرجاع|ارجاع|استرجاع)|"
     r"return\s*polic|"
     r"refund\s*polic|"
     r"exchange\s*polic"
@@ -68,7 +70,8 @@ _PRIVACY_RE = re.compile(
 _WARRANTY_POLICY_RE = re.compile(
     r"("
     r"سياس[ةه]\s*(?:ال)?ضمان|"
-    r"هل\s*عند(?:كم|ك)\s*(?:سياس[ةه]\s*)?ضمان|"
+    r"(?:هل\s*)?عند(?:كم|ك)\s*(?:سياس[ةه]\s*)?ضمان|"
+    r"فيه\s*ضمان|"
     r"warranty\s*polic|"
     r"do\s*you\s*(?:have\s*)?(?:a\s*)?warranty"
     r")",
@@ -219,6 +222,7 @@ def build_merchant_policy_decision(
     message: str,
     facts: Any = None,
     merchant_context: Any = None,
+    question_kind: Optional[str] = None,
 ) -> Optional[Any]:
     """Build ACTION_LLM_REPLY for informational long-form knowledge, or None."""
     del merchant_context  # reserved for future prepared-context enrichment
@@ -229,7 +233,7 @@ def build_merchant_policy_decision(
     if not text:
         return None
 
-    if is_deferred_faq_customer_question(text):
+    if is_deferred_faq_customer_question(text) and not question_kind:
         return Decision(
             action=ACTION_LLM_REPLY,
             args={
@@ -249,7 +253,7 @@ def build_merchant_policy_decision(
             reason="Pack A3 FAQ customer exposure deferred — no visibility contract",
         )
 
-    topic = classify_merchant_policy_topic(text)
+    topic = question_kind or classify_merchant_policy_topic(text)
     if not topic:
         return None
 

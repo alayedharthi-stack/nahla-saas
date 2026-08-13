@@ -1194,7 +1194,29 @@ class DefaultDecisionEngine:
             except Exception:  # noqa: BLE001
                 logger.exception("[DECISION_ENGINE] social_non_commerce_probe_failed")
             _category = str(getattr(_current_social_nc, "category", "") or "")
-            if _category != "greeting" or _has_stale_commerce_context(ctx):
+            _fact_blocks_social = False
+            try:
+                from ..commerce.fact_answer import classify_fact_answer  # noqa: PLC0415
+
+                _fact_req = classify_fact_answer(
+                    ctx.message or "",
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    history=getattr(ctx, "history", None),
+                )
+                _fact_blocks_social = bool(
+                    _fact_req is not None and not _fact_req.catalog_allowed
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok
+                _fact_blocks_social = False
+            if _fact_blocks_social:
+                logger.info(
+                    "[CURRENT_TURN_SOCIAL_NC] yield_fact_answer tenant=%s "
+                    "category=%s preview=%r",
+                    getattr(ctx, "tenant_id", None),
+                    _category or "-",
+                    (ctx.message or "")[:60],
+                )
+            elif _category != "greeting" or _has_stale_commerce_context(ctx):
                 logger.info(
                     "[CURRENT_TURN_SOCIAL_NC] route tenant=%s category=%s "
                     "reason=%s preview=%r",
@@ -1274,6 +1296,73 @@ class DefaultDecisionEngine:
         _resume_dec = _try_order_resume_decision(ctx)
         if _resume_dec is not None:
             return _resume_dec
+
+        # ── 0a.508b Order-actual shipping yields past fact-answer ──
+        # Restores the existing ASK_SHIPPING post-order Decision for
+        # origin/carrier/delivery-time of THIS order. Does not own
+        # ACTION_TRACK_ORDER ("وين طلبي؟") and does not blacklist فرع.
+        try:
+            from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                conversation_has_post_order_context,
+                is_order_actual_shipping_question,
+            )
+
+            _intent_name = str(getattr(intent, "name", "") or "")
+            if (
+                _intent_name != INTENT_TRACK_ORDER
+                and conversation_has_post_order_context(state)
+                and is_order_actual_shipping_question(ctx.message or "")
+            ):
+                from core.checkout_shipping_policy import clear_pending_shipping_city  # noqa: PLC0415
+
+                clear_pending_shipping_city(state)
+                logger.info(
+                    "[SHIPPING_INTENT] order-actual post-order — before fact-answer "
+                    "| tenant=%s preview=%r",
+                    ctx.tenant_id,
+                    (ctx.message or "")[:80],
+                )
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "shipping_post_order",
+                        "topic_hint": "shipping",
+                        "intent_hint": "order_tracking",
+                    },
+                    reason=(
+                        "order-actual shipping/origin/carrier outranks "
+                        "generic merchant fact-answer"
+                    ),
+                )
+        except Exception as _order_actual_exc:  # noqa: BLE001  # noqa: silent-ok — must not block decide
+            logger.debug(
+                "[SHIPPING_INTENT] order-actual probe skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _order_actual_exc,
+            )
+
+        # ── 0a.509 Authoritative fact-answer ownership (before catalog) ──
+        # Operational/policy/capability/hours/certification questions must
+        # not fall through to CatalogNavigator as a universal fallback.
+        try:
+            from ..commerce.fact_answer import build_fact_answer_decision  # noqa: PLC0415
+
+            _fact_dec = build_fact_answer_decision(
+                message=ctx.message or "",
+                intent_name=str(getattr(getattr(ctx, "intent", None), "name", "") or ""),
+                facts=getattr(ctx, "facts", None),
+                merchant_context=getattr(ctx, "merchant_context", None),
+                history=getattr(ctx, "history", None),
+                state=state,
+            )
+            if _fact_dec is not None:
+                return _fact_dec
+        except Exception as _fact_exc:  # noqa: BLE001  # noqa: silent-ok — fact-answer must not block decide
+            logger.debug(
+                "[FACT_ANSWER] routing skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _fact_exc,
+            )
 
         # ── 0a.51 Commerce entry catalog delivery (CE2) ───────────────────
         try:
@@ -3274,19 +3363,12 @@ class DefaultDecisionEngine:
             from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
                 is_merchant_shipping_companies_question,
             )
+            from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                conversation_has_post_order_context,
+            )
 
             _op = getattr(state, "order_prep", None)
-            _post_order = bool(
-                getattr(_op, "payment_receipt_received", False)
-                or str(getattr(_op, "order_status", "") or "").lower()
-                in (
-                    "under_review", "processing", "preparing",
-                    "ready", "shipped", "in_transit", "out_for_delivery",
-                    "delivered", "payment_pending",
-                )
-                or bool(getattr(state, "current_product_focus", None))
-                and bool(getattr(_op, "city", None))
-            )
+            _post_order = conversation_has_post_order_context(state)
             if (
                 is_merchant_shipping_companies_question(ctx.message or "")
                 and not _post_order

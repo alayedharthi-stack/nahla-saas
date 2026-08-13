@@ -250,70 +250,24 @@ def _try_native_catalog_entry_decision(
 
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve owned catalog navigation turns before discovery/search/product_media."""
-    # Specific merchant-capability FAQ outranks generic browse heuristics
-    # ("وش" + "عندكم"). Yield before any ownership lock.
     try:
-        from ..commerce.merchant_capability_faq import (  # noqa: PLC0415
-            should_yield_catalog_navigator_for_capability,
-        )
-
-        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
-        if should_yield_catalog_navigator_for_capability(
-            intent_name=_intent_name,
-            message=str(getattr(ctx, "message", "") or ""),
-        ):
-            _log_navigator_event(
-                ctx,
-                navigator_owner=False,
-                owner_exit_reason="merchant_capability_faq",
-                extra={"intent": _intent_name or "-"},
-            )
-            return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — capability yield probe is best-effort
-        pass
-
-    # Pack A2: structured MERCHANT_PROFILE questions outrank generic browse.
-    try:
-        from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
-            should_yield_catalog_for_merchant_profile,
-        )
+        from ..commerce.fact_answer import catalog_must_yield_to_fact_owner  # noqa: PLC0415
 
         _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
         _message = str(getattr(ctx, "message", "") or "")
-        if should_yield_catalog_for_merchant_profile(
+        if catalog_must_yield_to_fact_owner(
             intent_name=_intent_name,
             message=_message,
+            history=getattr(ctx, "history", None),
         ):
             _log_navigator_event(
                 ctx,
                 navigator_owner=False,
-                owner_exit_reason="merchant_profile",
+                owner_exit_reason="fact_answer_owner",
                 extra={"intent": _intent_name or "-"},
             )
             return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — profile yield probe is best-effort
-        pass
-
-    # Pack A3: merchant-wide policy / story / deferred FAQ outrank catalog.
-    try:
-        from ..commerce.merchant_policy_intents import (  # noqa: PLC0415
-            should_yield_catalog_for_merchant_policy,
-        )
-
-        _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
-        _message = str(getattr(ctx, "message", "") or "")
-        if not should_yield_catalog_for_merchant_policy(
-            intent_name=_intent_name,
-            message=_message,
-        ):
-            _log_navigator_event(
-                ctx,
-                navigator_owner=False,
-                owner_exit_reason="merchant_policy_knowledge",
-                extra={"intent": _intent_name or "-"},
-            )
-            return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — policy yield probe is best-effort
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fact-answer yield must not break navigator
         pass
 
     try:
