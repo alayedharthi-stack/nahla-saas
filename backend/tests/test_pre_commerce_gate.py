@@ -54,6 +54,16 @@ class TestPreCommerceGate:
         intent = _intent(INTENT_SOCIAL, conf=0.5, social_category="thanks")
         assert should_pre_commerce_shortcut(intent, None, min_confidence=0.82) is False
 
+    def test_social_fact_owner_does_not_shortcut(self):
+        intent = _intent(INTENT_SOCIAL, social_category="general_courtesy")
+        assert should_pre_commerce_shortcut(
+            intent, None, message="والشحن مين ماسكه؟",
+        ) is False
+
+    def test_pure_thanks_still_shortcuts(self):
+        intent = _intent(INTENT_SOCIAL, social_category="thanks")
+        assert should_pre_commerce_shortcut(intent, None, message="شكرا") is True
+
     def test_block_commerce_slot_shortcuts(self):
         intent = _intent(
             INTENT_SOCIAL,

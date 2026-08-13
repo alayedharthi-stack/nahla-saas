@@ -44,7 +44,7 @@ def _state(**overrides) -> BrainReplyState:
 def test_greeting_does_not_inject_kb_or_catalog_in_prompt():
     state = _state(intent_name="greeting")
     prompt = build_brain_reply_prompt(state)
-    assert "حقائق المتجر" not in prompt
+    assert _LARGE_KB[:80] not in prompt
     assert "[PRODUCT:1]" not in prompt
     assert len(prompt) < 40_000
 
@@ -122,3 +122,22 @@ def test_routine_social_turn_detects_greeting_and_thanks():
     assert is_routine_social_turn(_state(intent_name="greeting"))
     assert is_routine_social_turn(_state(intent_name="thanks"))
     assert not is_routine_social_turn(_state(intent_name=INTENT_ASK_PRODUCT))
+
+
+def test_social_intent_keeps_authoritative_answer_contract():
+    state = _state(
+        intent_name="social",
+        known_facts={
+            "answer_contract": {
+                "fact_kind": "shipping_companies",
+                "status": "KNOWN_VALUE",
+                "claimable_values": ["Dev Company"],
+            },
+            "shipping_methods": ["Dev Company"],
+        },
+    )
+    assert is_routine_social_turn(state) is False
+    slim = strip_state_dict_for_prompt(asdict(state), state, kb_in_prompt_block=False)
+    dumped = json.dumps(slim.get("known_facts") or {}, ensure_ascii=False)
+    assert "Dev Company" in dumped
+    assert "shipping_companies" in dumped

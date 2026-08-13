@@ -63,6 +63,23 @@ def should_pre_commerce_shortcut(
     ):
         return False
 
+    # FactAnswer is the turn owner. Coarse SOCIAL must not load
+    # store-name-only facts and then compose as if capabilities were UNKNOWN.
+    if message:
+        try:
+            from .commerce.fact_answer import fact_answer_owns_non_catalog_turn  # noqa: PLC0415
+
+            if fact_answer_owns_non_catalog_turn(
+                message,
+                intent_name=str(getattr(intent, "name", "") or ""),
+            ):
+                return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[PRE_COMMERCE_GATE_ERROR] fact-answer ownership probe failed: %s",
+                type(exc).__name__,
+            )
+
     if nc_match is not None and nc_match.block_commerce:
         if float(nc_match.confidence or 0) >= threshold:
             return True
