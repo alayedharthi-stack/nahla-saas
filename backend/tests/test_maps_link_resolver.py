@@ -537,6 +537,30 @@ def test_safety_net_no_url_fallback_is_honest(
     )
 
 
+def test_safety_net_skips_branch_existence_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existence questions must not be rewritten into a selectable-network
+    fallback when no branch evidence exists."""
+    from modules.ai.postprocess.safety_nets import apply_location_safety_net
+
+    db = _install_resolver_stubs(
+        monkeypatch,
+        snapshot_maps_url="",
+        settings_maps_url="",
+        kb_sections=[],
+    )
+    honest = "ما عندي معلومات مؤكدة عن وجود فرع في هذه المدينة."
+    result = apply_location_safety_net(
+        db, tenant_id=33,
+        customer_msg="عندكم فرع في لندن؟",
+        reply_text=honest,
+    )
+    assert result.fired is False
+    assert result.skipped_reason == "branch_existence_fact_owner"
+    assert result.new_reply in (None, "", honest)
+
+
 # ── Trigger phrasing — disjoint from store-link triggers ────────────────────
 
 

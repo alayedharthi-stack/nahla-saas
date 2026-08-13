@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from modules.ai.brain.commerce.fact_answer import (
     KIND_BRANCH_EXISTENCE,
+    KIND_CASH_ON_DELIVERY,
     KIND_CERTIFICATION,
     KIND_GIFT_RECOMMENDATION,
     KIND_PAYMENT_METHODS,
@@ -37,6 +38,7 @@ from modules.ai.brain.commerce.merchant_policy_intents import (
 from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_TRACK_ORDER
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
 from modules.ai.brain.types import (
+    INTENT_ASK_COD,
     INTENT_ASK_LOCATION,
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_PRICE,
@@ -44,6 +46,8 @@ from modules.ai.brain.types import (
     INTENT_ASK_SHIPPING,
     INTENT_ASK_WORKING_HOURS,
     INTENT_COMPLAINT_REFUND,
+    INTENT_PAY_NOW,
+    INTENT_SOCIAL,
     INTENT_START_ORDER,
     INTENT_TRACK_ORDER,
     BrainContext,
@@ -197,6 +201,18 @@ class TestUnknownContract:
         contract = build_fact_answer_contract(req, facts=_facts(maps_url=""))
         assert contract.status == STATUS_UNKNOWN
         assert "imply_branch_network" in contract.forbidden_inferences
+        assert "branch_selectable" in contract.forbidden_inferences
+        assert "branch_address_exists" in contract.forbidden_inferences
+
+    def test_branch_existence_maps_url_is_not_network_evidence(self) -> None:
+        req = classify_fact_answer("عندكم فرع في لندن؟", intent_name=INTENT_ASK_LOCATION)
+        assert req is not None
+        contract = build_fact_answer_contract(
+            req, facts=_facts(maps_url="https://maps.app.goo.gl/x"),
+        )
+        assert contract.status == STATUS_UNKNOWN
+        assert contract.claimable_values == []
+        assert "maps_url_proves_named_city" in contract.forbidden_inferences
 
     def test_certification_unknown_without_product_evidence(self) -> None:
         req = classify_fact_answer("هل المنتج معتمد من هيئة الغذاء؟")
@@ -425,3 +441,147 @@ class TestTransactionalOutranksGenericFact:
         d = engine.decide(_paid_ctx("وين طلبي؟", INTENT_TRACK_ORDER))
         assert d.action == ACTION_TRACK_ORDER
         assert d.args.get("topic") != "shipping_post_order"
+
+
+class TestSemanticConvergence:
+    """Canonical vs paraphrase ownership — no phrase-only routing."""
+
+    def test_payment_paraphrases_are_method_discovery(self) -> None:
+        engine = DefaultDecisionEngine()
+        for message, intent_name in (
+            ("وش طرق الدفع عندكم؟", INTENT_ASK_PAYMENT_INFO),
+            ("وش عندكم طريقة أدفع فيها؟", INTENT_PAY_NOW),
+            ("وش أقدر أدفع فيه؟", INTENT_PAY_NOW),
+        ):
+            req = classify_fact_answer(message, intent_name=intent_name)
+            assert req is not None, message
+            assert req.fact_kind == KIND_PAYMENT_METHODS, message
+            d = engine.decide(_ctx(message, intent_name))
+            assert d.action == ACTION_LLM_REPLY, message
+            assert d.args.get("topic") == "merchant_payment_methods", message
+            assert "cod" in (d.args.get("answer_contract") or {}).get("claimable_values", []), message
+
+    def test_cod_capability_not_method_list(self) -> None:
+        req = classify_fact_answer("هل أقدر أدفع عند الاستلام؟", intent_name=INTENT_PAY_NOW)
+        assert req is not None
+        assert req.fact_kind == KIND_CASH_ON_DELIVERY
+        d = DefaultDecisionEngine().decide(
+            _ctx("هل أقدر أدفع عند الاستلام؟", INTENT_ASK_COD),
+        )
+        assert d.args.get("topic") == "cash_on_delivery"
+
+    def test_bank_detail_ask_is_not_method_list(self) -> None:
+        req = classify_fact_answer("أرسل رقم الحساب البنكي", intent_name=INTENT_ASK_PAYMENT_INFO)
+        assert req is None or req.fact_kind != KIND_PAYMENT_METHODS
+        d = DefaultDecisionEngine().decide(
+            _ctx("أرسل رقم الحساب البنكي", INTENT_ASK_PAYMENT_INFO),
+        )
+        assert d.args.get("topic") != "merchant_payment_methods"
+        assert d.args.get("topic") == "payment_info"
+
+    def test_payment_followup_preserves_methods_context(self) -> None:
+        req = classify_fact_answer(
+            "طيب وش أقدر أستخدم؟",
+            history=[{"content": "وش طرق الدفع عندكم؟"}],
+        )
+        assert req is not None
+        assert req.fact_kind == KIND_PAYMENT_METHODS
+
+    def test_carrier_paraphrases_use_merchant_capability(self) -> None:
+        engine = DefaultDecisionEngine()
+        for message, intent_name in (
+            ("أي شركة توصلون معها؟", INTENT_ASK_SHIPPING),
+            ("والشحن مين ماسكه؟", INTENT_SOCIAL),
+            ("مين شركة التوصيل؟", INTENT_SOCIAL),
+        ):
+            req = classify_fact_answer(message, intent_name=intent_name)
+            assert req is not None, message
+            assert req.fact_kind == KIND_SHIPPING_COMPANIES, message
+            d = engine.decide(_ctx(message, intent_name))
+            assert d.args.get("question_kind") == KIND_SHIPPING_COMPANIES, message
+            assert "Dev Company" in (d.args.get("answer_contract") or {}).get(
+                "claimable_values", [],
+            ), message
+            assert d.args.get("topic") != "shipping_post_order", message
+
+    def test_carrier_followup_stays_merchant_capability(self) -> None:
+        req = classify_fact_answer(
+            "والشحن مين ماسكه؟",
+            intent_name=INTENT_SOCIAL,
+            history=[{"content": "وش شركات الشحن عندكم؟"}],
+        )
+        assert req is not None
+        assert req.fact_kind == KIND_SHIPPING_COMPANIES
+
+    def test_actual_order_who_holds_shipment_outranks_capability(self) -> None:
+        d = DefaultDecisionEngine().decide(_paid_ctx("طلبي مع مين؟", INTENT_ASK_SHIPPING))
+        assert d.args.get("topic") == "shipping_post_order"
+        assert d.args.get("question_kind") != KIND_SHIPPING_COMPANIES
+
+    def test_branch_existence_unknown_contract_forbids_network(self) -> None:
+        engine = DefaultDecisionEngine()
+        for message in (
+            "عندكم فرع في لندن؟",
+            "فيه فرع بالرياض؟",
+            "طيب عندكم فروع؟",
+        ):
+            req = classify_fact_answer(message, intent_name=INTENT_ASK_LOCATION)
+            assert req is not None, message
+            assert req.fact_kind == KIND_BRANCH_EXISTENCE, message
+            contract = build_fact_answer_contract(req, facts=_facts(maps_url=""))
+            assert contract.status == STATUS_UNKNOWN, message
+            assert not contract.claimable_values, message
+            assert "branch_selectable" in contract.forbidden_inferences
+            d = engine.decide(_ctx(message, INTENT_ASK_LOCATION))
+            assert d.args.get("question_kind") == KIND_BRANCH_EXISTENCE, message
+            assert d.args.get("answer_contract", {}).get("status") == STATUS_UNKNOWN, message
+            goal = str(d.args.get("response_goal") or "")
+            assert "branch_selectable" in goal or "address can be sent" in goal, message
+
+    def test_generic_branches_question_does_not_invent_place_token(self) -> None:
+        req = classify_fact_answer("طيب عندكم فروع؟", intent_name=INTENT_ASK_LOCATION)
+        assert req is not None
+        assert req.fact_kind == KIND_BRANCH_EXISTENCE
+        contract = build_fact_answer_contract(
+            req,
+            facts=_facts(),
+            merchant_context={
+                "merchant_profile": {
+                    "location": "الرياض",
+                    "location.status": STATUS_KNOWN_VALUE,
+                }
+            },
+            message="طيب عندكم فروع؟",
+        )
+        assert contract.status == STATUS_KNOWN_VALUE
+        assert "الرياض" in [str(v) for v in contract.claimable_values]
+        req = classify_fact_answer(
+            "طيب في لندن؟",
+            history=[{"content": "عندكم فروع؟"}],
+        )
+        assert req is not None
+        assert req.fact_kind == KIND_BRANCH_EXISTENCE
+        contract = build_fact_answer_contract(req, facts=_facts(maps_url=""))
+        assert contract.status == STATUS_UNKNOWN
+
+    def test_certification_followup_preserves_product_unknown(self) -> None:
+        req = classify_fact_answer(
+            "هذا عليه اعتماد؟",
+            history=[{"content": "اخترت هذا المنتج"}],
+        )
+        assert req is not None
+        assert req.fact_kind == KIND_CERTIFICATION
+        contract = build_fact_answer_contract(req, facts=_facts())
+        assert contract.status == STATUS_UNKNOWN
+
+    def test_carrier_then_eta_stays_unknown(self) -> None:
+        req = classify_fact_answer(
+            "طيب كم ياخذ عادة؟",
+            intent_name=INTENT_ASK_SHIPPING,
+            history=[{"content": "وش شركة الشحن عندكم؟"}],
+        )
+        assert req is not None
+        assert req.fact_kind == KIND_SHIPPING_ETA
+        contract = build_fact_answer_contract(req, facts=_facts())
+        assert contract.status == STATUS_UNKNOWN
+        assert "carrier_implies_eta" in contract.forbidden_inferences

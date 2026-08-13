@@ -3248,6 +3248,22 @@ def apply_location_safety_net(
         result.skipped_reason = "flag_disabled"
         return result
 
+    # Existence questions ("عندكم فرع في …؟") are fact-answer owned.
+    # Injecting maps or the no-maps "pick a branch / we will send the
+    # address" fallback implies a selectable network without evidence.
+    try:
+        from modules.ai.brain.commerce.fact_answer import (  # noqa: PLC0415
+            KIND_BRANCH_EXISTENCE,
+            classify_fact_answer,
+        )
+
+        _fact_req = classify_fact_answer(customer_msg or "")
+        if _fact_req is not None and _fact_req.fact_kind == KIND_BRANCH_EXISTENCE:
+            result.skipped_reason = "branch_existence_fact_owner"
+            return result
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — location net may still apply
+        pass
+
     if not _looks_like_location_request(customer_msg or ""):
         result.skipped_reason = "no_location_intent"
         return result

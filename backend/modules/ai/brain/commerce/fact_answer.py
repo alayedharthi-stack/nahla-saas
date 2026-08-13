@@ -20,7 +20,6 @@ from modules.ai.brain.types import (
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_WORKING_HOURS,
-    INTENT_PAY_NOW,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
 )
@@ -206,8 +205,25 @@ def classify_fact_answer(
     norm = _norm(text)
     intent = str(intent_name or "").strip()
     hist = _history_blob(history)
-    if intent in {INTENT_PAY_NOW, INTENT_TRACK_ORDER, INTENT_TALK_HUMAN}:
+    # TRACK_ORDER / TALK_HUMAN stay transactional. PAY_NOW must not skip
+    # payment-method *discovery* ("وش عندكم طريقة أدفع فيها؟") — that is
+    # MERCHANT_CAPABILITIES.payment_methods, not checkout continuation.
+    if intent in {INTENT_TRACK_ORDER, INTENT_TALK_HUMAN}:
         return None
+
+    pack_b_pay = False
+    pack_b_ship = False
+    try:
+        from .merchant_capability_faq import (  # noqa: PLC0415
+            is_merchant_payment_methods_question,
+            is_merchant_shipping_companies_question,
+        )
+
+        pack_b_pay = is_merchant_payment_methods_question(text)
+        pack_b_ship = is_merchant_shipping_companies_question(text)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — local shapes remain authoritative
+        pack_b_pay = False
+        pack_b_ship = False
 
     if _CERT_CONCEPT.search(norm):
         return FactAnswerRequest(
@@ -242,11 +258,17 @@ def classify_fact_answer(
             reason="shipping_eta_shape",
         )
     if (
-        _COMPANY_CONCEPT.search(norm)
-        and (_SHIP_CONCEPT.search(norm) or _WHO_SHAPE.search(norm))
-    ) or (
-        _WHO_SHAPE.search(norm)
-        and _SHIP_CONCEPT.search(norm)
+        (
+            pack_b_ship
+            or (
+                _COMPANY_CONCEPT.search(norm)
+                and (_SHIP_CONCEPT.search(norm) or _WHO_SHAPE.search(norm))
+            )
+            or (
+                _WHO_SHAPE.search(norm)
+                and _SHIP_CONCEPT.search(norm)
+            )
+        )
         and not _FEE_SHAPE.search(norm)
         and not _ETA_SHAPE.search(norm)
     ):
@@ -262,7 +284,8 @@ def classify_fact_answer(
         or re.search(r"how\s*(?:can|do)\s*i\s*pay|payment\s*methods?", norm)
     )
     if (
-        payment_list_shape
+        pack_b_pay
+        or payment_list_shape
         or (_USE_AT_ORDER_SHAPE.search(norm) and not _QTY_OR_SKU.search(norm))
         or (
             _PAYMENT_CONCEPT.search(norm)
@@ -305,8 +328,19 @@ def classify_fact_answer(
             reason="hours_or_open_now",
         )
 
-    if intent == INTENT_ASK_LOCATION or _BRANCH_CONCEPT.search(norm):
-        kind = KIND_BRANCH_EXISTENCE if _EXISTENCE_SHAPE.search(norm) else KIND_LOCATION
+    branch_place_followup = bool(
+        _BRANCH_CONCEPT.search(hist)
+        and re.search(
+            r"^(?:طيب|حسنا|ok|okay)?\s*(?:في|ب)\s*\S{3,}\s*$",
+            norm,
+        )
+    )
+    if intent == INTENT_ASK_LOCATION or _BRANCH_CONCEPT.search(norm) or branch_place_followup:
+        kind = (
+            KIND_BRANCH_EXISTENCE
+            if (_EXISTENCE_SHAPE.search(norm) or branch_place_followup)
+            else KIND_LOCATION
+        )
         return FactAnswerRequest(
             domain=DOMAIN_PROFILE,
             fact_kind=kind,
@@ -462,6 +496,19 @@ def _field_status(payload: Dict[str, Any], key: str) -> tuple[str, Any]:
     return STATUS_KNOWN_VALUE, value
 
 
+def _asked_branch_place(norm_msg: str) -> str:
+    """Named place on a branch-existence question, if the turn supplied one."""
+    m = re.search(r"(?:فرع|فروع).{0,20}(?:في|ب)\s*(\S{2,})", norm_msg)
+    if m:
+        return str(m.group(1) or "").strip()
+    # Standalone preposition + place ("طيب في لندن"). Require a word
+    # boundary so the trailing ب in طيب is not read as "in".
+    m = re.search(r"(?:^|\s)(?:في|ب)\s+(\S{3,})", norm_msg)
+    if m:
+        return str(m.group(1) or "").strip()
+    return ""
+
+
 def _capability_list(caps: Dict[str, Any], *paths: str) -> tuple[str, List[Any]]:
     cursor: Any = caps
     for part in paths:
@@ -550,9 +597,15 @@ def build_fact_answer_contract(
         if branch_status == STATUS_KNOWN_VALUE and branch_val:
             known.append(branch_val)
             refs.append("merchant_profile.default_branch")
-        if maps:
+        if request.fact_kind == KIND_LOCATION and maps:
             known.append(maps)
             refs.append("commerce_facts.maps_url")
+        if request.fact_kind == KIND_BRANCH_EXISTENCE:
+            asked = _asked_branch_place(_norm(message))
+            evidence_blob = _norm(" ".join(str(x) for x in known if x))
+            if asked and (not evidence_blob or asked not in evidence_blob):
+                known = []
+                refs = refs or ["merchant_profile.location"]
         contract.evidence_refs = refs or ["merchant_profile.location"]
         contract.claimable_values = known
         contract.status = STATUS_KNOWN_VALUE if known else STATUS_UNKNOWN
@@ -560,6 +613,10 @@ def build_fact_answer_contract(
             "imply_branch_network",
             "invent_city_branch",
             "maps_url_proves_named_city",
+            "branch_network_exists",
+            "branch_address_exists",
+            "branch_selectable",
+            "offer_to_send_branch_address_without_evidence",
         ])
         return contract
 
@@ -678,7 +735,7 @@ def build_fact_answer_contract(
 
 
 def _unknown_goal(fact_kind: str) -> str:
-    return (
+    base = (
         f"answer_contract status=UNKNOWN for {fact_kind}. "
         "The customer asked an authoritative factual question. "
         "You may reason and speak naturally, but you must NOT invent "
@@ -687,6 +744,14 @@ def _unknown_goal(fact_kind: str) -> str:
         "Do not construct hours, branches, certifications, fees, ETAs, "
         "or payment methods that are not in claimable_values."
     )
+    if fact_kind == KIND_BRANCH_EXISTENCE:
+        return (
+            base
+            + " Forbidden inferences: branch_network_exists, "
+            "branch_address_exists, branch_selectable. Do not imply "
+            "that branches can be selected or that an address can be sent."
+        )
+    return base
 
 
 def _known_goal(fact_kind: str) -> str:

@@ -992,9 +992,24 @@ class DefaultDecisionEngine:
                     ctx.message or "",
                 )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — optional embedded commerce probe; social may proceed
-                pass
+                _skip_social_for_commerce = False
+            if not _skip_social_for_commerce:
+                try:
+                    from ..commerce.fact_answer import classify_fact_answer  # noqa: PLC0415
+
+                    _fact_req = classify_fact_answer(
+                        ctx.message or "",
+                        intent_name=str(getattr(intent, "name", "") or ""),
+                        history=getattr(ctx, "history", None),
+                    )
+                    if _fact_req is not None and not _fact_req.catalog_allowed:
+                        _skip_social_for_commerce = True
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — fact probe must not block social
+                    pass
+            if _skip_social_for_commerce:
                 logger.info(
-                    "[SOCIAL_ROUTE] skipped tenant=%s category=%s reason=embedded_commerce_inquiry preview=%r",
+                    "[SOCIAL_ROUTE] skipped tenant=%s category=%s "
+                    "reason=fact_or_embedded_commerce preview=%r",
                     getattr(ctx, "tenant_id", None),
                     category,
                     (ctx.message or "")[:60],
