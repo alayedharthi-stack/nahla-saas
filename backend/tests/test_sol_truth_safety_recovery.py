@@ -26,11 +26,13 @@ from modules.ai.brain.commerce.fact_answer import (
     build_fact_answer_decision,
     catalog_must_yield_to_fact_owner,
     classify_fact_answer,
+    fact_answer_owns_non_catalog_turn,
 )
 from modules.ai.brain.commerce.merchant_capability_faq import (
     is_merchant_payment_methods_question,
     is_merchant_shipping_companies_question,
 )
+from modules.ai.brain.pre_commerce_gate import should_pre_commerce_shortcut
 from modules.ai.brain.commerce.merchant_policy_intents import (
     classify_merchant_policy_topic,
     should_yield_catalog_for_merchant_policy,
@@ -220,6 +222,19 @@ class TestUnknownContract:
         contract = build_fact_answer_contract(req, facts=_facts())
         assert contract.status == STATUS_UNKNOWN
         assert "product_existence_implies_certification" in contract.forbidden_inferences
+
+    def test_certification_pronoun_and_paraphrase_same_unknown_owner(self) -> None:
+        for message in ("هل فستان معتمد؟", "هذا عليه اعتماد؟", "عليه شهادة؟"):
+            req = classify_fact_answer(message, intent_name=INTENT_ASK_PRODUCT)
+            assert req is not None, message
+            assert req.fact_kind == KIND_CERTIFICATION, message
+            contract = build_fact_answer_contract(req, facts=_facts())
+            assert contract.status == STATUS_UNKNOWN, message
+            d = DefaultDecisionEngine().decide(_ctx(message, INTENT_ASK_PRODUCT))
+            assert d.action == ACTION_LLM_REPLY, message
+            assert d.args.get("question_kind") == KIND_CERTIFICATION, message
+            assert (d.args.get("response_goal") or "").strip(), message
+            assert d.args.get("answer_contract", {}).get("status") == STATUS_UNKNOWN, message
 
     def test_fee_and_eta_not_inferred_from_carrier(self) -> None:
         facts = _facts()
@@ -493,6 +508,7 @@ class TestSemanticConvergence:
             ("أي شركة توصلون معها؟", INTENT_ASK_SHIPPING),
             ("والشحن مين ماسكه؟", INTENT_SOCIAL),
             ("مين شركة التوصيل؟", INTENT_SOCIAL),
+            ("مين يتولى التوصيل؟", INTENT_SOCIAL),
         ):
             req = classify_fact_answer(message, intent_name=intent_name)
             assert req is not None, message
@@ -512,6 +528,16 @@ class TestSemanticConvergence:
         )
         assert req is not None
         assert req.fact_kind == KIND_SHIPPING_COMPANIES
+
+    def test_minimal_facts_lose_carrier_until_pack_b_surface_loads(self) -> None:
+        req = classify_fact_answer("والشحن مين ماسكه؟", intent_name=INTENT_SOCIAL)
+        assert req is not None
+        empty = build_fact_answer_contract(req, facts=CommerceFacts())
+        known = build_fact_answer_contract(req, facts=_facts())
+        assert empty.status == STATUS_UNKNOWN
+        assert empty.claimable_values == []
+        assert known.status == STATUS_KNOWN_VALUE
+        assert "Dev Company" in known.claimable_values
 
     def test_actual_order_who_holds_shipment_outranks_capability(self) -> None:
         d = DefaultDecisionEngine().decide(_paid_ctx("طلبي مع مين؟", INTENT_ASK_SHIPPING))
@@ -585,3 +611,32 @@ class TestSemanticConvergence:
         contract = build_fact_answer_contract(req, facts=_facts())
         assert contract.status == STATUS_UNKNOWN
         assert "carrier_implies_eta" in contract.forbidden_inferences
+
+
+class TestLiveInprocessFactContractParity:
+    def test_social_carrier_paraphrase_does_not_take_pre_commerce_shortcut(self) -> None:
+        intent = Intent(
+            name=INTENT_SOCIAL,
+            confidence=0.95,
+            slots={"social_category": "general_courtesy"},
+            raw_message="والشحن مين ماسكه؟",
+        )
+        assert fact_answer_owns_non_catalog_turn(
+            "والشحن مين ماسكه؟", intent_name=INTENT_SOCIAL,
+        )
+        assert should_pre_commerce_shortcut(
+            intent, None, message="والشحن مين ماسكه؟",
+        ) is False
+        assert should_pre_commerce_shortcut(
+            intent, None, message="مين شركة التوصيل؟",
+        ) is False
+
+    def test_pure_thanks_still_takes_pre_commerce_shortcut(self) -> None:
+        intent = Intent(
+            name=INTENT_SOCIAL,
+            confidence=0.95,
+            slots={"social_category": "thanks"},
+            raw_message="شكرا",
+        )
+        assert not fact_answer_owns_non_catalog_turn("شكرا", intent_name=INTENT_SOCIAL)
+        assert should_pre_commerce_shortcut(intent, None, message="شكرا") is True

@@ -113,7 +113,28 @@ def cap_kb_for_prompt(text: str) -> str:
     return body[:limit] + _KB_TRUNCATION_MARKER
 
 
+def _authoritative_fact_contract_present(state: BrainReplyState) -> bool:
+    """True when compose already holds the per-turn FactAnswer contract."""
+    facts = getattr(state, "known_facts", None) or {}
+    if not isinstance(facts, dict):
+        return False
+    contract = facts.get("answer_contract")
+    if isinstance(contract, dict) and str(contract.get("fact_kind") or "").strip():
+        return True
+    cap = facts.get("merchant_capability_answer")
+    if isinstance(cap, dict) and str(cap.get("question_kind") or "").strip() in {
+        "shipping_companies",
+        "payment_methods",
+        "cash_on_delivery",
+    }:
+        return True
+    return False
+
+
 def is_routine_social_turn(state: BrainReplyState) -> bool:
+    # Coarse SOCIAL/greeting must not erase a more specific fact owner.
+    if _authoritative_fact_contract_present(state):
+        return False
     if bool(getattr(state, "persona_expression_mode", False)):
         return True
     if bool(getattr(state, "non_commerce_block_mode", False)):

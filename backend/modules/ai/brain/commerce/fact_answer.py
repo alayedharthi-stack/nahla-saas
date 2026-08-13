@@ -381,6 +381,23 @@ def classify_fact_answer(
     return None
 
 
+def fact_answer_owns_non_catalog_turn(
+    message: str,
+    *,
+    intent_name: str = "",
+    history: Optional[Sequence[Any]] = None,
+) -> bool:
+    """True when this turn already has a non-catalog FactAnswer owner.
+
+    Coarse SOCIAL/greeting labels must not skip capability/profile fact
+    load or strip the per-turn answer_contract from compose.
+    """
+    req = classify_fact_answer(
+        message, intent_name=intent_name, history=history,
+    )
+    return bool(req is not None and not req.catalog_allowed)
+
+
 def fact_answer_yields_to_transactional(
     message: str,
     *,
@@ -881,5 +898,6 @@ __all__ = [
     "build_fact_answer_decision",
     "catalog_must_yield_to_fact_owner",
     "classify_fact_answer",
+    "fact_answer_owns_non_catalog_turn",
     "fact_answer_yields_to_transactional",
 ]
