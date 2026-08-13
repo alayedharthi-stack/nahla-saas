@@ -5,8 +5,11 @@ Does not assert exact Arabic customer wording.
 """
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from unittest.mock import patch
 
 from modules.ai.brain.commerce.fact_answer import (
     KIND_BRANCH_EXISTENCE,
@@ -39,6 +42,8 @@ from modules.ai.brain.commerce.merchant_policy_intents import (
 )
 from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_TRACK_ORDER
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
+from modules.ai.brain.intent_priority.types import GOAL_SOCIAL_ONLY, IntentPriorityVerdict
+from modules.ai.brain.pipeline import _compose_response_goal
 from modules.ai.brain.types import (
     INTENT_ASK_COD,
     INTENT_ASK_LOCATION,
@@ -54,8 +59,10 @@ from modules.ai.brain.types import (
     INTENT_TRACK_ORDER,
     BrainContext,
     CommerceFacts,
+    Decision,
     Intent,
     MerchantConversationState,
+    SuggestionSnapshot,
 )
 
 
@@ -640,3 +647,630 @@ class TestLiveInprocessFactContractParity:
         )
         assert not fact_answer_owns_non_catalog_turn("شكرا", intent_name=INTENT_SOCIAL)
         assert should_pre_commerce_shortcut(intent, None, message="شكرا") is True
+
+
+def _seed_live_shipment_capability_world() -> tuple[Any, Any, Any]:
+    """Tenant-1-shaped persisted facts: Pack B known, snapshot shipping empty."""
+    from core.salla_merchant_capabilities import resource_block
+    from models import (
+        BillingPlan,
+        BillingSubscription,
+        Integration,
+        StoreKnowledgeSnapshot,
+    )
+    from tests.commerce_scenario_fixtures import (
+        make_scenario_db,
+        seed_conversation,
+        seed_customer,
+        seed_tenant,
+    )
+
+    db, _engine = make_scenario_db()
+    tenant = seed_tenant(db, name="متجر تجريبي عام")
+    assert tenant.id == 1
+    customer = seed_customer(db, tenant.id, phone="+966500000001")
+    conversation = seed_conversation(db, tenant.id, customer.id)
+
+    plan = BillingPlan(
+        id=92001,
+        tenant_id=None,
+        slug="sol-shipping-contract",
+        name="Shipping Contract",
+        description="test",
+        currency="SAR",
+        price_sar=899,
+        billing_cycle="monthly",
+        features=[],
+        limits={"conversations_per_month": 1000},
+    )
+    db.add(plan)
+    db.flush()
+    db.add(
+        BillingSubscription(
+            id=92001,
+            tenant_id=tenant.id,
+            plan_id=plan.id,
+            status="active",
+            started_at=datetime.now(timezone.utc) - timedelta(days=1),
+            ends_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+    )
+    company = {
+        "id": 1196381883,
+        "name": "Dev Company",
+        "slug": "dev-company",
+        "active": True,
+        "enabled": True,
+    }
+    checkout_profile = {
+        "schema_version": 1,
+        "source": "salla",
+        "surface": "salla_storefront",
+        "last_synced_at": "2026-08-13T00:00:00+00:00",
+        "payment_methods": ["mada"],
+        "shipping_companies": [company],
+        "shipping_zones": [],
+        "payments": resource_block(
+            status="known",
+            endpoint="/payment/methods",
+            scope="payments.read",
+            items=[{"id": 1, "code": "mada", "label": "mada", "enabled": True}],
+        ),
+        "shipping": {
+            "companies": resource_block(
+                status="known",
+                endpoint="/shipping/companies/",
+                scope="shipping.read",
+                items=[company],
+            ),
+            "zones": resource_block(
+                status="known",
+                endpoint="/shipping/zones",
+                scope="shipping.read",
+                items=[],
+            ),
+        },
+    }
+    db.add(
+        Integration(
+            provider="salla",
+            external_store_id="sol-store-1",
+            tenant_id=tenant.id,
+            enabled=True,
+            config={
+                "platform": "salla",
+                "access_token": "test-token",
+                "checkout_profile": checkout_profile,
+            },
+        )
+    )
+    db.add(
+        StoreKnowledgeSnapshot(
+            tenant_id=tenant.id,
+            store_profile={
+                "store_name": "متجر تجريبي عام",
+                "store_url": "https://example.test",
+            },
+            shipping_summary={"methods": [], "notes": ""},
+            policy_summary={},
+            coupon_summary={},
+            catalog_summary={},
+            last_full_sync_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+    return db, customer, conversation
+
+
+class TestFactAnswerComposeConsumption:
+    def test_response_goal_is_not_prefixed_with_social_only(self) -> None:
+        decision = Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "merchant_shipping_companies",
+                "question_kind": KIND_SHIPPING_COMPANIES,
+                "response_goal": (
+                    "answer_contract status=KNOWN_VALUE for shipping_companies. "
+                    "Use ONLY claimable_values from known_facts.answer_contract."
+                ),
+                "answer_contract": {
+                    "fact_kind": KIND_SHIPPING_COMPANIES,
+                    "status": STATUS_KNOWN_VALUE,
+                    "claimable_values": ["Dev Company"],
+                },
+            },
+        )
+        verdict = IntentPriorityVerdict(
+            primary_customer_goal=GOAL_SOCIAL_ONLY,
+            recommended_focus="social_only — مجاملة قصيرة فقط.",
+        )
+        goal = _compose_response_goal(
+            decision,
+            SuggestionSnapshot(),
+            intent_priority=verdict,
+        )
+        assert "social_only" not in goal
+        assert "KNOWN_VALUE" in goal
+        assert "shipping_companies" in goal
+
+    def test_canonical_ask_shipping_goal_is_not_fee_policy_framing(self) -> None:
+        decision = Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "merchant_shipping_companies",
+                "question_kind": KIND_SHIPPING_COMPANIES,
+                "response_goal": (
+                    "answer_contract status=KNOWN_VALUE for shipping_companies. "
+                    "Use ONLY claimable_values from known_facts.answer_contract."
+                ),
+                "answer_contract": {
+                    "fact_kind": KIND_SHIPPING_COMPANIES,
+                    "status": STATUS_KNOWN_VALUE,
+                    "claimable_values": ["Dev Company"],
+                },
+            },
+        )
+        verdict = IntentPriorityVerdict(
+            primary_customer_goal="shipping_inquiry",
+            recommended_focus="shipping_inquiry — أجيبي على تكلفة/سياسة الشحن مباشرة.",
+        )
+        goal = _compose_response_goal(
+            decision,
+            SuggestionSnapshot(),
+            intent_priority=verdict,
+        )
+        assert "تكلفة/سياسة الشحن" not in goal
+        assert "KNOWN_VALUE" in goal
+
+
+class TestLivePipelineShippingFactTransport:
+    def test_pack_b_carrier_is_single_effective_compose_contract(self) -> None:
+        """Full MerchantBrain + real serializer; only the model boundary is stubbed."""
+        from modules.ai.brain.pipeline import get_brain
+        from modules.ai.orchestrator.types import AIReplyPayload
+
+        db, customer, conversation = _seed_live_shipment_capability_world()
+        brain = get_brain()
+        captured: List[Dict[str, Any]] = []
+
+        def _provider_stub(**kwargs: Any) -> AIReplyPayload:
+            captured.append(
+                {
+                    "prompt": str(
+                        (kwargs.get("prompt_overrides") or {}).get(
+                            "__full_system_prompt"
+                        )
+                        or ""
+                    ),
+                    "history": list(kwargs.get("history") or []),
+                    "brain_state": dict(
+                        (kwargs.get("context_metadata") or {}).get("brain_state")
+                        or {}
+                    ),
+                }
+            )
+            return AIReplyPayload(
+                reply_text="شركة التوصيل هي Dev Company.",
+                provider_used="mock",
+                metadata={"model": "test-provider"},
+            )
+
+        cases = (
+            ("وش شركات الشحن عندكم؟", []),
+            ("والشحن مين ماسكه؟", []),
+            ("مين شركة التوصيل؟", []),
+            ("مين يتولى التوصيل؟", []),
+            ("أي شركة توصلون معها؟", []),
+            (
+                "أي شركة توصلون معها؟",
+                [
+                    {
+                        "direction": "out",
+                        "body": "ما عندي اسم شركة توصيل مؤكدة حالياً.",
+                    }
+                ],
+            ),
+        )
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            side_effect=_provider_stub,
+        ):
+            for message, history in cases:
+                before = len(captured)
+                out = asyncio.run(
+                    brain.process(
+                        db,
+                        1,
+                        "966500000001",
+                        message,
+                        history=history,
+                        profile={"preferred_language": "ar"},
+                        customer_id=customer.id,
+                        conversation_id=conversation.id,
+                    )
+                )
+                assert len(captured) == before + 1, message
+                assert "Dev Company" in str(out.get("reply") or ""), message
+                model_input = captured[-1]
+                known = dict(model_input["brain_state"].get("known_facts") or {})
+                contract = dict(known.get("answer_contract") or {})
+                assert contract.get("status") == STATUS_KNOWN_VALUE, message
+                assert contract.get("fact_kind") == KIND_SHIPPING_COMPANIES, message
+                assert contract.get("claimable_values") == ["Dev Company"], message
+                assert "Dev Company" in model_input["prompt"], message
+                assert '"shipping_methods":[]' not in model_input["prompt"], message
+                response_goal = str(
+                    model_input["brain_state"].get("response_goal") or ""
+                )
+                assert "social_only" not in response_goal, message
+                assert "KNOWN_VALUE" in response_goal, message
+                assert model_input["brain_state"].get("primary_customer_goal") != (
+                    "social_only"
+                ), message
+                assert "respond_socially" not in model_input["prompt"], message
+
+                # The current turn contract is the only carrier answer surface.
+                # Empty StoreKnowledgeSnapshot.shipping_summary is a different
+                # legacy policy surface and must not contradict Pack B in compose.
+                merchant_context = dict(
+                    model_input["brain_state"].get("merchant_context") or {}
+                )
+                policies = dict(merchant_context.get("policies") or {})
+                assert "shipping_methods" not in policies, message
+
+        contaminated = captured[-1]
+        assert any(
+            "ما عندي اسم شركة توصيل" in str(item.get("content") or "")
+            for item in contaminated["history"]
+        )
+        assert "Dev Company" in contaminated["prompt"]
+
+    def test_paid_fulfillment_lock_does_not_erase_pack_b_carrier_contract(self) -> None:
+        """Catalog skip during a paid order must not load store-name-only facts."""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from modules.ai.brain.pipeline import get_brain
+        from modules.ai.orchestrator.types import AIReplyPayload
+
+        db, customer, conversation = _seed_live_shipment_capability_world()
+        paid_state = MerchantConversationState(stage="support", greeted=True)
+        paid_state.order_prep.payment_receipt_received = True
+        conversation.extra_metadata = {"brain_state": paid_state.to_dict()}
+        flag_modified(conversation, "extra_metadata")
+        db.commit()
+
+        captured: List[Dict[str, Any]] = []
+
+        def _provider_stub(**kwargs: Any) -> AIReplyPayload:
+            captured.append(
+                {
+                    "prompt": str(
+                        (kwargs.get("prompt_overrides") or {}).get(
+                            "__full_system_prompt"
+                        )
+                        or ""
+                    ),
+                    "brain_state": dict(
+                        (kwargs.get("context_metadata") or {}).get("brain_state")
+                        or {}
+                    ),
+                }
+            )
+            return AIReplyPayload(
+                reply_text="شركة التوصيل هي Dev Company.",
+                provider_used="mock",
+                metadata={"model": "test-provider"},
+            )
+
+        brain = get_brain()
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            side_effect=_provider_stub,
+        ):
+            for message in (
+                "والشحن مين ماسكه؟",
+                "أي شركة توصلون معها؟",
+                "مين يتولى التوصيل؟",
+            ):
+                captured.clear()
+                out = asyncio.run(
+                    brain.process(
+                        db,
+                        1,
+                        "966500000001",
+                        message,
+                        history=[],
+                        profile={"preferred_language": "ar"},
+                        customer_id=customer.id,
+                        conversation_id=conversation.id,
+                    )
+                )
+                assert captured, message
+                known = dict(captured[-1]["brain_state"].get("known_facts") or {})
+                contract = dict(known.get("answer_contract") or {})
+                assert contract.get("status") == STATUS_KNOWN_VALUE, (
+                    message,
+                    contract,
+                    known.get("shipping_methods"),
+                )
+                assert contract.get("claimable_values") == ["Dev Company"], message
+                assert "Dev Company" in captured[-1]["prompt"], message
+                assert "Dev Company" in str(out.get("reply") or ""), message
+                assert "social_only" not in str(
+                    captured[-1]["brain_state"].get("response_goal") or ""
+                ), message
+
+    def test_transactional_shipping_precedence_survives_full_pipeline(self) -> None:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from modules.ai.brain.pipeline import get_brain
+        from modules.ai.orchestrator.types import AIReplyPayload
+        from tests.commerce_scenario_fixtures import seed_order, seed_shipment
+
+        db, customer, conversation = _seed_live_shipment_capability_world()
+        paid_state = MerchantConversationState(stage="support", greeted=True)
+        paid_state.order_prep.payment_receipt_received = True
+        conversation.extra_metadata = {"brain_state": paid_state.to_dict()}
+        flag_modified(conversation, "extra_metadata")
+        db.commit()
+
+        captured: List[Dict[str, Any]] = []
+
+        def _provider_stub(**kwargs: Any) -> AIReplyPayload:
+            captured.append(
+                {
+                    "prompt": str(
+                        (kwargs.get("prompt_overrides") or {}).get(
+                            "__full_system_prompt"
+                        )
+                        or ""
+                    ),
+                    "brain_state": dict(
+                        (kwargs.get("context_metadata") or {}).get("brain_state")
+                        or {}
+                    ),
+                }
+            )
+            return AIReplyPayload(
+                reply_text="أتحقق من بيانات الطلب والشحنة المسجلة.",
+                provider_used="mock",
+                metadata={"model": "test-provider"},
+            )
+
+        brain = get_brain()
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            side_effect=_provider_stub,
+        ):
+            out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "طلبي مع أي شركة شحن؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+
+        assert captured
+        reply_state = captured[-1]["brain_state"]
+        assert "post_purchase_tracking" in str(
+            reply_state.get("response_goal") or ""
+        )
+        known = dict(reply_state.get("known_facts") or {})
+        assert (known.get("answer_contract") or {}).get("fact_kind") != (
+            KIND_SHIPPING_COMPANIES
+        )
+        assert "Dev Company" not in captured[-1]["prompt"]
+        assert out.get("reply")
+
+        # Once ORDER_ACTUAL exists, explicit tracking remains transactional and
+        # uses shipment evidence rather than the generic Pack B capability.
+        actual_db, actual_customer, actual_conversation = (
+            _seed_live_shipment_capability_world()
+        )
+        order = seed_order(
+            actual_db,
+            1,
+            status="shipped",
+            external_id="sol-order-actual-1",
+            external_order_number="NHL-9001",
+            customer_info={"phone": "+966500000001"},
+            line_items=[
+                {
+                    "title": "حذاء رياضي أبيض",
+                    "quantity": 1,
+                    "unit_price": "250",
+                }
+            ],
+        )
+        seed_shipment(
+            actual_db,
+            1,
+            order.id,
+            provider="Actual Carrier",
+            tracking_number="TRK9001",
+        )
+        captured.clear()
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            side_effect=_provider_stub,
+        ):
+            tracking_out = asyncio.run(
+                brain.process(
+                    actual_db,
+                    1,
+                    "966500000001",
+                    "وين طلبي؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    customer_id=actual_customer.id,
+                    conversation_id=actual_conversation.id,
+                )
+            )
+        assert not captured
+        assert "Actual Carrier" in str(tracking_out.get("reply") or "")
+        assert "TRK9001" in str(tracking_out.get("reply") or "")
+        assert "Dev Company" not in str(tracking_out.get("reply") or "")
+
+    def test_neighbor_facts_and_catalog_do_not_inherit_carrier(self) -> None:
+        from modules.ai.brain.pipeline import get_brain
+        from modules.ai.orchestrator.types import AIReplyPayload
+
+        db, customer, conversation = _seed_live_shipment_capability_world()
+        captured: List[Dict[str, Any]] = []
+
+        def _provider_stub(**kwargs: Any) -> AIReplyPayload:
+            captured.append(
+                {
+                    "prompt": str(
+                        (kwargs.get("prompt_overrides") or {}).get(
+                            "__full_system_prompt"
+                        )
+                        or ""
+                    ),
+                    "brain_state": dict(
+                        (kwargs.get("context_metadata") or {}).get("brain_state")
+                        or {}
+                    ),
+                }
+            )
+            contract = dict(
+                ((kwargs.get("context_metadata") or {}).get("brain_state") or {})
+                .get("known_facts", {})
+                .get("answer_contract")
+                or {}
+            )
+            kind = str(contract.get("fact_kind") or "")
+            if kind == KIND_PAYMENT_METHODS:
+                text = "يمكن الدفع عبر mada."
+            elif kind == KIND_SHIPPING_ETA:
+                text = "ما عندي مدة شحن مؤكدة."
+            else:
+                text = "ما عندي معلومة مؤكدة."
+            return AIReplyPayload(
+                reply_text=text,
+                provider_used="mock",
+                metadata={"model": "test-provider"},
+            )
+
+        brain = get_brain()
+        with patch(
+            "modules.ai.orchestrator.adapter.generate_ai_reply",
+            side_effect=_provider_stub,
+        ):
+            eta_out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "طيب كم ياخذ عادة؟",
+                    history=[
+                        {"direction": "in", "body": "أي شركة توصلون معها؟"},
+                        {
+                            "direction": "out",
+                            "body": "شركة التوصيل هي Dev Company.",
+                        },
+                    ],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+            pay_out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "وش عندكم طريقة أدفع فيها؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+            branch_out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "عندكم فرع في لندن؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+            cert_out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "هذا عليه اعتماد؟",
+                    history=[
+                        {
+                            "direction": "in",
+                            "body": "عندكم فستان سهرة أسود؟",
+                        }
+                    ],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+            catalog_out = asyncio.run(
+                brain.process(
+                    db,
+                    1,
+                    "966500000001",
+                    "وش المنتجات عندكم؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    customer_id=customer.id,
+                    conversation_id=conversation.id,
+                )
+            )
+
+        eta_state = captured[0]["brain_state"]
+        eta_contract = dict(
+            (eta_state.get("known_facts") or {}).get("answer_contract") or {}
+        )
+        assert eta_contract.get("fact_kind") == KIND_SHIPPING_ETA
+        assert eta_contract.get("status") == STATUS_UNKNOWN
+        assert "Dev Company" not in (eta_contract.get("claimable_values") or [])
+        assert str(eta_out.get("reply") or "").strip()
+
+        pay_state = captured[1]["brain_state"]
+        pay_contract = dict(
+            (pay_state.get("known_facts") or {}).get("answer_contract") or {}
+        )
+        assert pay_contract.get("fact_kind") == KIND_PAYMENT_METHODS
+        assert pay_contract.get("status") == STATUS_KNOWN_VALUE
+        assert "mada" in (pay_contract.get("claimable_values") or [])
+        assert "mada" in str(pay_out.get("reply") or "")
+
+        branch_state = captured[2]["brain_state"]
+        branch_contract = dict(
+            (branch_state.get("known_facts") or {}).get("answer_contract") or {}
+        )
+        assert branch_contract.get("fact_kind") == KIND_BRANCH_EXISTENCE
+        assert branch_contract.get("status") == STATUS_UNKNOWN
+        assert str(branch_out.get("reply") or "").strip()
+
+        cert_state = captured[3]["brain_state"]
+        cert_contract = dict(
+            (cert_state.get("known_facts") or {}).get("answer_contract") or {}
+        )
+        assert cert_contract.get("fact_kind") == KIND_CERTIFICATION
+        assert cert_contract.get("status") == STATUS_UNKNOWN
+        assert str(cert_out.get("reply") or "").strip()
+
+        catalog_state = captured[4]["brain_state"]
+        catalog_contract = dict(
+            (catalog_state.get("known_facts") or {}).get("answer_contract") or {}
+        )
+        assert catalog_contract.get("fact_kind") != KIND_SHIPPING_COMPANIES
+        assert str(catalog_out.get("reply") or "").strip()

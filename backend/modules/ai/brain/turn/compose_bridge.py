@@ -15,6 +15,21 @@ from .flags import is_owner_brief_native_compose_enabled
 from .owner_brief import topic_for_owner
 
 
+def _fact_answer_contract_owns(args: dict[str, Any]) -> bool:
+    contract = args.get("answer_contract")
+    return isinstance(contract, dict) and bool(
+        str(contract.get("fact_kind") or "").strip()
+    )
+
+
+def _persona_social_brief(brief: Any) -> bool:
+    if not isinstance(brief, dict):
+        return False
+    owner = str(brief.get("owner") or "")
+    reply_goal = str(brief.get("reply_goal") or "")
+    return owner == "persona/social" or reply_goal.startswith("respond_socially")
+
+
 def resolve_owner_brief_dict(
     decision: Decision,
     ctx: BrainContext,
@@ -26,8 +41,12 @@ def resolve_owner_brief_dict(
     """
     args = dict(getattr(decision, "args", None) or {})
     existing = args.get("owner_brief")
+    if _fact_answer_contract_owns(args) and _persona_social_brief(existing):
+        return None
     if isinstance(existing, dict) and existing:
         return existing
+    if _fact_answer_contract_owns(args):
+        return None
 
     if not is_owner_brief_native_compose_enabled():
         return None
@@ -55,6 +74,8 @@ def maybe_attach_owner_brief_for_compose(
         return decision, False
 
     args = dict(getattr(decision, "args", None) or {})
+    if _fact_answer_contract_owns(args):
+        return decision, False
     if isinstance(args.get("owner_brief"), dict) and args.get("owner_brief"):
         return decision, False
 

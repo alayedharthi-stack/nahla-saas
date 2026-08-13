@@ -85,6 +85,34 @@ def test_resolve_prefers_enforce_brief_over_ctx():
     assert resolved == enforced_brief
 
 
+def test_fact_answer_contract_skips_persona_social_brief(monkeypatch):
+    monkeypatch.setenv("TURN_ARBITER_OWNER_BRIEF_COMPOSE_ENABLED", "true")
+    ctx = _ctx("والشحن مين ماسكه؟")
+    prepare_turn_arbitration(ctx)
+    decision = Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "answer_contract": {
+                "fact_kind": "shipping_companies",
+                "status": "KNOWN_VALUE",
+                "claimable_values": ["Dev Company"],
+            },
+            "response_goal": (
+                "answer_contract status=KNOWN_VALUE for shipping_companies"
+            ),
+            "owner_brief": {
+                "owner": "persona/social",
+                "reply_goal": "respond_socially_or_identity_or_gratitude_naturally",
+                "compose_mode": "persona",
+            },
+        },
+    )
+    new_decision, attached = maybe_attach_owner_brief_for_compose(decision, ctx)
+    assert attached is False
+    assert "KNOWN_VALUE" in str((new_decision.args or {}).get("response_goal") or "")
+    assert resolve_owner_brief_dict(decision, ctx) is None
+
+
 def test_resolve_from_arbitration_when_flag_on(monkeypatch):
     monkeypatch.setenv("TURN_ARBITER_OWNER_BRIEF_COMPOSE_ENABLED", "true")
     ctx = _ctx("ما عندكم كود خصم")

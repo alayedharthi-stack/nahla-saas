@@ -64,6 +64,47 @@ def _sanitize_tenant_profile_for_prompt(
     if mp.get("name"):
         out["store_name"] = mp.get("name")
     return out
+
+
+def _answer_contract_fact_kind(answer_contract: Any) -> str:
+    if not isinstance(answer_contract, dict):
+        return ""
+    return str(answer_contract.get("fact_kind") or "").strip()
+
+
+_FACT_KIND_PRIMARY_GOAL = {
+    "shipping_companies": "shipping_inquiry",
+    "shipping_eta": "shipping_inquiry",
+    "shipping_fee": "shipping_inquiry",
+    "shipping_coverage": "shipping_inquiry",
+    "shipping_policy": "shipping_inquiry",
+    "payment_methods": "payment_inquiry",
+    "cash_on_delivery": "payment_inquiry",
+    "branch_existence": "location_request",
+    "location": "location_request",
+}
+
+
+def _primary_goal_for_answer_contract(answer_contract: Any) -> str:
+    kind = _answer_contract_fact_kind(answer_contract)
+    return _FACT_KIND_PRIMARY_GOAL.get(kind, "general")
+
+
+def _scope_merchant_context_to_answer_contract(
+    merchant_context: Any,
+    answer_contract: Any,
+) -> Dict[str, Any]:
+    """Keep legacy policy projections from competing with the turn contract."""
+    out = dict(merchant_context) if isinstance(merchant_context, dict) else {}
+    if _answer_contract_fact_kind(answer_contract) != "shipping_companies":
+        return out
+
+    policies = dict(out.get("policies") or {})
+    policies.pop("shipping_methods", None)
+    out["policies"] = policies
+    return out
+
+
 from .decision.actions import (
     ACTION_CATALOG_NAVIGATE,
     ACTION_GREET,
@@ -1447,6 +1488,37 @@ class MerchantBrain:
                 intent=intent,
                 commerce_bundle=_commerce_bundle_early,
             )
+            if _order_fulfillment_skip:
+                from .commerce.fact_answer import (  # noqa: PLC0415
+                    classify_fact_answer,
+                    fact_answer_yields_to_transactional,
+                )
+
+                _fact_request = classify_fact_answer(
+                    message or "",
+                    intent_name=str(getattr(intent, "name", "") or ""),
+                    history=history,
+                )
+                if (
+                    _fact_request is not None
+                    and not _fact_request.catalog_allowed
+                    and not fact_answer_yields_to_transactional(
+                        message or "",
+                        intent_name=str(getattr(intent, "name", "") or ""),
+                        state=state_for_classify,
+                        fact_kind=_fact_request.fact_kind,
+                    )
+                ):
+                    _order_fulfillment_skip = False
+                    logger.info(
+                        "[ORDER_CONTEXT_GATE] tenant=%s "
+                        "skip_catalog_preload=0 "
+                        "reason=fact_answer_requires_full_facts "
+                        "fact_kind=%s preview=%r",
+                        tenant_id,
+                        _fact_request.fact_kind,
+                        (message or "")[:80],
+                    )
             if _order_fulfillment_skip:
                 log_order_context_block(
                     tenant_id=tenant_id,
@@ -3352,6 +3424,10 @@ class MerchantBrain:
                 slim_merchant_ctx["tenant_profile"] = _scoped_tp
                 if _faq_approved:
                     slim_merchant_ctx["faq_approved"] = _faq_approved
+                slim_merchant_ctx = _scope_merchant_context_to_answer_contract(
+                    slim_merchant_ctx,
+                    (decision.args or {}).get("answer_contract"),
+                )
             except Exception as exc:
                 logger.warning(
                     "[BrainPipeline] failed to slim merchant_context "
@@ -6486,6 +6562,11 @@ def _build_reply_state(
         _primary_goal = str(
             getattr(_intent_priority, "primary_customer_goal", "") or ""
         ).strip()
+    _answer_contract = (decision.args or {}).get("answer_contract")
+    if _answer_contract_fact_kind(_answer_contract):
+        if _primary_goal in {"social_only", "greeting_only", ""}:
+            _primary_goal = _primary_goal_for_answer_contract(_answer_contract)
+        _priority_focus = ""
     if _persona_topic:
         logger.info(
             "[PERSONA_EXPRESSION] tenant=%s topic=%s kind=%s "
@@ -6661,6 +6742,11 @@ def _compose_response_goal(
         checkout_facts=checkout_facts,
     )
     from .persona_expression import persona_topic_from_decision_args  # noqa: PLC0415
+
+    # One effective turn contract: FactAnswer already named the verdict.
+    # Do not prepend social_only / shipping-cost framing over it.
+    if _answer_contract_fact_kind((decision.args or {}).get("answer_contract")):
+        return base_goal
 
     if persona_topic_from_decision_args(decision.args):
         return _prepend_intent_priority_directive(base_goal, intent_priority)

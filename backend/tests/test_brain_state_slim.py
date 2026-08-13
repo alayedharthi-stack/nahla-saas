@@ -183,6 +183,24 @@ def test_gate_general_turn_without_operational_facts_remains_eligible() -> None:
     assert reason == "intent_general"
 
 
+def test_gate_blocks_social_turn_with_authoritative_fact_contract() -> None:
+    ok, reason = should_slim_general_brain_state(
+        _heavy_state(
+            intent_name="social",
+            known_facts={
+                "answer_contract": {
+                    "fact_kind": "shipping_companies",
+                    "status": "KNOWN_VALUE",
+                    "claimable_values": ["Dev Company"],
+                },
+                "checkout_preparation": {"order_status": "none"},
+            },
+        ),
+    )
+    assert ok is False
+    assert reason == "authoritative_fact_contract"
+
+
 def test_gate_blocks_general_turn_with_structured_shipping_knowledge() -> None:
     ok, reason = should_slim_general_brain_state(
         _heavy_state(
