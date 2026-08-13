@@ -1297,18 +1297,21 @@ class DefaultDecisionEngine:
         if _resume_dec is not None:
             return _resume_dec
 
-        # ── 0a.508b Order-actual shipping outranks generic fact-answer ──
-        # Customer-specific shipment/order questions (origin, carrier,
-        # delivery time of THIS order) must reach the existing
-        # shipping_post_order owner. Generic merchant facts stay at 0a.509.
+        # ── 0a.508b Order-actual shipping yields past fact-answer ──
+        # Restores the existing ASK_SHIPPING post-order Decision for
+        # origin/carrier/delivery-time of THIS order. Does not own
+        # ACTION_TRACK_ORDER ("وين طلبي؟") and does not blacklist فرع.
         try:
             from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
                 conversation_has_post_order_context,
                 is_order_actual_shipping_question,
             )
 
-            if conversation_has_post_order_context(state) and is_order_actual_shipping_question(
-                ctx.message or "",
+            _intent_name = str(getattr(intent, "name", "") or "")
+            if (
+                _intent_name != INTENT_TRACK_ORDER
+                and conversation_has_post_order_context(state)
+                and is_order_actual_shipping_question(ctx.message or "")
             ):
                 from core.checkout_shipping_policy import clear_pending_shipping_city  # noqa: PLC0415
 

@@ -34,7 +34,7 @@ from modules.ai.brain.commerce.merchant_policy_intents import (
     classify_merchant_policy_topic,
     should_yield_catalog_for_merchant_policy,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_TRACK_ORDER
 from modules.ai.brain.decision.engine import DefaultDecisionEngine
 from modules.ai.brain.types import (
     INTENT_ASK_LOCATION,
@@ -45,6 +45,7 @@ from modules.ai.brain.types import (
     INTENT_ASK_WORKING_HOURS,
     INTENT_COMPLAINT_REFUND,
     INTENT_START_ORDER,
+    INTENT_TRACK_ORDER,
     BrainContext,
     CommerceFacts,
     Intent,
@@ -417,4 +418,10 @@ class TestTransactionalOutranksGenericFact:
         engine = DefaultDecisionEngine()
         d = engine.decide(_paid_ctx("عندكم فرع في جدة؟", INTENT_ASK_LOCATION))
         assert d.args.get("question_kind") == KIND_BRANCH_EXISTENCE
+        assert d.args.get("topic") != "shipping_post_order"
+
+    def test_explicit_where_is_my_order_stays_track_order(self) -> None:
+        engine = DefaultDecisionEngine()
+        d = engine.decide(_paid_ctx("وين طلبي؟", INTENT_TRACK_ORDER))
+        assert d.action == ACTION_TRACK_ORDER
         assert d.args.get("topic") != "shipping_post_order"

@@ -914,8 +914,7 @@ _ORDER_ACTUAL_SHIPPING_TOPIC_RE = re.compile(
     r"شرك[ةه]|ناقل|carrier|courier|"
     r"سمسا|smsa|aramex|ارامكس|\bdhl\b|"
     r"انرسل|ارسل|طلع|"
-    r"متي\s*(?:يوصل|توصل|يجي)|متى\s*(?:يوصل|توصل|يجي)|"
-    r"(?:وين|فين|اين)"
+    r"متي\s*(?:يوصل|توصل|يجي)|متى\s*(?:يوصل|توصل|يجي)"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
