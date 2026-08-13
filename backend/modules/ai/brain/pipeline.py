@@ -7073,14 +7073,18 @@ def _compose_base_response_goal(
 
     if (
         decision.action == ACTION_LLM_REPLY
-        and (decision.args or {}).get("topic") == "location_delivery"
+        and (
+            (decision.args or {}).get("topic") == "location_delivery"
+            or (decision.args or {}).get("question_kind") == "branch_existence"
+        )
     ):
         return (
             "location_delivery — The customer asked for store location or branches. "
             "Use ONLY claimable location/branch evidence in known_facts.answer_contract. "
             "If status is UNKNOWN, say you do not have confirmed branch/location "
             "information. Do NOT imply a branch network, named-city presence, "
-            "or selectable addresses. Do NOT invent hours. Do NOT push checkout. "
+            "selectable branches, or that an address can be sent. Do NOT invent hours. "
+            "Do NOT push checkout. "
             "Do NOT substitute the e-commerce store URL for a physical maps pin."
         )
 
