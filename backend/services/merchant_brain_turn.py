@@ -626,6 +626,14 @@ def _apply_outbound_dedup(
                     ):
                         reply = po_reply_before_dedup
                         outbound_abort_suppressor = ""
+                        logger.info(
+                            "[CHAT_DEDUP] tenant=%s to=%s tier=hard "
+                            "commerce_inquiry_silence_blocked=true "
+                            "restored_brain_candidate=true reply_len=%d",
+                            tenant_id,
+                            to,
+                            len(reply or ""),
+                        )
                     else:
                         reply = ""
                         _note_live_text_mutation(
