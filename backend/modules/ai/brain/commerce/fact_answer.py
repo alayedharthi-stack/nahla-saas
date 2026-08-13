@@ -501,7 +501,9 @@ def _asked_branch_place(norm_msg: str) -> str:
     m = re.search(r"(?:فرع|فروع).{0,20}(?:في|ب)\s*(\S{2,})", norm_msg)
     if m:
         return str(m.group(1) or "").strip()
-    m = re.search(r"(?:في|ب)\s*(\S{3,})", norm_msg)
+    # Standalone preposition + place ("طيب في لندن"). Require a word
+    # boundary so the trailing ب in طيب is not read as "in".
+    m = re.search(r"(?:^|\s)(?:في|ب)\s+(\S{3,})", norm_msg)
     if m:
         return str(m.group(1) or "").strip()
     return ""

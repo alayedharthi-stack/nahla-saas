@@ -538,7 +538,23 @@ class TestSemanticConvergence:
             goal = str(d.args.get("response_goal") or "")
             assert "branch_selectable" in goal or "address can be sent" in goal, message
 
-    def test_branch_london_followup_stays_unknown(self) -> None:
+    def test_generic_branches_question_does_not_invent_place_token(self) -> None:
+        req = classify_fact_answer("طيب عندكم فروع؟", intent_name=INTENT_ASK_LOCATION)
+        assert req is not None
+        assert req.fact_kind == KIND_BRANCH_EXISTENCE
+        contract = build_fact_answer_contract(
+            req,
+            facts=_facts(),
+            merchant_context={
+                "merchant_profile": {
+                    "location": "الرياض",
+                    "location.status": STATUS_KNOWN_VALUE,
+                }
+            },
+            message="طيب عندكم فروع؟",
+        )
+        assert contract.status == STATUS_KNOWN_VALUE
+        assert "الرياض" in [str(v) for v in contract.claimable_values]
         req = classify_fact_answer(
             "طيب في لندن؟",
             history=[{"content": "عندكم فروع؟"}],
