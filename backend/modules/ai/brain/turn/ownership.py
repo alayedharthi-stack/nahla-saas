@@ -208,6 +208,17 @@ def _owner_from_understanding(ctx: BrainContext) -> Optional[tuple[str, str]]:
 def resolve_conversation_turn_ownership(ctx: BrainContext) -> ConversationTurnOwnership:
     """Resolve turn owner and forbidden fallbacks for the current inbound turn."""
     explicit_browse = has_explicit_catalog_browse_intent(ctx)
+    fact_blocks_catalog = False
+    try:
+        from ..commerce.fact_answer import catalog_must_yield_to_fact_owner  # noqa: PLC0415
+
+        fact_blocks_catalog = catalog_must_yield_to_fact_owner(
+            intent_name=str(getattr(getattr(ctx, "intent", None), "name", "") or ""),
+            message=str(getattr(ctx, "message", "") or ""),
+            history=getattr(ctx, "history", None),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not fail the turn
+        fact_blocks_catalog = False
 
     arb = _owner_from_arbitration(ctx)
     if arb is not None:
@@ -230,7 +241,10 @@ def resolve_conversation_turn_ownership(ctx: BrainContext) -> ConversationTurnOw
     forbidden: Set[str] = set(_OWNER_DEFAULT_FORBIDDEN.get(turn_owner, frozenset()))
     forbidden.update(_forbidden_from_contract(ctx))
 
-    if explicit_browse and turn_owner not in {OWNER_DISCOVERY}:
+    if fact_blocks_catalog:
+        forbidden.update(_DISCOVERY_FALLBACKS)
+        reason = f"fact_answer_forbids_catalog:{reason}"
+    elif explicit_browse and turn_owner not in {OWNER_DISCOVERY}:
         turn_owner = OWNER_DISCOVERY
         reason = f"explicit_browse_override:{reason}"
         forbidden -= set(_DISCOVERY_FALLBACKS)

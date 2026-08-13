@@ -113,6 +113,7 @@ _COMMERCE_SLIM_RESIDUAL_RULES = (
     "- اتبعي stage وresponse_goal وselected_product.\n"
     "- ردّي باختصار (2–5 أسطر) مناسب لواتساب.\n"
     "- لا تخترعي حقائق — استخدمي BrainStateJSON وFacts فقط.\n"
+    "- إذا وُجد answer_contract: لا تتجاوزي claimable_values؛ UNKNOWN ≠ اختراع.\n"
     "- سؤال متابعة واحد عند نقص المعلومة.\n"
     "### أسلوب الرد التجاري (إلزامي — واتساب سعودي)\n"
     "- ردّي كموظف/موظفة متجر سعودي ودود — طبيعي وقريب، لا رسمي زائد.\n"
@@ -509,6 +510,10 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
         "salla_shipping_companies_status",
         "merchant_capabilities",
         "merchant_capability_answer",
+        "merchant_policy",
+        "answer_contract",
+        "support_hours",
+        "maps_url",
     ):
         if key in raw and raw[key] not in (None, "", [], {}):
             out[key] = raw[key]

@@ -6026,6 +6026,9 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    _answer_contract = (decision.args or {}).get("answer_contract")
+    if isinstance(_answer_contract, dict) and _answer_contract:
+        known_facts["answer_contract"] = dict(_answer_contract)
     # Pack A3 UNKNOWN honesty — stamp retrieval_count into known_facts early
     # so post-compose guard + compose metadata share one source.
     try:
@@ -6049,12 +6052,18 @@ def _build_reply_state(
         )
 
         _decision_topic = str((decision.args or {}).get("topic") or "")
+        _decision_kind = str((decision.args or {}).get("question_kind") or "")
         _capability_turn = _decision_topic in {
             "cash_on_delivery",
             "merchant_payment_methods",
+        } or _decision_kind in {
+            "payment_methods",
+            "cash_on_delivery",
         } or is_merchant_payment_methods_question(ctx.message or "")
-        _shipping_carriers_turn = is_merchant_shipping_companies_question(
-            ctx.message or ""
+        _shipping_carriers_turn = (
+            _decision_kind == "shipping_companies"
+            or str((decision.args or {}).get("topic_hint") or "") == "shipping_companies"
+            or is_merchant_shipping_companies_question(ctx.message or "")
         )
         if _capability_turn or _shipping_carriers_turn:
             _cod_ev = load_cod_policy_evidence(
@@ -6720,6 +6729,8 @@ def _compose_base_response_goal(
         or _mk_topic.startswith("merchant_knowledge_")
     ):
         return _mk_goal
+    if _mk_goal and isinstance(_mk_args.get("answer_contract"), dict):
+        return _mk_goal
 
     _checkout = dict(checkout_facts or {})
     if _checkout.get("customer_asks_known_phone") and _checkout.get("known_phone"):
@@ -7065,16 +7076,12 @@ def _compose_base_response_goal(
         and (decision.args or {}).get("topic") == "location_delivery"
     ):
         return (
-            "location_delivery — Generate a short natural Saudi Arabic "
-            "WhatsApp reply. The customer asked for the store location, "
-            "branches, or directions. Answer warmly in 1–2 lines using "
-            "KB branch/location context when available. "
-            "Do NOT push order completion or say «نكمل إنشاء طلب». "
-            "Do NOT substitute the e-commerce store URL for a physical "
-            "maps pin — the wire layer injects the Google Maps URL / "
-            "CTA button after compose. "
-            "If reaching the branch might be difficult, briefly offer "
-            "to connect them with the right staff member."
+            "location_delivery — The customer asked for store location or branches. "
+            "Use ONLY claimable location/branch evidence in known_facts.answer_contract. "
+            "If status is UNKNOWN, say you do not have confirmed branch/location "
+            "information. Do NOT imply a branch network, named-city presence, "
+            "or selectable addresses. Do NOT invent hours. Do NOT push checkout. "
+            "Do NOT substitute the e-commerce store URL for a physical maps pin."
         )
 
     if decision.action == ACTION_LLM_REPLY:

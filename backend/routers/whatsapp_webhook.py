@@ -487,9 +487,9 @@ def _maybe_log_outbound_candidate_abort(
     suppressor: str | None = None,
     expression_owner: str | None = None,
 ) -> None:
-    """Structured audit when brain produced text that never persisted/sent."""
+    """Structured audit when the turn ends with empty outbound."""
     candidate = (brain_candidate or "").strip()
-    if not candidate or (final_reply or "").strip():
+    if (final_reply or "").strip():
         return
     try:
         from core.outbound_abort_audit import log_outbound_candidate_abort  # noqa: PLC0415
@@ -498,13 +498,13 @@ def _maybe_log_outbound_candidate_abort(
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             customer_id=customer_id,
-            generated_candidate_non_empty=True,
+            generated_candidate_non_empty=bool(candidate),
             final_response_empty=True,
             abort_reason=abort_reason,
             final_stage=final_stage,
             suppressor=suppressor,
             expression_owner=expression_owner,
-            candidate_preview=candidate,
+            candidate_preview=candidate or None,
         )
     except Exception:  # noqa: BLE001
         logger.exception(
