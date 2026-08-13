@@ -238,7 +238,7 @@ class TestKB2GuardNeverInventsAvailability:
         result = apply_product_availability_truth_guard(
             reply="متوفر",
             availability_context=_ctx(skus=[_sku(5, "Iota Product", checkout=True)]),
-            inbound_text="",
+            inbound_text="هل المنتج متوفر؟",
             tenant_id=99,
         )
         assert result.replaced is True

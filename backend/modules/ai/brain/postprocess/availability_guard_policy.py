@@ -197,6 +197,84 @@ def inbound_exempt_from_availability_rewrite(
     return False
 
 
+_OUT_OF_SCOPE_AVAILABILITY_ENFORCEMENT_TOPICS = frozenset({
+    "ask_payment_info",
+    "pay_now",
+    "payment",
+    "share_payment_info",
+    "complete_purchase",
+    "track_order",
+    "tracking_link_follow_up",
+    "ask_shipping",
+    "ask_store_info",
+    "ask_owner_contact",
+    "ask_cod",
+    "delivery_intent",
+    "location_intent",
+    "open_category_inquiry",
+    "product_knowledge_facts",
+    "product_attribute_information",
+    "product_usage_information",
+    "health_advisory",
+    "cold_shipping_inquiry",
+    "price_objection",
+})
+
+_AVAILABILITY_SCOPED_TOPICS = frozenset({
+    "kb_availability_facts",
+    "product_availability",
+})
+
+
+def is_availability_scoped_turn(
+    *,
+    inbound_text: str = "",
+    decision_topic: str = "",
+    availability_context: Optional[Any] = None,
+) -> bool:
+    """
+    True when availability enforcement (surgical strip / unknown fallback) may apply.
+
+    Payment, shipping, staff, and other non-availability compose topics stay out of scope.
+    """
+    topic = str(decision_topic or "").strip().lower()
+    if topic in _OUT_OF_SCOPE_AVAILABILITY_ENFORCEMENT_TOPICS:
+        return False
+    if inbound_exempt_from_availability_rewrite(
+        inbound_text,
+        availability_context=availability_context,
+    ):
+        return False
+    if topic in _AVAILABILITY_SCOPED_TOPICS:
+        return True
+    try:
+        from core.product_entity_resolution import direct_product_availability_ask  # noqa: PLC0415
+
+        if direct_product_availability_ask(inbound_text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional entity probe
+        pass
+    try:
+        from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: PLC0415
+            global_availability_browse_requested,
+        )
+
+        if global_availability_browse_requested(inbound_text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional browse probe
+        pass
+    try:
+        from modules.ai.brain.commerce.solution_seeking import (  # noqa: PLC0415
+            _is_bare_availability_inquiry,
+        )
+
+        if _is_bare_availability_inquiry(inbound_text):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional availability probe
+        pass
+    return False
+
+
 def evidence_allows_positive_claim(evidence_state: str) -> bool:
     """True when a positive availability wording in the reply may pass through."""
     return evidence_state in {

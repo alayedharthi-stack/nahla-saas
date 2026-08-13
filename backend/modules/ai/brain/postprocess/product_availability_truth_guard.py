@@ -26,6 +26,7 @@ from modules.ai.brain.postprocess.product_availability_evidence import (
     evaluate_product_availability_evidence,
 )
 from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+    is_availability_scoped_turn,
     should_block_availability_rewrite,
 )
 
@@ -509,6 +510,62 @@ def _would_rewrite(action: str, mode: str) -> bool:
     return False
 
 
+def _sentence_has_availability_claim(sentence: str) -> bool:
+    if reply_availability_polarity(sentence) is not None:
+        return True
+    return reply_positive_options_claim(sentence)
+
+
+def strip_ungrounded_availability_claim_sentences(reply: str) -> tuple[str, bool]:
+    """Remove sentences/lines that assert availability polarity or options claims."""
+    raw = str(reply or "")
+    if not raw.strip():
+        return raw, False
+
+    removed = False
+    if "\n" in raw:
+        kept_lines: List[str] = []
+        for line in raw.splitlines():
+            if _sentence_has_availability_claim(line):
+                removed = True
+                continue
+            kept_lines.append(line)
+        if not removed:
+            return raw, False
+        return "\n".join(kept_lines).strip(), True
+
+    kept: List[str] = []
+    for chunk in re.split(r"(?<=[.!?؟،])\s+", raw):
+        part = chunk.strip().rstrip("،,.")
+        if not part:
+            continue
+        if _sentence_has_availability_claim(part):
+            removed = True
+            continue
+        kept.append(part)
+    if not removed:
+        return raw, False
+    return " ".join(kept).strip(), True
+
+
+def _honest_negative_claim_matches_unresolved(
+    claim_polarity: Optional[str],
+    guard_action: str,
+    evidence: ProductAvailabilityEvidenceResult,
+) -> bool:
+    """Honest negative wording is acceptable when evidence is unresolved."""
+    if claim_polarity != "negative":
+        return False
+    if guard_action not in ("rewrite_conflict", "rewrite_unknown"):
+        return False
+    if (
+        evidence.evidence_state == EVIDENCE_RESOLVED_AVAILABLE
+        and evidence.evidence_ok_for_positive
+    ):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class ProductAvailabilityTruthGuardResult:
     reply: str
@@ -864,16 +921,54 @@ def apply_product_availability_truth_guard(
                 would_rewrite=would_rw,
             )
 
-        new_reply = _rewrite_for_action(
+        if _honest_negative_claim_matches_unresolved(
+            claim_polarity,
             guard_action,
-            evidence=evidence,
-            availability_context=availability_context,
+            evidence,
+        ):
+            return ProductAvailabilityTruthGuardResult(
+                reply=working,
+                action="allowed",
+                replaced=stripped_inactive,
+                reason="honest_negative_unresolved_preserved",
+                evidence=evidence,
+                availability_claim_blocked=False,
+                shadow_mode=False,
+                would_rewrite=False,
+            )
+
+        scoped = is_availability_scoped_turn(
             inbound_text=inbound_text,
+            decision_topic=decision_topic,
+            availability_context=availability_context,
         )
-        if not str(new_reply or "").strip():
-            new_reply = _UNKNOWN_REPLY_AR
+        if not scoped:
+            return ProductAvailabilityTruthGuardResult(
+                reply=working,
+                action="allowed",
+                replaced=stripped_inactive,
+                reason="topic_scope_skip_full_rewrite",
+                evidence=evidence,
+                availability_claim_blocked=would_rw,
+                shadow_mode=False,
+                would_rewrite=would_rw,
+            )
+
+        stripped_reply, did_strip = strip_ungrounded_availability_claim_sentences(working)
+        if did_strip and str(stripped_reply or "").strip():
+            return ProductAvailabilityTruthGuardResult(
+                reply=stripped_reply,
+                action=guard_action,
+                replaced=True,
+                reason=f"surgical_strip:{evidence.reason}",
+                evidence=evidence,
+                availability_claim_blocked=True,
+                shadow_mode=False,
+                would_rewrite=True,
+            )
+
         return ProductAvailabilityTruthGuardResult(
-            reply=new_reply,
+            reply=_UNKNOWN_REPLY_AR,
             action=guard_action,
             replaced=True,
             reason=evidence.reason,

@@ -258,23 +258,16 @@ class TestGuardEnforceMode:
             availability_context=ctx,
             tenant_id=99,
         )
-        assert result.replaced is True
-        assert "معلومات متعارضة" not in result.reply
-        assert customer_facing_availability_reply_is_clean(result.reply)
-        assert "متوفر" not in result.reply
-        assert "بعدة خيارات" not in result.reply
-        assert "أبشر" not in result.reply
-        assert result.reply == build_friendly_availability_conflict_reply(
-            result.evidence,
-            availability_context=ctx,
-        )
+        assert result.replaced is False
+        assert result.reply == reply
+        assert result.reason == "honest_negative_unresolved_preserved"
 
     def test_enforce_rewrites_unknown(self) -> None:
         reply = "\u0645\u062a\u0648\u0641\u0631"
         result = apply_product_availability_truth_guard(
             reply=reply,
             availability_context=_ctx(skus=[_sku(60, "Iota Product", checkout=True)], connected=True),
-            inbound_text="",
+            inbound_text="\u0647\u0644 \u0627\u0644\u0645\u0646\u062a\u062c \u0645\u062a\u0648\u0641\u0631\u061f",
             tenant_id=99,
         )
         assert result.replaced is True
@@ -450,16 +443,17 @@ class TestShippingInquiryGuardBypass:
         assert result.action == "allowed_shipping_inquiry"
         assert result.availability_claim_blocked is False
 
-    def test_non_shipping_topic_still_rewrites_unknown_availability_claim(self) -> None:
+    def test_non_shipping_topic_preserves_shipping_fee_reply(self) -> None:
         result = apply_product_availability_truth_guard(
             reply=self._SHIPPING_REPLY,
             availability_context=_ctx(skus=[], connected=False),
             inbound_text="كم سعر الشحن لجدة؟",
             tenant_id=99,
         )
-        assert result.replaced is True
-        assert result.reply == _UNKNOWN_REPLY_AR
-        assert result.action == "rewrite_unknown"
+        assert result.replaced is False
+        assert result.reply == self._SHIPPING_REPLY
+        assert "35" in result.reply
+        assert result.reason == "topic_scope_skip_full_rewrite"
 
 
 class TestCatalogProductFactAnswerExempt:
