@@ -3155,6 +3155,7 @@ class DefaultDecisionEngine:
             from ..commerce.product_visual import (  # noqa: PLC0415
                 extract_visual_product_query,
                 is_deictic_visual_request,
+                is_invalid_visual_product_query,
             )
 
             if _is_commerce_blocked(ctx):
@@ -3175,6 +3176,8 @@ class DefaultDecisionEngine:
                 or str(intent.slots.get("product_name") or "").strip()
             )
             deictic = is_deictic_visual_request(ctx.message or "")
+            if query and (deictic or is_invalid_visual_product_query(query)):
+                query = ""
             if deictic:
                 from ..commerce.product_visual import (  # noqa: PLC0415
                     resolve_trusted_focus_for_deictic,
@@ -3182,25 +3185,6 @@ class DefaultDecisionEngine:
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
                 if trusted.title:
                     focus_title = trusted.title
-            if focus_title:
-                return Decision(
-                    action=ACTION_LLM_REPLY,
-                    args={
-                        "topic": "product_visual",
-                        "focus_product": focus_title,
-                        "product_query": focus_title,
-                        "response_goal": "send_product_visual",
-                    },
-                    reason="customer wants product image — focused SKU",
-                    confidence=0.92,
-                )
-            if query and not deictic:
-                return Decision(
-                    action=ACTION_SEARCH_PRODUCTS,
-                    args={"query": query, "after_search": "product_visual"},
-                    reason=f"customer wants image of {query!r}",
-                    confidence=0.90,
-                )
             try:
                 from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
                     try_visual_catalog_send_decision,
@@ -3211,21 +3195,31 @@ class DefaultDecisionEngine:
                     return _vis_dec
             except Exception:  # noqa: BLE001  # noqa: silent-ok — visual delivery capability must not block visual owner
                 pass
+            if focus_title:
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "product_visual",
+                        "focus_product": focus_title,
+                        "product_query": focus_title,
+                        "response_goal": "send_product_visual",
+                    },
+                    reason="customer wants product image — focused SKU, media not executable",
+                    confidence=0.92,
+                )
+            if query and not deictic:
+                return Decision(
+                    action=ACTION_SEARCH_PRODUCTS,
+                    args={"query": query, "after_search": "product_visual"},
+                    reason=f"customer wants image of {query!r}",
+                    confidence=0.90,
+                )
+            if deictic:
                 from ..commerce.product_visual import (  # noqa: PLC0415
                     resolve_trusted_focus_for_deictic,
                 )
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
                 if not trusted.title:
-                    try:
-                        from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
-                            try_visual_catalog_send_decision,
-                        )
-
-                        _vis_dec = try_visual_catalog_send_decision(ctx)
-                        if _vis_dec is not None:
-                            return _vis_dec
-                    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual delivery retry must not block deictic clarify
-                        pass
                     return Decision(
                         action=ACTION_CLARIFY,
                         args={

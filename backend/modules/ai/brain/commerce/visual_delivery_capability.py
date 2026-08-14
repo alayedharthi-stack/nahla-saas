@@ -113,15 +113,51 @@ def visual_delivery_available(capability: Any) -> bool:
 
 def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
     """Send real product media when a visual ask has imageable catalog evidence."""
+    state = getattr(ctx, "state", None)
     cap = collect_visual_delivery_capability(
-        state=getattr(ctx, "state", None),
+        state=state,
         facts=getattr(ctx, "facts", None),
         merchant_context=getattr(ctx, "merchant_context", None),
     )
     if not visual_delivery_available(cap):
         return None
     products = list(cap.get("products") or [])
-    title = str((products[0] or {}).get("title") or "").strip()
+    title = ""
+    trusted_title = ""
+    try:
+        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+            is_deictic_visual_request,
+            resolve_trusted_focus_for_deictic,
+        )
+
+        trusted = resolve_trusted_focus_for_deictic(
+            state,
+            str(getattr(ctx, "message", "") or ""),
+        )
+        trusted_title = str(trusted.title or "").strip()
+        if trusted_title:
+            for row in products:
+                if str(row.get("title") or "").strip() == trusted_title:
+                    title = trusted_title
+                    products = [row] + [p for p in products if p is not row]
+                    break
+            if not title:
+                title = trusted_title
+        elif is_deictic_visual_request(str(getattr(ctx, "message", "") or "")):
+            import re as _re  # noqa: PLC0415
+
+            _possessive = _re.search(
+                r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
+                str(getattr(ctx, "message", "") or ""),
+            )
+            if _possessive:
+                # Possessive image follow-up without presented/focus context
+                # must not silently send an unrelated first catalog SKU.
+                return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual focus probe must not block capability send
+        title = ""
+    if not title:
+        title = str((products[0] or {}).get("title") or "").strip()
     if not title:
         return None
     from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: PLC0415

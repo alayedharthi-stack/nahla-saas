@@ -287,6 +287,7 @@ def apply_commerce_focus_lifecycle(
 
     if intent in _PRODUCT_COMMERCE_INTENTS or act in {
         "search_products",
+        "catalog_navigate",
         "propose_draft_order",
         "narrow_results",
     }:
@@ -297,7 +298,9 @@ def apply_commerce_focus_lifecycle(
                 reason=f"return_from_{focus_mode}",
             )
 
-    if intent == "ask_product" and act == "search_products":
+    if act == "catalog_navigate" or (
+        intent in {"ask_product", "start_order"} and act in {"search_products", "catalog_navigate"}
+    ):
         clear_order_tracking_focus(state, reason="fresh_product_browse")
 
 

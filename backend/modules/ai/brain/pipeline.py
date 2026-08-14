@@ -1478,6 +1478,17 @@ class MerchantBrain:
         _order_fulfillment_skip = False
         _include_catalog_products = True
         try:
+            _intent_name_early = str(getattr(intent, "name", "") or "")
+            if _intent_name_early in {
+                "track_order",
+                "latest_order_summary",
+                "order_history_count",
+                "order_reference_list",
+            }:
+                _include_catalog_products = False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — order-evidence catalog skip must not block turn
+            pass
+        try:
             from .order_context_gate import (  # noqa: PLC0415
                 log_order_context_block,
                 should_skip_catalog_preload,
@@ -6133,6 +6144,34 @@ def _build_reply_state(
         )
         if _catalog_candidates:
             known_facts["catalog_reasoning_candidates"] = _catalog_candidates
+            try:
+                _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+                _action = str(getattr(decision, "action", "") or "")
+                _order_owned = _intent_name in {
+                    "track_order",
+                    "latest_order_summary",
+                    "order_history_count",
+                    "order_reference_list",
+                } or _action == "track_order"
+                if current_state is not None and not _order_owned:
+                    presented = [
+                        dict(row)
+                        for row in _catalog_candidates
+                        if isinstance(row, dict) and str(row.get("title") or "").strip()
+                    ]
+                    if presented:
+                        current_state.last_presented_products = presented
+                        for row in presented:
+                            if row.get("provenance"):
+                                continue
+                            row["provenance"] = "assistant_presented"
+                        known_facts["last_presented_products"] = presented[:8]
+                elif current_state is not None and current_state.last_presented_products:
+                    known_facts["last_presented_products"] = list(
+                        current_state.last_presented_products
+                    )[:8]
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — presented-product stamp must not block compose
+                pass
         try:
             from modules.ai.brain.commerce.visual_delivery_capability import (  # noqa: PLC0415
                 collect_visual_delivery_capability,

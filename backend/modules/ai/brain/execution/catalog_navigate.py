@@ -419,14 +419,23 @@ class CatalogNavigateHandler:
         merchant_settings = parse_merchant_discovery_settings(
             args.get("discovery_settings") if isinstance(args.get("discovery_settings"), dict) else {}
         )
+        conversation_focus = str(getattr(getattr(ctx, "state", None), "conversation_focus", "") or "")
+        ranking_state = getattr(ctx, "state", None)
+        if conversation_focus in {"order_tracking", "shipping_policy"}:
+            ranking_state = None
         products = load_best_seller_catalog_products(
             getattr(ctx, "_db", None),
             ctx.tenant_id,
             message=ctx.message or "",
             query="",
-            state=getattr(ctx, "state", None),
+            state=ranking_state,
             limit=max(12, getattr(strategy, "initial_count", 3) * 4),
         )
+        if not products:
+            products = self._fallback_top_products(
+                ctx,
+                limit=max(12, getattr(strategy, "initial_count", 3) * 4),
+            )
         composer = DiscoveryPresentationComposer()
         presentation = composer.compose_products(
             list(products or []),
@@ -454,6 +463,32 @@ class CatalogNavigateHandler:
                 source="top_fallback",
             ),
         }
+
+    def _fallback_top_products(self, ctx: BrainContext, *, limit: int) -> List[Dict[str, Any]]:
+        """Global catalog fallback when best-seller / group ranking is empty."""
+        facts = getattr(ctx, "facts", None)
+        for rows in (
+            list(getattr(facts, "discovery_products", None) or []),
+            list(getattr(facts, "top_products", None) or []),
+        ):
+            if rows:
+                return list(rows)[: max(1, int(limit or 12))]
+        db = getattr(ctx, "_db", None)
+        tenant_id = getattr(ctx, "tenant_id", None)
+        if db is None or tenant_id is None:
+            return []
+        try:
+            from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
+
+            return list(
+                CatalogContextBuilder(db, int(tenant_id)).get_top_products(int(limit or 12)) or []
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — empty catalog must not crash browse
+            logger.exception(
+                "[CATALOG_NAVIGATOR] top_products_fallback_failed tenant=%s",
+                tenant_id,
+            )
+            return []
 
     def _resolve_strategy(
         self,
