@@ -195,11 +195,19 @@ class TestProductOrderingPromptGrounding:
         ctx = _ctx("أبي عسل", candidates=[])
         ctx.facts.top_products = []
         prompt = build_product_ordering_prompt(ctx)
+        assert str(prompt or "").strip()
         for forbidden in _FORBIDDEN_INVENTED:
             assert forbidden not in prompt
         assert "طلح نجد" not in prompt
         assert "سمر الحجاز" not in prompt
-        assert "خليني أتأكد" in prompt or "ما ظهرت" in prompt
+        honest = (
+            "؟" in prompt
+            or "منتج" in prompt
+            or "تطابق" in prompt
+            or "ما ظهر" in prompt
+            or "ما عندي" in prompt
+        )
+        assert honest, "empty catalog must clarify or signal absence, not invent SKUs"
 
     def test_empty_catalog_uncertainty_reply(self) -> None:
         reply = build_uncertain_catalog_reply(category_hint="العسل")
