@@ -26,6 +26,7 @@ from modules.ai.brain.postprocess.product_availability_evidence import (
     evaluate_product_availability_evidence,
 )
 from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+    inbound_asks_stock_or_orderability,
     should_block_availability_rewrite,
 )
 
@@ -714,11 +715,14 @@ def apply_product_availability_truth_guard(
             checkout_pressure_allowed=checkout_pressure_allowed,
             surface=surface,
         )
-        if mode == "enforce" and not _catalog_fact_exempt:
+        # Existence listings are not checkout claims. Only strip inactive SKUs
+        # when the inbound asked stock/orderability (e.g. «وش المتوفر»).
+        _strip_inactive = inbound_asks_stock_or_orderability(inbound_text)
+        if mode == "enforce" and not _catalog_fact_exempt and _strip_inactive:
             working, stripped_inactive = strip_non_checkout_catalog_product_lines(
                 working, catalog_skus,
             )
-        elif mode == "shadow" and not _catalog_fact_exempt:
+        elif mode == "shadow" and not _catalog_fact_exempt and _strip_inactive:
             _, stripped_inactive = strip_non_checkout_catalog_product_lines(
                 original, catalog_skus,
             )
@@ -766,7 +770,28 @@ def apply_product_availability_truth_guard(
 
         claim_polarity = reply_availability_polarity(working)
         if claim_polarity is None and reply_positive_options_claim(working):
-            claim_polarity = "positive"
+            # «عندنا خيارات» is an availability claim only when the inbound
+            # asked stock/orderability or a specific-subject existence
+            # question. Open catalog browse and gift/recommendation turns
+            # must not be rewritten into the canned UNKNOWN line.
+            inbound_is_availability_ask = inbound_asks_stock_or_orderability(
+                inbound_text,
+            )
+            if not inbound_is_availability_ask:
+                try:
+                    from modules.ai.brain.commerce.commerce_inquiry_boundary import (  # noqa: PLC0415
+                        CommerceTurnKind,
+                        classify_commerce_turn_kind,
+                    )
+
+                    inbound_is_availability_ask = (
+                        classify_commerce_turn_kind(inbound_text)
+                        == CommerceTurnKind.AVAILABILITY
+                    )
+                except Exception:  # noqa: BLE001
+                    inbound_is_availability_ask = False
+            if inbound_is_availability_ask:
+                claim_polarity = "positive"
         evidence = evaluate_product_availability_evidence(
             availability_context=availability_context,
             inbound_text=inbound_text,

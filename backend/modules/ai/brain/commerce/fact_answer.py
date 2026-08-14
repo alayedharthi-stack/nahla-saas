@@ -557,6 +557,7 @@ def build_fact_answer_contract(
     facts: Any = None,
     merchant_context: Any = None,
     message: str = "",
+    state: Any = None,
 ) -> FactAnswerContract:
     """Bind the current question to claimable evidence only."""
     profile = _projection_map(facts, merchant_context, "merchant_profile")
@@ -731,15 +732,15 @@ def build_fact_answer_contract(
         return contract
 
     if request.fact_kind == KIND_GIFT_RECOMMENDATION:
-        titles: List[str] = []
-        if facts is not None:
-            for item in list(getattr(facts, "top_products", None) or []):
-                if isinstance(item, dict):
-                    title = str(item.get("title") or "").strip()
-                    if title:
-                        titles.append(title)
+        from .catalog_reasoning_evidence import catalog_reasoning_titles  # noqa: PLC0415
+
+        titles = catalog_reasoning_titles(
+            facts=facts,
+            merchant_context=merchant_context,
+            state=state,
+        )
         contract.claimable_values = titles
-        contract.evidence_refs = ["commerce_facts.top_products"]
+        contract.evidence_refs = ["catalog_reasoning_candidates"]
         contract.status = STATUS_KNOWN_VALUE if titles else STATUS_UNKNOWN
         contract.catalog_allowed = True
         contract.forbidden_inferences.extend([
@@ -812,7 +813,11 @@ def build_fact_answer_decision(
     from modules.ai.brain.types import Decision  # noqa: PLC0415
 
     contract = build_fact_answer_contract(
-        req, facts=facts, merchant_context=merchant_context, message=message,
+        req,
+        facts=facts,
+        merchant_context=merchant_context,
+        message=message,
+        state=state,
     )
 
     if req.domain == DOMAIN_POLICY and req.fact_kind in _POLICY_KINDS:

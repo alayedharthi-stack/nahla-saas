@@ -561,7 +561,13 @@ class TestVariantPricingPathAllow:
         assert result.action == "allowed"
         assert result.replaced is False
 
-    def test_non_allow_path_still_strips_oos_price_line(self) -> None:
+    def test_non_allow_path_price_inquiry_keeps_existing_product_price(self) -> None:
+        """Existence/price is not checkout eligibility.
+
+        A price question may name a real catalog product even when the SKU
+        is not currently checkout-eligible. Stock/orderability questions
+        still strip those lines (see test_stock_ask_still_strips...).
+        """
         result = apply_product_availability_truth_guard(
             reply=self._VARIANT_PRICE_REPLY,
             availability_context=self._oos_shirt_ctx(),
@@ -569,6 +575,5 @@ class TestVariantPricingPathAllow:
             chosen_path="",
             tenant_id=99,
         )
-        assert result.replaced is True
-        assert result.action == "strip_inactive_catalog_lines"
-        assert result.reply == ""
+        assert result.replaced is False
+        assert result.reply == self._VARIANT_PRICE_REPLY

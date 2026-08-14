@@ -115,8 +115,35 @@ class DefaultFactsLoader:
                 "title":       p.title,
                 "price":       p.price,
                 "sku":         p.sku,
+                "can_checkout": True,
+                "in_stock":    bool(getattr(p, "in_stock", True)),
             }
             for p in top_rows
+        ]
+
+        # Existence-capable discovery set — active in-stock rows even without
+        # a storefront external_id. Checkout eligibility is an explicit flag.
+        discovery_rows = (
+            apply_active_catalog_query_filters(
+                db.query(Product).filter(Product.tenant_id == tenant_id),
+                Product,
+            )
+            .order_by(Product.in_stock.desc(), Product.id)
+            .limit(8)
+            .all()
+        )
+        facts.discovery_products = [
+            {
+                "id": p.id,
+                "external_id": (p.external_id or "").strip() or None,
+                "title": p.title,
+                "price": p.price,
+                "sku": p.sku,
+                "in_stock": bool(getattr(p, "in_stock", True)),
+                "can_checkout": bool(str(p.external_id or "").strip()),
+            }
+            for p in discovery_rows
+            if str(getattr(p, "title", "") or "").strip()
         ]
 
         # ── 3. Coupons ────────────────────────────────────────────────────

@@ -46,6 +46,24 @@ def _norm_ar(text: str) -> str:
     return s.lower().strip()
 
 
+_AVAILABILITY_STATUS_MARKERS = (
+    "متوفر",
+    "متاح",
+    "للطلب",
+    "in stock",
+    "available",
+    "availability",
+)
+
+
+def inbound_asks_stock_or_orderability(message: str) -> bool:
+    """True when the customer asked stock/orderability, not mere catalog existence."""
+    norm = _norm_ar(message or "")
+    if not norm:
+        return False
+    return any(_norm_ar(marker) in norm for marker in _AVAILABILITY_STATUS_MARKERS)
+
+
 def browse_alternatives_requested(message: str) -> bool:
     """Customer asks for other options after a prior browse turn."""
     norm = _norm_ar(message or "")

@@ -6102,9 +6102,36 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    try:
+        from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            collect_catalog_reasoning_candidates,
+        )
+
+        _catalog_candidates = collect_catalog_reasoning_candidates(
+            facts=getattr(ctx, "facts", None),
+            merchant_context=merchant_context,
+            state=current_state,
+        )
+        if _catalog_candidates:
+            known_facts["catalog_reasoning_candidates"] = _catalog_candidates
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog evidence must not block compose
+        pass
     _answer_contract = (decision.args or {}).get("answer_contract")
     if isinstance(_answer_contract, dict) and _answer_contract:
         known_facts["answer_contract"] = dict(_answer_contract)
+        _gift_titles = [
+            str(row.get("title") or "").strip()
+            for row in list(known_facts.get("catalog_reasoning_candidates") or [])
+            if isinstance(row, dict) and str(row.get("title") or "").strip()
+        ]
+        if (
+            str(known_facts["answer_contract"].get("fact_kind") or "") == "gift_recommendation"
+            and not list(known_facts["answer_contract"].get("claimable_values") or [])
+            and _gift_titles
+        ):
+            known_facts["answer_contract"]["claimable_values"] = _gift_titles
+            known_facts["answer_contract"]["status"] = "KNOWN_VALUE"
+            known_facts["answer_contract"]["evidence_refs"] = ["catalog_reasoning_candidates"]
     # Pack A3 UNKNOWN honesty — stamp retrieval_count into known_facts early
     # so post-compose guard + compose metadata share one source.
     try:

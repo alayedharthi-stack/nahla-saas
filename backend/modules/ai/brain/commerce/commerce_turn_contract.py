@@ -160,6 +160,7 @@ def _recent_customer_order_reference(history: Optional[List[Any]]) -> str:
 
 
 def _has_existing_order_support_context(ctx: BrainContext) -> bool:
+    """True when order evidence exists — availability, not current-turn ownership."""
     state = getattr(ctx, "state", None)
     commerce_bundle = getattr(ctx, "commerce_bundle", None) or {}
     try:
@@ -176,6 +177,36 @@ def _has_existing_order_support_context(ctx: BrainContext) -> bool:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — order evidence probe is best-effort
         pass
     return bool(_recent_customer_order_reference(getattr(ctx, "history", None)))
+
+
+def _current_turn_existing_order_support_owns(ctx: BrainContext) -> bool:
+    """Order evidence may be available without owning catalog/discovery turns.
+
+    Ownership requires current-turn support intent + continuity
+    (``should_yield_to_existing_order_support``). Historical orders must not
+    block ``search_products`` on an unrelated browse/recommendation turn.
+    """
+    try:
+        from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: PLC0415
+            should_yield_to_existing_order_support,
+        )
+
+        profile = getattr(ctx, "profile", None) or {}
+        inbound_metadata = (
+            profile.get("inbound_metadata")
+            if isinstance(profile, dict)
+            else {}
+        )
+        ownership = should_yield_to_existing_order_support(
+            getattr(ctx, "message", "") or "",
+            inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+            brain_state=getattr(ctx, "state", None),
+            history=getattr(ctx, "history", None),
+            commerce_bundle=getattr(ctx, "commerce_bundle", None) or {},
+        )
+        return bool(getattr(ownership, "should_yield", False))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block decide
+        return False
 
 
 def decision_owned_by_existing_order_support(decision: Decision) -> bool:
@@ -562,15 +593,21 @@ def build_commerce_turn_contract(
             _CATALOG_ORDER_FORBIDDEN,
         )
         reasons.append("placed_order_statement")
-    elif _has_existing_order_support_context(ctx):
+    elif _current_turn_existing_order_support_owns(ctx):
         known_facts["existing_order_support_only"] = True
+        known_facts["existing_order_evidence_available"] = _has_existing_order_support_context(
+            ctx,
+        )
         commerce_state = "existing_order_support"
         next_goal = "existing_order_support"
         forbidden_actions = _merge_forbidden(
             forbidden_actions,
             _CATALOG_ORDER_FORBIDDEN,
         )
-        reasons.append("existing_order_support_context")
+        reasons.append("existing_order_support_current_turn")
+    elif _has_existing_order_support_context(ctx):
+        known_facts["existing_order_evidence_available"] = True
+        reasons.append("existing_order_evidence_available_not_owning")
 
     from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
         is_current_catalog_order_submitted,
