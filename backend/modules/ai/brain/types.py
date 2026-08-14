@@ -826,8 +826,12 @@ class CommerceFacts:
     orderable: bool = False
     # Best available coupon code for this turn (empty string = none)
     coupon_eligibility: str = ""
-    # Top 5 products for greeting / discovery response
+    # Top 5 synced products for greeting / numeric pick (need external_id).
     top_products: List[Dict[str, Any]] = field(default_factory=list)
+    # Bounded existence-capable catalog for discovery/recommendation reasoning.
+    # Distinct from top_products: native/unsynced in-stock rows may appear here
+    # with can_checkout=false. Never dump the full catalog.
+    discovery_products: List[Dict[str, Any]] = field(default_factory=list)
     # Platform driving the store: "salla" | "zid" | "shopify" | "manual" | "unknown"
     integration_platform: str = "unknown"
     # Whether the store is within configured working hours (None = no config = always open)
