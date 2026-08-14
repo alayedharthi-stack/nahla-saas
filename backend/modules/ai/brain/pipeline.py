@@ -6116,6 +6116,23 @@ def _build_reply_state(
             known_facts["catalog_reasoning_candidates"] = _catalog_candidates
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog evidence must not block compose
         pass
+    try:
+        from modules.ai.brain.commerce.customer_order_evidence import (  # noqa: PLC0415
+            collect_customer_order_evidence,
+        )
+
+        _order_evidence = collect_customer_order_evidence(
+            db=db,
+            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+            phone=str(getattr(ctx, "customer_phone", "") or ""),
+            customer_id=getattr(ctx, "customer_id", None),
+            conversation_id=getattr(ctx, "conversation_id", None),
+            message=str(getattr(ctx, "message", "") or ""),
+        )
+        if _order_evidence:
+            known_facts["customer_order_evidence"] = _order_evidence
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order evidence must not block compose
+        pass
     _answer_contract = (decision.args or {}).get("answer_contract")
     if isinstance(_answer_contract, dict) and _answer_contract:
         known_facts["answer_contract"] = dict(_answer_contract)

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import DateTime, and_, asc, case, desc, false, func, literal, or_
 from sqlalchemy.ext.compiler import compiles
@@ -21,7 +21,7 @@ from sqlalchemy.sql import expression
 
 from core.local_order_resolver import (
     LocalOrderSnapshot,
-    _load_shipment_tracking,
+    _load_shipment_evidence,
     _phone_lookup_keys,
     _resolve_phone,
     _snapshot_from_order,
@@ -36,6 +36,7 @@ _CLOSED_STATUSES = frozenset({
     "cancelled", "canceled", "abandoned", "delivered", "completed", "complete",
 })
 _MAX_ORDER_REFERENCE_LIST_LIMIT = 5
+_MAX_ORDER_EVIDENCE_LIMIT = 8
 _CLOSED_STATUSES_SQL: Tuple[str, ...] = tuple(sorted(_CLOSED_STATUSES))
 # Production ``metadata.created_at`` shapes (offset, microsecond+offset, Z).
 _PG_CREATED_AT_GUARD = (
@@ -644,6 +645,102 @@ def list_recent_order_snapshots(
     return _to_snapshots(db, int(tenant_id), rows)
 
 
+def list_customer_order_rows(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation_id: Optional[int] = None,
+    customer_id: Optional[int] = None,
+    phone: Optional[str] = None,
+    include_abandoned: bool = False,
+    include_cancelled: bool = True,
+    limit: int = 8,
+) -> List[Any]:
+    """Return recent Order rows for a tenant-scoped customer lookup.
+
+    Customer matching happens in SQL before LIMIT so other customers'
+    newer orders cannot hide this customer's history.
+    """
+    _ = conversation_id
+    effective_limit = max(1, min(int(limit or 8), _MAX_ORDER_EVIDENCE_LIMIT))
+    if db is None:
+        return []
+
+    from models import Order  # noqa: PLC0415
+
+    _identity, customer_id_eff, phone_keys = _resolve_ledger_scope(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=customer_id,
+        phone=phone,
+    )
+    _match_clause, visible_where = _ledger_clauses(
+        Order,
+        tenant_id=int(tenant_id),
+        customer_id_eff=customer_id_eff,
+        phone_keys=phone_keys,
+        include_abandoned=include_abandoned,
+        include_cancelled=include_cancelled,
+    )
+    return _query_ledger_orders(
+        db,
+        visible_where=visible_where,
+        order_model=Order,
+        limit=effective_limit,
+    )
+
+
+def find_customer_orders_by_references(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int] = None,
+    phone: Optional[str] = None,
+    references: Optional[Sequence[str]] = None,
+    include_abandoned: bool = False,
+    include_cancelled: bool = True,
+) -> List[Any]:
+    """Load specific order numbers still scoped to this tenant + customer."""
+    refs = [
+        str(token or "").strip().lstrip("#")
+        for token in list(references or [])
+        if str(token or "").strip()
+    ]
+    refs = [token for token in refs if token]
+    if db is None or not refs:
+        return []
+
+    from models import Order  # noqa: PLC0415
+
+    _identity, customer_id_eff, phone_keys = _resolve_ledger_scope(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=customer_id,
+        phone=phone,
+    )
+    _match_clause, visible_where = _ledger_clauses(
+        Order,
+        tenant_id=int(tenant_id),
+        customer_id_eff=customer_id_eff,
+        phone_keys=phone_keys,
+        include_abandoned=include_abandoned,
+        include_cancelled=include_cancelled,
+    )
+    hashed = [f"#{token}" for token in refs]
+    ref_clause = or_(
+        Order.external_id.in_(refs),
+        Order.external_order_number.in_(refs),
+        Order.external_order_number.in_(hashed),
+    )
+    return _query_ledger_orders(
+        db,
+        visible_where=visible_where,
+        order_model=Order,
+        extra_filters=(ref_clause,),
+        limit=max(1, min(len(refs), _MAX_ORDER_EVIDENCE_LIMIT)),
+    )
+
+
 def _to_snapshots(
     db: Any,
     tenant_id: int,
@@ -652,8 +749,8 @@ def _to_snapshots(
     out: List[LocalOrderSnapshot] = []
     for row in orders:
         oid = int(getattr(row, "id", 0) or 0)
-        tracking = _load_shipment_tracking(db, tenant_id, oid)
-        out.append(_snapshot_from_order(row, tracking_number=tracking))
+        evidence = _load_shipment_evidence(db, tenant_id, oid)
+        out.append(_snapshot_from_order(row, **evidence))
     return out
 
 
@@ -663,6 +760,8 @@ __all__ = [
     "EvidenceQuality",
     "OrderCounts",
     "_ledger_phone_sql_keys",
+    "find_customer_orders_by_references",
+    "list_customer_order_rows",
     "list_recent_order_snapshots",
     "resolve_customer_commerce_profile",
 ]
