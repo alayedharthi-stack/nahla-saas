@@ -20,6 +20,10 @@ from modules.ai.brain.types import (
     INTENT_ASK_PAYMENT_INFO,
     INTENT_ASK_SHIPPING,
     INTENT_ASK_WORKING_HOURS,
+    INTENT_LATEST_ORDER_SUMMARY,
+    INTENT_ORDER_HISTORY_COUNT,
+    INTENT_ORDER_REFERENCE_LIST,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
 )
@@ -208,7 +212,14 @@ def classify_fact_answer(
     # TRACK_ORDER / TALK_HUMAN stay transactional. PAY_NOW must not skip
     # payment-method *discovery* ("وش عندكم طريقة أدفع فيها؟") — that is
     # MERCHANT_CAPABILITIES.payment_methods, not checkout continuation.
-    if intent in {INTENT_TRACK_ORDER, INTENT_TALK_HUMAN}:
+    if intent in {
+        INTENT_TRACK_ORDER,
+        INTENT_TALK_HUMAN,
+        INTENT_PRODUCT_VISUAL_REQUEST,
+        INTENT_LATEST_ORDER_SUMMARY,
+        INTENT_ORDER_HISTORY_COUNT,
+        INTENT_ORDER_REFERENCE_LIST,
+    }:
         return None
 
     pack_b_pay = False
@@ -447,6 +458,11 @@ def catalog_must_yield_to_fact_owner(
         INTENT_ASK_SHIPPING,
         INTENT_ASK_PAYMENT_INFO,
         INTENT_ASK_COD,
+        INTENT_TRACK_ORDER,
+        INTENT_PRODUCT_VISUAL_REQUEST,
+        INTENT_LATEST_ORDER_SUMMARY,
+        INTENT_ORDER_HISTORY_COUNT,
+        INTENT_ORDER_REFERENCE_LIST,
     }:
         return True
     try:

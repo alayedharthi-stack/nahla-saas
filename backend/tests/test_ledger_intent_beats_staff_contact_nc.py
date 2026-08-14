@@ -93,8 +93,8 @@ class TestLedgerIntentBeatsStaffContactNonCommerce:
         assert matched.name == INTENT_LATEST_ORDER_SUMMARY
 
         decision = _decide(LIVE_RCA_MESSAGE, intent=matched)
-        assert decision.action == ACTION_CUSTOMER_LEDGER_REPLY
-        assert decision.action != ACTION_LLM_REPLY
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CUSTOMER_LEDGER_REPLY
         assert decision.args.get("ledger_topic") == INTENT_LATEST_ORDER_SUMMARY
         assert "staff_contact" not in (decision.reason or "")
 
@@ -118,7 +118,10 @@ class TestLedgerIntentBeatsStaffContactNonCommerce:
             assert matched.name == ledger_intent
 
         decision = _decide(message, intent=intent)
-        assert decision.action == ACTION_CUSTOMER_LEDGER_REPLY
+        if ledger_intent == INTENT_LATEST_ORDER_SUMMARY:
+            assert decision.action == ACTION_LLM_REPLY
+        else:
+            assert decision.action == ACTION_CUSTOMER_LEDGER_REPLY
         assert decision.args.get("ledger_topic") == ledger_intent
         assert "staff_contact" not in (decision.reason or "")
 

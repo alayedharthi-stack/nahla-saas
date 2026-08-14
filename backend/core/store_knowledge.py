@@ -1057,6 +1057,7 @@ def build_merchant_context(
     history: Optional[List[Dict[str, Any]]] = None,
     profile: Optional[Dict[str, Any]] = None,
     product_limit: int = 8,
+    include_products: bool = True,
 ) -> Dict[str, Any]:
     """Return a structured, fact-grounded merchant context for Brain/LLM use.
 
@@ -1104,47 +1105,51 @@ def build_merchant_context(
         store_profile["store_name"] = clean_store_name(str(store_profile["store_name"]))
 
     # Match build_context_block: if search finds nothing, still surface orderable top products.
-    pq = (product_query or "").strip()
-    if pq:
-        products = catalog.search_products(pq, limit=effective_limit)
-        if not products:
+    products: List[Dict[str, Any]] = []
+    total_product_count = 0
+    unavailable_count = 0
+    without_description_count = 0
+    formatted_rows: List[Dict[str, Any]] = []
+    if include_products:
+        pq = (product_query or "").strip()
+        if pq:
+            products = catalog.search_products(pq, limit=effective_limit)
+            if not products:
+                products = catalog.get_top_products(effective_limit)
+        else:
             products = catalog.get_top_products(effective_limit)
-    else:
-        products = catalog.get_top_products(effective_limit)
 
-    # Insights: one cheap COUNT + a small bounded sample for _format()-accurate orderable stats.
-    # (Full-table Python _format loops are too heavy for large catalogs.)
-    from sqlalchemy import func as sa_func  # noqa: PLC0415
-    from sqlalchemy import or_ as sa_or_  # noqa: PLC0415
+        from sqlalchemy import func as sa_func  # noqa: PLC0415
+        from sqlalchemy import or_ as sa_or_  # noqa: PLC0415
 
-    total_product_count = int(
-        db.query(sa_func.count(Product.id))
-        .filter(Product.tenant_id == tenant_id)
-        .scalar()
-        or 0
-    )
-    insight_scan_limit = min(150, total_product_count)
-    product_rows = (
-        db.query(Product)
-        .filter_by(tenant_id=tenant_id)
-        .order_by(Product.in_stock.desc(), Product.id)
-        .limit(insight_scan_limit)
-        .all()
-    )
-    formatted_rows = [catalog._format(p) for p in product_rows]  # noqa: SLF001 - same module helper
-    unavailable_count = sum(1 for p in formatted_rows if not p.get("orderable"))
-    without_description_count = int(
-        db.query(sa_func.count(Product.id))
-        .filter(
-            Product.tenant_id == tenant_id,
-            sa_or_(
-                Product.description.is_(None),
-                sa_func.trim(Product.description) == "",
-            ),
+        total_product_count = int(
+            db.query(sa_func.count(Product.id))
+            .filter(Product.tenant_id == tenant_id)
+            .scalar()
+            or 0
         )
-        .scalar()
-        or 0
-    )
+        insight_scan_limit = min(150, total_product_count)
+        product_rows = (
+            db.query(Product)
+            .filter_by(tenant_id=tenant_id)
+            .order_by(Product.in_stock.desc(), Product.id)
+            .limit(insight_scan_limit)
+            .all()
+        )
+        formatted_rows = [catalog._format(p) for p in product_rows]  # noqa: SLF001 - same module helper
+        unavailable_count = sum(1 for p in formatted_rows if not p.get("orderable"))
+        without_description_count = int(
+            db.query(sa_func.count(Product.id))
+            .filter(
+                Product.tenant_id == tenant_id,
+                sa_or_(
+                    Product.description.is_(None),
+                    sa_func.trim(Product.description) == "",
+                ),
+            )
+            .scalar()
+            or 0
+        )
 
     policy_summary = dict(loader.policy_summary() or {})
     shipping_summary = dict(loader.shipping_summary() or {})

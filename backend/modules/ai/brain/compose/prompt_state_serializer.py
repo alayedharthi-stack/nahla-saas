@@ -514,6 +514,7 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
         "answer_contract",
         "catalog_reasoning_candidates",
         "customer_order_evidence",
+        "visual_delivery",
         "has_products",
         "product_count",
         "in_stock_count",

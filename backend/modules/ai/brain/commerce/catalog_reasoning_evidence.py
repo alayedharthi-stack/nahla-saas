@@ -70,6 +70,15 @@ def _normalize_candidate(row: Any) -> Optional[Dict[str, Any]]:
     category = str(row.get("category") or row.get("category_name") or "").strip()
     if category:
         item["category"] = category
+    image_url = str(
+        row.get("image_url")
+        or row.get("image")
+        or row.get("product_image_url")
+        or row.get("thumbnail_url")
+        or ""
+    ).strip()
+    if image_url:
+        item["image_url"] = image_url
     return item
 
 
@@ -109,6 +118,10 @@ def collect_catalog_reasoning_candidates(
     4. state.last_search_candidates / last_recommended_products
     """
     cap = max(1, min(int(limit or _DEFAULT_LIMIT), 12))
+    ctx = merchant_context if isinstance(merchant_context, dict) else {}
+    cached = ctx.get("_catalog_reasoning_candidates")
+    if isinstance(cached, list) and cached:
+        return list(cached)[:cap]
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -143,6 +156,8 @@ def collect_catalog_reasoning_candidates(
             limit=cap,
         )
 
+    if isinstance(merchant_context, dict) and out:
+        merchant_context["_catalog_reasoning_candidates"] = list(out)
     return out
 
 

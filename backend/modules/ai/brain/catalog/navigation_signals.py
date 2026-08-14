@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from ..types import (
     BrainContext,
     INTENT_GREETING,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
@@ -183,6 +184,8 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional tracking probe
         pass
 
+    product_visual_request = intent_name == INTENT_PRODUCT_VISUAL_REQUEST
+
     support_or_staff_contact = intent_name == INTENT_TALK_HUMAN
     try:
         from ..commerce.contact_escalation import (  # noqa: PLC0415
@@ -292,6 +295,9 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
     elif shipping_or_order_status:
         hard_blocked = True
         block_reason = "shipping_or_order_status"
+    elif product_visual_request:
+        hard_blocked = True
+        block_reason = "product_visual_request"
     elif support_or_staff_contact:
         hard_blocked = True
         block_reason = "support_or_staff_contact"
@@ -353,6 +359,7 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         "intent_browse": intent_browse,
         "navigation_state": navigation_state,
         "score": round(score, 3),
+        "product_visual_request": product_visual_request,
     })
 
     return CatalogNavigationSignals(

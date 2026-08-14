@@ -2374,7 +2374,6 @@ class DefaultDecisionEngine:
         # ── 2.9 Customer commerce ledger (order history — phase 1) ───────
         if intent.name in (
             INTENT_ORDER_HISTORY_COUNT,
-            INTENT_LATEST_ORDER_SUMMARY,
             INTENT_ORDER_REFERENCE_LIST,
         ):
             from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
@@ -2384,6 +2383,20 @@ class DefaultDecisionEngine:
                 action=ACTION_CUSTOMER_LEDGER_REPLY,
                 args={"ledger_topic": intent.name},
                 reason="customer commerce ledger history inquiry",
+                confidence=float(intent.confidence or 0.94),
+            )
+
+        if intent.name == INTENT_LATEST_ORDER_SUMMARY:
+            from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+            stamp_ledger_context(state)
+            return Decision(
+                action=ACTION_LLM_REPLY,
+                args={
+                    "topic": "customer_order_evidence",
+                    "ledger_topic": intent.name,
+                },
+                reason="latest order summary — evidence compose",
                 confidence=float(intent.confidence or 0.94),
             )
 
@@ -2411,6 +2424,39 @@ class DefaultDecisionEngine:
                         confidence=0.93,
                     )
             except Exception:  # noqa: BLE001
+                pass
+            try:
+                from ..intent import rules as _intent_rules  # noqa: PLC0415
+                from ..commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                    is_explicit_order_tracking_request,
+                )
+
+                _rule_hit = _intent_rules.match(ctx.message or "")
+                _explicit_status = bool(
+                    is_explicit_order_tracking_request(
+                        ctx.message or "",
+                        state=state,
+                        history=getattr(ctx, "history", None),
+                        commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                    )
+                )
+                if (
+                    (
+                        _rule_hit is None
+                        or str(getattr(_rule_hit, "name", "") or "") != INTENT_TRACK_ORDER
+                    )
+                    and not _explicit_status
+                ):
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={"topic": "customer_order_evidence"},
+                        reason=(
+                            "order question without status-rule match — "
+                            "full customer_order_evidence compose"
+                        ),
+                        confidence=float(intent.confidence or 0.9),
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — non-rule track_order probe must not block tracking
                 pass
             return Decision(
                 action=ACTION_TRACK_ORDER,
@@ -2447,7 +2493,7 @@ class DefaultDecisionEngine:
                     commerce_bundle=getattr(ctx, "commerce_bundle", None),
                 ):
                     _candidates = []
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — pending order-reference probe must not block product match
                 pass
             if _block_stale_resume("pending_candidates"):
                 _candidates = []
@@ -3128,7 +3174,8 @@ class DefaultDecisionEngine:
                 or str(intent.slots.get("product_query") or "").strip()
                 or str(intent.slots.get("product_name") or "").strip()
             )
-            if is_deictic_visual_request(ctx.message or ""):
+            deictic = is_deictic_visual_request(ctx.message or "")
+            if deictic:
                 from ..commerce.product_visual import (  # noqa: PLC0415
                     resolve_trusted_focus_for_deictic,
                 )
@@ -3147,19 +3194,38 @@ class DefaultDecisionEngine:
                     reason="customer wants product image — focused SKU",
                     confidence=0.92,
                 )
-            if query:
+            if query and not deictic:
                 return Decision(
                     action=ACTION_SEARCH_PRODUCTS,
                     args={"query": query, "after_search": "product_visual"},
                     reason=f"customer wants image of {query!r}",
                     confidence=0.90,
                 )
-            if is_deictic_visual_request(ctx.message or ""):
+            try:
+                from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
+                    try_visual_catalog_send_decision,
+                )
+
+                _vis_dec = try_visual_catalog_send_decision(ctx)
+                if _vis_dec is not None:
+                    return _vis_dec
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — visual delivery capability must not block visual owner
+                pass
                 from ..commerce.product_visual import (  # noqa: PLC0415
                     resolve_trusted_focus_for_deictic,
                 )
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
                 if not trusted.title:
+                    try:
+                        from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
+                            try_visual_catalog_send_decision,
+                        )
+
+                        _vis_dec = try_visual_catalog_send_decision(ctx)
+                        if _vis_dec is not None:
+                            return _vis_dec
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual delivery retry must not block deictic clarify
+                        pass
                     return Decision(
                         action=ACTION_CLARIFY,
                         args={
