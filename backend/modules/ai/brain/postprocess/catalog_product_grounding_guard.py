@@ -67,6 +67,16 @@ _BULLET_OR_NUMBERED_RE = re.compile(
     re.MULTILINE | re.UNICODE,
 )
 
+_RECOMMEND_SPLIT_RE = re.compile(
+    r"\s*(?:أو|او|,|،)\s*",
+    re.UNICODE,
+)
+
+_RECOMMEND_LEAD_RE = re.compile(
+    r"(?:أنصحك|انصحك|ننصحك|نصيحة|هدية|خيارات|فكر(?:ي|ين)?\s+في)\s*[:،]?\s*",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _SEASONAL_DATE_CLAIM_RE = re.compile(
     r"(?:"
     r"(?:يجي|يوصل|ينزل|يتوفر|راح\s+يجي|راح\s+يوصل|بيكون)\s+"
@@ -172,7 +182,62 @@ def _extract_product_mentions(reply: str) -> List[str]:
         if item and item not in seen and len(item) >= 4:
             seen.add(item)
             mentions.append(item)
+    for phrase in _extract_recommend_conjuncts(reply or ""):
+        if phrase and phrase not in seen and len(phrase) >= 3:
+            seen.add(phrase)
+            mentions.append(phrase)
     return mentions
+
+
+def _extract_or_pairs(reply: str) -> List[str]:
+    """Short A-or-B noun phrases. Used only when mixed with catalog titles."""
+    out: List[str] = []
+    for raw_line in str(reply or "").splitlines() or [str(reply or "")]:
+        line = raw_line.strip()
+        if not line or len(line) > 120 or not _RECOMMEND_SPLIT_RE.search(line):
+            continue
+        line = _RECOMMEND_LEAD_RE.sub("", line, count=1)
+        line = re.sub(r"[🎁✨👗🪷🛒.]+$", "", line).strip()
+        parts = [p.strip(" .،,*-•") for p in _RECOMMEND_SPLIT_RE.split(line) if p.strip()]
+        if not (2 <= len(parts) <= 3):
+            continue
+        cleaned: List[str] = []
+        for part in parts:
+            part = re.sub(r"^(?:ب|ل|ك)\s*", "", part).strip()
+            part = re.sub(r"\s+كهدية.*$", "", part).strip()
+            if 2 < len(part) <= 40:
+                cleaned.append(part)
+        if 2 <= len(cleaned) <= 3:
+            for part in cleaned:
+                if part not in out:
+                    out.append(part)
+    return out
+
+
+def _extract_recommend_conjuncts(reply: str) -> List[str]:
+    text = str(reply or "").strip()
+    if not text or not _RECOMMEND_LEAD_RE.search(text):
+        return []
+    return _extract_or_pairs(text)
+
+
+def _strip_ungrounded_mentions(reply: str, ungrounded: Sequence[str]) -> str:
+    working = str(reply or "")
+    for mention in ungrounded:
+        token = str(mention or "").strip()
+        if not token:
+            continue
+        pattern = re.compile(
+            rf"(?:\s*(?:أو|او|,|،)\s*)?{re.escape(token)}",
+            re.UNICODE,
+        )
+        working = pattern.sub("", working)
+    working = re.sub(r"[ \t]{2,}", " ", working)
+    working = re.sub(r"(?:أو|او)\s*(?:أو|او)", "أو", working)
+    working = re.sub(r"^(?:أو|او)\s+", "", working)
+    working = re.sub(r"\s+(?:أو|او)\s*$", "", working)
+    working = re.sub(r"\s+([.،,])", r"\1", working)
+    return working.strip()
 
 
 def _distinctive_tokens(text: str) -> Set[str]:
@@ -181,6 +246,7 @@ def _distinctive_tokens(text: str) -> Set[str]:
     stop = frozenset({
         "منتج", "product", "عسل", "حجم", "وزن", "كيلو", "نصف", "ربع", "جرام",
         "البلدي", "بلدي", "طبيعي", "اصلي", "أصلي",
+        "مميز", "جميل", "رائع", "حلو", "مناسب", "جديد", "خاص",
     })
     return {
         t
@@ -202,6 +268,8 @@ def _strict_catalog_mention_match(mention: str, title: str) -> bool:
     if not title_toks:
         return False
     overlap = mention_toks & title_toks
+    if len(mention_toks) == 1:
+        return bool(overlap)
     required = 2 if len(title_toks) >= 2 else 1
     return len(overlap) >= required
 
@@ -348,7 +416,26 @@ def apply_catalog_product_grounding_guard(
         )
 
     catalog_titles = _catalog_titles_from_evidence(evidence, executor_products)
+    meta = dict(inbound_metadata or {})
+    for extra in (
+        list(meta.get("catalog_reasoning_titles") or []),
+        list(meta.get("claimable_values") or []),
+    ):
+        for title in extra:
+            token = str(title or "").strip()
+            if token and token not in catalog_titles:
+                catalog_titles.append(token)
     ungrounded = _ungrounded_product_mentions(original, catalog_titles)
+    or_parts = _extract_or_pairs(original)
+    grounded_or = [
+        part for part in or_parts
+        if _mention_grounded_in_catalog(part, catalog_titles)
+    ]
+    ungrounded_or = [part for part in or_parts if part not in grounded_or]
+    if grounded_or and ungrounded_or:
+        for part in ungrounded_or:
+            if part not in ungrounded:
+                ungrounded.append(part)
     seasonal_invented = _seasonal_availability_invented(
         original, inbound_text, catalog_titles,
     )
@@ -393,11 +480,25 @@ def apply_catalog_product_grounding_guard(
     except Exception:  # noqa: BLE001
         logger.exception("[CATALOG_GROUNDING_GUARD] catalog_containment_probe_failed")
 
-    rewritten = _rewrite_grounded_reply(
-        catalog_titles=catalog_titles,
-        inbound_text=inbound_text,
-        category_hint=category_hint,
+    stripped = _strip_ungrounded_mentions(original, ungrounded)
+    extracted = _extract_product_mentions(original)
+    mention_pool = list(extracted)
+    for part in _extract_or_pairs(original):
+        if part not in mention_pool:
+            mention_pool.append(part)
+    mixed_grounded = any(
+        mention not in ungrounded
+        and _mention_grounded_in_catalog(mention, catalog_titles)
+        for mention in mention_pool
     )
+    if mixed_grounded and stripped.strip() and stripped.strip() != original.strip():
+        rewritten = stripped
+    else:
+        rewritten = _rewrite_grounded_reply(
+            catalog_titles=catalog_titles,
+            inbound_text=inbound_text,
+            category_hint=category_hint,
+        )
 
     if mode == "shadow":
         logger.info(

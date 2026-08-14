@@ -577,6 +577,9 @@ class MerchantConversationState:
     next_page_available: bool = False
     catalog_navigation_source: str = ""
     native_catalog_send_failed: bool = False
+    # Last order reference discussed with the customer (display_reference).
+    # Follow-up "طلبي" evidence uses this as referenced_order — not a phrase router.
+    last_discussed_order_ref: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -663,6 +666,7 @@ class MerchantConversationState:
             "next_page_available": self.next_page_available,
             "catalog_navigation_source": self.catalog_navigation_source,
             "native_catalog_send_failed": self.native_catalog_send_failed,
+            "last_discussed_order_ref": self.last_discussed_order_ref,
         }
 
     @staticmethod
@@ -759,6 +763,7 @@ class MerchantConversationState:
             next_page_available=bool(d.get("next_page_available", False)),
             catalog_navigation_source=str(d.get("catalog_navigation_source", "") or ""),
             native_catalog_send_failed=bool(d.get("native_catalog_send_failed", False)),
+            last_discussed_order_ref=str(d.get("last_discussed_order_ref", "") or ""),
         )
 
 

@@ -87,6 +87,7 @@ _STOP_PRODUCT_TOKENS = frozenset({
     "شكله", "لي", "علي", "ل", "لـ", "ال", "و", "في", "من", "على", "فوق",
     "ابي", "ابغى", "ابغا", "ودي", "ارسل", "ابعث", "ورني", "اشوف", "هذا", "هذي",
     "اللي", "لي", "وين", "فين", "سعر", "كم", "بكم", "ثمن", "ريال",
+    "نعم", "ايوه", "ايه", "تمام", "طيب",
 })
 
 # Vision-template tokens — never valid catalog queries (ARCH-MEDIA-001 Wave 0).
@@ -717,6 +718,15 @@ def is_product_visual_request(message: str) -> bool:
     return False
 
 
+def _is_invalid_visual_query(cand: str) -> bool:
+    token = str(cand or "").strip()
+    if not token:
+        return True
+    if token in _STOP_PRODUCT_TOKENS or _is_vision_stoplist_query(token):
+        return True
+    return not _product_tokens(token)
+
+
 def extract_visual_product_query(message: str) -> str:
     """Extract explicit product name from a visual request, if any."""
     raw = customer_authored_caption(message) or (message or "").strip()
@@ -731,7 +741,7 @@ def extract_visual_product_query(message: str) -> str:
         cand = (m2.group(1) or "").strip()
         if cand.startswith("ل") and len(cand) > 1:
             cand = cand[1:]
-        if not _is_vision_stoplist_query(cand):
+        if not _is_invalid_visual_query(cand):
             return cand
     m_group = re.search(
         r"(?:صور|صوره|صورة)\s*(?:ل|لـ|ال|لل)([\w\u0600-\u06FF][\w\u0600-\u06FF\s\-]{1,40})",
@@ -741,7 +751,7 @@ def extract_visual_product_query(message: str) -> str:
         cand = (m_group.group(1) or "").strip()
         if cand.startswith("ل") and len(cand) > 1:
             cand = cand[1:]
-        if not _is_vision_stoplist_query(cand):
+        if not _is_invalid_visual_query(cand):
             return cand
     m_carousel = re.search(
         r"(?:ال)?(?:عسل|منتج|طلح|سدر|سمر)\s+(?:اللي\s+)?(?:فوق|هذا|هذي)\b",
@@ -752,10 +762,7 @@ def extract_visual_product_query(message: str) -> str:
     m3 = re.search(r"([\w\u0600-\u06FF]{2,20})\s+صور(?:ه|ة)?", norm)
     if m3:
         cand = (m3.group(1) or "").strip()
-        if (
-            cand not in _STOP_PRODUCT_TOKENS
-            and not _is_vision_stoplist_query(cand)
-        ):
+        if not _is_invalid_visual_query(cand):
             return cand
     m4 = re.search(
         r"^(?:ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a)|اعرض(?:\s*لي)?)\s+([\w\u0600-\u06FF]{2,40})\s*$",
@@ -764,20 +771,15 @@ def extract_visual_product_query(message: str) -> str:
     if m4:
         cand = (m4.group(1) or "").strip()
         if (
-            cand not in _STOP_PRODUCT_TOKENS
-            and cand not in {"شكل", "شكلها", "شكله"}
-            and not _is_vision_stoplist_query(cand)
+            cand not in {"شكل", "شكلها", "شكله"}
+            and not _is_invalid_visual_query(cand)
         ):
             return cand
     m = _NAMED_VISUAL_RE.search(norm)
     if m:
         for g in ("product", "product2", "product3"):
             val = (m.group(g) or "").strip()
-            if (
-                val
-                and val not in _STOP_PRODUCT_TOKENS
-                and not _is_vision_stoplist_query(val)
-            ):
+            if val and not _is_invalid_visual_query(val):
                 return val.strip()
     return ""
 

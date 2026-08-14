@@ -1476,6 +1476,7 @@ class MerchantBrain:
             )
 
         _order_fulfillment_skip = False
+        _include_catalog_products = True
         try:
             from .order_context_gate import (  # noqa: PLC0415
                 log_order_context_block,
@@ -1510,10 +1511,11 @@ class MerchantBrain:
                     )
                 ):
                     _order_fulfillment_skip = False
+                    _include_catalog_products = False
                     logger.info(
                         "[ORDER_CONTEXT_GATE] tenant=%s "
-                        "skip_catalog_preload=0 "
-                        "reason=fact_answer_requires_full_facts "
+                        "skip_catalog_products=1 "
+                        "reason=fact_answer_needs_merchant_facts_not_catalog "
                         "fact_kind=%s preview=%r",
                         tenant_id,
                         _fact_request.fact_kind,
@@ -1689,6 +1691,7 @@ class MerchantBrain:
                     state          = state,
                     history        = history,
                     profile        = profile,
+                    include_products=_include_catalog_products,
                 ) or {}
                 if _browse_defocus:
                     merchant_context["browse_defocus"] = True
@@ -1956,7 +1959,7 @@ class MerchantBrain:
                 try:
                     if intent and getattr(intent, "name", "") == "talk_to_human":
                         _handoff_signals["is_explicit_handoff_request"] = True
-                except Exception:
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — handoff signal stamp must not break pipeline
                     pass
                 relational = _compute_relational(
                     inbound_text=message or "",
@@ -4900,6 +4903,22 @@ class MerchantBrain:
                             extract_types_overview_query(message or "")
                             or extract_inquiry_product_query(message or "")
                         )
+                    try:
+                        from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+                            catalog_reasoning_titles,
+                        )
+
+                        _cpgg_meta["catalog_reasoning_titles"] = catalog_reasoning_titles(
+                            facts=getattr(ctx, "facts", None),
+                            merchant_context=merchant_context,
+                            state=new_state,
+                        )
+                        _contract = dict((decision.args or {}).get("answer_contract") or {})
+                        _cpgg_meta["claimable_values"] = list(
+                            _contract.get("claimable_values") or []
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog title stamp must not block grounding
+                        pass
                     _cpgg = apply_catalog_product_grounding_guard(
                         reply=reply or "",
                         inbound_text=message or "",
@@ -6114,6 +6133,20 @@ def _build_reply_state(
         )
         if _catalog_candidates:
             known_facts["catalog_reasoning_candidates"] = _catalog_candidates
+        try:
+            from modules.ai.brain.commerce.visual_delivery_capability import (  # noqa: PLC0415
+                collect_visual_delivery_capability,
+            )
+
+            _visual_cap = collect_visual_delivery_capability(
+                catalog_candidates=_catalog_candidates,
+                state=current_state,
+                facts=getattr(ctx, "facts", None),
+                merchant_context=merchant_context,
+            )
+            known_facts["visual_delivery"] = _visual_cap
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — visual capability stamp must not block compose
+            pass
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog evidence must not block compose
         pass
     try:
@@ -6128,9 +6161,63 @@ def _build_reply_state(
             customer_id=getattr(ctx, "customer_id", None),
             conversation_id=getattr(ctx, "conversation_id", None),
             message=str(getattr(ctx, "message", "") or ""),
+            last_discussed_order_ref=str(
+                getattr(current_state, "last_discussed_order_ref", "") or ""
+            ),
         )
         if _order_evidence:
             known_facts["customer_order_evidence"] = _order_evidence
+            try:
+                from modules.ai.brain.commerce.customer_order_evidence import (  # noqa: PLC0415
+                    stamp_last_discussed_order_ref,
+                )
+                from modules.ai.brain.types import (  # noqa: PLC0415
+                    INTENT_LATEST_ORDER_SUMMARY,
+                    INTENT_TRACK_ORDER,
+                )
+
+                _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+                _row = None
+                _explicit_track = False
+                try:
+                    from modules.ai.brain.intent import rules as _stamp_rules  # noqa: PLC0415
+                    from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
+                        is_explicit_order_tracking_request,
+                    )
+
+                    _rule_hit = _stamp_rules.match(str(getattr(ctx, "message", "") or ""))
+                    _explicit_track = (
+                        str(getattr(_rule_hit, "name", "") or "") == INTENT_TRACK_ORDER
+                        or bool(
+                            is_explicit_order_tracking_request(
+                                str(getattr(ctx, "message", "") or ""),
+                                state=current_state,
+                                history=getattr(ctx, "history", None),
+                                commerce_bundle=getattr(ctx, "commerce_bundle", None),
+                            )
+                        )
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — last-discussed stamp probe must not block compose
+                    _explicit_track = False
+                if _intent_name == INTENT_LATEST_ORDER_SUMMARY:
+                    _row = _order_evidence.get("latest_order")
+                elif _explicit_track:
+                    _row = _order_evidence.get("current_order") or _order_evidence.get(
+                        "latest_open_order"
+                    )
+                elif _order_evidence.get("referenced_order"):
+                    _row = _order_evidence.get("referenced_order")
+                elif _intent_name == INTENT_TRACK_ORDER:
+                    _row = _order_evidence.get("current_order") or _order_evidence.get(
+                        "latest_open_order"
+                    )
+                if isinstance(_row, dict):
+                    stamp_last_discussed_order_ref(
+                        current_state,
+                        _row.get("display_reference"),
+                    )
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001  # noqa: silent-ok — order evidence must not block compose
         pass
     _answer_contract = (decision.args or {}).get("answer_contract")

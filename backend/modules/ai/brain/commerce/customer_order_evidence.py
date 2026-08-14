@@ -149,6 +149,18 @@ def _order_evidence_item(
     return payload
 
 
+def last_discussed_order_ref_from_state(state: Any) -> str:
+    return str(getattr(state, "last_discussed_order_ref", "") or "").strip()
+
+
+def stamp_last_discussed_order_ref(state: Any, ref: Any) -> None:
+    if state is None:
+        return
+    token = str(ref or "").strip()
+    if token:
+        state.last_discussed_order_ref = token
+
+
 def collect_customer_order_evidence(
     *,
     db: Any = None,
@@ -157,6 +169,7 @@ def collect_customer_order_evidence(
     customer_id: Any = None,
     conversation_id: Any = None,
     message: str = "",
+    last_discussed_order_ref: str = "",
     limit: int = _DEFAULT_LIMIT,
 ) -> Optional[Dict[str, Any]]:
     """Return bounded tenant+customer order evidence, or None if unscoped."""
@@ -229,9 +242,38 @@ def collect_customer_order_evidence(
             break
 
     current = next((row for row in orders if row.get("is_open")), None)
-    if current is None and orders:
-        current = orders[0]
+    latest_open = current
     latest = orders[0] if orders else None
+
+    last_ref = str(last_discussed_order_ref or "").strip()
+    referenced = None
+    if last_ref:
+        referenced = next(
+            (
+                row
+                for row in orders
+                if last_ref
+                in {
+                    str(row.get("display_reference") or ""),
+                    str(row.get("external_order_number") or ""),
+                    str(row.get("external_id") or ""),
+                    str(row.get("order_id") or ""),
+                }
+            ),
+            None,
+        )
+    if referenced is None and refs:
+        ref_set = set(refs)
+        referenced = next(
+            (
+                row
+                for row in orders
+                if str(row.get("display_reference") or "") in ref_set
+                or str(row.get("external_order_number") or "") in ref_set
+                or str(row.get("external_id") or "") in ref_set
+            ),
+            None,
+        )
 
     counts = profile.order_counts
     payload: Dict[str, Any] = {
@@ -241,8 +283,16 @@ def collect_customer_order_evidence(
         "order_count": int(counts.total_orders or 0),
         "open_order_count": int(counts.open_orders or 0),
         "current_order": current,
+        "latest_open_order": latest_open,
         "latest_order": latest,
+        "referenced_order": referenced,
         "orders": orders,
+        "roles": {
+            "current_order": "first_open_otherwise_none",
+            "latest_open_order": "first_open",
+            "latest_order": "newest_including_cancelled",
+            "referenced_order": "last_discussed_or_explicit_ref",
+        },
         "history_truncated": int(counts.total_orders or 0) > len(orders),
         "evidence_quality": {
             "line_items_present": any(bool(row.get("line_items")) for row in orders),
@@ -264,4 +314,6 @@ def customer_order_evidence_available(evidence: Any) -> bool:
 __all__ = [
     "collect_customer_order_evidence",
     "customer_order_evidence_available",
+    "last_discussed_order_ref_from_state",
+    "stamp_last_discussed_order_ref",
 ]

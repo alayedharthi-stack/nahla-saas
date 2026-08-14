@@ -301,6 +301,7 @@ class TestACurrentOrder:
         assert current["display_reference"] == GENERIC_ORDER_REF
         assert current["is_open"] is True
         assert str(current.get("total")) == "741"
+        assert payload["latest_open_order"]["display_reference"] == GENERIC_ORDER_REF
 
 
 class TestBLatestPreviousHistory:
@@ -312,6 +313,7 @@ class TestBLatestPreviousHistory:
         assert GENERIC_ORDER_REF in refs
         assert GENERIC_OLDER_REF in refs
         assert payload["latest_order"]["display_reference"] == GENERIC_ORDER_REF
+        assert payload["latest_open_order"]["display_reference"] == GENERIC_ORDER_REF
         assert payload["order_count"] == 2
 
 
@@ -504,6 +506,7 @@ class TestHUnknownTruth:
         assert payload["order_count"] == 0
         assert payload["orders"] == []
         assert payload["current_order"] is None
+        assert payload["latest_open_order"] is None
         assert customer_order_evidence_available(payload) is False
 
     def test_unscoped_identity_returns_none(self, db, world) -> None:
@@ -618,3 +621,80 @@ class TestSlimAndProjection:
         )
         ok, reason = should_slim_general_brain_state(state)
         assert ok is True
+
+
+class TestCancelledNewerThanOpen:
+    def test_current_is_open_latest_is_cancelled(self, db) -> None:
+        tenant = seed_tenant(db, name=GENERIC_MERCHANT)
+        customer = seed_customer(db, tenant.id, name=GENERIC_CUSTOMER)
+        conv = seed_conversation(db, tenant.id, customer_id=customer.id)
+        open_order = seed_order(
+            db,
+            tenant.id,
+            source="salla",
+            status="in_progress",
+            external_id="257404293",
+            external_order_number="257404293",
+            customer_info={"phone": DEFAULT_PHONE_E164},
+            line_items=[
+                {"product_title": GENERIC_SHOE, "quantity": 1},
+                {"product_title": GENERIC_SHIRT, "quantity": 3},
+            ],
+            extra_metadata={"created_at": "2026-05-04T10:00:00+00:00"},
+        )
+        open_order.customer_id = customer.id
+        cancelled = seed_order(
+            db,
+            tenant.id,
+            source="salla",
+            status="cancelled",
+            external_id="269977976",
+            external_order_number="269977976",
+            customer_info={"phone": DEFAULT_PHONE_E164},
+            line_items=[{"product_title": "تنورة", "quantity": 1}],
+            extra_metadata={
+                "created_at": "2026-07-02T10:00:00+00:00",
+                "payment_method": "cod",
+            },
+        )
+        cancelled.customer_id = customer.id
+        db.commit()
+        payload = collect_customer_order_evidence(
+            db=db,
+            tenant_id=tenant.id,
+            phone=DEFAULT_PHONE_E164,
+            customer_id=customer.id,
+            conversation_id=conv.id,
+            last_discussed_order_ref="269977976",
+        )
+        assert payload is not None
+        assert payload["current_order"]["display_reference"] == "257404293"
+        assert payload["latest_open_order"]["display_reference"] == "257404293"
+        assert payload["latest_order"]["display_reference"] == "269977976"
+        assert payload["latest_order"]["status"] == "cancelled"
+        names = {item["name"] for item in payload["latest_order"]["line_items"]}
+        assert "تنورة" in names
+        assert payload["referenced_order"]["display_reference"] == "269977976"
+        follow_names = {
+            item["name"] for item in payload["referenced_order"]["line_items"]
+        }
+        assert "تنورة" in follow_names
+
+    def test_slot_track_without_status_rule_is_evidence_compose(self) -> None:
+        ctx = _ctx(
+            "وش طلباتي السابقة؟",
+            intent_name=INTENT_TRACK_ORDER,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "customer_order_evidence"
+
+    def test_latest_summary_is_evidence_compose_not_canned(self) -> None:
+        matched = rules.match("آخر طلب لي وش كان فيه؟")
+        assert matched is not None
+        assert matched.name == INTENT_LATEST_ORDER_SUMMARY
+        ctx = _ctx("آخر طلب لي وش كان فيه؟", intent_name=INTENT_LATEST_ORDER_SUMMARY)
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CUSTOMER_LEDGER_REPLY
+        assert decision.args.get("ledger_topic") == INTENT_LATEST_ORDER_SUMMARY

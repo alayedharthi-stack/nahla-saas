@@ -728,6 +728,15 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     """
     message = str(getattr(ctx, "message", "") or "").strip()
     state = getattr(ctx, "state", None)
+    _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if _intent_name in {
+        "track_order",
+        "product_visual_request",
+        "latest_order_summary",
+        "order_history_count",
+        "order_reference_list",
+    }:
+        return None
 
     try:
         from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415

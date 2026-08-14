@@ -304,8 +304,17 @@ def test_responder_search_miss_uses_deterministic_template_for_weak_subject() ->
     with patch.object(composer, "_llm_compose", new_callable=AsyncMock) as mock_llm:
         text = asyncio.run(composer.compose(decision, result, ctx))
     mock_llm.assert_not_awaited()
-    assert "الكتالوج" in text
-    assert "ما ظهر عندي تطابق" in text or "ما لقيت تطابق" in text
+    assert str(text or "").strip()
+    assert "سدر الحجاز" not in text
+    assert "طلح" not in text
+    no_confirmed_match = (
+        "تطابق" in text
+        or "ما ظهر" in text
+        or "ما لقيت" in text
+        or "ما عندي" in text
+        or "؟" in text
+    )
+    assert no_confirmed_match, "weak-subject miss must not invent a catalog match"
 
 
 def test_responder_search_miss_uses_persona_compose_for_catalog_like_subject() -> None:
