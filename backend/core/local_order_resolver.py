@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from sqlalchemy import or_
+
 from utils.phone_utils import format_wa_send_recipient, normalize_phone_compat
 
 logger = logging.getLogger("nahla.local_order_resolver")
@@ -97,9 +99,18 @@ def _phone_lookup_keys(phone: str) -> Set[str]:
     if msisdn:
         keys.add(msisdn)
         keys.add(f"+{msisdn}")
+        if msisdn.startswith("966") and len(msisdn) >= 12:
+            keys.add("0" + msisdn[3:])
+            keys.add(msisdn[3:])
     e164 = normalize_phone_compat(raw)
     if e164:
         keys.add(e164)
+        digits = e164.lstrip("+")
+        if digits:
+            keys.add(digits)
+            if digits.startswith("966") and len(digits) >= 12:
+                keys.add("0" + digits[3:])
+                keys.add(digits[3:])
     return {k for k in keys if k}
 
 
@@ -242,6 +253,11 @@ def _fetch_tenant_orders_for_customer(
     customer_id: Optional[int],
     limit: int = 50,
 ) -> List[Any]:
+    """Load this customer's orders with tenant+identity filter before LIMIT.
+
+    Do not fetch a tenant-wide newest-N window and then filter in Python —
+    other customers' newer rows would hide this customer's history.
+    """
     if db is None:
         return []
     try:
@@ -249,24 +265,32 @@ def _fetch_tenant_orders_for_customer(
     except Exception:  # noqa: BLE001
         return []
 
-    keys = _phone_lookup_keys(phone)
-    rows = (
+    keys = list(_phone_lookup_keys(phone))
+    clauses: List[Any] = []
+    if customer_id:
+        try:
+            cid = int(customer_id)
+        except (TypeError, ValueError):
+            cid = 0
+        if cid:
+            clauses.append(Order.customer_id == cid)
+    if keys:
+        clauses.append(
+            or_(
+                Order.customer_info["phone"].as_string().in_(keys),
+                Order.customer_info["mobile"].as_string().in_(keys),
+                Order.customer_info["shipping_phone"].as_string().in_(keys),
+            )
+        )
+    if not clauses:
+        return []
+    return (
         db.query(Order)
-        .filter(Order.tenant_id == int(tenant_id))
+        .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
         .order_by(Order.id.desc())
-        .limit(max(limit, 10))
+        .limit(max(int(limit or 50), 10))
         .all()
     )
-    matched: List[Any] = []
-    for row in rows:
-        if keys and _order_matches_phone(row, keys):
-            matched.append(row)
-            continue
-        if customer_id:
-            meta = dict(getattr(row, "extra_metadata", None) or {})
-            if int(meta.get("customer_id") or 0) == int(customer_id):
-                matched.append(row)
-    return matched
 
 
 def _find_active_whatsapp_draft(
@@ -513,13 +537,24 @@ def resolve_customer_order_context(
     )
 
 
+def _line_item_display_name(item: Dict[str, Any]) -> str:
+    nested = item.get("product") if isinstance(item.get("product"), dict) else {}
+    return str(
+        item.get("name")
+        or item.get("title")
+        or item.get("product_name")
+        or item.get("product_title")
+        or nested.get("name")
+        or nested.get("title")
+        or ""
+    ).strip()
+
+
 def local_order_to_track_payload(snapshot: LocalOrderSnapshot) -> Dict[str, Any]:
     """Shape expected by ``TrackOrderHandler`` / compose templates."""
     items = []
     for it in snapshot.line_items:
-        name = str(
-            it.get("name") or it.get("title") or it.get("product_name") or ""
-        ).strip()
+        name = _line_item_display_name(it)
         items.append({
             "name": name,
             "title": name,

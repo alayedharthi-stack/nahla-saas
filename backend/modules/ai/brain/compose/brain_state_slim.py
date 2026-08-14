@@ -142,20 +142,28 @@ def should_slim_general_brain_state(state: BrainReplyState) -> Tuple[bool, str]:
     if getattr(state, "selected_product", None):
         return False, "selected_product_focus"
 
+    _slim_ok_intents = {
+        "social",
+        "greeting",
+        "who_are_you",
+        "persona_interaction",
+        "hesitation",
+        "talk_to_human",
+        "employee_not_responding",
+    }
     if (
         isinstance(facts, dict)
         and facts.get("catalog_reasoning_candidates")
-        and intent not in {
-            "social",
-            "greeting",
-            "who_are_you",
-            "persona_interaction",
-            "hesitation",
-            "talk_to_human",
-            "employee_not_responding",
-        }
+        and intent not in _slim_ok_intents
     ):
         return False, "catalog_reasoning_evidence"
+
+    if (
+        isinstance(facts, dict)
+        and facts.get("customer_order_evidence")
+        and intent not in _slim_ok_intents
+    ):
+        return False, "customer_order_evidence"
 
     pending = str(getattr(state, "explicit_pending_action", "") or "").strip()
     if pending:
