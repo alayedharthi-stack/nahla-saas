@@ -25,10 +25,6 @@ _ORDER_OWNER_INTENTS = frozenset({
 })
 
 _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
-_NUMBERED_LIST_RE = re.compile(
-    r"^(?:[-•*]|\d+[\.\)])\s+",
-    re.MULTILINE,
-)
 
 
 def _title_of(row: Any) -> str:
@@ -55,6 +51,46 @@ def _prices_in_text(text: str) -> set[float]:
         except ValueError:
             continue
     return out
+
+
+def _image_of(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(
+        row.get("image_url")
+        or row.get("image")
+        or row.get("product_image_url")
+        or row.get("thumbnail_url")
+        or ""
+    ).strip()
+
+
+def _prefer_representative(rows: Sequence[Any]) -> Optional[Dict[str, Any]]:
+    ranked = [row for row in rows if isinstance(row, dict)]
+    if not ranked:
+        return None
+
+    def _key(row: Dict[str, Any]) -> tuple[int, int]:
+        return (1 if _image_of(row) else 0, 1 if row.get("in_stock", True) else 0)
+
+    return max(ranked, key=_key)
+
+
+def _collapse_same_title(rows: Sequence[Any]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = _title_of(row).casefold()
+        if not title:
+            continue
+        grouped.setdefault(title, []).append(row)
+    collapsed: List[Dict[str, Any]] = []
+    for group in grouped.values():
+        picked = _prefer_representative(group)
+        if picked is not None:
+            collapsed.append(picked)
+    return collapsed
 
 
 def _stamp_row(
@@ -195,11 +231,12 @@ def stamp_assistant_named_catalog_from_reply(
     if not mapped:
         return []
 
-    listed = bool(_NUMBERED_LIST_RE.search(str(reply or ""))) or len(mapped) >= 2
-    if listed and len(mapped) >= 2:
+    titles = {_title_of(row).casefold() for row in mapped if _title_of(row)}
+    multi_title = len(titles) >= 2
+    if multi_title:
         presented = [
             _stamp_row(row, provenance="assistant_presented", turn=turn)
-            for row in mapped
+            for row in _collapse_same_title(mapped)
         ]
         state.last_presented_products = presented
         state.last_recommended_products = []
@@ -210,21 +247,22 @@ def stamp_assistant_named_catalog_from_reply(
         )
         return presented
 
-    if len(mapped) == 1:
-        recommended = _stamp_row(
-            mapped[0],
-            provenance="assistant_recommended",
-            turn=turn,
-        )
-        state.last_recommended_products = [recommended]
-        _ensure_in_presented(state, recommended)
-        logger.info(
-            "[PRESENTED_PROVENANCE] stamped_recommended id=%r title=%r",
-            recommended.get("id") or recommended.get("external_id"),
-            recommended.get("title"),
-        )
-        return [recommended]
-    return []
+    picked = _prefer_representative(mapped)
+    if picked is None:
+        return []
+    recommended = _stamp_row(
+        picked,
+        provenance="assistant_recommended",
+        turn=turn,
+    )
+    state.last_recommended_products = [recommended]
+    _ensure_in_presented(state, recommended)
+    logger.info(
+        "[PRESENTED_PROVENANCE] stamped_recommended id=%r title=%r",
+        recommended.get("id") or recommended.get("external_id"),
+        recommended.get("title"),
+    )
+    return [recommended]
 
 
 __all__ = [
