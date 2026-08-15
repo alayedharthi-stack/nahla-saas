@@ -80,13 +80,13 @@ _BULLET_OR_NUMBERED_RE = re.compile(
 )
 
 _RECOMMEND_SPLIT_RE = re.compile(
-    r"\s*(?:أو|او|,|،)\s*",
+    r"\s*(?:أو|او)\s*",
     re.UNICODE,
 )
 
 _RECOMMEND_LEAD_RE = re.compile(
-    r"(?:أنصحك|انصحك|ننصحك|نصيحة|هدية|خيارات|فكر(?:ي|ين)?\s+في)\s*[:،]?\s*",
-    re.UNICODE | re.IGNORECASE,
+    r"^(?:أنصحك|انصحك|ننصحك|نصيحة)\s*[:،]?\s*",
+    re.UNICODE | re.IGNORECASE | re.MULTILINE,
 )
 
 _SEASONAL_DATE_CLAIM_RE = re.compile(
@@ -213,10 +213,12 @@ def _extract_or_pairs(reply: str) -> List[str]:
         parts = [p.strip(" .،,*-•") for p in _RECOMMEND_SPLIT_RE.split(line) if p.strip()]
         if not (2 <= len(parts) <= 3):
             continue
+        if any(len(part) > 40 for part in parts):
+            continue
         cleaned: List[str] = []
         for part in parts:
             part = re.sub(r"^(?:ب|ل|ك)\s*", "", part).strip()
-            part = re.sub(r"\s+كهدية.*$", "", part).strip()
+            part = re.sub(r"\s+كهدية$", "", part).strip()
             if 2 < len(part) <= 40:
                 cleaned.append(part)
         if 2 <= len(cleaned) <= 3:
@@ -293,6 +295,15 @@ def _mention_grounded_in_catalog(mention: str, catalog_titles: Sequence[str]) ->
         if _strict_catalog_mention_match(mention, title):
             return True
     return False
+
+
+def _looks_like_product_option_list(reply: str) -> bool:
+    text = str(reply or "")
+    if not text.strip():
+        return False
+    if _BULLET_OR_NUMBERED_RE.search(text):
+        return True
+    return len(_extract_or_pairs(text)) >= 2
 
 
 def _ungrounded_product_mentions(
@@ -463,6 +474,24 @@ def apply_catalog_product_grounding_guard(
 
     if not ungrounded and not seasonal_invented:
         return CatalogProductGroundingGuardResult(reply=original, action="allowed")
+
+    invention_marker_hit = any(
+        _norm(marker) in _norm(original)
+        and not _mention_grounded_in_catalog(marker, catalog_titles)
+        for marker in _KNOWN_INVENTION_MARKERS
+    )
+    if (
+        ungrounded
+        and not seasonal_invented
+        and not invention_marker_hit
+        and not _looks_like_product_option_list(original)
+    ):
+        return CatalogProductGroundingGuardResult(
+            reply=original,
+            action="allowed_non_option_prose",
+            reason="ungrounded_tokens_not_product_option_list",
+            ungrounded_mentions=tuple(ungrounded),
+        )
 
     contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
     try:

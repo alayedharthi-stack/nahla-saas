@@ -76,7 +76,34 @@ def test_presented_products_resolve_deictic_without_customer_selection():
     state["last_presented_products"] = [{"title": _TALH, "id": 77}]
     trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
     assert trusted.title == _TALH
+    assert trusted.product_id == "77"
     assert trusted.origin == "last_presented_products"
+
+
+def test_recommended_product_beats_multi_presented_list():
+    state = _state(turn=6, recent=[])
+    state["last_presented_products"] = [
+        {"title": _TALH, "id": 77},
+        {"title": _BEE_VENOM, "id": 88},
+    ]
+    state["last_recommended_products"] = [
+        {"title": _TALH, "id": 77, "provenance": "assistant_recommended"},
+    ]
+    trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
+    assert trusted.title == _TALH
+    assert trusted.product_id == "77"
+    assert trusted.origin == "last_recommended_products"
+
+
+def test_ambiguous_presented_products_are_not_first_row():
+    state = _state(turn=6, recent=[])
+    state["last_presented_products"] = [
+        {"title": _TALH, "id": 77},
+        {"title": _BEE_VENOM, "id": 88},
+    ]
+    trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
+    assert trusted.title == ""
+    assert trusted.reason == "ambiguous_presented"
 
 
 def test_voice_stt_variants_detect_as_visual():

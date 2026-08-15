@@ -4869,6 +4869,28 @@ class MerchantBrain:
             )
 
         try:
+            from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                stamp_assistant_named_catalog_from_reply,
+            )
+            from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+                collect_catalog_reasoning_candidates,
+            )
+
+            stamp_assistant_named_catalog_from_reply(
+                state=new_state,
+                reply=reply or "",
+                catalog_candidates=collect_catalog_reasoning_candidates(
+                    facts=getattr(ctx, "facts", None),
+                    merchant_context=merchant_context,
+                    state=new_state,
+                ),
+                intent_name=str(getattr(intent, "name", "") or ""),
+                turn=int(getattr(new_state, "turn", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
+            logger.exception("[PRESENTED_PROVENANCE] stamp failed")
+
+        try:
             from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: PLC0415
                 apply_catalog_product_grounding_guard,
                 catalog_product_grounding_guard_mode,
@@ -6145,30 +6167,13 @@ def _build_reply_state(
         if _catalog_candidates:
             known_facts["catalog_reasoning_candidates"] = _catalog_candidates
             try:
-                _intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
-                _action = str(getattr(decision, "action", "") or "")
-                _order_owned = _intent_name in {
-                    "track_order",
-                    "latest_order_summary",
-                    "order_history_count",
-                    "order_reference_list",
-                } or _action == "track_order"
-                if current_state is not None and not _order_owned:
-                    presented = [
-                        dict(row)
-                        for row in _catalog_candidates
-                        if isinstance(row, dict) and str(row.get("title") or "").strip()
-                    ]
-                    if presented:
-                        current_state.last_presented_products = presented
-                        for row in presented:
-                            if row.get("provenance"):
-                                continue
-                            row["provenance"] = "assistant_presented"
-                        known_facts["last_presented_products"] = presented[:8]
-                elif current_state is not None and current_state.last_presented_products:
+                if current_state is not None and current_state.last_presented_products:
                     known_facts["last_presented_products"] = list(
                         current_state.last_presented_products
+                    )[:8]
+                if current_state is not None and current_state.last_recommended_products:
+                    known_facts["last_recommended_products"] = list(
+                        current_state.last_recommended_products
                     )[:8]
             except Exception:  # noqa: BLE001  # noqa: silent-ok — presented-product stamp must not block compose
                 pass
