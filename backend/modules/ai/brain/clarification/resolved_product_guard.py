@@ -34,6 +34,9 @@ _BARE_SUBJECT_TOKENS = frozenset({
     "لتر", "ml", "piece", "pack", "حبه", "حبة", "سعر", "بكم", "كم", "ال",
     # Order-start verbs — never catalog product names (P0 start-order guard).
     "اطلب", "اشتري", "طلب", "order", "buy", "purchase", "اخذ", "استلم", "شراء",
+    # Visual discourse leftovers — never catalog product names.
+    "وريني", "ورني", "ارسل", "ابعث", "اعرض", "اختاري", "اختار",
+    "صورته", "صورتها", "صورهم", "صورهن",
 })
 
 

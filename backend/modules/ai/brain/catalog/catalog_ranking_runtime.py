@@ -117,6 +117,14 @@ def load_best_seller_catalog_products(
         group_id=effective_group,
         limit=max(1, int(limit or 12)),
     )
+    if not rankings and effective_group is not None:
+        rankings = read_best_sellers(
+            db,
+            int(tenant_id),
+            group_id=None,
+            limit=max(1, int(limit or 12)),
+        )
+        effective_group = None
     if not rankings:
         return []
 

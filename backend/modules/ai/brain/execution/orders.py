@@ -1675,6 +1675,31 @@ class TrackOrderHandler:
         local_resolver = bool(payload.get("local_resolver"))
         selected_reason = str(payload.get("selected_reason") or "").strip()
         matched_by_ref = bool(payload.get("matched_by_ref"))
+        _latest_status = str((latest or {}).get("status") or "").strip().lower()
+        if not order_number and (
+            selected_reason == "most_recent_order"
+            or _latest_status in {"cancelled", "canceled"}
+            or not local_resolver
+        ):
+            from core.local_order_resolver import resolve_customer_order_context  # noqa: PLC0415
+
+            local_ctx = resolve_customer_order_context(
+                getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+                conversation_id=getattr(ctx, "conversation_id", None),
+                customer_id=getattr(ctx, "customer_id", None),
+                phone=str(getattr(ctx, "customer_phone", "") or ""),
+                intent="track_order",
+            )
+            if local_ctx.latest_open_order is not None:
+                from core.local_order_resolver import local_order_to_track_payload  # noqa: PLC0415
+
+                latest = local_order_to_track_payload(local_ctx.latest_open_order)
+                selected_reason = "latest_open_order"
+                local_resolver = True
+                payload["order"] = latest
+                payload["selected_reason"] = selected_reason
+                payload["local_resolver"] = True
 
         if order_number:
             if not latest:

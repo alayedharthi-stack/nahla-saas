@@ -244,6 +244,12 @@ def collect_customer_order_evidence(
     current = next((row for row in orders if row.get("is_open")), None)
     latest_open = current
     latest = orders[0] if orders else None
+    previous = [
+        row
+        for row in orders
+        if current is None
+        or int(row.get("order_id") or 0) != int(current.get("order_id") or 0)
+    ]
 
     last_ref = str(last_discussed_order_ref or "").strip()
     referenced = None
@@ -283,14 +289,18 @@ def collect_customer_order_evidence(
         "order_count": int(counts.total_orders or 0),
         "open_order_count": int(counts.open_orders or 0),
         "current_order": current,
+        "current_open_order": current,
         "latest_open_order": latest_open,
         "latest_order": latest,
+        "previous_orders": previous,
         "referenced_order": referenced,
         "orders": orders,
         "roles": {
             "current_order": "first_open_otherwise_none",
+            "current_open_order": "alias_of_current_order",
             "latest_open_order": "first_open",
             "latest_order": "newest_including_cancelled",
+            "previous_orders": "history_excluding_current_open",
             "referenced_order": "last_discussed_or_explicit_ref",
         },
         "history_truncated": int(counts.total_orders or 0) > len(orders),

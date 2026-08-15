@@ -672,6 +672,10 @@ class TestCancelledNewerThanOpen:
         assert payload["latest_open_order"]["display_reference"] == "257404293"
         assert payload["latest_order"]["display_reference"] == "269977976"
         assert payload["latest_order"]["status"] == "cancelled"
+        assert payload["current_open_order"]["display_reference"] == "257404293"
+        prev_refs = {row["display_reference"] for row in payload["previous_orders"]}
+        assert "269977976" in prev_refs
+        assert "257404293" not in prev_refs
         names = {item["name"] for item in payload["latest_order"]["line_items"]}
         assert "تنورة" in names
         assert payload["referenced_order"]["display_reference"] == "269977976"

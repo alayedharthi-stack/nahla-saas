@@ -1273,10 +1273,18 @@ class DefaultComposer:
                 from modules.ai.brain.intent.link_disambiguation import (  # noqa: PLC0415
                     should_use_generative_tracking_follow_up,
                 )
-                if should_use_generative_tracking_follow_up(
-                    ctx.message or "",
-                    history=ctx.history,
-                    state=ctx.state,
+                _track_reason = str(data.get("selected_reason") or "").strip()
+                _bound_open = _track_reason in {
+                    "latest_open_order",
+                    "active_whatsapp_draft",
+                }
+                if (
+                    not _bound_open
+                    and should_use_generative_tracking_follow_up(
+                        ctx.message or "",
+                        history=ctx.history,
+                        state=ctx.state,
+                    )
                 ):
                     return await self._llm_compose(ctx, result)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking follow-up gate best-effort; fall through to template

@@ -64,6 +64,21 @@ def _state(
     return bs
 
 
+def test_deictic_possessive_image_is_not_a_product_name():
+    assert extract_visual_product_query("وريني صورته") == ""
+    assert is_deictic_visual_request("وريني صورته") is True
+    assert extract_visual_product_query("وريني صورتها") == ""
+    assert is_deictic_visual_request("وريني صورتها") is True
+
+
+def test_presented_products_resolve_deictic_without_customer_selection():
+    state = _state(turn=6, recent=[])
+    state["last_presented_products"] = [{"title": _TALH, "id": 77}]
+    trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
+    assert trusted.title == _TALH
+    assert trusted.origin == "last_presented_products"
+
+
 def test_voice_stt_variants_detect_as_visual():
     for msg in (
         "ابي اشوف الصوره",

@@ -29,12 +29,12 @@ _PRODUCT_MARKER_RE = re.compile(r"\[PRODUCT:([^\]]+)\]", re.IGNORECASE)
 # Deictic — refers to "the image" without naming a SKU.
 _DEICTIC_VISUAL_RE = re.compile(
     r"(?:"
-    r"(?:ال)?صور(?:ه|ة)?\s*(?:وين|فين|وينها|فينها|م[\s]?و|مو\s*موجود)"
-    r"|(?:وين|فين)\s*(?:ال)?صور(?:ه|ة)?"
-    r"|(?:ارسل|أرسل|ابعث|أبعث|ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a))\s*(?:ال)?صور(?:ه|ة)?"
-    r"|(?:اشوف|أشوف)\s*(?:ال)?صور(?:ه|ة)?"
+    r"(?:ال)?صور(?:ه|ة)?(?:ته|تها|هم|هن|ك|كم)?\s*(?:وين|فين|وينها|فينها|م[\s]?و|مو\s*موجود)"
+    r"|(?:وين|فين)\s*(?:ال)?صور(?:ه|ة)?(?:ته|تها|هم|هن)?"
+    r"|(?:ارسل|أرسل|ابعث|أبعث|ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a))\s*(?:ال)?صور(?:ه|ة)?(?:ته|تها|هم|هن)?"
+    r"|(?:اشوف|أشوف)\s*(?:ال)?صور(?:ه|ة)?(?:ته|تها|هم|هن)?"
     r"|(?:ور(?:ي|)ني|ور(?:ي|)ن(?:ي|a))\s+شكل(?:ه|ها)"
-    r"|صور(?:ه|ة)?\s*(?:المنتج|منتج)"
+    r"|صور(?:ه|ة)?(?:ته|تها|هم|هن)?\s*(?:المنتج|منتج)?"
     r")",
     re.UNICODE | re.IGNORECASE,
 )
@@ -88,6 +88,10 @@ _STOP_PRODUCT_TOKENS = frozenset({
     "ابي", "ابغى", "ابغا", "ودي", "ارسل", "ابعث", "ورني", "اشوف", "هذا", "هذي",
     "اللي", "لي", "وين", "فين", "سعر", "كم", "بكم", "ثمن", "ريال",
     "نعم", "ايوه", "ايه", "تمام", "طيب",
+    # Discourse / deictic leftovers — never catalog SKUs.
+    "وريني", "وروني", "اعرض", "اختاري", "اختار", "ارسلي", "ابعثي",
+    "صورته", "صورتها", "صورهم", "صورهن", "صورتك", "صورتكم",
+    "شكله", "شكلها", "شكلهم",
 })
 
 # Vision-template tokens — never valid catalog queries (ARCH-MEDIA-001 Wave 0).
@@ -550,6 +554,25 @@ def _latest_customer_product_mention(state: Any, *, limit: int = 10) -> str:
     return ""
 
 
+def _presented_title(state: Any) -> str:
+    """Assistant-presented catalog title — conversational context, not customer selection."""
+    bs = _state_dict(state)
+    for key in (
+        "last_presented_products",
+        "last_recommended_products",
+    ):
+        rows = bs.get(key) or []
+        if not isinstance(rows, list):
+            continue
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or raw.get("name") or "").strip()
+            if title:
+                return title
+    return ""
+
+
 def resolve_trusted_focus_for_deictic(
     state: Any,
     inbound_message: str = "",
@@ -565,6 +588,10 @@ def resolve_trusted_focus_for_deictic(
     focus_id = _focus_id(bs)
     age = focus_age_turns(bs)
     recent = _latest_customer_product_mention(bs)
+    presented = _presented_title(state)
+    if not focus and presented:
+        focus = presented
+        focus_id = ""
 
     if focus and recent and not _fuzzy_title_match(focus, recent):
         if age > FOCUS_FRESH_TURNS or not is_visual_deictic_focus_trusted(state):
@@ -585,6 +612,17 @@ def resolve_trusted_focus_for_deictic(
             origin="recent_customer_mention",
             fresh=True,
             reason="topic_shift_over_stale_focus",
+        )
+
+    if presented and (not _focus_title(bs) or age >= 999):
+        return _finish_focus_resolution(
+            evaluated_focus=presented,
+            recent=recent,
+            state=state,
+            title=presented,
+            origin="last_presented_products",
+            fresh=True,
+            reason="assistant_presented",
         )
 
     if focus and is_visual_deictic_focus_trusted(state):
@@ -722,9 +760,16 @@ def _is_invalid_visual_query(cand: str) -> bool:
     token = str(cand or "").strip()
     if not token:
         return True
+    if len(_norm(token)) < 3:
+        return True
     if token in _STOP_PRODUCT_TOKENS or _is_vision_stoplist_query(token):
         return True
     return not _product_tokens(token)
+
+
+def is_invalid_visual_product_query(cand: str) -> bool:
+    """True when a token is discourse/deictic and must not be a catalog SKU."""
+    return _is_invalid_visual_query(cand)
 
 
 def extract_visual_product_query(message: str) -> str:
@@ -733,6 +778,11 @@ def extract_visual_product_query(message: str) -> str:
     if not raw:
         return ""
     norm = normalize_for_visual_detection(raw)
+    deictic_hit = _DEICTIC_VISUAL_RE.search(norm)
+    if deictic_hit:
+        rest = norm[deictic_hit.end():].strip(" ?؟.,،")
+        if not rest or _is_invalid_visual_query(rest):
+            return ""
     m2 = re.search(
         r"صور(?:ه|ة)?\s*(?:ل|ل|ال)\s*([\w\u0600-\u06FF][\w\u0600-\u06FF\s\-]{1,40})",
         norm,
@@ -886,6 +936,7 @@ __all__ = [
     "focus_age_turns",
     "is_deictic_visual_request",
     "is_focus_fresh",
+    "is_invalid_visual_product_query",
     "is_product_visual_request",
     "is_visual_deictic_focus_trusted",
     "is_visual_focus_fresh",

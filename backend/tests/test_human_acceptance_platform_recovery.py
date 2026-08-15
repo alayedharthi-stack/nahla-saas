@@ -205,6 +205,39 @@ class TestCatalogBrowseAndRecommendation:
         titles = catalog_reasoning_titles(facts=_facts())
         assert GENERIC_SHOE in titles
         assert GENERIC_SHIRT in titles
+
+
+class TestOrderTrackingThenCatalogNavigate:
+    def test_catalog_navigate_clears_order_tracking_focus(self) -> None:
+        from modules.ai.brain.commerce.commerce_focus_owner import (
+            FOCUS_ORDER_TRACKING,
+            apply_commerce_focus_lifecycle,
+            set_product_focus,
+        )
+
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        set_product_focus(
+            state,
+            {"id": 12, "title": GENERIC_SHIRT, "external_id": "ext-shirt"},
+            reason="browse",
+            turn=4,
+        )
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_TRACK_ORDER,
+            action="track_order",
+            message="وين طلبي الحالي؟",
+            turn=5,
+        )
+        assert state.conversation_focus == FOCUS_ORDER_TRACKING
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="start_order",
+            action="catalog_navigate",
+            message="طيب نرجع للتسوق",
+            turn=6,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
         assert GENERIC_PERFUME not in titles
         assert 1 < len(titles) <= 8
 
@@ -314,6 +347,10 @@ class TestOrderFollowupContinuity:
         assert payload["referenced_order"]["display_reference"] == "269977976"
         names = {item["name"] for item in payload["referenced_order"]["line_items"]}
         assert "تنورة" in names
+        assert payload["current_open_order"]["display_reference"] == "257404293"
+        prev_refs = {row["display_reference"] for row in payload["previous_orders"]}
+        assert "269977976" in prev_refs
+        assert "257404293" not in prev_refs
 
 
 class TestProductMediaCapability:
@@ -470,6 +507,17 @@ class TestTopicSwitchingLongConversation:
             _ctx("طيب نرجع للتسوق وريني شي مناسب", intent_name=INTENT_ASK_PRODUCT, facts=facts),
         )
         assert back_to_shop.action != ACTION_TRACK_ORDER
+        from modules.ai.brain.execution.catalog_navigate import CatalogNavigateHandler
+
+        switch_ctx = _ctx(
+            "طيب نرجع للتسوق",
+            intent_name=INTENT_ASK_PRODUCT,
+            facts=facts,
+        )
+        switch_ctx.state.conversation_focus = "order_tracking"
+        rows = CatalogNavigateHandler()._fallback_top_products(switch_ctx, limit=8)
+        switch_titles = {str(r.get("title") or "") for r in rows}
+        assert GENERIC_SHIRT in switch_titles
         media = DefaultDecisionEngine().decide(
             _ctx(
                 "نعم ارسل صور",
@@ -526,3 +574,87 @@ class TestMultiTenantIsolation:
             for item in row.get("line_items") or []
         }
         assert GENERIC_PERFUME not in names
+
+
+class TestProductPronounContinuity:
+    def test_deictic_visual_does_not_treat_discourse_as_sku(self) -> None:
+        from modules.ai.brain.commerce.product_visual import (
+            extract_visual_product_query,
+            is_deictic_visual_request,
+        )
+
+        msg = "وريني صورته"
+        assert extract_visual_product_query(msg) == ""
+        assert is_deictic_visual_request(msg) is True
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        state.last_presented_products = list(_facts().discovery_products)
+        ctx = _ctx(
+            msg,
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=state,
+        )
+        ctx.intent.slots["product_query"] = "وريني"
+        decision = DefaultDecisionEngine().decide(ctx)
+        query = str((decision.args or {}).get("query") or "")
+        assert query != "وريني"
+        assert "وريني" not in query
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("after_search") == "product_visual"
+        assert decision.args.get("force_product_card") is True
+
+    def test_assistant_presented_catalog_survives_for_pronoun(self) -> None:
+        from modules.ai.brain.commerce.product_visual import resolve_trusted_focus_for_deictic
+
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        state.last_presented_products = [
+            {"title": GENERIC_SHIRT, "id": 12, "provenance": "assistant_presented"},
+        ]
+        trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
+        assert trusted.title == GENERIC_SHIRT
+        assert trusted.origin == "last_presented_products"
+
+
+class TestTopicSwitchCatalogFallback:
+    def test_top_fallback_uses_discovery_when_ranker_empty(self) -> None:
+        from modules.ai.brain.execution.catalog_navigate import CatalogNavigateHandler
+
+        handler = CatalogNavigateHandler()
+        ctx = _ctx("طيب نرجع للتسوق", intent_name=INTENT_ASK_PRODUCT)
+        ctx.state.conversation_focus = "order_tracking"
+        rows = handler._fallback_top_products(ctx, limit=8)
+        titles = {str(r.get("title") or "") for r in rows}
+        assert GENERIC_SHIRT in titles
+        assert GENERIC_SHOE in titles
+
+
+class TestOrderTrackingThenCatalogNavigate:
+    def test_catalog_navigate_clears_order_tracking_focus(self) -> None:
+        from modules.ai.brain.commerce.commerce_focus_owner import (
+            FOCUS_ORDER_TRACKING,
+            apply_commerce_focus_lifecycle,
+            set_product_focus,
+        )
+
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        set_product_focus(
+            state,
+            {"id": 12, "title": GENERIC_SHIRT, "external_id": "ext-shirt"},
+            reason="browse",
+            turn=4,
+        )
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_TRACK_ORDER,
+            action="track_order",
+            message="وين طلبي الحالي؟",
+            turn=5,
+        )
+        assert state.conversation_focus == FOCUS_ORDER_TRACKING
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name="start_order",
+            action="catalog_navigate",
+            message="طيب نرجع للتسوق",
+            turn=6,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
