@@ -930,10 +930,14 @@ def is_non_payment_service_inquiry(message: str) -> bool:
 
 
 def is_payment_query(message: str) -> bool:
-    """Cheap rule-based check used by the webhook to decide whether to
-    consult :func:`find_best_payment_asset`. False positives are fine —
-    the asset finder filters by tag relevance — but false negatives are
-    not, since the whole point is to recover when GPT misses the asset."""
+    """Retrieval ranking helper for :func:`find_best_payment_asset`.
+
+    This is **not** customer semantic intent, outbound consent, or
+    authorization to execute a payment-asset send. False-positive
+    bank-name collisions (e.g. a social mention that overlaps a bank
+    token) must not own the turn. Execution gates live in
+    ``payment_execution_ownership`` / requestive consent.
+    """
     if not message:
         return False
     if is_non_payment_service_inquiry(message):
@@ -953,11 +957,10 @@ def find_best_payment_asset(
     payment / bank / barcode / QR, or ``None`` if no item passes the
     score threshold.
 
-    Used as a HARD OVERRIDE: when the customer asks for bank info and
-    GPT's reply doesn't include the corresponding ``[MEDIA:<id>]``, the
-    webhook attaches the result of this function regardless. Returning
-    ``None`` is normal — many merchants don't have a barcode uploaded —
-    in which case the webhook just lets GPT's text reply go through.
+    Retrieval only. Callers must already have established requestive
+    payment ownership (Brain/LLM semantic intent, or a structured
+    payment action). Asset existence must not create intent. Returning
+    ``None`` is normal — many merchants don't have a barcode uploaded.
 
     The returned dict has the same shape as :func:`extract_media_markers`
     output entries so it can be mixed into the attachments list with no

@@ -57,15 +57,20 @@ _COMMERCE_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], float], ...] = (
     (re.compile(r"وين\s+(?:ال)?دفع|كيف\s+(?:ادفع|أدفع|احول)"), 0.45),
 )
 
+# Requestive payment language only. Bank-name / substring collisions
+# (``is_payment_query``) must not mint this score. IBAN / transfer-data
+# phrases below were previously reached only via that catch-all.
 _PAYMENT_SEMANTIC_RE = re.compile(
     r"(?:"
-    r"ارسل(?:وا)?\s*(?:لي\s+)?(?:ال)?حساب|"
+    r"ارسل(?:وا)?\s*(?:لي\s+)?(?:ال)?(?:حساب|ايبان)|"
     r"(?:ابي|ابغى|ابغي|أبي|أبغى|ودي|حاب)\s+(?:احول|أحول|ادفع|أدفع)|"
     r"وين\s+(?:ال)?(?:دفع|تحويل)|"
     r"جاهز(?:ه|ة)?\s*(?:لل)?تحويل|"
     r"(?:حساب|رقم)\s*(?:ال)?بنك|"
     r"رقم\s*(?:ال)?حساب|"
-    r"iban|"
+    r"iban|ايبان|"
+    r"بيانات\s*(?:ال)?(?:تحويل|دفع)|"
+    r"(?:ال)?تحويل\s*(?:ال)?بنكي|"
     r"طريقة\s+(?:الدفع|التحويل)|"
     r"كيف\s+(?:ادفع|أدفع|احول|اسدد|الدفع|التحويل)"
     r")",
@@ -426,12 +431,10 @@ def detect_payment_intent_strength(
     if _PAYMENT_SEMANTIC_RE.search(norm):
         return PaymentIntentVerdict(0.88, "semantic")
 
-    try:
-        from core.ai_libraries import is_payment_query  # noqa: PLC0415
-        if is_payment_query(msg):
-            return PaymentIntentVerdict(0.78, "semantic")
-    except Exception:  # noqa: BLE001
-        pass
+    # Retrieval-only lexical hits (``is_payment_query`` / bank-name
+    # substrings) are NOT semantic intent. They must not mint a 0.78
+    # score that later becomes outbound consent or payment-asset
+    # execution. Ranking stays in ``find_best_payment_asset``.
 
     # Short readiness phrases during active payment funnel (not receipt upload).
     if state is not None and bool(getattr(state, "awaiting_payment_receipt", False)):
@@ -483,6 +486,15 @@ def has_payment_outbound_consent(
     state: Any = None,
     conversation_id: Any = None,
 ) -> bool:
+    """True when customer-authored origin has *requestive* payment language.
+
+    This is not legal consent, not capability availability, and not
+    authorization to skip Brain. A weak ``is_payment_query`` bank-name
+    collision is not sufficient. Callers that send customer-visible
+    payment media must still apply
+    ``payment_execution_ownership`` (structured inbound, or post-Brain
+    attach after this flag is true).
+    """
     from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
         customer_origin_has_payment_request,
         emit_payment_intent_telemetry,
