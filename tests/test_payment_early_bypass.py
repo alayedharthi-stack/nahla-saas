@@ -121,31 +121,52 @@ def test_early_bypass_does_not_clear_handoff_flags():
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# 2. Late-stage owner-fallback detection — phrasings GPT actually used
-#    in production must trigger the text replacement.
+# 2. Late-stage payment ownership — Brain owns unstructured semantics.
+#    Platform must not inspect LLM prose or restore canned takeover.
 # ─────────────────────────────────────────────────────────────────────────
 
 def test_late_stage_fallback_detection_covers_actual_gpt_phrasings():
-    """The merchant's screenshot shows GPT replying with
-    ``"أعتذر إني ما أقدر أوفرها لك مباشرة — بس الفريق راح يتواصل معك"``.
-    The previous detection list missed this phrasing. Lock the new
-    phrases in source so future refactors can't shrink the list."""
+    """Stale contract rewritten: GPT phrase-list takeover was removed
+    in PR #828. Remaining invariant is ownership, not a wording list.
+
+    The platform must not scan arbitrary LLM prose to seize payment
+    ownership or replace a composed reply with canned bank copy.
+    Unstructured natural-language turns reach Brain; requestive
+    consent may attach an authoritative asset after compose.
+    """
     src = _read_webhook()
-    required_markers = [
-        "ما أقدر أوفرها",          # "ما أقدر أوفرها لك"
-        "أعتذر إني ما أقدر",       # "أعتذر إني ما أقدر"
-        "راح يتواصل معك",          # "الفريق راح يتواصل معك"
-        "وصل طلبك للفريق",         # "وصل طلبك لفريق المتجر"
-        "وصلت رسالتك",             # generic safe-reply leak
-        "تواصلي مع المتجر",        # feminine variant
-        "أحوّلك للفريق",           # active escalation phrasing
-    ]
-    for m in required_markers:
-        assert m in src, (
-            f"late-stage owner-fallback detection missing phrase {m!r} — "
-            f"GPT will say this in production and the override won't "
-            f"replace it with the warm payment intro"
-        )
+    start = src.find("Payment-asset HARD OVERRIDE")
+    assert start != -1
+    end = src.find("Marker scrub", start)
+    if end == -1:
+        end = start + 8000
+    hard_override = src[start:end]
+
+    assert "looks_like_owner_fallback" not in hard_override
+    assert "replaced owner-fallback" not in hard_override
+    assert "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي." not in src
+    assert "may_attach_payment_asset_after_brain" in hard_override
+    assert "unstructured_requires_brain_semantic_ownership" in src
+
+    from modules.ai.brain.commerce.payment_execution_ownership import (
+        may_attach_payment_asset_after_brain,
+        payment_early_bypass_allowed,
+    )
+
+    text_meta = {"source_type": "text", "normalized_type": "text"}
+    assert payment_early_bypass_allowed(
+        inbound_metadata=text_meta, normalized_type="text",
+    ) is False
+    assert may_attach_payment_asset_after_brain(
+        requestive_consent=False,
+        inbound_metadata=text_meta,
+        normalized_type="text",
+    ) is False
+    assert may_attach_payment_asset_after_brain(
+        requestive_consent=True,
+        inbound_metadata=text_meta,
+        normalized_type="text",
+    ) is True
 
 
 # ─────────────────────────────────────────────────────────────────────────
