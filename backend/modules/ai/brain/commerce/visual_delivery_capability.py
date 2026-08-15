@@ -135,13 +135,37 @@ def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
             str(getattr(ctx, "message", "") or ""),
         )
         trusted_title = str(trusted.title or "").strip()
-        if trusted_title:
-            for row in products:
-                if str(row.get("title") or "").strip() == trusted_title:
-                    title = trusted_title
-                    products = [row] + [p for p in products if p is not row]
-                    break
-            if not title:
+        trusted_id = str(getattr(trusted, "product_id", "") or "").strip()
+        if trusted.reason == "ambiguous_presented":
+            import re as _re  # noqa: PLC0415
+
+            _possessive = _re.search(
+                r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
+                str(getattr(ctx, "message", "") or ""),
+            )
+            if _possessive:
+                return None
+        elif trusted_title or trusted_id:
+            matched = None
+            if trusted_id:
+                for row in products:
+                    rid = str(
+                        row.get("id") or row.get("product_id") or row.get("external_id") or ""
+                    ).strip()
+                    if rid and rid == trusted_id:
+                        matched = row
+                        break
+            if matched is None and trusted_title:
+                title_hits = [
+                    row for row in products
+                    if str(row.get("title") or "").strip() == trusted_title
+                ]
+                if len(title_hits) == 1:
+                    matched = title_hits[0]
+            if matched is not None:
+                title = str(matched.get("title") or trusted_title).strip()
+                products = [matched] + [p for p in products if p is not matched]
+            elif trusted_title:
                 title = trusted_title
         elif is_deictic_visual_request(str(getattr(ctx, "message", "") or "")):
             import re as _re  # noqa: PLC0415

@@ -297,6 +297,8 @@ def apply_commerce_focus_lifecycle(
                 state,
                 reason=f"return_from_{focus_mode}",
             )
+        if str(getattr(state, "conversation_focus", "") or "") == FOCUS_ORDER_TRACKING:
+            clear_order_tracking_focus(state, reason="shopping_continuation")
 
     if act == "catalog_navigate" or (
         intent in {"ask_product", "start_order"} and act in {"search_products", "catalog_navigate"}

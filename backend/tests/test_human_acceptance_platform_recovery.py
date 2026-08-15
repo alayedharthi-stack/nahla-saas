@@ -18,6 +18,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from core.store_knowledge import build_merchant_context  # noqa: E402
+from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: E402
+    stamp_assistant_named_catalog_from_reply,
+)
 from modules.ai.brain.catalog.navigation import (  # noqa: E402
     try_catalog_navigation_decision,
 )
@@ -49,6 +52,7 @@ from modules.ai.brain.commerce.visual_delivery_capability import (  # noqa: E402
     visual_delivery_available,
 )
 from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CLARIFY,
     ACTION_LLM_REPLY,
     ACTION_SEARCH_PRODUCTS,
     ACTION_TRACK_ORDER,
@@ -244,6 +248,23 @@ class TestOrderTrackingThenCatalogNavigate:
             action="catalog_navigate",
             message="طيب نرجع للتسوق",
             turn=6,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
+
+    def test_shopping_llm_reply_clears_order_tracking_focus(self) -> None:
+        from modules.ai.brain.commerce.commerce_focus_owner import (
+            FOCUS_ORDER_TRACKING,
+            apply_commerce_focus_lifecycle,
+        )
+
+        state = MerchantConversationState(stage="exploring", turn=8, greeted=True)
+        state.conversation_focus = FOCUS_ORDER_TRACKING
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_ASK_PRODUCT,
+            action="llm_reply",
+            message="طيب نرجع للتسوق",
+            turn=8,
         )
         assert state.conversation_focus != FOCUS_ORDER_TRACKING
 
@@ -588,6 +609,16 @@ class TestProductPronounContinuity:
         assert is_deictic_visual_request(msg) is True
         state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
         state.last_presented_products = list(_facts().discovery_products)
+        state.last_recommended_products = [
+            {
+                "id": 12,
+                "title": GENERIC_SHIRT,
+                "external_id": "ext-shirt",
+                "image_url": "https://cdn.example.test/shirt.jpg",
+                "provenance": "assistant_recommended",
+                "customer_selected": False,
+            }
+        ]
         ctx = _ctx(
             msg,
             intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
@@ -601,6 +632,9 @@ class TestProductPronounContinuity:
         assert decision.action == ACTION_SEARCH_PRODUCTS
         assert decision.args.get("after_search") == "product_visual"
         assert decision.args.get("force_product_card") is True
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay
+        assert str(replay[0].get("title") or "") == GENERIC_SHIRT
 
     def test_assistant_presented_catalog_survives_for_pronoun(self) -> None:
         from modules.ai.brain.commerce.product_visual import resolve_trusted_focus_for_deictic
@@ -611,7 +645,9 @@ class TestProductPronounContinuity:
         ]
         trusted = resolve_trusted_focus_for_deictic(state, "وريني صورته")
         assert trusted.title == GENERIC_SHIRT
+        assert trusted.product_id == "12"
         assert trusted.origin == "last_presented_products"
+        assert state.selected_product_id == ""
 
 
 class TestTopicSwitchCatalogFallback:
@@ -625,3 +661,218 @@ class TestTopicSwitchCatalogFallback:
         titles = {str(r.get("title") or "") for r in rows}
         assert GENERIC_SHIRT in titles
         assert GENERIC_SHOE in titles
+
+
+class TestAssistantPresentedProvenance:
+    def test_named_list_stamps_presented_not_customer_selected(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=4, greeted=True)
+        candidates = list(_facts().discovery_products)
+        reply = (
+            "1. **حذاء رياضي أبيض** بسعر 120 ريال.\n"
+            "2. **قميص قطني أزرق** بسعر 80 ريال."
+        )
+        stamped = stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply=reply,
+            catalog_candidates=candidates,
+            turn=4,
+        )
+        titles = {str(row.get("title") or "") for row in stamped}
+        assert GENERIC_SHOE in titles
+        assert GENERIC_SHIRT in titles
+        assert state.last_recommended_products == []
+        assert all(row.get("customer_selected") is False for row in state.last_presented_products)
+        assert state.current_product_focus in (None, {})
+        assert state.selected_product_id == ""
+
+    def test_unique_named_recommendation_stamps_recommended_id(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=5, greeted=True)
+        candidates = list(_facts().discovery_products)
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="1. حذاء رياضي أبيض\n2. قميص قطني أزرق",
+            catalog_candidates=candidates,
+            turn=4,
+        )
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="أنصحك بالقميص قطني أزرق",
+            catalog_candidates=candidates,
+            turn=5,
+        )
+        recommended = list(state.last_recommended_products or [])
+        assert len(recommended) == 1
+        assert recommended[0]["id"] == 12
+        assert recommended[0]["provenance"] == "assistant_recommended"
+        assert recommended[0].get("customer_selected") is False
+        assert state.current_product_focus in (None, {})
+
+    def test_price_disambiguates_same_title_family(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=3, greeted=True)
+        candidates = [
+            {"id": 22, "title": "فستان", "external_id": "dress-149", "price": 149.0},
+            {"id": 23, "title": "فستان", "external_id": "dress-289", "price": 289.0},
+            {"id": 28, "title": "جاكيت", "external_id": "jacket-169", "price": 169.0},
+        ]
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="1. **فستان** بسعر 289 ريال.\n2. **جاكيت** بسعر 169 ريال.",
+            catalog_candidates=candidates,
+            turn=3,
+        )
+        ids = {row.get("id") for row in state.last_presented_products}
+        assert 23 in ids
+        assert 22 not in ids
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="أنصحك بالفستان",
+            catalog_candidates=candidates,
+            turn=4,
+        )
+        assert state.last_recommended_products[0]["id"] == 23
+
+
+class TestPresentedProductVisualFamilies:
+    def test_recommended_product_visual_executes(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        state.last_presented_products = list(_facts().discovery_products)
+        state.last_recommended_products = [
+            {
+                "id": 12,
+                "title": GENERIC_SHIRT,
+                "external_id": "ext-shirt",
+                "image_url": "https://cdn.example.test/shirt.jpg",
+                "provenance": "assistant_recommended",
+                "customer_selected": False,
+            }
+        ]
+        ctx = _ctx(
+            "وريني صورته",
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=state,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("after_search") == "product_visual"
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay[0]["id"] == 12
+        assert replay[0]["title"] == GENERIC_SHIRT
+
+    def test_ambiguous_presented_products_do_not_canned_clarify(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        state.last_presented_products = list(_facts().discovery_products)
+        ctx = _ctx(
+            "وريني صورته",
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=state,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CLARIFY
+        assert decision.args.get("response_goal") == "resolve_visual_referent"
+
+    def test_customer_selected_product_visual_wins(self) -> None:
+        from modules.ai.brain.commerce.commerce_focus_owner import set_product_focus
+
+        state = MerchantConversationState(stage="exploring", turn=7, greeted=True)
+        state.last_presented_products = list(_facts().discovery_products)
+        set_product_focus(
+            state,
+            {
+                "id": 11,
+                "title": GENERIC_SHOE,
+                "external_id": "ext-shoe",
+                "image_url": "https://cdn.example.test/shoe.jpg",
+            },
+            reason="customer_pick",
+            turn=7,
+        )
+        ctx = _ctx(
+            "وريني صورته",
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=state,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay[0]["id"] == 11
+        assert replay[0]["title"] == GENERIC_SHOE
+
+
+class TestOrderToShoppingContinuation:
+    def test_populated_catalog_does_not_replace_llm_shopping_reply(self) -> None:
+        os.environ["NAHLA_CATALOG_PRODUCT_GROUNDING_GUARD_MODE"] = "enforce"
+        llm = "أكيد! عندك خيارات رائعة إذا تبغى هدايا أو أي شيء آخر. وش تحب تشتري اليوم؟"
+        result = apply_catalog_product_grounding_guard(
+            reply=llm,
+            inbound_text="طيب نرجع للتسوق",
+            inbound_metadata={
+                "intent": INTENT_ASK_PRODUCT,
+                "catalog_reasoning_titles": [GENERIC_SHIRT, GENERIC_SHOE, "فستان"],
+            },
+            intent=_intent("طيب نرجع للتسوق", INTENT_ASK_PRODUCT),
+        )
+        assert result.replaced is False
+        assert result.reply == llm
+        assert "الكتالوج" not in result.reply
+
+    def test_grounded_recommendation_is_not_rewritten(self) -> None:
+        os.environ["NAHLA_CATALOG_PRODUCT_GROUNDING_GUARD_MODE"] = "enforce"
+        llm = "أنصحك بالفستان، لأنه مثالي كهدية ويعطي لمسة أنيقة. تبي أرسل لك تفاصيله أو صورة؟"
+        result = apply_catalog_product_grounding_guard(
+            reply=llm,
+            inbound_text="اختاري لي أنت",
+            inbound_metadata={"catalog_reasoning_titles": ["فستان", "جاكيت", "تنورة"]},
+        )
+        assert result.replaced is False
+        assert "فستان" in result.reply
+        assert "الكتالوج" not in result.reply
+
+
+class TestRepeatedTopicSwitchOwnership:
+    def test_order_payment_catalog_do_not_leave_stale_order_owner(self) -> None:
+        from modules.ai.brain.commerce.commerce_focus_owner import (
+            FOCUS_ORDER_TRACKING,
+            apply_commerce_focus_lifecycle,
+        )
+
+        state = MerchantConversationState(stage="exploring", turn=10, greeted=True)
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_ASK_PRODUCT,
+            action="search_products",
+            message="وش عندكم؟",
+            turn=10,
+        )
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_TRACK_ORDER,
+            action="track_order",
+            message="وين طلبي الحالي؟",
+            turn=11,
+        )
+        assert state.conversation_focus == FOCUS_ORDER_TRACKING
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_ASK_PRODUCT,
+            action="llm_reply",
+            message="طيب نرجع للتسوق",
+            turn=12,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_ASK_PAYMENT_INFO,
+            action="faq_reply",
+            message="وش طرق الدفع",
+            turn=13,
+        )
+        apply_commerce_focus_lifecycle(
+            state,
+            intent_name=INTENT_ASK_PRODUCT,
+            action="llm_reply",
+            message="وريني شي مناسب",
+            turn=14,
+        )
+        assert state.conversation_focus != FOCUS_ORDER_TRACKING
+

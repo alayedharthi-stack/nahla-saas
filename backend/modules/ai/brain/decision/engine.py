@@ -3187,7 +3187,13 @@ class DefaultDecisionEngine:
                     resolve_trusted_focus_for_deictic,
                 )
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
-                if trusted.title:
+                _possessive = re.search(
+                    r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
+                    ctx.message or "",
+                )
+                if trusted.reason == "ambiguous_presented" and _possessive:
+                    focus_title = ""
+                elif trusted.title:
                     focus_title = trusted.title
             try:
                 from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
@@ -3223,6 +3229,23 @@ class DefaultDecisionEngine:
                     resolve_trusted_focus_for_deictic,
                 )
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
+                _possessive = re.search(
+                    r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
+                    ctx.message or "",
+                )
+                if trusted.reason == "ambiguous_presented" and _possessive:
+                    return Decision(
+                        action=ACTION_LLM_REPLY,
+                        args={
+                            "topic": "product_visual",
+                            "response_goal": "resolve_visual_referent",
+                            "presented_products": list(
+                                getattr(state, "last_presented_products", None) or []
+                            )[:8],
+                        },
+                        reason="deictic visual → ambiguous presented products",
+                        confidence=0.88,
+                    )
                 if not trusted.title:
                     return Decision(
                         action=ACTION_CLARIFY,

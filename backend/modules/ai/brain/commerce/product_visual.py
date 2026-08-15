@@ -13,7 +13,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -554,23 +554,82 @@ def _latest_customer_product_mention(state: Any, *, limit: int = 10) -> str:
     return ""
 
 
-def _presented_title(state: Any) -> str:
-    """Assistant-presented catalog title — conversational context, not customer selection."""
+def _product_rows(state: Any, key: str) -> List[Dict[str, Any]]:
     bs = _state_dict(state)
-    for key in (
-        "last_presented_products",
-        "last_recommended_products",
-    ):
-        rows = bs.get(key) or []
-        if not isinstance(rows, list):
+    rows = bs.get(key) or []
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for raw in rows:
+        if not isinstance(raw, dict):
             continue
-        for raw in rows:
-            if not isinstance(raw, dict):
-                continue
-            title = str(raw.get("title") or raw.get("name") or "").strip()
-            if title:
-                return title
-    return ""
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        if not title:
+            continue
+        ident = str(
+            raw.get("id")
+            or raw.get("product_id")
+            or raw.get("external_id")
+            or title
+        ).strip().lower()
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(raw)
+    return out
+
+
+def _row_product_id(row: Dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("product_id") or row.get("external_id") or "").strip()
+
+
+def _unique_product_row(rows: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not rows:
+        return None
+    identities: List[str] = []
+    for row in rows:
+        ident = _row_product_id(row) or str(row.get("title") or "").strip().lower()
+        if ident and ident not in identities:
+            identities.append(ident)
+    if len(identities) != 1:
+        return None
+    return dict(rows[0])
+
+
+def _rows_matching_mention(
+    rows: Sequence[Dict[str, Any]],
+    mention: str,
+) -> List[Dict[str, Any]]:
+    if not mention:
+        return []
+    hits: List[Dict[str, Any]] = []
+    for row in rows:
+        title = str(row.get("title") or row.get("name") or "").strip()
+        if title and _fuzzy_title_match(title, mention):
+            hits.append(row)
+    return hits
+
+
+def _finish_from_row(
+    *,
+    row: Dict[str, Any],
+    recent: str,
+    state: Any,
+    origin: str,
+    reason: str,
+) -> TrustedFocusResult:
+    title = str(row.get("title") or row.get("name") or "").strip()
+    return _finish_focus_resolution(
+        evaluated_focus=title,
+        recent=recent,
+        state=state,
+        title=title,
+        product_id=_row_product_id(row),
+        origin=origin,
+        fresh=True,
+        reason=reason,
+    )
 
 
 def resolve_trusted_focus_for_deictic(
@@ -580,21 +639,59 @@ def resolve_trusted_focus_for_deictic(
     """
     Resolve which product a deictic visual ask refers to.
 
-    Prefers fresh, topic-aligned focus; falls back to recent customer
-    mentions on topic shift; otherwise returns empty → clarify.
+    Assistant-presented / recommended catalog entities are conversational
+    evidence. They are not customer selection. Fresh customer-selected
+    focus still wins when trusted.
     """
     bs = _state_dict(state)
     focus = _focus_title(bs)
     focus_id = _focus_id(bs)
     age = focus_age_turns(bs)
     recent = _latest_customer_product_mention(bs)
-    presented = _presented_title(state)
-    if not focus and presented:
-        focus = presented
-        focus_id = ""
+    recommended = _product_rows(state, "last_recommended_products")
+    presented = _product_rows(state, "last_presented_products")
+    pool = list(recommended) + [
+        row for row in presented
+        if _row_product_id(row) not in {_row_product_id(item) for item in recommended}
+    ]
 
-    if focus and recent and not _fuzzy_title_match(focus, recent):
-        if age > FOCUS_FRESH_TURNS or not is_visual_deictic_focus_trusted(state):
+    if recent:
+        matching = _rows_matching_mention(pool, recent)
+        unique_match = _unique_product_row(matching)
+        if unique_match is not None:
+            origin = (
+                "last_recommended_products"
+                if recommended and _row_product_id(unique_match) in {
+                    _row_product_id(row) for row in recommended
+                }
+                else "last_presented_products"
+            )
+            return _finish_from_row(
+                row=unique_match,
+                recent=recent,
+                state=state,
+                origin=origin,
+                reason="recent_mention_among_presented",
+            )
+        if matching:
+            return _finish_focus_resolution(
+                evaluated_focus=focus,
+                recent=recent,
+                state=state,
+                origin="assistant_presented_ambiguous",
+                reason="ambiguous_presented",
+            )
+        if focus and not _fuzzy_title_match(focus, recent) and not pool:
+            if age > FOCUS_FRESH_TURNS or not is_visual_deictic_focus_trusted(state):
+                return _finish_focus_resolution(
+                    evaluated_focus=focus,
+                    recent=recent,
+                    state=state,
+                    title=recent,
+                    origin="recent_customer_mention",
+                    fresh=True,
+                    reason="topic_shift_recent_mention",
+                )
             return _finish_focus_resolution(
                 evaluated_focus=focus,
                 recent=recent,
@@ -602,28 +699,8 @@ def resolve_trusted_focus_for_deictic(
                 title=recent,
                 origin="recent_customer_mention",
                 fresh=True,
-                reason="topic_shift_recent_mention",
+                reason="topic_shift_over_stale_focus",
             )
-        return _finish_focus_resolution(
-            evaluated_focus=focus,
-            recent=recent,
-            state=state,
-            title=recent,
-            origin="recent_customer_mention",
-            fresh=True,
-            reason="topic_shift_over_stale_focus",
-        )
-
-    if presented and (not _focus_title(bs) or age >= 999):
-        return _finish_focus_resolution(
-            evaluated_focus=presented,
-            recent=recent,
-            state=state,
-            title=presented,
-            origin="last_presented_products",
-            fresh=True,
-            reason="assistant_presented",
-        )
 
     if focus and is_visual_deictic_focus_trusted(state):
         return _finish_focus_resolution(
@@ -635,6 +712,35 @@ def resolve_trusted_focus_for_deictic(
             origin="current_product_focus",
             fresh=True,
             reason="focus_fresh",
+        )
+
+    unique_recommended = _unique_product_row(recommended)
+    if unique_recommended is not None:
+        return _finish_from_row(
+            row=unique_recommended,
+            recent=recent,
+            state=state,
+            origin="last_recommended_products",
+            reason="assistant_recommended",
+        )
+
+    unique_presented = _unique_product_row(presented)
+    if unique_presented is not None:
+        return _finish_from_row(
+            row=unique_presented,
+            recent=recent,
+            state=state,
+            origin="last_presented_products",
+            reason="assistant_presented",
+        )
+
+    if len(presented) >= 2:
+        return _finish_focus_resolution(
+            evaluated_focus=focus,
+            recent=recent,
+            state=state,
+            origin="assistant_presented_ambiguous",
+            reason="ambiguous_presented",
         )
 
     if focus and age <= FOCUS_GAP_STALE_TURNS and recent and _fuzzy_title_match(focus, recent):
@@ -649,7 +755,7 @@ def resolve_trusted_focus_for_deictic(
             reason="focus_reinforced_by_recent_mention",
         )
 
-    if recent and not focus:
+    if recent and not focus and not pool:
         return _finish_focus_resolution(
             evaluated_focus=focus,
             recent=recent,
