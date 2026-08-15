@@ -6740,53 +6740,31 @@ async def _handle_merchant_message(
 
         # ── PAYMENT-ASSET EARLY BYPASS ───────────────────────────────────
         #
-        # This block runs BEFORE the AI pause guard and BEFORE the mode
-        # resolver. The merchant reported (with screenshots) that asking
-        # "ارسل لي حساب الراجحي" produced a generic handoff message even
-        # though the bank-transfer barcode was active in the AI Media
-        # Library. Root cause analysis:
+        # Unstructured natural language must NOT execute payment media
+        # before Brain/LLM. Weak lexical hits (``is_payment_query`` /
+        # bank-name substrings) and merchant-asset existence are not
+        # customer semantic intent.
         #
-        #   1. The conversation had been previously flagged for human
-        #      handoff (via support_escalation or ai_pause_guard), which
-        #      causes ``should_skip_ai`` to return True and the webhook
-        #      to ``return`` without ever reaching the brain (the
-        #      "AI stopped" symptom the merchant noticed).
-        #   2. Even when the pause guard let the message through, the
-        #      mode resolver returned MODE_SUPPORT_ESCALATION and the
-        #      hard-coded handoff acknowledgement fired ("وصلت رسالتك.
-        #      تم تحويل المحادثة لفريق المتجر…") before the brain ran.
-        #
-        # The merchant's explicit requirement was: "إذا وجد AI Asset
-        # مناسب، يجب أن يتغلب على TEMPLATE fallbacks، contact_owner
-        # fallback، generic escalation". So if the inbound is a
-        # payment-info request AND we have a high-relevance active
-        # media asset, we deterministically:
-        #
-        #   * send a warm short text + the asset image, then
-        #   * stamp a "payment_asset_served" marker on the conversation,
-        #   * skip every other branch and return.
-        #
-        # We deliberately do NOT clear the human-handoff flags here —
-        # if the merchant manually took over the conversation, they
-        # keep ownership for everything else. The only escape we make
-        # is for THIS specific kind of question, which the merchant
-        # explicitly authorised by uploading the asset in the first
-        # place.
+        # Pre-Brain payment execution is allowed only for structured
+        # payment actions (button / list / machine action IDs). Genuine
+        # free-text payment asks continue into Brain; the platform may
+        # attach the authoritative asset after compose.
         try:
             from core.ai_libraries import (  # noqa: PLC0415
                 find_best_payment_asset as _find_payment_asset,
-                is_payment_query as _is_payment_query,
                 validate_media_for_send as _validate_media,
             )
             from modules.ai.brain.decision.payment_barcode_routing import (  # noqa: PLC0415
                 is_payment_barcode_image_request as _is_barcode_image_request,
-                payment_barcode_intro_text as _barcode_intro_text,
             )
             from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
                 has_payment_outbound_consent as _has_payment_consent,
             )
             from modules.ai.brain.commerce.customer_origin_intent import (  # noqa: PLC0415
                 split_inbound_text,
+            )
+            from modules.ai.brain.commerce.payment_execution_ownership import (  # noqa: PLC0415
+                payment_early_bypass_allowed as _payment_early_bypass_allowed,
             )
             from services.media_resolver import resolve_for_query as _resolve_for_query  # noqa: PLC0415
 
@@ -6802,20 +6780,34 @@ async def _handle_merchant_message(
                 normalized_type=_norm_type_early or None,
             )
             _origin_early = _split_early.customer_origin
-            _payment_consent = _has_payment_consent(
-                text or "",
+            _early_bypass_ok = _payment_early_bypass_allowed(
                 inbound_metadata=_in_meta_early,
                 normalized_type=_norm_type_early or None,
-                tenant_id=tenant_id,
-                route="early_payment_bypass",
-                conversation_id=getattr(convo, "id", None),
             )
-            _early_barcode_image = (
-                _payment_consent and _is_barcode_image_request(_origin_early)
-            )
-            _early_payment_intent = _payment_consent and (
-                _is_payment_query(_origin_early) or _early_barcode_image
-            )
+            _payment_consent = False
+            _early_barcode_image = False
+            _early_payment_intent = False
+            if not _early_bypass_ok:
+                logger.info(
+                    "[PAYMENT_INFO] early-bypass SKIPPED tenant=%s convo=%s "
+                    "reason=unstructured_requires_brain_semantic_ownership",
+                    tenant_id, getattr(convo, "id", None),
+                )
+            else:
+                _payment_consent = _has_payment_consent(
+                    text or "",
+                    inbound_metadata=_in_meta_early,
+                    normalized_type=_norm_type_early or None,
+                    tenant_id=tenant_id,
+                    route="early_payment_bypass",
+                    conversation_id=getattr(convo, "id", None),
+                )
+                _early_barcode_image = (
+                    _payment_consent and _is_barcode_image_request(_origin_early)
+                )
+                # Structured payment action IDs are already explicit intent.
+                # Do not re-derive intent from ``is_payment_query``.
+                _early_payment_intent = True
             _early_payment_asset = None
             _early_payment_key = ""
             if _early_barcode_image:
@@ -6917,24 +6909,27 @@ async def _handle_merchant_message(
                                     )
                                 )
                             else:
-                                _intro_text = (
-                                    "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
+                                # Structured payment action: send the
+                                # authoritative asset. Do not invent
+                                # customer-facing prose here.
+                                _intro_text = ""
+                            _text_ok = True
+                            if _intro_text:
+                                _text_ok = await _send_whatsapp_message(
+                                    phone_id=phone_id, to=to, text=_intro_text,
+                                    _tenant_id=tenant_id, _db=db,
                                 )
-                            _text_ok = await _send_whatsapp_message(
-                                phone_id=phone_id, to=to, text=_intro_text,
-                                _tenant_id=tenant_id, _db=db,
-                            )
-                            StateManager.save_message(
-                                db, to, _intro_text, "outbound",
-                                conversation_id=convo.id, tenant_id=tenant_id,
-                                extra_metadata=_otp_merge_save_metadata(
-                                    None,
-                                    {},
-                                    persona_compose_event=_early_persona_event,
+                                StateManager.save_message(
+                                    db, to, _intro_text, "outbound",
+                                    conversation_id=convo.id, tenant_id=tenant_id,
+                                    extra_metadata=_otp_merge_save_metadata(
+                                        None,
+                                        {},
+                                        persona_compose_event=_early_persona_event,
+                                    )
+                                    if _early_persona_event
+                                    else None,
                                 )
-                                if _early_persona_event
-                                else None,
-                            )
                             logger.info(
                                 "[PAYMENT_INFO] early-bypass APPLIED tenant=%s convo=%s "
                                 "asset_id=%s media_type=%s text_send_ok=%s "
@@ -11620,21 +11615,19 @@ async def _handle_merchant_message(
                 pass
 
         # ── Payment-asset HARD OVERRIDE ─────────────────────────────────
-        # If the customer's inbound looks like a bank/IBAN/QR/transfer
-        # request AND we have a relevant active media item BUT GPT didn't
-        # cite it, attach the asset anyway. This is the recovery path for
-        # the bug where GPT replied "ما عندي بيانات الحساب البنكي" while
-        # a "باركود التحويل البنكي الراجحي" item was sitting active in
-        # ai_media_library. Detection is rule-based (cheap), and we
-        # require the relevance score to clear a threshold so unrelated
-        # uploads can't accidentally pre-empt the conversation.
+        # After Brain/LLM has owned the turn: if requestive payment
+        # consent is true (not a weak bank-name collision) and GPT did
+        # not cite the merchant asset, attach the authoritative media.
+        # Do not replace a valid LLM reply with canned prose.
         try:
             from core.ai_libraries import (  # noqa: PLC0415
                 find_best_payment_asset as _find_payment_asset,
-                is_payment_query as _is_payment_query,
             )
             from modules.ai.brain.commerce.conversational_priority import (  # noqa: PLC0415
                 has_payment_outbound_consent as _has_payment_consent_hard,
+            )
+            from modules.ai.brain.commerce.payment_execution_ownership import (  # noqa: PLC0415
+                may_attach_payment_asset_after_brain as _may_attach_payment_asset,
             )
             _in_meta_hard = {}
             try:
@@ -11643,12 +11636,23 @@ async def _handle_merchant_message(
                 _in_meta_hard = {}
             if isinstance(inbound_metadata, dict):
                 _in_meta_hard.update(inbound_metadata)
-            _payment_intent = _has_payment_consent_hard(
+            _payment_consent_hard = _has_payment_consent_hard(
                 text or "",
                 inbound_metadata=_in_meta_hard,
                 tenant_id=tenant_id,
                 route="payment_hard_override",
                 conversation_id=getattr(convo, "id", None),
+            )
+            _payment_intent = _may_attach_payment_asset(
+                requestive_consent=_payment_consent_hard,
+                inbound_metadata=_in_meta_hard,
+                normalized_type=str(
+                    _in_meta_hard.get("normalized_type")
+                    or _in_meta_hard.get("source_type")
+                    or ""
+                ) or None,
+                brain_decision_args=_br_dec_args,
+                brain_intent_name=str(_br_dec_action or ""),
             )
             if _payment_intent:
                 from modules.ai.checkout_authority import (  # noqa: PLC0415
@@ -11705,44 +11709,6 @@ async def _handle_merchant_message(
                                 float(_normalised_hard.get("_relevance_score") or 0.0),
                                 bool(_already_attached_ids),
                             )
-                            _r_low = (reply or "").strip()
-                            _looks_like_owner_fallback = bool(_r_low) and any(
-                                marker in _r_low for marker in (
-                                    "ما عندي بيانات الحساب",
-                                    "ما عندي معلومات",
-                                    "ما أقدر أوفرها",
-                                    "ما اقدر اوفرها",
-                                    "أعتذر إني ما أقدر",
-                                    "اعتذر اني ما اقدر",
-                                    "أعتذر، ما",
-                                    "اعتذر، ما",
-                                    "لا أستطيع تقديم",
-                                    "لا استطيع تقديم",
-                                    "لا أملك معلومات",
-                                    "لا املك معلومات",
-                                    "هذه وسائل التواصل",
-                                    "تواصل مع المتجر",
-                                    "تواصلي مع المتجر",
-                                    "سأحوّلك للفريق",
-                                    "سأحولك للفريق",
-                                    "أحوّلك للفريق",
-                                    "احولك للفريق",
-                                    "تواصل مع المالك",
-                                    "الفريق راح يتواصل",
-                                    "راح يتواصل معك",
-                                    "سيتواصل معك الفريق",
-                                    "وصل طلبك للفريق",
-                                    "طلبك وصل للفريق",
-                                    "وصلت رسالتك",
-                                )
-                            )
-                            if _looks_like_owner_fallback:
-                                reply = "أكيد 🌷 تفضل، هذه بيانات التحويل البنكي."
-                                logger.info(
-                                    "[PAYMENT_INFO] tenant=%s replaced owner-fallback "
-                                    "reply with payment intro text",
-                                    tenant_id,
-                                )
                         else:
                             logger.info(
                                 "[PAYMENT_INFO] tenant=%s conversation_id=%s "

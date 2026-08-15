@@ -57,17 +57,33 @@ def test_service_inquiry_must_not_trigger_payment(message: str):
         "تمام بأخذ واحد أرسل الحساب",
         "ابي الباركود",
         "كيف أحول لكم؟",
-        "حساب الراجحي",
-        "بنك الرياض",
     ],
 )
 def test_explicit_payment_requests_still_detected(message: str):
     verdict = detect_payment_intent_strength(message)
-    assert verdict.strength >= 0.65 or is_payment_query(message)
+    assert verdict.strength >= 0.65
     assert has_payment_outbound_consent(
         message,
         tenant_id=33,
         route="test_p0_explicit_payment",
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "حساب الراجحي",
+        "بنك الرياض",
+    ],
+)
+def test_bank_name_substring_is_not_outbound_consent(message: str):
+    """Retrieval may still collide; consent/execution must not follow."""
+    assert is_payment_query(message)
+    assert detect_payment_intent_strength(message).strength < 0.65
+    assert not has_payment_outbound_consent(
+        message,
+        tenant_id=33,
+        route="test_p0_bank_name_substring",
     )
 
 
@@ -90,10 +106,28 @@ def test_riyadh_bank_qualified_stays_ask_payment_info(message: str):
     assert intent is not None
     assert intent.name == INTENT_ASK_PAYMENT_INFO
     assert is_payment_query(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "رقم حساب بنك الرياض؟",
+        "ابي حساب بنك الرياض",
+    ],
+)
+def test_riyadh_requestive_payment_still_has_consent(message: str):
     assert has_payment_outbound_consent(
         message,
         tenant_id=33,
         route="test_riyadh_bank_gate",
+    )
+
+
+def test_branch_like_bank_name_is_not_outbound_consent():
+    assert not has_payment_outbound_consent(
+        "فيه فرع بنك الرياض قريب؟",
+        tenant_id=33,
+        route="test_riyadh_branch_not_consent",
     )
 
 

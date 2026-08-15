@@ -193,11 +193,9 @@ def customer_origin_has_payment_request(
             return True
     except Exception:  # noqa: BLE001
         pass
-    try:
-        from core.ai_libraries import is_payment_query  # noqa: PLC0415
-        return bool(is_payment_query(text))
-    except Exception:  # noqa: BLE001
-        return False
+    # Do not fall back to ``is_payment_query``. Bare bank-name / substring
+    # hits are retrieval signals, not customer-origin payment requests.
+    return False
 
 
 def classify_payment_intent_source(split: InboundTextSplit) -> str:
