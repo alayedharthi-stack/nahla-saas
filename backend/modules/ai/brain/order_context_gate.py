@@ -565,15 +565,34 @@ def should_skip_catalog_preload(
     intent: Any,
     commerce_bundle: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Pipeline helper — skip ``build_merchant_context`` catalog preload."""
+    """Pipeline helper — skip ``build_merchant_context`` catalog preload.
+
+    Fulfillment lock may still block *search/recommend actions*. It must not
+    pretend the catalog is empty on product / gift / visual / browse turns.
+    """
     try:
         from .types import BrainContext, CommerceFacts, Intent  # noqa: PLC0415
 
+        resolved = intent if isinstance(intent, Intent) else Intent(
+            name=str(getattr(intent, "name", "") or "general"),
+            confidence=0.5,
+        )
+        intent_name = str(getattr(resolved, "name", "") or "").strip()
+        if intent_name in {
+            "ask_product",
+            "start_order",
+            "product_visual_request",
+            "ask_store_info",
+            "online_store_inquiry",
+        }:
+            return False
+        if is_fulfillment_discovery_unlock(message or "", intent_name=intent_name):
+            return False
         ctx = BrainContext(
             tenant_id=0,
             customer_phone="",
             message=message or "",
-            intent=intent if isinstance(intent, Intent) else Intent(name="general", confidence=0.5),
+            intent=resolved,
             state=state,
             facts=CommerceFacts(),
             commerce_bundle=commerce_bundle or {},

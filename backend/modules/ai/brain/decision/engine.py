@@ -2393,8 +2393,9 @@ class DefaultDecisionEngine:
             return Decision(
                 action=ACTION_LLM_REPLY,
                 args={
-                    "topic": "customer_order_evidence",
+                    "topic": "latest_order_summary",
                     "ledger_topic": intent.name,
+                    "block_catalog_push": True,
                 },
                 reason="latest order summary — evidence compose",
                 confidence=float(intent.confidence or 0.94),
@@ -2449,7 +2450,10 @@ class DefaultDecisionEngine:
                 ):
                     return Decision(
                         action=ACTION_LLM_REPLY,
-                        args={"topic": "customer_order_evidence"},
+                        args={
+                            "topic": "order_history",
+                            "block_catalog_push": True,
+                        },
                         reason=(
                             "order question without status-rule match — "
                             "full customer_order_evidence compose"

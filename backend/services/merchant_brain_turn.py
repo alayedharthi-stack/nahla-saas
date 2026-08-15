@@ -623,6 +623,11 @@ def _apply_outbound_dedup(
                         current_inbound=text or "",
                         candidate_reply=po_reply_before_dedup,
                         previous_outbound=prev_outbound,
+                        intent_name=str(
+                            (inbound_metadata or {}).get("intent")
+                            or (inbound_metadata or {}).get("intent_name")
+                            or ""
+                        ),
                     ):
                         reply = po_reply_before_dedup
                         outbound_abort_suppressor = ""

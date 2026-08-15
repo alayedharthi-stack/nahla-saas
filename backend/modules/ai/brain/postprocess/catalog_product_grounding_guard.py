@@ -54,7 +54,19 @@ _CATALOG_REWRITE_BLOCKED_TOPICS = frozenset({
     "health_advisory_product_safety",
     "cold_shipping_inquiry",
     "shipping_inquiry",
+    "shipping_eta",
     "storefront_self_checkout",
+    "order_tracking",
+    "latest_order_summary",
+    "order_history",
+    "order_reference_list",
+})
+
+_ORDER_OWNER_INTENTS = frozenset({
+    "track_order",
+    "latest_order_summary",
+    "order_history_count",
+    "order_reference_list",
 })
 
 _HONEY_PRODUCT_MENTION_RE = re.compile(
@@ -366,6 +378,15 @@ def apply_catalog_product_grounding_guard(
         return CatalogProductGroundingGuardResult(
             reply=original,
             action="allowed_catalog_push_blocked",
+        )
+
+    intent_name = str(getattr(intent, "name", "") or "").strip()
+    if not intent_name:
+        intent_name = str(dict(inbound_metadata or {}).get("intent") or "").strip()
+    if intent_name in _ORDER_OWNER_INTENTS:
+        return CatalogProductGroundingGuardResult(
+            reply=original,
+            action="allowed_order_evidence_owner",
         )
 
     path = str(chosen_path or "").strip()

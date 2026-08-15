@@ -31,7 +31,6 @@ _GENERIC_INVENTORY_BROWSE_RE = re.compile(
 
 _BROWSE_INTENTS = frozenset({
     "ask_product",
-    "product_visual_request",
 })
 
 
@@ -65,6 +64,17 @@ def is_catalog_browse_silent_recovery_message(message: str) -> bool:
             intent_name = str(getattr(matched, "name", "") or "").strip()
     except Exception:  # noqa: BLE001  # noqa: silent-ok — intent probe must not break recovery
         pass
+
+    try:
+        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
+            is_product_visual_request,
+        )
+
+        if intent_name == "product_visual_request" or is_product_visual_request(raw):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual probe must not break recovery
+        if intent_name == "product_visual_request":
+            return False
 
     try:
         from modules.ai.brain.catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
@@ -103,9 +113,6 @@ def is_catalog_browse_silent_recovery_message(message: str) -> bool:
         pass
 
     if intent_name in _BROWSE_INTENTS and _GENERIC_INVENTORY_BROWSE_RE.search(_normalize(raw)):
-        return True
-
-    if intent_name == "product_visual_request":
         return True
 
     return False

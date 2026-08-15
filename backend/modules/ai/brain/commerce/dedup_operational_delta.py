@@ -321,11 +321,22 @@ def should_bypass_hard_dedup_repeat_availability(
     return prior_outbound_was_wrong_social_only_reply(previous_outbound)
 
 
+_SOCIAL_SILENCE_INTENTS = frozenset({
+    "greeting",
+    "thanks",
+    "social",
+    "farewell",
+    "who_are_you",
+    "persona_interaction",
+})
+
+
 def should_restore_brain_reply_after_dedup_silence(
     *,
     current_inbound: str,
     candidate_reply: str,
     previous_outbound: str = "",
+    intent_name: str = "",
 ) -> bool:
     """True when hard dedup would silence a distinct customer turn that already composed.
 
@@ -348,8 +359,45 @@ def should_restore_brain_reply_after_dedup_silence(
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — restore probe is fail-closed
         pass
-    if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
+    try:
+        from modules.ai.brain.catalog.catalog_browse_turn_policy import (  # noqa: PLC0415
+            is_catalog_browse_message,
+        )
+
+        if is_catalog_browse_message(current_inbound):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — restore probe is fail-closed
+        pass
+
+    name = str(intent_name or "").strip()
+    try:
+        from modules.ai.brain.intent import rules as intent_rules  # noqa: PLC0415
+
+        matched = intent_rules.match(current_inbound or "")
+        if not name:
+            name = str(getattr(matched, "name", "") or "").strip()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — restore probe is fail-closed
+        pass
+    if name in _SOCIAL_SILENCE_INTENTS:
         return False
+    if name in {
+        "ask_product",
+        "start_order",
+        "product_visual_request",
+        "track_order",
+        "latest_order_summary",
+        "order_history_count",
+        "order_reference_list",
+        "ask_store_info",
+        "online_store_inquiry",
+        "ask_shipping",
+        "ask_payment_info",
+    }:
+        return True
+    if not _inbound_is_availability_or_commerce_inquiry(current_inbound):
+        # Brain already composed for this distinct inbound. An empty hard-dedup
+        # substitute must not create a silent turn on unclassified topic switches.
+        return True
     if should_bypass_hard_dedup_repeat_availability(current_inbound, previous_outbound):
         return True
     # Any commerce inquiry must not end in zero outbound when brain composed text.

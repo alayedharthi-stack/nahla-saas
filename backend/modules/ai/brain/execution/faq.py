@@ -32,7 +32,7 @@ class FAQReplyHandler:
             social = {}
         payload = {
             "store_name": ctx.facts.store_name,
-            "store_url": ctx.facts.store_url,
+            "store_url": str(getattr(ctx.facts, "store_url", "") or "").strip(),
             # Maps URL surfaced for the location FAQ template; empty
             # string when the merchant has not configured a maps link
             # in any source. The template's no-URL path is honest
@@ -52,6 +52,20 @@ class FAQReplyHandler:
             "support_hours": ctx.facts.support_hours,
             "payment_methods": ctx.facts.payment_methods,
         }
+        if not payload["store_url"]:
+            try:
+                from modules.ai.brain.commerce.store_inquiry_compose_guard import (  # noqa: PLC0415
+                    apply_store_url_to_facts,
+                )
+
+                apply_store_url_to_facts(
+                    ctx.facts,
+                    getattr(ctx, "_db", None),
+                    int(getattr(ctx, "tenant_id", 0) or 0),
+                )
+                payload["store_url"] = str(getattr(ctx.facts, "store_url", "") or "").strip()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — resolver must not block FAQ
+                pass
         return ActionResult(
             success=bool(topic),
             data={

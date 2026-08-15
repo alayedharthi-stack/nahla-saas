@@ -45,6 +45,11 @@ _WARM_ACK_ONLY_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_TEMPORAL_LEFTOVER_RE = re.compile(
+    r"^(?:حالياً|حاليا|حاليًا|الآن|الان)\s*[.،,]*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 _URL_IN_TEXT_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
@@ -151,6 +156,8 @@ def strip_store_inquiry_contradictions(text: str) -> tuple[str, bool, bool]:
             ).strip(" ،,.:")
             if remainder and not _WARM_ACK_ONLY_RE.match(remainder) and not _URL_IN_TEXT_RE.search(remainder):
                 # Drop residual intro-only lines; URL is reattached by reconcile.
+                if _TEMPORAL_LEFTOVER_RE.match(remainder):
+                    continue
                 if not re.fullmatch(
                     r"(?:هذا\s*)?(?:هو\s*)?رابط\s*(?:ال)?متجر(?:\s*الإلكتروني)?",
                     remainder,

@@ -136,11 +136,26 @@ def should_apply_merchant_knowledge_unknown_truth_guard(
     facts = dict(known_facts or {})
     topic = str(args.get("topic") or "")
     surface = str(args.get("policy_surface") or "")
+    contract = args.get("answer_contract") if isinstance(args.get("answer_contract"), Mapping) else {}
+    if not contract:
+        contract = facts.get("answer_contract") if isinstance(facts.get("answer_contract"), Mapping) else {}
+    fact_kind = str(
+        (contract or {}).get("fact_kind")
+        or args.get("question_kind")
+        or ""
+    ).strip()
+    contract_status = str((contract or {}).get("status") or "").strip().upper()
+
+    shipping_unknown = (
+        fact_kind in {"shipping_eta", "shipping_fee", "shipping_coverage"}
+        or topic in {"shipping_eta", "shipping_inquiry", "shipping_fee"}
+    ) and contract_status in {"", "UNKNOWN"}
+
     if surface != "merchant_knowledge_section" and not topic.startswith(
         "merchant_knowledge_"
-    ):
+    ) and not shipping_unknown:
         return False
-    status = str(args.get("merchant_policy_status") or "").strip().upper()
+    status = str(args.get("merchant_policy_status") or contract_status or "").strip().upper()
     if status != "UNKNOWN":
         # store_story may only set store_story_status; treat missing as UNKNOWN
         # only when topic is merchant_knowledge_*.
