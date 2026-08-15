@@ -205,6 +205,14 @@ class TestCatalogBrowseAndRecommendation:
         titles = catalog_reasoning_titles(facts=_facts())
         assert GENERIC_SHOE in titles
         assert GENERIC_SHIRT in titles
+        assert GENERIC_PERFUME not in titles
+        assert 1 < len(titles) <= 8
+
+    def test_perfume_title_is_available_only_when_in_catalog(self) -> None:
+        without = catalog_reasoning_titles(facts=_facts(perfume=False))
+        with_perfume = catalog_reasoning_titles(facts=_facts(perfume=True))
+        assert GENERIC_PERFUME not in without
+        assert GENERIC_PERFUME in with_perfume
 
 
 class TestOrderTrackingThenCatalogNavigate:
@@ -238,14 +246,6 @@ class TestOrderTrackingThenCatalogNavigate:
             turn=6,
         )
         assert state.conversation_focus != FOCUS_ORDER_TRACKING
-        assert GENERIC_PERFUME not in titles
-        assert 1 < len(titles) <= 8
-
-    def test_perfume_title_is_available_only_when_in_catalog(self) -> None:
-        without = catalog_reasoning_titles(facts=_facts(perfume=False))
-        with_perfume = catalog_reasoning_titles(facts=_facts(perfume=True))
-        assert GENERIC_PERFUME not in without
-        assert GENERIC_PERFUME in with_perfume
 
 
 class TestCatalogGroundingMixedRecommend:
@@ -625,36 +625,3 @@ class TestTopicSwitchCatalogFallback:
         titles = {str(r.get("title") or "") for r in rows}
         assert GENERIC_SHIRT in titles
         assert GENERIC_SHOE in titles
-
-
-class TestOrderTrackingThenCatalogNavigate:
-    def test_catalog_navigate_clears_order_tracking_focus(self) -> None:
-        from modules.ai.brain.commerce.commerce_focus_owner import (
-            FOCUS_ORDER_TRACKING,
-            apply_commerce_focus_lifecycle,
-            set_product_focus,
-        )
-
-        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
-        set_product_focus(
-            state,
-            {"id": 12, "title": GENERIC_SHIRT, "external_id": "ext-shirt"},
-            reason="browse",
-            turn=4,
-        )
-        apply_commerce_focus_lifecycle(
-            state,
-            intent_name=INTENT_TRACK_ORDER,
-            action="track_order",
-            message="وين طلبي الحالي؟",
-            turn=5,
-        )
-        assert state.conversation_focus == FOCUS_ORDER_TRACKING
-        apply_commerce_focus_lifecycle(
-            state,
-            intent_name="start_order",
-            action="catalog_navigate",
-            message="طيب نرجع للتسوق",
-            turn=6,
-        )
-        assert state.conversation_focus != FOCUS_ORDER_TRACKING

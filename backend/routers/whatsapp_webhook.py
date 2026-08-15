@@ -9495,6 +9495,11 @@ async def _handle_merchant_message(
                                     current_inbound=text or "",
                                     candidate_reply=_po_reply_before_dedup,
                                     previous_outbound=_dedup_prev_outbound,
+                                    intent_name=str(
+                                        (_meta_for_dedup or {}).get("intent")
+                                        or (_meta_for_dedup or {}).get("intent_name")
+                                        or ""
+                                    ),
                                 ):
                                     reply = _po_reply_before_dedup
                                     _outbound_abort_suppressor = None

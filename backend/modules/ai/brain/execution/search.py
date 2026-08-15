@@ -214,8 +214,18 @@ class ProductSearchHandler:
                     error="replay_products_inactive",
                     data={"message": "replay_products_inactive"},
                 )
-            products = _apply_category_scope(_apply_affinity_boost(active_replay, ctx))
-            return _format_result(products, query=str(decision.args.get("query") or ""))
+            boosted = _apply_affinity_boost(active_replay, ctx)
+            after_search = str(decision.args.get("after_search") or "").strip()
+            # Visual replay is already the imageable set. Category-scope
+            # using a deictic inbound (صورته / هذا) empties a valid send.
+            if after_search == "product_visual" or decision.args.get("force_product_card"):
+                products = boosted
+            else:
+                products = _apply_category_scope(boosted)
+            replay_query = str(decision.args.get("query") or "")
+            if after_search == "product_visual" and boosted:
+                replay_query = str((boosted[0] or {}).get("title") or replay_query)
+            return _format_result(products, query=replay_query)
 
         query = decision.args.get("query", ctx.message)
 

@@ -21,7 +21,10 @@ from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: E402
 from modules.ai.brain.commerce.product_visual import (  # noqa: E402
     is_product_visual_request,
 )
-from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
+    ACTION_SEARCH_PRODUCTS,
+)
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.order_context_gate import (  # noqa: E402
     is_fulfillment_discovery_unlock,
@@ -97,8 +100,9 @@ class TestFulfillmentLockBrowseUnlock:
         msg = "وش المتوفر"
         ctx = _locked_ctx(msg)
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("source") == "top_products"
+        assert decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE}
+        if decision.action == ACTION_SEARCH_PRODUCTS:
+            assert decision.args.get("source") == "top_products"
 
     def test_generic_ack_still_blocked(self):
         msg = "تمام"

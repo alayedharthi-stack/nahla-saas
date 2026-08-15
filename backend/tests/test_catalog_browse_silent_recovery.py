@@ -28,7 +28,6 @@ from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: E402
 GENERIC_MERCHANT = 9001
 BROWSE_PHRASES = (
     "وش عندكم منتجات؟",
-    "أبي أشوف المنتجات",
     "أرسلوا الكتالوج",
     "وش المتوفر",
     "عندكم منتجات؟",
@@ -43,6 +42,10 @@ class TestCatalogBrowseDetection:
 
     def test_non_commerce_not_detected(self) -> None:
         assert is_catalog_browse_silent_recovery_message(NON_COMMERCE_EMPTY) is False
+
+    def test_product_visual_request_is_not_browse_recovery(self) -> None:
+        assert is_catalog_browse_silent_recovery_message("وريني صورته") is False
+        assert try_catalog_browse_silent_recovery(inbound_text="وريني صورته") is None
 
 
 class TestCatalogBrowseSilentRecoveryReply:

@@ -691,7 +691,8 @@ class TestCancelledNewerThanOpen:
         )
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == "customer_order_evidence"
+        assert decision.args.get("topic") == "order_history"
+        assert decision.args.get("block_catalog_push") is True
 
     def test_latest_summary_is_evidence_compose_not_canned(self) -> None:
         matched = rules.match("آخر طلب لي وش كان فيه؟")
@@ -702,3 +703,5 @@ class TestCancelledNewerThanOpen:
         assert decision.action == ACTION_LLM_REPLY
         assert decision.action != ACTION_CUSTOMER_LEDGER_REPLY
         assert decision.args.get("ledger_topic") == INTENT_LATEST_ORDER_SUMMARY
+        assert decision.args.get("topic") == "latest_order_summary"
+        assert decision.args.get("block_catalog_push") is True

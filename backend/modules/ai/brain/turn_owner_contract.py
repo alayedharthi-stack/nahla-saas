@@ -150,6 +150,13 @@ def _infer_owner(*, topic: str, action: str, args: Mapping[str, Any]) -> Optiona
         return "product_knowledge"
     if action == "catalog_navigate" or args.get("catalog_delivery_kind"):
         return "commerce_entry_catalog_delivery"
+    if action in {"track_order"} or topic in {
+        "latest_order_summary",
+        "order_tracking",
+        "order_history",
+        "order_reference_list",
+    }:
+        return "order_evidence"
     if action == "propose_draft_order":
         return "ordering"
     if action == "search_products":
@@ -266,6 +273,16 @@ def build_turn_owner_contract(
             POSTPROCESS_MEDICAL_CLAIM_REWRITE,
             POSTPROCESS_ORDER_SLOT_REPLAY,
         })
+
+    elif owner == "order_evidence" or action in {"track_order"} or topic in {
+        "latest_order_summary",
+        "order_tracking",
+        "order_history",
+        "order_reference_list",
+    }:
+        protected_final_reply = True
+        block_catalog_push = True
+        blocked.update({POSTPROCESS_CATALOG_GROUNDING})
 
     return TurnOwnerContract(
         owner=owner,

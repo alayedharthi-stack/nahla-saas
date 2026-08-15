@@ -175,6 +175,15 @@ def should_block_catalog_grounding_fallback(
     if protected_final_reply:
         return True, "protected_final_reply"
 
+    intent_name = str(getattr(intent, "name", "") or "").strip()
+    if intent_name in {
+        "track_order",
+        "latest_order_summary",
+        "order_history_count",
+        "order_reference_list",
+    }:
+        return True, "order_evidence_owner"
+
     if _has_explicit_catalog_browse_intent(
         inbound_text,
         intent=intent,
