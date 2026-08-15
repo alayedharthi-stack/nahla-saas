@@ -487,6 +487,21 @@ class DefaultStateStore:
             payment_method=state.payment_method,
             pending_action=state.pending_action,
             last_recommended_products=list(state.last_recommended_products or []),
+            last_presented_products=list(
+                getattr(state, "last_presented_products", None) or []
+            ),
+            last_presented_collections=list(
+                getattr(state, "last_presented_collections", None) or []
+            ),
+            last_presented_group_products=list(
+                getattr(state, "last_presented_group_products", None) or []
+            ),
+            selected_product_id=str(getattr(state, "selected_product_id", "") or ""),
+            selected_variant_id=str(getattr(state, "selected_variant_id", "") or ""),
+            selected_collection=str(getattr(state, "selected_collection", "") or ""),
+            selection_context_turn=int(
+                getattr(state, "selection_context_turn", 0) or 0
+            ),
             pending_short_address_code=getattr(state, "pending_short_address_code", "") or "",
             pending_google_maps_url=getattr(state, "pending_google_maps_url", "") or "",
             pending_city=getattr(state, "pending_city", "") or "",

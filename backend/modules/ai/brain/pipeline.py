@@ -3995,6 +3995,28 @@ class MerchantBrain:
         except Exception as _wg_exc:  # noqa: BLE001 — never break a turn
             logger.warning("[WELCOME_GATE] prepend skipped: %s", _wg_exc)
 
+        try:
+            from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                stamp_assistant_named_catalog_from_reply,
+            )
+            from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+                collect_catalog_reasoning_candidates,
+            )
+
+            stamp_assistant_named_catalog_from_reply(
+                state=new_state,
+                reply=reply or "",
+                catalog_candidates=collect_catalog_reasoning_candidates(
+                    facts=getattr(ctx, "facts", None),
+                    merchant_context=merchant_context,
+                    state=new_state,
+                ),
+                intent_name=str(getattr(intent, "name", "") or ""),
+                turn=int(getattr(new_state, "turn", 0) or 0),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
+            logger.exception("[PRESENTED_PROVENANCE] stamp failed")
+
         # ── 8. Persist state ───────────────────────────────────────────────
         try:
             if _t_post_compose is not None:

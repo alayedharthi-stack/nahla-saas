@@ -165,6 +165,14 @@ def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
             if matched is not None:
                 title = str(matched.get("title") or trusted_title).strip()
                 products = [matched] + [p for p in products if p is not matched]
+            elif str(getattr(trusted, "origin", "") or "") in {
+                "last_recommended_products",
+                "last_presented_products",
+                "current_product_focus",
+            }:
+                # Unique referent exists but is not imageable. Do not send
+                # a different SKU's media as if it belonged to the referent.
+                return None
             elif trusted_title:
                 title = trusted_title
         elif is_deictic_visual_request(str(getattr(ctx, "message", "") or "")):

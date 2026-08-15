@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -64,6 +65,7 @@ from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # no
 from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: E402
     apply_staff_escalation_truth_guard,
 )
+from modules.ai.brain.state.store import DefaultStateStore  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     INTENT_ASK_LOCATION,
     INTENT_ASK_PAYMENT_INFO,
@@ -73,6 +75,7 @@ from modules.ai.brain.types import (  # noqa: E402
     INTENT_TRACK_ORDER,
     BrainContext,
     CommerceFacts,
+    Decision,
     Intent,
     MerchantConversationState,
 )
@@ -731,6 +734,96 @@ class TestAssistantPresentedProvenance:
         )
         assert state.last_recommended_products[0]["id"] == 23
 
+    def test_same_title_family_without_price_stamps_one_recommended(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=3, greeted=True)
+        candidates = [
+            {
+                "id": 22,
+                "title": "فستان",
+                "external_id": "dress-149",
+                "price": 149.0,
+                "image_url": "https://cdn.example.test/dress-149.jpg",
+            },
+            {
+                "id": 23,
+                "title": "فستان",
+                "external_id": "dress-289",
+                "price": 289.0,
+                "image_url": "https://cdn.example.test/dress-289.jpg",
+            },
+            {
+                "id": 28,
+                "title": "جاكيت",
+                "external_id": "jacket-169",
+                "price": 169.0,
+                "image_url": "https://cdn.example.test/jacket.jpg",
+            },
+            {
+                "id": 31,
+                "title": "بنطلون",
+                "external_id": "pants-129",
+                "price": 129.0,
+                "image_url": "https://cdn.example.test/pants.jpg",
+            },
+        ]
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="1. **فستان**\n2. **جاكيت**\n3. **بنطلون**",
+            catalog_candidates=candidates,
+            turn=3,
+        )
+        presented_titles = {str(row.get("title") or "") for row in state.last_presented_products}
+        assert presented_titles == {"فستان", "جاكيت", "بنطلون"}
+        assert len(state.last_presented_products) == 3
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="أوصي بالفستان لأنه أنيق ومناسب كهديه. تبي أرسل لك تفاصيله أو صورة منه؟",
+            catalog_candidates=candidates,
+            turn=4,
+        )
+        recommended = list(state.last_recommended_products or [])
+        assert len(recommended) == 1
+        assert recommended[0]["title"] == "فستان"
+        assert recommended[0]["provenance"] == "assistant_recommended"
+        assert recommended[0].get("customer_selected") is False
+        assert recommended[0].get("id") in {22, 23}
+
+    def test_presented_survives_state_transition(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=4, greeted=True)
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="1. حذاء رياضي أبيض\n2. قميص قطني أزرق",
+            catalog_candidates=list(_facts().discovery_products),
+            turn=4,
+        )
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="أنصحك بالقميص قطني أزرق",
+            catalog_candidates=list(_facts().discovery_products),
+            turn=5,
+        )
+        nxt = DefaultStateStore().transition(
+            state,
+            _intent("وريني صورته", INTENT_PRODUCT_VISUAL_REQUEST),
+            Decision(action=ACTION_LLM_REPLY, reason="next-turn"),
+        )
+        assert nxt.last_presented_products
+        assert len(nxt.last_recommended_products) == 1
+        assert nxt.last_recommended_products[0]["id"] == 12
+
+    def test_named_catalog_stamp_runs_before_state_persist(self) -> None:
+        src = (
+            Path(__file__).resolve().parents[1]
+            / "modules"
+            / "ai"
+            / "brain"
+            / "pipeline.py"
+        )
+        text = src.read_text(encoding="utf-8")
+        persist = text.find("self._state_store.save(")
+        stamp = text.find("stamp_assistant_named_catalog_from_reply(")
+        assert 0 <= stamp < persist
+
 
 class TestPresentedProductVisualFamilies:
     def test_recommended_product_visual_executes(self) -> None:
@@ -776,6 +869,16 @@ class TestPresentedProductVisualFamilies:
 
         state = MerchantConversationState(stage="exploring", turn=7, greeted=True)
         state.last_presented_products = list(_facts().discovery_products)
+        state.last_recommended_products = [
+            {
+                "id": 12,
+                "title": GENERIC_SHIRT,
+                "external_id": "ext-shirt",
+                "image_url": "https://cdn.example.test/shirt.jpg",
+                "provenance": "assistant_recommended",
+                "customer_selected": False,
+            }
+        ]
         set_product_focus(
             state,
             {
@@ -797,6 +900,66 @@ class TestPresentedProductVisualFamilies:
         replay = list(decision.args.get("replay_candidates") or [])
         assert replay[0]["id"] == 11
         assert replay[0]["title"] == GENERIC_SHOE
+
+    def test_recommended_without_image_does_not_send_other_sku_media(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=6, greeted=True)
+        state.last_presented_products = list(_facts().discovery_products)
+        state.last_recommended_products = [
+            {
+                "id": 13,
+                "title": GENERIC_PERFUME,
+                "external_id": "ext-perfume",
+                "image_url": "",
+                "provenance": "assistant_recommended",
+                "customer_selected": False,
+            }
+        ]
+        ctx = _ctx(
+            "وريني صورته",
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=state,
+            facts=_facts(),
+        )
+        visual = try_visual_catalog_send_decision(ctx)
+        assert visual is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        replay = list((decision.args or {}).get("replay_candidates") or [])
+        assert all(row.get("id") != 11 for row in replay)
+        assert all(row.get("title") != GENERIC_SHOE for row in replay)
+        if decision.action == ACTION_SEARCH_PRODUCTS:
+            assert (decision.args or {}).get("after_search") != "product_visual"
+
+    def test_recommendation_survives_transition_then_visual_executes(self) -> None:
+        state = MerchantConversationState(stage="exploring", turn=5, greeted=True)
+        candidates = list(_facts().discovery_products)
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="1. حذاء رياضي أبيض\n2. قميص قطني أزرق",
+            catalog_candidates=candidates,
+            turn=4,
+        )
+        stamp_assistant_named_catalog_from_reply(
+            state=state,
+            reply="أنصحك بالقميص قطني أزرق",
+            catalog_candidates=candidates,
+            turn=5,
+        )
+        nxt = DefaultStateStore().transition(
+            state,
+            _intent("وريني صورته", INTENT_PRODUCT_VISUAL_REQUEST),
+            Decision(action=ACTION_LLM_REPLY, reason="visual-follow-up"),
+        )
+        ctx = _ctx(
+            "وريني صورته",
+            intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+            state=nxt,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("after_search") == "product_visual"
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay[0]["id"] == 12
+        assert replay[0]["title"] == GENERIC_SHIRT
 
 
 class TestOrderToShoppingContinuation:
