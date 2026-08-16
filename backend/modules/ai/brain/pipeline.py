@@ -732,8 +732,6 @@ def _maybe_apply_native_catalog_order(
     meta = dict(inbound_metadata or {})
     if meta.get("source_type") != "catalog_order":
         return
-    if not message:
-        return
 
     logger.info(
         "[WA_NATIVE_ORDER] wa_order_received tenant=%s item_count=%s",
@@ -6420,6 +6418,16 @@ def _build_reply_state(
             )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — store-link defocus must not block compose
         pass
+    _social_identity_defocus = non_commerce_block_mode or str(
+        (decision.args or {}).get("topic") or ""
+    ) in {"persona_social", "persona_identity", "identity_collaboration"}
+    if _social_identity_defocus:
+        selected_product = None
+        known_facts["checkout_preparation"] = {}
+        known_facts.pop("customer_order_evidence", None)
+        known_facts.pop("catalog_reasoning_candidates", None)
+        known_facts.pop("last_presented_products", None)
+        known_facts.pop("last_recommended_products", None)
     _sr = getattr(ctx, "state_relevance", None)
     if _sr is not None and hasattr(_sr, "to_dict"):
         known_facts["state_relevance_verdict"] = _sr.to_dict()
@@ -6442,18 +6450,19 @@ def _build_reply_state(
         pass
 
     if isinstance(_trusted_brain_projection, dict) and _trusted_brain_projection:
-        known_facts["trusted_context_projection"] = dict(_trusted_brain_projection)
-        try:
-            from modules.ai.brain.truth_surface.trusted_context_brain_projection import (  # noqa: PLC0415
-                selected_product_from_projection,
-            )
+        if not _social_identity_defocus:
+            known_facts["trusted_context_projection"] = dict(_trusted_brain_projection)
+            try:
+                from modules.ai.brain.truth_surface.trusted_context_brain_projection import (  # noqa: PLC0415
+                    selected_product_from_projection,
+                )
 
-            if not _browse_defocus and not selected_product:
-                _projected_product = selected_product_from_projection(_trusted_brain_projection)
-                if _projected_product:
-                    selected_product = _projected_product
-        except Exception:  # noqa: BLE001  # noqa: silent-ok
-            pass
+                if not _browse_defocus and not selected_product:
+                    _projected_product = selected_product_from_projection(_trusted_brain_projection)
+                    if _projected_product:
+                        selected_product = _projected_product
+            except Exception:  # noqa: BLE001  # noqa: silent-ok
+                pass
 
     try:
         from modules.ai.brain.truth_surface.coupon_offer_consumption_gate import (  # noqa: PLC0415

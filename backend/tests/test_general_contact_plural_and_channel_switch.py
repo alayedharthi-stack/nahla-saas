@@ -18,6 +18,7 @@ from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
     CHECKOUT_CHANNEL_STORE,
     CHECKOUT_CHANNEL_WHATSAPP,
     CheckoutChannelCapabilities,
+    CheckoutRouteDecision,
     evaluate_checkout_route_owner,
 )
 from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: E402
@@ -180,6 +181,16 @@ class TestChannelSwitchAfterWhatsapp:
         ), patch(
             "modules.ai.brain.commerce.checkout_route_owner._branch_showroom_routing_available",
             return_value=True,
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
+            return_value=CheckoutRouteDecision(
+                reply_text="📍 هذا موقع المعرض",
+                reason="showroom_location_delivered",
+                checkout_channel=CHECKOUT_CHANNEL_SHOWROOM,
+                clear_awaiting_channel=True,
+                cta_label="موقع المعرض",
+                cta_url="https://maps.app.goo.gl/example",
+            ),
         ):
             decision = evaluate_checkout_route_owner(
                 _StubDB(),
@@ -188,7 +199,9 @@ class TestChannelSwitchAfterWhatsapp:
                 message="زيارة المعرض",
             )
 
-        assert decision is None
+        assert decision is not None
+        assert decision.reason == "showroom_location_delivered"
+        assert decision.cta_url
 
     def test_showroom_unavailable_when_not_configured(
         self,

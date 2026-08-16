@@ -4305,6 +4305,43 @@ async def _dispatch_message(
                 wa_msg_id=msg_id or None,
                 drop_reason="empty_text_no_fallback",
             )
+            try:
+                from core.wa_catalog_order_immediate_draft import (  # noqa: PLC0415
+                    is_catalog_order_inbound,
+                    persist_catalog_order_immediate_draft,
+                )
+                from core.wa_native_catalog_order import (  # noqa: PLC0415
+                    persist_structured_catalog_order_referent,
+                )
+                from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+
+                _cat_meta = dict(normalized_inbound.metadata or {})
+                if is_catalog_order_inbound(_cat_meta) and sender:
+                    _cat_convo = _get_or_create_conversation(
+                        db, resolved_tenant_id, sender,
+                    )
+                    persist_structured_catalog_order_referent(
+                        db,
+                        tenant_id=int(resolved_tenant_id or 0),
+                        phone=sender or "",
+                        inbound_metadata=_cat_meta,
+                        conversation=_cat_convo,
+                    )
+                    persist_catalog_order_immediate_draft(
+                        db,
+                        tenant_id=int(resolved_tenant_id or 0),
+                        conversation=_cat_convo,
+                        inbound_metadata=_cat_meta,
+                        phone=sender or "",
+                        source_message_key=(msg_id or None),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "[WA_NATIVE_ORDER] persist_only_catalog_order_stamp_failed "
+                    "tenant=%s sender=%s",
+                    resolved_tenant_id,
+                    sender,
+                )
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────

@@ -489,6 +489,7 @@ def _apply_outbound_dedup(
     persona_ownership: Any,
     brain_persona_compose_event: Optional[Dict[str, Any]],
     live_provenance_tracker: Optional[Dict[str, Any]] = None,
+    skip_social_identity_dedup: bool = False,
 ) -> tuple[str, str]:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
 
@@ -508,7 +509,7 @@ def _apply_outbound_dedup(
         visual_inbound = False
 
     if is_hard and not carries_signal and not visual_inbound:
-        skip_substitution = False
+        skip_substitution = bool(skip_social_identity_dedup)
         try:
             from modules.ai.brain.commerce.fallback_guard import detect_hard_topic_shift
 
@@ -1165,6 +1166,16 @@ async def evaluate_live_merchant_brain_turn(
             _t_mbg_dedup = _time_mbg_dedup.monotonic()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_mbg_dedup = None
+        _dec_args = dict(parsed.get("br_dec_args") or {})
+        _skip_social_identity_dedup = bool(
+            parsed.get("brain_nc_block")
+            or _dec_args.get("block_commerce_escalation")
+            or str(_dec_args.get("topic") or "") in {
+                "persona_social",
+                "persona_identity",
+                "identity_collaboration",
+            }
+        )
         reply, outbound_abort_suppressor = _apply_outbound_dedup(
             db=db,
             tenant_id=explicit_tenant_id,
@@ -1180,6 +1191,7 @@ async def evaluate_live_merchant_brain_turn(
             persona_ownership=persona_ownership,
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
             live_provenance_tracker=live_provenance_tracker,
+            skip_social_identity_dedup=_skip_social_identity_dedup,
         )
         try:
             if _t_mbg_dedup is not None:

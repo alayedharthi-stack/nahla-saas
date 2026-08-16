@@ -771,16 +771,14 @@ def _resolve_channel_switch_decision(
             checkout_channel=target,
             awaiting_checkout_channel=False,
         )
-        if not caps.showroom_visit or not _branch_showroom_routing_available(
-            db, int(tenant_id or 0),
-        ):
+        if not caps.showroom_visit:
             return CheckoutRouteDecision(
                 reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,
                 reason="showroom_visit_unavailable",
                 checkout_channel=target,
                 clear_awaiting_channel=True,
             )
-        return None
+        return _showroom_delivery_decision(db, tenant_id=int(tenant_id or 0))
 
     return None
 
@@ -920,6 +918,76 @@ def _storefront_delivery_decision(
         clear_awaiting_channel=True,
         cta_label="",
         cta_url="",
+        )
+
+
+def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDecision:
+    """Deliver the canonical active/primary showroom location as structured CTA."""
+    from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
+        _build_location_reply,
+        _lookup_tenant_maps_url,
+    )
+
+    branch = None
+    try:
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            load_active_branches,
+        )
+
+        active = load_active_branches(db, int(tenant_id or 0))
+        if active:
+            branch = active[0]
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — branch load must not block maps fallback
+        branch = None
+
+    maps_url = str(getattr(branch, "maps_url", "") or "").strip()
+    source = "structured_branch" if maps_url else ""
+    if not maps_url:
+        maps_url, source = _lookup_tenant_maps_url(db, int(tenant_id or 0))
+    if not maps_url:
+        return CheckoutRouteDecision(
+            reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,
+            reason="showroom_visit_unavailable",
+            checkout_channel=CHECKOUT_CHANNEL_SHOWROOM,
+            clear_awaiting_channel=True,
+        )
+
+    city = str(getattr(branch, "city", "") or "").strip()
+    district = str(getattr(branch, "district", "") or "").strip()
+    address = str(getattr(branch, "address", "") or "").strip()
+    name = str(getattr(branch, "name", "") or "").strip()
+    has_details = bool(branch and (city or district or address or name))
+    body = _build_location_reply(
+        maps_url,
+        branch_name=name,
+        city=city,
+        district=district,
+        address=address,
+        has_branch_details=has_details,
+    )
+    try:
+        from core.wa_link_buttons import extract_first_cta_url  # noqa: PLC0415
+
+        extracted = extract_first_cta_url(body)
+        if extracted is not None:
+            body = str(extracted.cleaned_text or "").strip() or body
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — CTA body strip must not block showroom delivery
+        body = body.replace(maps_url, "").strip() or body
+    logger.info(
+        "[CHECKOUT_ROUTE] showroom_location_delivered tenant=%s source=%s "
+        "branch_id=%s city=%r",
+        tenant_id,
+        source or "-",
+        getattr(branch, "id", None) if branch is not None else None,
+        city,
+    )
+    return CheckoutRouteDecision(
+        reply_text=body,
+        reason="showroom_location_delivered",
+        checkout_channel=CHECKOUT_CHANNEL_SHOWROOM,
+        clear_awaiting_channel=True,
+        cta_label="موقع المعرض",
+        cta_url=maps_url,
     )
 
 
@@ -1132,16 +1200,14 @@ def evaluate_checkout_route_owner(
                 clear_awaiting_channel=True,
             )
         if picked == CHECKOUT_CHANNEL_SHOWROOM:
-            if not caps.showroom_visit or not _branch_showroom_routing_available(
-                db, int(tenant_id or 0),
-            ):
+            if not caps.showroom_visit:
                 return CheckoutRouteDecision(
                     reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,
                     reason="showroom_visit_unavailable",
                     checkout_channel=picked,
                     clear_awaiting_channel=True,
                 )
-            return None
+            return _showroom_delivery_decision(db, tenant_id=int(tenant_id or 0))
         return None
 
     if channel == CHECKOUT_CHANNEL_STORE:

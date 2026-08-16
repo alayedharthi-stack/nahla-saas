@@ -4213,6 +4213,19 @@ class DefaultDecisionEngine:
                     ctx, _extracted_product_query,
                 )
                 if not query:
+                    try:
+                        from ..commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                            structured_selected_referent,
+                        )
+
+                        _ref = structured_selected_referent(state)
+                        if isinstance(_ref, dict):
+                            query = str(
+                                _ref.get("title") or _ref.get("product_name") or ""
+                            ).strip()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — structured referent must not block search
+                        query = query
+                if not query:
                     from ..product_discovery_gate import extract_inquiry_product_query  # noqa: PLC0415
                     query = extract_inquiry_product_query(ctx.message or "")
                 if not query:
