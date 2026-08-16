@@ -19,9 +19,8 @@ def persona_composer_allowlist_result(
 ) -> str:
     """Diagnostic token for persona compose gate observability.
 
-    ``persona_composer_allowlist_tenants`` is obsolete leftover JSON. It is
-    not read. A stale ``[33]`` copied into another tenant's ai_settings must
-    not grant or deny compose overlay. Canonical gate:
+    Retired JSON key ``persona_composer_allowlist_tenants`` is stripped by
+    tenant-config hygiene and is not read. Canonical gate:
 
     persona_composer_enabled + store_ai_mode=test + HA phone + enforce flag.
 

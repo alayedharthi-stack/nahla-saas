@@ -226,6 +226,9 @@ async def update_settings(
         settings.extra_metadata = meta
         flag_modified(settings, "extra_metadata")
 
+    from core.tenant_config_hygiene import apply_tenant_settings_hygiene  # noqa: PLC0415
+
+    apply_tenant_settings_hygiene(db, settings)
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
@@ -291,6 +294,9 @@ async def patch_store_ai_settings(
 
     settings.ai_settings = ai_settings
     flag_modified(settings, "ai_settings")
+    from core.tenant_config_hygiene import apply_tenant_settings_hygiene  # noqa: PLC0415
+
+    apply_tenant_settings_hygiene(db, settings)
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)

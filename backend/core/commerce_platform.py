@@ -18,31 +18,16 @@ from sqlalchemy.orm import Session
 _CONNECTED_PROVIDERS = frozenset({"salla", "zid", "shopify"})
 
 
-def resolve_connected_commerce_platform(db: Session, tenant_id: int) -> Optional[str]:
+def resolve_connected_commerce_platform(
+    db: Session,
+    tenant_id: int,
+    store_settings: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
     """Return 'salla' | 'zid' | 'shopify' when a real connection exists."""
-    from models import Integration  # noqa: PLC0415
+    from core.tenant_config_hygiene import connected_provider_for_tenant  # noqa: PLC0415
 
-    rows = (
-        db.query(Integration)
-        .filter(
-            Integration.tenant_id == int(tenant_id),
-            Integration.enabled == True,  # noqa: E712
-        )
-        .all()
-    )
-    for row in rows:
-        provider = str(getattr(row, "provider", None) or "").strip().lower()
-        if provider in _CONNECTED_PROVIDERS:
-            return provider
-
-    store = _store_settings(db, tenant_id)
-    if str(store.get("salla_access_token") or "").strip():
-        return "salla"
-    if str(store.get("zid_client_id") or "").strip():
-        return "zid"
-    if str(store.get("shopify_access_token") or "").strip():
-        return "shopify"
-    return None
+    store = store_settings if store_settings is not None else _store_settings(db, tenant_id)
+    return connected_provider_for_tenant(db, tenant_id, store_settings=store)
 
 
 def platform_type_alone_is_not_connection(store_settings: Optional[dict[str, Any]]) -> bool:

@@ -267,6 +267,17 @@ class TestPr829ControlledReplay:
         _assert_brain_owns(transfer, label="transfer_followup")
         assert transfer.ofv2_reason != "collect_next_field"
 
+        from core.tenant_config_hygiene import apply_tenant_settings_hygiene  # noqa: PLC0415
+
+        ts = world.db.query(TenantSettings).filter_by(tenant_id=world.tenant.id).one()
+        apply_tenant_settings_hygiene(world.db, ts)
+        world.db.commit()
+        world.db.refresh(ts)
+        assert "persona_composer_allowlist_tenants" not in (ts.ai_settings or {})
+        assert (ts.store_settings or {}).get("platform_type") == "custom"
+        assert (ts.ai_settings or {}).get("persona_composer_enabled") is True
+        assert (ts.ai_settings or {}).get("store_ai_mode") == STORE_AI_MODE_TEST
+
     def test_tenant1_control_same_semantic_core(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

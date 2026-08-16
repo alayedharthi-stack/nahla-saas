@@ -114,9 +114,6 @@ DEFAULT_AI: Dict[str, Any] = {
         "dua",
         "payment_media_intro",
     ],
-    # Obsolete leftover JSON key. Runtime ignores it. Canonical compose-overlay
-    # opt-in is persona_composer_enabled + store_ai_mode=test + HA phone.
-    "persona_composer_allowlist_tenants": [],
 }
 
 DEFAULT_STORE: Dict[str, Any] = {
@@ -212,6 +209,7 @@ def merge_ai_defaults(stored: Optional[Dict]) -> Dict:
             result["store_ai_mode"] = STORE_AI_MODE_OFF
         else:
             result["store_ai_mode"] = STORE_AI_MODE_ON
+    result.pop("persona_composer_allowlist_tenants", None)
     return result
 
 
@@ -328,4 +326,7 @@ def get_or_create_settings(db: Session, tenant_id: int) -> TenantSettings:
         )
         db.add(settings)
         db.flush()
+    from core.tenant_config_hygiene import apply_tenant_settings_hygiene  # noqa: PLC0415
+
+    apply_tenant_settings_hygiene(db, settings)
     return settings

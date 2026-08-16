@@ -127,6 +127,23 @@ class TestStructuredExceptionsRemainDeterministic:
         assert not ofv2_may_own_prebrain(_text_meta(), message=sentence)
 
 
+class TestPersonaComposerDoesNotSelectSemanticEngine:
+    def test_enabled_overlay_still_requires_brain_for_unstructured(self) -> None:
+        msg = _SOCIAL_WHILE_CHECKOUT[0]
+        assert unstructured_natural_language_requires_brain(_text_meta(), message=msg)
+        assert not ofv2_may_own_prebrain(_text_meta(), message=msg)
+
+    def test_ownership_ignores_persona_store_ai_mode_and_platform_type(self) -> None:
+        import inspect  # noqa: PLC0415
+        from modules.ai.brain.commerce import unstructured_turn_ownership as u  # noqa: PLC0415
+
+        src = inspect.getsource(u)
+        assert "store_ai_mode" not in src
+        assert "persona_composer" not in src
+        assert "platform_type" not in src
+        assert "persona_composer_allowlist_tenants" not in src
+
+
 class TestNameSlotDoesNotIngestFollowUp:
     def test_follow_up_is_not_customer_identity(self) -> None:
         from unittest.mock import MagicMock, patch  # noqa: PLC0415

@@ -33,9 +33,13 @@ def _enabled_ai(**overrides: object) -> dict:
     return merge_ai_defaults(base)
 
 
-class TestPersonaComposerAllowlistObsolete:
-    def test_default_config_keeps_empty_legacy_key(self) -> None:
-        assert DEFAULT_AI["persona_composer_allowlist_tenants"] == []
+class TestPersonaComposerAllowlistRetired:
+    def test_canonical_defaults_do_not_include_legacy_key(self) -> None:
+        assert "persona_composer_allowlist_tenants" not in DEFAULT_AI
+        merged = merge_ai_defaults(
+            {"persona_composer_allowlist_tenants": [ACCEPTANCE_TENANT_ID]}
+        )
+        assert "persona_composer_allowlist_tenants" not in merged
 
     def test_stale_tenant_id_list_is_not_a_gate(self) -> None:
         ai = _enabled_ai()
