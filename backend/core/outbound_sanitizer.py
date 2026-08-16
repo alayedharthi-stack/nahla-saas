@@ -473,6 +473,19 @@ def sanitize_outbound_payload(
         if not body:
             return payload, False
 
+        try:
+            from core.wa_link_buttons import strip_empty_markdown_links  # noqa: PLC0415
+
+            stripped_md = strip_empty_markdown_links(body)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — empty-markdown strip must not block send
+            stripped_md = body
+        mutated = stripped_md != body
+        if mutated:
+            if _replace_body_in_payload(payload, stripped_md):
+                body = stripped_md
+            else:
+                mutated = False
+
         # ── Internal planner / policy leak (June 2026) ──────────
         sanitized_body, was_internal_scrub = sanitize_outbound_text(
             body,
@@ -545,7 +558,7 @@ def sanitize_outbound_payload(
         if handoff_scrubbed:
             return payload, True
 
-        return payload, False
+        return payload, mutated
     except Exception as exc:  # noqa: BLE001
         # The sanitiser MUST NOT take the send path down. Worst case:
         # we log the exception and let the original payload through.

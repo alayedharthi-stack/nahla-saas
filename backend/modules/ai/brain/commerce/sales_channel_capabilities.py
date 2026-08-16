@@ -15,6 +15,7 @@ _STRUCTURED_STORE_EVIDENCE = frozenset({
     "merchant_profile",
     "structured_settings",
     "integration",
+    "merchant_override",
 })
 
 _DEFAULT_CHANNEL_TOGGLES: Dict[str, Dict[str, bool]] = {
@@ -45,11 +46,12 @@ def store_url_evidence_activates_channel(*, source: str = "", found: bool = Fals
     if not found:
         return False
     src = str(source or "").strip().lower()
-    if src == "kb_free_text":
+    if src.startswith("kb_free_text"):
         return False
     if not src or src == "none":
         return True
-    return src in _STRUCTURED_STORE_EVIDENCE
+    head = src.split(":", 1)[0].strip()
+    return src in _STRUCTURED_STORE_EVIDENCE or head in _STRUCTURED_STORE_EVIDENCE
 
 
 @dataclass(frozen=True)

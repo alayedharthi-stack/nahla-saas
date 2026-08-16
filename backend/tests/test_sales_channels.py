@@ -93,7 +93,19 @@ class TestOnlineStoreChannelEvidence:
         assert "showroom_visit" in channels
         assert "whatsapp_quick_order" in channels
 
-    def test_kb_only_store_url_does_not_activate_online_store(self) -> None:
+    def test_merchant_override_store_url_activates_online_store(self) -> None:
+        sales = resolve_merchant_sales_channels(
+            None,
+            33,
+            store_url=_STORE,
+            store_url_source="merchant_profile:merchant_override",
+            maps_url=_MAPS,
+        )
+        assert "online_store" in sales.available_purchase_channel_ids()
+        assert store_url_evidence_activates_channel(
+            source="merchant_override",
+            found=True,
+        )
         assert not store_url_evidence_activates_channel(
             source="kb_free_text",
             found=True,

@@ -50,11 +50,28 @@ class NoAIReplyResult:
     conversation_id: Optional[int] = None
 
 
+_NOTIFY_ONLY_HANDOFF_REASONS = frozenset({
+    "customer_request",
+    "ai_escalation",
+    "staff_notify",
+})
+
+
 def _is_active_handoff_session_row(row: Any) -> bool:
     if row is None:
         return False
     status = getattr(row, "status", None)
     return isinstance(status, str) and status.strip().lower() == "active"
+
+
+def _handoff_session_disables_ai(row: Any) -> bool:
+    """Active staff-notify sessions must not silently kill AI."""
+    if not _is_active_handoff_session_row(row):
+        return False
+    reason = str(
+        getattr(row, "handoff_reason", None) or getattr(row, "reason", None) or ""
+    ).strip().lower()
+    return reason not in _NOTIFY_ONLY_HANDOFF_REASONS
 
 
 def disabled_reason_for_conversation(convo: Conversation | None) -> str:
@@ -65,15 +82,13 @@ def disabled_reason_for_conversation(convo: Conversation | None) -> str:
     if bool(getattr(convo, "ai_paused", False)):
         return str(getattr(convo, "ai_paused_reason", None) or REASON_AI_PAUSED)
 
-    if bool(getattr(convo, "is_human_handoff", False)):
-        return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "needs_human", False)):
-        return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "handoff_active", False)):
+    if bool(getattr(convo, "paused_by_human", False)):
         return REASON_HUMAN_SUPERVISION
     if getattr(convo, "taken_over_at", None) is not None:
         return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "paused_by_human", False)):
+    if bool(getattr(convo, "is_human_handoff", False)):
+        return REASON_HUMAN_SUPERVISION
+    if bool(getattr(convo, "handoff_active", False)):
         return REASON_HUMAN_SUPERVISION
     if str(getattr(convo, "status", "") or "").strip().lower() == "human":
         return REASON_HUMAN_SUPERVISION
@@ -226,7 +241,7 @@ def is_ai_disabled_for_conversation(
             )
             .first()
         )
-        if _is_active_handoff_session_row(session):
+        if _handoff_session_disables_ai(session):
             anchor = conversation or (convos[0] if convos else None)
             return AIDisabledDecision(
                 disabled=True,

@@ -148,8 +148,9 @@ class TestChannelSwitchAfterWhatsapp:
         assert decision is not None
         assert decision.checkout_channel == CHECKOUT_CHANNEL_STORE
         assert decision.reason in {"store_link_delivered", "store_link_unavailable"}
-        assert "https://shop.example" in decision.reply_text
         assert decision.cta_url == "https://shop.example"
+        if decision.reason == "store_link_delivered":
+            assert "https://shop.example" not in decision.reply_text
         persist.assert_called()
 
     def test_showroom_after_whatsapp_defers_when_branch_ready(

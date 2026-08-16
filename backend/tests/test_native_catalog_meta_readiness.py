@@ -296,6 +296,5 @@ class TestCheckoutRouteStillWorks:
                 customer_phone="966500000001",
                 message="ابي اطلب",
             )
-        assert decision is not None
-        assert decision.reason == "ask_checkout_channel"
+        assert decision is None
         assert has_checkout_entry_intent("ابي اطلب") is True

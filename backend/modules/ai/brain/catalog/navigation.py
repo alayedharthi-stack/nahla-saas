@@ -303,6 +303,22 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
     if not getattr(getattr(ctx, "facts", None), "has_products", False):
         return None
 
+    try:
+        from ..commerce.checkout_route_owner import is_catalog_send_request  # noqa: PLC0415
+
+        source = str(
+            getattr(getattr(ctx, "state", None), "catalog_navigation_source", "") or ""
+        ).strip()
+        if source == "native_catalog" and not is_catalog_send_request(ctx.message or ""):
+            _log_navigator_event(
+                ctx,
+                navigator_owner=False,
+                owner_exit_reason="native_catalog_already_sent",
+            )
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — prior native catalog yield must not break navigator
+        pass
+
     from .navigator_exit import navigator_should_yield_to_order_flow  # noqa: PLC0415
 
     if navigator_should_yield_to_order_flow(ctx.state):

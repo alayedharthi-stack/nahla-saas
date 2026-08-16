@@ -28,6 +28,53 @@ from ..types import ActionResult, BrainContext, Decision
 logger = logging.getLogger("nahla.brain.execution.catalog_navigate")
 
 
+def _native_catalog_presented_rows(db: Any, tenant_id: Any, thumbnail: str) -> List[Dict[str, Any]]:
+    """Map the native-catalog thumbnail onto a persisted product referent."""
+    sku = str(thumbnail or "").strip()
+    if not sku:
+        return []
+    row: Dict[str, Any] = {
+        "external_id": sku,
+        "provenance": "native_catalog_presented",
+        "customer_selected": False,
+    }
+    if db is None or not tenant_id:
+        return [row]
+    try:
+        from models import Product  # noqa: PLC0415
+
+        product = (
+            db.query(Product)
+            .filter(Product.tenant_id == int(tenant_id))
+            .filter(
+                (Product.external_id == sku)
+                | (Product.sku == sku)
+                | (Product.meta_retailer_id == sku)
+            )
+            .first()
+        )
+        if product is None or not isinstance(product, Product):
+            return [row]
+        title = str(getattr(product, "name", None) or getattr(product, "title", None) or "").strip()
+        if title:
+            row["title"] = title
+        if getattr(product, "id", None) is not None:
+            row["id"] = product.id
+        price = getattr(product, "price", None)
+        if price not in (None, ""):
+            row["price"] = price
+        image = str(
+            getattr(product, "image_url", None)
+            or getattr(product, "thumbnail_url", None)
+            or ""
+        ).strip()
+        if image:
+            row["image_url"] = image
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — thumbnail referent lookup is best-effort
+        pass
+    return [row]
+
+
 class CatalogNavigateHandler:
     """Handles ACTION_CATALOG_NAVIGATE with protected ownership metadata."""
 
@@ -119,8 +166,9 @@ class CatalogNavigateHandler:
             resolve_native_catalog_body_text,
         )
 
+        presented = _native_catalog_presented_rows(db, getattr(ctx, "tenant_id", 0), thumbnail)
         return {
-            "products": [],
+            "products": presented,
             "collections": [],
             "product_lines": "",
             "discovery_presentation_text": "",
@@ -138,7 +186,7 @@ class CatalogNavigateHandler:
             "navigation_state_patch": self._navigation_patch(
                 decision,
                 collections=[],
-                products=[],
+                products=presented,
                 source="native_catalog",
             ),
         }
@@ -663,13 +711,14 @@ class CatalogNavigateHandler:
         args_patch = dict((getattr(decision, "args", None) or {}).get("navigation_state_patch") or {})
         patch = {
             "last_presented_collections": collections,
-            "last_presented_products": products,
-            "last_presented_group_products": products,
             "selected_collection": selected_collection or args_patch.get("selected_collection", ""),
             "current_catalog_group": current_catalog_group or args_patch.get("current_catalog_group"),
             "catalog_navigation_source": source,
             "selection_context_turn": None,
         }
+        if products:
+            patch["last_presented_products"] = products
+            patch["last_presented_group_products"] = products
         if group_products_pool is not None:
             patch["group_products_pool"] = list(group_products_pool)
             patch["group_products_offset"] = int(group_products_offset or 0)

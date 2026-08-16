@@ -594,6 +594,56 @@ _CHANNEL_BUTTONS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+_EXPLICIT_CHANNEL_IDS: Dict[str, str] = {
+    str(spec["reply"]["id"]): channel
+    for channel, spec in _CHANNEL_BUTTONS.items()
+}
+
+
+def _explicit_channel_title_map() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for channel, spec in _CHANNEL_BUTTONS.items():
+        title = _norm(str(spec["reply"]["title"] or ""))
+        if title:
+            out[title] = channel
+    return out
+
+
+def resolve_explicit_purchase_channel_payload(
+    message: str,
+    *,
+    caps: CheckoutChannelCapabilities,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Map platform chrome (button id / exact title / numbered index) only.
+
+    Free-text paraphrases are unstructured NL and must return None so Brain
+    owns semantics. Do not treat customer prose as a second semantic engine.
+    """
+    meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+    for key in ("button_id", "button_provenance", "list_reply_id"):
+        bid = str(meta.get(key) or "").strip()
+        if bid in _EXPLICIT_CHANNEL_IDS:
+            return _EXPLICIT_CHANNEL_IDS[bid]
+
+    raw = (message or "").strip()
+    if not raw:
+        return None
+    if raw in _EXPLICIT_CHANNEL_IDS:
+        return _EXPLICIT_CHANNEL_IDS[raw]
+
+    title_map = _explicit_channel_title_map()
+    titled = title_map.get(_norm(raw))
+    if titled:
+        return titled
+
+    if re.fullmatch(r"[123]", raw):
+        channels = available_channels(caps)
+        idx = int(raw) - 1
+        if 0 <= idx < len(channels):
+            return channels[idx]
+    return None
+
 _PURCHASE_CHANNEL_FACT_MAP: Dict[str, str] = {
     CHECKOUT_CHANNEL_WHATSAPP: "whatsapp_quick_order",
     CHECKOUT_CHANNEL_STORE: "online_store",
@@ -635,18 +685,18 @@ def _branch_showroom_routing_available(db: Any, tenant_id: int) -> bool:
         return False
 
 
-def _parse_channel_switch_choice(raw: str) -> Optional[str]:
-    """Match purchase-channel labels even when the channel is currently disabled."""
-    norm = _norm(raw)
-    if not norm:
-        return None
-    if _CHANNEL_STORE_RE.search(norm):
-        return CHECKOUT_CHANNEL_STORE
-    if _CHANNEL_SHOWROOM_RE.search(norm):
-        return CHECKOUT_CHANNEL_SHOWROOM
-    if _CHANNEL_WHATSAPP_RE.search(norm):
-        return CHECKOUT_CHANNEL_WHATSAPP
-    return None
+def _parse_channel_switch_choice(
+    raw: str,
+    *,
+    caps: CheckoutChannelCapabilities,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """Match only explicit structured purchase-channel chrome after commit."""
+    return resolve_explicit_purchase_channel_payload(
+        raw,
+        caps=caps,
+        inbound_metadata=inbound_metadata,
+    )
 
 
 def _channel_switch_target(
@@ -654,9 +704,13 @@ def _channel_switch_target(
     *,
     current_channel: str,
     caps: CheckoutChannelCapabilities,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    del caps  # availability validated in resolver
-    picked = _parse_channel_switch_choice(raw)
+    picked = _parse_channel_switch_choice(
+        raw,
+        caps=caps,
+        inbound_metadata=inbound_metadata,
+    )
     if not picked or picked == current_channel:
         return None
     return picked
@@ -670,9 +724,15 @@ def _resolve_channel_switch_decision(
     raw: str,
     caps: CheckoutChannelCapabilities,
     current_channel: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[CheckoutRouteDecision]:
     """Re-route when customer picks another purchase channel after commit."""
-    target = _channel_switch_target(raw, current_channel=current_channel, caps=caps)
+    target = _channel_switch_target(
+        raw,
+        current_channel=current_channel,
+        caps=caps,
+        inbound_metadata=inbound_metadata,
+    )
     if not target:
         return None
 
@@ -824,8 +884,17 @@ def _storefront_delivery_decision(
     )
     cta_label = truncate_wa_cta_label(resolution.cta_label)
     if resolution.found and resolution.url:
+        body = T_faq_store_info(caps.store_name, resolution.url)
+        try:
+            from core.wa_link_buttons import extract_first_cta_url  # noqa: PLC0415
+
+            extracted = extract_first_cta_url(body)
+            if extracted is not None:
+                body = str(extracted.cleaned_text or "").strip() or body
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — CTA body strip must not block store delivery
+            body = body.replace(resolution.url, "").strip() or body
         return CheckoutRouteDecision(
-            reply_text=T_faq_store_info(caps.store_name, resolution.url),
+            reply_text=body,
             reason="store_link_delivered",
             checkout_channel=CHECKOUT_CHANNEL_STORE,
             clear_awaiting_channel=True,
@@ -989,8 +1058,13 @@ def evaluate_checkout_route_owner(
     tenant_id: int,
     customer_phone: str,
     message: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[CheckoutRouteDecision]:
-    """Pre-brain checkout channel owner — ask channel or deliver store link."""
+    """Pre-brain checkout channel owner — explicit structured chrome only.
+
+    Unstructured purchase intent and pending-choice free text return None so
+    Brain owns semantics. Platform still executes explicit button IDs/titles.
+    """
     try:
         from modules.ai.order_flow_v2.flags import should_skip_legacy_order_flow_reply  # noqa: PLC0415
 
@@ -1006,7 +1080,7 @@ def evaluate_checkout_route_owner(
     if not raw:
         return None
 
-    stage, order_prep = load_checkout_route_context(
+    _stage, order_prep = load_checkout_route_context(
         db,
         tenant_id=int(tenant_id or 0),
         customer_phone=customer_phone or "",
@@ -1018,33 +1092,13 @@ def evaluate_checkout_route_owner(
         return None
 
     if _awaiting_channel(order_prep):
-        picked = parse_checkout_channel_choice(raw, caps=caps)
+        picked = resolve_explicit_purchase_channel_payload(
+            raw,
+            caps=caps,
+            inbound_metadata=inbound_metadata,
+        )
         if not picked:
-            catalog_help = is_catalog_visibility_question(raw)
-            if _should_defer_to_brain_while_awaiting_channel(raw):
-                return None
-            if not catalog_help and has_checkout_route_intent(raw):
-                persist_checkout_route_state(
-                    db,
-                    tenant_id=tenant_id,
-                    phone=customer_phone,
-                    checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
-                    awaiting_checkout_channel=False,
-                )
-                return None
-            return CheckoutRouteDecision(
-                reply_text=(
-                    build_catalog_visibility_reply(caps)
-                    if catalog_help
-                    else build_channel_choice_prompt(
-                        caps,
-                        include_numbered_options=False,
-                    )
-                ),
-                reason="catalog_visibility_help" if catalog_help else "channel_choice_repeat",
-                persist_awaiting_channel=True,
-                buttons=build_channel_choice_buttons(caps),
-            )
+            return None
         if picked == CHECKOUT_CHANNEL_STORE:
             persist_checkout_route_state(
                 db,
@@ -1063,14 +1117,6 @@ def evaluate_checkout_route_owner(
                 caps=caps,
                 brain_state=brain_state,
             )
-        if picked == CHECKOUT_CHANNEL_INQUIRY:
-            persist_checkout_route_state(
-                db,
-                tenant_id=tenant_id,
-                phone=customer_phone,
-                awaiting_checkout_channel=False,
-            )
-            return None
         persist_checkout_route_state(
             db,
             tenant_id=tenant_id,
@@ -1106,6 +1152,7 @@ def evaluate_checkout_route_owner(
             raw=raw,
             caps=caps,
             current_channel=channel,
+            inbound_metadata=inbound_metadata,
         )
         if switch is not None:
             return switch
@@ -1119,66 +1166,13 @@ def evaluate_checkout_route_owner(
             raw=raw,
             caps=caps,
             current_channel=channel,
+            inbound_metadata=inbound_metadata,
         )
         if switch is not None:
             return switch
-        if is_catalog_send_request(raw):
-            return None
-        if is_catalog_visibility_question(raw):
-            return CheckoutRouteDecision(
-                reply_text=build_catalog_visibility_reply(caps),
-                reason="catalog_visibility_help_active_whatsapp",
-                buttons=build_channel_choice_buttons(caps),
-            )
         return None
 
-    try:
-        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
-            is_active_order_flow,
-        )
-
-        if is_active_order_flow(stage=stage, order_prep=order_prep):
-            return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional active-order probe must not block channel ask
-        pass
-        return None
-
-    channels = available_channels(caps)
-    if not has_checkout_entry_intent(raw):
-        if is_catalog_send_request(raw):
-            return None
-        if is_catalog_visibility_question(raw) and (
-            bool(order_prep.get("checkout_route_prompt_sent"))
-            or str(order_prep.get("_catalog_navigation_source") or "").strip()
-            or bool(order_prep.get("_native_catalog_send_failed"))
-        ):
-            return _compose_prior_catalog_fallback_decision(
-                db,
-                int(tenant_id or 0),
-            )
-        return None
-
-    persist_checkout_route_state(
-        db,
-        tenant_id=tenant_id,
-        phone=customer_phone,
-        awaiting_checkout_channel=True,
-    )
-    logger.info(
-        "[CHECKOUT_ROUTE] ask_channel tenant=%s preview=%r channels=%s",
-        tenant_id,
-        raw[:80],
-        channels,
-    )
-    return CheckoutRouteDecision(
-        reply_text=build_channel_choice_prompt(
-            caps,
-            include_numbered_options=False,
-        ),
-        reason="ask_checkout_channel",
-        persist_awaiting_channel=True,
-        buttons=build_channel_choice_buttons(caps),
-    )
+    return None
 
 
 __all__ = [
@@ -1196,6 +1190,7 @@ __all__ = [
     "compose_purchase_channel_selection_goal",
     "purchase_channel_committed",
     "resolve_available_purchase_channel_facts",
+    "resolve_explicit_purchase_channel_payload",
     "should_block_bare_start_product_prompt",
     "should_route_bare_start_to_channel_selection",
     "checkout_route_owner_enabled",
@@ -1210,3 +1205,4 @@ __all__ = [
     "persist_checkout_route_state",
     "should_defer_staff_location_for_checkout_route",
 ]
+

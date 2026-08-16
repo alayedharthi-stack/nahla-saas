@@ -25,6 +25,10 @@ from core.native_catalog_fallback import (  # noqa: E402
     defer_native_catalog_customer_reply,
     is_native_catalog_claim_text,
 )
+from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: E402
+    TECHNICAL_CATALOG_BODY,
+    is_minimal_catalog_body,
+)
 from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
     CheckoutChannelCapabilities,
     evaluate_checkout_route_owner,
@@ -98,8 +102,26 @@ class TestCatalogNavigateDoesNotPreclaim:
         assert result.data["product_lines"] == ""
         body = result.data["native_catalog_entry"].get("body_text") or ""
         assert body != ctx.message
-        assert body == "."
+        assert is_minimal_catalog_body(body)
+        assert body == TECHNICAL_CATALOG_BODY
         assert "تفضّل، اختر من الكتالوج" not in body
+
+
+class TestNativeCatalogDoesNotReopenOnSemanticFollowUp:
+    def test_prior_native_catalog_yields_unstructured_follow_up_to_brain(self):
+        from modules.ai.brain.catalog.navigation import (  # noqa: PLC0415
+            try_catalog_navigation_decision,
+        )
+
+        ctx = _browse_ctx(db=MagicMock())
+        ctx.message = "بس هذي المنتجات اللي عندكم"
+        ctx.intent = Intent(
+            name="ask_product",
+            confidence=0.8,
+            raw_message=ctx.message,
+        )
+        ctx.state.catalog_navigation_source = "native_catalog"
+        assert try_catalog_navigation_decision(ctx) is None
 
 
 def _fake_tool_execution_result(products: list):
@@ -405,10 +427,7 @@ class TestCheckoutRouteCatalogSendRequest:
                 customer_phone="966500000001",
                 message="ما ظهر",
             )
-        assert decision is not None
-        assert decision.reason == "catalog_visibility_help_prior_catalog"
-        assert "تفضّل، اختر من الكتالوج" not in decision.reply_text
-        assert "ما ظهر الكتالوج" in decision.reply_text
+        assert decision is None
 
 
 class TestCatalogSenderSuccessBody:
