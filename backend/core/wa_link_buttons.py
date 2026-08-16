@@ -49,10 +49,46 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+
+def strip_empty_markdown_links(text: str) -> str:
+    """Remove empty Markdown link artifacts such as ``[موقع المعرض]()``."""
+    body = _EMPTY_MD_LINK_RE.sub("", text or "")
+    body = re.sub(r"[ \t]+\n", "\n", body)
+    return re.sub(r"\n{3,}", "\n\n", body).strip()
+
+
+def customer_requested_textual_url(message: str) -> bool:
+    """True when the customer asked to copy/see the URL as text."""
+    return bool(_TEXTUAL_URL_REQUEST_RE.search(str(message or "")))
+
+
+def prepare_cta_body_text(
+    body: str,
+    url: str = "",
+    *,
+    keep_textual_url: bool = False,
+) -> str:
+    """Keep one structured CTA as the URL owner unless copy-link was requested."""
+    cleaned = strip_empty_markdown_links(body or "")
+    if keep_textual_url:
+        return cleaned
+    extracted = extract_first_cta_url(cleaned)
+    if extracted is not None:
+        cleaned = str(extracted.cleaned_text or "").strip()
+    elif url:
+        cleaned = cleaned.replace(url, "").strip()
+        cleaned = strip_empty_markdown_links(cleaned)
+    return cleaned
+
 # Greedy enough for WhatsApp links but stops at whitespace / common
 # punctuation so we don't swallow trailing colons or RTL marks.
 _URL_RE = re.compile(
     r"https?://[^\s\u0600-\u06FF\u061B\u061F<>\"]+",
+    re.IGNORECASE,
+)
+_EMPTY_MD_LINK_RE = re.compile(r"\[[^\]]+\]\(\s*\)")
+_TEXTUAL_URL_REQUEST_RE = re.compile(
+    r"(?:انسخ|نسخ|كنص|copy(?:\s+(?:the\s+)?)?(?:link|url)|as\s+text)",
     re.IGNORECASE,
 )
 
@@ -266,6 +302,7 @@ def extract_first_cta_url(
     """
     if not text:
         return None
+    text = strip_empty_markdown_links(text)
     match = _URL_RE.search(text)
     if not match:
         return None

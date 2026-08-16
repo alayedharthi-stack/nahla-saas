@@ -30,7 +30,7 @@ _PRICE_RE = re.compile(r"(\d+(?:\.\d+)?)")
 def _title_of(row: Any) -> str:
     if not isinstance(row, dict):
         return ""
-    return str(row.get("title") or row.get("name") or row.get("display_label") or "").strip()
+    return str(row.get("title") or row.get("name") or row.get("display_label") or row.get("product_name") or "").strip()
 
 
 def _price_of(row: Any) -> Optional[float]:
@@ -265,7 +265,50 @@ def stamp_assistant_named_catalog_from_reply(
     return [recommended]
 
 
+def stamp_structured_presented_products(
+    state: Any,
+    rows: Sequence[Any],
+    *,
+    provenance: str,
+    customer_selected: bool = False,
+    turn: int = 0,
+    replace: bool = False,
+) -> List[Dict[str, Any]]:
+    """Persist structured catalog/UI product referents on existing slots only."""
+    if state is None:
+        return []
+    stamped: List[Dict[str, Any]] = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        item = _stamp_row(raw, provenance=provenance, turn=turn)
+        if not item.get("title") and item.get("id") is None and not item.get("external_id"):
+            continue
+        item["customer_selected"] = bool(customer_selected)
+        item["provenance"] = provenance
+        stamped.append(item)
+    if not stamped:
+        return []
+    if replace:
+        state.last_presented_products = stamped
+        return stamped
+    for item in stamped:
+        ident = product_focus_identity(item)
+        current = list(getattr(state, "last_presented_products", None) or [])
+        found = False
+        for existing in current:
+            if isinstance(existing, dict) and product_focus_identity(existing) == ident:
+                existing.update(item)
+                found = True
+                break
+        if not found:
+            current.append(item)
+        state.last_presented_products = current
+    return list(getattr(state, "last_presented_products", None) or [])
+
+
 __all__ = [
     "map_named_catalog_entities",
     "stamp_assistant_named_catalog_from_reply",
+    "stamp_structured_presented_products",
 ]

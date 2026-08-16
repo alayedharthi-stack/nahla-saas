@@ -779,10 +779,9 @@ def _persist_live_handoff(
         text,
         reason="customer_request",
     )
-    convo.status = "human"
-    convo.is_human_handoff = True
+    # Inbox notification only. Automated Brain escalation must not take
+    # human ownership of the thread or silence the next unstructured turn.
     convo.needs_human = True
-    convo.handoff_active = True
     db.flush()
 
 

@@ -378,7 +378,8 @@ class TestCheckoutRouteStorefrontDelivery:
         assert decision.reason == "store_link_delivered"
         assert decision.cta_url == SALLA_PDP.rstrip("/")
         assert REGISTER_URL not in decision.reply_text
-        assert SALLA_PDP.rstrip("/") in decision.reply_text
+        assert SALLA_PDP.rstrip("/") not in decision.reply_text
+        assert decision.cta_url == SALLA_PDP.rstrip("/")
         assert len(decision.cta_label) <= WA_CTA_LABEL_MAX
         assert decision.cta_label == CTA_LABEL_PRODUCT
 
@@ -450,7 +451,7 @@ class TestCheckoutRouteStorefrontDelivery:
                 _StubDB(),
                 tenant_id=10,
                 customer_phone="966500000001",
-                message="رابط المتجر",
+                message="المتجر الإلكتروني",
             )
 
         assert decision is not None

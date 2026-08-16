@@ -3968,6 +3968,11 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        inbound_metadata={
+                            "button_id": btn_id,
+                            "button_title": btn_txt,
+                            "button_provenance": btn_id,
+                        },
                     )
                     return
 
@@ -7500,11 +7505,9 @@ async def _handle_merchant_message(
                     to,
                 )
 
-        # ── Checkout route owner: explicit order-entry channel choice ───────
-        # Operational routing happens before Brain/staff/location/FAQ owners.
-        # This prevents bare turns like "ابي اطلب" from being interpreted as
-        # free-form catalog browse text, and gives the customer visible WA
-        # controls for WhatsApp checkout / store link / inquiry.
+        # ── Checkout route owner: explicit structured channel chrome only ──
+        # Button IDs/titles may execute deterministically. Unstructured NL,
+        # including pending-choice free text, returns to Brain.
         _checkout_route_decision = None
         try:
             from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: PLC0415
@@ -7516,6 +7519,7 @@ async def _handle_merchant_message(
                 tenant_id=tenant_id,
                 customer_phone=to,
                 message=text or "",
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
             )
         except Exception:
             logger.exception(
@@ -12416,15 +12420,19 @@ async def _handle_merchant_message(
             # quick-reply buttons are skipped (handled above).
             _cta_messages: list = []
             _reply_before_cta = reply or ""
+            _keep_textual_url = False
             try:
                 from core.wa_link_buttons import (  # noqa: PLC0415
+                    customer_requested_textual_url as _want_text_url,
                     split_text_for_cta_buttons as _split_cta,
                 )
+                _keep_textual_url = bool(_want_text_url(text or ""))
                 # We don't pass store_domain here: product detection by
                 # path pattern (/products/, /p/, …) is enough for the
                 # current AI-reply shapes. A future enhancement can plug
                 # the merchant's known domain in for stricter matching.
-                _cta_messages = _split_cta(reply or "")
+                if not _keep_textual_url:
+                    _cta_messages = _split_cta(reply or "")
             except Exception as _cta_exc:
                 logger.debug("[CTA_BUTTON] split failed tenant=%s: %s", tenant_id, _cta_exc)
                 _cta_messages = []
@@ -15187,7 +15195,18 @@ async def _send_cta_url(
     _tenant_id: Optional[int] = None, _db=None,
     *,
     header_image_url: Optional[str] = None,
+    keep_textual_url: bool = False,
 ) -> bool:
+    try:
+        from core.wa_link_buttons import prepare_cta_body_text  # noqa: PLC0415
+
+        body_text = prepare_cta_body_text(
+            body_text or "",
+            btn_url or "",
+            keep_textual_url=keep_textual_url,
+        ) or (body_text or "")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — CTA body prep must not block send
+        pass
     payload = build_cta_url_payload(
         to=to,
         body_text=body_text,

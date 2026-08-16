@@ -511,6 +511,19 @@ def apply_native_order_to_state(
         tenant_id,
         len(resolution.line_items),
     )
+    try:
+        from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
+            stamp_structured_presented_products,
+        )
+
+        stamp_structured_presented_products(
+            state,
+            list(resolution.line_items),
+            provenance="catalog_order_selected",
+            customer_selected=True,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — referent stamp must not block catalog order
+        logger.debug("[WA_NATIVE_ORDER] presented_referent_stamp_skipped", exc_info=True)
     return resolution
 
 

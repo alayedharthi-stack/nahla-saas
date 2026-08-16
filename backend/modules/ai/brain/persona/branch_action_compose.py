@@ -147,6 +147,7 @@ def guard_branch_action_body(text: str, facts: BranchComposeFacts) -> str:
         return body
     if facts.maps_cta_available:
         body = _URL_RE.sub("", body).strip()
+        body = re.sub(r"\[[^\]]+\]\(\s*\)", "", body).strip()
     if facts.contact_card_available:
         body = _PHONE_RE.sub("", body).strip()
     body = re.sub(r"\n{3,}", "\n\n", body).strip()

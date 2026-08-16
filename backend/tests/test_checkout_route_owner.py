@@ -137,7 +137,7 @@ class TestChannelChoicePrompt:
 
 
 class TestCheckoutRouteOwnerPreBrain:
-    def test_start_order_prompts_channel_choice(
+    def test_start_order_defers_unstructured_purchase_to_brain(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -164,16 +164,8 @@ class TestCheckoutRouteOwnerPreBrain:
                 message="ابي اطلب",
             )
 
-        assert decision is not None
-        assert decision.reason == "ask_checkout_channel"
-        assert decision.reply_text == "كيف تحب تكمل؟"
-        assert "طلب سريع عبر واتساب" not in decision.reply_text
-        assert "الطلب من المتجر الإلكتروني" not in decision.reply_text
-        assert "لدي استفسار" not in decision.reply_text
-        assert len(decision.buttons) == 2
-        assert "طلب سريع واتساب" in [b["reply"]["title"] for b in decision.buttons]
-        assert "المتجر الإلكتروني" in [b["reply"]["title"] for b in decision.buttons]
-        persist.assert_called_once()
+        assert decision is None
+        persist.assert_not_called()
 
     def test_price_ask_defers_to_brain_not_channel_choice(
         self,
@@ -236,12 +228,12 @@ class TestCheckoutRouteOwnerPreBrain:
                 _StubDB(),
                 tenant_id=10,
                 customer_phone="966500000001",
-                message="رابط المتجر",
+                message="المتجر الإلكتروني",
             )
 
         assert decision is not None
         assert decision.checkout_channel == CHECKOUT_CHANNEL_STORE
-        assert "https://shop.example" in decision.reply_text
+        assert "https://shop.example" not in decision.reply_text
         assert decision.cta_url == "https://shop.example"
         # WhatsApp CTA display_text max is 20; short operational label.
         assert decision.cta_label == "فتح المتجر"
@@ -277,7 +269,7 @@ class TestCheckoutRouteOwnerPreBrain:
                 _StubDB(),
                 tenant_id=10,
                 customer_phone="966500000001",
-                message="طلب سريع من واتساب",
+                message="طلب سريع واتساب",
             )
 
         assert decision is not None
@@ -319,7 +311,7 @@ class TestCheckoutRouteOwnerPreBrain:
             )
 
         assert decision is None
-        persist.assert_called_once()
+        persist.assert_not_called()
         assert parse_checkout_channel_choice("3", caps=caps) is None
         assert CHECKOUT_CHANNEL_INQUIRY not in available_channels(caps)
 
@@ -356,12 +348,7 @@ class TestCheckoutRouteOwnerPreBrain:
                 message="وين هي",
             )
 
-        assert decision is not None
-        assert decision.reason == "catalog_visibility_help"
-        assert "إذا ما ظهر لك الكتالوج" in decision.reply_text
-        assert "عكبر" not in decision.reply_text
-        assert "هلا قولي" not in decision.reply_text
-        assert len(decision.buttons) == 2
+        assert decision is None
 
     def test_question_mark_after_catalog_missing_not_broken_reply(
         self,
@@ -395,10 +382,7 @@ class TestCheckoutRouteOwnerPreBrain:
                 message="؟",
             )
 
-        assert decision is not None
-        assert decision.reason == "catalog_visibility_help"
-        assert "إذا ما ظهر لك الكتالوج" in decision.reply_text
-        assert "هلا قولي" not in decision.reply_text
+        assert decision is None
 
     def test_product_question_after_prompt_defers_to_brain(
         self,
@@ -631,6 +615,4 @@ class TestDuplicateVCardGate:
             message="أبي أكلم موظف",
             customer_phone="966549741354",
         )
-        assert decision is not None
-        assert decision.deliver_contact is False
-        assert decision.reason == "contact_already_sent"
+        assert decision is None

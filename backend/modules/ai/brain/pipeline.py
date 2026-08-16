@@ -5788,6 +5788,35 @@ class MerchantBrain:
         pending_buttons = list(result.data.get("pending_buttons") or [])
         if pending_product_cards:
             pending_buttons = []
+        if (
+            not pending_buttons
+            and not pending_product_cards
+            and str((decision.args or {}).get("topic") or "") == "purchase_channel_selection"
+        ):
+            try:
+                from .commerce.checkout_route_owner import (  # noqa: PLC0415
+                    build_channel_choice_buttons,
+                    load_channel_capabilities,
+                    persist_checkout_route_state,
+                )
+
+                pending_buttons = list(
+                    build_channel_choice_buttons(
+                        load_channel_capabilities(db, int(tenant_id or 0)),
+                    )
+                )
+                persist_checkout_route_state(
+                    db,
+                    tenant_id=int(tenant_id or 0),
+                    phone=customer_phone,
+                    awaiting_checkout_channel=True,
+                )
+            except Exception as _pcs_btn_exc:  # noqa: BLE001  # noqa: silent-ok — channel buttons must not block reply
+                logger.debug(
+                    "[PURCHASE_CHANNEL] button attach skipped tenant=%s err=%s",
+                    tenant_id,
+                    _pcs_btn_exc,
+                )
 
         _out = {
             "reply": reply,

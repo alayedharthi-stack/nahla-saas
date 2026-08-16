@@ -331,6 +331,49 @@ class TestAISuppression:
         assert decision.disabled is True
         assert decision.reason == REASON_HANDOFF_SESSION
 
+    def test_needs_human_alone_does_not_disable_ai(self) -> None:
+        convo = _convo(needs_human=True)
+        db = self._mock_db_no_handoff_session()
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db,
+                tenant_id=33,
+                customer_phone="966551459303",
+            )
+        assert decision.disabled is False
+
+    def test_customer_request_notify_session_does_not_disable_ai(self) -> None:
+        convo = _convo(needs_human=True)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            id=5, status="active", handoff_reason="customer_request",
+        )
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db,
+                tenant_id=33,
+                customer_phone="966551459303",
+            )
+        assert decision.disabled is False
+
     def test_sibling_paused_row_disables(self) -> None:
         active = _convo(id=1, ai_paused=False)
         paused = _convo(id=2, ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
