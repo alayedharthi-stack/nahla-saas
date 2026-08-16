@@ -33,14 +33,18 @@ def _enabled_ai(**overrides: object) -> dict:
     return merge_ai_defaults(base)
 
 
-class TestPersonaComposerAllowlistDenyAll:
-    def test_default_config_has_empty_allowlist(self) -> None:
-        assert DEFAULT_AI["persona_composer_allowlist_tenants"] == []
+class TestPersonaComposerAllowlistRetired:
+    def test_canonical_defaults_do_not_include_legacy_key(self) -> None:
+        assert "persona_composer_allowlist_tenants" not in DEFAULT_AI
+        merged = merge_ai_defaults(
+            {"persona_composer_allowlist_tenants": [ACCEPTANCE_TENANT_ID]}
+        )
+        assert "persona_composer_allowlist_tenants" not in merged
 
-    def test_default_merge_denies_tenant_33_and_arbitrary_tenant(self) -> None:
+    def test_stale_tenant_id_list_is_not_a_gate(self) -> None:
         ai = _enabled_ai()
-        for tenant_id in (ACCEPTANCE_TENANT_ID, 77, _GENERIC_TENANT):
-            assert not is_persona_composer_enforce_enabled(
+        for tenant_id in (ACCEPTANCE_TENANT_ID, 1, 77, _GENERIC_TENANT):
+            assert is_persona_composer_enforce_enabled(
                 tenant_id=tenant_id,
                 customer_phone=_TEST_PHONE,
                 ai_settings=ai,
@@ -49,17 +53,31 @@ class TestPersonaComposerAllowlistDenyAll:
                 tenant_id=tenant_id,
                 customer_phone=_TEST_PHONE,
                 ai_settings=ai,
-            ) == "tenant_not_allowlisted"
+            ) == "allowed"
 
-    def test_explicit_generic_tenant_allowlist_passes_in_test_mode(self) -> None:
-        ai = _enabled_ai(persona_composer_allowlist_tenants=[_GENERIC_TENANT])
+    def test_stale_copy_of_33_does_not_create_cross_tenant_privilege(self) -> None:
+        ai = _enabled_ai(persona_composer_allowlist_tenants=[ACCEPTANCE_TENANT_ID])
         assert is_persona_composer_enforce_enabled(
-            tenant_id=_GENERIC_TENANT,
+            tenant_id=1,
             customer_phone=_TEST_PHONE,
             ai_settings=ai,
         )
+        disabled = _enabled_ai(
+            persona_composer_enabled=False,
+            persona_composer_allowlist_tenants=[ACCEPTANCE_TENANT_ID],
+        )
+        assert not is_persona_composer_enforce_enabled(
+            tenant_id=1,
+            customer_phone=_TEST_PHONE,
+            ai_settings=disabled,
+        )
+        assert not is_persona_composer_enforce_enabled(
+            tenant_id=ACCEPTANCE_TENANT_ID,
+            customer_phone=_TEST_PHONE,
+            ai_settings=disabled,
+        )
 
-    def test_explicit_generic_tenant_blocks_wrong_phone(self) -> None:
+    def test_ha_phone_still_required(self) -> None:
         ai = _enabled_ai(persona_composer_allowlist_tenants=[_GENERIC_TENANT])
         assert not is_persona_composer_enforce_enabled(
             tenant_id=_GENERIC_TENANT,
@@ -67,7 +85,7 @@ class TestPersonaComposerAllowlistDenyAll:
             ai_settings=ai,
         )
 
-    def test_malformed_allowlist_fails_closed(self) -> None:
+    def test_malformed_allowlist_is_ignored(self) -> None:
         ai = merge_ai_defaults(
             {
                 "persona_composer_enabled": True,
@@ -76,21 +94,8 @@ class TestPersonaComposerAllowlistDenyAll:
                 "persona_composer_allowlist_tenants": "33",
             }
         )
-        assert not is_persona_composer_enforce_enabled(
-            tenant_id=ACCEPTANCE_TENANT_ID,
-            customer_phone=_TEST_PHONE,
-            ai_settings=ai,
-        )
-
-    def test_tenant_33_explicit_config_has_no_special_privilege(self) -> None:
-        ai = _enabled_ai(persona_composer_allowlist_tenants=[ACCEPTANCE_TENANT_ID])
         assert is_persona_composer_enforce_enabled(
             tenant_id=ACCEPTANCE_TENANT_ID,
-            customer_phone=_TEST_PHONE,
-            ai_settings=ai,
-        )
-        assert not is_persona_composer_enforce_enabled(
-            tenant_id=34,
             customer_phone=_TEST_PHONE,
             ai_settings=ai,
         )

@@ -113,6 +113,13 @@ def evaluate_staff_contact_recovery(
         )
         return None
 
+    from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+        unstructured_natural_language_requires_brain,
+    )
+
+    if unstructured_natural_language_requires_brain(message=message or ""):
+        return None
+
     from modules.ai.brain.commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
         should_defer_contact_routing_for_checkout_slot,
     )

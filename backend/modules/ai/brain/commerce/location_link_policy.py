@@ -40,6 +40,13 @@ def evaluate_location_link_policy(
     if not location_link_policy_enabled():
         return None
 
+    from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+        unstructured_natural_language_requires_brain,
+    )
+
+    if unstructured_natural_language_requires_brain(message=message or ""):
+        return None
+
     from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
         LinkIntentType,
         resolve_inbound_link_intent,

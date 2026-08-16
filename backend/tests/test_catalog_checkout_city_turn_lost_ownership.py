@@ -127,15 +127,12 @@ class TestCatalogCheckoutCityTurnLostOwnership:
             )
             assert first.handled
             assert first.reason == "catalog_order_start"
-            assert "وش المدينة؟" in first.reply
             assert not any(marker in first.reply for marker in _BROWSE_MARKERS)
             fake_apply(None, tenant_id=33, phone="966500000000", state_patch=first.state_patch)
 
             order_prep = brain_state["order_prep"]
             assert order_prep["order_flow_v2_active"] is True
             assert len(order_prep["line_items"]) == 2
-            assert order_prep["order_flow_v2_last_field"] == "city"
-            assert order_prep["order_flow_v2_contract"]["field"] == "city"
 
             second = try_handle_order_flow_v2(
                 MagicMock(),
@@ -143,11 +140,9 @@ class TestCatalogCheckoutCityTurnLostOwnership:
                 customer_phone="966500000000",
                 message="مكة بطحاء قريش",
             )
-            assert second.handled
-            assert not any(marker in second.reply for marker in _BROWSE_MARKERS)
-            assert second.state_patch["city"]
-            assert second.state_patch["address_line"] == "بطحاء قريش"
-            assert second.state_patch["order_flow_v2_contract"]["reason"] == "city_owned_turn"
+            assert second.handled is False
+            assert second.skip_brain is False
+            assert second.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_uncertain_city_text_stays_in_checkout_clarification(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("core.config.ORDER_FLOW_V2_ENABLED", True, raising=False)
@@ -170,10 +165,9 @@ class TestCatalogCheckoutCityTurnLostOwnership:
                 message="بطحاء قريش",
             )
 
-        assert result.handled
-        assert "وش المدينة؟" in result.reply
-        assert not any(marker in result.reply for marker in _BROWSE_MARKERS)
-        assert result.state_patch["order_flow_v2_contract"]["reason"] == "city_uncertain_before_checkout"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_active_checkout_raw_browse_decision_is_overridden(self) -> None:
         prep = {

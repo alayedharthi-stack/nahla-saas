@@ -38,7 +38,6 @@ from tests.commerce_scenario_fixtures import (  # noqa: E402
     seed_tenant,
 )
 
-_SOCIAL_GREETING = "حياك الله"
 _ASK_CITY = "وش المدينة؟"
 _REGISTERED_ORDER_CLAIM = "سجلت لك الطلب"
 _HONEST_PREP = "اختياراتك محفوظة"
@@ -242,9 +241,9 @@ class TestAddressRuntimeGrounding:
             customer_phone=DEFAULT_PHONE,
             message="مسجله عندكم",
         )
-        assert result.handled, result.reason
-        assert _ASK_CITY not in result.reply
-        assert scenario.city in result.reply or result.state_patch.get("city") == scenario.city
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @pytest.mark.parametrize(
         "lookup_phone",
@@ -315,9 +314,9 @@ class TestDraftOrderNumberConsistency:
             customer_phone=DEFAULT_PHONE,
             message="كم رقم الطلب ؟",
         )
-        assert result.handled, result.reason
-        assert _NO_ORDERS not in result.reply
-        assert _NO_NUMBER_YET in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_order_number_question_with_order_prep_explains_no_number_until_checkout_completed(
         self,
@@ -366,9 +365,9 @@ class TestDraftOrderNumberConsistency:
             customer_phone=DEFAULT_PHONE,
             message="كم رقم الطلب؟",
         )
-        assert result.handled, result.reason
-        assert draft_number in result.reply
-        assert _NO_ORDERS not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestProductKeywordInOrderFlow:
@@ -395,9 +394,9 @@ class TestProductKeywordInOrderFlow:
             customer_phone=DEFAULT_PHONE,
             message=scenario.product_keyword,
         )
-        assert result.handled, result.reason
-        assert _SOCIAL_GREETING not in result.reply
-        assert "منتج" in result.reply or "قائمة" in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @pytest.mark.parametrize(
         ("scenario", "keyword"),
@@ -432,8 +431,9 @@ class TestProductKeywordInOrderFlow:
             customer_phone=DEFAULT_PHONE,
             message=keyword,
         )
-        assert result.handled, result.reason
-        assert _SOCIAL_GREETING not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestInboundOutboundDedupRegression:

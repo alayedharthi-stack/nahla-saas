@@ -55,6 +55,11 @@ class TurnAudit:
     dedup_hit: bool = False
     dedup_msg_id: str = ""
     brain_called: bool = False
+    llm_called: bool = False
+    llm_stub_output: str = ""
+    ofv2_reason: str = ""
+    inbound_type: str = ""
+    structural_or_unstructured: str = ""
     errors: List[str] = field(default_factory=list)
     divergence_reason: str = ""
 
@@ -115,6 +120,7 @@ class BrainReplayRunner:
         self._last_brain_result: Dict[str, Any] = {}
         self._brain_called = False
         self._llm_compose_calls = 0
+        self._last_llm_stub_output = ""
 
     def _next_msg_id(self, override: Optional[str] = None) -> str:
         if override:
@@ -142,11 +148,15 @@ class BrainReplayRunner:
 
         async def _counting_stub_llm(*args, **kwargs):
             runner._llm_compose_calls += 1
-            return await stub_llm_compose(*args, **kwargs)
+            out = await stub_llm_compose(*args, **kwargs)
+            runner._last_llm_stub_output = str(out or "")
+            return out
 
         async def _counting_stub_legacy(*args, **kwargs):
             runner._llm_compose_calls += 1
-            return await stub_legacy_llm_compose(*args, **kwargs)
+            out = await stub_legacy_llm_compose(*args, **kwargs)
+            runner._last_llm_stub_output = str(out or "")
+            return out
 
         def _pcg_wrap(*args, **kwargs):
             runner._guard_trace.payment_credential = True
@@ -377,6 +387,8 @@ class BrainReplayRunner:
         self._guard_trace.reset()
         self._last_brain_result = {}
         self._brain_called = False
+        self._last_llm_stub_output = ""
+        llm_before = self._llm_compose_calls
         msg_id = self._next_msg_id(provider_msg_id)
 
         last_event = (
@@ -438,6 +450,21 @@ class BrainReplayRunner:
 
         of2_reason = str(outbound_meta.get("order_flow_v2_reason") or "")
         turn.brain_called = self._brain_called
+        turn.llm_called = self._llm_compose_calls > llm_before
+        turn.llm_stub_output = self._last_llm_stub_output
+        turn.ofv2_reason = of2_reason
+        turn.inbound_type = str(meta.get("type") or meta.get("normalized_type") or "text")
+        from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+            unstructured_natural_language_requires_brain,
+        )
+
+        turn.structural_or_unstructured = (
+            "unstructured"
+            if unstructured_natural_language_requires_brain(
+                meta, normalized_type=turn.inbound_type, message=text,
+            )
+            else "structural"
+        )
         turn.skip_brain = not self._brain_called and bool(reply)
         turn.route_owner = self._infer_route_owner(
             outbound_meta=outbound_meta,

@@ -381,7 +381,8 @@ def try_handle_order_flow_v2(
         return OrderFlowV2Result(handled=False)
 
     meta = dict(inbound_metadata or {})
-    text = str(message or "").strip()
+    raw_text = str(message or "").strip()
+    text = raw_text
     try:
         from modules.ai.media.routing_guard import resolve_semantic_customer_message  # noqa: PLC0415
 
@@ -392,6 +393,24 @@ def try_handle_order_flow_v2(
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block checkout owner
         text = str(message or "").strip()
+
+    from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+        UNSTRUCTURED_REQUIRES_BRAIN_REASON,
+        ofv2_may_own_prebrain,
+    )
+
+    # Media-frame stripping must not destroy native catalog-order dumps.
+    if ofv2_may_own_prebrain(
+        meta,
+        normalized_type=inbound_normalized_type,
+        message=raw_text,
+    ) and not ofv2_may_own_prebrain(
+        meta,
+        normalized_type=inbound_normalized_type,
+        message=text,
+    ):
+        text = raw_text
+
     conversation, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=customer_phone)
     live, shadow_log, _op_reason = operational_tuple(
         db,
@@ -428,6 +447,19 @@ def try_handle_order_flow_v2(
             reason=_op_reason,
             operational_reason=_op_reason,
             permission_source=perm_load.source,
+        )
+
+    if not ofv2_may_own_prebrain(
+        meta,
+        normalized_type=inbound_normalized_type,
+        message=raw_text,
+    ):
+        return OrderFlowV2Result(
+            handled=False,
+            reason=UNSTRUCTURED_REQUIRES_BRAIN_REASON,
+            operational_reason=_op_reason,
+            permission_source=perm_load.source,
+            shadow_only=(not live and shadow_log),
         )
 
     order_prep = prep_dict((brain_state or {}).get("order_prep") or {})

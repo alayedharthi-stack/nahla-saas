@@ -158,15 +158,8 @@ def resolve_order_flow_v2_operational(
             reason=billing_reason,
         )
 
-    from core.tenant import STORE_AI_MODE_TEST  # noqa: PLC0415
-
-    if mode_decision.mode == STORE_AI_MODE_TEST:
-        return OrderFlowV2OperationalDecision(
-            live=True,
-            shadow_log=False,
-            reason="test_mode_canary_enforcement",
-        )
-
+    # Test vs live store_ai_mode must not select a different intelligence owner.
+    # OFV2 live remains ORDER_FLOW_V2_ENABLED / ENFORCE_TENANTS only.
     return OrderFlowV2OperationalDecision(live=False, shadow_log=True, reason="shadow_only")
 
 

@@ -136,8 +136,9 @@ class TestLocalDraftCheckoutAuthority:
             customer_phone="966500000001",
             message="كم رقم الطلب",
         )
-        assert result.handled
-        assert "NHL-1-000088" in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @patch("modules.ai.order_flow_v2.owner.operational_tuple", return_value=(True, False, "test_mode_canary_enforcement"))
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
@@ -157,9 +158,10 @@ class TestLocalDraftCheckoutAuthority:
             customer_phone="966500000001",
             message="نورة عبدالله",
         )
-        assert result.handled
-        assert "الكتالوج" not in (result.reply or "")
-        assert result.state_patch.get("customer_first_name") == "نورة"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
+        assert result.state_patch.get("customer_first_name") in (None, "")
 
     @patch("modules.ai.order_flow_v2.owner.operational_tuple", return_value=(True, False, "test_mode_canary_enforcement"))
     @patch("modules.ai.order_flow_v2.owner.load_local_draft_evidence")
@@ -177,9 +179,9 @@ class TestLocalDraftCheckoutAuthority:
             customer_phone="966500000001",
             message="انا اخترت المنتجات",
         )
-        assert result.handled
-        assert result.reply
-        assert "اختياراتك" in result.reply or "الاسم" in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @patch("modules.ai.order_flow_v2.owner.operational_tuple", return_value=(True, False, "test_mode_canary_enforcement"))
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
@@ -201,10 +203,9 @@ class TestLocalDraftCheckoutAuthority:
             customer_phone="966500000001",
             message="ودوه لعنواني",
         )
-        assert result.handled
-        assert result.reason == "delivery_continuation"
-        assert "29" not in (result.reply or "")
-        assert "غير مضبوطة" not in (result.reply or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @patch("modules.ai.checkout_authority.load_local_draft_evidence")
     def test_track_fallback_uses_local_draft_not_no_orders(self, draft_mock) -> None:
@@ -282,13 +283,13 @@ class TestLocalDraftCheckoutAuthority:
             customer_phone="966500000001",
             message="كم رقم الطلب",
         )
-        assert result.handled
-        assert "NHL-1-000044" in result.reply
-        assert "عسل" not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestCanaryV2Enforcement:
-    def test_test_mode_allowlisted_phone_gets_live_v2(self) -> None:
+    def test_test_mode_does_not_force_live_v2(self) -> None:
         with patch("modules.ai.order_flow_v2.enforcement.is_ai_allowed_by_store_mode") as mode:
             from core.ai_disabled_gate import StoreAIModeDecision  # noqa: PLC0415
             from core.tenant import STORE_AI_MODE_TEST  # noqa: PLC0415
@@ -301,8 +302,9 @@ class TestCanaryV2Enforcement:
                     customer_phone="966500000001",
                     conversation=_conversation(),
                 )
-        assert decision.live is True
-        assert decision.reason == "test_mode_canary_enforcement"
+        assert decision.live is False
+        assert decision.shadow_log is True
+        assert decision.reason == "shadow_only"
 
     def test_non_allowlisted_test_mode_stays_shadow(self) -> None:
         with patch("modules.ai.order_flow_v2.enforcement.is_ai_allowed_by_store_mode") as mode:

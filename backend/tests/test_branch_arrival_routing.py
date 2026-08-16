@@ -104,7 +104,7 @@ def _enable_structured_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_STRUCTURED_BRANCH_CONTACTS", "1")
 
 
-def test_location_only_does_not_deliver_reception() -> None:
+def test_unstructured_location_ask_yields_to_brain() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -113,19 +113,13 @@ def test_location_only_does_not_deliver_reception() -> None:
     )
     decision = evaluate_branch_trigger_routing(
         db, tenant_id=10, message="وين موقعكم؟",
+        inbound_metadata={"source_type": "text", "normalized_type": "text"},
     )
-    assert decision is not None
-    assert decision.trigger_type == "location_request"
-    assert decision.maps_url
-    assert decision.deliver_reception_after_maps is False
-    assert decision.deliver_contact is False
+    assert decision is None
 
 
-def test_location_plus_reception_sends_maps_for_explicit_location() -> None:
-    from modules.ai.brain.commerce.branch_trigger_router import (
-        MSG_PICKUP_PREFERENCE_ASK,
-        evaluate_branch_trigger_routing,
-    )
+def test_unstructured_location_plus_reception_yields_to_brain() -> None:
+    from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
         branches=[_branch(location_response_mode="location_plus_reception")],
@@ -133,16 +127,12 @@ def test_location_plus_reception_sends_maps_for_explicit_location() -> None:
     )
     decision = evaluate_branch_trigger_routing(
         db, tenant_id=10, message="وين موقعكم؟",
+        inbound_metadata={"source_type": "text", "normalized_type": "text"},
     )
-    assert decision is not None
-    assert decision.trigger_type == "location_request"
-    assert decision.maps_url
-    assert decision.deliver_reception_after_maps is False
-    assert decision.reception_call_target is None
-    assert MSG_PICKUP_PREFERENCE_ASK not in decision.reply_text
+    assert decision is None
 
 
-def test_arrival_soft_does_not_escalate_or_vcard() -> None:
+def test_unstructured_arrival_soft_yields_to_brain() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -163,14 +153,12 @@ def test_arrival_soft_does_not_escalate_or_vcard() -> None:
     )
     decision = evaluate_branch_trigger_routing(
         db, tenant_id=10, message="أنا في الطريق",
+        inbound_metadata={"source_type": "text", "normalized_type": "text"},
     )
-    assert decision is not None
-    assert decision.trigger_type == "arrival_soft"
-    assert decision.deliver_contact is False
-    assert decision.persist_contact is False
+    assert decision is None
 
 
-def test_arrival_confirmed_sends_reception() -> None:
+def test_unstructured_arrival_confirmed_yields_to_brain() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -179,14 +167,12 @@ def test_arrival_confirmed_sends_reception() -> None:
     )
     decision = evaluate_branch_trigger_routing(
         db, tenant_id=10, message="وصلت",
+        inbound_metadata={"source_type": "text", "normalized_type": "text"},
     )
-    assert decision is not None
-    assert decision.trigger_type == "arrival_confirmed"
-    assert decision.deliver_contact is True
-    assert decision.call_target is not None
+    assert decision is None
 
 
-def test_no_response_advances_escalation() -> None:
+def test_unstructured_no_response_yields_to_brain() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -224,14 +210,12 @@ def test_no_response_advances_escalation() -> None:
             tenant_id=10,
             message="ما يرد",
             customer_phone="966500000001",
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
-    assert decision is not None
-    assert decision.trigger_type == "no_response"
-    assert decision.deliver_contact is True
-    assert decision.reason == "no_response_escalation_advance"
+    assert decision is None
 
 
-def test_custom_keyword_alhosh_works() -> None:
+def test_unstructured_custom_keyword_yields_to_brain() -> None:
     from modules.ai.brain.commerce.branch_trigger_router import evaluate_branch_trigger_routing
 
     db = _StructuredDB(
@@ -250,10 +234,9 @@ def test_custom_keyword_alhosh_works() -> None:
     )
     decision = evaluate_branch_trigger_routing(
         db, tenant_id=10, message="أنا في الحوش",
+        inbound_metadata={"source_type": "text", "normalized_type": "text"},
     )
-    assert decision is not None
-    assert decision.trigger_type == "arrival_confirmed"
-    assert decision.matched_phrase == "الحوش"
+    assert decision is None
 
 
 def test_flag_off_allows_legacy_keyword_router_skip(monkeypatch: pytest.MonkeyPatch) -> None:

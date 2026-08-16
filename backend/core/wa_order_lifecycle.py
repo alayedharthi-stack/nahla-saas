@@ -77,6 +77,21 @@ def has_accepted_delivery_address(order_prep: Dict[str, Any]) -> bool:
             or _prep_str(order_prep, "google_maps_url")
             or _prep_str(order_prep, "delivery_address_url")
         )
+    pending = order_prep.get("pending_delivery_location")
+    if isinstance(pending, dict):
+        pending_status = str(pending.get("delivery_address_status") or "").strip().lower()
+        if pending_status == "accepted":
+            if str(pending.get("google_maps_url") or pending.get("delivery_address_url") or "").strip():
+                return True
+            lat = pending.get("latitude") or pending.get("delivery_location_lat")
+            lng = pending.get("longitude") or pending.get("delivery_location_lng")
+            if lat is not None and lng is not None:
+                try:
+                    float(lat)
+                    float(lng)
+                    return True
+                except (TypeError, ValueError):
+                    pass
     return False
 
 

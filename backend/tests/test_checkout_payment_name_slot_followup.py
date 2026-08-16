@@ -96,26 +96,15 @@ class TestCheckoutPaymentNameSlotFollowup:
         prep = _active_checkout_prep(short_address_code="TAPB3320")
         conv = _conversation()
         load_state.return_value = (conv, {"order_prep": prep, "cart_items": prep["line_items"]})
-        db = MagicMock()
-        with patch(
-            "modules.ai.order_flow_v2.owner.apply_payment_method_selection",
-            return_value=({"order_flow_v2_payment_rejected": True, "requested_bank": "rajhi"}, None),
-        ):
-            with patch(
-                "modules.ai.order_flow_v2.owner.build_payment_bank_mismatch_reply",
-                return_value="بيانات الراجحي غير مفعّلة حاليًا، تواصل مع المتجر لتأكيد بيانات التحويل.",
-            ) as mismatch:
-                result = try_handle_order_flow_v2(
-                    db,
-                    tenant_id=33,
-                    customer_phone="966507283619",
-                    message="الراجحي",
-                )
-        assert result.handled
-        assert result.skip_brain
-        assert result.reason in {"payment_bank_rejected", "checkout_payment_bank_unavailable"}
-        mismatch.assert_called_once()
-        assert "هذه بيانات التحويل" not in (result.reply or "")
+        result = try_handle_order_flow_v2(
+            MagicMock(),
+            tenant_id=33,
+            customer_phone="966507283619",
+            message="الراجحي",
+        )
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_rajhi_no_media_no_account_does_not_claim_transfer_details(self, load_state, _draft, _op) -> None:
         db = MagicMock()
@@ -151,9 +140,8 @@ class TestCheckoutPaymentNameSlotFollowup:
         assert patch["customer_last_name"] == "الحارثي"
         assert is_explicit_customer_name_turn("سعدية الحارثي")
 
-    @patch("modules.ai.order_flow_v2.owner._sync_draft_order")
     def test_name_slot_persists_to_order_db_and_order_prep(
-        self, sync_draft, load_state, _draft, _op,
+        self, load_state, _draft, _op,
     ) -> None:
         prep = _active_checkout_prep()
         conv = _conversation()
@@ -164,10 +152,9 @@ class TestCheckoutPaymentNameSlotFollowup:
             customer_phone="966507283619",
             message="سعدية الحارثي",
         )
-        assert result.handled
-        merged = {**prep, **result.state_patch}
-        assert merged.get("customer_first_name") == "سعدية"
-        assert merged.get("customer_last_name") == "الحارثي"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_city_text_during_active_checkout_not_product_keyword(
         self, load_state, _draft, _op,
@@ -194,10 +181,9 @@ class TestCheckoutPaymentNameSlotFollowup:
             customer_phone="966507283619",
             message="ودوه لعنواني",
         )
-        assert result.handled
-        assert result.reason == "delivery_continuation"
-        assert "طريقة الدفع" in (result.reply or "") or "الدفع" in (result.reply or "")
-        assert "TAPB3320" not in (result.reply or "") or "عنوان" not in (result.reply or "").split("؟")[0]
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_no_brain_payment_fallback_when_local_draft_authoritative(
         self, load_state, _draft, _op,
@@ -214,8 +200,9 @@ class TestCheckoutPaymentNameSlotFollowup:
             customer_phone="966507283619",
             message="الراجحي",
         )
-        assert result.handled
-        assert result.skip_brain
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_replay_run_20260703T004200Z_canary_failures(
         self, load_state, _draft, _op,
@@ -229,42 +216,37 @@ class TestCheckoutPaymentNameSlotFollowup:
         city_result = try_handle_order_flow_v2(
             db, tenant_id=33, customer_phone="966507283619", message="الطايف",
         )
-        assert city_result.handled
-        assert city_result.reason != "order_flow_product_keyword"
+        assert city_result.handled is False
+        assert city_result.skip_brain is False
+        assert city_result.reason == "unstructured_requires_brain_semantic_ownership"
 
         prep_name = _active_checkout_prep()
         load_state.return_value = (conv, {"order_prep": prep_name, "cart_items": prep_name["line_items"]})
         name_result = try_handle_order_flow_v2(
             db, tenant_id=33, customer_phone="966507283619", message="سعدية الحارثي",
         )
-        assert name_result.handled
-        assert name_result.state_patch.get("customer_first_name") == "سعدية"
+        assert name_result.handled is False
+        assert name_result.skip_brain is False
+        assert name_result.reason == "unstructured_requires_brain_semantic_ownership"
 
         prep_delivery = _active_checkout_prep(short_address_code="TAPB3320")
         load_state.return_value = (conv, {"order_prep": prep_delivery, "cart_items": prep_delivery["line_items"]})
         delivery_result = try_handle_order_flow_v2(
             db, tenant_id=33, customer_phone="966507283619", message="ودوه لعنواني",
         )
-        assert delivery_result.handled
-        assert "الدفع" in (delivery_result.reply or "")
+        assert delivery_result.handled is False
+        assert delivery_result.skip_brain is False
+        assert delivery_result.reason == "unstructured_requires_brain_semantic_ownership"
 
         prep_bank = _active_checkout_prep(short_address_code="TAPB3320")
         load_state.return_value = (conv, {"order_prep": prep_bank, "cart_items": prep_bank["line_items"]})
-        with patch(
-            "modules.ai.order_flow_v2.owner.apply_payment_method_selection",
-            return_value=({"order_flow_v2_payment_rejected": True, "requested_bank": "rajhi"}, None),
-        ):
-            with patch(
-                "modules.ai.order_flow_v2.owner.build_payment_bank_mismatch_reply",
-                return_value="بيانات الراجحي غير مفعّلة حاليًا، تواصل مع المتجر لتأكيد بيانات التحويل.",
-            ):
-                bank_result = try_handle_order_flow_v2(
-                    db, tenant_id=33, customer_phone="966507283619", message="الراجحي",
-                )
-        assert bank_result.handled
-        assert bank_result.skip_brain
+        bank_result = try_handle_order_flow_v2(
+            db, tenant_id=33, customer_phone="966507283619", message="الراجحي",
+        )
+        assert bank_result.handled is False
+        assert bank_result.skip_brain is False
+        assert bank_result.reason == "unstructured_requires_brain_semantic_ownership"
         assert requested_bank_brand("الراجحي") == "rajhi"
-        assert "هذه بيانات التحويل" not in (bank_result.reply or "")
 
 
 class TestGenericMerchantScenarios:
@@ -291,6 +273,6 @@ class TestGenericMerchantScenarios:
             customer_phone="966500000099",
             message="نورة عبدالله",
         )
-        assert result.handled
-        assert result.state_patch.get("customer_first_name") == "نورة"
-        assert result.state_patch.get("customer_last_name") == "عبدالله"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"

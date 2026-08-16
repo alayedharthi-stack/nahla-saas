@@ -114,8 +114,6 @@ DEFAULT_AI: Dict[str, Any] = {
         "dua",
         "payment_media_intro",
     ],
-    # Deny-all default — acceptance tenants must opt in via stored ai_settings.
-    "persona_composer_allowlist_tenants": [],
 }
 
 DEFAULT_STORE: Dict[str, Any] = {
@@ -127,7 +125,9 @@ DEFAULT_STORE: Dict[str, Any] = {
     "store_name_en_source": "",
     "store_logo_url":       "",
     "store_url":            "",
-    "platform_type":        "salla",
+    # Dashboard label only — not a live commerce connection. Connection SoT
+    # is Integration rows (+ non-empty credentials). See commerce_platform.py.
+    "platform_type":        "custom",
     "salla_client_id":      "",
     "salla_client_secret":  "",
     "salla_access_token":   "",
@@ -209,6 +209,7 @@ def merge_ai_defaults(stored: Optional[Dict]) -> Dict:
             result["store_ai_mode"] = STORE_AI_MODE_OFF
         else:
             result["store_ai_mode"] = STORE_AI_MODE_ON
+    result.pop("persona_composer_allowlist_tenants", None)
     return result
 
 
@@ -325,4 +326,7 @@ def get_or_create_settings(db: Session, tenant_id: int) -> TenantSettings:
         )
         db.add(settings)
         db.flush()
+    from core.tenant_config_hygiene import apply_tenant_settings_hygiene  # noqa: PLC0415
+
+    apply_tenant_settings_hygiene(db, settings)
     return settings

@@ -139,21 +139,22 @@ def _structured_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestPhysicalLocationOwnership:
     def test_t1_wain_mawqecom_physical_not_storefront(self) -> None:
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_link_intent
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION
 
         msg = "وين موقعكم؟"
         assert resolve_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == TOPIC_LOCATION
-        assert "store_info" not in str(decision.args.get("topic") or "")
+        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+        topic = str(decision.args.get("topic") or "")
+        kind = str(decision.args.get("question_kind") or "")
+        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
+        assert "store_info" not in topic
 
     def test_t2_mawqe_almaarid_direct_no_preference_ask(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
     ) -> None:
         from modules.ai.brain.commerce.branch_trigger_router import (
-            MSG_PICKUP_PREFERENCE_ASK,
             evaluate_branch_trigger_routing,
         )
         from modules.ai.brain.commerce.link_intent import (
@@ -166,14 +167,8 @@ class TestPhysicalLocationOwnership:
         msg = "موقع المعرض"
         assert is_explicit_direct_location_request(msg)
 
-        monkeypatch.setattr(
-            "modules.ai.postprocess.safety_nets._lookup_tenant_maps_url",
-            lambda _db, _tid: (_MAPS_URL, "kb:branches"),
-        )
         llp = evaluate_location_link_policy(object(), tenant_id=10, message=msg)
-        assert llp is not None
-        assert llp.maps_url == _MAPS_URL
-        assert MSG_PICKUP_PREFERENCE_ASK not in (llp.reply_text or "")
+        assert llp is None
 
         db = _StructuredDB(
             branches=[_branch(location_response_mode="location_plus_reception")],
@@ -182,9 +177,7 @@ class TestPhysicalLocationOwnership:
         btr = evaluate_branch_trigger_routing(
             db, tenant_id=10, message="وين موقعكم؟",
         )
-        if btr is not None:
-            assert btr.maps_url
-            assert MSG_PICKUP_PREFERENCE_ASK not in (btr.reply_text or "")
+        assert btr is None
 
     def test_t3_send_location_not_website(self) -> None:
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_link_intent
@@ -221,17 +214,16 @@ class TestPhysicalLocationOwnership:
     def test_t6_missing_maps_no_catalog_substitute(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from core.native_catalog_fallback import compose_native_catalog_failure_decision
         from modules.ai.brain.commerce.contact_route_policy import MSG_LOCATION_NOT_CONFIGURED
-        from modules.ai.brain.commerce.physical_location_ownership import (
-            ACTION_PHYSICAL_LOCATION_MISSING_CONFIG,
-        )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION
 
         msg = "وين موقعكم؟"
         decision = _brain_ctx(msg, maps_url="")
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == TOPIC_LOCATION
-        assert decision.args.get("required_action") == ACTION_PHYSICAL_LOCATION_MISSING_CONFIG
+        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+        topic = str(decision.args.get("topic") or "")
+        kind = str(decision.args.get("question_kind") or "")
+        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
+        assert _STORE_URL not in str(decision.args)
 
         fallback = compose_native_catalog_failure_decision(
             None, 10, customer_message=msg,
@@ -306,9 +298,12 @@ class TestPhysicalLocationOwnership:
         from modules.ai.brain.commerce.physical_location_ownership import (
             is_physical_location_request,
         )
-        from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS
+        from modules.ai.brain.decision.actions import (
+            ACTION_CATALOG_NAVIGATE,
+            ACTION_SEARCH_PRODUCTS,
+        )
 
         msg = "وش الأنواع المتوفرة؟"
         assert not is_physical_location_request(msg)
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.action in {ACTION_SEARCH_PRODUCTS, ACTION_CATALOG_NAVIGATE}

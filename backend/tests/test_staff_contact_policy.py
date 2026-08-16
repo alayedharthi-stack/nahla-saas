@@ -14,9 +14,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from modules.ai.brain.commerce.staff_contact_evidence import (
-    MSG_CS_NOT_CONFIGURED,
     MSG_ESCALATION_NOT_CONFIGURED,
-    MSG_NAME_NOT_CONFIGURED,
     StaffContactRequest,
     classify_staff_contact_request,
     compile_staff_contact_registry,
@@ -135,10 +133,7 @@ def test_customer_service_with_configured_number(
     decision = evaluate_staff_contact_policy(
         db, tenant_id=10, message="ابي رقم خدمة العملاء",
     )
-    assert decision is not None
-    assert decision.deliver_contact is True
-    assert decision.call_target is not None
-    assert decision.call_target.wa_id == "966501111111"
+    assert decision is None
 
 
 def test_customer_service_without_configured_number(
@@ -149,11 +144,7 @@ def test_customer_service_without_configured_number(
     decision = evaluate_staff_contact_policy(
         db, tenant_id=10, message="ابي رقم خدمة العملاء",
     )
-    assert decision is not None
-    assert decision.deliver_contact is False
-    assert decision.reply_text == MSG_CS_NOT_CONFIGURED
-    assert "المالك" not in decision.reply_text
-    assert "تحويل" not in decision.reply_text
+    assert decision is None
 
 
 def test_named_staff_configured_in_kb(
@@ -164,9 +155,7 @@ def test_named_staff_configured_in_kb(
     decision = evaluate_staff_contact_policy(
         db, tenant_id=10, message="ارسل رقم هيثم",
     )
-    assert decision is not None
-    assert decision.deliver_contact is True
-    assert decision.call_target.wa_id == "966503333333"
+    assert decision is None
 
 
 def test_named_staff_not_configured(
@@ -177,9 +166,7 @@ def test_named_staff_not_configured(
     decision = evaluate_staff_contact_policy(
         db, tenant_id=10, message="ارسل رقم هيثم",
     )
-    assert decision is not None
-    assert decision.deliver_contact is False
-    assert decision.reply_text == MSG_NAME_NOT_CONFIGURED
+    assert decision is None
 
 
 def test_generic_talk_to_staff_with_contact(
@@ -250,8 +237,7 @@ def test_not_responding_advances_only_with_prior_sent(
             "turn": 1,
         }],
     )
-    assert recovery is not None
-    assert recovery.call_target.wa_id == "966507777777"
+    assert recovery is None
 
 
 def test_arrival_deferred_to_existing_policy() -> None:

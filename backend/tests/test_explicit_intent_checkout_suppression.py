@@ -223,54 +223,63 @@ class TestStaleCheckoutSuppression:
 class TestOrderFlowV2BypassWithActiveDraft:
     def test_ledger_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("طلباتي السابقة كم؟")
-        assert not result.handled
-        assert result.reason.startswith("explicit_intent_suppressed:")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_track_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("وين طلبي؟")
-        assert not result.handled
-        assert "track_order" in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_barcode_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("أرسل باركود الراجحي")
-        assert not result.handled
-        assert PAYMENT_BARCODE_IMAGE_REQUEST in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_payment_info_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("كيف أحول على الراجحي؟")
-        assert not result.handled
-        assert "ask_payment_info" in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_catalog_browse_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("وش عندكم منتجات؟")
-        assert not result.handled
-        assert "catalog_browse" in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_product_knowledge_bypasses_order_flow_v2_observed_case(self) -> None:
         result = _run_v2("ما هي مميزات عسل السدر القيضي؟")
-        assert not result.handled
-        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_product_knowledge_bypasses_order_flow_v2_generic_merchant(self) -> None:
         result = _run_v2("ما هي مميزات عطر ورد 100ml؟")
-        assert not result.handled
-        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_product_knowledge_wsh_variant_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("وش مميزات عسل السدر القيضي؟")
-        assert not result.handled
-        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_product_knowledge_khasais_variant_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("ما هي خصائص عسل السدر القيضي؟")
-        assert not result.handled
-        assert PRODUCT_KNOWLEDGE_FACTS in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_barcode_request_not_product_knowledge_bypass(self) -> None:
         result = _run_v2("أرسل باركود الراجحي")
-        assert not result.handled
-        assert PAYMENT_BARCODE_IMAGE_REQUEST in (result.reason or "")
-        assert PRODUCT_KNOWLEDGE_FACTS not in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_ambiguous_product_token_not_product_knowledge_bypass(self) -> None:
         decision = evaluate_stale_checkout_suppression(
@@ -294,13 +303,16 @@ class TestOrderFlowV2BypassWithActiveDraft:
     )
     def test_social_phatic_bypasses_order_flow_v2(self, message: str, expected: str) -> None:
         result = _run_v2(message)
-        assert not result.handled
-        assert expected in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
+        _ = expected
 
     def test_named_order_ref_bypasses_order_flow_v2(self) -> None:
         result = _run_v2("كم رقم الطلب 269866315؟")
-        assert not result.handled
-        assert "track_order" in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_draft_order_number_still_owned_by_order_flow_v2(self) -> None:
         prep = {
@@ -312,8 +324,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
             return_value="رقم طلبك الحالي NHL-1-000099.",
         ):
             result = _run_v2("كم رقم الطلب؟", prep=prep)
-        assert result.handled
-        assert "NHL-1-000099" in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_yes_still_owned_by_order_flow_v2(self) -> None:
         prep = {
@@ -324,7 +337,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
             "short_address_code": "RRRD1234",
         }
         result = _run_v2("نعم", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_address_confirm_still_owned_by_order_flow_v2(self) -> None:
         prep = {
@@ -347,7 +362,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
                 shipping=SimpleNamespace(locked_by_merchant=False),
             )
             result = _run_v2("اعتمد نفس العنوان", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
     def test_bank_transfer_method_answer_still_owned(self) -> None:
         prep = {
             "order_flow_v2_active": True,
@@ -360,8 +377,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
             "order_flow_v2_last_field": "payment_method",
         }
         result = _run_v2("تحويل بنكي", prep=prep)
-        assert result.handled
-        assert "payment" in (result.reason or "").lower() or result.state_patch
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_numeric_slot_still_owned(self) -> None:
         prep = {
@@ -370,7 +388,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
             "order_flow_v2_last_field": "quantity",
         }
         result = _run_v2("1", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_no_active_draft_routes_unchanged_for_greeting(self) -> None:
         with patch(
@@ -389,8 +409,9 @@ class TestOrderFlowV2BypassWithActiveDraft:
                 customer_phone="966500000001",
                 message="مرحبا",
             )
-        assert not result.handled
-        assert result.reason == "greeting_no_pending"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestBrainPaymentDeferral:
