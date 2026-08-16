@@ -714,6 +714,18 @@ def resolve_trusted_focus_for_deictic(
             reason="focus_fresh",
         )
 
+    unique_selected = _unique_product_row(
+        [row for row in presented if isinstance(row, dict) and row.get("customer_selected")]
+    )
+    if unique_selected is not None:
+        return _finish_from_row(
+            row=unique_selected,
+            recent=recent,
+            state=state,
+            origin="last_presented_products",
+            reason="customer_selected_structured_referent",
+        )
+
     unique_recommended = _unique_product_row(recommended)
     if unique_recommended is not None:
         return _finish_from_row(

@@ -107,7 +107,12 @@ def _stamp_row(
     pid = row.get("id") if row.get("id") is not None else row.get("product_id")
     if pid is not None:
         item["id"] = pid
-    ext = str(row.get("external_id") or "").strip()
+    ext = str(
+        row.get("external_id")
+        or row.get("product_retailer_id")
+        or row.get("sku")
+        or ""
+    ).strip()
     if ext:
         item["external_id"] = ext
     image_url = str(
@@ -265,6 +270,36 @@ def stamp_assistant_named_catalog_from_reply(
     return [recommended]
 
 
+def structured_selected_referent(state: Any) -> Optional[Dict[str, Any]]:
+    """Return the customer-selected structured product referent, if any.
+
+    Prefers ``customer_selected`` / ``catalog_order_selected`` rows over
+    assistant-presented catalog chrome. Does not invent intent.
+    """
+    presented = list(getattr(state, "last_presented_products", None) or [])
+    selected = [
+        row for row in presented
+        if isinstance(row, dict) and row.get("customer_selected")
+    ]
+    if selected:
+        return dict(selected[-1])
+    catalog_selected = [
+        row for row in presented
+        if isinstance(row, dict)
+        and str(row.get("provenance") or "") == "catalog_order_selected"
+    ]
+    if catalog_selected:
+        return dict(catalog_selected[-1])
+    focus = getattr(state, "current_product_focus", None)
+    if isinstance(focus, dict) and (
+        focus.get("from_catalog_order") or focus.get("from_native_catalog_order")
+    ):
+        title = str(focus.get("title") or focus.get("product_name") or "").strip()
+        if title or focus.get("id") is not None or focus.get("external_id"):
+            return dict(focus)
+    return None
+
+
 def stamp_structured_presented_products(
     state: Any,
     rows: Sequence[Any],
@@ -311,4 +346,5 @@ __all__ = [
     "map_named_catalog_entities",
     "stamp_assistant_named_catalog_from_reply",
     "stamp_structured_presented_products",
+    "structured_selected_referent",
 ]

@@ -232,7 +232,7 @@ def load_structured_escalation_steps(
     if db is None or not branch_id:
         return ()
     try:
-        from database.models import BranchEscalationStep  # noqa: PLC0415
+        from models import BranchEscalationStep  # noqa: PLC0415
 
         rows = (
             db.query(BranchEscalationStep)

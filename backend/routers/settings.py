@@ -43,6 +43,22 @@ _LEGACY_STORE_NAME_FIELDS = frozenset({"store_name", "store_name_source"})
 router = APIRouter()
 
 
+def _sales_channel_availability(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """Same resolver as checkout/Brain — dashboard must not recompute locally."""
+    try:
+        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            resolve_merchant_sales_channels,
+        )
+
+        sales = resolve_merchant_sales_channels(db, int(tenant_id or 0))
+        payload = sales.availability_facts()
+        payload["maps_url"] = sales.maps_url
+        payload["store_url"] = sales.store_url
+        return payload
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — settings GET must still return store config
+        return {}
+
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class WhatsAppSettingsIn(BaseModel):
@@ -174,6 +190,7 @@ async def get_settings(request: Request, db: Session = Depends(get_db)):
         "store":         apply_masks(store, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
         "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
+        "sales_channel_availability": _sales_channel_availability(db, tenant_id),
     }
 
 
@@ -243,6 +260,7 @@ async def update_settings(
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
         "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
+        "sales_channel_availability": _sales_channel_availability(db, tenant_id),
     }
 
 

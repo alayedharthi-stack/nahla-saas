@@ -64,18 +64,30 @@ export default function SalesChannelsSettingsTab() {
   const [storeSettings, setStoreSettings] = useState<StoreSettingsWithChannels | null>(null)
   const [storeUrl, setStoreUrl] = useState('')
   const [onlineEnabled, setOnlineEnabled] = useState(true)
-  const [mapsLocation, setMapsLocation] = useState('')
+  const [showroomAvailable, setShowroomAvailable] = useState(false)
+  const [onlineAvailable, setOnlineAvailable] = useState(false)
+
+  const applyAvailability = (data: {
+    store?: StoreSettingsWithChannels
+    sales_channel_availability?: {
+      online_store?: { available?: boolean }
+      showroom_visit?: { available?: boolean }
+    }
+  }) => {
+    const store = (data.store || {}) as StoreSettingsWithChannels
+    const avail = data.sales_channel_availability || {}
+    setStoreSettings(store)
+    setStoreUrl(store.store_url || '')
+    setOnlineEnabled(store.sales_channels?.online_store?.enabled ?? true)
+    setOnlineAvailable(Boolean(avail.online_store?.available))
+    setShowroomAvailable(Boolean(avail.showroom_visit?.available))
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const data = await settingsApi.getAll()
-      const store = (data.store || {}) as StoreSettingsWithChannels
-      setStoreSettings(store)
-      setStoreUrl(store.store_url || '')
-      setMapsLocation(store.google_maps_location || '')
-      setOnlineEnabled(store.sales_channels?.online_store?.enabled ?? true)
+      applyAvailability(await settingsApi.getAll())
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : sc.loadError)
     } finally {
@@ -103,8 +115,7 @@ export default function SalesChannelsSettingsTab() {
           },
         },
       })
-      const savedStore = updated.store as StoreSettingsWithChannels
-      setStoreSettings(savedStore)
+      applyAvailability(updated)
       setSaved(true)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : sc.saveError)
@@ -112,9 +123,6 @@ export default function SalesChannelsSettingsTab() {
       setSaving(false)
     }
   }
-
-  const onlineAvailable = onlineEnabled && Boolean(storeUrl.trim())
-  const showroomAvailable = Boolean(mapsLocation.trim())
 
   if (loading) {
     return (

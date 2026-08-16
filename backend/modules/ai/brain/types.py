@@ -810,10 +810,11 @@ class CommerceFacts:
     store_url_source: str = "none"
     store_url_resolve_reason: str = ""
     # Physical-location URL (Google / Apple / Waze maps) — populated
-    # from the May 2026 #36 maps resolver chain. Empty string means
-    # the merchant has not configured a maps URL anywhere; the FAQ
-    # template falls back to an honest clarifying line in that case.
+    # from merchant-admin branches first, then store_settings / snapshot.
     maps_url: str = ""
+    maps_url_source: str = "none"
+    # Tenant-scoped structured branch facts (id, city, maps_url, …).
+    branches: List[Dict[str, Any]] = field(default_factory=list)
     store_description: str = ""
     store_contact_phone: str = ""
     store_contact_email: str = ""

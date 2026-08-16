@@ -527,6 +527,94 @@ def apply_native_order_to_state(
     return resolution
 
 
+def persist_structured_catalog_order_referent(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    conversation: Any = None,
+) -> bool:
+    """Stamp native catalog-order identity onto persisted brain state.
+
+    Used when the inbound is persist-only (empty customer note) so Brain
+    never runs — the structured referent must still survive to the next turn.
+    """
+    meta = dict(inbound_metadata or {})
+    if meta.get("source_type") != "catalog_order" and not (
+        meta.get("product_items") or meta.get("order")
+    ):
+        return False
+    if db is None or not tenant_id or not (phone or conversation is not None):
+        return False
+    try:
+        from core.order_flow import _load_brain_state  # noqa: PLC0415
+        from modules.ai.brain.types import MerchantConversationState  # noqa: PLC0415
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        conv = conversation
+        bs: Dict[str, Any] = {}
+        if conv is None:
+            conv, bs = _load_brain_state(
+                db, tenant_id=int(tenant_id), phone=str(phone or ""),
+            )
+        else:
+            extra = dict(getattr(conv, "extra_metadata", None) or {})
+            raw_bs = extra.get("brain_state") or {}
+            bs = dict(raw_bs) if isinstance(raw_bs, dict) else {}
+        if conv is None:
+            return False
+        payload = parse_native_catalog_order(
+            {
+                "catalog_id": meta.get("catalog_id"),
+                "text": meta.get("customer_note"),
+                "product_items": meta.get("product_items") or [],
+            },
+            metadata=meta,
+        )
+        if not payload.items:
+            return False
+        state = MerchantConversationState.from_dict(bs if isinstance(bs, dict) else {})
+        apply_native_order_to_state(
+            db=db,
+            tenant_id=int(tenant_id),
+            state=state,
+            payload=payload,
+        )
+        updated = dict(bs or {})
+        updated["last_presented_products"] = list(
+            getattr(state, "last_presented_products", None) or []
+        )
+        updated["current_product_focus"] = getattr(state, "current_product_focus", None)
+        updated["cart_items"] = list(getattr(state, "cart_items", None) or [])
+        updated["stage"] = getattr(state, "stage", None) or updated.get("stage")
+        prep = getattr(state, "order_prep", None)
+        if prep is not None:
+            updated["order_prep"] = prep.to_dict() if hasattr(prep, "to_dict") else dict(prep)
+        extra_meta = dict(getattr(conv, "extra_metadata", None) or {})
+        extra_meta["brain_state"] = updated
+        conv.extra_metadata = extra_meta
+        flag_modified(conv, "extra_metadata")
+        db.add(conv)
+        db.flush()
+        logger.info(
+            "[WA_NATIVE_ORDER] persist_only_referent_stamped tenant=%s "
+            "presented=%d focus=%r",
+            tenant_id,
+            len(updated.get("last_presented_products") or []),
+            (updated.get("current_product_focus") or {}).get("title")
+            if isinstance(updated.get("current_product_focus"), dict)
+            else None,
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[WA_NATIVE_ORDER] persist_only_referent_stamp_failed tenant=%s",
+            tenant_id,
+        )
+        return False
+
+
 __all__ = [
     "NativeCatalogOrderItem",
     "NativeCatalogOrderPayload",
@@ -537,4 +625,5 @@ __all__ = [
     "extract_catalog_order_text_facts",
     "match_retailer_id",
     "parse_native_catalog_order",
+    "persist_structured_catalog_order_referent",
 ]

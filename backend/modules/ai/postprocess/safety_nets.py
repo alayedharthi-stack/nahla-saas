@@ -3031,24 +3031,27 @@ def _lookup_tenant_maps_url(db: Any, tenant_id: int) -> Tuple[str, str]:
         return "", "none"
     tenant_id = int(tenant_id)
 
-    # ── 0) Structured branch maps (Operations Center PR-A) ───────────
+    # ── 0) Merchant-admin branches (canonical location; not flag-gated) ─
     try:
         from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
-            lookup_structured_maps_url,
-            structured_branch_contacts_enabled,
+            resolve_canonical_location,
         )
 
-        if structured_branch_contacts_enabled():
-            url, src, branch_id = lookup_structured_maps_url(
-                db, tenant_id, message="",
+        loc = resolve_canonical_location(db, tenant_id)
+        if loc.maps_url:
+            logger.info(
+                "[MAPS_LINK_RESOLVER] tenant_id=%s source=%s "
+                "branch_id=%s url_len=%d",
+                tenant_id, loc.source, loc.branch_id or "-", len(loc.maps_url),
             )
-            if url:
-                logger.info(
-                    "[MAPS_LINK_RESOLVER] tenant_id=%s source=%s "
-                    "branch_id=%s url_len=%d",
-                    tenant_id, src, branch_id or "-", len(url),
-                )
-                return url, src
+            return loc.maps_url, loc.source
+        if loc.branches:
+            logger.info(
+                "[MAPS_LINK_RESOLVER] tenant_id=%s source=%s "
+                "structured_branch_without_maps=1",
+                tenant_id, loc.source,
+            )
+            return "", loc.source
     except Exception as exc:  # noqa: silent-ok - structured maps lookup must not block legacy resolver chain
         logger.debug(
             "safety_nets.maps_link | structured branch lookup failed "

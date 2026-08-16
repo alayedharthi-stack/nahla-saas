@@ -627,6 +627,23 @@ def apply_product_availability_truth_guard(
         return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
 
     topic = str(decision_topic or "").strip()
+    if topic in {
+        "persona_social",
+        "persona_identity",
+        "identity_collaboration",
+    }:
+        _emit_shadow(
+            evidence_state="-",
+            conflict_type="-",
+            guard_action="allowed_social_identity_turn",
+            would_rewrite=False,
+            reason="social_or_identity_topic_bypass",
+            customer_text_changed=False,
+        )
+        return ProductAvailabilityTruthGuardResult(
+            reply=original,
+            action="allowed_social_identity_turn",
+        )
     if topic == "product_knowledge_facts":
         _emit_shadow(
             evidence_state="-",

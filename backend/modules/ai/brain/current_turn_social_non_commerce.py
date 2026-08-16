@@ -417,6 +417,20 @@ def resolve_current_turn_social_non_commerce(
             confidence=max(_intent_confidence(intent), 0.90),
         )
 
+    meta = _metadata(inbound_metadata)
+    for _key in ("button_id", "button_provenance", "list_reply_id"):
+        _bid = str(meta.get(_key) or "").strip()
+        if _bid in {
+            "checkout_showroom_visit",
+            "checkout_store_link",
+            "checkout_whatsapp_fast",
+            "checkout_inquiry",
+        }:
+            return CurrentTurnSocialNonCommerce(
+                False,
+                reason="explicit_purchase_channel_payload",
+            )
+
     if is_colloquial_social_inventory_message(raw):
         return CurrentTurnSocialNonCommerce(
             True,

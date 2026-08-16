@@ -264,6 +264,17 @@ def build_turn_owner_contract(
             POSTPROCESS_PRODUCT_ORDERING_PROMPT,
         })
 
+    elif topic in {"persona_social", "persona_identity", "identity_collaboration"}:
+        protected_final_reply = True
+        block_catalog_push = True
+        pause_order_slot_collection = True
+        block_product_ordering_prompt = True
+        blocked.update({
+            POSTPROCESS_CATALOG_GROUNDING,
+            POSTPROCESS_ORDER_SLOT_REPLAY,
+            POSTPROCESS_PRODUCT_ORDERING_PROMPT,
+        })
+
     elif owner in {"commerce_entry_catalog", "commerce_entry_catalog_delivery"}:
         protected_final_reply = True
         block_product_benefit_rewrite = True

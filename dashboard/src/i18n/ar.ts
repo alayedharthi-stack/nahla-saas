@@ -156,7 +156,7 @@ const ar: Translations = {
       },
       showroom: {
         title:        'زيارة المعرض',
-        description:  'تتوفر عند وجود رابط Google Maps في إعدادات المتجر أو بيانات الفروع.',
+        description:  'تتوفر عند وجود رابط Google Maps في إعدادات المتجر أو على فرع نشط.',
         mapsHint:     'إعداد موقع Google Maps',
         branchesLink: 'إدارة الفروع',
       },
