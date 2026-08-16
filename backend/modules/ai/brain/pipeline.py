@@ -6172,6 +6172,9 @@ def _build_reply_state(
         "store_url": ctx.facts.store_url,
         "store_url_resolved": bool(getattr(ctx.facts, "store_url_resolved", False)),
         "store_url_source": str(getattr(ctx.facts, "store_url_source", "") or "none"),
+        "maps_url": str(getattr(ctx.facts, "maps_url", "") or ""),
+        "maps_url_source": str(getattr(ctx.facts, "maps_url_source", "") or "none"),
+        "branches": list(getattr(ctx.facts, "branches", None) or []),
         "has_products": ctx.facts.has_products,
         "product_count": ctx.facts.product_count,
         "in_stock_count": ctx.facts.in_stock_count,
@@ -6658,7 +6661,7 @@ def _build_reply_state(
         )
 
         _merchant_sales_channels = resolve_merchant_sales_channels(
-            None,
+            db,
             int(getattr(ctx, "tenant_id", 0) or 0),
             store_url=str(ctx.facts.store_url or ""),
             store_url_source=str(getattr(ctx.facts, "store_url_source", "") or ""),

@@ -367,7 +367,7 @@ class TestCanonicalShowroomLocation:
         assert "الحلقة الغربية" in (decision.reply_text or "") or decision.cta_url == active.maps_url
         assert "بطحاء قريش" not in (decision.reply_text or "")
 
-    def test_multiple_active_branches_use_primary_sort_order(self, monkeypatch) -> None:
+    def test_multiple_active_branches_use_sort_order_default(self, monkeypatch) -> None:
         _patch_brain_state(
             monkeypatch,
             {"stage": "discovery", "order_prep": {"awaiting_checkout_channel": True}},
@@ -430,3 +430,214 @@ class TestPreservedPurchaseControls:
         )
         assert url not in body
         assert body
+
+
+class TestMerchantAdminShowroomParity:
+    def test_active_branch_maps_makes_showroom_available_without_store_settings(
+        self, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("USE_STRUCTURED_BRANCH_CONTACTS", "0")
+        branch = SimpleNamespace(
+            id=1, tenant_id=10, name="المعرض", city="الرياض",
+            district="العليا", address="شارع التحلية",
+            maps_url="https://maps.app.goo.gl/canonical-showroom",
+            sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(branch,),
+        ):
+            from modules.ai.brain.commerce.sales_channel_capabilities import (
+                resolve_merchant_sales_channels,
+            )
+            from modules.operations.branch_contact_evidence import (
+                resolve_canonical_location,
+            )
+            from routers.settings import _sales_channel_availability
+
+            loc = resolve_canonical_location(_StubDB(), 10)
+            sales = resolve_merchant_sales_channels(_StubDB(), 10)
+            dash = _sales_channel_availability(_StubDB(), 10)
+        assert loc.maps_url == branch.maps_url
+        assert loc.source == "structured_branch"
+        assert loc.branch_id == 1
+        assert sales.showroom_visit.available is True
+        assert sales.maps_url == branch.maps_url
+        assert dash["showroom_visit"]["available"] is sales.showroom_visit.available
+        assert dash["maps_url"] == sales.maps_url
+
+    def test_inactive_branch_cannot_outrank_active(self) -> None:
+        active = SimpleNamespace(
+            id=1, tenant_id=10, name="المعرض", city="الطائف",
+            district="الحلقة الغربية", address="",
+            maps_url="https://maps.app.goo.gl/taif-showroom",
+            sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(active,),
+        ):
+            from modules.operations.branch_contact_evidence import (
+                resolve_canonical_location,
+            )
+            loc = resolve_canonical_location(_StubDB(), 10)
+        assert loc.maps_url == active.maps_url
+        assert "بطحاء قريش" not in loc.district
+        assert loc.city == "الطائف"
+
+    def test_legacy_store_settings_cannot_outrank_merchant_admin_branch(self) -> None:
+        branch = SimpleNamespace(
+            id=1, tenant_id=10, name="المعرض", city="الطائف",
+            district="الحلقة الغربية", address="",
+            maps_url="https://maps.app.goo.gl/taif-showroom",
+            sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(branch,),
+        ):
+            from modules.operations.branch_contact_evidence import (
+                resolve_canonical_location,
+            )
+            loc = resolve_canonical_location(_StubDB(), 10)
+        assert loc.maps_url == branch.maps_url
+        assert loc.source == "structured_branch"
+
+    def test_branch_facts_are_tenant_isolated(self) -> None:
+        t1 = SimpleNamespace(
+            id=1, tenant_id=1, name="فرع تجريبي", city="جدة",
+            district="", address="", maps_url="https://maps.app.goo.gl/t1",
+            sort_order=0, is_active=True,
+        )
+        t10 = SimpleNamespace(
+            id=9, tenant_id=10, name="المعرض", city="الرياض",
+            district="", address="", maps_url="https://maps.app.goo.gl/t10",
+            sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            side_effect=lambda _db, tid: (t1,) if int(tid) == 1 else (t10,),
+        ):
+            from modules.operations.branch_contact_evidence import (
+                resolve_canonical_location,
+            )
+            a = resolve_canonical_location(_StubDB(), 1)
+            b = resolve_canonical_location(_StubDB(), 10)
+        assert a.maps_url != b.maps_url
+        assert a.branch_id != b.branch_id
+
+    def test_brain_facts_receive_structured_branches(self) -> None:
+        from modules.ai.brain.types import CommerceFacts
+
+        facts = CommerceFacts()
+        facts.branches = [{
+            "id": 1, "name": "المعرض", "city": "الرياض",
+            "maps_url": "https://maps.app.goo.gl/canonical-showroom",
+            "sort_order": 0, "is_active": True,
+        }]
+        facts.maps_url = facts.branches[0]["maps_url"]
+        facts.maps_url_source = "structured_branch"
+        assert facts.branches[0]["maps_url"] == facts.maps_url
+        assert facts.maps_url_source == "structured_branch"
+
+    def test_showroom_cta_uses_canonical_maps_url(self, monkeypatch) -> None:
+        _patch_brain_state(
+            monkeypatch,
+            {"stage": "discovery", "order_prep": {"awaiting_checkout_channel": True}},
+        )
+        monkeypatch.setenv("CHECKOUT_ROUTE_OWNER_ENABLED", "1")
+        url = "https://maps.app.goo.gl/canonical-showroom"
+        loc = SimpleNamespace(
+            maps_url=url, source="structured_branch", branch_id=1,
+            name="المعرض", city="الرياض", district="العليا", address="",
+            branches=({"id": 1, "maps_url": url},),
+        )
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.load_channel_capabilities",
+            return_value=_caps(),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ), patch(
+            "modules.operations.branch_contact_evidence.resolve_canonical_location",
+            return_value=loc,
+        ):
+            decision = evaluate_checkout_route_owner(
+                _StubDB(),
+                tenant_id=10,
+                customer_phone="966500000001",
+                inbound_metadata={"button_id": "checkout_showroom_visit"},
+                message="ignored",
+            )
+        assert decision is not None
+        assert decision.cta_url == url
+
+    def test_escalation_capability_does_not_pause_ai(self) -> None:
+        from core.ai_disabled_gate import _handoff_session_disables_ai
+
+        notify = SimpleNamespace(status="active", handoff_reason="staff_notify")
+        assert _handoff_session_disables_ai(notify) is False
+        convo = SimpleNamespace(ai_paused=False)
+        assert convo.ai_paused is False
+
+    def test_genuine_human_takeover_still_disables_ai(self) -> None:
+        from core.ai_disabled_gate import (
+            REASON_AI_PAUSED,
+            _handoff_session_disables_ai,
+            disabled_reason_for_conversation,
+        )
+
+        takeover = SimpleNamespace(status="active", handoff_reason="human_takeover")
+        assert _handoff_session_disables_ai(takeover) is True
+        convo = SimpleNamespace(
+            ai_paused=True,
+            status="human",
+            extra_metadata={},
+        )
+        reason = disabled_reason_for_conversation(convo)
+        assert reason == REASON_AI_PAUSED
+
+
+class TestControlledReplaySequences:
+    def test_greeting_after_commerce_stays_social(self) -> None:
+        intent = Intent(name="greeting", confidence=0.96, raw_message="هلا")
+        state = MerchantConversationState(
+            stage="ordering",
+            current_product_focus={"id": 88, "title": "عطر ورد 100ml"},
+        )
+        verdict = resolve_current_turn_social_non_commerce(
+            "هلا", intent=intent, state=state,
+        )
+        assert verdict.matched is True
+        assert verdict.category == "greeting"
+
+    def test_recognition_with_order_evidence_stays_identity(self) -> None:
+        intent = Intent(name="who_are_you", confidence=0.95, raw_message="تعرفني؟")
+        state = MerchantConversationState(stage="ordering")
+        verdict = resolve_current_turn_social_non_commerce(
+            "تعرفني؟", intent=intent, state=state,
+        )
+        assert verdict.matched is True
+        assert verdict.category == "persona_identity"
+
+    def test_catalog_order_then_deictic_resolves_same_product(self) -> None:
+        state = MerchantConversationState(turn=3)
+        stamp_structured_presented_products(
+            state,
+            [{
+                "id": 143,
+                "product_name": "عطر ورد 100ml",
+                "product_retailer_id": "sku-rose-100",
+            }],
+            provenance="catalog_order_selected",
+            customer_selected=True,
+        )
+        loaded = MerchantConversationState.from_dict(state.to_dict())
+        trusted = resolve_trusted_focus_for_deictic(loaded, "ابي هذا")
+        assert str(trusted.product_id) == "143"
+
+    def test_tenant1_control_channels_remain_capability_driven(self) -> None:
+        titles = [b["reply"]["title"] for b in build_channel_choice_buttons(_caps())]
+        assert "زيارة المعرض" in titles
+        empty = build_channel_choice_buttons(_caps(store=False, showroom=False))
+        assert [b["reply"]["title"] for b in empty] == ["طلب سريع واتساب"]

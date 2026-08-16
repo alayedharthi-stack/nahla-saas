@@ -104,48 +104,18 @@ class MerchantSalesChannels:
 
 
 def _resolve_maps_url(db: Any, tenant_id: int) -> tuple[str, str]:
-    maps_url = ""
-    evidence = "none"
+    """Showroom maps evidence — same canonical location as CTA and facts."""
     try:
-        from database.models import StoreKnowledgeSnapshot, TenantSettings  # noqa: PLC0415
-
-        snap = (
-            db.query(StoreKnowledgeSnapshot)
-            .filter(StoreKnowledgeSnapshot.tenant_id == tenant_id)
-            .first()
+        from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+            resolve_canonical_location,
         )
-        if snap and snap.store_profile:
-            maps_url = str((snap.store_profile or {}).get("maps_url") or "").strip()
-            if maps_url:
-                evidence = "merchant_profile_maps_url"
 
-        settings = (
-            db.query(TenantSettings)
-            .filter(TenantSettings.tenant_id == tenant_id)
-            .first()
-        )
-        if settings and not maps_url:
-            store_cfg = dict(settings.store_settings or {})
-            maps_url = str(store_cfg.get("google_maps_location") or "").strip()
-            if maps_url:
-                evidence = "structured_settings_maps_url"
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — maps probe must not block channel resolution
+        loc = resolve_canonical_location(db, int(tenant_id or 0))
+        if loc.showroom_visit_available:
+            return loc.maps_url, loc.source or "structured_branch"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical location must not block channels
         pass
-
-    if not maps_url:
-        try:
-            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
-                structured_branch_contacts_enabled,
-                tenant_has_structured_branch_data,
-            )
-
-            if structured_branch_contacts_enabled() and tenant_has_structured_branch_data(
-                db, int(tenant_id or 0),
-            ):
-                evidence = "structured_branch_data"
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — branch probe must not block channel resolution
-            pass
-    return maps_url, evidence
+    return "", "none"
 
 
 def resolve_merchant_sales_channels(
@@ -190,10 +160,15 @@ def resolve_merchant_sales_channels(
 
     resolved_maps = str(maps_url or "").strip()
     maps_evidence = "maps_url" if resolved_maps else "none"
+    showroom_from_branch = False
     if db is not None and tenant_id and not resolved_maps:
         resolved_maps, maps_evidence = _resolve_maps_url(db, int(tenant_id))
+        showroom_from_branch = maps_evidence in {
+            "structured_branch",
+            "structured_branch_location",
+        }
 
-    showroom_available = bool(resolved_maps) or maps_evidence == "structured_branch_data"
+    showroom_available = bool(resolved_maps) or showroom_from_branch
 
     online_available = store_url_evidence_activates_channel(
         source=resolved_source,

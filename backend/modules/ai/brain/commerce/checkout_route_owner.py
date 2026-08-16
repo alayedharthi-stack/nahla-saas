@@ -922,26 +922,24 @@ def _storefront_delivery_decision(
 
 
 def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDecision:
-    """Deliver the canonical active/primary showroom location as structured CTA."""
+    """Deliver the default-by-sort-order active showroom as structured CTA."""
     from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
         _build_location_reply,
         _lookup_tenant_maps_url,
     )
 
-    branch = None
+    loc = None
     try:
         from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
-            load_active_branches,
+            resolve_canonical_location,
         )
 
-        active = load_active_branches(db, int(tenant_id or 0))
-        if active:
-            branch = active[0]
+        loc = resolve_canonical_location(db, int(tenant_id or 0))
     except Exception:  # noqa: BLE001  # noqa: silent-ok — branch load must not block maps fallback
-        branch = None
+        loc = None
 
-    maps_url = str(getattr(branch, "maps_url", "") or "").strip()
-    source = "structured_branch" if maps_url else ""
+    maps_url = str(getattr(loc, "maps_url", "") or "").strip()
+    source = str(getattr(loc, "source", "") or "")
     if not maps_url:
         maps_url, source = _lookup_tenant_maps_url(db, int(tenant_id or 0))
     if not maps_url:
@@ -952,11 +950,11 @@ def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDeci
             clear_awaiting_channel=True,
         )
 
-    city = str(getattr(branch, "city", "") or "").strip()
-    district = str(getattr(branch, "district", "") or "").strip()
-    address = str(getattr(branch, "address", "") or "").strip()
-    name = str(getattr(branch, "name", "") or "").strip()
-    has_details = bool(branch and (city or district or address or name))
+    city = str(getattr(loc, "city", "") or "").strip()
+    district = str(getattr(loc, "district", "") or "").strip()
+    address = str(getattr(loc, "address", "") or "").strip()
+    name = str(getattr(loc, "name", "") or "").strip()
+    has_details = bool(city or district or address or name)
     body = _build_location_reply(
         maps_url,
         branch_name=name,
@@ -978,7 +976,7 @@ def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDeci
         "branch_id=%s city=%r",
         tenant_id,
         source or "-",
-        getattr(branch, "id", None) if branch is not None else None,
+        getattr(loc, "branch_id", None) if loc is not None else None,
         city,
     )
     return CheckoutRouteDecision(

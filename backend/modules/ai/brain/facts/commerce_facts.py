@@ -375,30 +375,33 @@ class DefaultFactsLoader:
         except Exception:  # noqa: silent-ok — unified store URL probe must not break facts loader
             pass
 
-        # ── 6. KB free-text fallback for maps_url (May 2026 #38) ────────
-        # Parity with :func:`modules.ai.postprocess.safety_nets.
-        # _lookup_tenant_maps_url`. Pre-fix the LLM-facing facts only
-        # had layers 1 (snapshot) + 2 (store_settings); the safety net
-        # had a 3rd layer (KB free-text scan in ``branches`` /
-        # ``store_story`` / ``custom`` sections). When a merchant's
-        # maps URL lives only in a KB section, the LLM template
-        # emitted the awkward "أخبرنا بالفرع" fallback while the
-        # safety net later injected the actual URL — the customer
-        # then saw both, in sequence, contradicting each other. By
-        # mirroring the KB layer here, the template renders the
-        # canonical "موقعنا 📍\n{url}" reply on the first pass and
-        # the safety net stays out of the way (its
-        # ``url_already_in_reply`` short-circuit fires). Failures
-        # are non-fatal — degrade to whatever the upper layers
-        # already populated.
-        if not facts.maps_url:
+        # ── 6. Canonical merchant-admin location (branches first) ────────
+        try:
+            from modules.operations.branch_contact_evidence import (  # noqa: PLC0415
+                resolve_canonical_location,
+            )
+
+            loc = resolve_canonical_location(db, tenant_id)
+            facts.branches = list(loc.branches)
+            if loc.maps_url:
+                facts.maps_url = loc.maps_url
+                facts.maps_url_source = loc.source
+            elif loc.branches:
+                facts.maps_url = ""
+                facts.maps_url_source = loc.source
+        except Exception:  # noqa: silent-ok — canonical location must not break facts loader
+            pass
+
+        # KB free-text maps only when no merchant-admin branch location exists.
+        if not facts.maps_url and not facts.branches:
             try:
                 from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
                     _lookup_tenant_maps_url,
                 )
-                kb_maps_url, _kb_src = _lookup_tenant_maps_url(db, tenant_id)
+                kb_maps_url, kb_src = _lookup_tenant_maps_url(db, tenant_id)
                 if kb_maps_url:
                     facts.maps_url = kb_maps_url
+                    facts.maps_url_source = str(kb_src or "kb")
             except Exception:  # noqa: silent-ok — KB scan errors must not break facts loader
                 pass
 

@@ -97,14 +97,29 @@ export interface StoreAIPatchResponse {
   ai: AISettings
 }
 
+export interface SalesChannelAvailabilitySlot {
+  enabled?: boolean
+  available?: boolean
+  evidence?: string
+}
+
+export interface SalesChannelAvailability {
+  online_store?: SalesChannelAvailabilitySlot
+  whatsapp_quick_order?: SalesChannelAvailabilitySlot
+  showroom_visit?: SalesChannelAvailabilitySlot
+  maps_url?: string
+  store_url?: string
+}
+
+import { apiCall } from './client'
+
 export interface AllSettings {
   whatsapp: WhatsAppSettings
   ai: AISettings
   store: StoreSettings
   notifications: NotificationSettings
+  sales_channel_availability?: SalesChannelAvailability
 }
-
-import { apiCall } from './client'
 
 export const settingsApi = {
   getAll: () => apiCall<AllSettings>('/settings'),
