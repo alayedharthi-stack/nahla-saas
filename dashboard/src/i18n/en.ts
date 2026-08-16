@@ -152,7 +152,7 @@ const en: Translations = {
       },
       showroom: {
         title:        'Showroom visit',
-        description:  'Available when Google Maps or branch data is configured.',
+        description:  'Available when a Google Maps URL is set in store settings or on an active branch.',
         mapsHint:     'Configure Google Maps location',
         branchesLink: 'Manage branches',
       },

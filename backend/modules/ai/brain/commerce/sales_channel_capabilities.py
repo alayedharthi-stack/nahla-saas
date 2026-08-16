@@ -111,7 +111,7 @@ def _resolve_maps_url(db: Any, tenant_id: int) -> tuple[str, str]:
         )
 
         loc = resolve_canonical_location(db, int(tenant_id or 0))
-        if loc.showroom_visit_available:
+        if loc.showroom_visit_available and loc.maps_url:
             return loc.maps_url, loc.source or "structured_branch"
     except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical location must not block channels
         pass
@@ -160,15 +160,10 @@ def resolve_merchant_sales_channels(
 
     resolved_maps = str(maps_url or "").strip()
     maps_evidence = "maps_url" if resolved_maps else "none"
-    showroom_from_branch = False
     if db is not None and tenant_id and not resolved_maps:
         resolved_maps, maps_evidence = _resolve_maps_url(db, int(tenant_id))
-        showroom_from_branch = maps_evidence in {
-            "structured_branch",
-            "structured_branch_location",
-        }
 
-    showroom_available = bool(resolved_maps) or showroom_from_branch
+    showroom_available = bool(resolved_maps)
 
     online_available = store_url_evidence_activates_channel(
         source=resolved_source,

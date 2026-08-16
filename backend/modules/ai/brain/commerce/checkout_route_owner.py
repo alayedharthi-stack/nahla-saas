@@ -925,7 +925,6 @@ def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDeci
     """Deliver the default-by-sort-order active showroom as structured CTA."""
     from modules.ai.postprocess.safety_nets import (  # noqa: PLC0415
         _build_location_reply,
-        _lookup_tenant_maps_url,
     )
 
     loc = None
@@ -940,8 +939,6 @@ def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDeci
 
     maps_url = str(getattr(loc, "maps_url", "") or "").strip()
     source = str(getattr(loc, "source", "") or "")
-    if not maps_url:
-        maps_url, source = _lookup_tenant_maps_url(db, int(tenant_id or 0))
     if not maps_url:
         return CheckoutRouteDecision(
             reply_text=_MSG_SHOWROOM_VISIT_UNAVAILABLE,

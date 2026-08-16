@@ -324,7 +324,8 @@ class CanonicalLocationResolution:
 
     @property
     def showroom_visit_available(self) -> bool:
-        return bool(self.maps_url) or bool(self.branches)
+        """Showroom is executable only when a canonical Maps URL exists."""
+        return bool(str(self.maps_url or "").strip())
 
 
 def resolve_canonical_location(
@@ -335,9 +336,14 @@ def resolve_canonical_location(
 ) -> CanonicalLocationResolution:
     """Authoritative location for capabilities, facts, dashboard, and CTA.
 
-    Precedence:
-      1. Active ``merchant_branches`` with visit evidence (default-by-sort-order;
-         ``resolve_branch_for_message`` may pick a city/name match).
+    Showroom visit is available only when this resolver returns a Maps URL.
+    Address/city without maps_url is Brain-visible branch context, not a
+    purchase-channel capability.
+
+    Precedence for maps_url:
+      1. Active ``merchant_branches`` with maps_url (default-by-sort-order;
+         ``resolve_branch_for_message`` may pick a city/name match among
+         mapped branches).
       2. ``StoreKnowledgeSnapshot.store_profile.maps_url``
       3. ``TenantSettings.store_settings.google_maps_location``
     KB free-text is not part of this resolver and must not activate showroom.
@@ -348,24 +354,24 @@ def resolve_canonical_location(
         return empty
 
     branches = load_active_branches(db, int(tenant_id))
-    visit = tuple(b for b in branches if branch_has_visit_evidence(b))
-    visit_facts = tuple(_branch_fact_dict(b) for b in visit)
-    chosen = None
-    if visit:
+    branch_facts = tuple(_branch_fact_dict(b) for b in branches)
+    mapped = tuple(
+        b for b in branches if str(getattr(b, "maps_url", "") or "").strip()
+    )
+    if mapped:
         chosen = resolve_branch_for_message(db, int(tenant_id), message)
-        if chosen is None or not branch_has_visit_evidence(chosen):
-            with_maps = tuple(b for b in visit if str(getattr(b, "maps_url", "") or "").strip())
-            chosen = with_maps[0] if with_maps else visit[0]
+        if chosen is None or not str(getattr(chosen, "maps_url", "") or "").strip():
+            chosen = mapped[0]
         maps_url = str(getattr(chosen, "maps_url", "") or "").strip()
         return CanonicalLocationResolution(
             maps_url=maps_url,
-            source="structured_branch" if maps_url else "structured_branch_location",
+            source="structured_branch",
             branch_id=int(getattr(chosen, "id", 0) or 0) or None,
             name=str(getattr(chosen, "name", "") or "").strip(),
             city=str(getattr(chosen, "city", "") or "").strip(),
             district=str(getattr(chosen, "district", "") or "").strip(),
             address=str(getattr(chosen, "address", "") or "").strip(),
-            branches=visit_facts,
+            branches=branch_facts,
         )
 
     maps_url = ""
@@ -396,8 +402,14 @@ def resolve_canonical_location(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — legacy maps fallback must not block branches
         pass
     if not maps_url:
+        if branch_facts:
+            return CanonicalLocationResolution(branches=branch_facts)
         return empty
-    return CanonicalLocationResolution(maps_url=maps_url, source=source)
+    return CanonicalLocationResolution(
+        maps_url=maps_url,
+        source=source,
+        branches=branch_facts,
+    )
 
 
 def tenant_has_structured_branch_data(db: Any, tenant_id: int) -> bool:

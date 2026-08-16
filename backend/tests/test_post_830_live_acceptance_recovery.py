@@ -598,6 +598,127 @@ class TestMerchantAdminShowroomParity:
         assert reason == REASON_AI_PAUSED
 
 
+def _showroom_contract_layers(tenant_id: int = 10) -> dict:
+    from modules.ai.brain.commerce.checkout_route_owner import (
+        _showroom_delivery_decision,
+    )
+    from modules.ai.brain.commerce.sales_channel_capabilities import (
+        resolve_merchant_sales_channels,
+    )
+    from modules.operations.branch_contact_evidence import (
+        resolve_canonical_location,
+    )
+    from routers.settings import _sales_channel_availability
+
+    db = _StubDB()
+    loc = resolve_canonical_location(db, tenant_id)
+    sales = resolve_merchant_sales_channels(db, tenant_id)
+    dash = _sales_channel_availability(db, tenant_id)
+    decision = _showroom_delivery_decision(db, tenant_id=tenant_id)
+    dashboard = bool((dash.get("showroom_visit") or {}).get("available"))
+    purchase = bool(sales.showroom_visit.available)
+    brain = bool(loc.showroom_visit_available)
+    execution = decision.reason == "showroom_location_delivered"
+    return {
+        "loc": loc,
+        "sales": sales,
+        "dash": dash,
+        "decision": decision,
+        "dashboard": dashboard,
+        "brain": brain,
+        "purchase": purchase,
+        "execution": execution,
+    }
+
+
+class TestShowroomCapabilityContract:
+    """One Maps-required definition for dashboard, Brain, purchase channel, CTA."""
+
+    def test_case1_active_branch_with_maps_all_layers_available(self) -> None:
+        branch = SimpleNamespace(
+            id=1, tenant_id=10, name="المعرض", city="الرياض",
+            district="العليا", address="شارع التحلية",
+            maps_url="https://maps.app.goo.gl/canonical-showroom",
+            sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(branch,),
+        ):
+            layers = _showroom_contract_layers(10)
+        assert layers["dashboard"] is True
+        assert layers["brain"] is True
+        assert layers["purchase"] is True
+        assert layers["execution"] is True
+        assert layers["dashboard"] == layers["brain"] == layers["purchase"] == layers["execution"]
+        assert layers["decision"].cta_url == branch.maps_url
+        assert layers["sales"].maps_url == branch.maps_url
+        assert layers["dash"]["maps_url"] == branch.maps_url
+
+    def test_case2_address_only_branch_all_layers_unavailable(self) -> None:
+        branch = SimpleNamespace(
+            id=2, tenant_id=10, name="فرع تجريبي عام", city="الرياض",
+            district="العليا", address="شارع التحلية",
+            maps_url="", sort_order=0, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(branch,),
+        ):
+            layers = _showroom_contract_layers(10)
+        assert layers["loc"].branches
+        assert not layers["loc"].maps_url
+        assert layers["dashboard"] is False
+        assert layers["brain"] is False
+        assert layers["purchase"] is False
+        assert layers["execution"] is False
+        assert layers["dashboard"] == layers["brain"] == layers["purchase"] == layers["execution"]
+        assert not (layers["decision"].cta_url or "").strip()
+        assert layers["decision"].reason == "showroom_visit_unavailable"
+
+    def test_case3_no_branch_all_layers_unavailable(self) -> None:
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(),
+        ):
+            layers = _showroom_contract_layers(10)
+        assert not layers["loc"].maps_url
+        assert not layers["loc"].branches
+        assert layers["dashboard"] is False
+        assert layers["brain"] is False
+        assert layers["purchase"] is False
+        assert layers["execution"] is False
+        assert layers["dashboard"] == layers["brain"] == layers["purchase"] == layers["execution"]
+        assert not (layers["decision"].cta_url or "").strip()
+
+    def test_case4_multiple_active_branches_keep_sort_order_default(self) -> None:
+        primary = SimpleNamespace(
+            id=1, tenant_id=10, name="فرع الرياض", city="الرياض",
+            district="العليا", address="",
+            maps_url="https://maps.app.goo.gl/riyadh", sort_order=0, is_active=True,
+        )
+        secondary = SimpleNamespace(
+            id=2, tenant_id=10, name="فرع جدة", city="جدة",
+            district="الحمراء", address="",
+            maps_url="https://maps.app.goo.gl/jeddah", sort_order=1, is_active=True,
+        )
+        with patch(
+            "modules.operations.branch_contact_evidence.load_active_branches",
+            return_value=(primary, secondary),
+        ):
+            layers = _showroom_contract_layers(10)
+        assert layers["dashboard"] is True
+        assert layers["brain"] is True
+        assert layers["purchase"] is True
+        assert layers["execution"] is True
+        assert layers["dashboard"] == layers["brain"] == layers["purchase"] == layers["execution"]
+        assert layers["loc"].maps_url == primary.maps_url
+        assert layers["loc"].branch_id == primary.id
+        assert layers["decision"].cta_url == primary.maps_url
+        assert layers["decision"].cta_url != secondary.maps_url
+        assert layers["sales"].maps_url == primary.maps_url
+
+
 class TestControlledReplaySequences:
     def test_greeting_after_commerce_stays_social(self) -> None:
         intent = Intent(name="greeting", confidence=0.96, raw_message="هلا")
