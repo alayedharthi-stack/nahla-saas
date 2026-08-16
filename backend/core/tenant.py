@@ -114,7 +114,8 @@ DEFAULT_AI: Dict[str, Any] = {
         "dua",
         "payment_media_intro",
     ],
-    # Deny-all default — acceptance tenants must opt in via stored ai_settings.
+    # Obsolete leftover JSON key. Runtime ignores it. Canonical compose-overlay
+    # opt-in is persona_composer_enabled + store_ai_mode=test + HA phone.
     "persona_composer_allowlist_tenants": [],
 }
 
@@ -127,7 +128,9 @@ DEFAULT_STORE: Dict[str, Any] = {
     "store_name_en_source": "",
     "store_logo_url":       "",
     "store_url":            "",
-    "platform_type":        "salla",
+    # Dashboard label only — not a live commerce connection. Connection SoT
+    # is Integration rows (+ non-empty credentials). See commerce_platform.py.
+    "platform_type":        "custom",
     "salla_client_id":      "",
     "salla_client_secret":  "",
     "salla_access_token":   "",

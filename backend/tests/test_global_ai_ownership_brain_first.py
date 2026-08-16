@@ -119,6 +119,13 @@ class TestStructuredExceptionsRemainDeterministic:
             _text_meta(), message="RIYD1234",
         )
 
+    def test_national_short_code_does_not_match_natural_language(self) -> None:
+        sentence = "العنوان الوطني RIYD1234 قريب من البيت"
+        assert unstructured_natural_language_requires_brain(
+            _text_meta(), message=sentence,
+        )
+        assert not ofv2_may_own_prebrain(_text_meta(), message=sentence)
+
 
 class TestNameSlotDoesNotIngestFollowUp:
     def test_follow_up_is_not_customer_identity(self) -> None:

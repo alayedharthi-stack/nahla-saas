@@ -84,7 +84,7 @@ class StoreSettingsIn(BaseModel):
     store_name_en: str = ""
     store_logo_url: str = ""
     store_url: str = ""
-    platform_type: str = "salla"
+    platform_type: str = "custom"
     salla_client_id: str = ""
     salla_client_secret: str = ""
     salla_access_token: str = ""

@@ -1229,19 +1229,18 @@ def _existing_sections_for_prompt(
 
 
 def _platform_signal_for_tenant(db: Session, tenant_id: int) -> PlatformSignal:
-    """Read the store_settings JSONB to decide which platform is connected.
+    """Resolve whether a commerce platform is actually connected.
 
-    Mirrors the precedence-banner logic in the dashboard so the
-    classifier prompt sees the same world the merchant does.
+    Source of truth is Integration rows (and non-empty credentials).
+    ``store_settings.platform_type`` alone is a stale/onboarding label and
+    must not mark a merchant as Salla-connected.
     """
-    try:
-        settings = get_or_create_settings(db, tenant_id)
-        store = dict(settings.store_settings or {})
-    except Exception:
-        store = {}
+    from core.commerce_platform import (  # noqa: PLC0415
+        resolve_connected_commerce_platform,
+    )
 
-    platform = str(store.get("platform_type") or "").strip().lower()
-    if platform == "salla" and store.get("salla_access_token"):
+    platform = resolve_connected_commerce_platform(db, tenant_id)
+    if platform == "salla":
         return PlatformSignal(
             connected=True,
             platform="salla",
@@ -1251,7 +1250,7 @@ def _platform_signal_for_tenant(db: Session, tenant_id: int) -> PlatformSignal:
                 "create/update لهذه الحقول؛ أنتج تعارضاً (conflict) بدلاً منها."
             ),
         )
-    if platform == "zid" and store.get("zid_client_id"):
+    if platform == "zid":
         return PlatformSignal(
             connected=True,
             platform="zid",
@@ -1260,7 +1259,7 @@ def _platform_signal_for_tenant(db: Session, tenant_id: int) -> PlatformSignal:
                 "تتجاوز هذه الحقول من قاعدة المعرفة."
             ),
         )
-    if platform == "shopify" and store.get("shopify_access_token"):
+    if platform == "shopify":
         return PlatformSignal(
             connected=True,
             platform="shopify",
