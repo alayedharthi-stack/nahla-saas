@@ -135,6 +135,13 @@ def evaluate_staff_contact_policy(
     if not staff_contact_policy_enabled():
         return None
 
+    from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+        unstructured_natural_language_requires_brain,
+    )
+
+    if unstructured_natural_language_requires_brain(message=message or ""):
+        return None
+
     from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
         MSG_AMBIGUOUS_STAFF_CLARIFY,
         _CONTACT_ASK_RE,

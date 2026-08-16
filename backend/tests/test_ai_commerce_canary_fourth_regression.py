@@ -25,9 +25,6 @@ from core.wa_address_ingestion import (  # noqa: E402
     resolve_address_state_patch,
 )
 from models import MerchantKnowledgeSection  # noqa: E402
-from modules.ai.brain.commerce.catalog_product_grounding import (  # noqa: E402
-    build_catalog_grounded_list_reply,
-)
 from modules.ai.brain.commerce.commerce_turn_contract import is_address_on_file_claim  # noqa: E402
 from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: E402
     apply_payment_credential_guard,
@@ -57,7 +54,6 @@ from tests.commerce_scenario_fixtures import (  # noqa: E402
 _PLACEHOLDER_IBAN = "SA1234567890123456789012"
 _VERIFIED_IBAN = "SA0380000000608010167519"
 _EGYPTIAN_MARKERS = ("كام", "بتاعنا", "بتاع", "لسه")
-_CATALOG_BROWSE_PHRASE = "أقدر أعرض لك الخيارات المؤكدة من الكتالوج"
 
 
 @pytest.fixture(autouse=True)
@@ -333,9 +329,9 @@ class TestAddressRouting:
             customer_phone=DEFAULT_PHONE,
             message=text,
         )
-        assert result.handled
-        assert _CATALOG_BROWSE_PHRASE not in result.reply
-        assert build_catalog_grounded_list_reply(["كفر جوال"]) != result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestProductImageRequest:
@@ -368,9 +364,9 @@ class TestProductImageRequest:
             message="ابي أشوف صورته",
             inbound_metadata={"native_catalog_sent": True},
         )
-        assert result.handled
-        assert result.reason == "order_flow_product_image_request"
-        assert "حياك الله" not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 class TestDedupObservability:

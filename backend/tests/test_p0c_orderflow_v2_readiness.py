@@ -280,7 +280,12 @@ class TestCommercePermissionsGate:
                         db,
                         tenant_id=tenant.id,
                         customer_phone="966500000001",
-                        message="الرياض",
+                        message="",
+                        inbound_metadata={
+                            "source_type": "catalog_order",
+                            "product_items": [{"retailer_id": "SKU-1", "quantity": 1}],
+                        },
+                        inbound_normalized_type="catalog_order",
                     )
         assert result.handled is False
         assert result.reason == "commerce_permission_denied:create_orders"
@@ -352,7 +357,7 @@ class TestDisabledAndFallback:
 
 
 class TestCanaryPreserved:
-    def test_test_mode_canary_still_live(self) -> None:
+    def test_test_mode_does_not_select_a_different_ofv2_owner(self) -> None:
         with patch("modules.ai.order_flow_v2.enforcement.is_ai_allowed_by_store_mode") as mode:
             from core.ai_disabled_gate import StoreAIModeDecision  # noqa: PLC0415
             from core.tenant import STORE_AI_MODE_TEST  # noqa: PLC0415
@@ -365,5 +370,6 @@ class TestCanaryPreserved:
                     customer_phone="966500000001",
                     conversation=_conversation(),
                 )
-        assert decision.live is True
-        assert decision.reason == "test_mode_canary_enforcement"
+        assert decision.live is False
+        assert decision.shadow_log is True
+        assert decision.reason == "shadow_only"

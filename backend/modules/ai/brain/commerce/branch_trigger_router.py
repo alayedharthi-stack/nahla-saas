@@ -393,6 +393,16 @@ def evaluate_branch_trigger_routing(
     inbound_metadata: Optional[dict] = None,
 ) -> Optional[BranchTriggerDecision]:
     """Return a pre-brain decision when structured keyword routing matches."""
+    from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: PLC0415
+        unstructured_natural_language_requires_brain,
+    )
+
+    if unstructured_natural_language_requires_brain(
+        inbound_metadata,
+        message=message or "",
+    ):
+        return None
+
     from modules.ai.brain.turn_owner_contract import (  # noqa: PLC0415
         should_suppress_prebrain_branch_routing,
     )

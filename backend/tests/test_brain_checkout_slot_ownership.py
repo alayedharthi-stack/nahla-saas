@@ -62,9 +62,9 @@ class TestActiveCheckoutSlotOwnership:
                 customer_phone="966500000001",
                 message="انا اخترت المنتجات",
             )
-        assert result.handled
-        assert result.reason == "catalog_selection_acknowledged"
-        assert "اختياراتك" in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_after_valid_address_delivery_method_defaults_to_delivery_or_confirms_delivery(self) -> None:
         prep = {

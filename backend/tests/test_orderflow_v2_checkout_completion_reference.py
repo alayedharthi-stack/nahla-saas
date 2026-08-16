@@ -15,7 +15,6 @@ if _BACKEND not in sys.path:
 
 from core.order_creation_evidence import (  # noqa: E402
     NO_ORDER_NUMBER_YET_AR,
-    ORDER_REFERENCE_CREATE_FAILED_AR,
 )
 from modules.ai.brain.postprocess.order_creation_claim_guard import (  # noqa: E402
     apply_order_creation_claim_guard,
@@ -112,16 +111,10 @@ class TestOrderFlowV2CheckoutCompletionReference:
             message="تحويل الراجحي",
         )
 
-        assert result.handled
-        assert result.reason == "checkout_complete_with_reference"
-        assert "تم إنشاء طلبك بنجاح" in result.reply
-        assert "NHL-1-000501" in result.reply
-        assert result.state_patch.get("order_creation_status") == "created"
-        assert result.state_patch.get("draft_order_reference") == "NHL-1-000501"
-        sync_mock.assert_called_once()
-        call_kw = sync_mock.call_args.kwargs
-        assert call_kw["conversation"] is conv
-        assert call_kw["trigger"] == "order_flow_v2_checkout_complete"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
+        sync_mock.assert_not_called()
 
     @patch("modules.ai.brain.postprocess.payment_credential_guard.compose_verified_bank_transfer_block")
     @patch("services.nahla_order_bridge.sync_nahla_wa_order")
@@ -168,12 +161,10 @@ class TestOrderFlowV2CheckoutCompletionReference:
             message="تحويل الراجحي",
         )
 
-        assert result.handled
-        assert result.reason == "checkout_complete_no_reference"
-        assert "تم إنشاء طلبك" not in result.reply
-        assert "NHL-" not in result.reply
-        assert ORDER_REFERENCE_CREATE_FAILED_AR in result.reply
-        assert result.state_patch.get("order_creation_status") != "created"
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
+        sync_mock.assert_not_called()
 
     @patch("core.order_context_builder._load_active_draft")
     @patch("modules.ai.order_flow_v2.owner._load_brain_state")
@@ -198,25 +189,25 @@ class TestOrderFlowV2CheckoutCompletionReference:
             message="كم رقم الطلب؟",
         )
 
-        assert result.handled
-        assert NO_ORDER_NUMBER_YET_AR in result.reply
-        assert "NHL-" not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
+    @patch("core.local_order_resolver.resolve_customer_order_context")
     @patch("core.order_context_builder._load_active_draft")
     def test_order_number_question_after_persisted_order_returns_reference(
         self,
         draft_mock,
+        resolver_mock,
     ):
         draft_mock.return_value = SimpleNamespace(
             order_id=88,
             external_id="nahla-wa-1-42",
         )
-        db = MagicMock()
-        db.query.return_value.filter_by.return_value.first.return_value = SimpleNamespace(
-            id=88,
-            external_order_number="NHL-1-000088",
-            external_id="nahla-wa-1-42",
+        resolver_mock.return_value = SimpleNamespace(
+            selected_order=SimpleNamespace(display_reference="NHL-1-000088"),
         )
+        db = MagicMock()
         prep = _complete_prep()
 
         reply = build_checkout_order_number_reply(

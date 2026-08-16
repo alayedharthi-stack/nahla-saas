@@ -157,22 +157,6 @@ def _assert_address_confirm_reply(
         assert marker.lower() not in lowered
 
 
-def _assert_saved_address_applied(
-    state_patch: dict,
-    *,
-    scenario: CommerceScenario,
-) -> None:
-    assert _DENY_SAVED_ADDRESS not in str(state_patch)
-    assert (
-        state_patch.get("city") == scenario.city
-        or state_patch.get("customer_confirmed_previous_address")
-    )
-    assert (
-        state_patch.get("short_address_code") == scenario.short_code
-        or state_patch.get("google_maps_url")
-    )
-
-
 class TestKnownCustomerAddressRegression:
     @patch("modules.ai.order_flow_v2.owner.build_line_items_from_payload")
     def test_catalog_order_uses_existing_customer_address_before_asking_city(
@@ -237,10 +221,9 @@ class TestKnownCustomerAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message="عنواني السابق عندكم",
         )
-        assert result.handled, result.reason
-        assert _DENY_SAVED_ADDRESS not in result.reply
-        assert _ASK_CITY not in result.reply
-        _assert_saved_address_applied(result.state_patch, scenario=scenario)
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_order_flow_uses_known_customer_city_and_short_code(self) -> None:
         db, tenant, _customer, _product, convo, scenario = _seed_known_customer_world(
@@ -381,7 +364,6 @@ class TestKnownCustomerAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message="عنواني السابق عندكم",
         )
-        assert result.handled, result.reason
-        assert result.state_patch.get("city") in (None, "")
-        assert not result.state_patch.get("customer_confirmed_previous_address")
-        assert _DENY_SAVED_ADDRESS not in result.reply
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"

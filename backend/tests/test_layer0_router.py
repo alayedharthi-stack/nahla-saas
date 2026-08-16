@@ -98,85 +98,68 @@ class TestLayer0PureTurns:
         )
         assert decision is None
 
-    def test_thanks_does_not_need_brain(self):
+    def test_thanks_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(),
             tenant_id=102,
             customer_phone="966500000002",
             message="شكراً",
         )
-        assert decision is not None
-        assert decision.matched.startswith("thanks")
-        assert "العفو" in decision.reply_text or "يعافيك" in decision.reply_text
+        assert decision is None
 
-    def test_religious_thanks_uses_persona_template_not_llm(self):
+    def test_religious_thanks_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(),
             tenant_id=103,
             customer_phone="966500000003",
             message="جزاك الله خير",
         )
-        assert decision is not None
-        assert "آمين" in decision.reply_text or "بالمثل" in decision.reply_text
-        # Must not be empty — persona dua pool, never LLM compose path.
-        assert decision.reply_text.strip()
+        assert decision is None
 
-    def test_store_link_does_not_need_brain(self):
+    def test_store_link_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(store_url="https://shop.example.com"),
             tenant_id=104,
             customer_phone="966500000004",
             message="رابط المتجر",
         )
-        assert decision is not None
-        assert decision.matched == "store_link"
-        assert "https://shop.example.com" in decision.reply_text
+        assert decision is None
 
-    def test_store_link_missing_url_no_brain(self):
+    def test_store_link_missing_url_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(store_url=""),
             tenant_id=105,
             customer_phone="966500000005",
             message="رابط المتجر الإلكتروني",
         )
-        assert decision is not None
-        from modules.ai.brain.compose.templates import (  # noqa: PLC0415
-            MSG_STORE_LINK_NOT_CONFIGURED,
-        )
+        assert decision is None
 
-        assert MSG_STORE_LINK_NOT_CONFIGURED in decision.reply_text
-
-    def test_working_hours_does_not_need_brain(self):
+    def test_working_hours_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(support_hours="9 ص - 10 م"),
             tenant_id=106,
             customer_phone="966500000006",
             message="متى دوامكم",
         )
-        assert decision is not None
-        assert decision.matched == "working_hours"
-        assert "9 ص - 10 م" in decision.reply_text
+        assert decision is None
 
-    def test_working_hours_missing_no_brain(self):
+    def test_working_hours_missing_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(support_hours=""),
             tenant_id=107,
             customer_phone="966500000007",
             message="أوقات العمل",
         )
-        assert decision is not None
-        assert "لم يتم تحديد أوقات العمل" in decision.reply_text
+        assert decision is None
 
-    def test_goodbye_does_not_need_brain(self):
+    def test_goodbye_defers_to_brain(self):
         decision = evaluate_layer0_route(
             _mock_db(),
             tenant_id=108,
             customer_phone="966500000008",
             message="مع السلامة",
         )
-        assert decision is not None
-        assert decision.matched == "goodbye"
-        assert decision.reply_text.strip()
+        assert decision is None
 
 
 class TestLayer0CommerceFallback:
@@ -258,7 +241,7 @@ class TestLayer0NoBrainOrLlm:
                     customer_phone="966500000201",
                     message="شكراً",
                 )
-        assert decision is not None
+        assert decision is None
         mock_brain.assert_not_called()
         mock_llm.assert_not_called()
 
@@ -273,7 +256,7 @@ class TestLayer0NoBrainOrLlm:
                 customer_phone="966500000202",
                 message="يعطيك العافية",
             )
-        assert decision is not None
+        assert decision is None
         mock_ack.assert_not_called()
 
 

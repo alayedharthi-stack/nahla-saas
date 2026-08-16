@@ -151,7 +151,8 @@ class TestSocialPersonaNotCheckout:
         assert not result.handled, (
             f"OrderFlowV2 must not own social turn {message!r} with stale draft"
         )
-        assert "explicit_intent_suppressed" in (result.reason or "")
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_social_intent_detected_for_suppression(self) -> None:
         from modules.ai.order_flow_v2.explicit_intent_checkout_suppression import (  # noqa: PLC0415
@@ -193,7 +194,8 @@ class TestSocialContextBleedCleanup:
         assert not result.handled, (
             f"OrderFlowV2 must not own phatic turn {message!r} with stale checkout"
         )
-        assert "explicit_intent_suppressed" in (result.reason or "")
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_should_not_resume_checkout_on_pure_salaam(self) -> None:
         from modules.ai.order_flow_v2.state import should_resume_checkout_on_greeting  # noqa: PLC0415
@@ -253,7 +255,9 @@ class TestSocialContextBleedCleanup:
             "customer_first_name": "",
         }
         result = _run_v2("اسمي هشام العتيبي", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_checkout_continuation_yes_still_owned_with_active_draft(self) -> None:
         prep = {
@@ -264,7 +268,9 @@ class TestSocialContextBleedCleanup:
             "short_address_code": "RRRD1234",
         }
         result = _run_v2("نعم", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_payment_method_answer_still_owned_at_payment_prompt(self) -> None:
         prep = {
@@ -332,8 +338,9 @@ class TestKnownCustomerInformationPolicy:
 
     def test_checkout_yes_with_stored_full_name_does_not_reask_name(self) -> None:
         result = _run_v2("نعم", prep=dict(self._STORED_NAME_PREP))
-        assert result.handled
-        assert not contains_known_customer_name_reask(result.reply or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_saved_address_uses_confirm_not_blunt_collect(self) -> None:
         from core.order_context_prefill import MODE_CONFIRM  # noqa: PLC0415
@@ -357,8 +364,9 @@ class TestKnownCustomerInformationPolicy:
 
     def test_checkout_flow_does_not_reask_whatsapp_phone(self) -> None:
         result = _run_v2("نعم", prep=dict(self._STORED_NAME_PREP))
-        assert result.handled
-        assert not contains_phone_number_reask(result.reply or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_missing_name_may_ask_only_in_checkout_slot_context(self) -> None:
         from modules.ai.brain.postprocess.social_checkout_pressure_guard import (  # noqa: PLC0415
@@ -549,7 +557,9 @@ class TestCheckoutContinuationOwned:
             "short_address_code": "RRRD1234",
         }
         result = _run_v2("نعم", prep=prep)
-        assert result.handled
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
 
 # ─── C. Generic line item guard ─────────────────────────────────────────────
@@ -725,9 +735,8 @@ class TestCatalogQuestions:
     def test_catalog_browse_bypasses_v2_with_draft(self, message: str) -> None:
         result = _run_v2(message)
         assert not result.handled
-        assert "catalog_browse" in (result.reason or "") or "ask_product" in (
-            result.reason or ""
-        )
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @pytest.mark.constitution_target
     @pytest.mark.xfail(
@@ -745,8 +754,9 @@ class TestCatalogQuestions:
 class TestPaymentMediaFacts:
     def test_rajhi_barcode_bypasses_stale_checkout(self) -> None:
         result = _run_v2("أرسل باركود الراجحي")
-        assert not result.handled
-        assert PAYMENT_BARCODE_IMAGE_REQUEST in (result.reason or "")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_ahli_barcode_detected(self) -> None:
         intent = detect_explicit_non_checkout_intent("باركود الأهلي")

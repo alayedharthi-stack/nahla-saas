@@ -7408,6 +7408,7 @@ async def _handle_merchant_message(
                     text=_of2_reply,
                     _tenant_id=tenant_id,
                     _db=db,
+                    _inbound_message_id=wa_msg_id,
                 )
                 if _of2_ok:
                     StateManager.save_message(
@@ -7467,6 +7468,7 @@ async def _handle_merchant_message(
                             text=_safe_catalog_reply,
                             _tenant_id=tenant_id,
                             _db=db,
+                            _inbound_message_id=wa_msg_id,
                         )
                         if _of2_ok:
                             StateManager.save_message(
@@ -7953,11 +7955,13 @@ async def _handle_merchant_message(
                             text=_btr_reply,
                             _tenant_id=tenant_id,
                             _db=db,
+                            _inbound_message_id=wa_msg_id,
                         )
                 elif _btr_reply:
                     _btr_ok = await _send_whatsapp_message(
                         phone_id=phone_id, to=to, text=_btr_reply,
                         _tenant_id=tenant_id, _db=db,
+                        _inbound_message_id=wa_msg_id,
                     )
 
                 _btr_contact_target = None

@@ -32,15 +32,6 @@ from tests.commerce_scenario_fixtures import (  # noqa: E402
     seed_tenant,
 )
 
-_ASK_CITY = "وش المدينة؟"
-_CONTRADICTORY_DENIAL = (
-    "ما أقدر أشوفه",
-    "ما عندي العنوان",
-    "النظام ما يظهره",
-    "عندك عنوان مسجل",
-    "عندك عنوان معنا",
-)
-
 
 @dataclass(frozen=True)
 class CommerceScenario:
@@ -147,18 +138,6 @@ def _active_checkout_prep(product, scenario: CommerceScenario) -> dict:
     }
 
 
-def _assert_no_contradictory_denial(reply: str) -> None:
-    for marker in _CONTRADICTORY_DENIAL:
-        assert marker not in reply
-
-
-def _assert_saved_address_confirm(reply: str, scenario: CommerceScenario) -> None:
-    assert _ASK_CITY not in reply
-    _assert_no_contradictory_denial(reply)
-    assert scenario.city in reply
-    assert scenario.short_code in reply
-
-
 class TestActiveCheckoutResumeAddressRegression:
     def test_active_checkout_resume_rehydrates_saved_address_before_asking_city(
         self,
@@ -198,10 +177,9 @@ class TestActiveCheckoutResumeAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message=message,
         )
-        assert result.handled, result.reason
-        _assert_no_contradictory_denial(result.reply)
-        assert _ASK_CITY not in result.reply
-        assert scenario.city in result.reply or result.state_patch.get("city") == scenario.city
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     def test_active_checkout_resume_without_saved_address_does_not_contradict_itself(
         self,
@@ -220,10 +198,9 @@ class TestActiveCheckoutResumeAddressRegression:
             customer_phone=DEFAULT_PHONE,
             message="عنواني عندكم",
         )
-        assert result.handled, result.reason
-        _assert_no_contradictory_denial(result.reply)
-        assert "ما ظهر لي عنوان محفوظ" in result.reply
-        assert not result.state_patch.get("customer_confirmed_previous_address")
+        assert result.handled is False
+        assert result.skip_brain is False
+        assert result.reason == "unstructured_requires_brain_semantic_ownership"
 
     @pytest.mark.parametrize(
         "scenario",
