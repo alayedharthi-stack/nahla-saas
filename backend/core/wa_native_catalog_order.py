@@ -539,6 +539,10 @@ def persist_structured_catalog_order_referent(
 
     Used when the inbound is persist-only (empty customer note) so Brain
     never runs — the structured referent must still survive to the next turn.
+
+    Transaction ownership: mutate + flush only. The webhook / caller
+    commits the shared session. This helper must not commit pending
+    conversation or webhook writes belonging to the caller.
     """
     meta = dict(inbound_metadata or {})
     if meta.get("source_type") != "catalog_order" and not (
@@ -597,16 +601,6 @@ def persist_structured_catalog_order_referent(
         flag_modified(conv, "extra_metadata")
         db.add(conv)
         db.flush()
-        commit = getattr(db, "commit", None)
-        if callable(commit):
-            try:
-                commit()
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — test stubs / already-committed sessions
-                logger.debug(
-                    "[WA_NATIVE_ORDER] persist_only_referent_commit_skipped tenant=%s",
-                    tenant_id,
-                    exc_info=True,
-                )
         logger.info(
             "[WA_NATIVE_ORDER] persist_only_referent_stamped tenant=%s "
             "presented=%d focus=%r",
@@ -622,6 +616,16 @@ def persist_structured_catalog_order_referent(
             "[WA_NATIVE_ORDER] persist_only_referent_stamp_failed tenant=%s",
             tenant_id,
         )
+        rollback = getattr(db, "rollback", None)
+        if callable(rollback):
+            try:
+                rollback()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — rollback best-effort after stamp failure
+                logger.debug(
+                    "[WA_NATIVE_ORDER] persist_only_referent_rollback_failed tenant=%s",
+                    tenant_id,
+                    exc_info=True,
+                )
         return False
 
 

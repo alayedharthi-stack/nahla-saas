@@ -296,30 +296,6 @@ _PRIOR_DECAY = 0.05
 _PRIOR_FLOOR = 0.60
 
 
-# Explicit first-person gender self-identification. Not name inference.
-_EXPLICIT_MALE_PATTERNS = [
-    re.compile(r"(?:أنا|انا|إني|اني)\s+(?:رجل|ولد|ذكر)" + _TRAIL, re.UNICODE),
-    re.compile(r"(?:ولست|لست)\s+(?:امرأة|امراة|أنثى|انثى)" + _TRAIL, re.UNICODE),
-    re.compile(r"(?:مو|مش)\s+(?:امرأة|امراة)" + _TRAIL, re.UNICODE),
-]
-_EXPLICIT_FEMALE_PATTERNS = [
-    re.compile(r"(?:أنا|انا|إني|اني)\s+(?:امرأة|امراة|بنت|أنثى|انثى)" + _TRAIL, re.UNICODE),
-    re.compile(r"(?:ولست|لست)\s+(?:رجل|رجلا)" + _TRAIL, re.UNICODE),
-]
-
-
-def _from_explicit_self_identification(message: str) -> GenderHint:
-    """Customer-stated gender in the current message. Stronger than names."""
-    text = str(message or "").strip()
-    if not text:
-        return _UNKNOWN
-    if any(p.search(text) for p in _EXPLICIT_MALE_PATTERNS):
-        return GenderHint(value=GENDER_MALE, confidence=0.95, source="verb")
-    if any(p.search(text) for p in _EXPLICIT_FEMALE_PATTERNS):
-        return GenderHint(value=GENDER_FEMALE, confidence=0.95, source="verb")
-    return _UNKNOWN
-
-
 def detect_gender(
     message: str,
     customer_name: Optional[str] = None,
@@ -328,21 +304,19 @@ def detect_gender(
     """Cascade through the signals and return the best hint.
 
     Order:
-      1. Explicit first-person self-identification — strongest.
-      2. Verb-suffix signal (current message).
-      3. Name whitelist signal — medium.
-      4. Prior sticky hint (with mild per-turn decay).
+      1. Verb-suffix signal (current message) — strongest.
+      2. Name whitelist signal — medium.
+      3. Prior sticky hint (with mild per-turn decay).
 
     Conflict resolution: if the verb signal and the name signal
     disagree, we **return unknown** rather than pick a side — the
     customer is more important than the dataset. A real follow-up
-    turn will resolve it. Explicit self-identification is never
-    overridden by the name whitelist.
-    """
-    explicit_hint = _from_explicit_self_identification(message or "")
-    if explicit_hint.confidence > 0:
-        return explicit_hint
+    turn will resolve it.
 
+    This detector does not parse first-person self-identification
+    phrases. Addressing preference is consumed from already-established
+    structured gender state (profile / prior hint / verb suffixes).
+    """
     verb_hint = _from_verb_suffixes(message or "")
     name_hint = _from_name(customer_name)
 

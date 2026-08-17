@@ -131,37 +131,49 @@ def catalog_order_must_not_orphan(
     return is_structured_catalog_order_inbound(inbound_metadata, message)
 
 
+def customer_authored_catalog_order_text(
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    message: str = "",
+) -> str:
+    """Customer note for a catalog_order, never the operational frame marker."""
+    meta = _meta(inbound_metadata)
+    note = str(meta.get("customer_note") or "").strip()
+    if note:
+        return note
+    text = str(message or "").strip()
+    if not text or CATALOG_FRAME_MARKER in text:
+        return ""
+    return text
+
+
+def should_continue_structured_catalog_order(
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    message: str = "",
+) -> bool:
+    """True when empty customer text must still continue as catalog_order."""
+    return catalog_order_must_not_orphan(inbound_metadata, message)
+
+
 def maybe_restore_catalog_order_semantic_text(
     *,
     semantic_text: str,
     original_brain_text: str,
     inbound_metadata: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Keep brain-facing catalog framing when caption stripping emptied the turn."""
+    """Continue catalog_order from structured metadata, not synthetic customer language."""
     current = str(semantic_text or "").strip()
     original = str(original_brain_text or "").strip()
     meta = _meta(inbound_metadata)
-    if current:
-        if is_structured_catalog_order_inbound(meta, current or original):
-            return current, _completion_trace(
-                input_type="catalog_order",
-                semantic_owner="brain",
-                structured_action_owner="wa_native_catalog_order",
-                completion_class=COMPLETION_STRUCTURED_AND_CONTINUATION,
-                state_persisted=True,
-                brain_called=True,
-                compose_called=True,
-            )
+    authored = customer_authored_catalog_order_text(meta, current or original)
+    if not catalog_order_must_not_orphan(meta, current or original):
         return current, {}
-    if not catalog_order_must_not_orphan(meta, original):
-        return "", {}
-    restored = original or CATALOG_FRAME_MARKER
     logger.info(
-        "[CUSTOMER_TURN_COMPLETION] catalog_order_semantic_restored "
-        "input_type=catalog_order completion_class=%s",
+        "[CUSTOMER_TURN_COMPLETION] catalog_order_structured_continue "
+        "input_type=catalog_order completion_class=%s authored_len=%d",
         COMPLETION_STRUCTURED_AND_CONTINUATION,
+        len(authored),
     )
-    return restored, _completion_trace(
+    return authored, _completion_trace(
         input_type="catalog_order",
         semantic_owner="brain",
         structured_action_owner="wa_native_catalog_order",
@@ -170,7 +182,11 @@ def maybe_restore_catalog_order_semantic_text(
         brain_called=True,
         compose_called=True,
         suppression_reason=None,
-        extra={"catalog_order_semantic_restored": True},
+        extra={
+            "catalog_order_structured_event": True,
+            "catalog_order_empty_text_continued": not bool(authored),
+            "synthetic_customer_phrase": False,
+        },
     )
 
 
@@ -243,6 +259,8 @@ __all__ = [
     "COMPLETION_STRUCTURED_VISIBLE",
     "catalog_order_must_not_orphan",
     "classify_empty_text_early_return",
+    "customer_authored_catalog_order_text",
     "is_structured_catalog_order_inbound",
     "maybe_restore_catalog_order_semantic_text",
+    "should_continue_structured_catalog_order",
 ]

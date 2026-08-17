@@ -63,10 +63,15 @@ def resolve_semantic_customer_message(
             is_structured_catalog_order_inbound,
         )
 
-        # Native catalog_order framing is brain-facing operational text,
-        # not a media caption. Stripping it orphans the customer turn.
+        # Native catalog_order is a structured commerce event. Keep any
+        # real customer note; do not treat the operational frame marker
+        # as customer-authored language.
         if is_structured_catalog_order_inbound(meta, text):
-            return text
+            from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                customer_authored_catalog_order_text,
+            )
+
+            return customer_authored_catalog_order_text(meta, text)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog preserve must not block routing
         pass
     if is_media_framed_inbound_message(text):

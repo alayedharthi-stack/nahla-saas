@@ -4269,20 +4269,22 @@ async def _dispatch_message(
             )
             return
 
+        route_catalog_order_structured = False
         if not text and not route_unclear_audio_order_support:
             try:
                 from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
-                    CATALOG_FRAME_MARKER,
-                    catalog_order_must_not_orphan,
+                    should_continue_structured_catalog_order,
                 )
 
-                if catalog_order_must_not_orphan(
+                if should_continue_structured_catalog_order(
                     normalized_inbound.metadata,
                     normalized_inbound.text or "",
                 ):
-                    text = (normalized_inbound.text or "").strip() or CATALOG_FRAME_MARKER
+                    route_catalog_order_structured = True
                     _ni_meta = dict(normalized_inbound.metadata or {})
+                    _ni_meta["catalog_order_structured_event"] = True
                     _ni_meta["catalog_order_empty_text_continued"] = True
+                    _ni_meta["synthetic_customer_phrase"] = False
                     _ctc = dict(_ni_meta.get("customer_turn_completion") or {})
                     _ctc.update({
                         "input_type": "catalog_order",
@@ -4295,14 +4297,19 @@ async def _dispatch_message(
                     normalized_inbound.metadata = _ni_meta
                     logger.info(
                         "[CUSTOMER_TURN_COMPLETION] catalog_order continued past "
-                        "empty_text_no_fallback tenant=%s sender=%s",
+                        "empty_text_no_fallback tenant=%s sender=%s "
+                        "synthetic_customer_phrase=false",
                         resolved_tenant_id,
                         sender,
                     )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog completion must not block inbound
                 pass
 
-        if not text and not route_unclear_audio_order_support:
+        if (
+            not text
+            and not route_unclear_audio_order_support
+            and not route_catalog_order_structured
+        ):
             logger.info(
                 "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
@@ -4384,6 +4391,7 @@ async def _dispatch_message(
                         phone=sender or "",
                         source_message_key=(msg_id or None),
                     )
+                    db.commit()
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "[WA_NATIVE_ORDER] persist_only_catalog_order_stamp_failed "
@@ -4391,6 +4399,10 @@ async def _dispatch_message(
                     resolved_tenant_id,
                     sender,
                 )
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — rollback after failed persist-only catalog commit
+                    pass
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────
@@ -5802,21 +5814,29 @@ async def _handle_merchant_message(
     dedicated paths that emit pre-approved templates / canned copy and
     never enter this conversational pipeline.
     """
+    _catalog_order_structured_continue = False
     if not (text or "").strip():
         try:
             from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
-                CATALOG_FRAME_MARKER,
-                catalog_order_must_not_orphan,
+                customer_authored_catalog_order_text,
+                should_continue_structured_catalog_order,
             )
 
-            if catalog_order_must_not_orphan(
-                inbound_metadata if isinstance(inbound_metadata, dict) else {},
+            _cat_meta = (
+                inbound_metadata if isinstance(inbound_metadata, dict) else {}
+            )
+            if should_continue_structured_catalog_order(
+                _cat_meta,
                 inbound_persist_body or "",
             ):
-                text = str(inbound_persist_body or "").strip() or CATALOG_FRAME_MARKER
+                _catalog_order_structured_continue = True
+                text = customer_authored_catalog_order_text(
+                    _cat_meta,
+                    inbound_persist_body or "",
+                )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog restore must not block merchant entry
             pass
-    if not (text or "").strip():
+    if not (text or "").strip() and not _catalog_order_structured_continue:
         _unclear_audio_order_support = False
         try:
             from modules.ai.media.routing_guard import (  # noqa: PLC0415

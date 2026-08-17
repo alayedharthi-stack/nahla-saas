@@ -20,6 +20,7 @@ if _BACKEND not in sys.path:
 
 from dataclasses import asdict
 
+from core.wa_native_catalog_order import persist_structured_catalog_order_referent  # noqa: E402
 from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: E402
     restore_selected_product_focus,
     stamp_structured_presented_products,
@@ -58,7 +59,11 @@ from modules.ai.brain.types import (  # noqa: E402
     MerchantConversationState,
     SuggestionSnapshot,
 )
-from modules.ai.gender.detector import GENDER_MALE, detect_gender  # noqa: E402
+from modules.ai.gender.context import (  # noqa: E402
+    REPLY_STYLE_MASCULINE,
+    CustomerGenderContext,
+)
+from modules.ai.gender.detector import GENDER_MALE, GENDER_UNKNOWN, detect_gender  # noqa: E402
 from modules.ai.media.customer_turn_completion import (  # noqa: E402
     AUDITED_CUSTOMER_ORIGIN_EARLY_RETURNS,
     CATALOG_FRAME_MARKER,
@@ -69,6 +74,7 @@ from modules.ai.media.customer_turn_completion import (  # noqa: E402
     classify_empty_text_early_return,
     is_structured_catalog_order_inbound,
     maybe_restore_catalog_order_semantic_text,
+    should_continue_structured_catalog_order,
 )
 from modules.ai.media.routing_guard import resolve_semantic_customer_message  # noqa: E402
 
@@ -230,14 +236,15 @@ class TestCustomerIdentityProjection:
 
 
 class TestStructuredCatalogSelectionCompletion:
-    def test_catalog_frame_is_kept_as_semantic_text(self) -> None:
+    def test_catalog_frame_is_not_customer_language(self) -> None:
         semantic = resolve_semantic_customer_message(
             brain_text=CATALOG_FRAME,
             inbound_metadata=_CATALOG_META,
             inbound_normalized_type="text",
         )
-        assert CATALOG_FRAME_MARKER in semantic
-        assert semantic.strip()
+        assert CATALOG_FRAME_MARKER not in (semantic or "")
+        assert is_structured_catalog_order_inbound(_CATALOG_META, "")
+        assert should_continue_structured_catalog_order(_CATALOG_META, "")
 
     def test_caption_strip_without_catalog_meta_still_drops_media_frame(self) -> None:
         framed = "[تصنيف صورة]\nوصف بصري للمنتج"
@@ -248,13 +255,16 @@ class TestStructuredCatalogSelectionCompletion:
         )
         assert "تصنيف" not in semantic
 
-    def test_empty_semantic_catalog_order_is_restored(self) -> None:
+    def test_empty_semantic_catalog_order_continues_from_structured_metadata(self) -> None:
         restored, meta = maybe_restore_catalog_order_semantic_text(
             semantic_text="",
             original_brain_text=CATALOG_FRAME,
             inbound_metadata=_CATALOG_META,
         )
-        assert CATALOG_FRAME_MARKER in restored
+        assert restored == ""
+        assert CATALOG_FRAME_MARKER not in restored
+        assert meta["catalog_order_structured_event"] is True
+        assert meta["synthetic_customer_phrase"] is False
         assert meta["customer_turn_completion"]["completion_class"] == (
             COMPLETION_STRUCTURED_AND_CONTINUATION
         )
@@ -285,6 +295,153 @@ class TestStructuredCatalogSelectionCompletion:
         assert ref["id"] == 143
         assert ref["customer_selected"] is True
         assert ref["external_id"] == "86bqzca62a"
+
+
+class _RecordingSession:
+    def __init__(self, *, flush_error=None, commit_error=None):
+        self.commits = 0
+        self.flushes = 0
+        self.rollbacks = 0
+        self.added = []
+        self.pending_unrelated = ["unrelated_write"]
+        self.flush_error = flush_error
+        self.commit_error = commit_error
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    def flush(self):
+        if self.flush_error:
+            raise self.flush_error
+        self.flushes += 1
+
+    def commit(self):
+        if self.commit_error:
+            raise self.commit_error
+        self.commits += 1
+        self.pending_unrelated.clear()
+
+    def rollback(self):
+        self.rollbacks += 1
+        self.pending_unrelated.clear()
+
+
+class TestCatalogReferentTransactionOwnership:
+    def _payload(self):
+        return {
+            "source_type": "catalog_order",
+            "catalog_id": "cat-1",
+            "product_items": [{
+                "product_retailer_id": "sku-white-sneaker",
+                "quantity": 1,
+                "item_price": 126,
+                "currency": "SAR",
+            }],
+        }
+
+    def _line(self):
+        return {
+            "product_id": "88",
+            "product_name": GENERIC_PRODUCT,
+            "title": GENERIC_PRODUCT,
+            "quantity": 1,
+            "product_retailer_id": "sku-white-sneaker",
+            "match_status": "confirmed",
+        }
+
+    def test_helper_flushes_without_committing_unrelated_writes(self) -> None:
+        conv = SimpleNamespace(extra_metadata={"brain_state": {"stage": "exploring"}})
+        db = _RecordingSession()
+        fake_resolution = SimpleNamespace(
+            line_items=[self._line()],
+            matched_count=1,
+            unmatched_count=0,
+            needs_review_count=0,
+        )
+        with patch(
+            "core.wa_native_catalog_order.build_line_items_from_payload",
+            return_value=fake_resolution,
+        ), patch("sqlalchemy.orm.attributes.flag_modified"):
+            ok = persist_structured_catalog_order_referent(
+                db,
+                tenant_id=10,
+                phone="966500000001",
+                inbound_metadata=self._payload(),
+                conversation=conv,
+            )
+        assert ok is True
+        assert db.flushes == 1
+        assert db.commits == 0
+        assert db.pending_unrelated == ["unrelated_write"]
+        presented = conv.extra_metadata["brain_state"].get("last_presented_products") or []
+        assert presented
+        db.commit()
+        assert db.commits == 1
+        assert db.pending_unrelated == []
+
+    def test_flush_failure_rolls_back_and_is_observable(self) -> None:
+        conv = SimpleNamespace(extra_metadata={"brain_state": {"stage": "exploring"}})
+        db = _RecordingSession(flush_error=RuntimeError("flush failed"))
+        fake_resolution = SimpleNamespace(
+            line_items=[self._line()],
+            matched_count=1,
+            unmatched_count=0,
+            needs_review_count=0,
+        )
+        with patch(
+            "core.wa_native_catalog_order.build_line_items_from_payload",
+            return_value=fake_resolution,
+        ), patch("sqlalchemy.orm.attributes.flag_modified"):
+            ok = persist_structured_catalog_order_referent(
+                db,
+                tenant_id=10,
+                phone="966500000001",
+                inbound_metadata=self._payload(),
+                conversation=conv,
+            )
+        assert ok is False
+        assert db.commits == 0
+        assert db.rollbacks == 1
+
+    def test_caller_commit_failure_is_not_swallowed_by_helper(self) -> None:
+        db = _RecordingSession(commit_error=RuntimeError("commit failed"))
+        with pytest.raises(RuntimeError, match="commit failed"):
+            db.commit()
+        assert db.commits == 0
+
+    def test_inbound_replay_stamp_is_idempotent(self) -> None:
+        conv = SimpleNamespace(extra_metadata={"brain_state": {"stage": "exploring"}})
+        db = _RecordingSession()
+        fake_resolution = SimpleNamespace(
+            line_items=[self._line()],
+            matched_count=1,
+            unmatched_count=0,
+            needs_review_count=0,
+        )
+        with patch(
+            "core.wa_native_catalog_order.build_line_items_from_payload",
+            return_value=fake_resolution,
+        ), patch("sqlalchemy.orm.attributes.flag_modified"):
+            first = persist_structured_catalog_order_referent(
+                db,
+                tenant_id=10,
+                phone="966500000001",
+                inbound_metadata=self._payload(),
+                conversation=conv,
+            )
+            second = persist_structured_catalog_order_referent(
+                db,
+                tenant_id=10,
+                phone="966500000001",
+                inbound_metadata=self._payload(),
+                conversation=conv,
+            )
+        assert first is True
+        assert second is True
+        assert db.commits == 0
+        presented = conv.extra_metadata["brain_state"].get("last_presented_products") or []
+        assert len(presented) >= 1
+        assert presented[0]["customer_selected"] is True
 
 
 class TestPurchaseContinuity:
@@ -386,19 +543,32 @@ class TestKnownCustomerFactReuse:
 
 
 class TestExplicitCustomerCorrection:
-    def test_explicit_male_self_id_is_detected(self) -> None:
-        hint = detect_gender("انا هيثم الحارثي رجل ولست امرأة")
-        assert hint.value == GENDER_MALE
-        assert hint.confidence >= 0.9
-        assert hint.source == "verb"
+    def test_self_identification_phrases_are_not_a_semantic_parser(self) -> None:
+        from modules.ai.gender import detector as gender_detector  # noqa: PLC0415
 
-    def test_same_turn_does_not_keep_feminine_continue(self) -> None:
+        src = open(gender_detector.__file__, encoding="utf-8").read()
+        assert "_EXPLICIT_MALE_PATTERNS" not in src
+        assert "_from_explicit_self_identification" not in src
+        hint = detect_gender("انا هيثم الحارثي رجل ولست امرأة")
+        assert hint.value == GENDER_UNKNOWN
+        assert hint.source in {"none", "unknown"}
+
+    def test_grammar_guard_consumes_structured_masculine_state(self) -> None:
+        ctx = CustomerGenderContext(
+            gender=GENDER_MALE,
+            confidence="high",
+            confidence_score=0.95,
+            source="profile",
+            reply_style=REPLY_STYLE_MASCULINE,
+        )
         result = apply_gender_agreement_guard(
             "شكرًا لتوضيحك، هيثم. نكمل طلبك الآن! كملي لي اسم العائلة",
+            gender_context=ctx,
             message="انا هيثم الحارثي رجل ولست امرأة",
         )
         assert "كملي" not in result.reply
         assert result.replaced is True
+        assert result.reply_style == REPLY_STYLE_MASCULINE
 
     def test_no_name_to_gender_exception_added(self) -> None:
         from modules.ai.gender import detector as gender_detector  # noqa: PLC0415
@@ -431,10 +601,17 @@ class TestCompletionContractSweep:
     def test_webhook_continues_catalog_order_past_empty_text(self) -> None:
         webhook = os.path.join(_BACKEND, "routers", "whatsapp_webhook.py")
         src = open(webhook, encoding="utf-8").read()
-        assert "catalog_order_must_not_orphan" in src
+        assert "should_continue_structured_catalog_order" in src
         assert "maybe_restore_catalog_order_semantic_text" in src
         assert "empty_text_no_fallback" in src
-        assert src.count("catalog_order_must_not_orphan") >= 2
+        assert "synthetic_customer_phrase" in src
+        assert "CATALOG_FRAME_MARKER" not in src
+        helper = os.path.join(_BACKEND, "core", "wa_native_catalog_order.py")
+        helper_src = open(helper, encoding="utf-8").read()
+        persist_fn = helper_src.split("def persist_structured_catalog_order_referent", 1)[1]
+        persist_fn = persist_fn.split("\n__all__", 1)[0]
+        assert "db.commit()" not in persist_fn
+        assert "commit()" not in persist_fn
 
 
 class TestTenantIsolation:
@@ -487,7 +664,13 @@ class TestLatencyHelpers:
         t3 = time.perf_counter()
         apply_gender_agreement_guard(
             "كملي الطلب",
-            message="انا رجل ولست امرأة",
+            gender_context=CustomerGenderContext(
+                gender=GENDER_MALE,
+                confidence="high",
+                confidence_score=0.95,
+                source="profile",
+                reply_style=REPLY_STYLE_MASCULINE,
+            ),
         )
         correction_ms = (time.perf_counter() - t3) * 1000
         assert identity_ms < 50
