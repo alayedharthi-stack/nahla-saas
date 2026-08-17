@@ -3,6 +3,8 @@ Tests for inbound fragment guard and catalog fallback containment.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from modules.ai.brain.commerce.catalog_product_grounding import (
@@ -49,9 +51,27 @@ def _claim_evidence(*titles: str) -> ProductClaimGroundingEvidence:
 
 def test_kod_khasem_badeel_not_catalog_fallback() -> None:
     inbound = "كود خصم بديل"
-    blocked, reason = should_block_catalog_grounding_fallback(inbound_text=inbound)
-    assert blocked is True
-    assert reason == "discount_coupon_inquiry"
+    _, reason = should_block_catalog_grounding_fallback(inbound_text=inbound)
+    assert reason != "discount_coupon_inquiry"
+
+    long_coupon = "عندكم كود خصم للطلب الحالي؟"
+    blocked_long, reason_long = should_block_catalog_grounding_fallback(
+        inbound_text=long_coupon,
+    )
+    assert blocked_long is False
+    assert reason_long != "discount_coupon_inquiry"
+
+    facts = SimpleNamespace(
+        has_coupons=True,
+        shareable_promotions=[{"code": "SAVE6", "source_type": "manual"}],
+    )
+    blocked_facts, reason_facts = should_block_catalog_grounding_fallback(
+        inbound_text=inbound,
+        decision_topic="promotion_inquiry",
+        facts=facts,
+    )
+    assert blocked_facts is True
+    assert reason_facts == "promotion_facts_present"
 
     llm_reply = "عسل السدر متوفر بخصم 10%"
     result = apply_catalog_product_grounding_guard(
@@ -59,6 +79,8 @@ def test_kod_khasem_badeel_not_catalog_fallback() -> None:
         inbound_text=inbound,
         evidence=_claim_evidence("عسل طلح"),
         executor_products=[{"title": "عسل طلح"}],
+        inbound_metadata={"decision_topic": "promotion_inquiry"},
+        facts=facts,
     )
     assert "الخيارات المؤكدة" not in result.reply
     assert result.action == "blocked_catalog_containment"

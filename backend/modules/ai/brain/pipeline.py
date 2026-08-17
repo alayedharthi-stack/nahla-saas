@@ -5006,6 +5006,18 @@ class MerchantBrain:
                 else:
                     _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                     _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                    _cpgg_meta["decision_action"] = str(getattr(decision, "action", "") or "")
+                    _cpgg_known = dict(
+                        getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}
+                    )
+                    if _cpgg_known.get("trusted_coupon_offer_facts"):
+                        _cpgg_meta["trusted_coupon_offer_facts"] = dict(
+                            _cpgg_known.get("trusted_coupon_offer_facts") or {}
+                        )
+                    if _cpgg_known.get("customer_conditional_coupon_facts"):
+                        _cpgg_meta["customer_conditional_coupon_facts"] = dict(
+                            _cpgg_known.get("customer_conditional_coupon_facts") or {}
+                        )
                     if _turn_owner_contract_meta:
                         _cpgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
                     for _flag in (
@@ -5054,6 +5066,7 @@ class MerchantBrain:
                         order_state=new_state,
                         inbound_metadata=_cpgg_meta,
                         intent=intent,
+                        facts=getattr(ctx, "facts", None),
                     )
                     if _cpgg.replaced:
                         reply = _cpgg.reply
@@ -5184,6 +5197,7 @@ class MerchantBrain:
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                _crqg_meta["decision_action"] = str(getattr(decision, "action", "") or "")
                 _tc_offer_facts = dict(
                     (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
                         "trusted_coupon_offer_facts",
@@ -5226,6 +5240,8 @@ class MerchantBrain:
                     llm_candidate_present=bool(
                         result.data.get("llm_candidate_present")
                     ),
+                    facts=getattr(ctx, "facts", None),
+                    intent=intent,
                 )
                 if _crqg.requires_grounded_recompose:
                     result.data["quality_guard_recompose_attempted"] = True
@@ -5333,6 +5349,8 @@ class MerchantBrain:
                             llm_candidate_present=bool(
                                 result.data.get("llm_candidate_present")
                             ),
+                            facts=getattr(ctx, "facts", None),
+                            intent=intent,
                         )
                     if _crqg.requires_grounded_recompose:
                         if decision.action == ACTION_SEARCH_PRODUCTS:
@@ -5532,9 +5550,25 @@ class MerchantBrain:
         except Exception as _gag_exc:  # noqa: BLE001
             logger.warning(
                 "[GENDER_AGREEMENT_GUARD] pipeline hook failed tenant=%s err=%s",
-                tenant_id, _gag_exc,
+                tenant_id,             _gag_exc,
             )
             _crh = None
+
+        try:
+            from modules.ai.orchestrator.ai_usage_ledger import (  # noqa: PLC0415
+                classify_truncation_first_layer,
+            )
+
+            _prior_layer = str(result.data.get("truncation_first_layer") or "")
+            if _prior_layer != "provider":
+                result.data["truncation_first_layer"] = classify_truncation_first_layer(
+                    finish_reason=result.data.get("llm_finish_reason"),
+                    raw_model_text=str(result.data.get("compose_reply_candidate") or ""),
+                    composed_text=str(result.data.get("compose_reply_candidate") or ""),
+                    postprocess_text=str(reply or ""),
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — truncation trace must not block outbound
+            pass
 
         try:
             from modules.ai.brain.final_reply_source import (  # noqa: PLC0415
@@ -7187,10 +7221,10 @@ def _compose_base_response_goal(
         _mk_surface == "merchant_knowledge_section"
         or _mk_topic.startswith("merchant_knowledge_")
     ):
-        return _mk_goal or (
-            "merchant_knowledge — answer from retrieved tenant knowledge "
-            "and structured merchant facts only. Do not pursue checkout next_goal."
-        )
+        # Structured knowledge ownership: do not inherit checkout next_goal.
+        # Existing decision response_goal (if any) is unchanged; never add
+        # repair-specific customer-prompt prose here.
+        return _mk_goal
     if _mk_goal and isinstance(_mk_args.get("answer_contract"), dict):
         return _mk_goal
 

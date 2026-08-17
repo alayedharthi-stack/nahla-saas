@@ -576,8 +576,11 @@ def current_intent_outranks_ordering_safety_net(ctx: Any) -> bool:
             message_fulfills_checkout_slot,
         )
 
+        # Only consult the existing awaited-slot helper when structured
+        # checkout state already exists. Raw message text is not a
+        # platform semantic owner on its own.
         order_prep = getattr(getattr(ctx, "state", None), "order_prep", None)
-        if message_fulfills_checkout_slot(
+        if order_prep and message_fulfills_checkout_slot(
             str(getattr(ctx, "message", "") or ""),
             order_prep=order_prep,
         ):

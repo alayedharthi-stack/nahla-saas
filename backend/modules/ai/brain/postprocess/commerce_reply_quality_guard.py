@@ -52,8 +52,10 @@ def _finalize_commerce_fallback(
     trusted_coupon_offer_facts: Optional[dict] = None,
     customer_conditional_coupon_facts: Optional[dict] = None,
     customer_conditional_coupon_compose_active: bool = False,
+    facts: Any = None,
+    intent: Any = None,
 ) -> Tuple[str, str]:
-    """Block catalog fallback on non-catalog turns; route coupon inquiries safely."""
+    """Block catalog fallback on non-catalog turns using structured facts."""
     if isinstance(trusted_coupon_offer_facts, dict) and trusted_coupon_offer_facts:
         return fallback, kind
     if _conditional_coupon_compose_collision_active(
@@ -69,9 +71,19 @@ def _finalize_commerce_fallback(
 
         blocked, block_reason = should_block_catalog_grounding_fallback(
             inbound_text=inbound_text,
-            inbound_metadata=inbound_metadata,
+            inbound_metadata={
+                **dict(inbound_metadata or {}),
+                **({
+                    "trusted_coupon_offer_facts": trusted_coupon_offer_facts,
+                } if trusted_coupon_offer_facts else {}),
+                **({
+                    "customer_conditional_coupon_facts": customer_conditional_coupon_facts,
+                } if customer_conditional_coupon_facts else {}),
+            },
+            intent=intent,
             decision_topic=decision_topic,
             protected_final_reply=protected_final_reply,
+            facts=facts,
         )
         if blocked and is_catalog_fallback_reply(fallback):
             return "", f"catalog_containment_{block_reason or 'blocked'}"
@@ -673,6 +685,8 @@ def apply_commerce_reply_quality_guard(
     customer_conditional_coupon_facts: Optional[Dict[str, Any]] = None,
     customer_conditional_coupon_compose_active: bool = False,
     llm_candidate_present: bool = False,
+    facts: Any = None,
+    intent: Any = None,
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     kb_negative = _kb_negative_availability_decision(
@@ -751,6 +765,8 @@ def apply_commerce_reply_quality_guard(
             trusted_coupon_offer_facts=trusted_coupon_offer_facts,
             customer_conditional_coupon_facts=customer_conditional_coupon_facts,
             customer_conditional_coupon_compose_active=customer_conditional_coupon_compose_active,
+            facts=facts,
+            intent=intent,
         )
         if kb_negative and kind == "kb_negative_suppressed":
             return CommerceReplyQualityGuardResult(
@@ -860,6 +876,8 @@ def apply_commerce_reply_quality_guard(
             trusted_coupon_offer_facts=trusted_coupon_offer_facts,
             customer_conditional_coupon_facts=customer_conditional_coupon_facts,
             customer_conditional_coupon_compose_active=customer_conditional_coupon_compose_active,
+            facts=facts,
+            intent=intent,
         )
         used_fallback = True
         if kb_negative and fallback_kind == "kb_negative_suppressed":

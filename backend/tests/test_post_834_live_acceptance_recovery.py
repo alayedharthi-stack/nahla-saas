@@ -111,6 +111,38 @@ class TestSendGuardAdvisoryFlags:
         assert decision.block is True
         assert decision.reason == REASON_HUMAN_TAKEOVER
 
+    def test_status_human_alone_does_not_block(self) -> None:
+        from core.ownership_state import (
+            OWNERSHIP_HUMAN_REQUESTED,
+            conversation_handoff_active,
+            resolve_ownership_state,
+        )
+
+        decision = should_block_automation_for_conversation(
+            MagicMock(),
+            tenant_id=1,
+            customer_phone="966500000001",
+            conversation=_convo(status="human"),
+        )
+        assert decision.block is False
+        ownership = resolve_ownership_state(MagicMock(), _convo(status="human"))
+        assert ownership.state == OWNERSHIP_HUMAN_REQUESTED
+        assert conversation_handoff_active(MagicMock(), _convo(status="human")) is False
+
+    def test_advisory_status_does_not_fail_closed_on_gate_error(self) -> None:
+        from core.handoff_truth import has_possible_human_ownership_signals
+
+        convo = _convo(status="human", needs_human=True, handoff_active=True)
+        assert has_possible_human_ownership_signals(convo) is False
+
+    def test_genuine_takeover_still_fail_closes_on_gate_error(self) -> None:
+        from datetime import datetime, timezone
+
+        from core.handoff_truth import has_possible_human_ownership_signals
+
+        convo = _convo(taken_over_at=datetime.now(timezone.utc))
+        assert has_possible_human_ownership_signals(convo) is True
+
 
 class TestKnowledgeCapability:
     def test_store_story_args_are_structured_not_raw_text(self) -> None:
@@ -118,7 +150,7 @@ class TestKnowledgeCapability:
         args = store_story_capability_args(facts)
         assert knowledge_kind_from_args(args) == "store_story"
         assert args["policy_surface"] == "merchant_knowledge_section"
-        assert args["response_goal"].startswith("merchant_knowledge_store_story")
+        assert "response_goal" not in args
         assert should_request_store_story_knowledge(
             intent_name="ask_store_info", facts=facts,
         ) is True
@@ -158,8 +190,8 @@ class TestKnowledgeCapability:
             suggestion,
             checkout_facts={"next_goal": "collect_city_only"},
         )
-        assert "merchant_knowledge" in goal
         assert "collect_city_only" not in goal
+        assert "answer from retrieved tenant knowledge" not in goal
 
     def test_disabled_story_is_not_requested(self) -> None:
         facts = SimpleNamespace(store_story_status="UNKNOWN")
@@ -242,14 +274,23 @@ class TestPromotionsContract:
             has_coupons=True,
             shareable_promotions=[{"code": "SAVE6", "source_type": "manual"}],
         )
+        blocked_unrelated, reason_unrelated = should_block_catalog_grounding_fallback(
+            inbound_text="قميص قطني أزرق",
+            intent=SimpleNamespace(name="general"),
+            facts=facts,
+        )
+        assert blocked_unrelated is False
+        assert reason_unrelated != "promotion_facts_present"
         blocked, reason = should_block_catalog_grounding_fallback(
             inbound_text="قميص قطني أزرق",
+            decision_topic="promotion_inquiry",
             facts=facts,
         )
         assert blocked is True
         assert reason == "promotion_facts_present"
         browse_blocked, browse_reason = should_block_catalog_grounding_fallback(
             inbound_text="وش عندكم من العسل؟",
+            decision_topic="promotion_inquiry",
             facts=facts,
         )
         assert browse_blocked is False
@@ -262,6 +303,43 @@ class TestPromotionsContract:
             intent_name="general",
         )
         assert "أرسل لي كود الخصم اللي عندك" not in (result.reply or "")
+
+    def test_quality_guard_coupon_wording_without_facts_is_not_containment(self) -> None:
+        blocked, reason = should_block_catalog_grounding_fallback(
+            inbound_text="ابي كوبون خصم",
+        )
+        assert blocked is False
+        assert reason != "discount_coupon_inquiry"
+        result = apply_commerce_reply_quality_guard(
+            reply="",
+            inbound_text="ابي كوبون خصم",
+            intent_name="general",
+        )
+        assert "catalog_containment_discount_coupon_inquiry" not in (
+            result.fallback_kind or ""
+        )
+
+    def test_quality_guard_uses_structured_promotion_facts(self) -> None:
+        facts = SimpleNamespace(
+            has_coupons=True,
+            shareable_promotions=[{"code": "SAVE6", "source_type": "manual"}],
+        )
+        blocked, reason = should_block_catalog_grounding_fallback(
+            inbound_text="قميص قطني أزرق",
+            decision_topic="promotion_inquiry",
+            facts=facts,
+        )
+        assert blocked is True
+        assert reason == "promotion_facts_present"
+        result = apply_commerce_reply_quality_guard(
+            reply="",
+            inbound_text="قميص قطني أزرق",
+            intent_name="general",
+            decision_topic="promotion_inquiry",
+            facts=facts,
+        )
+        assert "أرسل لي كود الخصم اللي عندك" not in (result.reply or "")
+        assert "discount_coupon_inquiry" not in (result.fallback_kind or "")
 
 
 class TestCustomerHistoryFacts:
@@ -308,6 +386,16 @@ class TestCurrentIntentOutranksStaleCommerce:
             ),
         ) is False
 
+    def test_general_without_slots_or_awaited_prep_yields(self) -> None:
+        assert current_intent_outranks_ordering_safety_net(
+            _ctx(intent_name="general", message="أحمد سالم"),
+        ) is True
+
+    def test_general_awaited_checkout_slot_keeps_funnel(self) -> None:
+        ctx = _ctx(intent_name="general", message="الرياض")
+        ctx.state.order_prep = {"missing_fields": ["city"]}
+        assert current_intent_outranks_ordering_safety_net(ctx) is False
+
     def test_start_order_does_not_yield_ordering_funnel(self) -> None:
         assert current_intent_outranks_ordering_safety_net(
             _ctx(intent_name="start_order", message="ابي اشتري"),
@@ -334,3 +422,101 @@ class TestNoRawTextKnowledgeRouter:
             detect.assert_not_called()
         assert result.knowledge_query_run is False
         assert result.tenant_id == 7
+
+
+class TestStructuredOverlayVsLongForm:
+    def test_custom_short_facts_are_overlay_eligible_not_document_kinds(self) -> None:
+        from core.knowledge import is_long_form_document_section
+        from services.knowledge_section_kinds import is_behavioral_kind
+        from services.merchant_document_retrieval import (
+            DOCUMENT_KINDS,
+            is_long_form_document_kind,
+        )
+
+        assert "custom" not in DOCUMENT_KINDS
+        assert is_long_form_document_kind("custom") is False
+        assert is_behavioral_kind("custom") is False
+        row = SimpleNamespace(kind="custom")
+        assert is_long_form_document_section(row) is False
+
+    def test_store_story_stays_retrieval_only(self) -> None:
+        from services.merchant_document_retrieval import (
+            DOCUMENT_KINDS,
+            is_long_form_document_kind,
+        )
+
+        assert "store_story" in DOCUMENT_KINDS
+        assert is_long_form_document_kind("store_story") is True
+
+    def test_reply_style_is_not_forced_into_document_kinds(self) -> None:
+        from services.merchant_document_retrieval import DOCUMENT_KINDS
+
+        assert "reply_style" not in DOCUMENT_KINDS
+
+
+class TestTruncationTrace:
+    def test_provider_length_finish_reason_is_first_layer(self) -> None:
+        from modules.ai.orchestrator.ai_usage_ledger import (
+            classify_truncation_first_layer,
+            extract_provider_completion_telemetry,
+        )
+
+        telemetry = extract_provider_completion_telemetry(
+            reply_text="نعم، يبدو أنك عميلة سابقة لدينا. إذا كان",
+            httpx_data={
+                "stop_reason": "max_tokens",
+                "usage": {"output_tokens": 18},
+            },
+        )
+        assert telemetry["finish_reason"] == "max_tokens"
+        assert telemetry["output_tokens"] == 18
+        assert telemetry["raw_char_count"] == 40
+        assert classify_truncation_first_layer(
+            finish_reason=telemetry["finish_reason"],
+            raw_model_text="نعم، يبدو أنك عميلة سابقة لدينا. إذا كان",
+            composed_text="نعم، يبدو أنك عميلة سابقة لدينا. إذا كان",
+            persisted_text="نعم، يبدو أنك عميلة سابقة لدينا. إذا كان",
+            visible_text="نعم، يبدو أنك عميلة سابقة لدينا. إذا كان",
+        ) == "provider"
+
+    def test_complete_raw_then_downstream_cut_is_not_provider(self) -> None:
+        from modules.ai.orchestrator.ai_usage_ledger import (
+            classify_truncation_first_layer,
+            extract_provider_completion_telemetry,
+        )
+
+        complete = (
+            "نعم، يبدو أنك عميلة سابقة لدينا. إذا كان عندك طلب سابق "
+            "أقدر أراجع تفاصيله من السجل."
+        )
+        telemetry = extract_provider_completion_telemetry(
+            reply_text=complete,
+            httpx_data={
+                "stop_reason": "end_turn",
+                "usage": {"output_tokens": 40},
+            },
+        )
+        assert telemetry["finish_reason"] == "end_turn"
+        truncated = "نعم، يبدو أنك عميلة سابقة لدينا. إذا كان"
+        assert classify_truncation_first_layer(
+            finish_reason=telemetry["finish_reason"],
+            raw_model_text=complete,
+            composed_text=complete,
+            postprocess_text=truncated,
+            persisted_text=truncated,
+            visible_text=truncated,
+        ) == "postprocess"
+
+    def test_db_equals_visible_rules_out_wire_cut(self) -> None:
+        from modules.ai.orchestrator.ai_usage_ledger import (
+            classify_truncation_first_layer,
+        )
+
+        body = "نعم، يبدو أنك عميلة سابقة لدينا. إذا كان"
+        assert classify_truncation_first_layer(
+            finish_reason="end_turn",
+            raw_model_text=body,
+            composed_text=body,
+            persisted_text=body,
+            visible_text=body,
+        ) == "none"

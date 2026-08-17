@@ -101,6 +101,116 @@ def extract_gemini_usage(
     }, True
 
 
+_PROVIDER_LENGTH_FINISH_REASONS = frozenset({
+    "max_tokens",
+    "length",
+    "max_output_tokens",
+    "max_output",
+})
+
+
+def extract_provider_completion_telemetry(
+    *,
+    reply_text: str = "",
+    response: Any = None,
+    httpx_data: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Stamp provider completion metadata without changing generation config.
+
+    Captures finish/stop reason, output tokens, and raw character count when
+    the provider exposes them. Never infers a reason when absent.
+    """
+    finish_reason: Optional[str] = None
+    output_tokens: Optional[int] = None
+    if response is not None:
+        raw_reason = getattr(response, "stop_reason", None)
+        if raw_reason is None:
+            raw_reason = getattr(response, "finish_reason", None)
+        if raw_reason:
+            finish_reason = str(raw_reason).strip() or None
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            token_val = getattr(usage, "output_tokens", None)
+            if token_val is None:
+                token_val = getattr(usage, "completion_tokens", None)
+            if token_val is not None:
+                try:
+                    output_tokens = int(token_val)
+                except (TypeError, ValueError):
+                    output_tokens = None
+    elif isinstance(httpx_data, Mapping):
+        raw_reason = httpx_data.get("stop_reason") or httpx_data.get("finish_reason")
+        if not raw_reason:
+            choices = httpx_data.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0] if isinstance(choices[0], Mapping) else {}
+                raw_reason = first.get("finish_reason")
+        if not raw_reason:
+            candidates = httpx_data.get("candidates")
+            if isinstance(candidates, list) and candidates:
+                first = candidates[0] if isinstance(candidates[0], Mapping) else {}
+                raw_reason = first.get("finishReason") or first.get("finish_reason")
+        if raw_reason:
+            finish_reason = str(raw_reason).strip() or None
+        usage = httpx_data.get("usage")
+        if not isinstance(usage, Mapping):
+            usage = httpx_data.get("usageMetadata") if isinstance(
+                httpx_data.get("usageMetadata"), Mapping,
+            ) else {}
+        token_val = None
+        if isinstance(usage, Mapping):
+            token_val = (
+                usage.get("output_tokens")
+                or usage.get("completion_tokens")
+                or usage.get("candidatesTokenCount")
+            )
+        if token_val is not None:
+            try:
+                output_tokens = int(token_val)
+            except (TypeError, ValueError):
+                output_tokens = None
+    return {
+        "finish_reason": finish_reason,
+        "output_tokens": output_tokens,
+        "raw_char_count": len(reply_text or ""),
+    }
+
+
+def classify_truncation_first_layer(
+    *,
+    finish_reason: Optional[str] = None,
+    raw_model_text: str = "",
+    composed_text: str = "",
+    postprocess_text: str = "",
+    sanitizer_text: str = "",
+    persisted_text: str = "",
+    visible_text: str = "",
+) -> str:
+    """Return the first layer that shortened the customer-visible reply."""
+    reason = str(finish_reason or "").strip().lower()
+    if reason in _PROVIDER_LENGTH_FINISH_REASONS:
+        return "provider"
+    raw = (raw_model_text or "").strip()
+    if not raw:
+        return "provider_empty"
+    composed = (composed_text or "").strip() or raw
+    if composed != raw and len(composed) < len(raw):
+        return "compose"
+    post = (postprocess_text or "").strip() or composed
+    if post != composed and len(post) < len(composed):
+        return "postprocess"
+    sanitizer = (sanitizer_text or "").strip() or post
+    if sanitizer != post and len(sanitizer) < len(post):
+        return "sanitizer"
+    persisted = (persisted_text or "").strip() or sanitizer
+    if persisted != sanitizer and len(persisted) < len(sanitizer):
+        return "splitter_or_persist"
+    visible = (visible_text or "").strip() or persisted
+    if visible != persisted and len(visible) < len(persisted):
+        return "provider_outbound"
+    return "none"
+
+
 def _record_ai_usage_from_provider_response(
     *,
     audit_extra: Optional[Mapping[str, Any]],

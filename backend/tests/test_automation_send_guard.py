@@ -85,17 +85,38 @@ class TestShouldBlockAutomationForConversation:
             needs_human=True,
             status="human",
         )
-        with patch(
-            "core.ownership_state.conversation_handoff_active",
-            return_value=False,
-        ):
-            decision = should_block_automation_for_conversation(
-                MagicMock(),
-                tenant_id=33,
-                customer_phone="966559968061",
-                conversation=convo,
-            )
+        decision = should_block_automation_for_conversation(
+            MagicMock(),
+            tenant_id=33,
+            customer_phone="966559968061",
+            conversation=convo,
+        )
         assert decision.block is False
+
+    def test_status_human_alone_does_not_block(self) -> None:
+        convo = _convo(status="human")
+        decision = should_block_automation_for_conversation(
+            MagicMock(),
+            tenant_id=33,
+            customer_phone="966559968061",
+            conversation=convo,
+        )
+        assert decision.block is False
+
+    def test_genuine_takeover_still_blocks_without_advisory_flags(self) -> None:
+        convo = _convo(
+            taken_over_at=datetime.now(timezone.utc),
+            taken_over_by="dashboard:handoff",
+            status="active",
+        )
+        decision = should_block_automation_for_conversation(
+            MagicMock(),
+            tenant_id=33,
+            customer_phone="966559968061",
+            conversation=convo,
+        )
+        assert decision.block is True
+        assert decision.reason == REASON_HUMAN_TAKEOVER
 
     def test_active_conversation_allows(self) -> None:
         convo = _convo()

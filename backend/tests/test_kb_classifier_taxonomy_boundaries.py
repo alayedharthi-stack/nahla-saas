@@ -107,6 +107,18 @@ def test_prompt_carries_kb3_quick_test_question() -> None:
     assert "ينسحب المساعد ويسلّم الموضوع لموظف" in PROPOSAL_SCHEMA_NOTE
 
 
+def test_prompt_keeps_reply_style_out_of_product_production_facts() -> None:
+    """Operational product/production bodies must not be classified as
+    reply_style. Pins the generic taxonomy contract — not a live-example
+    keyword list.
+    """
+    from modules.ai.knowledge.classifier import PROPOSAL_SCHEMA_NOTE
+
+    assert "فصل أسلوب الرد عن حقائق المنتج/الإنتاج" in PROPOSAL_SCHEMA_NOTE
+    assert "فلا تستخدم reply_style" in PROPOSAL_SCHEMA_NOTE
+    assert "product_usage" in PROPOSAL_SCHEMA_NOTE
+
+
 # ════════════════════════════════════════════════════════════════════
 # Part 2 — Few-shot example contrast pair (shipping vs escalation)
 # ════════════════════════════════════════════════════════════════════

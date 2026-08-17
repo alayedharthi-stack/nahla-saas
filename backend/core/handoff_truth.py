@@ -28,7 +28,6 @@ from sqlalchemy.orm import Session
 
 from core.ownership_state import (
     conversation_handoff_active,
-    has_advisory_queue_signals,
     has_implicit_takeover_signals,
     is_explicit_takeover,
 )
@@ -90,18 +89,19 @@ def _find_conversations_for_phone(
 
 
 def has_possible_human_ownership_signals(convo: Any) -> bool:
-    """Fast heuristic for fail-closed when gate verification fails."""
+    """Fast heuristic for fail-closed when gate verification fails.
+
+    Advisory queue flags (needs_human / handoff_active / is_human_handoff /
+    status=human) must not fail-closed suppress AI. Genuine pause/takeover
+    still fail-closed.
+    """
     if convo is None:
         return False
     if bool(getattr(convo, "ai_paused", False)):
         return True
-    if str(getattr(convo, "status", "") or "").strip().lower() == "human":
-        return True
     if is_explicit_takeover(convo):
         return True
     if has_implicit_takeover_signals(convo):
-        return True
-    if has_advisory_queue_signals(convo):
         return True
     return False
 
@@ -115,8 +115,12 @@ def aggregate_possible_human_ownership_signals(
 ) -> bool:
     """True when ANY sibling conversation row shows human-ownership signals."""
     try:
-        if _get_active_handoff_session(db, tenant_id, customer_phone) is not None:
-            return True
+        session = _get_active_handoff_session(db, tenant_id, customer_phone)
+        if session is not None:
+            from core.ai_disabled_gate import _handoff_session_disables_ai  # noqa: PLC0415
+
+            if _handoff_session_disables_ai(session):
+                return True
     except Exception:
         return True
 

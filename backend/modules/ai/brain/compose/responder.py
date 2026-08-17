@@ -2801,6 +2801,37 @@ class DefaultComposer:
                 if isinstance(_payload_meta.get("usage"), dict)
                 else {}
             )
+            _telemetry = (
+                _payload_meta.get("completion_telemetry")
+                if isinstance(_payload_meta.get("completion_telemetry"), dict)
+                else {}
+            )
+            if not _telemetry:
+                _raw_out = getattr(payload, "raw_model_output", None)
+                if isinstance(_raw_out, dict) and isinstance(
+                    _raw_out.get("completion_telemetry"), dict,
+                ):
+                    _telemetry = dict(_raw_out.get("completion_telemetry") or {})
+            result.data["llm_finish_reason"] = (
+                _telemetry.get("finish_reason")
+                or _payload_meta.get("finish_reason")
+            )
+            result.data["llm_output_tokens"] = (
+                _telemetry.get("output_tokens")
+                or _payload_meta.get("output_tokens")
+            )
+            result.data["llm_raw_char_count"] = (
+                _telemetry.get("raw_char_count")
+                or _payload_meta.get("raw_char_count")
+            )
+            from modules.ai.orchestrator.ai_usage_ledger import (  # noqa: PLC0415
+                classify_truncation_first_layer,
+            )
+
+            result.data["truncation_first_layer"] = classify_truncation_first_layer(
+                finish_reason=result.data.get("llm_finish_reason"),
+                raw_model_text=str(getattr(payload, "reply_text", "") or ""),
+            )
             _record_default_compose_llm(
                 duration_ms=int(
                     (_time_dc.monotonic() - (_t_llm_compose or _time_dc.monotonic()))

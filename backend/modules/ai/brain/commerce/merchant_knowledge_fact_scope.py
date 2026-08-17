@@ -92,11 +92,6 @@ def store_story_capability_args(facts: Any = None) -> Dict[str, Any]:
         "knowledge_kind": "store_story",
         "merchant_policy_status": status,
         "block_catalog_navigation": True,
-        "response_goal": (
-            "merchant_knowledge_store_story — answer from retrieved tenant "
-            "store_story documents and structured merchant facts only. "
-            "Do not pursue checkout next_goal."
-        ),
     }
 
 
