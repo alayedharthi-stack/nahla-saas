@@ -182,7 +182,7 @@ def resolve_shareable_promotions(
             .limit(max(int(limit) * 3, int(limit)))
             .all()
         )
-    except Exception:
+    except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
         return PromotionTruthResult(
             tenant_id=tid,
             query_run=True,
@@ -224,7 +224,7 @@ def resolve_shareable_promotions(
             offers.append(_offer_to_fact(promo))
             if len(offers) >= int(limit):
                 break
-    except Exception:
+    except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
         pass
 
     if not generation_rules_present:
@@ -240,7 +240,7 @@ def resolve_shareable_promotions(
                         .first()
                         is not None
                     )
-        except Exception:
+        except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
             generation_rules_present = False
 
     return PromotionTruthResult(

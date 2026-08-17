@@ -3347,7 +3347,7 @@ class MerchantBrain:
                             has_payments=bool(getattr(ctx.facts, "payment_methods", None)),
                         )
                         ctx._knowledge_observability = _obs.to_dict()  # type: ignore[attr-defined]
-                    except Exception:  # noqa: BLE001 — observability must not affect the turn
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not affect the turn
                         ctx._knowledge_observability = {  # type: ignore[attr-defined]
                             "knowledge_query_run": True,
                             "tenant_id": int(tenant_id or 0),
