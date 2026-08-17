@@ -5974,6 +5974,7 @@ async def _handle_merchant_message(
                 wa_msg_id=wa_msg_id,
                 wa_message_ts=wa_message_ts,
                 inbound_metadata=inbound_metadata,
+                suppression_reason=_ai_off.reason,
             )
             log_ai_disabled_gate(
                 tenant_id=tenant_id,
@@ -6025,6 +6026,7 @@ async def _handle_merchant_message(
                     wa_msg_id=wa_msg_id,
                     wa_message_ts=wa_message_ts,
                     inbound_metadata=inbound_metadata,
+                    suppression_reason=REASON_GATE_VERIFY_FAILED,
                 )
                 log_ai_disabled_gate(
                     tenant_id=tenant_id,

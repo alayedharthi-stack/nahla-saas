@@ -832,6 +832,10 @@ class CommerceFacts:
     orderable: bool = False
     # Best available coupon code for this turn (empty string = none)
     coupon_eligibility: str = ""
+    # Bounded tenant-scoped shareable coupon facts (no invented codes).
+    shareable_promotions: List[Dict[str, Any]] = field(default_factory=list)
+    # Bounded tenant-scoped offer/promotion rules (no codes invented).
+    shareable_offers: List[Dict[str, Any]] = field(default_factory=list)
     # Top 5 synced products for greeting / numeric pick (need external_id).
     top_products: List[Dict[str, Any]] = field(default_factory=list)
     # Bounded existence-capable catalog for discovery/recommendation reasoning.

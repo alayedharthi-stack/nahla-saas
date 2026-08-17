@@ -86,12 +86,13 @@ def disabled_reason_for_conversation(convo: Conversation | None) -> str:
         return REASON_HUMAN_SUPERVISION
     if getattr(convo, "taken_over_at", None) is not None:
         return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "is_human_handoff", False)):
-        return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "handoff_active", False)):
-        return REASON_HUMAN_SUPERVISION
     if str(getattr(convo, "status", "") or "").strip().lower() == "human":
         return REASON_HUMAN_SUPERVISION
+
+    # is_human_handoff / handoff_active / needs_human are advisory queue
+    # signals (customer asked for staff). They must not silently kill AI.
+    # Genuine keyboard ownership is paused_by_human, taken_over_at,
+    # status=human, explicit ownership_state, or a non-notify HandoffSession.
 
     return ""
 
@@ -370,6 +371,7 @@ def persist_inbound_for_suppressed_turn(
     wa_msg_id: str | None = None,
     wa_message_ts: Any = None,
     inbound_metadata: dict[str, Any] | None = None,
+    suppression_reason: str = "",
 ) -> Conversation:
     """Save inbound only — no outbound, no brain, no arbiter."""
     from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
@@ -386,12 +388,15 @@ def persist_inbound_for_suppressed_turn(
         "historical_import": False,
         "ai_disabled_gate": True,
     }
+    if inbound_metadata:
+        meta.update(inbound_metadata)
     if wa_msg_id:
         meta["wa_message_id"] = wa_msg_id
     if wa_message_ts is not None and hasattr(wa_message_ts, "isoformat"):
         meta["whatsapp_timestamp"] = wa_message_ts.isoformat()
-    if inbound_metadata:
-        meta.update(inbound_metadata)
+    if suppression_reason:
+        meta["ai_disabled_reason"] = str(suppression_reason)
+    meta["ai_disabled_gate"] = True
 
     StateManager.save_message(
         db,

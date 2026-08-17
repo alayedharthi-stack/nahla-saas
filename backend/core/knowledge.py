@@ -12,12 +12,26 @@ from typing import Any, Iterable, Optional, Set
 
 from core.catalog import is_catalog_active
 
+# Merchant/admin states that must not reach customer Brain.
+_NOT_CUSTOMER_AI_STATUS = frozenset({
+    "needs_review",
+    "pending",
+    "draft",
+    "rejected",
+    "review",
+})
+
 
 def kb_row_is_ai_visible(row: Any) -> bool:
     """Deterministic visibility check mirroring AI query filters."""
     if getattr(row, "deleted_at", None) is not None:
         return False
-    return bool(getattr(row, "is_active", True))
+    if not bool(getattr(row, "is_active", True)):
+        return False
+    status = str(getattr(row, "ai_status", "") or "").strip().lower()
+    if status in _NOT_CUSTOMER_AI_STATUS:
+        return False
+    return True
 
 
 def is_imported_document_section(row: Any) -> bool:
@@ -78,9 +92,18 @@ def apply_visible_kb_query_filters(query: Any, *, include_deleted: bool = False)
 
 def apply_ai_visible_kb_query_filters(query: Any) -> Any:
     """Rows eligible for AI retrieval overlays and operational KB scans."""
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    status_col = _ai_status_col()
     return (
         query.filter(_deleted_at_col().is_(None))
         .filter(_is_active_col().is_(True))
+        .filter(
+            or_(
+                status_col.is_(None),
+                ~status_col.in_(tuple(_NOT_CUSTOMER_AI_STATUS)),
+            )
+        )
     )
 
 
@@ -107,6 +130,12 @@ def _is_active_col() -> Any:
     from models import MerchantKnowledgeSection  # noqa: PLC0415
 
     return MerchantKnowledgeSection.is_active
+
+
+def _ai_status_col() -> Any:
+    from models import MerchantKnowledgeSection  # noqa: PLC0415
+
+    return MerchantKnowledgeSection.ai_status
 
 
 def section_product_ids(section: Any) -> Set[int]:

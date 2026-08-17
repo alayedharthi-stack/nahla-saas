@@ -3206,6 +3206,7 @@ class MerchantBrain:
         _structured_behavior_block: str = ""
         _retrieved_docs_block: str = ""
         _resolver_overlay_text = ""
+        _overlay_obs: Dict[str, Any] = {}
 
         if _pre_commerce_shortcut:
             _ai_settings_for_prompt = load_minimal_ai_settings(db, tenant_id)
@@ -3257,8 +3258,10 @@ class MerchantBrain:
                     build_behavioral_overlay_block,
                     build_structured_facts_block,
                 )
+                _overlay_obs: Dict[str, Any] = {}
                 _structured_facts_block = build_structured_facts_block(
                     db, tenant_id, active_product_ids=_active_pids,
+                    observability_out=_overlay_obs,
                 ) or ""
                 _structured_behavior_block = build_behavioral_overlay_block(
                     db, tenant_id,
@@ -3270,6 +3273,7 @@ class MerchantBrain:
                 )
                 _structured_facts_block = ""
                 _structured_behavior_block = ""
+                _overlay_obs = {}
 
             # Pack A1 — relevance-gated long-form document retrieval (capped).
             # Kept as a DISTINCT block so it never replaces legacy manual KB
@@ -3279,10 +3283,20 @@ class MerchantBrain:
                     format_retrieved_documents_for_prompt,
                     retrieve_merchant_documents,
                 )
+                from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+                    knowledge_kind_from_args,
+                )
+                _faq_deferred = str(
+                    (decision.args or {}).get("faq_visibility") or ""
+                ) == "deferred"
+                _structured_kind = knowledge_kind_from_args(decision.args)
+                if _faq_deferred:
+                    _structured_kind = ""
                 _doc_retrieval = retrieve_merchant_documents(
                     db,
                     tenant_id,
                     _raw_message or message or "",
+                    structured_kind=_structured_kind or None,
                 )
                 _retrieved_docs_block = format_retrieved_documents_for_prompt(
                     _doc_retrieval
@@ -3304,6 +3318,40 @@ class MerchantBrain:
                             if s.kind
                         ],
                     }
+                    try:
+                        from .commerce.knowledge_truth import (  # noqa: PLC0415
+                            merge_knowledge_observability,
+                        )
+                        _obs = merge_knowledge_observability(
+                            tenant_id=int(tenant_id or 0),
+                            overlay_ids=_overlay_obs.get("selected_knowledge_ids") or [],
+                            retrieval_ids=list(
+                                getattr(_doc_retrieval, "selected_knowledge_ids", ()) or ()
+                            ),
+                            candidate_count=max(
+                                int(_overlay_obs.get("candidate_count") or 0),
+                                int(getattr(_doc_retrieval, "candidate_count", 0) or 0),
+                            ),
+                            retrieved_kinds=list(
+                                ctx._pack_a3_retrieval_meta.get("knowledge_kinds") or []
+                            ),
+                            has_catalog=bool(getattr(ctx.facts, "has_products", False)),
+                            has_branches=bool(getattr(ctx.facts, "branches", None)),
+                            has_contacts=bool(
+                                getattr(ctx.facts, "store_contact_phone", "")
+                                or getattr(ctx.facts, "store_contact_email", "")
+                            ),
+                            has_promotions=bool(
+                                getattr(ctx.facts, "shareable_promotions", None)
+                            ),
+                            has_payments=bool(getattr(ctx.facts, "payment_methods", None)),
+                        )
+                        ctx._knowledge_observability = _obs.to_dict()  # type: ignore[attr-defined]
+                    except Exception:  # noqa: BLE001 — observability must not affect the turn
+                        ctx._knowledge_observability = {  # type: ignore[attr-defined]
+                            "knowledge_query_run": True,
+                            "tenant_id": int(tenant_id or 0),
+                        }
                     _a3_topic = str((decision.args or {}).get("topic") or "")
                     if _a3_topic.startswith("merchant_knowledge_"):
                         _a3_args = dict(decision.args or {})
@@ -6877,6 +6925,12 @@ def _build_reply_state(
         coupon_policy={
             "has_coupons": ctx.facts.has_coupons,
             "eligible_code": ctx.facts.coupon_eligibility,
+            "shareable_promotions": list(
+                getattr(ctx.facts, "shareable_promotions", None) or []
+            )[:8],
+            "shareable_offers": list(
+                getattr(ctx.facts, "shareable_offers", None) or []
+            )[:8],
             "discount_ok_now": suggestion.discount_ok_now,
             "coupon_logic_considered": suggestion.coupon_logic_considered,
         },

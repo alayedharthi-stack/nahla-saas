@@ -12,7 +12,7 @@ Phase 1 scalars (cheap, always loaded):
 Phase 2 additions (slightly more work but still < 5ms):
   in_stock_count     — products with in_stock=True
   orderable          — integration active + in_stock > 0
-  coupon_eligibility — best active coupon code (first match)
+  coupon_eligibility — only when eligibility is determined (not first-code)
   top_products       — top 5 in-stock products (id, external_id, title, price)
   integration_platform — "salla" | "zid" | "manual" | "unknown"
   within_working_hours — None when no store_hours configured
@@ -36,7 +36,6 @@ class DefaultFactsLoader:
 
     def load(self, db: Any, tenant_id: int) -> CommerceFacts:
         from models import (  # noqa: PLC0415
-            Coupon,
             Integration,
             Product,
             StoreKnowledgeSnapshot,
@@ -146,26 +145,15 @@ class DefaultFactsLoader:
             if str(getattr(p, "title", "") or "").strip()
         ]
 
-        # ── 3. Coupons ────────────────────────────────────────────────────
-        now = datetime.now(timezone.utc)
+        # ── 3. Coupons (structured tenant-scoped promotion truth) ─────────
+        from ..commerce.promotion_truth import resolve_shareable_promotions  # noqa: PLC0415
 
-        active_coupons = (
-            db.query(Coupon)
-            .filter(
-                Coupon.tenant_id == tenant_id,
-                (Coupon.expires_at == None) | (Coupon.expires_at > now),  # noqa: E711
-            )
-            .limit(5)
-            .all()
-        )
-        facts.has_coupons = bool(active_coupons)
-
-        # Best coupon eligibility (Phase 2): pick the first valid coupon code
-        for c in active_coupons:
-            code = getattr(c, "code", "") or ""
-            if code:
-                facts.coupon_eligibility = str(code)
-                break
+        promo = resolve_shareable_promotions(db, tenant_id)
+        facts.has_coupons = bool(promo.shareable)
+        facts.shareable_promotions = list(promo.shareable)
+        facts.shareable_offers = list(promo.offers)
+        # Do not promote the first code as "eligible" — Brain may recommend
+        # from the structured set; eligibility remains unevaluated here.
 
         # ── 4. Store metadata ─────────────────────────────────────────────
         snapshot = (

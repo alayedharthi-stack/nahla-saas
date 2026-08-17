@@ -374,6 +374,62 @@ class TestAISuppression:
             )
         assert decision.disabled is False
 
+    def test_notify_handoff_flags_do_not_disable_ai(self) -> None:
+        convo = _convo(
+            needs_human=True,
+            handoff_active=True,
+            is_human_handoff=True,
+            status="active",
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            id=75, status="active", handoff_reason="customer_request",
+        )
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="test"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db,
+                tenant_id=1,
+                customer_phone="966500000001",
+            )
+        assert decision.disabled is False
+
+    def test_genuine_dashboard_takeover_still_disables(self) -> None:
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        convo = _convo(
+            status="human",
+            paused_by_human=True,
+            taken_over_at=datetime.now(timezone.utc),
+            taken_over_by="dashboard:handoff",
+        )
+        db = self._mock_db_no_handoff_session()
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db,
+                tenant_id=1,
+                customer_phone="966500000001",
+            )
+        assert decision.disabled is True
+        assert decision.reason == REASON_HUMAN_SUPERVISION
+
     def test_sibling_paused_row_disables(self) -> None:
         active = _convo(id=1, ai_paused=False)
         paused = _convo(id=2, ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)

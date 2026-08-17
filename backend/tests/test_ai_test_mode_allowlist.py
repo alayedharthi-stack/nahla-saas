@@ -159,9 +159,15 @@ class TestConversationGuardsStillApply:
             assert decision.disabled is True
             assert decision.reason == REASON_AI_PAUSED
 
-    def test_listed_sender_still_blocked_when_handoff(self) -> None:
+    def test_listed_sender_still_blocked_when_genuine_takeover(self) -> None:
         db = MagicMock()
-        convo = _convo(handoff_active=True)
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        convo = _convo(
+            paused_by_human=True,
+            taken_over_at=datetime.now(timezone.utc),
+            status="human",
+        )
         with patch(
             "core.tenant.get_or_create_settings",
             return_value=_settings(_ai(store_ai_mode=STORE_AI_MODE_TEST, store_ai_enabled=False)),
@@ -173,6 +179,24 @@ class TestConversationGuardsStillApply:
                 db, tenant_id=33, customer_phone=ALLOWED,
             )
             assert decision.disabled is True
+
+    def test_listed_sender_not_blocked_by_advisory_handoff_flags(self) -> None:
+        db = MagicMock()
+        convo = _convo(handoff_active=True, is_human_handoff=True, needs_human=True)
+        with patch(
+            "core.tenant.get_or_create_settings",
+            return_value=_settings(_ai(store_ai_mode=STORE_AI_MODE_TEST, store_ai_enabled=False)),
+        ), patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db, tenant_id=33, customer_phone=ALLOWED,
+            )
+            assert decision.disabled is False
 
     def test_unlisted_sender_blocked_before_pause_check(self) -> None:
         db = MagicMock()
@@ -274,6 +298,8 @@ class TestSettingsPatch:
             return_value=settings,
         ), patch(
             "sqlalchemy.orm.attributes.flag_modified",
+        ), patch(
+            "core.tenant_config_hygiene.apply_tenant_settings_hygiene",
         ):
             result = asyncio.run(patch_store_ai_settings(
                 body=StoreAISettingsPatch(
@@ -301,6 +327,8 @@ class TestSettingsPatch:
             return_value=settings,
         ), patch(
             "sqlalchemy.orm.attributes.flag_modified",
+        ), patch(
+            "core.tenant_config_hygiene.apply_tenant_settings_hygiene",
         ):
             result = asyncio.run(patch_store_ai_settings(
                 body=StoreAISettingsPatch(store_ai_enabled=False),

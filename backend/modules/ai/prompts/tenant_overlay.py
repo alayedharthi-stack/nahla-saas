@@ -162,6 +162,30 @@ def _asset_flags_for_section(section: Any) -> List[str]:
     return flags
 
 
+def _stamp_overlay_observability(
+    observability_out: Optional[Dict[str, Any]],
+    *,
+    tenant_id: int,
+    queried_rows: List[Any],
+    included_rows: List[Any],
+) -> None:
+    if observability_out is None:
+        return
+    ids = [
+        int(getattr(r, "id", 0) or 0)
+        for r in included_rows
+        if getattr(r, "id", None)
+    ]
+    observability_out.update({
+        "knowledge_query_run": True,
+        "tenant_id": int(tenant_id or 0),
+        "candidate_count": len(queried_rows or []),
+        "selected_knowledge_ids": ids,
+        "source_section": "overlay",
+        "model_visible_knowledge_ids": ids,
+    })
+
+
 def _emit_kb_runtime_trace(
     *,
     tenant_id: int,
@@ -262,6 +286,7 @@ def build_structured_facts_block(
     tenant_id: int,
     *,
     active_product_ids: Optional[set] = None,
+    observability_out: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the facts bucket from ``merchant_knowledge_sections`` rows.
 
@@ -312,9 +337,21 @@ def build_structured_facts_block(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[KB.facts] query failed for tenant=%s: %s", tenant_id, exc)
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=[],
+            included_rows=[],
+        )
         return ""
 
     if not rows:
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=[],
+            included_rows=[],
+        )
         return ""
 
     # ── Pack A1: long-form document kinds are retrieval-only ────────────
@@ -345,6 +382,12 @@ def build_structured_facts_block(
             queried_rows=queried_rows_all,
             included_rows=[],
             dropped_behavioral=behavioral_dropped,
+        )
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=queried_rows_all,
+            included_rows=[],
         )
         logger.info(
             "[KB.facts] tenant=%s only behavioral/long-form rows present "
@@ -388,6 +431,12 @@ def build_structured_facts_block(
             included_rows=[],
             dropped_behavioral=behavioral_dropped,
             dropped_product_scope=scoped_dropped,
+        )
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=queried_non_behavior_rows,
+            included_rows=[],
         )
         return ""
 
@@ -472,6 +521,12 @@ def build_structured_facts_block(
         included_rows=rows,
         dropped_behavioral=behavioral_dropped,
         dropped_product_scope=scoped_dropped,
+    )
+    _stamp_overlay_observability(
+        observability_out,
+        tenant_id=tenant_id,
+        queried_rows=queried_non_behavior_rows,
+        included_rows=rows,
     )
     return "\n\n".join(parts)
 
