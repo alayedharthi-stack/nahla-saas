@@ -77,6 +77,7 @@ DECISION_KIND_CLEAR_INTENT = "clear_intent_fallback"
 
 CONSTRAINT_ASK_ORDER_SLOT = "ask_for_next_order_slot"
 CONSTRAINT_NO_PRICE_INVENTION = "must_not_invent_prices_or_discounts"
+CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT = "ask_only_platform_next_missing_field"
 
 
 @dataclass
@@ -294,6 +295,9 @@ def build_address_instruction(
     summary: Optional[Dict[str, Any]] = None,
     address_type: str = "",
     inbound_text: str = "",
+    checkout_facts: Optional[Dict[str, Any]] = None,
+    missing_fields: Optional[List[str]] = None,
+    next_missing_field: Optional[str] = None,
 ) -> ReplyInstruction:
     facts: Dict[str, Any] = {}
     if summary:
@@ -304,12 +308,21 @@ def build_address_instruction(
         })
     if address_type:
         facts["delivery_address_type"] = address_type
+    if checkout_facts:
+        for key, val in checkout_facts.items():
+            if val in (None, "", [], {}):
+                continue
+            facts[key] = val
+    facts["missing_fields"] = list(missing_fields or [])
+    facts["next_missing_field"] = next_missing_field or "none"
+    facts["constrained_compose_decides_slot"] = False
     return ReplyInstruction(
         path=PATH_ADDRESS_INGEST_ACK,
         decision_kind=DECISION_KIND_ADDRESS_INGEST,
         facts=facts,
         constraints=(
             CONSTRAINT_INCLUDE_ORDER_FACTS,
+            CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT,
             CONSTRAINT_NO_SHIPPING_PROMISE,
             CONSTRAINT_NO_INTERNAL_CONTACT_LEAK,
         ),
@@ -422,6 +435,7 @@ __all__ = [
     "CONSTRAINT_ASK_PARSEABLE_ADDRESS",
     "CONSTRAINT_ASK_ORDER_SLOT",
     "CONSTRAINT_ASK_PAYMENT_PROOF",
+    "CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT",
     "CONSTRAINT_INCLUDE_ORDER_FACTS",
     "CONSTRAINT_NO_FALSE_HANDOFF",
     "CONSTRAINT_NO_INTERNAL_CONTACT_LEAK",

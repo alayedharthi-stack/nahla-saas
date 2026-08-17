@@ -1632,7 +1632,6 @@ def maybe_handle_wa_address_inbound(
     short-circuit dict or ``None`` when the inbound is not address data.
     """
     from core.wa_address_ingestion import (  # noqa: PLC0415
-        compose_address_reply,
         is_accepted_maps_url,
         is_bare_short_address_code,
         resolve_address_state_patch,
@@ -1705,47 +1704,25 @@ def maybe_handle_wa_address_inbound(
         )
         return None
 
-    line_items = list(op.get("line_items") or bs.get("cart_items") or [])
-    from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
-
-    payment_methods = load_merchant_payment_methods(db, tenant_id)
-    reply_text = compose_address_reply(
-        order_prep=op,
-        brain_state=bs,
-        line_items=line_items,
-        payment_methods=payment_methods,
-    )
     state_patch = {
         **address_patch,
         "awaiting_location_text": False,
     }
     logger.info(
         "[ORDER_FLOW_STATE] address short-circuit fired tenant=%s phone=*%s "
-        "type=%s address_type=%s",
+        "type=%s address_type=%s compose=after_persist",
         tenant_id,
         (phone or "")[-4:],
         inbound_normalized_type,
         address_patch.get("delivery_address_type"),
     )
-    from core.reply_instruction import (  # noqa: PLC0415
-        attach_instruction_to_decision,
-        build_address_instruction,
-    )
-
-    return attach_instruction_to_decision(
-        {
-            "reply_text":  reply_text,
-            "summary":     summary,
-            "state_patch": state_patch,
-            "deterministic_path": "address_ingest_ack",
-        },
-        build_address_instruction(
-            legacy_copy=reply_text,
-            summary=summary,
-            address_type=str(address_patch.get("delivery_address_type") or ""),
-            inbound_text=str(inbound_text or ""),
-        ),
-    )
+    return {
+        "reply_text": "",
+        "summary": summary,
+        "state_patch": state_patch,
+        "deterministic_path": "address_ingest_ack",
+        "compose_after_persist": True,
+    }
 
 
 def maybe_handle_payment_method_selection_inbound(
