@@ -563,6 +563,26 @@ class DraftOrderHandler:
                 ctx.tenant_id,
                 exc_info=True,
             )
+        try:
+            from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+                apply_canonical_next_slot_to_decision,
+            )
+
+            apply_canonical_next_slot_to_decision(ctx, decision)
+            nxt = str(
+                getattr(decision, "next_slot", "")
+                or (decision.args or {}).get("next_slot")
+                or ""
+            ).strip()
+            if nxt and nxt != "none":
+                contract_missing = list((decision.args or {}).get("missing_fields") or [])
+                missing = [nxt] + [m for m in contract_missing if m != nxt]
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical slot overlay must not block checkout
+            logger.debug(
+                "[ORDER FLOW] canonical next_slot overlay skipped tenant=%s",
+                ctx.tenant_id,
+                exc_info=True,
+            )
         prep.missing_fields = missing
 
         # ── Verbose checkpoint: show exactly what's collected vs. missing ──────
@@ -619,6 +639,10 @@ class DraftOrderHandler:
                     "product": product_info,
                     "needs_collection": True,
                     "missing_fields": missing,
+                    "next_slot": str(
+                        getattr(decision, "next_slot", "")
+                        or (missing[0] if missing else "")
+                    ),
                     "question": _checkout_question(missing[0], is_sa=is_sa),
                     "is_first_ask": _is_first_ask,
                     "order_prep": _order_prep_export_dict(prep),

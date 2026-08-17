@@ -1103,11 +1103,6 @@ class DefaultComposer:
             if data.get("salla_escalate"):
                 return T.salla_escalate_message(product=data.get("product", {}))
             if data.get("checkout_continue_after_address"):
-                _cont = await self._compose_checkout_continuation_slot(
-                    ctx, result, decision=decision, data=data,
-                )
-                if _cont is not None:
-                    return _cont
                 return await self._llm_compose(ctx, result, decision=decision)
             if data.get("salla_retry"):
                 try:
@@ -1141,18 +1136,13 @@ class DefaultComposer:
                     )
 
                     _missing = list(data.get("missing_fields") or [])
-                    _slot = str(_missing[0] if _missing else "")
-                    try:
-                        from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
-                            canonical_checkout_next_slot,
-                        )
-
-                        _contract_missing, _contract_nxt = canonical_checkout_next_slot(ctx)
-                        if _contract_nxt and _contract_nxt != "none":
-                            _missing = list(_contract_missing)
-                            _slot = str(_contract_nxt)
-                    except Exception:  # noqa: BLE001  # noqa: silent-ok — contract slot overlay must not block compose
-                        pass
+                    _slot = str(
+                        data.get("next_slot")
+                        or getattr(decision, "next_slot", None)
+                        or ((decision.args or {}).get("next_slot") if decision is not None else "")
+                        or (_missing[0] if _missing else "")
+                        or ""
+                    )
                     _instr = build_order_slot_instruction(
                         slot=_slot,
                         legacy_copy=legacy_reply,
@@ -2353,78 +2343,6 @@ class DefaultComposer:
         record_fallback_metadata(result, reason="compose_failed_or_empty")
         result.data.pop("compose_facts_overlay", None)
         return T.order_status_not_found()
-
-    async def _compose_checkout_continuation_slot(
-        self,
-        ctx: BrainContext,
-        result: ActionResult,
-        *,
-        decision: Decision | None = None,
-        data: Dict[str, Any] | None = None,
-    ) -> str | None:
-        """Constrain checkout continuation to the canonical next_missing_field."""
-        from core.reply_instruction import (  # noqa: PLC0415
-            build_order_slot_instruction,
-            is_operational_constrained_compose_enabled,
-        )
-
-        if not is_operational_constrained_compose_enabled():
-            return None
-        payload = data if isinstance(data, dict) else dict(getattr(result, "data", None) or {})
-        try:
-            from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
-                canonical_checkout_next_slot,
-            )
-
-            missing, nxt = canonical_checkout_next_slot(ctx)
-        except Exception:  # noqa: BLE001
-            missing, nxt = list(payload.get("missing_fields") or []), "none"
-        if not nxt or nxt == "none":
-            local = list(payload.get("missing_fields") or [])
-            if local:
-                missing = local
-                nxt = str(local[0])
-        if not nxt or nxt == "none":
-            return None
-        legacy_reply = T.collect_order_details(
-            product=payload.get("product", {}),
-            question=str(payload.get("question") or ""),
-            missing_fields=list(missing or [nxt]),
-            is_first_ask=bool(payload.get("is_first_ask", False)),
-        )
-        from core.constrained_operational_compose import (  # noqa: PLC0415
-            compose_constrained_operational_reply,
-        )
-
-        instr = build_order_slot_instruction(
-            slot=str(nxt),
-            legacy_copy=legacy_reply,
-            product=payload.get("product", {}),
-            is_first_ask=bool(payload.get("is_first_ask", False)),
-            inbound_text=(ctx.message or ""),
-            next_missing_field=str(nxt),
-            missing_fields=list(missing or [nxt]),
-        )
-        hist: list = []
-        for row in (ctx.history or [])[-6:]:
-            body = str(row.get("body") or "").strip()
-            if not body:
-                continue
-            direction = str(row.get("direction") or "inbound")
-            role = "assistant" if direction in ("out", "outbound") else "user"
-            hist.append({"role": role, "content": body})
-        slot_reply, slot_meta = await compose_constrained_operational_reply(
-            db=None,
-            tenant_id=ctx.tenant_id,
-            phone=ctx.customer_phone,
-            instruction=instr,
-            inbound_text=(ctx.message or ""),
-            history=hist,
-        )
-        result.data["constrained_compose_meta"] = slot_meta
-        result.data["checkout_next_missing_field"] = nxt
-        result.data["checkout_missing_fields"] = list(missing or [])
-        return slot_reply
 
     async def _llm_compose(
         self,

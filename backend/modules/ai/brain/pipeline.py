@@ -2378,6 +2378,19 @@ class MerchantBrain:
                 )
 
         try:
+            from .commerce.commerce_turn_contract import (  # noqa: PLC0415
+                apply_canonical_next_slot_to_decision,
+            )
+
+            decision = apply_canonical_next_slot_to_decision(ctx, decision)
+        except Exception as _nxt_slot_exc:  # noqa: BLE001  # noqa: silent-ok — next_slot stamp must not block decide
+            logger.debug(
+                "[COMMERCE_TURN_CONTRACT] next_slot stamp skipped tenant=%s err=%s",
+                tenant_id,
+                _nxt_slot_exc,
+            )
+
+        try:
             from .turn.shadow import complete_turn_shadow_telemetry  # noqa: PLC0415
 
             complete_turn_shadow_telemetry(
@@ -7203,19 +7216,6 @@ def _compose_base_response_goal(
             "their name unless name_mode=ask."
         )
     _checkout_goal = str(_checkout.get("next_goal") or "").strip()
-    _nxt = str(_checkout.get("next_missing_field") or "").strip()
-    if (
-        _nxt
-        and _nxt != "none"
-        and decision.action == ACTION_PROPOSE_DRAFT_ORDER
-        and _checkout_goal != "confirm_known_address"
-        and bool(_checkout.get("checkout_location_evidence_known"))
-    ):
-        return (
-            f"platform owns next_missing_field={_nxt}. Ask only for that field. "
-            "Do not ask for location, maps, or address unless that is the "
-            "platform next field. Use CHECKOUT_IDENTITY_SHIPPING_FACTS."
-        )
     if _checkout_goal == "confirm_customer_order_and_shipping_details_once":
         return (
             "confirm_customer_order_and_shipping_details_once — one natural Saudi Arabic "

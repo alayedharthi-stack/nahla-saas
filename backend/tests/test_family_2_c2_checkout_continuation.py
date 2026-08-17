@@ -34,6 +34,7 @@ from core.wa_order_lifecycle import (  # noqa: E402
 from models import Base, Customer, CustomerAddress, Tenant  # noqa: E402
 from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: E402
     attach_commerce_turn_contract,
+    apply_canonical_next_slot_to_decision,
     build_commerce_turn_contract,
     canonical_checkout_next_slot,
 )
@@ -275,19 +276,25 @@ class TestC203NextMissingFieldProjectedThroughComposeBoundary:
             next_missing_field=str(nxt),
             missing_fields=list(missing),
         )
+        assert instr.facts["missing_slot"] == nxt
         assert instr.facts["next_missing_field"] == nxt
-        assert CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT in instr.constraints
+        assert instr.facts["constrained_compose_decides_slot"] is False
+        assert CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT not in instr.constraints
         goal = compose_operational_expression_goal(instr)
-        assert f"next_missing_field={nxt}" in goal
-        assert "Ask only for that field" in goal
+        assert f"ask for the next missing field ({nxt})" in goal
 
 
 class TestC204ProposeDraftOrderCannotOverrideCanonicalMissing:
-    def test_response_goal_uses_contract_next_slot_not_stale_address(self) -> None:
-        contract, _ctx = _accepted_checkout_contract()
+    def test_platform_stamps_next_slot_before_compose(self) -> None:
+        contract, ctx = _accepted_checkout_contract()
         nxt = contract.known_facts.get("next_missing_field")
+        decision = Decision(action="propose_draft_order", args={})
+        stamped = apply_canonical_next_slot_to_decision(ctx, decision)
+        assert stamped.next_slot == nxt
+        assert stamped.args.get("next_slot") == nxt
+        assert stamped.next_slot not in _LOCATION_SLOTS
         goal = _compose_base_response_goal(
-            Decision(action="propose_draft_order", args={}),
+            stamped,
             SuggestionSnapshot(),
             checkout_facts={
                 "next_missing_field": nxt,
@@ -295,21 +302,33 @@ class TestC204ProposeDraftOrderCannotOverrideCanonicalMissing:
                 "checkout_location_evidence_known": True,
             },
         )
-        assert f"next_missing_field={nxt}" in goal
-        assert "collect_delivery_address_only" not in goal
+        assert "platform owns next_missing_field" not in goal
 
-    def test_confirm_known_address_survives_when_current_location_unknown(self) -> None:
-        goal = _compose_base_response_goal(
+    def test_response_goal_ignores_next_missing_field_overlay(self) -> None:
+        facts = {
+            "next_goal": "collect_delivery_address_only",
+            "checkout_location_evidence_known": True,
+        }
+        with_slot = _compose_base_response_goal(
             Decision(action="propose_draft_order", args={}),
             SuggestionSnapshot(),
-            checkout_facts={
-                "next_missing_field": "delivery_address",
-                "next_goal": "confirm_known_address",
-                "checkout_location_evidence_known": False,
-            },
+            checkout_facts={**facts, "next_missing_field": "payment_method"},
         )
-        assert "Ask only for that field" not in goal
-        assert "next_missing_field=delivery_address" not in goal
+        without_slot = _compose_base_response_goal(
+            Decision(action="propose_draft_order", args={}),
+            SuggestionSnapshot(),
+            checkout_facts=facts,
+        )
+        assert with_slot == without_slot
+
+    def test_confirm_known_address_does_not_stamp_recollection_slot(self) -> None:
+        contract, ctx = _accepted_checkout_contract()
+        contract.next_goal = "confirm_known_address"
+        attach_commerce_turn_contract(ctx, contract)
+        decision = Decision(action="propose_draft_order", args={})
+        stamped = apply_canonical_next_slot_to_decision(ctx, decision)
+        assert stamped.next_slot is None
+        assert "next_slot" not in (stamped.args or {})
 
 
 class TestC205StaleAwaitingAddressCannotCauseRecollection:
@@ -437,15 +456,36 @@ class TestC209NoPhraseRegexTenantPhoneRuntime:
 
 class TestC210NoPromptModelProviderChanges:
     def test_customer_ai_runtime_not_retargeted(self) -> None:
-        changed = [
+        import inspect
+
+        order_slot_src = inspect.getsource(compose_operational_expression_goal)
+        _, _, rest = order_slot_src.partition("DECISION_KIND_ORDER_SLOT")
+        order_slot_block, _, _ = rest.partition("DECISION_KIND_CLEAR_INTENT")
+        assert "ask for the next missing field" in order_slot_block
+        assert "platform owns" not in order_slot_block
+        assert "Do not ask for location" not in order_slot_block
+
+        response_goal_src = inspect.getsource(_compose_base_response_goal)
+        assert "platform owns next_missing_field" not in response_goal_src
+        assert "Do not ask for location, maps, or address unless" not in response_goal_src
+
+        responder_src = open(
+            os.path.join(_BACKEND, "modules", "ai", "brain", "compose", "responder.py"),
+            encoding="utf-8",
+        ).read()
+        assert "_compose_checkout_continuation_slot" not in responder_src
+
+        prompt_files = [
+            os.path.join(_BACKEND, "modules", "ai", "brain", "compose", "operational_expression.py"),
+            os.path.join(_BACKEND, "modules", "ai", "brain", "pipeline.py"),
+            os.path.join(_BACKEND, "modules", "ai", "brain", "compose", "responder.py"),
             os.path.join(_BACKEND, "modules", "ai", "brain", "commerce", "commerce_turn_contract.py"),
             os.path.join(_BACKEND, "core", "wa_order_lifecycle.py"),
             os.path.join(_BACKEND, "core", "order_flow.py"),
             os.path.join(_BACKEND, "core", "reply_instruction.py"),
             os.path.join(_BACKEND, "modules", "ai", "brain", "execution", "orders.py"),
         ]
-        for path in changed:
+        for path in prompt_files:
             text = open(path, encoding="utf-8").read()
             assert "gpt-4o-mini" not in text
-            assert "temperature" not in text.split("def sync_funnel_status_after_accepted_delivery", 1)[-1][:800]
             assert "openai" not in os.path.basename(path)

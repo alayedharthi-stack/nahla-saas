@@ -151,22 +151,11 @@ def compose_operational_expression_goal(instruction: ReplyInstruction) -> str:
             "after bank transfer) without confirming payment."
         )
     elif kind == DECISION_KIND_ORDER_SLOT:
-        nxt = str(
-            instruction.facts.get("next_missing_field")
-            or instruction.facts.get("missing_slot")
-            or "none"
-        ).strip() or "none"
-        if nxt == "none":
-            context_note = (
-                "During checkout, the platform next_missing_field is none — "
-                "do not ask for location, maps, address, or any other checkout field."
-            )
-        else:
-            context_note = (
-                f"During checkout, the platform owns next_missing_field={nxt}. "
-                "Ask only for that field. Do not invent other missing fields. "
-                "Do not ask for location or maps unless that is the platform next field."
-            )
+        slot = instruction.facts.get("missing_slot", "")
+        context_note = (
+            f"During checkout, ask for the next missing field ({slot or 'unknown'}). "
+            "Keep the ask focused on one slot."
+        )
     elif kind == DECISION_KIND_CLEAR_INTENT:
         intent = instruction.facts.get("clear_intent", "")
         required = instruction.facts.get("required_delivery", "")

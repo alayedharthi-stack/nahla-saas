@@ -1107,7 +1107,7 @@ def maybe_enforce_commerce_turn_contract_decision(
                 enforced.action,
                 contract.next_goal,
             )
-        return enforced
+        return apply_canonical_next_slot_to_decision(ctx, enforced)
 
     if raw_action not in _CATALOG_ORDER_OVERRIDE_ACTIONS:
         return decision
@@ -1135,7 +1135,33 @@ def maybe_enforce_commerce_turn_contract_decision(
         catalog_decision.action,
         contract.next_goal,
     )
-    return catalog_decision
+    return apply_canonical_next_slot_to_decision(ctx, catalog_decision)
+
+
+def apply_canonical_next_slot_to_decision(
+    ctx: BrainContext,
+    decision: Decision,
+) -> Decision:
+    """Stamp ``decision.next_slot`` from the pre-decide checkout contract.
+
+    Compose must not choose the slot. ``confirm_known_address`` stays a
+    confirm path, not a recollection slot.
+    """
+    if str(getattr(decision, "action", "") or "") != ACTION_PROPOSE_DRAFT_ORDER:
+        return decision
+    contract = getattr(ctx, "commerce_turn_contract", None)
+    next_goal = str(getattr(contract, "next_goal", "") or "") if contract is not None else ""
+    if next_goal == "confirm_known_address":
+        return decision
+    missing, nxt = canonical_checkout_next_slot(ctx)
+    if not nxt or nxt == "none":
+        return decision
+    decision.next_slot = nxt
+    args = dict(getattr(decision, "args", None) or {})
+    args["next_slot"] = nxt
+    args["missing_fields"] = list(missing)
+    decision.args = args
+    return decision
 
 
 def is_address_on_file_claim(message: str) -> bool:
@@ -1156,6 +1182,7 @@ __all__ = [
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
     "canonical_checkout_next_slot",
+    "apply_canonical_next_slot_to_decision",
     "decision_owned_by_existing_order_support",
     "is_address_on_file_claim",
     "is_placed_order_statement",

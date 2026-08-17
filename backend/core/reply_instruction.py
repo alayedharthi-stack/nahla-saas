@@ -391,7 +391,6 @@ def build_order_slot_instruction(
         facts=facts,
         constraints=(
             CONSTRAINT_ASK_ORDER_SLOT,
-            CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT,
             CONSTRAINT_INCLUDE_ORDER_FACTS,
             CONSTRAINT_NO_SHIPPING_PROMISE,
             CONSTRAINT_NO_PRICE_INVENTION,
