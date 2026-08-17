@@ -7183,11 +7183,14 @@ def _compose_base_response_goal(
     _mk_topic = str(_mk_args.get("topic") or "")
     _mk_surface = str(_mk_args.get("policy_surface") or "")
     _mk_goal = str(_mk_args.get("response_goal") or "").strip()
-    if _mk_goal and (
+    if (
         _mk_surface == "merchant_knowledge_section"
         or _mk_topic.startswith("merchant_knowledge_")
     ):
-        return _mk_goal
+        return _mk_goal or (
+            "merchant_knowledge — answer from retrieved tenant knowledge "
+            "and structured merchant facts only. Do not pursue checkout next_goal."
+        )
     if _mk_goal and isinstance(_mk_args.get("answer_contract"), dict):
         return _mk_goal
 

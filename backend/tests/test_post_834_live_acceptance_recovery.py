@@ -117,6 +117,7 @@ class TestKnowledgeCapability:
         args = store_story_capability_args(facts)
         assert knowledge_kind_from_args(args) == "store_story"
         assert args["policy_surface"] == "merchant_knowledge_section"
+        assert args["response_goal"].startswith("merchant_knowledge_store_story")
         assert should_request_store_story_knowledge(
             intent_name="ask_store_info", facts=facts,
         ) is True
@@ -133,6 +134,31 @@ class TestKnowledgeCapability:
         )
         assert result.knowledge_query_run is False
         assert tuple(result.sections) == ()
+
+    def test_store_story_goal_outranks_stale_checkout_next_goal(self) -> None:
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import Decision
+
+        decision = Decision(
+            action=ACTION_LLM_REPLY,
+            args=store_story_capability_args(
+                SimpleNamespace(store_story_status="KNOWN_PRESENT"),
+            ),
+            reason="test",
+        )
+        suggestion = SimpleNamespace(
+            suggested_next_step="",
+            discount_ok_now=False,
+            coupon_logic_considered=False,
+        )
+        goal = _compose_base_response_goal(
+            decision,
+            suggestion,
+            checkout_facts={"next_goal": "collect_city_only"},
+        )
+        assert "merchant_knowledge" in goal
+        assert "collect_city_only" not in goal
 
     def test_disabled_story_is_not_requested(self) -> None:
         facts = SimpleNamespace(store_story_status="UNKNOWN")
