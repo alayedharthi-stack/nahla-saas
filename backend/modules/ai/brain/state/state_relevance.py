@@ -546,7 +546,7 @@ def current_intent_outranks_ordering_safety_net(ctx: Any) -> bool:
             order_prep=order_prep,
         ):
             return False
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — checkout-slot probe is optional
         pass
     if intent_name in {"general", ""}:
         return True
