@@ -20,7 +20,7 @@ _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
 
-_FRAGMENT_MAX_LEN = 48
+_FRAGMENT_MAX_LEN = 12
 _PRAYER_FRAGMENT_MAX_LEN = 16
 _FRAGMENT_TTL_SECONDS = 90.0
 _FRAGMENT_CLARIFY_ONCE = (
@@ -170,6 +170,7 @@ def should_block_catalog_grounding_fallback(
     intent: Any = None,
     decision_topic: str = "",
     protected_final_reply: bool = False,
+    facts: Any = None,
 ) -> Tuple[bool, str]:
     """Return (blocked, reason) when catalog fallback must not replace the reply."""
     if protected_final_reply:
@@ -190,6 +191,9 @@ def should_block_catalog_grounding_fallback(
         decision_topic=decision_topic,
     ):
         return False, ""
+
+    if getattr(facts, "has_coupons", False) or getattr(facts, "shareable_promotions", None):
+        return True, "promotion_facts_present"
 
     if is_discount_coupon_inquiry(inbound_text):
         return True, "discount_coupon_inquiry"
@@ -252,9 +256,6 @@ def evaluate_duplicate_fragment_turn(
             return DuplicateFragmentDecision(process_turn=True)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — bare order ref probe is best-effort
         pass
-
-    if is_discount_coupon_inquiry(text):
-        return DuplicateFragmentDecision(process_turn=True)
 
     norm = _normalize(text)
     if not norm or len(norm) > max_len:

@@ -578,12 +578,14 @@ class DefaultComposer:
                             if isinstance(getattr(ctx, "inbound_metadata", None), dict)
                             else None
                         ),
+                        intent=getattr(ctx, "intent", None),
                         decision_topic=str((decision.args or {}).get("topic") or ""),
+                        facts=getattr(ctx, "facts", None),
                     )
-                    if _blocked_miss and _miss_reason == "discount_coupon_inquiry":
+                    if _blocked_miss and _miss_reason == "promotion_facts_present":
                         logger.info(
                             "[RESPONDER] catalog_search_miss yielded to LLM "
-                            "reason=promotion_containment tenant=%s",
+                            "reason=promotion_facts tenant=%s",
                             getattr(ctx, "tenant_id", None),
                         )
                         return await self._llm_compose(ctx, result, decision=decision)

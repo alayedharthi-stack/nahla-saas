@@ -23,6 +23,7 @@ from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # no
 from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: E402
     evaluate_duplicate_fragment_turn,
     reset_fragment_cache_for_tests,
+    should_block_catalog_grounding_fallback,
 )
 from modules.ai.brain.commerce.merchant_knowledge_fact_scope import (  # noqa: E402
     knowledge_kind_from_args,
@@ -235,6 +236,24 @@ class TestPromotionsContract:
         assert first.process_turn is True
         assert second.process_turn is True
         reset_fragment_cache_for_tests()
+
+    def test_catalog_miss_blocks_on_promotion_facts_not_raw_text(self) -> None:
+        facts = SimpleNamespace(
+            has_coupons=True,
+            shareable_promotions=[{"code": "SAVE6", "source_type": "manual"}],
+        )
+        blocked, reason = should_block_catalog_grounding_fallback(
+            inbound_text="قميص قطني أزرق",
+            facts=facts,
+        )
+        assert blocked is True
+        assert reason == "promotion_facts_present"
+        browse_blocked, browse_reason = should_block_catalog_grounding_fallback(
+            inbound_text="وش عندكم من العسل؟",
+            facts=facts,
+        )
+        assert browse_blocked is False
+        assert browse_reason == ""
 
     def test_quality_guard_does_not_ask_customer_for_merchant_code(self) -> None:
         result = apply_commerce_reply_quality_guard(
