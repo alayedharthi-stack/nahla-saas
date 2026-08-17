@@ -18,7 +18,6 @@ from core.ai_pause_guard import REASON_MANUAL_PAUSE
 from core.automation_send_guard import (
     REASON_AI_DISABLED,
     REASON_HUMAN_TAKEOVER,
-    REASON_REQUIRES_HUMAN,
     should_block_automation_for_conversation,
 )
 
@@ -69,7 +68,7 @@ class TestShouldBlockAutomationForConversation:
         assert decision.block is True
         assert decision.reason == REASON_HUMAN_TAKEOVER
 
-    def test_needs_human_blocks(self) -> None:
+    def test_advisory_needs_human_does_not_block(self) -> None:
         convo = _convo(needs_human=True)
         decision = should_block_automation_for_conversation(
             MagicMock(),
@@ -77,8 +76,26 @@ class TestShouldBlockAutomationForConversation:
             customer_phone="966559968061",
             conversation=convo,
         )
-        assert decision.block is True
-        assert decision.reason == REASON_REQUIRES_HUMAN
+        assert decision.block is False
+
+    def test_leftover_advisory_handoff_flags_do_not_block(self) -> None:
+        convo = _convo(
+            is_human_handoff=True,
+            handoff_active=True,
+            needs_human=True,
+            status="human",
+        )
+        with patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = should_block_automation_for_conversation(
+                MagicMock(),
+                tenant_id=33,
+                customer_phone="966559968061",
+                conversation=convo,
+            )
+        assert decision.block is False
 
     def test_active_conversation_allows(self) -> None:
         convo = _convo()

@@ -64,10 +64,10 @@ def test_kod_khasem_badeel_not_catalog_fallback() -> None:
     assert result.action == "blocked_catalog_containment"
 
 
-def test_repeated_kod_khasem_badeel_only_one_clarify_turn() -> None:
-    tenant_id = 33
-    phone = "+966552972293"
-    msg = "كود خصم بديل"
+def test_repeated_short_social_fragment_only_one_clarify_turn() -> None:
+    tenant_id = 1
+    phone = "+966500000001"
+    msg = "ههه"
 
     first = evaluate_duplicate_fragment_turn(
         tenant_id=tenant_id, customer_phone=phone, text=msg,
@@ -84,6 +84,22 @@ def test_repeated_kod_khasem_badeel_only_one_clarify_turn() -> None:
     assert second.send_clarification_once is True
     assert third.process_turn is False
     assert third.send_clarification_once is False
+
+
+def test_repeated_coupon_request_still_processes_brain() -> None:
+    tenant_id = 1
+    phone = "+966500000001"
+    msg = "ابي كوبون خصم"
+
+    first = evaluate_duplicate_fragment_turn(
+        tenant_id=tenant_id, customer_phone=phone, text=msg,
+    )
+    second = evaluate_duplicate_fragment_turn(
+        tenant_id=tenant_id, customer_phone=phone, text=msg,
+    )
+
+    assert first.process_turn is True
+    assert second.process_turn is True
 
 
 def test_bishrak_fragment_not_catalog() -> None:
@@ -142,11 +158,10 @@ def test_real_product_browse_still_allowed() -> None:
     assert "الخيارات المؤكدة" not in result.reply
 
 
-def test_discount_coupon_support_reply_is_cautious() -> None:
+def test_discount_coupon_support_reply_is_not_customer_facing_owner() -> None:
     assert is_discount_coupon_inquiry("عندكم كود خصم؟")
     reply = build_discount_coupon_support_reply()
     assert "الكتالوج" not in reply
-    assert "كود" in reply
 
 
 def test_abshrak_full_social_not_prayer_fragment() -> None:
@@ -176,11 +191,11 @@ def test_protected_final_reply_blocks_catalog_rewrite() -> None:
     }
 
 
-def test_repeated_coupon_clarify_uses_discount_not_catalog() -> None:
+def test_repeated_coupon_clarify_does_not_ask_customer_for_merchant_code() -> None:
     from modules.ai.brain.commerce.inbound_fragment_guard import (
         duplicate_fragment_clarification_reply,
     )
 
     reply = duplicate_fragment_clarification_reply(inbound_text="كود خصم بديل")
     assert "الكتالوج" not in reply
-    assert "كود" in reply
+    assert "أرسل لي كود الخصم" not in reply

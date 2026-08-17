@@ -252,6 +252,8 @@ def merchant_customer_record_facts(
     record = {
         "registered": True,
         "personal_familiarity": False,
+        "has_historical_orders": False,
+        "historical_order_details_available": False,
         "customer_id": facts.get("customer_id"),
         "customer_name": facts.get("customer_name"),
         "customer_name_source": facts.get("customer_name_source"),
@@ -277,6 +279,7 @@ _IDENTITY_EVIDENCE_FACT_KEYS = (
     "customer_name_source",
     "customer_id",
     "personal_familiarity",
+    "customer_history_facts",
 )
 
 

@@ -304,6 +304,13 @@ def collect_customer_order_evidence(
             "referenced_order": "last_discussed_or_explicit_ref",
         },
         "history_truncated": int(counts.total_orders or 0) > len(orders),
+        "registered_customer": bool(cid),
+        "has_historical_orders": bool(previous),
+        "historical_order_details_available": bool(previous) and any(
+            bool(row.get("line_items") or row.get("display_reference"))
+            for row in previous
+        ),
+        "saved_address_available": False,
         "evidence_quality": {
             "line_items_present": any(bool(row.get("line_items")) for row in orders),
             "carrier_present": any(bool(row.get("carrier")) for row in orders),

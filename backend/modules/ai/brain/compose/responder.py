@@ -566,6 +566,31 @@ class DefaultComposer:
                 return discovery_text
 
             if not result.success or data.get("message") == "no_products_in_catalog":
+                try:
+                    from ..commerce.inbound_fragment_guard import (  # noqa: PLC0415
+                        should_block_catalog_grounding_fallback,
+                    )
+
+                    _blocked_miss, _miss_reason = should_block_catalog_grounding_fallback(
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        inbound_metadata=(
+                            dict(getattr(ctx, "inbound_metadata", None) or {})
+                            if isinstance(getattr(ctx, "inbound_metadata", None), dict)
+                            else None
+                        ),
+                        decision_topic=str((decision.args or {}).get("topic") or ""),
+                    )
+                    if _blocked_miss and _miss_reason == "discount_coupon_inquiry":
+                        logger.info(
+                            "[RESPONDER] catalog_search_miss yielded to LLM "
+                            "reason=promotion_containment tenant=%s",
+                            getattr(ctx, "tenant_id", None),
+                        )
+                        return await self._llm_compose(ctx, decision, result)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[RESPONDER] catalog_search_miss promotion yield failed",
+                    )
                 query = str((decision.args or {}).get("query") or "").strip()
                 inquiry_query = ""
                 try:

@@ -505,6 +505,54 @@ def should_block_workflow_resume(
     return bool(mapping.get(workflow, False))
 
 
+_CURRENT_INTENT_OUTRANKS_ORDERING = frozenset({
+    "ask_store_info",
+    "online_store_inquiry",
+    "ask_location",
+    "talk_to_human",
+    "ask_owner_contact",
+    "ask_shipping",
+    "track_order",
+    "employee_not_responding",
+    "who_are_you",
+    "greeting",
+    "social",
+    "platform_inquiry",
+    "persona_interaction",
+    "order_history_count",
+    "latest_order_summary",
+    "order_reference_list",
+})
+
+
+def current_intent_outranks_ordering_safety_net(ctx: Any) -> bool:
+    """True when stale ordering/checkout state must not own this turn.
+
+    Current Brain intent outranks leftover ``stage=ordering`` /
+    ``pending_action``. Checkout-slot fulfillment and product-order
+    intents may still continue the funnel.
+    """
+    intent_name = _intent_name(ctx)
+    if intent_name in _CURRENT_INTENT_OUTRANKS_ORDERING:
+        return True
+    try:
+        from ..commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
+            message_fulfills_checkout_slot,
+        )
+
+        order_prep = getattr(getattr(ctx, "state", None), "order_prep", None)
+        if message_fulfills_checkout_slot(
+            str(getattr(ctx, "message", "") or ""),
+            order_prep=order_prep,
+        ):
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    if intent_name in {"general", ""}:
+        return True
+    return False
+
+
 def log_state_relevance(
     *,
     tenant_id: Any = None,
@@ -569,4 +617,5 @@ __all__ = [
     "should_block_workflow_resume",
     "validate_state_relevance",
     "validate_state_relevance_from_summary",
+    "current_intent_outranks_ordering_safety_net",
 ]

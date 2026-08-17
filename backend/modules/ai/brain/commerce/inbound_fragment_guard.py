@@ -253,6 +253,9 @@ def evaluate_duplicate_fragment_turn(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — bare order ref probe is best-effort
         pass
 
+    if is_discount_coupon_inquiry(text):
+        return DuplicateFragmentDecision(process_turn=True)
+
     norm = _normalize(text)
     if not norm or len(norm) > max_len:
         return DuplicateFragmentDecision(process_turn=True)
@@ -301,8 +304,7 @@ def duplicate_fragment_clarification_reply(
     *,
     inbound_text: str = "",
 ) -> str:
-    if is_discount_coupon_inquiry(inbound_text):
-        return build_discount_coupon_support_reply()
+    del inbound_text
     return _FRAGMENT_CLARIFY_ONCE
 
 

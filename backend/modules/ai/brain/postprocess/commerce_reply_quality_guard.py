@@ -63,14 +63,9 @@ def _finalize_commerce_fallback(
         return "", "conditional_coupon_compose_collision_suppressed"
     try:
         from modules.ai.brain.commerce.inbound_fragment_guard import (  # noqa: PLC0415
-            build_discount_coupon_support_reply,
             is_catalog_fallback_reply,
-            is_discount_coupon_inquiry,
             should_block_catalog_grounding_fallback,
         )
-
-        if is_discount_coupon_inquiry(inbound_text):
-            return build_discount_coupon_support_reply(), "discount_coupon_support"
 
         blocked, block_reason = should_block_catalog_grounding_fallback(
             inbound_text=inbound_text,
@@ -79,8 +74,6 @@ def _finalize_commerce_fallback(
             protected_final_reply=protected_final_reply,
         )
         if blocked and is_catalog_fallback_reply(fallback):
-            if is_discount_coupon_inquiry(inbound_text):
-                return build_discount_coupon_support_reply(), "discount_coupon_support"
             return "", f"catalog_containment_{block_reason or 'blocked'}"
     except Exception:  # noqa: BLE001
         logger.exception("[COMMERCE_REPLY_QUALITY] catalog_containment_failed")
