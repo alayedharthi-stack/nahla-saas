@@ -628,6 +628,16 @@ class DefaultDecisionEngine:
                 or _product_correction_or_info_blocks_checkout()
             )
 
+        def _current_intent_yields_ordering() -> bool:
+            try:
+                from ..state.state_relevance import (  # noqa: PLC0415
+                    current_intent_outranks_ordering_safety_net,
+                )
+
+                return current_intent_outranks_ordering_safety_net(ctx)
+            except Exception:  # noqa: BLE001
+                return False
+
         def _block_stale_resume(workflow: str, *, reason: str = "semantic_mismatch") -> bool:
             try:
                 from ..state.state_relevance import (  # noqa: PLC0415
@@ -2114,6 +2124,7 @@ class DefaultDecisionEngine:
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
             and not _checkout_topic_blocks()
+            and not _current_intent_yields_ordering()
             and not getattr(_current_social_nc, "matched", False)
             and not _is_search_continue
         ):
@@ -3105,6 +3116,7 @@ class DefaultDecisionEngine:
             and not _explicit_commerce_switch
             and not _is_global_browse
             and not _checkout_topic_blocks()
+            and not _current_intent_yields_ordering()
             and not getattr(_current_social_nc, "matched", False)
             and (
                 intent.name in _CONTINUATION_INTENTS
@@ -4452,11 +4464,7 @@ class DefaultDecisionEngine:
 
         _yield_stale_ordering = False
         try:
-            from ..state.state_relevance import (  # noqa: PLC0415
-                current_intent_outranks_ordering_safety_net,
-            )
-
-            _yield_stale_ordering = current_intent_outranks_ordering_safety_net(ctx)
+            _yield_stale_ordering = _current_intent_yields_ordering()
             if _yield_stale_ordering:
                 logger.info(
                     "[ORDER FLOW] current intent outranks stale ordering state "

@@ -104,7 +104,7 @@ def should_request_store_story_knowledge(
     if str(getattr(facts, "store_story_status", "") or "") != "KNOWN_PRESENT":
         return False
     name = str(intent_name or "").strip()
-    return name in {"ask_store_info", "general"}
+    return name == "ask_store_info"
 
 
 def should_inject_shipping_knowledge_facts(

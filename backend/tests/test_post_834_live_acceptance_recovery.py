@@ -118,8 +118,11 @@ class TestKnowledgeCapability:
         assert knowledge_kind_from_args(args) == "store_story"
         assert args["policy_surface"] == "merchant_knowledge_section"
         assert should_request_store_story_knowledge(
-            intent_name="general", facts=facts,
+            intent_name="ask_store_info", facts=facts,
         ) is True
+        assert should_request_store_story_knowledge(
+            intent_name="general", facts=facts,
+        ) is False
         assert should_request_store_story_knowledge(
             intent_name="start_order", facts=facts,
         ) is False

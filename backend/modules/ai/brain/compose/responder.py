@@ -586,7 +586,7 @@ class DefaultComposer:
                             "reason=promotion_containment tenant=%s",
                             getattr(ctx, "tenant_id", None),
                         )
-                        return await self._llm_compose(ctx, decision, result)
+                        return await self._llm_compose(ctx, result, decision=decision)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "[RESPONDER] catalog_search_miss promotion yield failed",
