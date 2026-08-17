@@ -2124,7 +2124,7 @@ class DefaultDecisionEngine:
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
             and not _checkout_topic_blocks()
-            and not _current_intent_yields_ordering()
+            and not (_current_intent_yields_ordering() and not _is_confirm)
             and not getattr(_current_social_nc, "matched", False)
             and not _is_search_continue
         ):
@@ -3116,7 +3116,7 @@ class DefaultDecisionEngine:
             and not _explicit_commerce_switch
             and not _is_global_browse
             and not _checkout_topic_blocks()
-            and not _current_intent_yields_ordering()
+            and not (_current_intent_yields_ordering() and not _is_confirm)
             and not getattr(_current_social_nc, "matched", False)
             and (
                 intent.name in _CONTINUATION_INTENTS
@@ -4464,7 +4464,7 @@ class DefaultDecisionEngine:
 
         _yield_stale_ordering = False
         try:
-            _yield_stale_ordering = _current_intent_yields_ordering()
+            _yield_stale_ordering = _current_intent_yields_ordering() and not _is_confirm
             if _yield_stale_ordering:
                 logger.info(
                     "[ORDER FLOW] current intent outranks stale ordering state "
