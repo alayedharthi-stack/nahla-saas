@@ -234,6 +234,9 @@ def customer_authored_location_continue_text(
     message: str = "",
 ) -> str:
     """Customer-origin location payload for Brain continue — never canned copy."""
+    meta = _meta(inbound_metadata)
+    if meta.get("checkout_location_ingest_blocked"):
+        return ""
     text = str(message or "").strip()
     if text:
         return text
@@ -270,6 +273,52 @@ def should_continue_checkout_location_persist_failure(
     return bool(_meta(inbound_metadata).get("checkout_location_persist_failed"))
 
 
+_LOCATION_INGEST_KEYS = (
+    "state_patch",
+    "location",
+    "whatsapp_location",
+    "latitude",
+    "longitude",
+    "google_maps_url",
+    "maps_url",
+    "delivery_address_url",
+    "location_url",
+    "delivery_location_lat",
+    "delivery_location_lng",
+)
+
+
+def _block_unpersisted_checkout_location_ingest(meta: Dict[str, Any]) -> None:
+    """Strip accepted location ingest so Brain/OFV2 cannot treat it as saved."""
+    for key in _LOCATION_INGEST_KEYS:
+        meta.pop(key, None)
+    text = str(meta.get("text") or "").strip()
+    if text:
+        meta.pop("text", None)
+    nested = meta.get("normalized_inbound")
+    if isinstance(nested, dict):
+        nested = dict(nested)
+        for key in _LOCATION_INGEST_KEYS:
+            nested.pop(key, None)
+        if str(nested.get("source_type") or "").strip().lower() in {
+            "location",
+            "location_pin",
+            "whatsapp_location",
+        }:
+            nested["source_type"] = "text"
+        nested.pop("text", None)
+        meta["normalized_inbound"] = nested
+    meta["normalized_type"] = "text"
+    meta["inbound_normalized_type"] = "text"
+    meta["type"] = "text"
+    if str(meta.get("source_type") or "").strip().lower() in {
+        "location",
+        "location_pin",
+        "whatsapp_location",
+    }:
+        meta["source_type"] = "text"
+
+
 def resolve_checkout_location_persist_turn(
     *,
     persist_ok: bool,
@@ -286,12 +335,12 @@ def resolve_checkout_location_persist_turn(
     ``location_saved: true``.
     """
     meta = _meta(inbound_metadata)
-    if state_patch:
-        meta["state_patch"] = dict(state_patch)
     reason = str(persist_reason or "").strip() or (
         "persisted" if persist_ok else "apply_state_patch_false"
     )
     if persist_ok:
+        if state_patch:
+            meta["state_patch"] = dict(state_patch)
         extra = {
             "location_received": True,
             "location_persisted": True,
@@ -331,7 +380,11 @@ def resolve_checkout_location_persist_turn(
         "persistence_failure_reason": reason,
         "persistence_failure_source": "persist_checkout_location_patch",
         "checkout_location_persist_failed": True,
+        "checkout_location_ingest_blocked": True,
     }
+    # Do not forward an accepted ingest payload. Brain must complete the
+    # commercial turn without treating the unpersisted location as saved.
+    _block_unpersisted_checkout_location_ingest(meta)
     trace = _completion_trace(
         input_type=str(inbound_type or "location"),
         semantic_owner="brain",
@@ -346,13 +399,12 @@ def resolve_checkout_location_persist_turn(
     )
     meta.update(trace)
     meta.update(extra)
-    brain_text = customer_authored_location_continue_text(meta, inbound_text)
     return {
         "emit_success_ack": False,
         "call_brain": True,
         "completion_class": COMPLETION_BRAIN,
         "inbound_metadata": meta,
-        "brain_text": brain_text,
+        "brain_text": "",
         "location_received": True,
         "location_persisted": False,
         "location_saved": False,

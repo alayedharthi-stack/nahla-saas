@@ -5134,6 +5134,7 @@ async def _dispatch_message(
                         _addr_turn.get("completion_class"),
                     )
                     normalized_inbound.metadata = _addr_turn.get("inbound_metadata")
+                    text = str(_addr_turn.get("brain_text") or "")
                     # Continue to the existing Brain owner below — do not
                     # emit the saved ack and do not silent-return.
                 else:

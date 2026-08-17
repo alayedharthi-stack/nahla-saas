@@ -28,14 +28,20 @@ from core.order_shipping_snapshot import shipping_snapshot_confirmed  # noqa: E4
 from models import Base, Customer, CustomerAddress, Tenant  # noqa: E402
 from modules.ai.brain.execution.orders import _merge_message_details  # noqa: E402
 from modules.ai.brain.types import OrderPreparationState  # noqa: E402
+from core.wa_address_ingestion import resolve_address_state_patch  # noqa: E402
+from modules.ai.brain.commerce.unstructured_turn_ownership import (  # noqa: E402
+    ofv2_may_own_prebrain,
+)
 from modules.ai.media.customer_turn_completion import (  # noqa: E402
     AUDITED_CUSTOMER_ORIGIN_EARLY_RETURNS,
     COMPLETION_BRAIN,
     COMPLETION_ORPHAN,
     COMPLETION_STRUCTURED_AND_CONTINUATION,
+    customer_authored_location_continue_text,
     resolve_checkout_location_persist_turn,
     should_continue_checkout_location_persist_failure,
 )
+from modules.ai.order_flow_v2.ingest import apply_inbound_slots  # noqa: E402
 
 GENERIC_MAPS = "https://maps.google.com/?q=24.7136,46.6753"
 GENERIC_CITY = "الرياض"
@@ -79,7 +85,14 @@ class TestPersistFailureLocationCompletion:
         ctc = (plan["inbound_metadata"] or {}).get("customer_turn_completion") or {}
         assert ctc["semantic_owner"] == "brain"
         assert ctc["state_persisted"] is False
-        assert plan["brain_text"]
+        assert plan["brain_text"] == ""
+        meta = plan["inbound_metadata"] or {}
+        assert meta.get("checkout_location_ingest_blocked") is True
+        assert meta.get("location_saved") is False
+        assert "location" not in meta
+        assert meta.get("state_patch") is None
+        assert not meta.get("google_maps_url")
+        assert meta.get("inbound_normalized_type") == "text"
 
 
 class TestPersistFailureAddressTextCompletion:
@@ -98,7 +111,13 @@ class TestPersistFailureAddressTextCompletion:
         assert plan["location_persisted"] is False
         assert plan["location_received"] is True
         assert plan["completion_class"] == BRAIN_NATURAL_REPLY
-        assert plan["brain_text"] == GENERIC_MAPS
+        assert plan["brain_text"] == ""
+        assert plan["brain_text"] != GENERIC_MAPS
+        meta = plan["inbound_metadata"] or {}
+        assert meta.get("checkout_location_ingest_blocked") is True
+        assert meta.get("location_saved") is False
+        assert meta.get("state_patch") is None
+        assert not meta.get("google_maps_url")
 
 
 class TestPersistSuccessControl:
@@ -118,6 +137,59 @@ class TestPersistSuccessControl:
         assert plan["location_saved"] is True
         assert plan["completion_class"] == COMPLETION_STRUCTURED_AND_CONTINUATION
         assert plan["completion_class"] == STRUCTURED_ACTION_PLUS_REPLY
+        meta = plan["inbound_metadata"] or {}
+        assert meta.get("location_saved") is True
+        assert meta.get("checkout_location_ingest_blocked") is not True
+        assert (meta.get("location") or {}).get("latitude") == 24.7
+
+
+class TestPersistFailureDoesNotIngestAsAccepted:
+    def test_location_failure_is_not_ofv2_structural_location(self) -> None:
+        plan = resolve_checkout_location_persist_turn(
+            persist_ok=False,
+            persist_reason="apply_state_patch_false",
+            inbound_type="location",
+            inbound_metadata={
+                "normalized_type": "location",
+                "type": "location",
+                "location": {"latitude": 24.7136, "longitude": 46.6753},
+                "text": GENERIC_MAPS,
+            },
+            inbound_text="",
+            state_patch=_maps_patch(),
+        )
+        meta = plan["inbound_metadata"] or {}
+        assert ofv2_may_own_prebrain(
+            meta,
+            normalized_type=str(meta.get("inbound_normalized_type") or ""),
+            message=plan["brain_text"],
+        ) is False
+        assert apply_inbound_slots(
+            message=plan["brain_text"],
+            inbound_normalized_type=str(meta.get("inbound_normalized_type") or "text"),
+            inbound_metadata=meta,
+        ) == {}
+        assert resolve_address_state_patch(
+            inbound_normalized_type=str(meta.get("inbound_normalized_type") or "text"),
+            inbound_metadata=meta,
+            inbound_text=plan["brain_text"],
+        ) is None
+
+    def test_blocked_continue_text_does_not_restore_maps_url(self) -> None:
+        plan = resolve_checkout_location_persist_turn(
+            persist_ok=False,
+            persist_reason="apply_state_patch_false",
+            inbound_type="address_text",
+            inbound_metadata={"text": GENERIC_MAPS},
+            inbound_text=GENERIC_MAPS,
+            state_patch=_maps_patch(),
+        )
+        restored = customer_authored_location_continue_text(
+            plan["inbound_metadata"],
+            GENERIC_MAPS,
+        )
+        assert restored == ""
+        assert restored != GENERIC_MAPS
 
 
 class TestPersistOutcomeReason:
@@ -155,6 +227,7 @@ class TestWebhookCompletionOwners:
         assert loc_idx > 0
         loc_chunk = src[loc_idx: loc_idx + 900]
         assert "_handle_merchant_message(" in loc_chunk
+        assert "brain_text" in loc_chunk
         assert "resolve_checkout_location_persist_turn" in src
 
     def test_address_text_persist_failure_does_not_return_before_brain(self) -> None:
@@ -166,6 +239,7 @@ class TestWebhookCompletionOwners:
         assert addr_idx > 0
         addr_chunk = src[addr_idx: addr_idx + 700]
         assert "normalized_inbound.metadata" in addr_chunk
+        assert "brain_text" in addr_chunk
         assert "\n                    return\n" not in addr_chunk.split("else:")[0]
 
     def test_audited_persist_failure_paths_are_brain_owned(self) -> None:
