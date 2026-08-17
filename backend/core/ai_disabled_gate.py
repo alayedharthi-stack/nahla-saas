@@ -64,14 +64,32 @@ def _is_active_handoff_session_row(row: Any) -> bool:
     return isinstance(status, str) and status.strip().lower() == "active"
 
 
+def _handoff_reason_is_notify_only(reason: str) -> bool:
+    """True when the session is staff-notify, not genuine keyboard ownership.
+
+    Producers historically prefixed the canonical notify-only reason
+    (``customer_request_pre_brain:clear``). Prefix match is on structured
+    reason codes, not customer language.
+    """
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    if text in _NOTIFY_ONLY_HANDOFF_REASONS:
+        return True
+    return any(
+        text.startswith(f"{prefix}:") or text.startswith(f"{prefix}_")
+        for prefix in _NOTIFY_ONLY_HANDOFF_REASONS
+    )
+
+
 def _handoff_session_disables_ai(row: Any) -> bool:
     """Active staff-notify sessions must not silently kill AI."""
     if not _is_active_handoff_session_row(row):
         return False
     reason = str(
         getattr(row, "handoff_reason", None) or getattr(row, "reason", None) or ""
-    ).strip().lower()
-    return reason not in _NOTIFY_ONLY_HANDOFF_REASONS
+    )
+    return not _handoff_reason_is_notify_only(reason)
 
 
 def disabled_reason_for_conversation(convo: Conversation | None) -> str:
@@ -86,12 +104,11 @@ def disabled_reason_for_conversation(convo: Conversation | None) -> str:
         return REASON_HUMAN_SUPERVISION
     if getattr(convo, "taken_over_at", None) is not None:
         return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "is_human_handoff", False)):
-        return REASON_HUMAN_SUPERVISION
-    if bool(getattr(convo, "handoff_active", False)):
-        return REASON_HUMAN_SUPERVISION
-    if str(getattr(convo, "status", "") or "").strip().lower() == "human":
-        return REASON_HUMAN_SUPERVISION
+
+    # status=human is overloaded: notify-only queue producers historically
+    # wrote it without a takeover stamp. Genuine ownership always stamps
+    # paused_by_human and/or taken_over_at (dashboard reply, loop-pause).
+    # is_human_handoff / handoff_active / needs_human remain advisory.
 
     return ""
 
@@ -370,6 +387,7 @@ def persist_inbound_for_suppressed_turn(
     wa_msg_id: str | None = None,
     wa_message_ts: Any = None,
     inbound_metadata: dict[str, Any] | None = None,
+    suppression_reason: str = "",
 ) -> Conversation:
     """Save inbound only — no outbound, no brain, no arbiter."""
     from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
@@ -386,12 +404,15 @@ def persist_inbound_for_suppressed_turn(
         "historical_import": False,
         "ai_disabled_gate": True,
     }
+    if inbound_metadata:
+        meta.update(inbound_metadata)
     if wa_msg_id:
         meta["wa_message_id"] = wa_msg_id
     if wa_message_ts is not None and hasattr(wa_message_ts, "isoformat"):
         meta["whatsapp_timestamp"] = wa_message_ts.isoformat()
-    if inbound_metadata:
-        meta.update(inbound_metadata)
+    if suppression_reason:
+        meta["ai_disabled_reason"] = str(suppression_reason)
+    meta["ai_disabled_gate"] = True
 
     StateManager.save_message(
         db,

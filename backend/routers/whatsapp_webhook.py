@@ -5974,6 +5974,7 @@ async def _handle_merchant_message(
                 wa_msg_id=wa_msg_id,
                 wa_message_ts=wa_message_ts,
                 inbound_metadata=inbound_metadata,
+                suppression_reason=_ai_off.reason,
             )
             log_ai_disabled_gate(
                 tenant_id=tenant_id,
@@ -6025,6 +6026,7 @@ async def _handle_merchant_message(
                     wa_msg_id=wa_msg_id,
                     wa_message_ts=wa_message_ts,
                     inbound_metadata=inbound_metadata,
+                    suppression_reason=REASON_GATE_VERIFY_FAILED,
                 )
                 log_ai_disabled_gate(
                     tenant_id=tenant_id,
@@ -6388,7 +6390,8 @@ async def _handle_merchant_message(
         if _ho_convo is not None:
             try:
                 if _do_full_handoff_flip:
-                    _ho_convo.status            = "human"
+                    # Queue flags for the staff inbox. Do not mark the
+                    # conversation human-owned — notify-only must keep AI.
                     _ho_convo.is_human_handoff  = True
                     _ho_convo.needs_human       = True
                     _ho_convo.handoff_active    = True
@@ -6411,7 +6414,8 @@ async def _handle_merchant_message(
                 from handoff.manager import create_handoff_session  # noqa: PLC0415
                 create_handoff_session(
                     db, tenant_id, to, to, text or "",
-                    reason=f"customer_request_pre_brain:{_ho_tier}",
+                    reason="customer_request",
+                    context_snapshot={"pre_brain_tier": _ho_tier},
                 )
             except Exception as _ho_sess_exc:  # noqa: BLE001
                 logger.warning(
@@ -14054,10 +14058,10 @@ async def _handle_merchant_message(
                         )
                         create_handoff_session(
                             db, tenant_id, to, to, text or "",
-                            reason="customer_request_outer_exception",
+                            reason="customer_request",
+                            context_snapshot={"source": "outer_exception"},
                         )
                         if _outer_conv is not None:
-                            _outer_conv.status            = "human"
                             _outer_conv.is_human_handoff  = True
                             _outer_conv.needs_human       = True
                             _outer_conv.handoff_active    = True

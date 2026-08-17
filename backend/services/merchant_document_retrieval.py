@@ -166,6 +166,14 @@ class MerchantDocumentRetrievalResult:
     sections_skipped_incomplete: int = 0
     doc_refs_skipped: Tuple[str, ...] = ()
     skip_reason_codes: Tuple[str, ...] = ()
+    knowledge_query_run: bool = False
+    tenant_id: int = 0
+    candidate_count: int = 0
+    selected_knowledge_ids: Tuple[int, ...] = ()
+    source_section: str = "retrieval"
+    structured_conflicts: Tuple[str, ...] = ()
+    model_visible_knowledge_ids: Tuple[int, ...] = ()
+    query_failed: bool = False
 
 
 def is_long_form_document_kind(kind: Optional[str]) -> bool:
@@ -174,7 +182,11 @@ def is_long_form_document_kind(kind: Optional[str]) -> bool:
 
 
 def detect_document_retrieval_intent(message: str) -> Optional[str]:
-    """Return retrieval intent key, or None when long-form retrieval is skipped."""
+    """Legacy text-intent helper — NOT a customer-runtime semantic owner.
+
+    Customer conversation retrieval must receive ``structured_kind`` from
+    Brain. This detector remains for diagnostics / historical tests only.
+    """
     text = str(message or "").strip()
     if not text:
         return None
@@ -232,6 +244,12 @@ def _kinds_for_intent(intent: str) -> Tuple[str, ...]:
         return ("store_story",)
     if intent == "return_family":
         return ("return_policy", "refund_policy", "exchange_policy")
+    if intent == "return_policy":
+        return ("return_policy",)
+    if intent == "refund_policy":
+        return ("refund_policy",)
+    if intent == "exchange_policy":
+        return ("exchange_policy",)
     if intent == "shipping_policy":
         return ("shipping_policy",)
     if intent == "terms_policy":
@@ -240,31 +258,41 @@ def _kinds_for_intent(intent: str) -> Tuple[str, ...]:
         return ("privacy_policy",)
     if intent == "warranty":
         return ("warranty",)
-    # faq intentionally omitted — Pack A3 deferred customer exposure
+    if intent == "faq":
+        return ("faq",)
     return ()
 
 
 def retrieve_merchant_documents(
     db: Any,
     tenant_id: int,
-    message: str,
+    message: str = "",
     *,
     max_sections: int = MAX_SECTIONS_PER_TURN,
     hard_character_cap: int = HARD_CHARACTER_CAP,
+    structured_kind: Optional[str] = None,
 ) -> MerchantDocumentRetrievalResult:
-    """Retrieve 0–N relevant long-form MKS sections for one turn (source-agnostic)."""
+    """Retrieve 0–N relevant long-form MKS sections for one turn.
+
+    Customer runtime: Brain supplies ``structured_kind``. Raw customer
+    text is never a semantic owner here (``message`` is unused for intent).
+    """
+    del message  # not a knowledge-topic owner
     empty = MerchantDocumentRetrievalResult(
         sections=(),
         total_chars=0,
         matched_intent="",
         truncated=False,
+        knowledge_query_run=False,
+        tenant_id=int(tenant_id or 0),
     )
     if db is None or not tenant_id:
         return empty
 
-    intent = detect_document_retrieval_intent(message)
-    if not intent:
+    kind = str(structured_kind or "").strip().lower()
+    if kind not in DOCUMENT_KINDS:
         return empty
+    intent = kind
 
     kinds = _kinds_for_intent(intent)
     if not kinds:
@@ -301,7 +329,15 @@ def retrieve_merchant_documents(
             "[PackA1.retrieval] query failed tenant=%s: %s",
             tenant_id, exc,
         )
-        return empty
+        return MerchantDocumentRetrievalResult(
+            sections=(),
+            total_chars=0,
+            matched_intent=intent,
+            truncated=False,
+            knowledge_query_run=True,
+            tenant_id=int(tenant_id or 0),
+            query_failed=True,
+        )
 
     # custom is never policy/document truth for this path.
     eligible = []
@@ -311,8 +347,8 @@ def retrieve_merchant_documents(
         kind = str(getattr(r, "kind", "") or "").strip().lower()
         if not is_long_form_document_kind(kind) or kind == "custom":
             continue
-        # Pack A3: FAQ rows are never customer-retrieved (visibility deferred).
-        if kind == "faq":
+        # FAQ rows are customer-retrieved only when Brain passed structured_kind=faq.
+        if kind == "faq" and intent != "faq":
             continue
         # Merchant-wide warranty must not use product-linked sections.
         if intent == "warranty":
@@ -389,6 +425,7 @@ def retrieve_merchant_documents(
         if truncated:
             break
 
+    selected_ids = tuple(int(s.section_id) for s in selected if s.section_id)
     return MerchantDocumentRetrievalResult(
         sections=tuple(selected),
         total_chars=total,
@@ -397,6 +434,12 @@ def retrieve_merchant_documents(
         sections_skipped_incomplete=len(skipped_refs),
         doc_refs_skipped=tuple(skipped_refs),
         skip_reason_codes=tuple(skip_reasons),
+        knowledge_query_run=True,
+        tenant_id=int(tenant_id or 0),
+        candidate_count=len(rows),
+        selected_knowledge_ids=selected_ids,
+        source_section="retrieval",
+        model_visible_knowledge_ids=selected_ids,
     )
 
 

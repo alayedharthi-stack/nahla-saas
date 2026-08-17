@@ -162,6 +162,42 @@ def _asset_flags_for_section(section: Any) -> List[str]:
     return flags
 
 
+def _stamp_overlay_observability(
+    observability_out: Optional[Dict[str, Any]],
+    *,
+    tenant_id: int,
+    queried_rows: List[Any],
+    included_rows: List[Any],
+) -> None:
+    if observability_out is None:
+        return
+    ids = [
+        int(getattr(r, "id", 0) or 0)
+        for r in included_rows
+        if getattr(r, "id", None)
+    ]
+    kinds = sorted({
+        str(getattr(r, "kind", "") or "").strip().lower()
+        for r in included_rows
+        if str(getattr(r, "kind", "") or "").strip()
+    })
+    observability_out.update({
+        "knowledge_query_run": True,
+        "tenant_id": int(tenant_id or 0),
+        "candidate_count": len(queried_rows or []),
+        "selected_knowledge_ids": ids,
+        "source_section": "overlay",
+        "model_visible_knowledge_ids": ids,
+        "included_kinds": kinds,
+        "knowledge_query_failed": bool(
+            observability_out.get("knowledge_query_failed")
+        ),
+        "structured_overlay_held_empty": bool(
+            observability_out.get("structured_overlay_held_empty")
+        ),
+    })
+
+
 def _emit_kb_runtime_trace(
     *,
     tenant_id: int,
@@ -262,6 +298,13 @@ def build_structured_facts_block(
     tenant_id: int,
     *,
     active_product_ids: Optional[set] = None,
+    observability_out: Optional[Dict[str, Any]] = None,
+    has_catalog: bool = False,
+    has_branches: bool = False,
+    has_contacts: bool = False,
+    has_promotions: bool = False,
+    has_payments: bool = False,
+    has_orders: bool = False,
 ) -> str:
     """Build the facts bucket from ``merchant_knowledge_sections`` rows.
 
@@ -312,9 +355,23 @@ def build_structured_facts_block(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[KB.facts] query failed for tenant=%s: %s", tenant_id, exc)
+        if observability_out is not None:
+            observability_out["knowledge_query_failed"] = True
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=[],
+            included_rows=[],
+        )
         return ""
 
     if not rows:
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=[],
+            included_rows=[],
+        )
         return ""
 
     # ── Pack A1: long-form document kinds are retrieval-only ────────────
@@ -337,6 +394,37 @@ def build_structured_facts_block(
     rows = [r for r in rows if not is_behavioral_kind(getattr(r, "kind", None))]
     behavioral_dropped = pre_behavioral_total - len(rows)
 
+    # Structured operational records own price/location/contact/payment/
+    # promotion/order facts. Hold matching overlay kinds so KB prose cannot
+    # compete. Product usage/recipe explanation is not held back.
+    try:
+        from modules.ai.brain.commerce.knowledge_truth import (  # noqa: PLC0415
+            overlay_kinds_held_by_structured_truth,
+        )
+
+        held_kinds = overlay_kinds_held_by_structured_truth(
+            has_catalog=has_catalog,
+            has_branches=has_branches,
+            has_contacts=has_contacts,
+            has_promotions=has_promotions,
+            has_payments=has_payments,
+            has_orders=has_orders,
+        )
+    except Exception:  # noqa: silent-ok — overlay still renders remaining facts
+        held_kinds = frozenset()
+
+    held_dropped = 0
+    if held_kinds:
+        pre_hold_total = len(rows)
+        rows = [
+            r for r in rows
+            if str(getattr(r, "kind", "") or "").strip().lower() not in held_kinds
+        ]
+        held_dropped = pre_hold_total - len(rows)
+
+    if held_dropped and not rows and observability_out is not None:
+        observability_out["structured_overlay_held_empty"] = True
+
     if not rows:
         # Only behavioral/long-form rows existed — facts bucket is empty by design.
         _emit_kb_runtime_trace(
@@ -345,6 +433,12 @@ def build_structured_facts_block(
             queried_rows=queried_rows_all,
             included_rows=[],
             dropped_behavioral=behavioral_dropped,
+        )
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=queried_rows_all,
+            included_rows=[],
         )
         logger.info(
             "[KB.facts] tenant=%s only behavioral/long-form rows present "
@@ -389,6 +483,14 @@ def build_structured_facts_block(
             dropped_behavioral=behavioral_dropped,
             dropped_product_scope=scoped_dropped,
         )
+        _stamp_overlay_observability(
+            observability_out,
+            tenant_id=tenant_id,
+            queried_rows=queried_non_behavior_rows,
+            included_rows=[],
+        )
+        if held_dropped and observability_out is not None:
+            observability_out["structured_overlay_held_empty"] = True
         return ""
 
     grouped: Dict[int, List[Any]] = {}
@@ -472,6 +574,12 @@ def build_structured_facts_block(
         included_rows=rows,
         dropped_behavioral=behavioral_dropped,
         dropped_product_scope=scoped_dropped,
+    )
+    _stamp_overlay_observability(
+        observability_out,
+        tenant_id=tenant_id,
+        queried_rows=queried_non_behavior_rows,
+        included_rows=rows,
     )
     return "\n\n".join(parts)
 

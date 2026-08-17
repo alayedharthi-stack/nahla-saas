@@ -20,6 +20,12 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 from services.merchant_document_retrieval import (  # noqa: E402
     retrieve_merchant_documents,
 )
+
+
+def _retrieve(db, tenant_id, kind: str):
+    return retrieve_merchant_documents(
+        db, tenant_id, "", structured_kind=kind,
+    )
 from services.merchant_knowledge_customer_readiness import (  # noqa: E402
     EMPTY_CONTENT,
     INCOMPLETE_AUTHORING_TEMPLATE,
@@ -258,7 +264,7 @@ class TestRetrievalReadiness:
             title="سياسة الاسترجاع",
             body=_CANONICAL_PLACEHOLDER,
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        result = _retrieve(db, tenant.id, "return_policy")
         assert len(result.sections) == 0
         assert result.sections_skipped_incomplete >= 1
         assert any(r.startswith("mks:") for r in result.doc_refs_skipped)
@@ -273,7 +279,7 @@ class TestRetrievalReadiness:
             title="سياسة الاسترجاع",
             body=_COMPLETE_RETURN,
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        result = _retrieve(db, tenant.id, "return_policy")
         assert len(result.sections) >= 1
         assert "7 أيام" in result.sections[0].body
         assert result.sections_skipped_incomplete == 0
@@ -297,7 +303,7 @@ class TestRetrievalReadiness:
             body=_COMPLETE_RETURN,
             priority=2,
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        result = _retrieve(db, tenant.id, "return_policy")
         assert len(result.sections) == 1
         assert result.sections[0].section_id == good.id
         assert f"mks:{bad.id}" in result.doc_refs_skipped
@@ -314,7 +320,7 @@ class TestRetrievalReadiness:
             title="قصة المتجر",
             body="قصتنا: [اكتب هنا قصة المتجر]",
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش قصة المتجر؟")
+        result = _retrieve(db, tenant.id, "store_story")
         assert len(result.sections) == 0
         assert result.sections_skipped_incomplete >= 1
 
@@ -328,7 +334,7 @@ class TestRetrievalReadiness:
             title="سياسة الشحن",
             body="الشحن: [أضف مدة التوصيل — مثلاً 3 أيام]",
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الشحن؟")
+        result = _retrieve(db, tenant.id, "shipping_policy")
         assert len(result.sections) == 0
 
     def test_placeholder_body_does_not_reach_compose_format(self):
@@ -344,7 +350,7 @@ class TestRetrievalReadiness:
             kind="return_policy",
             body=_CANONICAL_PLACEHOLDER,
         )
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        result = _retrieve(db, tenant.id, "return_policy")
         prompt = format_retrieved_documents_for_prompt(result)
         assert prompt == ""
         assert "[أضف المدة" not in prompt
@@ -361,7 +367,7 @@ class TestExistenceRetrievalCoherence:
             body=_CANONICAL_PLACEHOLDER,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "UNKNOWN"
         assert existence["return_policy"]["doc_ref"] is None
         assert len(retrieval.sections) == 0
@@ -381,7 +387,7 @@ class TestExistenceRetrievalCoherence:
             body=_COMPLETE_RETURN,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
         assert existence["return_policy"]["doc_ref"] == f"mks:{section.id}"
         assert len(retrieval.sections) >= 1
@@ -405,7 +411,7 @@ class TestExistenceRetrievalCoherence:
             priority=2,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
         assert existence["return_policy"]["doc_ref"] == f"mks:{good.id}"
         assert len(retrieval.sections) == 1
@@ -434,8 +440,8 @@ class TestDualTenantIsolation:
         )
         map_a = build_policy_existence_map(db, tenant_a.id)
         map_b = build_policy_existence_map(db, tenant_b.id)
-        ret_a = retrieve_merchant_documents(db, tenant_a.id, "وش سياسة الاسترجاع؟")
-        ret_b = retrieve_merchant_documents(db, tenant_b.id, "وش سياسة الاسترجاع؟")
+        ret_a = _retrieve(db, tenant_a.id, "return_policy")
+        ret_b = _retrieve(db, tenant_b.id, "return_policy")
         assert map_a["return_policy"]["status"] == "UNKNOWN"
         assert len(ret_a.sections) == 0
         assert map_b["return_policy"]["status"] == "KNOWN_PRESENT"
@@ -444,7 +450,7 @@ class TestDualTenantIsolation:
 
 
 class TestFaqRemainsDeferred:
-    def test_faq_not_customer_retrieved_even_when_complete(self):
+    def test_faq_text_alone_does_not_retrieve(self):
         db, _ = make_scenario_db()
         tenant = seed_tenant(db, name="متجر تجريبي عام")
         seed_knowledge_section(
@@ -457,6 +463,20 @@ class TestFaqRemainsDeferred:
         result = retrieve_merchant_documents(db, tenant.id, "أسئلة شائعة؟")
         assert result.matched_intent == ""
         assert len(result.sections) == 0
+
+    def test_faq_retrieved_when_brain_supplies_kind(self):
+        db, _ = make_scenario_db()
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        seed_knowledge_section(
+            db,
+            tenant.id,
+            kind="faq",
+            title="أسئلة شائعة",
+            body="س: هل الشحن مجاني؟ ج: يعتمد على المدينة والطلب.",
+        )
+        result = _retrieve(db, tenant.id, "faq")
+        assert result.matched_intent == "faq"
+        assert len(result.sections) >= 1
 
 
 class TestKnownRowShapeFixture:
@@ -495,7 +515,7 @@ class TestEmptyBodyCoherenceGate:
             body="",
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "UNKNOWN"
         assert existence["return_policy"]["doc_ref"] is None
         assert len(retrieval.sections) == 0
@@ -511,7 +531,7 @@ class TestEmptyBodyCoherenceGate:
             body="   \n\t  ",
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "UNKNOWN"
         assert existence["return_policy"]["doc_ref"] is None
         assert len(retrieval.sections) == 0
@@ -536,7 +556,7 @@ class TestEmptyBodyCoherenceGate:
             priority=2,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
         assert existence["return_policy"]["doc_ref"] == f"mks:{good.id}"
         assert len(retrieval.sections) == 1
@@ -568,7 +588,7 @@ class TestEmptyBodyCoherenceGate:
             priority=3,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "KNOWN_PRESENT"
         assert existence["return_policy"]["doc_ref"] == f"mks:{good.id}"
         assert len(retrieval.sections) == 1
@@ -594,7 +614,7 @@ class TestEmptyBodyCoherenceGate:
             priority=2,
         )
         existence = build_policy_existence_map(db, tenant.id)
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        retrieval = _retrieve(db, tenant.id, "return_policy")
         assert existence["return_policy"]["status"] == "UNKNOWN"
         assert existence["return_policy"]["doc_ref"] is None
         assert len(retrieval.sections) == 0
@@ -612,7 +632,7 @@ class TestEmptyBodyCoherenceGate:
         ):
             seed_knowledge_section(db, tenant.id, kind=kind, body=body)
             existence = build_policy_existence_map(db, tenant.id)
-            retrieval = retrieve_merchant_documents(db, tenant.id, msg)
+            retrieval = _retrieve(db, tenant.id, kind)
             assert existence[kind]["status"] == "KNOWN_PRESENT", kind
             assert len(retrieval.sections) >= 1, kind
             assert existence[kind]["doc_ref"] == retrieval.sections[0].provenance.get(
@@ -634,7 +654,7 @@ class TestStoreStoryTitleOnly:
         verdict = assess_mks_customer_readiness("", title="قصة المتجر")
         assert verdict.is_ready is False
         assert verdict.status == EMPTY_CONTENT
-        retrieval = retrieve_merchant_documents(db, tenant.id, "وش قصة المتجر؟")
+        retrieval = _retrieve(db, tenant.id, "store_story")
         assert len(retrieval.sections) == 0
 
     def test_title_only_story_does_not_establish_presence(self):
