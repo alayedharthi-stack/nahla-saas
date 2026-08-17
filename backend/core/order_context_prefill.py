@@ -777,6 +777,129 @@ def build_checkout_compose_facts(
     return facts
 
 
+_DELIVERY_MISSING_SLOTS = frozenset({
+    "delivery_address",
+    "address",
+    "address_line",
+    "short_address_code",
+    "google_maps_url",
+    "address_location",
+})
+
+
+def _previous_address_as_prep(previous: Any) -> Dict[str, Any]:
+    return {
+        "city": str(getattr(previous, "city", "") or "").strip(),
+        "district": str(getattr(previous, "district", "") or "").strip(),
+        "address_line": str(getattr(previous, "address_line", "") or "").strip(),
+        "google_maps_url": str(getattr(previous, "maps_url", "") or "").strip(),
+        "short_address_code": str(getattr(previous, "short_address", "") or "").strip(),
+        "latitude": getattr(previous, "latitude", None),
+        "longitude": getattr(previous, "longitude", None),
+    }
+
+
+def checkout_location_evidence_known(order_prep: Optional[Dict[str, Any]] = None) -> bool:
+    """True when checkout already has accepted maps/short-code/pin evidence."""
+    prep = dict(order_prep or {})
+    if has_accepted_delivery_address(prep):
+        return True
+    if str(prep.get("pending_google_maps_url") or "").strip():
+        return True
+    pending = prep.get("pending_delivery_location")
+    if isinstance(pending, dict):
+        if str(
+            pending.get("google_maps_url")
+            or pending.get("url")
+            or pending.get("maps_url")
+            or ""
+        ).strip():
+            return True
+        if pending.get("latitude") is not None and pending.get("longitude") is not None:
+            return True
+    return False
+
+
+def apply_saved_address_to_checkout_contract(
+    *,
+    missing_fields: List[str],
+    known_facts: Dict[str, Any],
+    order_context: Any = None,
+    order_prep: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Project canonical saved/checkout address into missing_fields.
+
+    Complete saved facts are not collect slots. Current checkout prep and
+    explicit shipping-edit requests still win. Does not persist prep.
+    """
+    facts = dict(known_facts or {})
+    missing = list(missing_fields or [])
+    prep = dict(order_prep or {})
+    prefill = getattr(order_context, "prefill", None) if order_context is not None else None
+    if bool(getattr(prefill, "shipping_edit_requested", False)):
+        facts["customer_corrections_applied"] = True
+        return missing, facts
+
+    previous = getattr(order_context, "known_previous_address", None) if order_context is not None else None
+    hydrated: List[str] = []
+
+    checkout_city = str(prep.get("city") or "").strip()
+    saved_city = str(getattr(previous, "city", "") or "").strip() if previous is not None else ""
+    if checkout_city or saved_city:
+        facts["checkout_city"] = checkout_city or saved_city
+        if saved_city:
+            facts["saved_city"] = saved_city
+            facts["saved_address_available"] = True
+            facts["saved_address_source"] = str(
+                getattr(previous, "source", "") or "customer_addresses"
+            )
+        missing = [m for m in missing if m != "city"]
+        hydrated.append("city")
+
+    checkout_district = str(prep.get("district") or "").strip()
+    saved_district = str(getattr(previous, "district", "") or "").strip() if previous is not None else ""
+    if checkout_district or saved_district:
+        facts["checkout_district"] = checkout_district or saved_district
+        if saved_district:
+            facts["saved_district"] = saved_district
+        hydrated.append("district")
+
+    prev_prep = _previous_address_as_prep(previous) if previous is not None else {}
+    saved_delivery = False
+    if previous is not None:
+        accepted_flag = getattr(previous, "accepted_delivery_address", None)
+        if accepted_flag is None:
+            saved_delivery = has_accepted_delivery_address(prev_prep)
+        else:
+            saved_delivery = bool(accepted_flag)
+    checkout_delivery = checkout_location_evidence_known(prep)
+    if previous is not None:
+        facts["saved_address_available"] = True
+        facts["saved_address_source"] = str(
+            getattr(previous, "source", "") or "customer_addresses"
+        )
+        facts["saved_address_complete"] = bool(saved_delivery)
+        if str(prev_prep.get("short_address_code") or "").strip():
+            facts["saved_national_short_address"] = prev_prep["short_address_code"]
+        if str(prev_prep.get("google_maps_url") or "").strip():
+            facts["saved_location_link"] = prev_prep["google_maps_url"]
+    facts["location_link_persisted"] = bool(
+        checkout_location_evidence_known(prep)
+        or (
+            saved_delivery
+            and str(prev_prep.get("google_maps_url") or "").strip()
+        )
+    )
+    if saved_delivery or checkout_delivery:
+        missing = [m for m in missing if m not in _DELIVERY_MISSING_SLOTS]
+        hydrated.append("delivery_address")
+
+    if hydrated:
+        facts["hydrated_fields"] = hydrated
+    facts["checkout_missing_fields"] = list(missing)
+    return missing, facts
+
+
 __all__ = [
     "EditIntentFacts",
     "MODE_ASK",
@@ -799,4 +922,6 @@ __all__ = [
     "maybe_apply_operational_prefill_to_state",
     "resolve_identity_missing_mode",
     "shadow_missing_fields_from_modes",
+    "apply_saved_address_to_checkout_contract",
+    "checkout_location_evidence_known",
 ]

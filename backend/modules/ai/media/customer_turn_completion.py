@@ -65,7 +65,23 @@ AUDITED_CUSTOMER_ORIGIN_EARLY_RETURNS = (
         "input_type": "location",
         "class": COMPLETION_STRUCTURED_AND_CONTINUATION,
         "repaired": False,
-        "note": "location continues through existing location/Brain owners when text/coords exist",
+        "note": "persist-success location/maps ack remains the existing structured ingest owner",
+    },
+    {
+        "path": "whatsapp_webhook.location_persist_failure",
+        "input_type": "location",
+        "before": COMPLETION_ORPHAN,
+        "after": COMPLETION_BRAIN,
+        "repaired": True,
+        "note": "persist failure must not claim saved and must not silent-return; Brain owns the commercial turn",
+    },
+    {
+        "path": "whatsapp_webhook.address_text_persist_failure",
+        "input_type": "address_text",
+        "before": COMPLETION_ORPHAN,
+        "after": COMPLETION_BRAIN,
+        "repaired": True,
+        "note": "accepted address-text persist failure continues through existing Brain owner",
     },
     {
         "path": "whatsapp_webhook.human_priority_takeover",
@@ -213,6 +229,189 @@ def classify_empty_text_early_return(
     return COMPLETION_PROTOCOL
 
 
+def customer_authored_location_continue_text(
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    message: str = "",
+) -> str:
+    """Customer-origin location payload for Brain continue — never canned copy."""
+    meta = _meta(inbound_metadata)
+    if meta.get("checkout_location_ingest_blocked"):
+        return ""
+    text = str(message or "").strip()
+    if text:
+        return text
+    meta = _meta(inbound_metadata)
+    for key in ("google_maps_url", "maps_url", "delivery_address_url"):
+        url = str(meta.get(key) or "").strip()
+        if url:
+            return url
+    loc = meta.get("location") or meta.get("whatsapp_location") or {}
+    if isinstance(loc, dict):
+        for key in ("google_maps_url", "url", "maps_url"):
+            url = str(loc.get(key) or "").strip()
+            if url:
+                return url
+        lat = loc.get("latitude")
+        lng = loc.get("longitude")
+        if lat is not None and lng is not None:
+            return f"https://maps.google.com/?q={lat},{lng}"
+    patch = meta.get("state_patch") if isinstance(meta.get("state_patch"), dict) else {}
+    url = str(patch.get("google_maps_url") or "").strip()
+    if url:
+        return url
+    lat = patch.get("latitude")
+    lng = patch.get("longitude")
+    if lat is not None and lng is not None:
+        return f"https://maps.google.com/?q={lat},{lng}"
+    return ""
+
+
+def should_continue_checkout_location_persist_failure(
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when checkout location/address persist failed and Brain must complete the turn."""
+    return bool(_meta(inbound_metadata).get("checkout_location_persist_failed"))
+
+
+_LOCATION_INGEST_KEYS = (
+    "state_patch",
+    "location",
+    "whatsapp_location",
+    "latitude",
+    "longitude",
+    "google_maps_url",
+    "maps_url",
+    "delivery_address_url",
+    "location_url",
+    "delivery_location_lat",
+    "delivery_location_lng",
+)
+
+
+def _block_unpersisted_checkout_location_ingest(meta: Dict[str, Any]) -> None:
+    """Strip accepted location ingest so Brain/OFV2 cannot treat it as saved."""
+    for key in _LOCATION_INGEST_KEYS:
+        meta.pop(key, None)
+    text = str(meta.get("text") or "").strip()
+    if text:
+        meta.pop("text", None)
+    nested = meta.get("normalized_inbound")
+    if isinstance(nested, dict):
+        nested = dict(nested)
+        for key in _LOCATION_INGEST_KEYS:
+            nested.pop(key, None)
+        if str(nested.get("source_type") or "").strip().lower() in {
+            "location",
+            "location_pin",
+            "whatsapp_location",
+        }:
+            nested["source_type"] = "text"
+        nested.pop("text", None)
+        meta["normalized_inbound"] = nested
+    meta["normalized_type"] = "text"
+    meta["inbound_normalized_type"] = "text"
+    meta["type"] = "text"
+    if str(meta.get("source_type") or "").strip().lower() in {
+        "location",
+        "location_pin",
+        "whatsapp_location",
+    }:
+        meta["source_type"] = "text"
+
+
+def resolve_checkout_location_persist_turn(
+    *,
+    persist_ok: bool,
+    persist_reason: str = "",
+    inbound_type: str,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    inbound_text: str = "",
+    state_patch: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Choose the single completion owner after a checkout location persist attempt.
+
+    Persist success → existing structured ingest ack (no Brain).
+    Persist failure → existing Brain owner; never a silent return and never
+    ``location_saved: true``.
+    """
+    meta = _meta(inbound_metadata)
+    reason = str(persist_reason or "").strip() or (
+        "persisted" if persist_ok else "apply_state_patch_false"
+    )
+    if persist_ok:
+        if state_patch:
+            meta["state_patch"] = dict(state_patch)
+        extra = {
+            "location_received": True,
+            "location_persisted": True,
+            "location_saved": True,
+            "persistence_failure_reason": None,
+            "checkout_location_persist_failed": False,
+        }
+        trace = _completion_trace(
+            input_type=str(inbound_type or "location"),
+            semantic_owner="constrained_operational_compose",
+            structured_action_owner="core.order_flow.persist_checkout_location_patch",
+            completion_class=COMPLETION_STRUCTURED_AND_CONTINUATION,
+            state_persisted=True,
+            brain_called=False,
+            compose_called=True,
+            customer_visible=True,
+            extra=extra,
+        )
+        meta.update(trace)
+        meta.update(extra)
+        return {
+            "emit_success_ack": True,
+            "call_brain": False,
+            "completion_class": COMPLETION_STRUCTURED_AND_CONTINUATION,
+            "inbound_metadata": meta,
+            "brain_text": "",
+            "location_received": True,
+            "location_persisted": True,
+            "location_saved": True,
+            "persistence_failure_reason": None,
+        }
+
+    extra = {
+        "location_received": True,
+        "location_persisted": False,
+        "location_saved": False,
+        "persistence_failure_reason": reason,
+        "persistence_failure_source": "persist_checkout_location_patch",
+        "checkout_location_persist_failed": True,
+        "checkout_location_ingest_blocked": True,
+    }
+    # Do not forward an accepted ingest payload. Brain must complete the
+    # commercial turn without treating the unpersisted location as saved.
+    _block_unpersisted_checkout_location_ingest(meta)
+    trace = _completion_trace(
+        input_type=str(inbound_type or "location"),
+        semantic_owner="brain",
+        structured_action_owner="core.order_flow.persist_checkout_location_patch",
+        completion_class=COMPLETION_BRAIN,
+        state_persisted=False,
+        brain_called=True,
+        compose_called=True,
+        customer_visible=True,
+        suppression_reason=None,
+        extra=extra,
+    )
+    meta.update(trace)
+    meta.update(extra)
+    return {
+        "emit_success_ack": False,
+        "call_brain": True,
+        "completion_class": COMPLETION_BRAIN,
+        "inbound_metadata": meta,
+        "brain_text": "",
+        "location_received": True,
+        "location_persisted": False,
+        "location_saved": False,
+        "persistence_failure_reason": reason,
+    }
+
+
 def _completion_trace(
     *,
     input_type: str,
@@ -260,7 +459,10 @@ __all__ = [
     "catalog_order_must_not_orphan",
     "classify_empty_text_early_return",
     "customer_authored_catalog_order_text",
+    "customer_authored_location_continue_text",
     "is_structured_catalog_order_inbound",
     "maybe_restore_catalog_order_semantic_text",
+    "resolve_checkout_location_persist_turn",
+    "should_continue_checkout_location_persist_failure",
     "should_continue_structured_catalog_order",
 ]

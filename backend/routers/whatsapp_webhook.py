@@ -4005,8 +4005,11 @@ async def _dispatch_message(
         ):
             try:
                 from core.order_flow import (  # noqa: PLC0415
-                    apply_state_patch,
                     maybe_handle_wa_address_inbound,
+                    persist_checkout_location_outcome,
+                )
+                from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                    resolve_checkout_location_persist_turn,
                 )
                 _loc_decision = maybe_handle_wa_address_inbound(
                     db=db,
@@ -4023,12 +4026,14 @@ async def _dispatch_message(
                 )
                 _loc_decision = None
             if _loc_decision is not None:
+                _loc_persisted = False
+                _loc_persist_reason = "apply_state_patch_false"
                 try:
-                    apply_state_patch(
+                    _loc_persisted, _loc_persist_reason = persist_checkout_location_outcome(
                         db,
                         tenant_id=resolved_tenant_id,
                         phone=sender or "",
-                        state_patch=_loc_decision["state_patch"],
+                        state_patch=_loc_decision.get("state_patch") or {},
                     )
                 except Exception as _loc_patch_exc:  # noqa: BLE001
                     logger.warning(
@@ -4036,16 +4041,46 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _loc_patch_exc,
                     )
-                await _post_wa(
-                    used_pid,
-                    {
-                        "messaging_product": "whatsapp",
-                        "to": sender,
-                        "type": "text",
-                        "text": {"body": _loc_decision["reply_text"]},
-                    },
-                    _tenant_id=resolved_tenant_id,
-                    _db=db,
+                    _loc_persist_reason = "apply_state_patch_exception"
+                _loc_turn = resolve_checkout_location_persist_turn(
+                    persist_ok=_loc_persisted,
+                    persist_reason=_loc_persist_reason,
+                    inbound_type="location",
+                    inbound_metadata=normalized_inbound.metadata or {},
+                    inbound_text="",
+                    state_patch=_loc_decision.get("state_patch") or {},
+                )
+                if _loc_turn.get("emit_success_ack"):
+                    await _post_wa(
+                        used_pid,
+                        {
+                            "messaging_product": "whatsapp",
+                            "to": sender,
+                            "type": "text",
+                            "text": {"body": _loc_decision["reply_text"]},
+                        },
+                        _tenant_id=resolved_tenant_id,
+                        _db=db,
+                    )
+                    return
+                logger.warning(
+                    "[ORDER_FLOW_STATE] location ack skipped persist_failed "
+                    "tenant=%s phone=*%s reason=%s completion=%s",
+                    resolved_tenant_id,
+                    (sender or "")[-4:],
+                    _loc_persist_reason,
+                    _loc_turn.get("completion_class"),
+                )
+                await _handle_merchant_message(
+                    phone_id=used_pid,
+                    to=sender,
+                    text=str(_loc_turn.get("brain_text") or ""),
+                    tenant_id=resolved_tenant_id,
+                    db=db,
+                    inbound_metadata=_loc_turn.get("inbound_metadata"),
+                    inbound_persist_body=str(_loc_turn.get("brain_text") or ""),
+                    wa_message_ts=_wa_msg_ts,
+                    wa_msg_id=msg_id or None,
                 )
                 return
 
@@ -5060,12 +5095,19 @@ async def _dispatch_message(
                 return
 
             if _address_decision is not None:
+                from core.order_flow import persist_checkout_location_outcome  # noqa: PLC0415
+                from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                    resolve_checkout_location_persist_turn,
+                )
+
+                _addr_persisted = False
+                _addr_persist_reason = "apply_state_patch_false"
                 try:
-                    apply_state_patch(
+                    _addr_persisted, _addr_persist_reason = persist_checkout_location_outcome(
                         db,
                         tenant_id=resolved_tenant_id,
                         phone=sender,
-                        state_patch=_address_decision["state_patch"],
+                        state_patch=_address_decision.get("state_patch") or {},
                     )
                 except Exception as _addr_patch_exc:  # noqa: BLE001
                     logger.warning(
@@ -5073,29 +5115,52 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _addr_patch_exc,
                     )
-                from core.constrained_operational_compose import (  # noqa: PLC0415
-                    resolve_prebrain_reply_text,
-                )
-
-                _addr_reply_text, _addr_compose_meta = await resolve_prebrain_reply_text(
-                    db=db,
-                    tenant_id=resolved_tenant_id,
-                    phone=sender,
-                    decision=_address_decision,
+                    _addr_persist_reason = "apply_state_patch_exception"
+                _addr_turn = resolve_checkout_location_persist_turn(
+                    persist_ok=_addr_persisted,
+                    persist_reason=_addr_persist_reason,
+                    inbound_type="address_text",
+                    inbound_metadata=normalized_inbound.metadata or {},
                     inbound_text=persist_body or text or "",
+                    state_patch=_address_decision.get("state_patch") or {},
                 )
-                await _post_wa(
-                    used_pid,
-                    {
-                        "messaging_product": "whatsapp",
-                        "to": sender,
-                        "type": "text",
-                        "text": {"body": _addr_reply_text},
-                    },
-                    _tenant_id=resolved_tenant_id,
-                    _db=db,
-                )
-                return
+                if not _addr_turn.get("emit_success_ack"):
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] address ack skipped persist_failed "
+                        "tenant=%s phone=*%s reason=%s completion=%s",
+                        resolved_tenant_id,
+                        (sender or "")[-4:],
+                        _addr_persist_reason,
+                        _addr_turn.get("completion_class"),
+                    )
+                    normalized_inbound.metadata = _addr_turn.get("inbound_metadata")
+                    text = str(_addr_turn.get("brain_text") or "")
+                    # Continue to the existing Brain owner below — do not
+                    # emit the saved ack and do not silent-return.
+                else:
+                    from core.constrained_operational_compose import (  # noqa: PLC0415
+                        resolve_prebrain_reply_text,
+                    )
+
+                    _addr_reply_text, _addr_compose_meta = await resolve_prebrain_reply_text(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        decision=_address_decision,
+                        inbound_text=persist_body or text or "",
+                    )
+                    await _post_wa(
+                        used_pid,
+                        {
+                            "messaging_product": "whatsapp",
+                            "to": sender,
+                            "type": "text",
+                            "text": {"body": _addr_reply_text},
+                        },
+                        _tenant_id=resolved_tenant_id,
+                        _db=db,
+                    )
+                    return
 
             if _payment_method_decision is not None:
                 if _payment_method_decision.get("state_patch"):
@@ -5815,17 +5880,26 @@ async def _handle_merchant_message(
     never enter this conversational pipeline.
     """
     _catalog_order_structured_continue = False
+    _location_persist_failure_continue = False
     if not (text or "").strip():
         try:
             from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
                 customer_authored_catalog_order_text,
+                customer_authored_location_continue_text,
+                should_continue_checkout_location_persist_failure,
                 should_continue_structured_catalog_order,
             )
 
             _cat_meta = (
                 inbound_metadata if isinstance(inbound_metadata, dict) else {}
             )
-            if should_continue_structured_catalog_order(
+            if should_continue_checkout_location_persist_failure(_cat_meta):
+                _location_persist_failure_continue = True
+                text = customer_authored_location_continue_text(
+                    _cat_meta,
+                    inbound_persist_body or "",
+                )
+            elif should_continue_structured_catalog_order(
                 _cat_meta,
                 inbound_persist_body or "",
             ):
@@ -5836,7 +5910,11 @@ async def _handle_merchant_message(
                 )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog restore must not block merchant entry
             pass
-    if not (text or "").strip() and not _catalog_order_structured_continue:
+    if (
+        not (text or "").strip()
+        and not _catalog_order_structured_continue
+        and not _location_persist_failure_continue
+    ):
         _unclear_audio_order_support = False
         try:
             from modules.ai.media.routing_guard import (  # noqa: PLC0415
