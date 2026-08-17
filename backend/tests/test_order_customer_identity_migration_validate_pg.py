@@ -30,7 +30,9 @@ from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
 )
 
 MIGRATION_TENANT_ID = 880_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0098"})
+from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
+    REPOSITORY_ALEMBIC_HEADS,
+)
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
@@ -171,7 +173,7 @@ def test_repository_has_parallel_heads_0092_and_0098() -> None:
     finally:
         os.chdir(prev_cwd)
     heads = set(script.get_heads())
-    assert heads == _REPOSITORY_ALEMBIC_HEADS
+    assert heads == REPOSITORY_ALEMBIC_HEADS
 
 
 def test_migration_0088_creates_concurrent_indexes(ephemeral_validate_engine: Engine) -> None:
@@ -327,8 +329,8 @@ def test_migration_0088_never_selected_by_head_literal() -> None:
     finally:
         os.chdir(prev_cwd)
     for head in script.get_heads():
-        assert head in _REPOSITORY_ALEMBIC_HEADS
-    assert "head" not in {"0092", "0098"}
+        assert head in REPOSITORY_ALEMBIC_HEADS
+    assert "head" not in REPOSITORY_ALEMBIC_HEADS
 
 
 def test_new_writes_still_enforced_after_0088(ephemeral_validate_engine: Engine) -> None:

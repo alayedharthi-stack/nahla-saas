@@ -31,7 +31,9 @@ MIGRATION_TENANT_ID = 880_001
 LEGACY_CUSTOMER_REF = "LEG-CUST-1"
 LEGACY_ORDER_EXT_ID = "LEG-ORD-1"
 _EXPAND_MIGRATION_TARGET = "0087"
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0098"})
+from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
+    REPOSITORY_ALEMBIC_HEADS,
+)
 
 _0087_CONSTRAINTS = (
     "chk_orders_external_no_canonical_customer",
@@ -250,9 +252,10 @@ def test_migration_chain_0086_seed_0087_target_repository_0098_head(
     finally:
         os.chdir(prev_cwd)
     heads = set(script.get_heads())
-    assert heads == _REPOSITORY_ALEMBIC_HEADS
-    # Ephemeral DB stops at A1-Expand 0087; integration bootstrap pins 0093, head is 0098.
-    assert "0098" in heads
+    assert heads == REPOSITORY_ALEMBIC_HEADS
+    # Ephemeral DB stops at A1-Expand 0087; current integration head is 0099.
+    assert "0099" in heads
+    assert script.get_revision("0099").down_revision == "0098"
 
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()

@@ -133,6 +133,22 @@ def _seed_team(db, tenant_id: int, *, prefix: str = ""):
     return branch, seller, cs, cs2, manager
 
 
+def _llm(steps, unresolved=None, ambiguities=None):
+    return {
+        "steps": [
+            {
+                "contact_id": int(item[0]),
+                "trigger_condition": item[1] if len(item) > 1 else "sequence",
+                "permitted_action": item[2] if len(item) > 2 else "",
+            }
+            for item in steps
+        ],
+        "unresolved_references": unresolved or [],
+        "ambiguities": ambiguities or [],
+        "summary_for_merchant": "ما فهمته نحلة",
+    }
+
+
 def test_instruction_resolves_existing_contact_id(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, seller, cs, cs2, manager = _seed_team(db, tenant_id)
@@ -141,6 +157,12 @@ def test_instruction_resolves_existing_contact_id(db_session) -> None:
         "إذا وصل العميل أعطه نورة. إذا لم يرد أعطه أحمد سالم. ثم سعد. صعّد لفهد.",
         contacts,
         branch_id=branch.id,
+        extracted=_llm([
+            (seller.id, "arrival", "share_customer_contact"),
+            (cs.id, "no_response", "share_customer_contact"),
+            (cs2.id, "sequence", "share_customer_contact"),
+            (manager.id, "complaint_urgent", "notify_or_handoff"),
+        ]),
     )
     assert draft.invented_contacts is False
     assert draft.invented_numbers is False
@@ -159,6 +181,10 @@ def test_unknown_person_requires_merchant_resolution(db_session) -> None:
         "أعطه رقم خالد",
         contacts,
         branch_id=branch.id,
+        extracted=_llm(
+            [],
+            unresolved=[{"token": "خالد", "reason": "unknown_person"}],
+        ),
     )
     assert draft.can_confirm is False
     assert any(u.reason == "unknown_person" for u in draft.unresolved)
@@ -169,7 +195,12 @@ def test_phone_change_on_contact_updates_live_policy(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, seller, *_ = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    draft = compile_instruction("أعطه نورة", contacts, branch_id=branch.id)
+    draft = compile_instruction(
+        "أعطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(seller.id, "sequence", "share_customer_contact")]),
+    )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
     db.commit()
@@ -188,7 +219,12 @@ def test_internal_only_never_exposes_number(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, *_rest, manager = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    draft = compile_instruction("صعّد لفهد", contacts, branch_id=branch.id)
+    draft = compile_instruction(
+        "صعّد لفهد",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(manager.id, "complaint_urgent", "notify_or_handoff")]),
+    )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
     db.commit()
@@ -205,7 +241,12 @@ def test_customer_visible_returns_authoritative_contact(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, seller, *_ = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    draft = compile_instruction("أعطه نورة", contacts, branch_id=branch.id)
+    draft = compile_instruction(
+        "أعطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(seller.id, "sequence", "share_customer_contact")]),
+    )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
     db.commit()
@@ -225,6 +266,11 @@ def test_multistep_progresses_only_with_customer_or_event(db_session) -> None:
         "نورة ثم أحمد سالم ثم سعد",
         contacts,
         branch_id=branch.id,
+        extracted=_llm([
+            (seller.id, "sequence", "share_customer_contact"),
+            (cs.id, "no_response", "share_customer_contact"),
+            (cs2.id, "no_response", "share_customer_contact"),
+        ]),
     )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
@@ -245,9 +291,17 @@ def test_multistep_progresses_only_with_customer_or_event(db_session) -> None:
 
 def test_no_response_not_invented_from_elapsed_time(db_session) -> None:
     db, tenant_id, _ = db_session
-    branch, seller, *_ = _seed_team(db, tenant_id)
+    branch, seller, cs, *_ = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    draft = compile_instruction("نورة ثم أحمد سالم", contacts, branch_id=branch.id)
+    draft = compile_instruction(
+        "نورة ثم أحمد سالم",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([
+            (seller.id, "sequence", "share_customer_contact"),
+            (cs.id, "no_response", "share_customer_contact"),
+        ]),
+    )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
     db.commit()
@@ -259,11 +313,21 @@ def test_instruction_change_updates_canonical_policy(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, seller, cs, *_ = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    first = compile_instruction("أعطه نورة", contacts, branch_id=branch.id)
+    first = compile_instruction(
+        "أعطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(seller.id, "sequence", "share_customer_contact")]),
+    )
     first.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=first)
     db.commit()
-    second = compile_instruction("أعطه أحمد سالم", contacts, branch_id=branch.id)
+    second = compile_instruction(
+        "أعطه أحمد سالم",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(cs.id, "sequence", "share_customer_contact")]),
+    )
     second.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=second)
     db.commit()
@@ -332,7 +396,12 @@ def test_kb_conflicting_phone_loses_to_structured_contact(db_session) -> None:
     policy = load_canonical_policy(db, tenant_id, branch_id=branch.id)
     if policy is None or not policy.steps:
         contacts_list = load_tenant_contacts(db, tenant_id)
-        draft = compile_instruction("نورة", contacts_list, branch_id=branch.id)
+        draft = compile_instruction(
+            "نورة",
+            contacts_list,
+            branch_id=branch.id,
+            extracted=_llm([(seller.id, "sequence", "share_customer_contact")]),
+        )
         draft.can_confirm = True
         apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
         db.commit()
@@ -383,7 +452,12 @@ def test_notify_only_keeps_ai_active(db_session) -> None:
     db, tenant_id, _ = db_session
     branch, *_rest, manager = _seed_team(db, tenant_id)
     contacts = load_tenant_contacts(db, tenant_id)
-    draft = compile_instruction("صعّد لفهد", contacts, branch_id=branch.id)
+    draft = compile_instruction(
+        "صعّد لفهد",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(manager.id, "complaint_urgent", "notify_or_handoff")]),
+    )
     draft.can_confirm = True
     apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=draft)
     db.commit()
@@ -468,3 +542,109 @@ def test_staff_policy_defers_internal_contact(db_session, monkeypatch) -> None:
     assert decision is None or decision.deliver_contact is False
     if decision is not None:
         assert rec.phone not in (decision.reply_text or "")
+
+
+def test_varied_wording_uses_admin_extraction_not_phrase_lists(db_session) -> None:
+    db, tenant_id, _ = db_session
+    branch, seller, *_ = _seed_team(db, tenant_id)
+    contacts = load_tenant_contacts(db, tenant_id)
+    extracted = _llm([(seller.id, "arrival", "share_customer_contact")])
+    first = compile_instruction(
+        "لما يجي المعرض عطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=extracted,
+    )
+    second = compile_instruction(
+        "عند وصول العميل أرسل رقم نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=extracted,
+    )
+    assert [s.contact_id for s in first.steps] == [s.contact_id for s in second.steps]
+    src = Path(__file__).resolve().parents[1] / "modules" / "operations" / "escalation_policy_authoring.py"
+    text = src.read_text(encoding="utf-8")
+    assert "_NAME_AFTER_VERB_RE" not in text
+    assert "_condition_for_clause" not in text
+    assert "_STOP" not in text
+
+
+def test_invalid_model_contact_id_is_rejected(db_session) -> None:
+    db, tenant_id, _ = db_session
+    branch, *_ = _seed_team(db, tenant_id)
+    contacts = load_tenant_contacts(db, tenant_id)
+    draft = compile_instruction(
+        "أعطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(999999, "sequence", "share_customer_contact")]),
+    )
+    assert draft.can_confirm is False
+    assert any(u.reason == "invalid_contact_id" for u in draft.unresolved)
+
+
+def test_ambiguous_same_role_requires_clarification(db_session) -> None:
+    db, tenant_id, _ = db_session
+    branch, _seller, cs, cs2, _manager = _seed_team(db, tenant_id)
+    contacts = load_tenant_contacts(db, tenant_id)
+    draft = compile_instruction(
+        "أعطه خدمة العملاء",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm(
+            [],
+            ambiguities=["ambiguous_role:خدمة العملاء"],
+        ),
+    )
+    assert draft.can_confirm is False
+    assert any("ambiguous" in a for a in draft.ambiguities)
+    assert {cs.id, cs2.id}.issubset({c.id for c in contacts})
+
+
+def test_unspecified_visibility_is_not_customer_shareable() -> None:
+    class _Row:
+        customer_visibility = ""
+        phone_e164 = "+966511111111"
+
+    assert may_share_with_customer(_Row()) is False
+
+
+def test_preview_does_not_mutate_live_policy_until_confirm(db_session) -> None:
+    db, tenant_id, _ = db_session
+    branch, seller, cs, *_ = _seed_team(db, tenant_id)
+    contacts = load_tenant_contacts(db, tenant_id)
+    live = compile_instruction(
+        "أعطه نورة",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(seller.id, "sequence", "share_customer_contact")]),
+    )
+    live.can_confirm = True
+    apply_confirmed_draft(db, tenant_id=tenant_id, branch_id=branch.id, draft=live)
+    db.commit()
+    before = load_canonical_policy(db, tenant_id, branch_id=branch.id)
+    preview = compile_instruction(
+        "أعطه أحمد سالم",
+        contacts,
+        branch_id=branch.id,
+        extracted=_llm([(cs.id, "sequence", "share_customer_contact")]),
+        existing_steps=before.steps if before else None,
+    )
+    db.commit()
+    after = load_canonical_policy(db, tenant_id, branch_id=branch.id)
+    assert preview.steps[0].contact_id == cs.id
+    assert after is not None
+    assert after.shareable_steps()[0].contact_id == seller.id
+    assert "escalation_sequence_changed" in preview.change_summary
+
+
+def test_structured_runtime_defaults_on(monkeypatch) -> None:
+    from modules.operations.branch_contact_evidence import (
+        structured_branch_contacts_enabled,
+    )
+
+    monkeypatch.delenv("USE_STRUCTURED_BRANCH_CONTACTS", raising=False)
+    monkeypatch.delenv("ROLLBACK_STRUCTURED_BRANCH_CONTACTS", raising=False)
+    assert structured_branch_contacts_enabled() is True
+    monkeypatch.setenv("ROLLBACK_STRUCTURED_BRANCH_CONTACTS", "1")
+    assert structured_branch_contacts_enabled() is False

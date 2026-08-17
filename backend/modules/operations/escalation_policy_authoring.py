@@ -3,7 +3,9 @@
 Natural language is for merchant authoring only. Customer runtime must
 load the confirmed structured policy; it must not re-parse this text.
 
-This compiler is tenant-roster entity linking. It never invents contacts,
+Semantic understanding is owned by the admin authoring LLM.
+This module owns Unicode normalization, tenant-scoped validation,
+contact_id binding, preview, and persistence. It never invents contacts,
 phone numbers, branches, or permissions.
 """
 from __future__ import annotations
@@ -12,7 +14,7 @@ import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from modules.operations.contact_visibility import (
     BOTH,
@@ -42,23 +44,6 @@ VALID_CONDITIONS = frozenset({
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
-_CLAUSE_SPLIT_RE = re.compile(r"[\n\r]+|(?=\b(?:إذا|اذا)\b)")
-_NAME_AFTER_VERB_RE = re.compile(
-    r"(?:اعطه|أعطه|اعطي|أعطي|أعطها|كلم|كلمي|صعد|صعّد|تواصل مع|حوله|حوّله)\s+"
-    r"(?:رقم\s+|مع\s+)?([^\n،,.]+)",
-    re.UNICODE,
-)
-
-# Authoring-time stopwords only. Not used on the customer runtime path.
-_STOP = frozenset({
-    "رقم", "الواتساب", "واتساب", "اذا", "إذا", "ثم", "او", "أو", "و",
-    "العميل", "البائع", "خدمة", "العملاء", "الادارة", "الإدارة", "الموظف",
-    "التالي", "البديل", "المعرض", "للمعرض", "رد", "لم", "ما", "احد", "أحد",
-    "شكوى", "عاجلة", "عاجل", "اولا", "أولا", "بعدها", "بعدين", "ليه",
-    "مع", "في", "من", "على", "إلى", "الى", "له", "لها", "هذا", "هذه",
-})
-
-_NEXT_TOKENS = ("التالي", "البديل", "اخر", "آخر", "موظف اخر", "موظف آخر")
 
 
 def _norm(text: str) -> str:
@@ -132,6 +117,7 @@ class PolicyDraft:
     invented_numbers: bool = False
     can_confirm: bool = False
     change_summary: List[str] = field(default_factory=list)
+    summary_for_merchant: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
@@ -191,78 +177,6 @@ def load_tenant_contacts(db: Any, tenant_id: int) -> Tuple[AuthoringContact, ...
     return tuple(out)
 
 
-def _condition_for_clause(clause_norm: str) -> str:
-    if any(tok in clause_norm for tok in ("وصول", "وصلت", "معرض", "فرع")):
-        return CONDITION_ARRIVAL
-    if any(tok in clause_norm for tok in ("ما رد", "لم يرد", "ما ردوا", "ما جاوب")):
-        return CONDITION_NO_RESPONSE
-    if any(tok in clause_norm for tok in ("شكوى", "عاجل", "الاداره", "الادارة")):
-        return CONDITION_COMPLAINT
-    return CONDITION_SEQUENCE
-
-
-def _longest_matches(
-    clause_norm: str,
-    contacts: Sequence[AuthoringContact],
-    used_ids: set[int],
-) -> List[AuthoringContact]:
-    ranked: List[Tuple[int, int, AuthoringContact]] = []
-    for contact in contacts:
-        if contact.id in used_ids:
-            continue
-        name_n = _norm(contact.display_name)
-        role_n = _norm(contact.role)
-        best_pos = -1
-        best_len = 0
-        for token in (name_n, role_n):
-            if not token or len(token) < 2:
-                continue
-            pos = clause_norm.find(token)
-            if pos < 0:
-                continue
-            if len(token) > best_len:
-                best_len = len(token)
-                best_pos = pos
-        if best_pos >= 0:
-            ranked.append((best_pos, -best_len, contact))
-    ranked.sort()
-    return [item[2] for item in ranked]
-
-
-def _person_like_tokens(clause: str) -> List[str]:
-    found: List[str] = []
-    for match in _NAME_AFTER_VERB_RE.finditer(clause or ""):
-        raw = (match.group(1) or "").strip()
-        parts = [p for p in re.split(r"\s+", raw) if p]
-        buf: List[str] = []
-        for part in parts[:3]:
-            n = _norm(part)
-            if not n or n in _STOP or len(n) < 2:
-                if buf:
-                    break
-                continue
-            buf.append(part.strip("؟?.,،"))
-        if buf:
-            found.append(" ".join(buf))
-    return found
-
-
-def _next_same_role(
-    contacts: Sequence[AuthoringContact],
-    used_ids: set[int],
-    role: str,
-) -> Optional[AuthoringContact]:
-    role_n = _norm(role)
-    if not role_n:
-        return None
-    for contact in contacts:
-        if contact.id in used_ids:
-            continue
-        if _norm(contact.role) == role_n:
-            return contact
-    return None
-
-
 def _step_from_contact(
     contact: AuthoringContact,
     *,
@@ -297,6 +211,8 @@ def compile_instruction(
     branch_id: Optional[int] = None,
     resolutions: Optional[Dict[str, int]] = None,
     existing_steps: Optional[Sequence[DraftStep]] = None,
+    extracted: Optional[Dict[str, Any]] = None,
+    extractor: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> PolicyDraft:
     text = (instruction_text or "").strip()
     roster = [c for c in contacts if c.is_active]
@@ -309,61 +225,85 @@ def compile_instruction(
         return draft
 
     by_id = {c.id: c for c in roster}
+    if extracted is None:
+        from modules.operations.escalation_policy_admin_llm import (  # noqa: PLC0415
+            candidate_payload,
+            extract_escalation_intent,
+        )
+
+        run_extract = extractor or extract_escalation_intent
+        extracted = run_extract(
+            text,
+            candidates=candidate_payload(roster),
+        )
+    extracted = extracted or {}
+
     used: set[int] = set()
-    last_role = ""
-    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text) if c and c.strip()]
-    if not clauses:
-        clauses = [text]
+    for raw in extracted.get("steps") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            cid = int(raw.get("contact_id") or 0)
+        except (TypeError, ValueError):
+            cid = 0
+        if cid not in by_id:
+            draft.unresolved.append(
+                UnresolvedReference(
+                    token=str(raw.get("contact_id") or ""),
+                    reason="invalid_contact_id",
+                )
+            )
+            continue
+        if cid in used:
+            draft.ambiguities.append(f"duplicate_contact_id:{cid}")
+            continue
+        used.add(cid)
+        draft.steps.append(
+            _step_from_contact(
+                by_id[cid],
+                order=len(draft.steps) + 1,
+                condition=str(raw.get("trigger_condition") or CONDITION_SEQUENCE),
+                action_override=str(raw.get("permitted_action") or ""),
+            )
+        )
+
+    for raw in extracted.get("unresolved_references") or []:
+        if isinstance(raw, dict):
+            token = str(raw.get("token") or "").strip()
+            reason = str(raw.get("reason") or "unknown_person")
+        else:
+            token = str(raw or "").strip()
+            reason = "unknown_person"
+        if token:
+            draft.unresolved.append(UnresolvedReference(token=token, reason=reason))
+
+    for item in extracted.get("ambiguities") or []:
+        text_item = str(item or "").strip()
+        if text_item and text_item not in draft.ambiguities:
+            draft.ambiguities.append(text_item)
 
     resolution_map = {
         _norm(k): int(v)
         for k, v in (resolutions or {}).items()
         if str(k).strip() and int(v or 0) in by_id
     }
-
-    for clause in clauses:
-        clause_n = _norm(clause)
-        condition = _condition_for_clause(clause_n)
-        matched = _longest_matches(clause_n, roster, used)
-        wants_next = any(tok in clause_n for tok in _NEXT_TOKENS)
-        if wants_next and last_role:
-            nxt = _next_same_role(roster, used, last_role)
-            if nxt is not None and nxt not in matched:
-                matched.append(nxt)
-        if not matched:
-            for token in _person_like_tokens(clause):
-                token_n = _norm(token)
-                resolved_id = resolution_map.get(token_n)
-                if resolved_id and resolved_id not in used:
-                    matched.append(by_id[resolved_id])
-                    continue
-                known = any(
-                    token_n == _norm(c.display_name) or token_n == _norm(c.role)
-                    for c in roster
-                )
-                if not known:
-                    draft.unresolved.append(
-                        UnresolvedReference(
-                            token=token,
-                            reason="unknown_person",
-                            clause=clause,
-                        )
-                    )
-
-        for contact in matched:
-            if contact.id in used:
-                continue
-            used.add(contact.id)
-            last_role = contact.role
+    still_unresolved: List[UnresolvedReference] = []
+    for item in draft.unresolved:
+        resolved_id = resolution_map.get(_norm(item.token))
+        if resolved_id and resolved_id not in used:
+            used.add(resolved_id)
             draft.steps.append(
                 _step_from_contact(
-                    contact,
+                    by_id[resolved_id],
                     order=len(draft.steps) + 1,
-                    condition=condition,
+                    condition=CONDITION_SEQUENCE,
                 )
             )
+            continue
+        still_unresolved.append(item)
+    draft.unresolved = still_unresolved
 
-    if not draft.steps and not draft.unresolved:
+    if not draft.steps and not draft.unresolved and not draft.ambiguities:
         draft.ambiguities.append("no_contact_references")
 
     if existing_steps:
@@ -372,10 +312,16 @@ def compile_instruction(
         if old_ids != new_ids:
             draft.change_summary.append("escalation_sequence_changed")
 
-    draft.can_confirm = bool(draft.steps) and not draft.unresolved
+    draft.can_confirm = (
+        bool(draft.steps)
+        and not draft.unresolved
+        and not any(str(a).startswith("ambiguous") for a in draft.ambiguities)
+        and "authoring_model_unavailable" not in draft.ambiguities
+    )
     draft.confirmation_required = True
     draft.invented_contacts = False
     draft.invented_numbers = False
+    draft.summary_for_merchant = str(extracted.get("summary_for_merchant") or "").strip()
     return draft
 
 

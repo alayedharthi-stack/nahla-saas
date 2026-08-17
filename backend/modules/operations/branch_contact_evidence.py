@@ -16,6 +16,23 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger("nahla.operations.branch_contact_evidence")
 
 _FLAG_FALSY = frozenset({"0", "false", "no", "off"})
+_FLAG_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def structured_branch_contacts_enabled() -> bool:
+    """Canonical structured contact/policy runtime. Default ON.
+
+    Global operational rollback only. Not a per-merchant feature switch.
+    """
+    rollback = os.getenv("ROLLBACK_STRUCTURED_BRANCH_CONTACTS", "").strip().lower()
+    if rollback in _FLAG_TRUTHY:
+        logger.info("[STRUCTURED_CONTACTS] fallback=global_rollback")
+        return False
+    raw = os.getenv("USE_STRUCTURED_BRANCH_CONTACTS", "1").strip().lower()
+    enabled = raw not in _FLAG_FALSY
+    if not enabled:
+        logger.info("[STRUCTURED_CONTACTS] fallback=legacy_env_off")
+    return enabled
 
 _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
@@ -44,11 +61,6 @@ _ADMIN_ROLE_TOKENS = frozenset({
     "ادارة",
     "مدير",
 })
-
-
-def structured_branch_contacts_enabled() -> bool:
-    raw = os.getenv("USE_STRUCTURED_BRANCH_CONTACTS", "0").strip().lower()
-    return raw not in _FLAG_FALSY
 
 
 def _norm(text: str) -> str:

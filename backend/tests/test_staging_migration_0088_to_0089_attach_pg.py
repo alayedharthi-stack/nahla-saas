@@ -35,7 +35,9 @@ from scripts.operators.staging_migration_0088_to_0089_contract import (  # noqa:
 )
 
 MIGRATION_TENANT_ID = 890_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0098"})
+from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
+    REPOSITORY_ALEMBIC_HEADS,
+)
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
@@ -182,7 +184,7 @@ def test_repository_has_parallel_heads_0092_and_0098() -> None:
         script = ScriptDirectory(str(_DATABASE / "migrations"))
     finally:
         os.chdir(prev_cwd)
-    assert set(script.get_heads()) == _REPOSITORY_ALEMBIC_HEADS
+    assert set(script.get_heads()) == REPOSITORY_ALEMBIC_HEADS
 
 
 def test_upgrade_command_never_uses_head_literal() -> None:

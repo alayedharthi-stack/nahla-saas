@@ -84,16 +84,15 @@ def may_share_with_customer(record: Any, *, action: str = "") -> bool:
     """True when the platform may give phone / WhatsApp CTA to the customer.
 
     Explicit ``internal_only`` never shares. Explicit visible/both share.
-    Unspecified legacy records stay shareable so existing reception
-    delivery is preserved until the merchant confirms a new policy.
+    Unknown / unspecified visibility is not customer-shareable.
     """
     vis = visibility_of(record)
-    if vis == INTERNAL_ONLY:
+    if vis == INTERNAL_ONLY or vis == UNSPECIFIED:
         return False
     act = normalize_action(action) if action else SHARE_CUSTOMER_CONTACT
     if action and act not in CUSTOMER_SHARE_ACTIONS:
         return False
-    return vis in {CUSTOMER_VISIBLE, BOTH, UNSPECIFIED}
+    return vis in {CUSTOMER_VISIBLE, BOTH}
 
 
 def may_notify_internally(record: Any, *, action: str = "") -> bool:
@@ -107,7 +106,7 @@ def may_notify_internally(record: Any, *, action: str = "") -> bool:
 
 def default_action_for_visibility(visibility: str) -> str:
     vis = normalize_visibility(visibility)
-    if vis in {CUSTOMER_VISIBLE, BOTH, UNSPECIFIED}:
+    if vis in {CUSTOMER_VISIBLE, BOTH}:
         return SHARE_CUSTOMER_CONTACT
     return NOTIFY_OR_HANDOFF
 

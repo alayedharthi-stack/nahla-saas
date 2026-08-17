@@ -16,7 +16,31 @@ validated-staging state ``{0088, 0093}``; it must not select ``0092``.
 """
 from __future__ import annotations
 
-REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0098"})
+import os
+import sys
+from pathlib import Path
+
+from alembic.script import ScriptDirectory
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def load_repository_alembic_heads() -> frozenset[str]:
+    """Derive current repository Alembic heads from the migration graph."""
+    database_dir = _REPO / "database"
+    if str(database_dir) not in sys.path:
+        sys.path.insert(0, str(database_dir))
+    prev_cwd = os.getcwd()
+    try:
+        os.chdir(database_dir)
+        script = ScriptDirectory(str(database_dir / "migrations"))
+        return frozenset(str(head) for head in script.get_heads())
+    finally:
+        os.chdir(prev_cwd)
+
+
+# Parallel heads after 0098→0099: A1-Validate (0092) + escalation authoring (0099).
+REPOSITORY_ALEMBIC_HEADS = load_repository_alembic_heads()
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})
 VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0093"})

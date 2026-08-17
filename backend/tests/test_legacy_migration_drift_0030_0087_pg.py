@@ -15,6 +15,9 @@ for p in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
+    REPOSITORY_ALEMBIC_HEADS,
+)
 from scripts.operators import staging_migration_0030_to_0032 as stage_a_op  # noqa: E402
 from scripts.operators import staging_migration_0083_to_0087 as stage_c_op  # noqa: E402
 from tests.legacy_migration_drift_0030_0087_postgres_fixtures import (  # noqa: E402
@@ -76,7 +79,7 @@ def test_repository_parallel_heads_0088_0089_while_expand_runner_stops_at_0087()
         heads = set(ScriptDirectory("migrations").get_heads())
     finally:
         os.chdir(prev_cwd)
-    assert heads == frozenset({"0092", "0098"})
+    assert heads == REPOSITORY_ALEMBIC_HEADS
     assert FINAL_TARGET == "0087"
 
 
