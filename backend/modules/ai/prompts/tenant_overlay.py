@@ -176,6 +176,11 @@ def _stamp_overlay_observability(
         for r in included_rows
         if getattr(r, "id", None)
     ]
+    kinds = sorted({
+        str(getattr(r, "kind", "") or "").strip().lower()
+        for r in included_rows
+        if str(getattr(r, "kind", "") or "").strip()
+    })
     observability_out.update({
         "knowledge_query_run": True,
         "tenant_id": int(tenant_id or 0),
@@ -183,6 +188,10 @@ def _stamp_overlay_observability(
         "selected_knowledge_ids": ids,
         "source_section": "overlay",
         "model_visible_knowledge_ids": ids,
+        "included_kinds": kinds,
+        "knowledge_query_failed": bool(
+            observability_out.get("knowledge_query_failed")
+        ),
     })
 
 
@@ -287,6 +296,12 @@ def build_structured_facts_block(
     *,
     active_product_ids: Optional[set] = None,
     observability_out: Optional[Dict[str, Any]] = None,
+    has_catalog: bool = False,
+    has_branches: bool = False,
+    has_contacts: bool = False,
+    has_promotions: bool = False,
+    has_payments: bool = False,
+    has_orders: bool = False,
 ) -> str:
     """Build the facts bucket from ``merchant_knowledge_sections`` rows.
 
@@ -337,6 +352,8 @@ def build_structured_facts_block(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[KB.facts] query failed for tenant=%s: %s", tenant_id, exc)
+        if observability_out is not None:
+            observability_out["knowledge_query_failed"] = True
         _stamp_overlay_observability(
             observability_out,
             tenant_id=tenant_id,
@@ -373,6 +390,30 @@ def build_structured_facts_block(
     pre_behavioral_total = len(rows)
     rows = [r for r in rows if not is_behavioral_kind(getattr(r, "kind", None))]
     behavioral_dropped = pre_behavioral_total - len(rows)
+
+    # Structured operational records own price/location/contact/payment/
+    # promotion/order facts. Hold matching overlay kinds so KB prose cannot
+    # compete. Product usage/recipe explanation is not held back.
+    try:
+        from modules.ai.brain.commerce.knowledge_truth import (  # noqa: PLC0415
+            overlay_kinds_held_by_structured_truth,
+        )
+
+        held_kinds = overlay_kinds_held_by_structured_truth(
+            has_catalog=has_catalog,
+            has_branches=has_branches,
+            has_contacts=has_contacts,
+            has_promotions=has_promotions,
+            has_payments=has_payments,
+            has_orders=has_orders,
+        )
+        if held_kinds:
+            rows = [
+                r for r in rows
+                if str(getattr(r, "kind", "") or "").strip().lower() not in held_kinds
+            ]
+    except Exception:  # noqa: silent-ok — overlay still renders remaining facts
+        held_kinds = frozenset()
 
     if not rows:
         # Only behavioral/long-form rows existed — facts bucket is empty by design.

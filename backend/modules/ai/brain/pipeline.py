@@ -3262,6 +3262,18 @@ class MerchantBrain:
                 _structured_facts_block = build_structured_facts_block(
                     db, tenant_id, active_product_ids=_active_pids,
                     observability_out=_overlay_obs,
+                    has_catalog=bool(getattr(ctx.facts, "has_products", False)),
+                    has_branches=bool(getattr(ctx.facts, "branches", None)),
+                    has_contacts=bool(
+                        getattr(ctx.facts, "store_contact_phone", "")
+                        or getattr(ctx.facts, "store_contact_email", "")
+                    ),
+                    has_promotions=bool(
+                        getattr(ctx.facts, "shareable_promotions", None)
+                        or getattr(ctx.facts, "shareable_offers", None)
+                    ),
+                    has_payments=bool(getattr(ctx.facts, "payment_methods", None)),
+                    has_orders=bool(getattr(ctx.facts, "recent_orders", None)),
                 ) or ""
                 _structured_behavior_block = build_behavioral_overlay_block(
                     db, tenant_id,
@@ -3273,7 +3285,7 @@ class MerchantBrain:
                 )
                 _structured_facts_block = ""
                 _structured_behavior_block = ""
-                _overlay_obs = {}
+                _overlay_obs = {"knowledge_query_failed": True}
 
             # Pack A1 — relevance-gated long-form document retrieval (capped).
             # Kept as a DISTINCT block so it never replaces legacy manual KB
@@ -3328,7 +3340,10 @@ class MerchantBrain:
                                 int(getattr(_doc_retrieval, "candidate_count", 0) or 0),
                             ),
                             retrieved_kinds=list(
-                                ctx._pack_a3_retrieval_meta.get("knowledge_kinds") or []
+                                dict.fromkeys(
+                                    list(ctx._pack_a3_retrieval_meta.get("knowledge_kinds") or [])
+                                    + list(_overlay_obs.get("included_kinds") or [])
+                                )
                             ),
                             has_catalog=bool(getattr(ctx.facts, "has_products", False)),
                             has_branches=bool(getattr(ctx.facts, "branches", None)),
@@ -3338,8 +3353,14 @@ class MerchantBrain:
                             ),
                             has_promotions=bool(
                                 getattr(ctx.facts, "shareable_promotions", None)
+                                or getattr(ctx.facts, "shareable_offers", None)
                             ),
                             has_payments=bool(getattr(ctx.facts, "payment_methods", None)),
+                            has_orders=bool(getattr(ctx.facts, "recent_orders", None)),
+                            knowledge_query_failed=bool(
+                                _overlay_obs.get("knowledge_query_failed")
+                                or getattr(_doc_retrieval, "query_failed", False)
+                            ),
                         )
                         ctx._knowledge_observability = _obs.to_dict()  # type: ignore[attr-defined]
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not affect the turn

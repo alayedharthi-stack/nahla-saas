@@ -16,6 +16,8 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from core.ai_disabled_gate import (  # noqa: E402
+    REASON_AI_PAUSED,
+    REASON_HUMAN_OWNERSHIP,
     REASON_HUMAN_SUPERVISION,
     REASON_STORE_AI_TEST_MODE_NOT_ALLOWED,
     disabled_reason_for_conversation,
@@ -27,6 +29,7 @@ from core.knowledge import apply_ai_visible_kb_query_filters, kb_row_is_ai_visib
 from core.tenant import STORE_AI_MODE_TEST  # noqa: E402
 from modules.ai.brain.commerce.knowledge_truth import (  # noqa: E402
     merge_knowledge_observability,
+    overlay_kinds_held_by_structured_truth,
     structured_conflicts_for_kinds,
 )
 from modules.ai.brain.commerce.promotion_truth import (  # noqa: E402
@@ -35,7 +38,10 @@ from modules.ai.brain.commerce.promotion_truth import (  # noqa: E402
     QUERY_OK,
     resolve_shareable_promotions,
 )
-from services.merchant_document_retrieval import retrieve_merchant_documents  # noqa: E402
+from services.merchant_document_retrieval import (  # noqa: E402
+    MAX_SECTIONS_PER_TURN,
+    retrieve_merchant_documents,
+)
 from modules.ai.prompts import tenant_overlay as overlay_mod  # noqa: E402
 from utils.phone_utils import (  # noqa: E402
     normalize_whatsapp_phone_for_ai_allowlist,
@@ -310,10 +316,14 @@ class TestKnowledgeTenantScope:
 
     def test_structured_catalog_facts_win_over_kb_kinds(self) -> None:
         conflicts = structured_conflicts_for_kinds(
-            ["product_usage"],
+            ["product_price"],
             has_catalog=True,
         )
         assert "catalog_structured_wins" in conflicts
+        assert "catalog_structured_wins" not in structured_conflicts_for_kinds(
+            ["product_usage"],
+            has_catalog=True,
+        )
 
     def test_knowledge_observability_contract(self) -> None:
         obs = merge_knowledge_observability(
@@ -486,6 +496,57 @@ class TestPromotionTruth:
         assert result.shareable[0]["eligibility_determined"] is False
         assert result.shareable[0]["eligibility_note"] == "conditions_not_fully_evaluated"
 
+    def test_offer_query_failure_with_empty_coupons_is_not_no_promotions(self) -> None:
+        db = MagicMock()
+
+        def _query(model):
+            name = getattr(model, "__name__", "") or str(model)
+            q = MagicMock()
+            q.filter.return_value = q
+            q.order_by.return_value = q
+            q.limit.return_value = q
+            if name == "Coupon":
+                q.all.return_value = []
+                return q
+            if name == "Promotion":
+                raise RuntimeError("offers unavailable")
+            q.all.return_value = []
+            q.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+        assert result.offers == []
+        assert result.query_failed is True
+        assert result.query_outcome == PROMOTION_QUERY_FAILED
+        assert result.invented_codes is False
+
+    def test_offer_query_failure_keeps_valid_coupons(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = MagicMock()
+
+        def _query(model):
+            name = getattr(model, "__name__", "") or str(model)
+            q = MagicMock()
+            q.filter.return_value = q
+            q.order_by.return_value = q
+            q.limit.return_value = q
+            if name == "Coupon":
+                q.all.return_value = [_CouponRow(expires_at=future)]
+                return q
+            if name == "Promotion":
+                raise RuntimeError("offers unavailable")
+            q.all.return_value = []
+            q.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable[0]["code"] == "SAVE10"
+        assert result.query_failed is False
+        assert result.query_outcome == QUERY_OK
+
     def test_active_offer_has_no_invented_code(self) -> None:
         future = datetime.now(timezone.utc) + timedelta(days=7)
         db = self._query([], promos=[_PromoRow(ends_at=future)])
@@ -508,3 +569,343 @@ class TestPromotionTruth:
         ).read()
         assert "CouponGenerator" not in src
         assert "materialise_for_customer" not in src
+
+
+def _mock_db_no_handoff_session() -> MagicMock:
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    return db
+
+
+def _kb_section(section_id: int, kind: str, body: str = "Generic merchant policy text.") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=section_id,
+        kind=kind,
+        title=kind,
+        body=body,
+        source="manual",
+        metadata_json={},
+        product_links=[],
+    )
+
+
+def _retrieve_with_structured_kind(
+    db: MagicMock,
+    tenant_id: int,
+    structured_kind: str,
+    rows: list,
+    *,
+    message: str = "",
+) -> object:
+    q = db.query.return_value
+    q.filter.return_value = q
+    q.order_by.return_value = q
+    q.limit.return_value = q
+    q.all.return_value = list(rows)
+    with patch(
+        "core.knowledge.apply_ai_visible_kb_query_filters",
+        side_effect=lambda query: query,
+    ), patch(
+        "services.merchant_knowledge_customer_readiness.mks_section_customer_ready",
+        return_value=SimpleNamespace(is_ready=True, reason_code=""),
+    ):
+        return retrieve_merchant_documents(
+            db, tenant_id, message, structured_kind=structured_kind,
+        )
+
+
+class TestSuiteAGateSuppression:
+    def test_needs_human_alone_does_not_disable_ai(self) -> None:
+        convo = _convo(needs_human=True)
+        assert disabled_reason_for_conversation(convo) == ""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            id=5, status="active", handoff_reason="customer_request",
+        )
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db, tenant_id=1, customer_phone="966500000001",
+            )
+        assert decision.disabled is False
+
+    def test_ai_paused_true_disables(self) -> None:
+        convo = _convo(ai_paused=True, ai_paused_reason=REASON_AI_PAUSED)
+        assert disabled_reason_for_conversation(convo) == REASON_AI_PAUSED
+        db = _mock_db_no_handoff_session()
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=False,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db, tenant_id=1, customer_phone="966500000001",
+            )
+        assert decision.disabled is True
+        assert decision.reason == REASON_AI_PAUSED
+
+    def test_ownership_handoff_active_disables(self) -> None:
+        convo = _convo()
+        db = _mock_db_no_handoff_session()
+        with patch(
+            "core.ai_disabled_gate._find_conversations_for_phone",
+            return_value=[convo],
+        ), patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=True, mode="on"),
+        ), patch(
+            "core.ownership_state.conversation_handoff_active",
+            return_value=True,
+        ):
+            decision = is_ai_disabled_for_conversation(
+                db, tenant_id=1, customer_phone="966500000001",
+            )
+        assert decision.disabled is True
+        assert decision.reason == REASON_HUMAN_OWNERSHIP
+
+    def test_paused_by_human_disables(self) -> None:
+        convo = _convo(paused_by_human=True)
+        assert disabled_reason_for_conversation(convo) == REASON_HUMAN_SUPERVISION
+
+    def test_status_human_alone_does_not_disable(self) -> None:
+        convo = _convo(status="human")
+        assert disabled_reason_for_conversation(convo) == ""
+
+    def test_taken_over_at_disables(self) -> None:
+        convo = _convo(taken_over_at=datetime.now(timezone.utc))
+        assert disabled_reason_for_conversation(convo) == REASON_HUMAN_SUPERVISION
+
+    def test_advisory_handoff_flags_alone_do_not_disable(self) -> None:
+        convo = _convo(is_human_handoff=True, handoff_active=True)
+        assert disabled_reason_for_conversation(convo) == ""
+
+    def test_prefixed_notify_session_does_not_disable(self) -> None:
+        from core.ai_disabled_gate import _handoff_session_disables_ai
+
+        row = SimpleNamespace(
+            status="active",
+            handoff_reason="customer_request_pre_brain:clear",
+        )
+        assert _handoff_session_disables_ai(row) is False
+        leftover = SimpleNamespace(
+            status="active",
+            handoff_reason="customer_request_outer_exception",
+        )
+        assert _handoff_session_disables_ai(leftover) is False
+
+    def test_staff_takeover_session_still_disables(self) -> None:
+        from core.ai_disabled_gate import _handoff_session_disables_ai
+
+        row = SimpleNamespace(status="active", handoff_reason="staff_takeover")
+        assert _handoff_session_disables_ai(row) is True
+
+
+class TestSuiteDKnowledgeRetrieval:
+    def test_brain_store_story_kind_retrieves(self) -> None:
+        db = MagicMock()
+        result = _retrieve_with_structured_kind(
+            db, 1, "store_story", [_kb_section(41, "store_story")],
+        )
+        assert result.knowledge_query_run is True
+        assert result.matched_intent == "store_story"
+        assert result.selected_knowledge_ids == (41,)
+
+    def test_brain_shipping_policy_kind_retrieves(self) -> None:
+        db = MagicMock()
+        result = _retrieve_with_structured_kind(
+            db, 1, "shipping_policy", [_kb_section(42, "shipping_policy")],
+        )
+        assert result.knowledge_query_run is True
+        assert result.matched_intent == "shipping_policy"
+        assert result.selected_knowledge_ids == (42,)
+
+    def test_large_kb_bounded_to_max_sections_per_turn(self) -> None:
+        rows = [
+            _kb_section(i, "return_policy", body=f"Policy chunk {i} " * 20)
+            for i in range(1, 9)
+        ]
+        db = MagicMock()
+        result = _retrieve_with_structured_kind(
+            db, 1, "return_policy", rows,
+        )
+        assert result.knowledge_query_run is True
+        assert len(result.sections) <= MAX_SECTIONS_PER_TURN
+        assert result.candidate_count == 8
+
+    def test_empty_kb_with_structured_kind_runs_query(self) -> None:
+        db = MagicMock()
+        result = _retrieve_with_structured_kind(db, 1, "faq", [])
+        assert result.sections == ()
+        assert result.knowledge_query_run is True
+        assert result.matched_intent == "faq"
+
+    def test_empty_kb_without_structured_kind_skips_query(self) -> None:
+        db = MagicMock()
+        result = retrieve_merchant_documents(db, 1, "")
+        assert result.sections == ()
+        assert result.knowledge_query_run is False
+        db.query.assert_not_called()
+
+    def test_knowledge_query_failure_is_observable(self) -> None:
+        db = MagicMock()
+        db.query.side_effect = RuntimeError("kb unavailable")
+        with patch(
+            "core.knowledge.apply_ai_visible_kb_query_filters",
+            side_effect=lambda query: query,
+        ):
+            result = retrieve_merchant_documents(
+                db, 1, "", structured_kind="store_story",
+            )
+        assert result.sections == ()
+        assert result.knowledge_query_run is True
+        assert result.query_failed is True
+        assert result.matched_intent == "store_story"
+
+
+class TestSuiteCWebhookSuppressionReason:
+    def test_webhook_persist_sites_pass_suppression_reason(self) -> None:
+        src = open(
+            os.path.join(_BACKEND, "routers", "whatsapp_webhook.py"),
+            encoding="utf-8",
+        ).read()
+        marker = "persist_inbound_for_suppressed_turn("
+        starts = []
+        idx = 0
+        while True:
+            found = src.find(marker, idx)
+            if found == -1:
+                break
+            starts.append(found)
+            idx = found + len(marker)
+        assert len(starts) >= 2
+        for start in starts:
+            snippet = src[start:start + 700]
+            assert "suppression_reason=" in snippet
+
+
+class TestSuiteEStructuredConflicts:
+    def test_branches_structured_wins(self) -> None:
+        conflicts = structured_conflicts_for_kinds(
+            ["branch"], has_branches=True,
+        )
+        assert conflicts == ["branches_structured_wins"]
+
+    def test_contacts_structured_wins(self) -> None:
+        conflicts = structured_conflicts_for_kinds(
+            ["staff_contact"], has_contacts=True,
+        )
+        assert conflicts == ["contacts_structured_wins"]
+
+    def test_promotions_structured_wins(self) -> None:
+        conflicts = structured_conflicts_for_kinds(
+            ["promotion"], has_promotions=True,
+        )
+        assert conflicts == ["promotions_structured_wins"]
+
+    def test_payments_structured_wins(self) -> None:
+        conflicts = structured_conflicts_for_kinds(
+            ["payment_method"], has_payments=True,
+        )
+        assert conflicts == ["payments_structured_wins"]
+
+    def test_overlay_holds_operational_kinds_not_explanations(self) -> None:
+        held = overlay_kinds_held_by_structured_truth(
+            has_catalog=True,
+            has_branches=True,
+            has_payments=True,
+            has_promotions=True,
+        )
+        assert "branches" in held
+        assert "payment_method" in held
+        assert "coupon" in held
+        assert "product_price" in held
+        assert "product_usage" not in held
+        assert "product_recipe" not in held
+        assert "store_story" not in held
+
+    def test_overlay_holds_nothing_without_structured_owners(self) -> None:
+        held = overlay_kinds_held_by_structured_truth()
+        assert held == frozenset()
+
+
+class TestSuiteFPromotionTruth:
+    def _query(self, coupons, promos=None):
+        return TestPromotionTruth()._query(coupons, promos=promos)
+
+    def test_future_starts_at_in_metadata_excluded(self) -> None:
+        future_expiry = datetime.now(timezone.utc) + timedelta(days=7)
+        future_start = datetime.now(timezone.utc) + timedelta(days=2)
+        db = self._query([
+            _CouponRow(
+                code="LATER",
+                expires_at=future_expiry,
+                extra_metadata={"starts_at": future_start},
+            ),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+
+    def test_conditions_project_min_order_products_categories_limit(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([
+            _CouponRow(
+                expires_at=future,
+                extra_metadata={
+                    "min_order_amount": 200,
+                    "product_ids": [11, 12],
+                    "category_ids": [3],
+                    "per_customer_limit": 1,
+                },
+            ),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        conditions = result.shareable[0]["conditions"]
+        assert conditions["min_order_amount"] == 200
+        assert conditions["product_ids"] == [11, 12]
+        assert conditions["category_ids"] == [3]
+        assert conditions["per_customer_limit"] == 1
+
+    def test_three_active_coupons_all_appear(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([
+            _CouponRow(id=1, code="T33A", expires_at=future),
+            _CouponRow(id=2, code="T33B", expires_at=future),
+            _CouponRow(id=3, code="T33C", expires_at=future),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        codes = {item["code"] for item in result.shareable}
+        assert codes == {"T33A", "T33B", "T33C"}
+
+    def test_campaign_allocation_channel_excluded(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([
+            _CouponRow(
+                code="CAMPAIGN10",
+                expires_at=future,
+                allocation_channel="campaign",
+            ),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+
+    def test_cross_tenant_result_carries_requested_tenant_id(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        coupons = [_CouponRow(id=1, code="SHARED", expires_at=future)]
+        db = self._query(coupons)
+        result_ten = resolve_shareable_promotions(db, 10)
+        result_twenty = resolve_shareable_promotions(db, 20)
+        assert result_ten.tenant_id == 10
+        assert result_twenty.tenant_id == 20

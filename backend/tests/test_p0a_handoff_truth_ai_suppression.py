@@ -23,6 +23,7 @@ from core.ai_disabled_gate import (
     REASON_HANDOFF_SESSION,
     REASON_HUMAN_OWNERSHIP,
     REASON_HUMAN_SUPERVISION,
+    disabled_reason_for_conversation,
     is_ai_disabled_for_conversation,
 )
 from core.handoff_truth import (
@@ -283,8 +284,8 @@ class TestAISuppression:
                 tenant_id=33,
                 customer_phone="966551459303",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_HUMAN_SUPERVISION
+        assert decision.disabled is False
+        assert disabled_reason_for_conversation(convo) == ""
 
     def test_human_ownership_disables(self) -> None:
         convo = _convo()

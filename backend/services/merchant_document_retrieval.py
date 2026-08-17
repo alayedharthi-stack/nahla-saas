@@ -173,6 +173,7 @@ class MerchantDocumentRetrievalResult:
     source_section: str = "retrieval"
     structured_conflicts: Tuple[str, ...] = ()
     model_visible_knowledge_ids: Tuple[int, ...] = ()
+    query_failed: bool = False
 
 
 def is_long_form_document_kind(kind: Optional[str]) -> bool:
@@ -335,6 +336,7 @@ def retrieve_merchant_documents(
             truncated=False,
             knowledge_query_run=True,
             tenant_id=int(tenant_id or 0),
+            query_failed=True,
         )
 
     # custom is never policy/document truth for this path.

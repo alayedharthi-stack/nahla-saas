@@ -220,6 +220,7 @@ def resolve_shareable_promotions(
 
     offers: List[Dict[str, Any]] = []
     generation_rules_present = False
+    offers_query_failed = False
     try:
         from models import Promotion  # noqa: PLC0415
         from services.promotion_engine import is_promotion_active  # noqa: PLC0415
@@ -242,8 +243,13 @@ def resolve_shareable_promotions(
             offers.append(_offer_to_fact(promo))
             if len(offers) >= int(limit):
                 break
-    except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
-        pass
+    except Exception:  # noqa: silent-ok — offer query fail-open for customer; diagnostics must not look like an empty catalog
+        offers_query_failed = True
+        logger.info(
+            "[PROMOTION_TRUTH] tenant=%s outcome=%s source=offers",
+            tid,
+            PROMOTION_QUERY_FAILED,
+        )
 
     if not generation_rules_present:
         try:
@@ -258,20 +264,31 @@ def resolve_shareable_promotions(
                         .first()
                         is not None
                     )
-        except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
+        except Exception:  # noqa: silent-ok — coupon-rule probe fail-open; generation_authorized stays false
+            logger.info(
+                "[PROMOTION_TRUTH] tenant=%s outcome=%s source=coupon_rules",
+                tid,
+                PROMOTION_QUERY_FAILED,
+            )
             generation_rules_present = False
 
     if shareable or offers:
         outcome = QUERY_OK
+        query_failed = False
+    elif offers_query_failed:
+        outcome = PROMOTION_QUERY_FAILED
+        query_failed = True
     else:
         outcome = NO_VALID_PROMOTIONS
+        query_failed = False
     logger.info(
-        "[PROMOTION_TRUTH] tenant=%s outcome=%s candidate_count=%s shareable=%s offers=%s",
+        "[PROMOTION_TRUTH] tenant=%s outcome=%s candidate_count=%s shareable=%s offers=%s offers_query_failed=%s",
         tid,
         outcome,
         len(rows),
         len(shareable),
         len(offers),
+        int(offers_query_failed),
     )
     return PromotionTruthResult(
         tenant_id=tid,
@@ -283,7 +300,7 @@ def resolve_shareable_promotions(
         generation_authorized=False,
         invented_codes=False,
         source="native_coupons",
-        query_failed=False,
+        query_failed=query_failed,
         query_outcome=outcome,
     )
 
