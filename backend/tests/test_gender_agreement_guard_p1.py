@@ -23,6 +23,7 @@ from modules.ai.gender.context import (  # noqa: E402
     REPLY_STYLE_NEUTRAL,
     SOURCE_EXPLICIT,
     SOURCE_INFERRED_NAME,
+    CustomerGenderContext,
     persist_gender_hint,
     resolve_customer_gender_context,
     should_persist_gender_hint,
@@ -184,6 +185,12 @@ class TestExplicitGenderPersistence:
             )
             assert ctx.gender == GENDER_FEMALE, msg
             assert ctx.confidence_score >= APPLY_CONFIDENCE_THRESHOLD, msg
+
+
+    def test_self_id_phrase_does_not_infer_gender(self) -> None:
+        hint = detect_gender("انا رجل ولست امرأة")
+        assert hint.value != GENDER_MALE or hint.source != "verb"
+
 
 
 class TestAddressGuardModes:

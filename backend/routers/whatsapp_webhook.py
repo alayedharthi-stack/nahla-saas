@@ -4194,6 +4194,22 @@ async def _dispatch_message(
         except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block inbound routing
             text = normalized_inbound.text.strip()
             route_unclear_audio_order_support = False
+        try:
+            from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                maybe_restore_catalog_order_semantic_text,
+            )
+
+            text, _catalog_completion_meta = maybe_restore_catalog_order_semantic_text(
+                semantic_text=text,
+                original_brain_text=normalized_inbound.text,
+                inbound_metadata=normalized_inbound.metadata,
+            )
+            if _catalog_completion_meta:
+                _ni_meta = dict(normalized_inbound.metadata or {})
+                _ni_meta.update(_catalog_completion_meta)
+                normalized_inbound.metadata = _ni_meta
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog completion restore must not block inbound
+            pass
         if route_unclear_audio_order_support:
             _ni_meta = dict(normalized_inbound.metadata or {})
             _ni_meta["route_unclear_audio_order_support"] = True
@@ -4253,7 +4269,47 @@ async def _dispatch_message(
             )
             return
 
+        route_catalog_order_structured = False
         if not text and not route_unclear_audio_order_support:
+            try:
+                from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                    should_continue_structured_catalog_order,
+                )
+
+                if should_continue_structured_catalog_order(
+                    normalized_inbound.metadata,
+                    normalized_inbound.text or "",
+                ):
+                    route_catalog_order_structured = True
+                    _ni_meta = dict(normalized_inbound.metadata or {})
+                    _ni_meta["catalog_order_structured_event"] = True
+                    _ni_meta["catalog_order_empty_text_continued"] = True
+                    _ni_meta["synthetic_customer_phrase"] = False
+                    _ctc = dict(_ni_meta.get("customer_turn_completion") or {})
+                    _ctc.update({
+                        "input_type": "catalog_order",
+                        "semantic_owner": "brain",
+                        "structured_action_owner": "wa_native_catalog_order",
+                        "completion_class": "structured_action_and_natural_continuation",
+                        "suppression_reason": None,
+                    })
+                    _ni_meta["customer_turn_completion"] = _ctc
+                    normalized_inbound.metadata = _ni_meta
+                    logger.info(
+                        "[CUSTOMER_TURN_COMPLETION] catalog_order continued past "
+                        "empty_text_no_fallback tenant=%s sender=%s "
+                        "synthetic_customer_phrase=false",
+                        resolved_tenant_id,
+                        sender,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog completion must not block inbound
+                pass
+
+        if (
+            not text
+            and not route_unclear_audio_order_support
+            and not route_catalog_order_structured
+        ):
             logger.info(
                 "[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT | tenant_id=%s sender=%s normalized_type=%s",
                 resolved_tenant_id, sender, normalized_inbound.normalized_type,
@@ -4335,6 +4391,7 @@ async def _dispatch_message(
                         phone=sender or "",
                         source_message_key=(msg_id or None),
                     )
+                    db.commit()
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "[WA_NATIVE_ORDER] persist_only_catalog_order_stamp_failed "
@@ -4342,6 +4399,10 @@ async def _dispatch_message(
                     resolved_tenant_id,
                     sender,
                 )
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — rollback after failed persist-only catalog commit
+                    pass
             return
 
         # ── Merchant vs Platform routing ─────────────────────────────────────────
@@ -5753,7 +5814,29 @@ async def _handle_merchant_message(
     dedicated paths that emit pre-approved templates / canned copy and
     never enter this conversational pipeline.
     """
+    _catalog_order_structured_continue = False
     if not (text or "").strip():
+        try:
+            from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                customer_authored_catalog_order_text,
+                should_continue_structured_catalog_order,
+            )
+
+            _cat_meta = (
+                inbound_metadata if isinstance(inbound_metadata, dict) else {}
+            )
+            if should_continue_structured_catalog_order(
+                _cat_meta,
+                inbound_persist_body or "",
+            ):
+                _catalog_order_structured_continue = True
+                text = customer_authored_catalog_order_text(
+                    _cat_meta,
+                    inbound_persist_body or "",
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog restore must not block merchant entry
+            pass
+    if not (text or "").strip() and not _catalog_order_structured_continue:
         _unclear_audio_order_support = False
         try:
             from modules.ai.media.routing_guard import (  # noqa: PLC0415

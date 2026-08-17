@@ -301,18 +301,21 @@ def detect_gender(
     customer_name: Optional[str] = None,
     prior_hint: Optional[GenderHint] = None,
 ) -> GenderHint:
-    """Cascade through the three signals and return the best hint.
+    """Cascade through the signals and return the best hint.
 
     Order:
       1. Verb-suffix signal (current message) — strongest.
       2. Name whitelist signal — medium.
-      3. Prior sticky hint (with mild per-turn decay so the
-         classification doesn't last forever without reinforcement).
+      3. Prior sticky hint (with mild per-turn decay).
 
     Conflict resolution: if the verb signal and the name signal
     disagree, we **return unknown** rather than pick a side — the
     customer is more important than the dataset. A real follow-up
     turn will resolve it.
+
+    This detector does not parse first-person self-identification
+    phrases. Addressing preference is consumed from already-established
+    structured gender state (profile / prior hint / verb suffixes).
     """
     verb_hint = _from_verb_suffixes(message or "")
     name_hint = _from_name(customer_name)

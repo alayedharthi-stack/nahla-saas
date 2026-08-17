@@ -141,3 +141,30 @@ def test_social_intent_keeps_authoritative_answer_contract():
     dumped = json.dumps(slim.get("known_facts") or {}, ensure_ascii=False)
     assert "Dev Company" in dumped
     assert "shipping_companies" in dumped
+
+
+def test_persona_identity_keeps_merchant_record_not_commerce():
+    state = _state(
+        intent_name="who_are_you",
+        persona_expression_mode=True,
+        known_facts={
+            "merchant_customer_record": {
+                "registered": True,
+                "personal_familiarity": False,
+                "customer_name": "أحمد سالم",
+            },
+            "customer_name_known": True,
+            "customer_name": "أحمد سالم",
+            "personal_familiarity": False,
+            "customer_order_evidence": {"latest_order_id": 99},
+            "checkout_preparation": {"customer_first_name": "أحمد"},
+        },
+    )
+    assert is_routine_social_turn(state) is True
+    slim = strip_state_dict_for_prompt(asdict(state), state, kb_in_prompt_block=False)
+    facts = slim.get("known_facts") or {}
+    assert facts.get("customer_name") == "أحمد سالم"
+    assert facts.get("merchant_customer_record", {}).get("registered") is True
+    assert facts.get("personal_familiarity") is False
+    assert "customer_order_evidence" not in facts
+    assert "checkout_preparation" not in facts

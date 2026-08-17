@@ -1831,9 +1831,23 @@ def _looks_like_phone_name(text: str) -> bool:
 def _prep_has_real_name(prep: OrderPreparationState) -> bool:
     first = str(prep.customer_first_name or "").strip()
     last = str(prep.customer_last_name or "").strip()
-    if first and not _looks_like_phone_name(first):
+    if _looks_like_phone_name(first) or _looks_like_phone_name(last):
+        return False
+    if first and last:
         return True
-    return bool(last and not _looks_like_phone_name(last))
+    # First-only is incomplete for shipping labels. A multi-token first
+    # slot already encodes an equivalent full name via the existing splitter.
+    if first and not last:
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                split_operational_full_name,
+            )
+
+            _split_first, _split_last = split_operational_full_name(first)
+            return bool(_split_last)
+        except Exception:  # noqa: BLE001
+            return False
+    return False
 
 
 def _should_patch_customer_first(prep: OrderPreparationState, incoming: str) -> bool:
@@ -2120,10 +2134,28 @@ def _missing_checkout_fields(
         - a structured address OR an explicit free-form address_line
     """
     missing: list[str] = []
-    if not prep.customer_first_name:
+    first = str(prep.customer_first_name or "").strip()
+    last = str(prep.customer_last_name or "").strip()
+    if not first and not last:
         missing.append("customer_first_name")
-    if not prep.customer_last_name:
         missing.append("customer_last_name")
+    elif not last:
+        split_last = ""
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                split_operational_full_name,
+            )
+
+            _split_first, split_last = split_operational_full_name(first)
+            if split_last:
+                prep.customer_first_name = _split_first
+                prep.customer_last_name = split_last
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — existing splitter must not block checkout
+            split_last = ""
+        if not split_last:
+            missing.append("customer_last_name")
+    elif not first:
+        missing.append("customer_first_name")
     if not prep.city:
         missing.append("city")
 

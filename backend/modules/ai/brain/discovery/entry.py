@@ -980,6 +980,15 @@ def route_discovery_entry(
 
     if entry.entry_type == START_ORDER_BARE:
         try:
+            from ..commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                structured_selected_referent,
+            )
+
+            if structured_selected_referent(getattr(ctx, "state", None)):
+                return None
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — selected-product reuse must not block discovery
+            pass
+        try:
             from ..commerce.checkout_route_owner import (  # noqa: PLC0415
                 should_route_bare_start_to_channel_selection,
             )

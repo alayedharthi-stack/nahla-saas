@@ -539,6 +539,12 @@ def persist_structured_catalog_order_referent(
 
     Used when the inbound is persist-only (empty customer note) so Brain
     never runs — the structured referent must still survive to the next turn.
+
+    Transaction ownership: mutate + flush only. The webhook / caller
+    owns both commit and roll back of the shared session. This helper
+    must not commit or roll back pending conversation or webhook writes
+    belonging to the caller. On mutate/flush failure the helper raises
+    so the transaction owner can roll back.
     """
     meta = dict(inbound_metadata or {})
     if meta.get("source_type") != "catalog_order" and not (
@@ -612,7 +618,7 @@ def persist_structured_catalog_order_referent(
             "[WA_NATIVE_ORDER] persist_only_referent_stamp_failed tenant=%s",
             tenant_id,
         )
-        return False
+        raise
 
 
 __all__ = [
