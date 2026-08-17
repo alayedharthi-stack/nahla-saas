@@ -30,10 +30,13 @@ from modules.ai.brain.commerce.knowledge_truth import (  # noqa: E402
     structured_conflicts_for_kinds,
 )
 from modules.ai.brain.commerce.promotion_truth import (  # noqa: E402
+    NO_VALID_PROMOTIONS,
+    PROMOTION_QUERY_FAILED,
+    QUERY_OK,
     resolve_shareable_promotions,
 )
-from modules.ai.prompts import tenant_overlay as overlay_mod  # noqa: E402
 from services.merchant_document_retrieval import retrieve_merchant_documents  # noqa: E402
+from modules.ai.prompts import tenant_overlay as overlay_mod  # noqa: E402
 from utils.phone_utils import (  # noqa: E402
     normalize_whatsapp_phone_for_ai_allowlist,
     phone_matches_ai_test_allowlist,
@@ -226,6 +229,85 @@ class TestKnowledgeTenantScope:
         assert result.knowledge_query_run is False
         db.query.assert_not_called()
 
+    def test_raw_customer_text_does_not_activate_semantic_kb_retrieval(self) -> None:
+        db = MagicMock()
+        for text in ("shipping policy?", "return policy?", "our story", "faq"):
+            result = retrieve_merchant_documents(db, 1, text)
+            assert result.sections == ()
+            assert result.knowledge_query_run is False
+            assert result.matched_intent == ""
+        db.query.assert_not_called()
+
+    def test_same_structured_kind_ignores_customer_wording(self) -> None:
+        section = SimpleNamespace(
+            id=22,
+            kind="shipping_policy",
+            title="ship",
+            body="Generic merchant ships cotton shirts within three days.",
+            source="manual",
+            metadata_json={},
+            product_links=[],
+        )
+        db = MagicMock()
+        q = db.query.return_value
+        q.filter.return_value = q
+        q.order_by.return_value = q
+        q.limit.return_value = q
+        q.all.return_value = [section]
+        with patch(
+            "core.knowledge.apply_ai_visible_kb_query_filters",
+            side_effect=lambda query: query,
+        ), patch(
+            "services.merchant_knowledge_customer_readiness.mks_section_customer_ready",
+            return_value=SimpleNamespace(is_ready=True, reason_code=""),
+        ):
+            ids = []
+            for wording in ("one formulation", "another formulation", ""):
+                result = retrieve_merchant_documents(
+                    db, 1, wording, structured_kind="shipping_policy",
+                )
+                assert result.matched_intent == "shipping_policy"
+                ids.append(result.selected_knowledge_ids)
+        assert ids == [(22,), (22,), (22,)]
+
+    def test_customer_runtime_does_not_call_text_intent_detector(self) -> None:
+        import services.merchant_document_retrieval as retrieval_mod
+
+        src = open(retrieval_mod.__file__, encoding="utf-8").read()
+        fn = src.split("def retrieve_merchant_documents", 1)[1].split("\ndef ", 1)[0]
+        assert "detect_document_retrieval_intent" not in fn
+
+    def test_faq_retrieved_only_with_brain_kind(self) -> None:
+        section = SimpleNamespace(
+            id=33,
+            kind="faq",
+            title="faq",
+            body="Generic merchant FAQ: cotton shirts ship from Riyadh.",
+            source="manual",
+            metadata_json={},
+            product_links=[],
+        )
+        db = MagicMock()
+        q = db.query.return_value
+        q.filter.return_value = q
+        q.order_by.return_value = q
+        q.limit.return_value = q
+        q.all.return_value = [section]
+        empty = retrieve_merchant_documents(db, 1, "faq please")
+        assert empty.sections == ()
+        with patch(
+            "core.knowledge.apply_ai_visible_kb_query_filters",
+            side_effect=lambda query: query,
+        ), patch(
+            "services.merchant_knowledge_customer_readiness.mks_section_customer_ready",
+            return_value=SimpleNamespace(is_ready=True, reason_code=""),
+        ):
+            result = retrieve_merchant_documents(
+                db, 1, "faq please", structured_kind="faq",
+            )
+        assert result.matched_intent == "faq"
+        assert result.selected_knowledge_ids == (33,)
+
     def test_structured_catalog_facts_win_over_kb_kinds(self) -> None:
         conflicts = structured_conflicts_for_kinds(
             ["product_usage"],
@@ -384,6 +466,25 @@ class TestPromotionTruth:
         result = resolve_shareable_promotions(db, 1)
         assert result.shareable == []
         assert result.invented_codes is False
+        assert result.query_failed is False
+        assert result.query_outcome == NO_VALID_PROMOTIONS
+
+    def test_coupon_query_failure_is_not_empty_catalog(self) -> None:
+        db = MagicMock()
+        db.query.side_effect = RuntimeError("unavailable")
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+        assert result.query_failed is True
+        assert result.query_outcome == PROMOTION_QUERY_FAILED
+        assert result.invented_codes is False
+
+    def test_eligibility_undetermined_is_not_guaranteed(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([_CouponRow(expires_at=future)])
+        result = resolve_shareable_promotions(db, 1)
+        assert result.query_outcome == QUERY_OK
+        assert result.shareable[0]["eligibility_determined"] is False
+        assert result.shareable[0]["eligibility_note"] == "conditions_not_fully_evaluated"
 
     def test_active_offer_has_no_invented_code(self) -> None:
         future = datetime.now(timezone.utc) + timedelta(days=7)

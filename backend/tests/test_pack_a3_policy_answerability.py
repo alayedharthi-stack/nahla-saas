@@ -234,8 +234,10 @@ class TestPresentAndUnknownPaths:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 33, msg)
-        assert result.matched_intent == "return_family"
+            result = retrieve_merchant_documents(
+                db, 33, msg, structured_kind=dec.args["knowledge_kind"],
+            )
+        assert result.matched_intent == "return_policy"
         assert len(result.sections) == 1
         assert result.sections[0].provenance["doc_ref"] == "mks:122"
         assert "7 أيام" in result.sections[0].body
@@ -385,7 +387,9 @@ class TestDualTenantIsolation:
                 "core.knowledge.apply_ai_visible_kb_query_filters",
                 side_effect=lambda query: query,
             ):
-                return retrieve_merchant_documents(db, tenant_id, "وش سياسة الاسترجاع؟")
+                return retrieve_merchant_documents(
+                    db, tenant_id, "", structured_kind="return_policy",
+                )
 
         ra = _run(10, a)
         rb = _run(20, b)

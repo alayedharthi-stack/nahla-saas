@@ -152,6 +152,8 @@ class DefaultFactsLoader:
         facts.has_coupons = bool(promo.shareable)
         facts.shareable_promotions = list(promo.shareable)
         facts.shareable_offers = list(promo.offers)
+        facts.promotion_query_outcome = str(promo.query_outcome or "")
+        facts.promotion_query_failed = bool(promo.query_failed)
         # Do not promote the first code as "eligible" — Brain may recommend
         # from the structured set; eligibility remains unevaluated here.
 

@@ -7,13 +7,20 @@ source (native / Salla / imported); the semantic contract does not.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+logger = logging.getLogger("nahla.brain.promotion_truth")
+
 
 _MAX_SHAREABLE = 8
 _CAMPAIGN_ONLY_CHANNELS = frozenset({"campaign", "email", "sms", "autopilot"})
+
+QUERY_OK = "ok"
+NO_VALID_PROMOTIONS = "NO_VALID_PROMOTIONS"
+PROMOTION_QUERY_FAILED = "PROMOTION_QUERY_FAILED"
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,8 @@ class PromotionTruthResult:
     generation_authorized: bool = False
     invented_codes: bool = False
     source: str = "native_coupons"
+    query_failed: bool = False
+    query_outcome: str = NO_VALID_PROMOTIONS
 
 
 def _as_utc(dt: Any) -> Optional[datetime]:
@@ -166,6 +175,8 @@ def resolve_shareable_promotions(
             tenant_id=tid,
             query_run=False,
             candidate_count=0,
+            query_failed=False,
+            query_outcome=NO_VALID_PROMOTIONS,
         )
     now_ = now or datetime.now(timezone.utc)
     if now_.tzinfo is None:
@@ -183,10 +194,17 @@ def resolve_shareable_promotions(
             .all()
         )
     except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
+        logger.info(
+            "[PROMOTION_TRUTH] tenant=%s outcome=%s",
+            tid,
+            PROMOTION_QUERY_FAILED,
+        )
         return PromotionTruthResult(
             tenant_id=tid,
             query_run=True,
             candidate_count=0,
+            query_failed=True,
+            query_outcome=PROMOTION_QUERY_FAILED,
         )
 
     shareable: List[Dict[str, Any]] = []
@@ -243,6 +261,18 @@ def resolve_shareable_promotions(
         except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
             generation_rules_present = False
 
+    if shareable or offers:
+        outcome = QUERY_OK
+    else:
+        outcome = NO_VALID_PROMOTIONS
+    logger.info(
+        "[PROMOTION_TRUTH] tenant=%s outcome=%s candidate_count=%s shareable=%s offers=%s",
+        tid,
+        outcome,
+        len(rows),
+        len(shareable),
+        len(offers),
+    )
     return PromotionTruthResult(
         tenant_id=tid,
         query_run=True,
@@ -253,10 +283,15 @@ def resolve_shareable_promotions(
         generation_authorized=False,
         invented_codes=False,
         source="native_coupons",
+        query_failed=False,
+        query_outcome=outcome,
     )
 
 
 __all__ = [
+    "NO_VALID_PROMOTIONS",
+    "PROMOTION_QUERY_FAILED",
+    "QUERY_OK",
     "PromotionTruthResult",
     "resolve_shareable_promotions",
 ]

@@ -181,7 +181,11 @@ def is_long_form_document_kind(kind: Optional[str]) -> bool:
 
 
 def detect_document_retrieval_intent(message: str) -> Optional[str]:
-    """Return retrieval intent key, or None when long-form retrieval is skipped."""
+    """Legacy text-intent helper — NOT a customer-runtime semantic owner.
+
+    Customer conversation retrieval must receive ``structured_kind`` from
+    Brain. This detector remains for diagnostics / historical tests only.
+    """
     text = str(message or "").strip()
     if not text:
         return None
@@ -261,17 +265,18 @@ def _kinds_for_intent(intent: str) -> Tuple[str, ...]:
 def retrieve_merchant_documents(
     db: Any,
     tenant_id: int,
-    message: str,
+    message: str = "",
     *,
     max_sections: int = MAX_SECTIONS_PER_TURN,
     hard_character_cap: int = HARD_CHARACTER_CAP,
     structured_kind: Optional[str] = None,
 ) -> MerchantDocumentRetrievalResult:
-    """Retrieve 0–N relevant long-form MKS sections for one turn (source-agnostic).
+    """Retrieve 0–N relevant long-form MKS sections for one turn.
 
-    ``structured_kind`` is Brain-owned topic (already classified). When
-    present it selects kinds; customer-text regex is only the fallback.
+    Customer runtime: Brain supplies ``structured_kind``. Raw customer
+    text is never a semantic owner here (``message`` is unused for intent).
     """
+    del message  # not a knowledge-topic owner
     empty = MerchantDocumentRetrievalResult(
         sections=(),
         total_chars=0,
@@ -284,12 +289,9 @@ def retrieve_merchant_documents(
         return empty
 
     kind = str(structured_kind or "").strip().lower()
-    if kind in DOCUMENT_KINDS:
-        intent = kind
-    else:
-        intent = detect_document_retrieval_intent(message)
-    if not intent:
+    if kind not in DOCUMENT_KINDS:
         return empty
+    intent = kind
 
     kinds = _kinds_for_intent(intent)
     if not kinds:

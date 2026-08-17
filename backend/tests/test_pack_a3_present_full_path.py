@@ -191,7 +191,7 @@ class TestPackA3PresentFullPathNoBillingBypass:
         verdict = assess_mks_customer_readiness(_PLACEHOLDER_BODY)
         assert verdict.is_ready is False
         assert verdict.status == "INCOMPLETE_AUTHORING_TEMPLATE"
-        result = retrieve_merchant_documents(db, tenant.id, "وش سياسة الاسترجاع؟")
+        result = retrieve_merchant_documents(db, tenant.id, "", structured_kind="return_policy")
         assert len(result.sections) == 0
         assert result.sections_skipped_incomplete >= 1
         existence = build_policy_existence_map(db, tenant.id)

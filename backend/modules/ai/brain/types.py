@@ -836,6 +836,9 @@ class CommerceFacts:
     shareable_promotions: List[Dict[str, Any]] = field(default_factory=list)
     # Bounded tenant-scoped offer/promotion rules (no codes invented).
     shareable_offers: List[Dict[str, Any]] = field(default_factory=list)
+    # Closed diagnostic codes only — never customer error text.
+    promotion_query_outcome: str = ""
+    promotion_query_failed: bool = False
     # Top 5 synced products for greeting / numeric pick (need external_id).
     top_products: List[Dict[str, Any]] = field(default_factory=list)
     # Bounded existence-capable catalog for discovery/recommendation reasoning.

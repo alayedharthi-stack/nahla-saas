@@ -3286,16 +3286,11 @@ class MerchantBrain:
                 from .commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
                     knowledge_kind_from_args,
                 )
-                _faq_deferred = str(
-                    (decision.args or {}).get("faq_visibility") or ""
-                ) == "deferred"
                 _structured_kind = knowledge_kind_from_args(decision.args)
-                if _faq_deferred:
-                    _structured_kind = ""
                 _doc_retrieval = retrieve_merchant_documents(
                     db,
                     tenant_id,
-                    _raw_message or message or "",
+                    "",
                     structured_kind=_structured_kind or None,
                 )
                 _retrieved_docs_block = format_retrieved_documents_for_prompt(
@@ -6931,6 +6926,7 @@ def _build_reply_state(
             "shareable_offers": list(
                 getattr(ctx.facts, "shareable_offers", None) or []
             )[:8],
+            "eligibility_guaranteed": False,
             "discount_ok_now": suggestion.discount_ok_now,
             "coupon_logic_considered": suggestion.coupon_logic_considered,
         },

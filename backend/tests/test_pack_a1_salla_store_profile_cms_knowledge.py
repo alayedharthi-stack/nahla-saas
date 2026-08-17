@@ -213,7 +213,7 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "وش قصة المتجر؟")
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="store_story")
         assert result.matched_intent == "store_story"
         assert len(result.sections) == 1
         assert result.sections[0].provenance["source"] == "manual"
@@ -231,8 +231,8 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "ما سياسة الاسترجاع؟")
-        assert result.matched_intent == "return_family"
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="return_policy")
+        assert result.matched_intent == "return_policy"
         assert result.sections[0].kind == "return_policy"
 
     def test_manual_shipping_policy_retrievable(self):
@@ -248,12 +248,12 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "ما سياسة الشحن؟")
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="shipping_policy")
         assert result.matched_intent == "shipping_policy"
         assert result.sections[0].kind == "shipping_policy"
 
-    def test_manual_faq_not_customer_retrieved_pack_a3_deferred(self):
-        """Pack A3: FAQ rows are AI-visible but not customer-retrieved yet."""
+    def test_manual_faq_text_alone_does_not_retrieve(self):
+        """Raw customer text is not a knowledge-topic owner."""
         from services.merchant_document_retrieval import (
             detect_document_retrieval_intent,
             retrieve_merchant_documents,
@@ -274,6 +274,23 @@ class TestMerchantDocumentRetrieval:
         assert result.matched_intent == ""
         assert len(result.sections) == 0
 
+    def test_manual_faq_retrieved_when_brain_supplies_kind(self):
+        from services.merchant_document_retrieval import retrieve_merchant_documents
+
+        faq = _fake_section(
+            section_id=4, tenant_id=1, kind="faq",
+            body="FAQ body: shipping times vary by city.", title="أسئلة شائعة",
+        )
+        db = MagicMock()
+        self._query_returns(db, [faq])
+        with patch(
+            "core.knowledge.apply_ai_visible_kb_query_filters",
+            side_effect=lambda query: query,
+        ):
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="faq")
+        assert result.matched_intent == "faq"
+        assert len(result.sections) == 1
+
     def test_does_not_require_imported_or_salla_origin(self):
         from services.merchant_document_retrieval import retrieve_merchant_documents
 
@@ -288,7 +305,7 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "ما سياسة الاسترجاع؟")
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="return_policy")
         assert len(result.sections) == 1
 
     def test_max_sections_and_char_cap(self):
@@ -311,7 +328,7 @@ class TestMerchantDocumentRetrieval:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "ما سياسة الاسترجاع؟")
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="return_policy")
         assert len(result.sections) <= MAX_SECTIONS_PER_TURN
         assert result.total_chars <= HARD_CHARACTER_CAP
         assert result.truncated is True
@@ -350,10 +367,10 @@ class TestMerchantDocumentRetrieval:
             side_effect=lambda query: query,
         ):
             self._query_returns(db, [story_a])
-            a = retrieve_merchant_documents(db, 10, "وش قصة المتجر؟")
+            a = retrieve_merchant_documents(db, 10, "", structured_kind="store_story")
             assert a.sections[0].body == "Story Tenant A"
             self._query_returns(db, [story_b])
-            b = retrieve_merchant_documents(db, 20, "وش قصة المتجر؟")
+            b = retrieve_merchant_documents(db, 20, "", structured_kind="store_story")
             assert b.sections[0].body == "Story Tenant B"
 
     def test_dual_tenant_return_policy_no_cross_leak(self):
@@ -373,11 +390,11 @@ class TestMerchantDocumentRetrieval:
             side_effect=lambda query: query,
         ):
             self._query_returns(db, [ret_a])
-            a = retrieve_merchant_documents(db, 10, "ما سياسة الاسترجاع؟")
+            a = retrieve_merchant_documents(db, 10, "", structured_kind="return_policy")
             assert "A only" in a.sections[0].body
             assert "B only" not in a.sections[0].body
             self._query_returns(db, [ret_b])
-            b = retrieve_merchant_documents(db, 20, "ما سياسة الاسترجاع؟")
+            b = retrieve_merchant_documents(db, 20, "", structured_kind="return_policy")
             assert "B only" in b.sections[0].body
 
 
@@ -497,7 +514,7 @@ class TestNoSallaCmsRuntimeDependency:
             "core.knowledge.apply_ai_visible_kb_query_filters",
             side_effect=lambda query: query,
         ):
-            result = retrieve_merchant_documents(db, 1, "وش قصة المتجر؟")
+            result = retrieve_merchant_documents(db, 1, "", structured_kind="store_story")
         assert len(result.sections) == 1
         assert result.sections[0].body == "Merchant authored story"
 
