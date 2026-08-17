@@ -64,9 +64,9 @@ def _convo(**kwargs):
     return SimpleNamespace(**defaults)
 
 
-def _ctx(*, intent_name: str, message: str = "مرحبا"):
+def _ctx(*, intent_name: str, message: str = "مرحبا", slots: dict | None = None):
     return SimpleNamespace(
-        intent=SimpleNamespace(name=intent_name),
+        intent=SimpleNamespace(name=intent_name, slots=dict(slots or {})),
         message=message,
         semantic_interpretation=None,
         state=SimpleNamespace(
@@ -253,6 +253,15 @@ class TestCurrentIntentOutranksStaleCommerce:
         assert current_intent_outranks_ordering_safety_net(
             _ctx(intent_name="general", message="المتجر"),
         ) is True
+
+    def test_general_checkout_name_slot_does_not_yield_funnel(self) -> None:
+        assert current_intent_outranks_ordering_safety_net(
+            _ctx(
+                intent_name="general",
+                message="أحمد سالم",
+                slots={"customer_name": "أحمد سالم"},
+            ),
+        ) is False
 
     def test_start_order_does_not_yield_ordering_funnel(self) -> None:
         assert current_intent_outranks_ordering_safety_net(

@@ -524,6 +524,38 @@ _CURRENT_INTENT_OUTRANKS_ORDERING = frozenset({
     "order_reference_list",
 })
 
+_CHECKOUT_CONTINUATION_SLOT_KEYS = frozenset({
+    "customer_first_name",
+    "customer_last_name",
+    "customer_name",
+    "full_name",
+    "city",
+    "short_address_code",
+    "google_maps_url",
+    "location_url",
+    "address",
+    "address_line",
+    "street",
+    "district",
+    "postal_code",
+    "zip_code",
+    "building_number",
+    "additional_number",
+    "latitude",
+    "longitude",
+    "quantity",
+    "phone",
+    "shipping_phone",
+})
+
+
+def _intent_slot_keys(ctx: Any) -> frozenset:
+    intent = getattr(ctx, "intent", None)
+    slots = getattr(intent, "slots", None)
+    if isinstance(slots, dict):
+        return frozenset(str(k) for k in slots.keys() if k)
+    return frozenset()
+
 
 def current_intent_outranks_ordering_safety_net(ctx: Any) -> bool:
     """True when stale ordering/checkout state must not own this turn.
@@ -535,6 +567,10 @@ def current_intent_outranks_ordering_safety_net(ctx: Any) -> bool:
     intent_name = _intent_name(ctx)
     if intent_name in _CURRENT_INTENT_OUTRANKS_ORDERING:
         return True
+    if intent_name in {"general", ""} and (
+        _intent_slot_keys(ctx) & _CHECKOUT_CONTINUATION_SLOT_KEYS
+    ):
+        return False
     try:
         from ..commerce.checkout_slot_contact_guard import (  # noqa: PLC0415
             message_fulfills_checkout_slot,
