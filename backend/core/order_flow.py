@@ -1982,7 +1982,7 @@ def persist_checkout_location_outcome(
         refreshed = sync_funnel_status_after_accepted_delivery(patch)
         if refreshed:
             patch["order_status"] = refreshed
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — funnel refresh must not block location persist
         logger.debug(
             "[ORDER_FLOW_STATE] funnel status refresh skipped tenant=%s",
             tenant_id,

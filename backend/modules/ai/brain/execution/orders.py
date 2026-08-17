@@ -555,9 +555,9 @@ class DraftOrderHandler:
                 prep.order_status = refreshed
                 try:
                     ctx.state.order_prep = prep
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — in-memory prep write is best-effort
                     pass
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — funnel refresh must not block checkout
             logger.debug(
                 "[ORDER FLOW] funnel status refresh skipped tenant=%s",
                 ctx.tenant_id,

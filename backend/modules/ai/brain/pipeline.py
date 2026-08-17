@@ -6882,7 +6882,7 @@ def _build_reply_state(
             known_facts["checkout_identity_shipping"] = _checkout_facts
             known_facts["next_missing_field"] = _nxt
             known_facts["checkout_missing_fields"] = list(_missing)
-    except Exception as _ctc_facts_exc:  # noqa: BLE001
+    except Exception as _ctc_facts_exc:  # noqa: BLE001  # noqa: silent-ok — contract overlay must not block compose
         logger.debug(
             "[CHECKOUT_COMPOSE_FACTS] contract overlay skipped tenant=%s err=%s",
             getattr(ctx, "tenant_id", None),

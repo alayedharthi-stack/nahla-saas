@@ -1151,7 +1151,7 @@ class DefaultComposer:
                         if _contract_nxt and _contract_nxt != "none":
                             _missing = list(_contract_missing)
                             _slot = str(_contract_nxt)
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — contract slot overlay must not block compose
                         pass
                     _instr = build_order_slot_instruction(
                         slot=_slot,
