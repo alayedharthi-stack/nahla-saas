@@ -120,11 +120,11 @@ def reproject_address_ingest_decision_after_persist(
             brain_state=bs,
             message=str(inbound_text or ""),
         )
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "[ADDRESS_INGEST_POST_PERSIST] order_context load failed tenant=%s",
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[ADDRESS_INGEST_POST_PERSIST] order_context load failed tenant=%s err=%s",
             tenant_id,
-            exc_info=True,
+            exc,
         )
 
     known_facts: Dict[str, Any] = dict(identity.known_facts or {})
