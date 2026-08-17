@@ -579,7 +579,7 @@ def log_state_relevance(
             float(verdict.relevance_confidence or 0.0),
             ",".join(verdict.active_workflows) or "-",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — logging must not raise
         pass
 
 
@@ -601,7 +601,7 @@ def log_state_resurrection_blocked(
             intent_hint or "-",
             (preview or "")[:80],
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — logging must not raise
         pass
 
 
