@@ -96,6 +96,17 @@ _PRESERVE_NEXT_GOALS = frozenset({
     "continue_checkout_from_catalog_order",
 })
 
+_ADDRESS_COLLECT_GOALS = frozenset({
+    "collect_missing_city",
+    "collect_city_for_whatsapp_order",
+    "collect_city_only",
+    "collect_missing_address",
+    "collect_delivery_address_for_whatsapp_order",
+    "collect_delivery_address_only",
+    "collect_or_confirm_delivery_address",
+    "collect_next_whatsapp_order_field",
+})
+
 _SAME_ORDER_CONFIRM_RE = re.compile(
     r"(?:^|\s)(?:نفس\s*(?:ال)?(?:طلب|طلبي|طلبيتي)|نفسه|نفسها|زي\s*قبل)(?:\s*[\?؟!.]*)?$",
     re.UNICODE | re.IGNORECASE,
@@ -354,6 +365,20 @@ def _resolve_active_checkout_known_facts(
     line_items = list(prep_d.get("line_items") or [])
     if line_items:
         facts["line_items_known"] = True
+        first_item = next((li for li in line_items if isinstance(li, dict)), None)
+        if first_item:
+            selected_id = str(
+                first_item.get("product_id")
+                or first_item.get("product_retailer_id")
+                or ""
+            ).strip()
+            if selected_id:
+                facts["selected_product_id"] = selected_id
+            source = str(first_item.get("source") or "").strip()
+            if prep_d.get("catalog_line_items_authoritative"):
+                facts["selected_product_source"] = source or "whatsapp_catalog"
+            elif source:
+                facts["selected_product_source"] = source
         titles = [
             str(li.get("product_name") or li.get("title") or "").strip()
             for li in line_items
@@ -573,6 +598,31 @@ def _identity_collect_goal_is_stale(
     return False
 
 
+def _address_collect_goal_is_stale(
+    next_goal: Optional[str],
+    missing_fields: Sequence[str],
+) -> bool:
+    goal = str(next_goal or "").strip()
+    if not goal or goal in _PRESERVE_NEXT_GOALS:
+        return False
+    if goal not in _ADDRESS_COLLECT_GOALS:
+        return False
+    address_slots = {"city"} | {
+        "delivery_address",
+        "address",
+        "address_line",
+        "short_address_code",
+        "google_maps_url",
+        "address_location",
+    }
+    if goal in {"collect_missing_city", "collect_city_for_whatsapp_order", "collect_city_only"}:
+        return "city" not in missing_fields
+    if "address" in goal:
+        return not any(m in address_slots - {"city"} for m in missing_fields)
+    # Generic collect-next: stale only when no address/city slots remain.
+    return not any(m in address_slots for m in missing_fields)
+
+
 def build_commerce_turn_contract(
     ctx: BrainContext,
     *,
@@ -773,6 +823,37 @@ def build_commerce_turn_contract(
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[COMMERCE_TURN_CONTRACT] catalog customer identity apply failed tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
+        try:
+            from core.order_context_prefill import (  # noqa: PLC0415
+                apply_saved_address_to_checkout_contract,
+            )
+
+            goal_before = next_goal
+            missing_fields, known_facts = apply_saved_address_to_checkout_contract(
+                missing_fields=list(missing_fields),
+                known_facts=dict(known_facts),
+                order_context=order_context,
+                order_prep=prep_d,
+            )
+            known_facts["next_goal_before_hydration"] = goal_before
+            if _address_collect_goal_is_stale(next_goal, missing_fields):
+                if known_facts.get("saved_address_complete") and not prep_d.get(
+                    "customer_confirmed_previous_address"
+                ):
+                    next_goal = "confirm_known_address"
+                else:
+                    next_goal = _derive_active_checkout_next_goal(
+                        str(getattr(ctx, "message", "") or ""),
+                        missing_fields,
+                    )
+                reasons.append("saved_address_next_goal_refreshed_after_hydration")
+            known_facts["next_goal_after_hydration"] = next_goal
+            known_facts["checkout_missing_fields"] = list(missing_fields)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[COMMERCE_TURN_CONTRACT] saved address apply failed tenant=%s",
                 getattr(ctx, "tenant_id", None),
             )
 

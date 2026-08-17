@@ -4005,8 +4005,8 @@ async def _dispatch_message(
         ):
             try:
                 from core.order_flow import (  # noqa: PLC0415
-                    apply_state_patch,
                     maybe_handle_wa_address_inbound,
+                    persist_checkout_location_patch,
                 )
                 _loc_decision = maybe_handle_wa_address_inbound(
                     db=db,
@@ -4023,12 +4023,13 @@ async def _dispatch_message(
                 )
                 _loc_decision = None
             if _loc_decision is not None:
+                _loc_persisted = False
                 try:
-                    apply_state_patch(
+                    _loc_persisted = persist_checkout_location_patch(
                         db,
                         tenant_id=resolved_tenant_id,
                         phone=sender or "",
-                        state_patch=_loc_decision["state_patch"],
+                        state_patch=_loc_decision.get("state_patch") or {},
                     )
                 except Exception as _loc_patch_exc:  # noqa: BLE001
                     logger.warning(
@@ -4036,6 +4037,14 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _loc_patch_exc,
                     )
+                if not _loc_persisted:
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] location ack skipped persist_failed "
+                        "tenant=%s phone=*%s",
+                        resolved_tenant_id,
+                        (sender or "")[-4:],
+                    )
+                    return
                 await _post_wa(
                     used_pid,
                     {
@@ -4429,6 +4438,7 @@ async def _dispatch_message(
                     maybe_handle_receipt_inbound,
                     maybe_handle_payment_evidence_inbound,
                     apply_state_patch,
+                    persist_checkout_location_patch,
                 )
                 _receipt_decision = maybe_handle_receipt_inbound(
                     db=db,
@@ -5060,12 +5070,15 @@ async def _dispatch_message(
                 return
 
             if _address_decision is not None:
+                from core.order_flow import persist_checkout_location_patch  # noqa: PLC0415
+
+                _addr_persisted = False
                 try:
-                    apply_state_patch(
+                    _addr_persisted = persist_checkout_location_patch(
                         db,
                         tenant_id=resolved_tenant_id,
                         phone=sender,
-                        state_patch=_address_decision["state_patch"],
+                        state_patch=_address_decision.get("state_patch") or {},
                     )
                 except Exception as _addr_patch_exc:  # noqa: BLE001
                     logger.warning(
@@ -5073,6 +5086,14 @@ async def _dispatch_message(
                         "tenant=%s phone=%s err=%s",
                         resolved_tenant_id, sender, _addr_patch_exc,
                     )
+                if not _addr_persisted:
+                    logger.warning(
+                        "[ORDER_FLOW_STATE] address ack skipped persist_failed "
+                        "tenant=%s phone=*%s",
+                        resolved_tenant_id,
+                        (sender or "")[-4:],
+                    )
+                    return
                 from core.constrained_operational_compose import (  # noqa: PLC0415
                     resolve_prebrain_reply_text,
                 )

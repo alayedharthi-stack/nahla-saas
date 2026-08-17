@@ -1930,6 +1930,29 @@ def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None
         prep.customer_phone = str(ctx.customer_phone or "").strip()
 
 
+def _grounded_address_slot(
+    key: str,
+    slots: Dict[str, Any],
+    extracted: Dict[str, Any],
+    message: str,
+    aliases: Tuple[str, ...] = (),
+) -> str:
+    """Accept an address slot only when grounded in the current message.
+
+    LLM slots may include last-turn history. Stale prose must not overwrite
+    structured checkout truth.
+    """
+    extracted_val = str(extracted.get(key) or "").strip()
+    if extracted_val:
+        return extracted_val
+    msg = str(message or "")
+    for alias in (key,) + tuple(aliases):
+        slot_val = str(slots.get(alias) or "").strip()
+        if slot_val and slot_val in msg:
+            return slot_val
+    return ""
+
+
 def _merge_message_details(prep: OrderPreparationState, slots: dict, message: str) -> None:
     from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots
 
@@ -1963,18 +1986,9 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     full_name = str(slots.get("customer_name") or slots.get("full_name") or "").strip()
     first_name = str(slots.get("customer_first_name") or slots.get("first_name") or "").strip()
     last_name = str(slots.get("customer_last_name") or slots.get("last_name") or "").strip()
-    city = str(slots.get("city") or "").strip()
     country = str(slots.get("country") or "").strip()
     email = str(slots.get("customer_email") or slots.get("email") or "").strip()
     phone = str(slots.get("customer_phone") or slots.get("phone") or "").strip()
-    short_code = str(slots.get("short_address_code") or "").strip().upper()
-    maps_url = str(slots.get("google_maps_url") or slots.get("location_url") or "").strip()
-    address_line = str(slots.get("address_line") or slots.get("address") or "").strip()
-    street = str(slots.get("street") or "").strip()
-    district = str(slots.get("district") or "").strip()
-    postal_code = str(slots.get("postal_code") or slots.get("zip_code") or "").strip()
-    building_number = str(slots.get("building_number") or "").strip()
-    additional_number = str(slots.get("additional_number") or "").strip()
 
     if full_name and not (first_name or last_name):
         first_name, last_name = _split_name(full_name)
@@ -1997,6 +2011,23 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
                 last_name,
             )
         prep.customer_last_name = last_name
+    city = _grounded_address_slot("city", slots, extracted, message)
+    short_code = _grounded_address_slot("short_address_code", slots, extracted, message)
+    maps_url = _grounded_address_slot(
+        "google_maps_url", slots, extracted, message, aliases=("location_url",)
+    )
+    address_line = _grounded_address_slot(
+        "address_line", slots, extracted, message, aliases=("address",)
+    )
+    street = _grounded_address_slot("street", slots, extracted, message)
+    district = _grounded_address_slot("district", slots, extracted, message)
+    postal_code = _grounded_address_slot(
+        "postal_code", slots, extracted, message, aliases=("zip_code",)
+    )
+    building_number = _grounded_address_slot("building_number", slots, extracted, message)
+    additional_number = _grounded_address_slot(
+        "additional_number", slots, extracted, message
+    )
     if city:
         prep.city = city
     if country:
@@ -2006,7 +2037,7 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     if phone:
         prep.customer_phone = phone
     if short_code:
-        prep.short_address_code = short_code
+        prep.short_address_code = short_code.upper()
     if maps_url:
         prep.google_maps_url = maps_url
     if address_line:
@@ -2032,10 +2063,10 @@ def _merge_message_details(prep: OrderPreparationState, slots: dict, message: st
     if signals.get("longitude") is not None and prep.longitude is None:
         prep.longitude = _safe_float(signals.get("longitude"))
 
-    if "latitude" in slots and prep.latitude is None:
-        prep.latitude = _safe_float(slots.get("latitude"))
-    if "longitude" in slots and prep.longitude is None:
-        prep.longitude = _safe_float(slots.get("longitude"))
+    if extracted.get("latitude") is not None and prep.latitude is None:
+        prep.latitude = _safe_float(extracted.get("latitude"))
+    if extracted.get("longitude") is not None and prep.longitude is None:
+        prep.longitude = _safe_float(extracted.get("longitude"))
 
 
 async def _resolve_checkout_address(prep: OrderPreparationState) -> None:
@@ -2573,6 +2604,12 @@ def _sync_single_product_line_item(
     ctx: BrainContext,
 ) -> None:
     """Keep one authoritative line item with trusted unit price + quantity."""
+    from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+        is_catalog_line_items_authoritative_from_prep,
+    )
+
+    if is_catalog_line_items_authoritative_from_prep(prep):
+        return
     external_id = str(product_info.get("external_id") or prep.product_id or "").strip()
     title = str(
         product_info.get("title")
