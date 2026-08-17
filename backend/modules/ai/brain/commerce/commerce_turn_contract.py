@@ -71,6 +71,31 @@ _PHONE_FIELD_NAMES = frozenset({
     "mobile",
 })
 
+_NAME_FIELD_NAMES = frozenset({
+    "name",
+    "full_name",
+    "customer_name",
+    "customer_first_name",
+    "customer_last_name",
+})
+
+# Goals that mean "ask the customer for identity" — stale after known identity
+# is projected into missing_fields.
+_IDENTITY_COLLECT_GOALS = frozenset({
+    "collect_customer_name_for_whatsapp_order",
+    "collect_customer_name_only",
+    "confirm_customer_name_once",
+    "collect_phone_for_whatsapp_order",
+    "collect_customer_phone",
+})
+
+_PRESERVE_NEXT_GOALS = frozenset({
+    "existing_order_support",
+    "summarize_active_draft_order",
+    "confirm_known_address",
+    "continue_checkout_from_catalog_order",
+})
+
 _SAME_ORDER_CONFIRM_RE = re.compile(
     r"(?:^|\s)(?:نفس\s*(?:ال)?(?:طلب|طلبي|طلبيتي)|نفسه|نفسها|زي\s*قبل)(?:\s*[\?؟!.]*)?$",
     re.UNICODE | re.IGNORECASE,
@@ -533,6 +558,21 @@ def _filter_phone_from_missing(
     return [m for m in missing if m not in _PHONE_FIELD_NAMES]
 
 
+def _identity_collect_goal_is_stale(
+    next_goal: Optional[str],
+    missing_fields: Sequence[str],
+) -> bool:
+    """True when next_goal still asks for a name/phone slot that is no longer missing."""
+    goal = str(next_goal or "").strip()
+    if not goal or goal in _PRESERVE_NEXT_GOALS:
+        return False
+    if goal in _IDENTITY_COLLECT_GOALS:
+        if "phone" in goal or "mobile" in goal:
+            return not any(m in _PHONE_FIELD_NAMES for m in missing_fields)
+        return not any(m in _NAME_FIELD_NAMES for m in missing_fields)
+    return False
+
+
 def build_commerce_turn_contract(
     ctx: BrainContext,
     *,
@@ -680,7 +720,12 @@ def build_commerce_turn_contract(
         if isinstance(shadow_missing, list) and shadow_missing:
             reasons.append("order_context_shadow_missing_fields_available")
 
-    if known_facts.get("catalog_order_current_turn") or known_facts.get("active_catalog_checkout"):
+    apply_identity = bool(
+        known_facts.get("catalog_order_current_turn")
+        or known_facts.get("active_catalog_checkout")
+        or commerce_state == "whatsapp_quick_order"
+    )
+    if apply_identity:
         from dataclasses import asdict, is_dataclass  # noqa: PLC0415
 
         prep_d: Dict[str, Any] = {}
@@ -719,6 +764,12 @@ def build_commerce_turn_contract(
             )
             if known_facts.get("customer_name_known"):
                 reasons.append("catalog_checkout_customer_name_known")
+            if _identity_collect_goal_is_stale(next_goal, missing_fields):
+                next_goal = _derive_active_checkout_next_goal(
+                    str(getattr(ctx, "message", "") or ""),
+                    missing_fields,
+                )
+                reasons.append("identity_next_goal_refreshed_after_known_facts")
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[COMMERCE_TURN_CONTRACT] catalog customer identity apply failed tenant=%s",
