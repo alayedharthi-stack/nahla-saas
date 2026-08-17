@@ -3470,6 +3470,9 @@ class MerchantBrain:
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
                     "retrieved_documents_block": _retrieved_docs_block,
+                    "structured_overlay_held_empty": bool(
+                        _overlay_obs.get("structured_overlay_held_empty")
+                    ),
                     "tenant_profile":    _sanitize_tenant_profile_for_prompt(
                         mc.get("tenant_profile") or {},
                         mc.get("merchant_profile") or {},
@@ -3517,6 +3520,9 @@ class MerchantBrain:
                     "structured_facts_block": _structured_facts_block,
                     "structured_behavior_block": _structured_behavior_block,
                     "retrieved_documents_block": _retrieved_docs_block,
+                    "structured_overlay_held_empty": bool(
+                        _overlay_obs.get("structured_overlay_held_empty")
+                    ),
                 }
 
         if _search_candidates_persisted_this_turn:
@@ -6924,6 +6930,8 @@ def _build_reply_state(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — pending-q clear must not block compose
         pass
 
+    from .commerce.promotion_truth import coupon_policy_for_compose  # noqa: PLC0415
+
     _reply_state = BrainReplyState(
         store_name=ctx.facts.store_name,
         tone=effective_tone,
@@ -6938,19 +6946,11 @@ def _build_reply_state(
         last_question_asked=_last_q_asked,
         last_question_answered=_last_q_answered,
         recommended_next_step=suggestion.suggested_next_step or current_state.recommended_next_step,
-        coupon_policy={
-            "has_coupons": ctx.facts.has_coupons,
-            "eligible_code": ctx.facts.coupon_eligibility,
-            "shareable_promotions": list(
-                getattr(ctx.facts, "shareable_promotions", None) or []
-            )[:8],
-            "shareable_offers": list(
-                getattr(ctx.facts, "shareable_offers", None) or []
-            )[:8],
-            "eligibility_guaranteed": False,
-            "discount_ok_now": suggestion.discount_ok_now,
-            "coupon_logic_considered": suggestion.coupon_logic_considered,
-        },
+        coupon_policy=coupon_policy_for_compose(
+            ctx.facts,
+            discount_ok_now=suggestion.discount_ok_now,
+            coupon_logic_considered=suggestion.coupon_logic_considered,
+        ),
         recent_turns=recent_turns,
         policy_reason=str(decision.args.get("policy_reason") or ""),
         conversation_summary=_conversation_summary,

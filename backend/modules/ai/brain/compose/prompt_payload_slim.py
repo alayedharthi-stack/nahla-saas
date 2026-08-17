@@ -160,6 +160,9 @@ def resolve_kb_block_for_prompt(
     structured = (structured_kb or "").strip()
     if structured:
         return cap_kb_for_prompt(structured)
+    mc = getattr(state, "merchant_context", None) or {}
+    if isinstance(mc, dict) and mc.get("structured_overlay_held_empty"):
+        return ""
     facts = (overlay_facts or "").strip()
     if facts:
         return cap_kb_for_prompt(facts)

@@ -192,6 +192,9 @@ def _stamp_overlay_observability(
         "knowledge_query_failed": bool(
             observability_out.get("knowledge_query_failed")
         ),
+        "structured_overlay_held_empty": bool(
+            observability_out.get("structured_overlay_held_empty")
+        ),
     })
 
 
@@ -407,13 +410,20 @@ def build_structured_facts_block(
             has_payments=has_payments,
             has_orders=has_orders,
         )
-        if held_kinds:
-            rows = [
-                r for r in rows
-                if str(getattr(r, "kind", "") or "").strip().lower() not in held_kinds
-            ]
     except Exception:  # noqa: silent-ok — overlay still renders remaining facts
         held_kinds = frozenset()
+
+    held_dropped = 0
+    if held_kinds:
+        pre_hold_total = len(rows)
+        rows = [
+            r for r in rows
+            if str(getattr(r, "kind", "") or "").strip().lower() not in held_kinds
+        ]
+        held_dropped = pre_hold_total - len(rows)
+
+    if held_dropped and not rows and observability_out is not None:
+        observability_out["structured_overlay_held_empty"] = True
 
     if not rows:
         # Only behavioral/long-form rows existed — facts bucket is empty by design.
@@ -479,6 +489,8 @@ def build_structured_facts_block(
             queried_rows=queried_non_behavior_rows,
             included_rows=[],
         )
+        if held_dropped and observability_out is not None:
+            observability_out["structured_overlay_held_empty"] = True
         return ""
 
     grouped: Dict[int, List[Any]] = {}

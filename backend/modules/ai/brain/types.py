@@ -839,6 +839,10 @@ class CommerceFacts:
     # Closed diagnostic codes only — never customer error text.
     promotion_query_outcome: str = ""
     promotion_query_failed: bool = False
+    promotion_coupon_source: str = ""
+    promotion_offer_source: str = ""
+    promotion_generation_rule_source: str = ""
+    generation_rules_state: str = ""
     # Top 5 synced products for greeting / numeric pick (need external_id).
     top_products: List[Dict[str, Any]] = field(default_factory=list)
     # Bounded existence-capable catalog for discovery/recommendation reasoning.

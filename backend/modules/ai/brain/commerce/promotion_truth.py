@@ -21,6 +21,16 @@ _CAMPAIGN_ONLY_CHANNELS = frozenset({"campaign", "email", "sms", "autopilot"})
 QUERY_OK = "ok"
 NO_VALID_PROMOTIONS = "NO_VALID_PROMOTIONS"
 PROMOTION_QUERY_FAILED = "PROMOTION_QUERY_FAILED"
+PROMOTION_PARTIAL_FAILURE = "PROMOTION_PARTIAL_FAILURE"
+
+SOURCE_OK = "ok"
+SOURCE_FAILED = "failed"
+SOURCE_NOT_QUERIED = "not_queried"
+
+GENERATION_PRESENT = "present"
+GENERATION_ABSENT = "absent"
+GENERATION_FAILED = "failed"
+GENERATION_NOT_QUERIED = "not_queried"
 
 
 @dataclass(frozen=True)
@@ -30,12 +40,16 @@ class PromotionTruthResult:
     candidate_count: int
     shareable: List[Dict[str, Any]] = field(default_factory=list)
     offers: List[Dict[str, Any]] = field(default_factory=list)
-    generation_rules_present: bool = False
+    generation_rules_present: Optional[bool] = None
+    generation_rules_state: str = GENERATION_NOT_QUERIED
     generation_authorized: bool = False
     invented_codes: bool = False
     source: str = "native_coupons"
     query_failed: bool = False
     query_outcome: str = NO_VALID_PROMOTIONS
+    coupon_source: str = SOURCE_NOT_QUERIED
+    offer_source: str = SOURCE_NOT_QUERIED
+    generation_rule_source: str = SOURCE_NOT_QUERIED
 
 
 def _as_utc(dt: Any) -> Optional[datetime]:
@@ -53,6 +67,21 @@ def _meta_dict(row: Any) -> Dict[str, Any]:
     return dict(meta) if isinstance(meta, dict) else {}
 
 
+def _as_id_list(value: Any) -> List[Any]:
+    """Project JSON id fields without treating scalars as iterables."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [item for item in value if item not in (None, "")]
+    if isinstance(value, dict):
+        return []
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [value]
+    return []
+
+
 def _conditions_from_row(row: Any) -> Dict[str, Any]:
     meta = _meta_dict(row)
     conditions: Dict[str, Any] = {}
@@ -66,12 +95,16 @@ def _conditions_from_row(row: Any) -> Dict[str, Any]:
     ):
         if meta.get(src_key) not in (None, "") and out_key not in conditions:
             conditions[out_key] = meta.get(src_key)
-    product_ids = meta.get("product_ids") or meta.get("applicable_products")
+    product_ids = _as_id_list(
+        meta.get("product_ids") or meta.get("applicable_products")
+    )
     if product_ids:
-        conditions["product_ids"] = list(product_ids)
-    category_ids = meta.get("category_ids") or meta.get("applicable_categories")
+        conditions["product_ids"] = product_ids
+    category_ids = _as_id_list(
+        meta.get("category_ids") or meta.get("applicable_categories")
+    )
     if category_ids:
-        conditions["category_ids"] = list(category_ids)
+        conditions["category_ids"] = category_ids
     rules = getattr(row, "rules", None) or []
     for rule in rules:
         rule_type = str(getattr(rule, "rule_type", "") or "").strip().lower()
@@ -79,14 +112,14 @@ def _conditions_from_row(row: Any) -> Dict[str, Any]:
         if not isinstance(cfg, dict):
             continue
         if rule_type in {"product", "products"}:
-            ids = cfg.get("product_ids") or cfg.get("ids") or []
+            ids = _as_id_list(cfg.get("product_ids") or cfg.get("ids"))
             if ids:
                 conditions.setdefault("product_ids", [])
                 conditions["product_ids"] = list(
                     dict.fromkeys([*conditions["product_ids"], *ids])
                 )
         if rule_type in {"category", "categories"}:
-            ids = cfg.get("category_ids") or cfg.get("ids") or []
+            ids = _as_id_list(cfg.get("category_ids") or cfg.get("ids"))
             if ids:
                 conditions.setdefault("category_ids", [])
                 conditions["category_ids"] = list(
@@ -117,7 +150,64 @@ def _row_is_currently_valid(row: Any, *, now: datetime) -> bool:
     channel = str(getattr(row, "allocation_channel", "") or meta.get("allocation_channel") or "").strip().lower()
     if channel in _CAMPAIGN_ONLY_CHANNELS:
         return False
+    if _row_is_globally_exhausted(row, meta):
+        return False
     return True
+
+
+def _as_nonneg_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
+
+
+def _row_is_globally_exhausted(row: Any, meta: Optional[Dict[str, Any]] = None) -> bool:
+    """Exclude only when authoritative global usage evidence proves exhaustion.
+
+    Per-customer limits without a current-customer counter stay unknown.
+    """
+    data = meta if isinstance(meta, dict) else _meta_dict(row)
+    usage_count = _as_nonneg_int(
+        data.get("usage_count")
+        if data.get("usage_count") not in (None, "")
+        else getattr(row, "usage_count", None)
+    )
+    usage_limit = _as_nonneg_int(
+        data.get("usage_limit")
+        if data.get("usage_limit") not in (None, "")
+        else data.get("max_uses")
+        if data.get("max_uses") not in (None, "")
+        else getattr(row, "usage_limit", None)
+    )
+    used_flag = data.get("used")
+    if used_flag is True and usage_limit == 1:
+        return True
+    if used_flag is True and usage_count is None:
+        usage_count = 1
+    if usage_count is None:
+        usage_count = 0
+    return bool(usage_limit is not None and usage_limit > 0 and usage_count >= usage_limit)
+
+
+def _session_is_poisoned(exc: BaseException) -> bool:
+    """True when further queries on this session would be unsafe."""
+    name = type(exc).__name__
+    if name in {"PendingRollbackError", "InternalError"}:
+        return True
+    text = str(exc).lower()
+    if "current transaction is aborted" in text:
+        return True
+    if "infailedsqltransaction" in text:
+        return True
+    if "can't reconnect until invalid" in text:
+        return True
+    return False
 
 
 def _row_to_coupon_fact(row: Any) -> Dict[str, Any]:
@@ -161,6 +251,45 @@ def _offer_to_fact(row: Any) -> Dict[str, Any]:
     }
 
 
+def coupon_policy_for_compose(
+    facts: Any,
+    *,
+    discount_ok_now: bool = False,
+    coupon_logic_considered: bool = False,
+) -> Dict[str, Any]:
+    """Structured coupon truth for compose. Never customer error text."""
+    outcome = str(getattr(facts, "promotion_query_outcome", "") or "")
+    query_failed = bool(getattr(facts, "promotion_query_failed", False))
+    return {
+        "has_coupons": bool(getattr(facts, "has_coupons", False)),
+        "eligible_code": getattr(facts, "coupon_eligibility", "") or "",
+        "shareable_promotions": list(
+            getattr(facts, "shareable_promotions", None) or []
+        )[:8],
+        "shareable_offers": list(
+            getattr(facts, "shareable_offers", None) or []
+        )[:8],
+        "eligibility_guaranteed": False,
+        "discount_ok_now": bool(discount_ok_now),
+        "coupon_logic_considered": bool(coupon_logic_considered),
+        "query_outcome": outcome,
+        "query_failed": query_failed,
+        "coupon_source": str(getattr(facts, "promotion_coupon_source", "") or ""),
+        "offer_source": str(getattr(facts, "promotion_offer_source", "") or ""),
+        "generation_rule_source": str(
+            getattr(facts, "promotion_generation_rule_source", "") or ""
+        ),
+        "generation_rules_state": str(
+            getattr(facts, "generation_rules_state", "") or ""
+        ),
+        "generation_authorized": False,
+        "invented_codes": False,
+        "no_valid_promotions": (
+            outcome == NO_VALID_PROMOTIONS and not query_failed
+        ),
+    }
+
+
 def resolve_shareable_promotions(
     db: Any,
     tenant_id: int,
@@ -177,10 +306,21 @@ def resolve_shareable_promotions(
             candidate_count=0,
             query_failed=False,
             query_outcome=NO_VALID_PROMOTIONS,
+            coupon_source=SOURCE_NOT_QUERIED,
+            offer_source=SOURCE_NOT_QUERIED,
+            generation_rule_source=SOURCE_NOT_QUERIED,
+            generation_rules_state=GENERATION_NOT_QUERIED,
         )
     now_ = now or datetime.now(timezone.utc)
     if now_.tzinfo is None:
         now_ = now_.replace(tzinfo=timezone.utc)
+
+    session_poisoned = False
+    coupon_source = SOURCE_NOT_QUERIED
+    offer_source = SOURCE_NOT_QUERIED
+    generation_rule_source = SOURCE_NOT_QUERIED
+    generation_rules_state = GENERATION_NOT_QUERIED
+    generation_rules_present: Optional[bool] = None
 
     rows: List[Any] = []
     try:
@@ -193,102 +333,127 @@ def resolve_shareable_promotions(
             .limit(max(int(limit) * 3, int(limit)))
             .all()
         )
-    except Exception:  # noqa: silent-ok — coupon query fail-open; Brain still answers without promotions
+        coupon_source = SOURCE_OK
+    except Exception as exc:  # noqa: silent-ok — coupon source fail-open; other sources still queried unless session is poisoned
+        coupon_source = SOURCE_FAILED
+        session_poisoned = _session_is_poisoned(exc)
         logger.info(
-            "[PROMOTION_TRUTH] tenant=%s outcome=%s",
+            "[PROMOTION_TRUTH] tenant=%s source=coupon outcome=%s poisoned=%s",
             tid,
             PROMOTION_QUERY_FAILED,
-        )
-        return PromotionTruthResult(
-            tenant_id=tid,
-            query_run=True,
-            candidate_count=0,
-            query_failed=True,
-            query_outcome=PROMOTION_QUERY_FAILED,
+            int(session_poisoned),
         )
 
     shareable: List[Dict[str, Any]] = []
     for row in rows:
-        if not _row_is_currently_valid(row, now=now_):
-            continue
-        fact = _row_to_coupon_fact(row)
-        if not fact["code"]:
-            continue
-        shareable.append(fact)
-        if len(shareable) >= int(limit):
-            break
+        try:
+            if not _row_is_currently_valid(row, now=now_):
+                continue
+            fact = _row_to_coupon_fact(row)
+            if not fact["code"]:
+                continue
+            shareable.append(fact)
+            if len(shareable) >= int(limit):
+                break
+        except Exception:  # noqa: silent-ok — skip malformed coupon row; other sources still queried
+            logger.info(
+                "[PROMOTION_TRUTH] tenant=%s source=coupon skipped_malformed_row",
+                tid,
+            )
 
     offers: List[Dict[str, Any]] = []
-    generation_rules_present = False
-    offers_query_failed = False
-    try:
-        from models import Promotion  # noqa: PLC0415
-        from services.promotion_engine import is_promotion_active  # noqa: PLC0415
-
-        promo_rows = (
-            db.query(Promotion)
-            .filter(Promotion.tenant_id == tid)
-            .order_by(Promotion.id.desc())
-            .limit(max(int(limit) * 2, int(limit)))
-            .all()
-        )
-        generation_rules_present = any(
-            str(getattr(p, "status", "") or "").strip().lower()
-            in {"active", "scheduled", "draft"}
-            for p in promo_rows
-        )
-        for promo in promo_rows:
-            if not is_promotion_active(promo, now=now_):
-                continue
-            offers.append(_offer_to_fact(promo))
-            if len(offers) >= int(limit):
-                break
-    except Exception:  # noqa: silent-ok — offer query fail-open for customer; diagnostics must not look like an empty catalog
-        offers_query_failed = True
-        logger.info(
-            "[PROMOTION_TRUTH] tenant=%s outcome=%s source=offers",
-            tid,
-            PROMOTION_QUERY_FAILED,
-        )
-
-    if not generation_rules_present:
+    if session_poisoned:
+        offer_source = SOURCE_NOT_QUERIED
+        generation_rule_source = SOURCE_NOT_QUERIED
+        generation_rules_state = GENERATION_NOT_QUERIED
+    else:
         try:
-            from models import CouponRule  # noqa: PLC0415
+            from models import Promotion  # noqa: PLC0415
+            from services.promotion_engine import is_promotion_active  # noqa: PLC0415
 
-            if shareable:
-                ids = [int(item["id"]) for item in shareable if item.get("id")]
-                if ids:
-                    generation_rules_present = (
-                        db.query(CouponRule.id)
-                        .filter(CouponRule.coupon_id.in_(ids))
-                        .first()
-                        is not None
+            promo_rows = (
+                db.query(Promotion)
+                .filter(Promotion.tenant_id == tid)
+                .order_by(Promotion.id.desc())
+                .limit(max(int(limit) * 2, int(limit)))
+                .all()
+            )
+            offer_source = SOURCE_OK
+            for promo in promo_rows:
+                try:
+                    if not is_promotion_active(promo, now=now_):
+                        continue
+                    offers.append(_offer_to_fact(promo))
+                    if len(offers) >= int(limit):
+                        break
+                except Exception:  # noqa: silent-ok — skip malformed offer row
+                    logger.info(
+                        "[PROMOTION_TRUTH] tenant=%s source=offers skipped_malformed_row",
+                        tid,
                     )
-        except Exception:  # noqa: silent-ok — coupon-rule probe fail-open; generation_authorized stays false
+        except Exception as exc:  # noqa: silent-ok — offer source fail-open; verified coupons remain
+            offer_source = SOURCE_FAILED
+            session_poisoned = session_poisoned or _session_is_poisoned(exc)
             logger.info(
-                "[PROMOTION_TRUTH] tenant=%s outcome=%s source=coupon_rules",
+                "[PROMOTION_TRUTH] tenant=%s source=offers outcome=%s poisoned=%s",
                 tid,
                 PROMOTION_QUERY_FAILED,
+                int(session_poisoned),
             )
-            generation_rules_present = False
 
-    if shareable or offers:
+        if session_poisoned:
+            generation_rule_source = SOURCE_NOT_QUERIED
+            generation_rules_state = GENERATION_NOT_QUERIED
+        else:
+            try:
+                from models import Coupon, CouponRule  # noqa: PLC0415
+
+                generation_rules_present = (
+                    db.query(CouponRule.id)
+                    .join(Coupon, CouponRule.coupon_id == Coupon.id)
+                    .filter(Coupon.tenant_id == tid)
+                    .first()
+                    is not None
+                )
+                generation_rule_source = SOURCE_OK
+                generation_rules_state = (
+                    GENERATION_PRESENT if generation_rules_present else GENERATION_ABSENT
+                )
+            except Exception as exc:  # noqa: silent-ok — generation lookup failure is UNKNOWN, not absent
+                generation_rule_source = SOURCE_FAILED
+                generation_rules_state = GENERATION_FAILED
+                generation_rules_present = None
+                logger.info(
+                    "[PROMOTION_TRUTH] tenant=%s source=coupon_rules outcome=%s poisoned=%s",
+                    tid,
+                    PROMOTION_QUERY_FAILED,
+                    int(_session_is_poisoned(exc)),
+                )
+
+    any_source_failed = SOURCE_FAILED in {
+        coupon_source, offer_source, generation_rule_source,
+    }
+    has_verified = bool(shareable or offers)
+    if has_verified and not any_source_failed:
         outcome = QUERY_OK
-        query_failed = False
-    elif offers_query_failed:
+    elif has_verified and any_source_failed:
+        outcome = PROMOTION_PARTIAL_FAILURE
+    elif any_source_failed:
         outcome = PROMOTION_QUERY_FAILED
-        query_failed = True
     else:
         outcome = NO_VALID_PROMOTIONS
-        query_failed = False
     logger.info(
-        "[PROMOTION_TRUTH] tenant=%s outcome=%s candidate_count=%s shareable=%s offers=%s offers_query_failed=%s",
+        "[PROMOTION_TRUTH] tenant=%s outcome=%s coupon=%s offer=%s gen=%s "
+        "candidate_count=%s shareable=%s offers=%s gen_state=%s",
         tid,
         outcome,
+        coupon_source,
+        offer_source,
+        generation_rule_source,
         len(rows),
         len(shareable),
         len(offers),
-        int(offers_query_failed),
+        generation_rules_state,
     )
     return PromotionTruthResult(
         tenant_id=tid,
@@ -296,19 +461,32 @@ def resolve_shareable_promotions(
         candidate_count=len(rows),
         shareable=shareable,
         offers=offers,
-        generation_rules_present=bool(generation_rules_present),
+        generation_rules_present=generation_rules_present,
+        generation_rules_state=generation_rules_state,
         generation_authorized=False,
         invented_codes=False,
         source="native_coupons",
-        query_failed=query_failed,
+        query_failed=any_source_failed,
         query_outcome=outcome,
+        coupon_source=coupon_source,
+        offer_source=offer_source,
+        generation_rule_source=generation_rule_source,
     )
 
 
 __all__ = [
+    "coupon_policy_for_compose",
+    "GENERATION_ABSENT",
+    "GENERATION_FAILED",
+    "GENERATION_NOT_QUERIED",
+    "GENERATION_PRESENT",
     "NO_VALID_PROMOTIONS",
+    "PROMOTION_PARTIAL_FAILURE",
     "PROMOTION_QUERY_FAILED",
     "QUERY_OK",
+    "SOURCE_FAILED",
+    "SOURCE_NOT_QUERIED",
+    "SOURCE_OK",
     "PromotionTruthResult",
     "resolve_shareable_promotions",
 ]

@@ -33,11 +33,22 @@ from modules.ai.brain.commerce.knowledge_truth import (  # noqa: E402
     structured_conflicts_for_kinds,
 )
 from modules.ai.brain.commerce.promotion_truth import (  # noqa: E402
+    GENERATION_ABSENT,
+    GENERATION_FAILED,
     NO_VALID_PROMOTIONS,
+    PROMOTION_PARTIAL_FAILURE,
     PROMOTION_QUERY_FAILED,
     QUERY_OK,
+    SOURCE_FAILED,
+    SOURCE_NOT_QUERIED,
+    SOURCE_OK,
+    coupon_policy_for_compose,
     resolve_shareable_promotions,
 )
+from modules.ai.brain.compose.prompt_payload_slim import (  # noqa: E402
+    resolve_kb_block_for_prompt,
+)
+from modules.ai.brain.types import BrainReplyState, INTENT_ASK_PRODUCT  # noqa: E402
 from services.merchant_document_retrieval import (  # noqa: E402
     MAX_SECTIONS_PER_TURN,
     retrieve_merchant_documents,
@@ -393,12 +404,13 @@ class TestPromotionTruth:
             q.filter.return_value = q
             q.order_by.return_value = q
             q.limit.return_value = q
-            name = getattr(model, "__name__", "") or str(model)
-            if name == "Promotion":
-                q.all.return_value = list(promos or [])
-                q.first.return_value = None
-            elif name == "CouponRule":
+            q.join.return_value = q
+            name = str(getattr(model, "__name__", "") or model)
+            if "CouponRule" in name:
                 q.all.return_value = []
+                q.first.return_value = None
+            elif "Promotion" in name:
+                q.all.return_value = list(promos or [])
                 q.first.return_value = None
             else:
                 q.all.return_value = list(coupons)
@@ -478,14 +490,35 @@ class TestPromotionTruth:
         assert result.invented_codes is False
         assert result.query_failed is False
         assert result.query_outcome == NO_VALID_PROMOTIONS
+        assert result.coupon_source == SOURCE_OK
+        assert result.offer_source == SOURCE_OK
+        assert result.generation_rules_state == GENERATION_ABSENT
+        assert result.generation_rules_present is False
 
     def test_coupon_query_failure_is_not_empty_catalog(self) -> None:
         db = MagicMock()
-        db.query.side_effect = RuntimeError("unavailable")
+
+        def _query(model):
+            name = str(getattr(model, "__name__", "") or model)
+            q = MagicMock()
+            q.filter.return_value = q
+            q.order_by.return_value = q
+            q.limit.return_value = q
+            q.join.return_value = q
+            if name == "Coupon":
+                raise RuntimeError("coupon unavailable")
+            q.all.return_value = []
+            q.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
         result = resolve_shareable_promotions(db, 1)
         assert result.shareable == []
+        assert result.offers == []
         assert result.query_failed is True
         assert result.query_outcome == PROMOTION_QUERY_FAILED
+        assert result.coupon_source == SOURCE_FAILED
+        assert result.offer_source == SOURCE_OK
         assert result.invented_codes is False
 
     def test_eligibility_undetermined_is_not_guaranteed(self) -> None:
@@ -544,8 +577,10 @@ class TestPromotionTruth:
         db.query.side_effect = _query
         result = resolve_shareable_promotions(db, 1)
         assert result.shareable[0]["code"] == "SAVE10"
-        assert result.query_failed is False
-        assert result.query_outcome == QUERY_OK
+        assert result.query_failed is True
+        assert result.query_outcome == PROMOTION_PARTIAL_FAILURE
+        assert result.offer_source == SOURCE_FAILED
+        assert result.coupon_source == SOURCE_OK
 
     def test_active_offer_has_no_invented_code(self) -> None:
         future = datetime.now(timezone.utc) + timedelta(days=7)
@@ -569,6 +604,111 @@ class TestPromotionTruth:
         ).read()
         assert "CouponGenerator" not in src
         assert "materialise_for_customer" not in src
+
+    def test_coupon_failure_keeps_valid_offer(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = MagicMock()
+
+        def _query(model):
+            name = str(getattr(model, "__name__", "") or model)
+            q = MagicMock()
+            q.filter.return_value = q
+            q.order_by.return_value = q
+            q.limit.return_value = q
+            q.join.return_value = q
+            if name == "Coupon":
+                raise RuntimeError("coupon unavailable")
+            if "CouponRule" in name:
+                q.first.return_value = None
+                q.all.return_value = []
+                return q
+            q.all.return_value = [_PromoRow(ends_at=future)]
+            q.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+        assert result.offers
+        assert result.offers[0]["code"] == ""
+        assert result.coupon_source == SOURCE_FAILED
+        assert result.offer_source == SOURCE_OK
+        assert result.query_outcome == PROMOTION_PARTIAL_FAILURE
+        assert result.query_failed is True
+        assert result.invented_codes is False
+
+    def test_coupon_rule_lookup_failure_is_unknown_not_false(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = MagicMock()
+
+        def _query(model):
+            name = str(getattr(model, "__name__", "") or model)
+            q = MagicMock()
+            q.filter.return_value = q
+            q.order_by.return_value = q
+            q.limit.return_value = q
+            q.join.return_value = q
+            if "CouponRule" in name:
+                raise RuntimeError("rules unavailable")
+            if name == "Promotion":
+                q.all.return_value = []
+                q.first.return_value = None
+                return q
+            q.all.return_value = [_CouponRow(expires_at=future)]
+            q.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable[0]["code"] == "SAVE10"
+        assert result.generation_rules_present is None
+        assert result.generation_rules_state == GENERATION_FAILED
+        assert result.generation_rule_source == SOURCE_FAILED
+        assert result.generation_authorized is False
+        assert result.query_outcome == PROMOTION_PARTIAL_FAILURE
+
+    def test_globally_exhausted_coupon_is_excluded(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([
+            _CouponRow(
+                code="USEDUP",
+                expires_at=future,
+                extra_metadata={"usage_count": 5, "usage_limit": 5},
+            ),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+        assert result.query_outcome == NO_VALID_PROMOTIONS
+        assert result.coupon_source == SOURCE_OK
+
+    def test_exhausted_offer_is_excluded(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query([], promos=[
+            _PromoRow(ends_at=future, usage_count=10, usage_limit=10),
+        ])
+        result = resolve_shareable_promotions(db, 1)
+        assert result.offers == []
+        assert result.query_outcome == NO_VALID_PROMOTIONS
+
+    def test_poisoned_session_does_not_query_later_sources(self) -> None:
+        class PendingRollbackError(Exception):
+            pass
+
+        db = MagicMock()
+        calls: list[str] = []
+
+        def _query(model):
+            name = str(getattr(model, "__name__", "") or model)
+            calls.append(name)
+            raise PendingRollbackError("current transaction is aborted")
+
+        db.query.side_effect = _query
+        result = resolve_shareable_promotions(db, 1)
+        assert result.coupon_source == SOURCE_FAILED
+        assert result.offer_source == SOURCE_NOT_QUERIED
+        assert result.generation_rule_source == SOURCE_NOT_QUERIED
+        assert result.query_outcome == PROMOTION_QUERY_FAILED
+        assert len(calls) == 1
 
 
 def _mock_db_no_handoff_session() -> MagicMock:
@@ -909,3 +1049,161 @@ class TestSuiteFPromotionTruth:
         result_twenty = resolve_shareable_promotions(db, 20)
         assert result_ten.tenant_id == 10
         assert result_twenty.tenant_id == 20
+
+    def test_scalar_product_ids_do_not_abort_offer_source(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+        db = self._query(
+            [_CouponRow(
+                expires_at=future,
+                extra_metadata={"product_ids": 11},
+            )],
+            promos=[_PromoRow(ends_at=future)],
+        )
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable[0]["code"] == "SAVE10"
+        assert result.shareable[0]["conditions"]["product_ids"] == [11]
+        assert result.offers
+        assert result.coupon_source == SOURCE_OK
+        assert result.offer_source == SOURCE_OK
+
+    def test_malformed_coupon_row_does_not_hide_valid_offer(self) -> None:
+        future = datetime.now(timezone.utc) + timedelta(days=7)
+
+        class _BoomRow:
+            def __init__(self, **kwargs):
+                self.id = 1
+                self.tenant_id = 1
+                self.code = "BOOM"
+                self.description = ""
+                self.discount_type = "percentage"
+                self.discount_value = "10"
+                self.expires_at = kwargs.get("expires_at")
+                self.source_type = "manual"
+                self.allocation_channel = ""
+                self.rules = []
+                self.starts_at = None
+
+            @property
+            def extra_metadata(self):
+                raise TypeError("scalar json product_ids")
+
+        db = self._query(
+            [_BoomRow(expires_at=future)],
+            promos=[_PromoRow(ends_at=future)],
+        )
+        result = resolve_shareable_promotions(db, 1)
+        assert result.shareable == []
+        assert result.offers
+        assert result.offer_source == SOURCE_OK
+        assert result.coupon_source == SOURCE_OK
+
+    def test_compose_policy_does_not_treat_source_failure_as_empty(self) -> None:
+        facts = SimpleNamespace(
+            has_coupons=False,
+            coupon_eligibility="",
+            shareable_promotions=[],
+            shareable_offers=[],
+            promotion_query_outcome=PROMOTION_QUERY_FAILED,
+            promotion_query_failed=True,
+            promotion_coupon_source=SOURCE_FAILED,
+            promotion_offer_source=SOURCE_OK,
+            promotion_generation_rule_source=SOURCE_OK,
+            generation_rules_state=GENERATION_ABSENT,
+        )
+        policy = coupon_policy_for_compose(facts)
+        assert policy["query_failed"] is True
+        assert policy["query_outcome"] == PROMOTION_QUERY_FAILED
+        assert policy["no_valid_promotions"] is False
+        assert policy["generation_authorized"] is False
+        assert policy["invented_codes"] is False
+
+    def test_compose_policy_keeps_generation_unknown_distinct_from_false(self) -> None:
+        facts = SimpleNamespace(
+            has_coupons=True,
+            coupon_eligibility="",
+            shareable_promotions=[{"code": "SAVE10"}],
+            shareable_offers=[],
+            promotion_query_outcome=PROMOTION_PARTIAL_FAILURE,
+            promotion_query_failed=True,
+            promotion_coupon_source=SOURCE_OK,
+            promotion_offer_source=SOURCE_OK,
+            promotion_generation_rule_source=SOURCE_FAILED,
+            generation_rules_state=GENERATION_FAILED,
+        )
+        policy = coupon_policy_for_compose(facts)
+        assert policy["generation_rules_state"] == GENERATION_FAILED
+        assert "generation_rules_present" not in policy
+        assert policy["generation_authorized"] is False
+
+    def test_healthy_empty_is_no_valid_promotions(self) -> None:
+        facts = SimpleNamespace(
+            has_coupons=False,
+            coupon_eligibility="",
+            shareable_promotions=[],
+            shareable_offers=[],
+            promotion_query_outcome=NO_VALID_PROMOTIONS,
+            promotion_query_failed=False,
+            promotion_coupon_source=SOURCE_OK,
+            promotion_offer_source=SOURCE_OK,
+            promotion_generation_rule_source=SOURCE_OK,
+            generation_rules_state=GENERATION_ABSENT,
+        )
+        policy = coupon_policy_for_compose(facts)
+        assert policy["no_valid_promotions"] is True
+        assert policy["query_failed"] is False
+
+
+class TestStructuredOverlayDoesNotFallBackToLegacy:
+    def test_held_empty_skips_legacy_overlay_facts(self) -> None:
+        state = BrainReplyState(
+            store_name="generic shop",
+            intent_name=INTENT_ASK_PRODUCT,
+            merchant_context={"structured_overlay_held_empty": True},
+        )
+        block = resolve_kb_block_for_prompt(
+            state,
+            structured_kb="",
+            overlay_facts="كوبون وهمي SAVE99 من المعرفة اليدوية",
+        )
+        assert block == ""
+
+    def test_unmigrated_merchant_still_uses_overlay_facts(self) -> None:
+        state = BrainReplyState(
+            store_name="generic shop",
+            intent_name=INTENT_ASK_PRODUCT,
+            merchant_context={"structured_overlay_held_empty": False},
+        )
+        block = resolve_kb_block_for_prompt(
+            state,
+            structured_kb="",
+            overlay_facts="نشحن القمصان خلال يومين",
+        )
+        assert "نشحن القمصان خلال يومين" in block
+
+    def test_overlay_hold_stamps_held_empty(self) -> None:
+        section = SimpleNamespace(
+            id=7,
+            kind="coupon",
+            title="promo",
+            body="SAVE99",
+            priority=1,
+            updated_at=None,
+            product_links=[],
+            media_links=[],
+        )
+        db = MagicMock()
+        q = db.query.return_value
+        q.filter.return_value = q
+        q.order_by.return_value = q
+        q.all.return_value = [section]
+        obs: dict = {}
+        with patch(
+            "core.knowledge.apply_ai_visible_kb_query_filters",
+            side_effect=lambda query: query,
+        ):
+            text = overlay_mod.build_structured_facts_block(
+                db, 1, observability_out=obs, has_promotions=True,
+            )
+        assert text == ""
+        assert obs.get("structured_overlay_held_empty") is True
+        assert "SAVE99" not in text

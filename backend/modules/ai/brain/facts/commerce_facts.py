@@ -154,6 +154,10 @@ class DefaultFactsLoader:
         facts.shareable_offers = list(promo.offers)
         facts.promotion_query_outcome = str(promo.query_outcome or "")
         facts.promotion_query_failed = bool(promo.query_failed)
+        facts.promotion_coupon_source = str(promo.coupon_source or "")
+        facts.promotion_offer_source = str(promo.offer_source or "")
+        facts.promotion_generation_rule_source = str(promo.generation_rule_source or "")
+        facts.generation_rules_state = str(promo.generation_rules_state or "")
         # Do not promote the first code as "eligible" — Brain may recommend
         # from the structured set; eligibility remains unevaluated here.
 
