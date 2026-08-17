@@ -1979,6 +1979,51 @@ def apply_state_patch(
         return False
 
 
+def persist_checkout_location_outcome(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    state_patch: Optional[Dict[str, Any]],
+) -> Tuple[bool, str]:
+    """Persist a location/address checkout patch and return ``(ok, reason)``.
+
+    Callers must not claim the location was saved unless ``ok`` is True.
+    """
+    patch = dict(state_patch or {})
+    if not patch:
+        logger.info(
+            "[ORDER_FLOW_STATE] location persist skipped empty_patch tenant=%s",
+            tenant_id,
+        )
+        return False, "empty_patch"
+    try:
+        ok = bool(
+            apply_state_patch(
+                db,
+                tenant_id=int(tenant_id),
+                phone=phone or "",
+                state_patch=patch,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[ORDER_FLOW_STATE] location persist exception tenant=%s phone=*%s",
+            tenant_id,
+            (phone or "")[-4:],
+        )
+        return False, "apply_state_patch_exception"
+    if ok:
+        return True, "persisted"
+    logger.warning(
+        "[ORDER_FLOW_STATE] location persist failed tenant=%s phone=*%s "
+        "— not claiming saved",
+        tenant_id,
+        (phone or "")[-4:],
+    )
+    return False, "apply_state_patch_false"
+
+
 def persist_checkout_location_patch(
     db: Any,
     *,
@@ -1990,28 +2035,12 @@ def persist_checkout_location_patch(
 
     Callers must not claim the location was saved unless this returns True.
     """
-    patch = dict(state_patch or {})
-    if not patch:
-        logger.info(
-            "[ORDER_FLOW_STATE] location persist skipped empty_patch tenant=%s",
-            tenant_id,
-        )
-        return False
-    ok = bool(
-        apply_state_patch(
-            db,
-            tenant_id=int(tenant_id),
-            phone=phone or "",
-            state_patch=patch,
-        )
+    ok, _reason = persist_checkout_location_outcome(
+        db,
+        tenant_id=tenant_id,
+        phone=phone,
+        state_patch=state_patch,
     )
-    if not ok:
-        logger.warning(
-            "[ORDER_FLOW_STATE] location persist failed tenant=%s phone=*%s "
-            "— not claiming saved",
-            tenant_id,
-            (phone or "")[-4:],
-        )
     return ok
 
 
