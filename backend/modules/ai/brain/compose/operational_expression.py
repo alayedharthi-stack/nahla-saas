@@ -20,6 +20,7 @@ from core.reply_instruction import (
     CONSTRAINT_NO_ORDER_STATUS_MUTATION,
     CONSTRAINT_NO_PAYMENT_CONFIRM,
     CONSTRAINT_NO_SHIPPING_PROMISE,
+    CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT,
     DECISION_KIND_ADDRESS_INGEST,
     DECISION_KIND_CLEAR_INTENT,
     DECISION_KIND_MAP_SCREENSHOT,
@@ -72,6 +73,11 @@ _CONSTRAINT_LABELS: Dict[str, str] = {
     CONSTRAINT_NO_PRICE_INVENTION: (
         "Do NOT invent prices, discounts, payment methods, or shipping costs."
     ),
+    CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT: (
+        "The platform owns the next checkout field. Ask only for "
+        "next_missing_field. If next_missing_field is none, do not ask for "
+        "name, phone, city, address, or any other checkout field."
+    ),
 }
 
 
@@ -123,10 +129,21 @@ def compose_operational_expression_goal(instruction: ReplyInstruction) -> str:
             "Coordinates cannot be extracted from the screenshot."
         )
     elif kind == DECISION_KIND_ADDRESS_INGEST:
-        context_note = (
-            "The customer's delivery address was ingested during checkout. "
-            "Acknowledge and continue collecting any remaining order fields."
-        )
+        nxt = str(instruction.facts.get("next_missing_field") or "none").strip() or "none"
+        if nxt == "none":
+            context_note = (
+                "The customer's delivery location was persisted during checkout. "
+                "Acknowledge using the structured facts. "
+                "The platform next_missing_field is none — do not ask for any "
+                "checkout field."
+            )
+        else:
+            context_note = (
+                "The customer's delivery location was persisted during checkout. "
+                "Acknowledge using the structured facts. "
+                f"The platform owns next_missing_field={nxt}. Ask only for that "
+                "field. Do not invent other missing fields."
+            )
     elif kind == DECISION_KIND_PAYMENT_METHOD:
         context_note = (
             "The customer selected a payment method during checkout. "

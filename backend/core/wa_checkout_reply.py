@@ -144,10 +144,11 @@ def compose_address_reply(
     brain_state: Dict[str, Any],
     line_items: Optional[list] = None,
     payment_methods: Optional[MerchantPaymentMethods] = None,
+    missing_fields: Optional[List[str]] = None,
 ) -> str:
     from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
 
-    missing = compute_wa_missing_fields(
+    missing = list(missing_fields) if missing_fields is not None else compute_wa_missing_fields(
         order_prep,
         brain_state=brain_state or {},
         line_items=line_items,
@@ -160,6 +161,15 @@ def compose_address_reply(
             "وصل الموقع وتم تسجيله ✅\n"
             "باقي نكمل بيانات التوصيل عشان نثبت الطلب."
         )
+
+    remaining_collect = [
+        field for field in missing
+        if field not in {"payment_method"}
+    ]
+    if remaining_collect:
+        # Location is persisted. Remaining slots are owned by the platform
+        # instruction (next_missing_field), not by this fail-closed copy.
+        return "وصل الموقع وتم تسجيله ✅"
 
     if payment_methods is None:
         from core.merchant_payment_methods import resolve_merchant_payment_methods  # noqa: PLC0415

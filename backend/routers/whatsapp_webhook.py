@@ -4051,13 +4051,56 @@ async def _dispatch_message(
                     state_patch=_loc_decision.get("state_patch") or {},
                 )
                 if _loc_turn.get("emit_success_ack"):
+                    from core.address_ingest_post_persist import (  # noqa: PLC0415
+                        persist_address_ingest_turn_messages,
+                        reproject_address_ingest_decision_after_persist,
+                    )
+                    from core.constrained_operational_compose import (  # noqa: PLC0415
+                        resolve_prebrain_reply_text,
+                    )
+
+                    _loc_decision = reproject_address_ingest_decision_after_persist(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender or "",
+                        inbound_text="",
+                        address_type=str(
+                            (_loc_decision.get("state_patch") or {}).get(
+                                "delivery_address_type"
+                            )
+                            or "location"
+                        ),
+                    )
+                    _loc_reply_text, _loc_compose_meta = await resolve_prebrain_reply_text(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender or "",
+                        decision=_loc_decision,
+                        inbound_text="",
+                    )
+                    persist_address_ingest_turn_messages(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender or "",
+                        inbound_body=str(
+                            (_loc_turn.get("inbound_metadata") or {}).get("google_maps_url")
+                            or ((_loc_decision.get("known_facts") or {}).get("checkout_maps_url"))
+                            or "[location]"
+                        ),
+                        outbound_body=_loc_reply_text,
+                        inbound_event_type="whatsapp_location",
+                        extra_metadata={
+                            "wa_message_id": msg_id or None,
+                            **(_loc_compose_meta or {}),
+                        },
+                    )
                     await _post_wa(
                         used_pid,
                         {
                             "messaging_product": "whatsapp",
                             "to": sender,
                             "type": "text",
-                            "text": {"body": _loc_decision["reply_text"]},
+                            "text": {"body": _loc_reply_text},
                         },
                         _tenant_id=resolved_tenant_id,
                         _db=db,
@@ -5138,16 +5181,44 @@ async def _dispatch_message(
                     # Continue to the existing Brain owner below — do not
                     # emit the saved ack and do not silent-return.
                 else:
+                    from core.address_ingest_post_persist import (  # noqa: PLC0415
+                        persist_address_ingest_turn_messages,
+                        reproject_address_ingest_decision_after_persist,
+                    )
                     from core.constrained_operational_compose import (  # noqa: PLC0415
                         resolve_prebrain_reply_text,
                     )
 
+                    _address_decision = reproject_address_ingest_decision_after_persist(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_text=persist_body or text or "",
+                        address_type=str(
+                            (_address_decision.get("state_patch") or {}).get(
+                                "delivery_address_type"
+                            )
+                            or "maps_url"
+                        ),
+                    )
                     _addr_reply_text, _addr_compose_meta = await resolve_prebrain_reply_text(
                         db=db,
                         tenant_id=resolved_tenant_id,
                         phone=sender,
                         decision=_address_decision,
                         inbound_text=persist_body or text or "",
+                    )
+                    persist_address_ingest_turn_messages(
+                        db,
+                        tenant_id=resolved_tenant_id,
+                        phone=sender,
+                        inbound_body=persist_body or text or "",
+                        outbound_body=_addr_reply_text,
+                        inbound_event_type="whatsapp_message",
+                        extra_metadata={
+                            "wa_message_id": msg_id or None,
+                            **(_addr_compose_meta or {}),
+                        },
                     )
                     await _post_wa(
                         used_pid,
