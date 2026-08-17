@@ -107,6 +107,8 @@ class StaffContactRecord:
     is_owner: bool
     chain_index: int
     source: str
+    customer_visibility: str = "customer_visible"
+    contact_id: Optional[int] = None
 
     def all_match_tokens(self) -> Tuple[str, ...]:
         tokens: List[str] = []

@@ -8411,7 +8411,7 @@ async def _handle_merchant_message(
             )
             _scp_decision = None
 
-        if _scp_decision is not None:
+        if _scp_decision is not None and getattr(_scp_decision, "skip_brain", True):
             _persona_ownership.mark_bypass(
                 _POReason.STAFF_CONTACT_RECOVERY,
                 owner="staff_contact_policy",

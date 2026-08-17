@@ -45,6 +45,9 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Simple merchant escalation authoring tests
+        run: python -m pytest backend/tests/test_simple_merchant_escalation_authoring.py -q --maxfail=1
+
       - name: Customer conditional coupon Layer 0 consumer tests
         run: |
           python -m pytest \

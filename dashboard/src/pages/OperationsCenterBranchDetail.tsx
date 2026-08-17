@@ -433,7 +433,15 @@ export default function OperationsCenterBranchDetail() {
       )}
 
       {tab === 'escalation' && (
-        <div className="max-w-3xl">
+        <div className="max-w-3xl space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+            لإعداد التصعيد بسهولة، استخدم صفحة
+            {' '}
+            <Link to="/sales-channels/contacts" className="text-brand-700 font-medium hover:underline">
+              فريق التواصل
+            </Link>
+            . المستويات وأزرار الرفع/الخفض إعدادات متقدمة.
+          </div>
           <EscalationChainPanel
             levels={levels}
             contacts={contacts}

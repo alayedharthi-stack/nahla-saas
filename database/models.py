@@ -3648,6 +3648,8 @@ class MerchantBranch(Base):
         String(32), nullable=False, default="reception_only", server_default="reception_only",
     )
     location_instructions_text = Column(Text, nullable=True)
+    escalation_instruction_text = Column(Text, nullable=True)
+    escalation_policy_json = Column(JSONB, nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -3701,6 +3703,12 @@ class BranchContact(Base):
     is_default_reception = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )
+    customer_visibility = Column(
+        String(32),
+        nullable=False,
+        default="internal_only",
+        server_default="internal_only",
+    )
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
 
     branch = relationship("MerchantBranch", back_populates="contacts")
@@ -3733,6 +3741,18 @@ class BranchEscalationStep(Base):
         Integer,
         ForeignKey("branch_contacts.id", ondelete="RESTRICT"),
         nullable=True,
+    )
+    permitted_action = Column(
+        String(64),
+        nullable=False,
+        default="share_customer_contact",
+        server_default="share_customer_contact",
+    )
+    trigger_condition = Column(
+        String(64),
+        nullable=False,
+        default="sequence",
+        server_default="sequence",
     )
     is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")

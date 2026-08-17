@@ -87,6 +87,7 @@ class BranchContactRecord:
     whatsapp_e164: str
     sort_order: int
     is_default_reception: bool = False
+    customer_visibility: str = ""
 
 
 def _branch_from_row(row: Any) -> BranchRecord:
@@ -112,6 +113,7 @@ def _contact_from_row(row: Any) -> BranchContactRecord:
         whatsapp_e164=str(row.whatsapp_e164 or "").strip(),
         sort_order=int(row.sort_order or 0),
         is_default_reception=bool(getattr(row, "is_default_reception", False)),
+        customer_visibility=str(getattr(row, "customer_visibility", "") or ""),
     )
 
 
@@ -464,6 +466,8 @@ def load_structured_staff_contact_registry(
                     is_owner=is_owner,
                     chain_index=chain_index,
                     source="structured_branch_contact",
+                    customer_visibility=str(contact.customer_visibility or ""),
+                    contact_id=int(contact.id),
                 )
             )
             chain_index += 1

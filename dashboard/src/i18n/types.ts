@@ -148,6 +148,30 @@ export interface Translations {
       contactsTab: {
         description: string
         openBranches: string
+        loading: string
+        loadError: string
+        previewError: string
+        saveError: string
+        instructionRequired: string
+        unresolvedDefault: string
+        saved: string
+        saving: string
+        save: string
+        teamTitle: string
+        teamHint: string
+        addContact: string
+        emptyTeam: string
+        colName: string
+        colRole: string
+        colPhone: string
+        colBranch: string
+        colVisible: string
+        yes: string
+        no: string
+        instructionTitle: string
+        previewTitle: string
+        emptyPreview: string
+        advancedLink: string
       }
       routingTab: {
         rules: string[]

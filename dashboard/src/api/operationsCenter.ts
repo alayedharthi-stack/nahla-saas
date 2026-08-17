@@ -25,12 +25,15 @@ export interface MerchantBranch {
 export interface BranchContact {
   id: number
   branch_id: number
+  branch_name?: string
   display_name: string
   role: string
   phone_e164: string
   whatsapp_e164: string
   is_active: boolean
   is_default_reception: boolean
+  customer_visibility?: string
+  customer_can_contact_directly?: boolean
   sort_order: number
 }
 
@@ -68,6 +71,7 @@ export type BranchInput = {
   location_response_mode?: string
   arrival_response_mode?: string
   location_instructions_text?: string
+  escalation_instruction_text?: string
 }
 
 export interface ArrivalKeyword {
@@ -111,6 +115,7 @@ export type ContactInput = {
   whatsapp_e164?: string
   is_active?: boolean
   is_default_reception?: boolean
+  customer_visibility?: string
   sort_order?: number
 }
 
@@ -282,4 +287,64 @@ export const operationsCenterApi = {
       `/operations-center/branches/${branchId}/preview-trigger`,
       { method: 'POST', body: JSON.stringify({ message }) },
     ),
+
+  listTeam: () =>
+    apiCall<{
+      default_branch_id: number | null
+      branches: MerchantBranch[]
+      contacts: BranchContact[]
+      instruction_text: string
+      preview_steps: EscalationPreviewStep[]
+      capability: Record<string, boolean>
+      kb_conflicts: Array<{ title: string; kb_phone: string; message: string }>
+    }>('/operations-center/team'),
+
+  previewEscalationPolicy: (body: {
+    instruction_text: string
+    branch_id?: number | null
+    resolutions?: Record<string, number>
+  }) =>
+    apiCall<EscalationPolicyDraft>(
+      '/operations-center/escalation-policy/preview',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  confirmEscalationPolicy: (body: {
+    instruction_text: string
+    branch_id?: number | null
+    confirm: boolean
+    resolutions?: Record<string, number>
+    steps?: Array<Record<string, unknown>>
+  }) =>
+    apiCall<{ branch_id: number; instruction_text: string; steps: EscalationPreviewStep[] }>(
+      '/operations-center/escalation-policy/confirm',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+}
+
+export type EscalationPreviewStep = {
+  order: number
+  contact_id: number
+  display_name: string
+  role: string
+  branch_name?: string
+  customer_visibility: string
+  permitted_action: string
+  trigger_condition: string
+  preview_action_label?: string
+  customer_share_allowed?: boolean
+}
+
+export type EscalationPolicyDraft = {
+  instruction_text: string
+  branch_id: number | null
+  steps: EscalationPreviewStep[]
+  unresolved: Array<{ token: string; reason: string; clause?: string }>
+  ambiguities: string[]
+  confirmation_required: boolean
+  invented_contacts: boolean
+  invented_numbers: boolean
+  can_confirm: boolean
+  change_summary: string[]
+  unresolved_message?: string
 }

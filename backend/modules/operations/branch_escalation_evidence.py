@@ -275,12 +275,31 @@ def load_structured_escalation_chain(
         return ()
 
     chain: list[StaffChainEntry] = []
+    from modules.operations.contact_visibility import (  # noqa: PLC0415
+        customer_facing_phone,
+        may_share_with_customer,
+    )
+
     for idx, step in enumerate(steps):
-        phone = str(getattr(step, "phone_e164", "") or "").strip()
+        contact = getattr(step, "contact", None)
+        live_phone = ""
+        if contact is not None:
+            live_phone = str(getattr(contact, "phone_e164", "") or "").strip()
+        copied = str(getattr(step, "phone_e164", "") or "").strip()
+        role = str(
+            getattr(contact, "role", None) or getattr(step, "role", "") or ""
+        ).strip().lower()
+        display = str(
+            getattr(contact, "display_name", None) or getattr(step, "display_name", "") or ""
+        ).strip()
+        share_ok = may_share_with_customer(contact if contact is not None else step)
+        phone = customer_facing_phone(contact if contact is not None else step) or (
+            live_phone if share_ok else ""
+        )
+        if not phone and share_ok:
+            phone = live_phone or copied
         if not phone:
             continue
-        role = str(getattr(step, "role", "") or "").strip().lower()
-        display = str(getattr(step, "display_name", "") or "").strip()
         is_owner = _is_admin_role(role)
         chain.append(
             StaffChainEntry(

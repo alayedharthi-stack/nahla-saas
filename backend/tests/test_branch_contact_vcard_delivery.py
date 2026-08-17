@@ -27,12 +27,12 @@ from modules.ai.brain.commerce.branch_trigger_router import (  # noqa: E402
 from modules.ai.brain.commerce.contact_delivery_gate import (  # noqa: E402
     evaluate_contact_delivery_gate,
 )
-from modules.ai.brain.persona.branch_action_compose import (  # noqa: E402
-    ACTION_KIND_BRANCH_CONTACT,
-)
 from modules.operations.branch_arrival_keyword_evidence import (  # noqa: E402
     TRIGGER_NO_RESPONSE,
     match_branch_trigger,
+)
+from modules.operations.branch_contact_evidence import (  # noqa: E402
+    load_branch_contacts,
 )
 from services.call_resolver import CallTarget, build_contacts_payload  # noqa: E402
 
@@ -188,14 +188,13 @@ class TestNoResponseRoute:
             tenant_id=TENANT_A,
             message=MSG_NO_ONE,
             customer_phone=CUSTOMER_PHONE,
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
-        assert decision is not None
-        assert decision.deliver_contact is True
-        assert decision.call_target is not None
-        assert decision.reason == ESCALATION_REASON
-        assert decision.compose_facts is not None
-        assert decision.compose_facts.action_kind == ACTION_KIND_BRANCH_CONTACT
-        assert decision.compose_facts.contact_card_available is True
+        # Customer NL stays Brain-owned; keyword match is evidence only.
+        assert decision is None
+        contacts = load_branch_contacts(db, 1)
+        assert contacts
+        assert contacts[0].phone_e164 == PHONE_A
 
 
 class TestContactDeliveryGate:
@@ -368,16 +367,19 @@ class TestTenantIsolation:
         )
         dec_a = evaluate_branch_trigger_routing(
             db_a, tenant_id=TENANT_A, message=MSG_NO_ONE, customer_phone=CUSTOMER_PHONE,
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
         dec_b = evaluate_branch_trigger_routing(
             db_b, tenant_id=TENANT_B, message=MSG_NO_ONE, customer_phone=CUSTOMER_PHONE,
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
-        assert dec_a is not None and dec_b is not None
-        assert dec_a.call_target is not None and dec_b.call_target is not None
-        assert dec_a.call_target.wa_id == PHONE_A
-        assert dec_b.call_target.wa_id == PHONE_B
-        assert dec_a.call_target.name == "أحمد سالم"
-        assert dec_b.call_target.name == "نورة عبدالله"
+        assert dec_a is None and dec_b is None
+        contacts_a = load_branch_contacts(db_a, 1)
+        contacts_b = load_branch_contacts(db_b, 2)
+        assert contacts_a[0].phone_e164 == PHONE_A
+        assert contacts_b[0].phone_e164 == PHONE_B
+        assert contacts_a[0].display_name == "أحمد سالم"
+        assert contacts_b[0].display_name == "نورة عبدالله"
 
 
 class TestRegressionRoutes:
@@ -387,11 +389,12 @@ class TestRegressionRoutes:
         )
         loc = evaluate_branch_trigger_routing(
             db, tenant_id=TENANT_A, message=MSG_LOCATION,
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
         arr = evaluate_branch_trigger_routing(
             db, tenant_id=TENANT_A, message=MSG_ON_THE_WAY,
+            inbound_metadata={"source_type": "text", "normalized_type": "text"},
         )
-        assert loc is not None and arr is not None
-        assert loc.use_cta is True
-        assert loc.deliver_contact is False
-        assert arr.deliver_contact is False
+        assert loc is None and arr is None
+        contacts = load_branch_contacts(db, 1)
+        assert contacts[0].phone_e164 == PHONE_A

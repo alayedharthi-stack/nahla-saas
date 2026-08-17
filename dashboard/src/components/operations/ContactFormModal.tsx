@@ -8,6 +8,7 @@ export type ContactFormState = {
   whatsapp_e164: string
   is_active: boolean
   is_default_reception: boolean
+  customer_can_contact_directly: boolean
 }
 
 const emptyForm = (): ContactFormState => ({
@@ -17,6 +18,7 @@ const emptyForm = (): ContactFormState => ({
   whatsapp_e164: '',
   is_active: true,
   is_default_reception: false,
+  customer_can_contact_directly: false,
 })
 
 function fromContact(c: BranchContact): ContactFormState {
@@ -27,6 +29,11 @@ function fromContact(c: BranchContact): ContactFormState {
     whatsapp_e164: c.whatsapp_e164 || '',
     is_active: c.is_active,
     is_default_reception: c.is_default_reception,
+    customer_can_contact_directly: Boolean(
+      c.customer_can_contact_directly
+      || c.customer_visibility === 'customer_visible'
+      || c.customer_visibility === 'both',
+    ),
   }
 }
 
@@ -93,6 +100,7 @@ export default function ContactFormModal({
       whatsapp_e164: form.whatsapp_e164.trim() || undefined,
       is_active: form.is_active,
       is_default_reception: form.is_default_reception,
+      customer_visibility: form.customer_can_contact_directly ? 'customer_visible' : 'internal_only',
     }
 
     try {
@@ -185,9 +193,24 @@ export default function ContactFormModal({
                 type="checkbox"
                 className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
                 checked={form.is_default_reception}
-                onChange={(e) => setForm({ ...form, is_default_reception: e.target.checked })}
+                onChange={(e) => setForm({
+                  ...form,
+                  is_default_reception: e.target.checked,
+                  customer_can_contact_directly: e.target.checked
+                    ? true
+                    : form.customer_can_contact_directly,
+                })}
               />
               <span className="text-slate-700">استقبال افتراضي لهذا الفرع</span>
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                checked={form.customer_can_contact_directly}
+                onChange={(e) => setForm({ ...form, customer_can_contact_directly: e.target.checked })}
+              />
+              <span className="text-slate-700">يمكن للعميل التواصل مباشرة؟</span>
             </label>
           </div>
         </div>

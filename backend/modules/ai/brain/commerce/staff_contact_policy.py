@@ -412,6 +412,22 @@ def evaluate_staff_contact_policy(
         return None
 
     if resolution.found and resolution.record is not None:
+        from modules.operations.contact_visibility import (  # noqa: PLC0415
+            may_share_with_customer,
+        )
+
+        if not may_share_with_customer(resolution.record):
+            _log_target_trace(
+                tenant_id=tenant_id,
+                request=request,
+                resolution_reason="internal_escalation_only",
+                deliver=False,
+            )
+            logger.info(
+                "[STAFF_CONTACT_POLICY] tenant=%s defer=true reason=internal_only",
+                tenant_id,
+            )
+            return None
         target = _build_call_target(resolution.record)
         if target is None:
             _log_target_trace(
@@ -605,6 +621,12 @@ def evaluate_generic_handoff_contact_policy(
         message=message or "",
     )
     if resolution.found and resolution.record is not None:
+        from modules.operations.contact_visibility import (  # noqa: PLC0415
+            may_share_with_customer,
+        )
+
+        if not may_share_with_customer(resolution.record):
+            return None
         target = _build_call_target(resolution.record)
         if target is None:
             return _decision_with_target(

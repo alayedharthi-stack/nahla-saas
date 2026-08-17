@@ -22,6 +22,13 @@ from core.tenant import get_or_create_tenant, resolve_tenant_id
 from models import BranchArrivalKeyword, BranchContact, BranchEscalationStep, MerchantBranch
 from utils.phone_utils import normalize_to_e164
 
+from modules.operations.contact_visibility import (  # noqa: E402
+    BOTH,
+    CUSTOMER_VISIBLE,
+    INTERNAL_ONLY,
+    normalize_visibility,
+)
+
 router = APIRouter(prefix="/operations-center", tags=["Operations Center"])
 
 
@@ -63,6 +70,7 @@ class ContactCreateIn(BaseModel):
     whatsapp_e164: Optional[str] = Field(None, max_length=32)
     is_active: bool = True
     is_default_reception: bool = False
+    customer_visibility: str = "internal_only"
     sort_order: int = 0
 
 
@@ -73,6 +81,7 @@ class ContactPatchIn(BaseModel):
     whatsapp_e164: Optional[str] = Field(None, max_length=32)
     is_active: Optional[bool] = None
     is_default_reception: Optional[bool] = None
+    customer_visibility: Optional[str] = None
     sort_order: Optional[int] = None
 
 
@@ -124,6 +133,20 @@ class ArrivalKeywordPatchIn(BaseModel):
 
 class TriggerPreviewIn(BaseModel):
     message: str = Field(min_length=1, max_length=2048)
+
+
+class EscalationPolicyPreviewIn(BaseModel):
+    instruction_text: str = Field(min_length=0, max_length=8000)
+    branch_id: Optional[int] = None
+    resolutions: Optional[Dict[str, int]] = None
+
+
+class EscalationPolicyConfirmIn(BaseModel):
+    instruction_text: str = Field(min_length=1, max_length=8000)
+    branch_id: Optional[int] = None
+    resolutions: Optional[Dict[str, int]] = None
+    confirm: bool = False
+    steps: Optional[List[Dict[str, Any]]] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -255,6 +278,8 @@ def _serialize_branch(row: MerchantBranch, *, contact_count: int = 0) -> Dict[st
         "location_response_mode": getattr(row, "location_response_mode", "") or "location_only",
         "arrival_response_mode": getattr(row, "arrival_response_mode", "") or "reception_only",
         "location_instructions_text": getattr(row, "location_instructions_text", "") or "",
+        "escalation_instruction_text": getattr(row, "escalation_instruction_text", "") or "",
+        "escalation_policy_json": getattr(row, "escalation_policy_json", None),
         "contact_count": int(contact_count),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -271,6 +296,10 @@ def _serialize_contact(row: BranchContact) -> Dict[str, Any]:
         "whatsapp_e164": row.whatsapp_e164 or "",
         "is_active": bool(row.is_active),
         "is_default_reception": bool(getattr(row, "is_default_reception", False)),
+        "customer_visibility": str(getattr(row, "customer_visibility", "") or "internal_only"),
+        "customer_can_contact_directly": str(
+            getattr(row, "customer_visibility", "") or ""
+        ).strip().lower() in {"customer_visible", "both"},
         "sort_order": int(row.sort_order or 0),
     }
 
@@ -284,6 +313,8 @@ def _serialize_escalation_step(row: BranchEscalationStep) -> Dict[str, Any]:
         "display_name": row.display_name,
         "role": row.role or "",
         "phone_e164": row.phone_e164,
+        "permitted_action": str(getattr(row, "permitted_action", "") or "share_customer_contact"),
+        "trigger_condition": str(getattr(row, "trigger_condition", "") or "sequence"),
         "is_active": bool(row.is_active),
         "sort_order": int(row.sort_order or 0),
     }
@@ -660,6 +691,9 @@ async def create_contact(
     whatsapp = _optional_phone_field(body.whatsapp_e164, field="whatsapp_e164")
     if body.is_default_reception:
         _clear_default_reception(db, branch_id)
+    visibility = normalize_visibility(body.customer_visibility)
+    if body.is_default_reception and visibility == INTERNAL_ONLY:
+        visibility = CUSTOMER_VISIBLE
     row = BranchContact(
         branch_id=branch_id,
         display_name=body.display_name.strip(),
@@ -668,6 +702,7 @@ async def create_contact(
         whatsapp_e164=whatsapp,
         is_active=body.is_active,
         is_default_reception=body.is_default_reception,
+        customer_visibility=visibility,
         sort_order=body.sort_order,
     )
     db.add(row)
@@ -695,6 +730,8 @@ async def update_contact(
         )
     if data.get("is_default_reception"):
         _clear_default_reception(db, branch_id, except_id=contact_id)
+    if "customer_visibility" in data:
+        data["customer_visibility"] = normalize_visibility(data.get("customer_visibility"))
     for key, val in data.items():
         if key == "role" and val is not None:
             val = str(val).strip() or None
@@ -1105,3 +1142,223 @@ async def preview_branch_trigger(
         preview_trigger_actions,
     )
     return preview_trigger_actions(db, tenant_id, branch_id, body.message.strip())
+
+
+def _ensure_default_branch(db: Session, tenant_id: int) -> MerchantBranch:
+    row = (
+        db.query(MerchantBranch)
+        .filter(MerchantBranch.tenant_id == tenant_id)
+        .order_by(MerchantBranch.sort_order.asc(), MerchantBranch.id.asc())
+        .first()
+    )
+    if row is not None:
+        return row
+    row = MerchantBranch(
+        tenant_id=tenant_id,
+        name="الفرع الرئيسي",
+        is_active=True,
+        sort_order=0,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.get("/team")
+async def list_team(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    from modules.operations.escalation_policy_authoring import (  # noqa: PLC0415
+        load_tenant_contacts,
+        steps_from_existing_rows,
+    )
+    from modules.operations.escalation_policy_runtime import (  # noqa: PLC0415
+        load_canonical_policy,
+    )
+    from modules.operations.kb_contact_conflict import (  # noqa: PLC0415
+        find_kb_contact_conflicts,
+    )
+
+    branches = (
+        db.query(MerchantBranch)
+        .filter(MerchantBranch.tenant_id == tenant_id)
+        .order_by(MerchantBranch.sort_order.asc(), MerchantBranch.id.asc())
+        .all()
+    )
+    contacts = load_tenant_contacts(db, tenant_id)
+    default_branch = branches[0] if branches else None
+    policy = None
+    instruction = ""
+    if default_branch is not None:
+        policy = load_canonical_policy(db, tenant_id, branch_id=int(default_branch.id))
+        instruction = str(getattr(default_branch, "escalation_instruction_text", "") or "")
+        existing_rows = (
+            db.query(BranchEscalationStep)
+            .filter(BranchEscalationStep.branch_id == int(default_branch.id))
+            .order_by(
+                BranchEscalationStep.escalation_level.asc(),
+                BranchEscalationStep.sort_order.asc(),
+            )
+            .all()
+        )
+        preview_steps = steps_from_existing_rows(existing_rows, contacts)
+    else:
+        preview_steps = []
+    serialized_contacts = []
+    for contact in contacts:
+        serialized_contacts.append({
+            "id": contact.id,
+            "branch_id": contact.branch_id,
+            "branch_name": contact.branch_name,
+            "display_name": contact.display_name,
+            "role": contact.role,
+            "phone_e164": contact.phone_e164,
+            "whatsapp_e164": contact.whatsapp_e164,
+            "is_active": contact.is_active,
+            "customer_visibility": contact.customer_visibility,
+            "customer_can_contact_directly": contact.customer_visibility in {
+                CUSTOMER_VISIBLE, BOTH,
+            },
+        })
+    capability = policy.capability() if policy is not None else {
+        "has_policy": False,
+        "has_customer_visible_contact": any(
+            c.customer_visibility in {CUSTOMER_VISIBLE, BOTH} for c in contacts
+        ),
+        "has_internal_contact": any(
+            c.customer_visibility == INTERNAL_ONLY for c in contacts
+        ),
+        "share_contact_available": False,
+        "notify_available": False,
+        "handoff_available": False,
+    }
+    return {
+        "default_branch_id": int(default_branch.id) if default_branch is not None else None,
+        "branches": [_serialize_branch(b) for b in branches],
+        "contacts": serialized_contacts,
+        "instruction_text": instruction,
+        "preview_steps": [
+            {
+                **step.__dict__,
+                "preview_action_label": step.preview_action_label(),
+            }
+            for step in preview_steps
+        ],
+        "capability": capability,
+        "kb_conflicts": find_kb_contact_conflicts(db, tenant_id, contacts),
+    }
+
+
+@router.post("/escalation-policy/preview")
+async def preview_escalation_policy(
+    body: EscalationPolicyPreviewIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    from modules.operations.escalation_policy_authoring import (  # noqa: PLC0415
+        compile_instruction,
+        load_tenant_contacts,
+        steps_from_existing_rows,
+    )
+
+    branch_id = body.branch_id
+    if branch_id:
+        _get_branch(db, tenant_id, int(branch_id))
+    elif not branch_id:
+        default = (
+            db.query(MerchantBranch)
+            .filter(MerchantBranch.tenant_id == tenant_id)
+            .order_by(MerchantBranch.sort_order.asc(), MerchantBranch.id.asc())
+            .first()
+        )
+        branch_id = int(default.id) if default is not None else None
+    contacts = load_tenant_contacts(db, tenant_id)
+    existing = []
+    if branch_id:
+        rows = (
+            db.query(BranchEscalationStep)
+            .filter(BranchEscalationStep.branch_id == int(branch_id))
+            .order_by(
+                BranchEscalationStep.escalation_level.asc(),
+                BranchEscalationStep.sort_order.asc(),
+            )
+            .all()
+        )
+        existing = steps_from_existing_rows(rows, contacts)
+    draft = compile_instruction(
+        body.instruction_text,
+        contacts,
+        branch_id=branch_id,
+        resolutions=body.resolutions,
+        existing_steps=existing,
+    )
+    payload = draft.to_dict()
+    payload["unresolved_message"] = (
+        "هذا الاسم غير موجود في فريق التواصل. أضفه أو اختر جهة تواصل موجودة قبل الحفظ."
+        if draft.unresolved
+        else ""
+    )
+    return payload
+
+
+@router.post("/escalation-policy/confirm")
+async def confirm_escalation_policy(
+    body: EscalationPolicyConfirmIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    from modules.operations.escalation_policy_authoring import (  # noqa: PLC0415
+        apply_confirmed_draft,
+        apply_structured_sequence,
+        compile_instruction,
+        load_tenant_contacts,
+    )
+
+    if not body.confirm:
+        raise HTTPException(status_code=422, detail="confirmation_required")
+    branch = _get_branch(db, tenant_id, int(body.branch_id)) if body.branch_id else _ensure_default_branch(db, tenant_id)
+    contacts = load_tenant_contacts(db, tenant_id)
+    if body.steps:
+        draft = apply_structured_sequence(
+            db,
+            tenant_id=tenant_id,
+            branch_id=int(branch.id),
+            steps=body.steps,
+            instruction_text=body.instruction_text,
+        )
+    else:
+        draft = compile_instruction(
+            body.instruction_text,
+            contacts,
+            branch_id=int(branch.id),
+            resolutions=body.resolutions,
+        )
+    if not draft.can_confirm:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "draft_not_confirmable",
+                "unresolved": [u.__dict__ for u in draft.unresolved],
+                "ambiguities": draft.ambiguities,
+            },
+        )
+    try:
+        result = apply_confirmed_draft(
+            db,
+            tenant_id=tenant_id,
+            branch_id=int(branch.id),
+            draft=draft,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    return result
+
