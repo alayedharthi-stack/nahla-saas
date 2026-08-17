@@ -18,6 +18,8 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from dataclasses import asdict
+
 from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: E402
     restore_selected_product_focus,
     stamp_structured_presented_products,
@@ -27,6 +29,10 @@ from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # no
     filter_missing_for_known_catalog_customer,
     merchant_customer_record_facts,
     resolve_catalog_checkout_customer_identity,
+)
+from modules.ai.brain.compose.prompt_payload_slim import (  # noqa: E402
+    is_routine_social_turn,
+    strip_state_dict_for_prompt,
 )
 from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: E402
     resolve_current_turn_social_non_commerce,
@@ -186,6 +192,19 @@ class TestCustomerIdentityProjection:
         assert facts.get("personal_familiarity") is False
         assert "customer_order_evidence" not in facts
         assert facts.get("checkout_preparation") == {}
+        reply_state.persona_expression_mode = True
+        reply_state.intent_name = "who_are_you"
+        assert is_routine_social_turn(reply_state) is True
+        slim = strip_state_dict_for_prompt(
+            asdict(reply_state),
+            reply_state,
+            kb_in_prompt_block=False,
+        )
+        slim_facts = slim.get("known_facts") or {}
+        assert slim_facts.get("customer_name") == GENERIC_CUSTOMER
+        assert slim_facts.get("merchant_customer_record", {}).get("registered") is True
+        assert "checkout_preparation" not in slim_facts
+        assert "customer_order_evidence" not in slim_facts
 
     def test_order_evidence_does_not_manufacture_identity_intent(self) -> None:
         intent = Intent(name="who_are_you", confidence=0.95, raw_message="تعرفني؟")
@@ -343,6 +362,28 @@ class TestKnownCustomerFactReuse:
         )
         assert missing == []
 
+    def test_two_token_first_slot_satisfies_last_name(self) -> None:
+        from modules.ai.brain.execution.orders import (  # noqa: PLC0415
+            _missing_checkout_fields,
+            _prep_has_real_name,
+        )
+        from modules.ai.brain.types import OrderPreparationState  # noqa: PLC0415
+
+        first_only = OrderPreparationState(customer_first_name="هيثم")
+        assert _prep_has_real_name(first_only) is False
+        missing = _missing_checkout_fields(first_only, is_sa=True)
+        assert "customer_last_name" in missing
+
+        full = OrderPreparationState(customer_first_name="هيثم الحارثي")
+        missing_full = _missing_checkout_fields(full, is_sa=True)
+        assert "customer_last_name" not in missing_full
+        assert "customer_first_name" not in missing_full
+        assert full.customer_last_name == "الحارثي"
+
+        generic = OrderPreparationState(customer_first_name="أحمد سالم")
+        missing_generic = _missing_checkout_fields(generic, is_sa=True)
+        assert "customer_last_name" not in missing_generic
+
 
 class TestExplicitCustomerCorrection:
     def test_explicit_male_self_id_is_detected(self) -> None:
@@ -393,6 +434,7 @@ class TestCompletionContractSweep:
         assert "catalog_order_must_not_orphan" in src
         assert "maybe_restore_catalog_order_semantic_text" in src
         assert "empty_text_no_fallback" in src
+        assert src.count("catalog_order_must_not_orphan") >= 2
 
 
 class TestTenantIsolation:

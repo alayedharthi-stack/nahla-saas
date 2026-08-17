@@ -597,6 +597,16 @@ def persist_structured_catalog_order_referent(
         flag_modified(conv, "extra_metadata")
         db.add(conv)
         db.flush()
+        commit = getattr(db, "commit", None)
+        if callable(commit):
+            try:
+                commit()
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — test stubs / already-committed sessions
+                logger.debug(
+                    "[WA_NATIVE_ORDER] persist_only_referent_commit_skipped tenant=%s",
+                    tenant_id,
+                    exc_info=True,
+                )
         logger.info(
             "[WA_NATIVE_ORDER] persist_only_referent_stamped tenant=%s "
             "presented=%d focus=%r",

@@ -270,6 +270,30 @@ def merchant_customer_record_facts(
     return out
 
 
+_IDENTITY_EVIDENCE_FACT_KEYS = (
+    "merchant_customer_record",
+    "customer_name_known",
+    "customer_name",
+    "customer_name_source",
+    "customer_id",
+    "personal_familiarity",
+)
+
+
+def merchant_identity_evidence_slice(
+    known_facts: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Slim merchant-record identity for social/identity compose. No commerce."""
+    facts = dict(known_facts or {})
+    out: Dict[str, Any] = {}
+    for key in _IDENTITY_EVIDENCE_FACT_KEYS:
+        val = facts.get(key)
+        if val in (None, "", {}, []):
+            continue
+        out[key] = val
+    return out
+
+
 def merge_prep_with_customer_identity(
     order_prep: Dict[str, Any],
     identity: CatalogCheckoutCustomerIdentity,
@@ -418,6 +442,7 @@ __all__ = [
     "filter_missing_for_known_catalog_customer",
     "is_catalog_checkout_name_question_forbidden",
     "merchant_customer_record_facts",
+    "merchant_identity_evidence_slice",
     "merge_prep_with_customer_identity",
     "reply_contains_forbidden_catalog_name_question",
     "resolve_catalog_checkout_customer_identity",

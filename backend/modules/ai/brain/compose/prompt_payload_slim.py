@@ -268,8 +268,21 @@ def strip_state_dict_for_prompt(
     commerce_lite = force_commerce_lite or should_apply_commerce_lite(state)
 
     if routine:
+        identity_slice: Dict[str, Any] = {}
+        try:
+            from modules.ai.brain.commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                merchant_identity_evidence_slice,
+            )
+
+            identity_slice = merchant_identity_evidence_slice(
+                getattr(state, "known_facts", None) or out.get("known_facts") or {},
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — identity slice must not block slim
+            identity_slice = {}
         for key in _ROUTINE_TOP_OMIT:
             out.pop(key, None)
+        if identity_slice:
+            out["known_facts"] = identity_slice
     elif commerce_lite:
         for key in _COMMERCE_LITE_TOP_OMIT:
             out.pop(key, None)

@@ -5803,6 +5803,20 @@ async def _handle_merchant_message(
     never enter this conversational pipeline.
     """
     if not (text or "").strip():
+        try:
+            from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                CATALOG_FRAME_MARKER,
+                catalog_order_must_not_orphan,
+            )
+
+            if catalog_order_must_not_orphan(
+                inbound_metadata if isinstance(inbound_metadata, dict) else {},
+                inbound_persist_body or "",
+            ):
+                text = str(inbound_persist_body or "").strip() or CATALOG_FRAME_MARKER
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog restore must not block merchant entry
+            pass
+    if not (text or "").strip():
         _unclear_audio_order_support = False
         try:
             from modules.ai.media.routing_guard import (  # noqa: PLC0415
