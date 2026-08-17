@@ -6431,6 +6431,34 @@ def _build_reply_state(
         known_facts.pop("catalog_reasoning_candidates", None)
         known_facts.pop("last_presented_products", None)
         known_facts.pop("last_recommended_products", None)
+    try:
+        from .commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+            merchant_customer_record_facts,
+            merge_prep_with_customer_identity,
+            resolve_catalog_checkout_customer_identity,
+        )
+
+        _identity = resolve_catalog_checkout_customer_identity(
+            db=db,
+            tenant_id=getattr(ctx, "tenant_id", None),
+            phone=str(getattr(ctx, "customer_phone", "") or ""),
+            order_prep=(
+                {}
+                if _social_identity_defocus
+                else dict(known_facts.get("checkout_preparation") or {})
+            ),
+            profile=ctx.profile if isinstance(getattr(ctx, "profile", None), dict) else {},
+        )
+        _identity_facts = merchant_customer_record_facts(_identity)
+        if _identity_facts:
+            known_facts.update(_identity_facts)
+        if not _social_identity_defocus and _identity.prep_patch:
+            known_facts["checkout_preparation"] = merge_prep_with_customer_identity(
+                dict(known_facts.get("checkout_preparation") or {}),
+                _identity,
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — merchant identity facts must not block compose
+        pass
     _sr = getattr(ctx, "state_relevance", None)
     if _sr is not None and hasattr(_sr, "to_dict"):
         known_facts["state_relevance_verdict"] = _sr.to_dict()

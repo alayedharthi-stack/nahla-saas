@@ -221,19 +221,53 @@ def resolve_catalog_checkout_customer_identity(
     elif full and _valid_customer_name(full):
         name_known = True
 
+    if customer_row is not None and getattr(customer_row, "id", None):
+        known_facts["customer_id"] = getattr(customer_row, "id")
+        known_facts["customer_record_exists"] = True
+
     if name_known:
         known_facts["customer_name_known"] = True
         known_facts["customer_name"] = full or first
         if name_source:
             known_facts["customer_name_source"] = name_source
-        if customer_row is not None and getattr(customer_row, "id", None):
-            known_facts["customer_id"] = getattr(customer_row, "id")
 
     return CatalogCheckoutCustomerIdentity(
         prep_patch=patch,
         known_facts=known_facts,
         customer_name_known=name_known,
     )
+
+
+def merchant_customer_record_facts(
+    identity: CatalogCheckoutCustomerIdentity,
+) -> Dict[str, Any]:
+    """Merchant-record identity for Brain facts — not personal familiarity."""
+    facts = dict(identity.known_facts or {})
+    if not (
+        identity.customer_name_known
+        or facts.get("customer_id")
+        or facts.get("customer_record_exists")
+    ):
+        return {}
+    record = {
+        "registered": True,
+        "personal_familiarity": False,
+        "customer_id": facts.get("customer_id"),
+        "customer_name": facts.get("customer_name"),
+        "customer_name_source": facts.get("customer_name_source"),
+    }
+    out: Dict[str, Any] = {
+        "merchant_customer_record": record,
+        "personal_familiarity": False,
+    }
+    if identity.customer_name_known:
+        out["customer_name_known"] = True
+        out["customer_name"] = facts.get("customer_name")
+        if facts.get("customer_name_source"):
+            out["customer_name_source"] = facts["customer_name_source"]
+    if facts.get("customer_id"):
+        out["customer_id"] = facts["customer_id"]
+    return out
 
 
 def merge_prep_with_customer_identity(
@@ -383,6 +417,7 @@ __all__ = [
     "enrich_catalog_checkout_prep_and_missing",
     "filter_missing_for_known_catalog_customer",
     "is_catalog_checkout_name_question_forbidden",
+    "merchant_customer_record_facts",
     "merge_prep_with_customer_identity",
     "reply_contains_forbidden_catalog_name_question",
     "resolve_catalog_checkout_customer_identity",

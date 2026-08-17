@@ -300,6 +300,41 @@ def structured_selected_referent(state: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def restore_selected_product_focus(state: Any) -> Optional[Dict[str, Any]]:
+    """Pin structured selected-product referent as current focus when missing.
+
+    Does not invent purchase intent. Lets a later natural purchase reuse the
+    already-selected item instead of reopening catalog discovery.
+    """
+    if state is None:
+        return None
+    ref = structured_selected_referent(state)
+    if not ref:
+        return None
+    focus = getattr(state, "current_product_focus", None)
+    if isinstance(focus, dict) and (
+        focus.get("id") is not None
+        or str(focus.get("title") or "").strip()
+        or focus.get("from_catalog_order")
+        or focus.get("from_native_catalog_order")
+    ):
+        return ref
+    state.current_product_focus = {
+        "id": ref.get("id"),
+        "title": str(ref.get("title") or ref.get("product_name") or "").strip(),
+        "price": ref.get("price"),
+        "external_id": str(ref.get("external_id") or "").strip(),
+        "product_retailer_id": str(
+            ref.get("external_id") or ref.get("product_retailer_id") or ""
+        ).strip(),
+        "from_catalog_order": True,
+        "from_native_catalog_order": True,
+        "customer_selected": True,
+        "restored_from_structured_referent": True,
+    }
+    return ref
+
+
 def stamp_structured_presented_products(
     state: Any,
     rows: Sequence[Any],
@@ -317,7 +352,12 @@ def stamp_structured_presented_products(
         if not isinstance(raw, dict):
             continue
         item = _stamp_row(raw, provenance=provenance, turn=turn)
-        if not item.get("title") and item.get("id") is None and not item.get("external_id"):
+        if (
+            not item.get("title")
+            and item.get("id") is None
+            and not item.get("external_id")
+            and not item.get("product_retailer_id")
+        ):
             continue
         item["customer_selected"] = bool(customer_selected)
         item["provenance"] = provenance
@@ -344,6 +384,7 @@ def stamp_structured_presented_products(
 
 __all__ = [
     "map_named_catalog_entities",
+    "restore_selected_product_focus",
     "stamp_assistant_named_catalog_from_reply",
     "stamp_structured_presented_products",
     "structured_selected_referent",

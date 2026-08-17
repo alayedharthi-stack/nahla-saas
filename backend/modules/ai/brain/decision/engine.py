@@ -3993,9 +3993,22 @@ class DefaultDecisionEngine:
 
         # ── 6. Start order — product in focus ──────────────────────────────
         if intent.name == INTENT_START_ORDER:
+            _selected_ref = None
+            try:
+                from ..commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                    restore_selected_product_focus,
+                )
+
+                _selected_ref = restore_selected_product_focus(state)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — selected-product restore must not block start-order
+                _selected_ref = None
             from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
 
             _bare_start_order = is_bare_start_order_phrase(ctx.message or "")
+            if _selected_ref:
+                # Structured catalog selection is already the product. A later
+                # natural purchase must reuse it, not reopen discovery.
+                _bare_start_order = False
             if _bare_start_order:
                 try:
                     from ..order_context_gate import is_fulfillment_session_locked  # noqa: PLC0415
@@ -4051,7 +4064,7 @@ class DefaultDecisionEngine:
 
             if (
                 not _bare_start_order
-                and state.current_product_focus
+                and (state.current_product_focus or _selected_ref)
                 and facts.has_products
             ):
                 # Only propose order if store can actually fulfil it

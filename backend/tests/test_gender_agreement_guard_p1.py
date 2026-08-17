@@ -186,6 +186,16 @@ class TestExplicitGenderPersistence:
             assert ctx.confidence_score >= APPLY_CONFIDENCE_THRESHOLD, msg
 
 
+    def test_explicit_male_self_id_rewrites_kamli(self) -> None:
+        result = apply_gender_agreement_guard(
+            "كملي لي اسم العائلة",
+            message="انا رجل ولست امرأة",
+        )
+        assert "كملي" not in result.reply
+        assert result.replaced is True
+
+
+
 class TestAddressGuardModes:
     @pytest.mark.parametrize(
         ("style", "src", "dst"),

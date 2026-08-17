@@ -4194,6 +4194,22 @@ async def _dispatch_message(
         except Exception:  # noqa: BLE001  # noqa: silent-ok — semantic resolve must not block inbound routing
             text = normalized_inbound.text.strip()
             route_unclear_audio_order_support = False
+        try:
+            from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                maybe_restore_catalog_order_semantic_text,
+            )
+
+            text, _catalog_completion_meta = maybe_restore_catalog_order_semantic_text(
+                semantic_text=text,
+                original_brain_text=normalized_inbound.text,
+                inbound_metadata=normalized_inbound.metadata,
+            )
+            if _catalog_completion_meta:
+                _ni_meta = dict(normalized_inbound.metadata or {})
+                _ni_meta.update(_catalog_completion_meta)
+                normalized_inbound.metadata = _ni_meta
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog completion restore must not block inbound
+            pass
         if route_unclear_audio_order_support:
             _ni_meta = dict(normalized_inbound.metadata or {})
             _ni_meta["route_unclear_audio_order_support"] = True
@@ -4252,6 +4268,39 @@ async def _dispatch_message(
                 wa_msg_id=msg_id or None,
             )
             return
+
+        if not text and not route_unclear_audio_order_support:
+            try:
+                from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                    CATALOG_FRAME_MARKER,
+                    catalog_order_must_not_orphan,
+                )
+
+                if catalog_order_must_not_orphan(
+                    normalized_inbound.metadata,
+                    normalized_inbound.text or "",
+                ):
+                    text = (normalized_inbound.text or "").strip() or CATALOG_FRAME_MARKER
+                    _ni_meta = dict(normalized_inbound.metadata or {})
+                    _ni_meta["catalog_order_empty_text_continued"] = True
+                    _ctc = dict(_ni_meta.get("customer_turn_completion") or {})
+                    _ctc.update({
+                        "input_type": "catalog_order",
+                        "semantic_owner": "brain",
+                        "structured_action_owner": "wa_native_catalog_order",
+                        "completion_class": "structured_action_and_natural_continuation",
+                        "suppression_reason": None,
+                    })
+                    _ni_meta["customer_turn_completion"] = _ctc
+                    normalized_inbound.metadata = _ni_meta
+                    logger.info(
+                        "[CUSTOMER_TURN_COMPLETION] catalog_order continued past "
+                        "empty_text_no_fallback tenant=%s sender=%s",
+                        resolved_tenant_id,
+                        sender,
+                    )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog completion must not block inbound
+                pass
 
         if not text and not route_unclear_audio_order_support:
             logger.info(

@@ -32,6 +32,8 @@ _FEMININE_TO_MASCULINE: List[Tuple[str, str]] = [
     (rf"أرسلي{_TRAIL}", "أرسل"),
     (rf"ارسلي{_TRAIL}", "أرسل"),
     (rf"اختاري{_TRAIL}", "اختر"),
+    (rf"كملي{_TRAIL}", "كمل"),
+    (rf"أكملي{_TRAIL}", "أكمل"),
     (rf"أبشري{_TRAIL}", "أبشر"),
     (rf"تسلمين{_TRAIL}", "تسلم"),
     (rf"عندكِ{_TRAIL}", "عندك"),
@@ -46,6 +48,8 @@ _MASCULINE_TO_FEMININE: List[Tuple[str, str]] = [
     (rf"أرسل{_NO_FEM_YA}{_TRAIL}", "أرسلي"),
     (rf"ارسل{_NO_FEM_YA}{_TRAIL}", "ارسلي"),
     (rf"اختر{_NO_FEM_YA}{_TRAIL}", "اختاري"),
+    (rf"كمل{_NO_FEM_YA}{_TRAIL}", "كملي"),
+    (rf"أكمل{_NO_FEM_YA}{_TRAIL}", "أكملي"),
     (rf"أبشر{_NO_FEM_YA}{_TRAIL}", "أبشري"),
     (rf"تسلم{_NO_FEM_YA}{_TRAIL}", "تسلمين"),
 ]
@@ -58,6 +62,8 @@ _GENDERED_TO_NEUTRAL: List[Tuple[str, str]] = [
     (rf"أرسلي{_TRAIL}", "لو سمحت"),
     (rf"ارسلي{_TRAIL}", "لو سمحت"),
     (rf"اختاري{_TRAIL}", "لو سمحت"),
+    (rf"كملي{_TRAIL}", "لو سمحت"),
+    (rf"أكملي{_TRAIL}", "لو سمحت"),
     (rf"أبشري{_TRAIL}", "لو سمحت"),
     (rf"تسلمين{_TRAIL}", "تسلم"),
     (rf"عندكِ{_TRAIL}", "لديك"),
@@ -68,7 +74,7 @@ _GENDERED_TO_NEUTRAL: List[Tuple[str, str]] = [
 
 _FEMININE_MARKERS_RE = re.compile(
     r"(?:"
-    r"تفضلين|تفضلي|أرسلي|ارسلي|اختاري|"
+    r"تفضلين|تفضلي|أرسلي|ارسلي|اختاري|كملي|أكملي|"
     r"عندكِ|تسلمين|أبشري|"
     r"كِ\b|لكِ\b|عليكِ\b|فيكِ\b"
     r")",
@@ -76,7 +82,7 @@ _FEMININE_MARKERS_RE = re.compile(
 )
 
 _MASCULINE_ADDRESS_RE = re.compile(
-    r"(?<!\w)(?:تفضل|أرسل|ارسل|اختر|أبشر|تسلم)(?!\w)",
+    r"(?<!\w)(?:تفضل|أرسل|ارسل|اختر|كمل|أكمل|أبشر|تسلم)(?!\w)",
     re.UNICODE | re.IGNORECASE,
 )
 
