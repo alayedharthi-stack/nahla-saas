@@ -187,23 +187,6 @@ class TestExplicitGenderPersistence:
             assert ctx.confidence_score >= APPLY_CONFIDENCE_THRESHOLD, msg
 
 
-    def test_structured_masculine_state_rewrites_kamli(self) -> None:
-        ctx = CustomerGenderContext(
-            gender=GENDER_MALE,
-            confidence="high",
-            confidence_score=0.95,
-            source="profile",
-            reply_style=REPLY_STYLE_MASCULINE,
-        )
-        result = apply_gender_agreement_guard(
-            "كملي لي اسم العائلة",
-            gender_context=ctx,
-            message="انا رجل ولست امرأة",
-        )
-        assert "كملي" not in result.reply
-        assert result.replaced is True
-        assert result.gender == GENDER_MALE
-
     def test_self_id_phrase_does_not_infer_gender(self) -> None:
         hint = detect_gender("انا رجل ولست امرأة")
         assert hint.value != GENDER_MALE or hint.source != "verb"

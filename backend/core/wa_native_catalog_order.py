@@ -541,8 +541,10 @@ def persist_structured_catalog_order_referent(
     never runs — the structured referent must still survive to the next turn.
 
     Transaction ownership: mutate + flush only. The webhook / caller
-    commits the shared session. This helper must not commit pending
-    conversation or webhook writes belonging to the caller.
+    owns both commit and roll back of the shared session. This helper
+    must not commit or roll back pending conversation or webhook writes
+    belonging to the caller. On mutate/flush failure the helper raises
+    so the transaction owner can roll back.
     """
     meta = dict(inbound_metadata or {})
     if meta.get("source_type") != "catalog_order" and not (
@@ -616,17 +618,7 @@ def persist_structured_catalog_order_referent(
             "[WA_NATIVE_ORDER] persist_only_referent_stamp_failed tenant=%s",
             tenant_id,
         )
-        rollback = getattr(db, "rollback", None)
-        if callable(rollback):
-            try:
-                rollback()
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — rollback best-effort after stamp failure
-                logger.debug(
-                    "[WA_NATIVE_ORDER] persist_only_referent_rollback_failed tenant=%s",
-                    tenant_id,
-                    exc_info=True,
-                )
-        return False
+        raise
 
 
 __all__ = [

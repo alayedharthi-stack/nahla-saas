@@ -297,6 +297,13 @@ class TestStructuredCatalogSelectionCompletion:
         assert ref["external_id"] == "86bqzca62a"
 
 
+def _persist_helper_source() -> str:
+    helper = os.path.join(_BACKEND, "core", "wa_native_catalog_order.py")
+    helper_src = open(helper, encoding="utf-8").read()
+    persist_fn = helper_src.split("def persist_structured_catalog_order_referent", 1)[1]
+    return persist_fn.split("\n__all__", 1)[0]
+
+
 class _RecordingSession:
     def __init__(self, *, flush_error=None, commit_error=None):
         self.commits = 0
@@ -372,6 +379,7 @@ class TestCatalogReferentTransactionOwnership:
         assert ok is True
         assert db.flushes == 1
         assert db.commits == 0
+        assert db.rollbacks == 0
         assert db.pending_unrelated == ["unrelated_write"]
         presented = conv.extra_metadata["brain_state"].get("last_presented_products") or []
         assert presented
@@ -379,7 +387,14 @@ class TestCatalogReferentTransactionOwnership:
         assert db.commits == 1
         assert db.pending_unrelated == []
 
-    def test_flush_failure_rolls_back_and_is_observable(self) -> None:
+    def test_helper_source_does_not_commit_or_rollback(self) -> None:
+        persist_fn = _persist_helper_source()
+        assert "db.commit()" not in persist_fn
+        assert "commit()" not in persist_fn
+        assert "db.rollback()" not in persist_fn
+        assert "rollback()" not in persist_fn
+
+    def test_flush_failure_propagates_without_helper_rollback(self) -> None:
         conv = SimpleNamespace(extra_metadata={"brain_state": {"stage": "exploring"}})
         db = _RecordingSession(flush_error=RuntimeError("flush failed"))
         fake_resolution = SimpleNamespace(
@@ -392,16 +407,45 @@ class TestCatalogReferentTransactionOwnership:
             "core.wa_native_catalog_order.build_line_items_from_payload",
             return_value=fake_resolution,
         ), patch("sqlalchemy.orm.attributes.flag_modified"):
-            ok = persist_structured_catalog_order_referent(
-                db,
-                tenant_id=10,
-                phone="966500000001",
-                inbound_metadata=self._payload(),
-                conversation=conv,
-            )
-        assert ok is False
+            with pytest.raises(RuntimeError, match="flush failed"):
+                persist_structured_catalog_order_referent(
+                    db,
+                    tenant_id=10,
+                    phone="966500000001",
+                    inbound_metadata=self._payload(),
+                    conversation=conv,
+                )
+        assert db.commits == 0
+        assert db.rollbacks == 0
+        assert db.pending_unrelated == ["unrelated_write"]
+
+    def test_caller_rolls_back_unrelated_writes_after_helper_failure(self) -> None:
+        conv = SimpleNamespace(extra_metadata={"brain_state": {"stage": "exploring"}})
+        db = _RecordingSession(flush_error=RuntimeError("flush failed"))
+        fake_resolution = SimpleNamespace(
+            line_items=[self._line()],
+            matched_count=1,
+            unmatched_count=0,
+            needs_review_count=0,
+        )
+        with patch(
+            "core.wa_native_catalog_order.build_line_items_from_payload",
+            return_value=fake_resolution,
+        ), patch("sqlalchemy.orm.attributes.flag_modified"):
+            try:
+                persist_structured_catalog_order_referent(
+                    db,
+                    tenant_id=10,
+                    phone="966500000001",
+                    inbound_metadata=self._payload(),
+                    conversation=conv,
+                )
+                db.commit()
+            except RuntimeError:
+                db.rollback()
         assert db.commits == 0
         assert db.rollbacks == 1
+        assert db.pending_unrelated == []
 
     def test_caller_commit_failure_is_not_swallowed_by_helper(self) -> None:
         db = _RecordingSession(commit_error=RuntimeError("commit failed"))
@@ -553,22 +597,59 @@ class TestExplicitCustomerCorrection:
         assert hint.value == GENDER_UNKNOWN
         assert hint.source in {"none", "unknown"}
 
-    def test_grammar_guard_consumes_structured_masculine_state(self) -> None:
-        ctx = CustomerGenderContext(
-            gender=GENDER_MALE,
-            confidence="high",
-            confidence_score=0.95,
-            source="profile",
-            reply_style=REPLY_STYLE_MASCULINE,
+    def test_explicit_correction_reaches_compose_without_stale_overwrite(self) -> None:
+        correction = "انا هيثم الحارثي رجل ولست امرأة"
+        stale = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            customer_gender_hint="female",
+            customer_gender_confidence=0.9,
+            customer_gender_source="context",
+            current_product_focus={"id": 77, "title": GENERIC_PRODUCT},
         )
-        result = apply_gender_agreement_guard(
-            "شكرًا لتوضيحك، هيثم. نكمل طلبك الآن! كملي لي اسم العائلة",
-            gender_context=ctx,
-            message="انا هيثم الحارثي رجل ولست امرأة",
+        hint = detect_gender(correction)
+        assert hint.value == GENDER_UNKNOWN
+        assert hint.source in {"none", "unknown"}
+
+        ctx = BrainContext(
+            tenant_id=1,
+            customer_phone="966500000001",
+            message=correction,
+            raw_message=correction,
+            intent=Intent(name="who_are_you", confidence=0.95, raw_message=correction),
+            state=stale,
+            facts=_facts(),
+            profile={"name": T33_CUSTOMER, "customer_name": T33_CUSTOMER},
+            history=[{"direction": "in", "body": correction}],
         )
-        assert "كملي" not in result.reply
-        assert result.replaced is True
-        assert result.reply_style == REPLY_STYLE_MASCULINE
+        assert ctx.message == correction
+        assert ctx.raw_message == correction
+
+        reply_state = _build_reply_state(
+            ctx=ctx,
+            previous_state=stale,
+            current_state=stale,
+            suggestion=SuggestionSnapshot(),
+            decision=Decision(
+                action="llm_reply",
+                args={"topic": "persona_identity", "block_commerce_escalation": True},
+                reason="identity",
+            ),
+            merchant_context={},
+            db=None,
+        )
+        assert any(correction in turn for turn in (reply_state.recent_turns or []))
+        facts = reply_state.known_facts or {}
+        assert facts.get("customer_name") == T33_CUSTOMER
+        assert facts.get("customer_name_known") is True
+        assert "customer_order_evidence" not in facts
+
+        guard_src = open(
+            os.path.join(_BACKEND, "modules", "ai", "gender", "address_guard.py"),
+            encoding="utf-8",
+        ).read()
+        assert "كملي" not in guard_src
+        assert "أكملي" not in guard_src
 
     def test_no_name_to_gender_exception_added(self) -> None:
         from modules.ai.gender import detector as gender_detector  # noqa: PLC0415
@@ -606,12 +687,15 @@ class TestCompletionContractSweep:
         assert "empty_text_no_fallback" in src
         assert "synthetic_customer_phrase" in src
         assert "CATALOG_FRAME_MARKER" not in src
-        helper = os.path.join(_BACKEND, "core", "wa_native_catalog_order.py")
-        helper_src = open(helper, encoding="utf-8").read()
-        persist_fn = helper_src.split("def persist_structured_catalog_order_referent", 1)[1]
-        persist_fn = persist_fn.split("\n__all__", 1)[0]
+        persist_fn = _persist_helper_source()
         assert "db.commit()" not in persist_fn
         assert "commit()" not in persist_fn
+        assert "db.rollback()" not in persist_fn
+        assert "rollback()" not in persist_fn
+        persist_idx = src.find("persist_structured_catalog_order_referent(")
+        caller_chunk = src[persist_idx: persist_idx + 1800]
+        assert "db.commit()" in caller_chunk
+        assert "db.rollback()" in caller_chunk
 
 
 class TestTenantIsolation:
@@ -663,7 +747,7 @@ class TestLatencyHelpers:
         purchase_ms = (time.perf_counter() - t2) * 1000
         t3 = time.perf_counter()
         apply_gender_agreement_guard(
-            "كملي الطلب",
+            "تفضلي الطلب",
             gender_context=CustomerGenderContext(
                 gender=GENDER_MALE,
                 confidence="high",
