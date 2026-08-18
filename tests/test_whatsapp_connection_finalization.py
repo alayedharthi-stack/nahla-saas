@@ -425,6 +425,7 @@ def _changed_files() -> set[str]:
         ["git", "diff", "--name-only", "HEAD"],
         ["git", "diff", "--cached", "--name-only"],
         ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "diff", "--name-only", "origin/main...HEAD"],
     ):
         proc = subprocess.run(
             args,

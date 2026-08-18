@@ -46,8 +46,8 @@ def finalize_successful_whatsapp_connection(
     try:
         from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
         stamp_whatsapp_ai_live_since_if_empty(conn)
-    except Exception:
-        logger.debug(
+    except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
+        logger.warning(
             "[WAFinalize] ai-live stamp skipped tenant=%s", tenant_id, exc_info=True,
         )
 
@@ -66,7 +66,7 @@ def finalize_successful_whatsapp_connection(
         )
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # noqa: silent-ok — rollback after failed persist must not hide the original error
             pass
         return False
 

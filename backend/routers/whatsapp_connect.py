@@ -568,7 +568,7 @@ def _reconcile_coexistence_status(
         except Exception as exc:  # noqa: BLE001
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — rollback after failed finalize must not hide the original error
                 pass
             logger.warning(
                 "[coexistence_reconcile] tenant=%s source=%s finalize FAILED: %s",
@@ -581,7 +581,7 @@ def _reconcile_coexistence_status(
             conn.connected_at = datetime.now(timezone.utc)
         try:
             stamp_whatsapp_ai_live_since_if_empty(conn)
-        except Exception:
+        except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
             pass
     logger.info(
         "[coexistence_reconcile] tenant=%s source=%s PROMOTED prev_status=%r prev_sending=%s "
@@ -1486,7 +1486,10 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
                 "meta_quality_rating": sync_state.get("quality_rating"),
                 "embedded_status_message": sync_state.get("message"),
             }
-            db.commit()
+            if str(conn.status or "") == "connected":
+                finalize_successful_whatsapp_connection(db, conn)
+            else:
+                db.commit()
             return {
                 "verified": bool(conn.sending_enabled),
                 "sending_enabled": conn.sending_enabled,
