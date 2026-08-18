@@ -95,6 +95,23 @@ def has_accepted_delivery_address(order_prep: Dict[str, Any]) -> bool:
     return False
 
 
+def sync_funnel_status_after_accepted_delivery(
+    order_prep: Dict[str, Any],
+) -> Optional[str]:
+    """Return the funnel marker after delivery is accepted.
+
+    ``order_status=awaiting_address`` is descriptive leftover once maps/short
+    code/pin evidence exists. Canonical missing-fields owns what to collect
+    next; this only clears the stale address funnel label.
+    """
+    if not has_accepted_delivery_address(order_prep):
+        return None
+    status = str(order_prep.get("order_status") or "").strip()
+    if status != "awaiting_address":
+        return None
+    return "awaiting_payment"
+
+
 def _has_cart_items(
     order_prep: Dict[str, Any],
     brain_state: Dict[str, Any],
@@ -242,6 +259,7 @@ __all__ = [
     "STATUS_PROCESSING",
     "compute_wa_missing_fields",
     "has_accepted_delivery_address",
+    "sync_funnel_status_after_accepted_delivery",
     "has_payment_submission",
     "is_payment_verified",
     "is_wa_automation_payment_eligible",

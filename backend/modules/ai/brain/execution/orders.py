@@ -545,6 +545,44 @@ class DraftOrderHandler:
         is_sa = _is_saudi_customer(ctx.customer_phone)
         missing = _missing_checkout_fields(prep, is_sa=is_sa)
         missing = _filter_missing_phone_if_known(missing, ctx.customer_phone)
+        try:
+            from core.wa_order_lifecycle import (  # noqa: PLC0415
+                sync_funnel_status_after_accepted_delivery,
+            )
+
+            refreshed = sync_funnel_status_after_accepted_delivery(prep.to_dict())
+            if refreshed:
+                prep.order_status = refreshed
+                try:
+                    ctx.state.order_prep = prep
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — in-memory prep write is best-effort
+                    pass
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — funnel refresh must not block checkout
+            logger.debug(
+                "[ORDER FLOW] funnel status refresh skipped tenant=%s",
+                ctx.tenant_id,
+                exc_info=True,
+            )
+        try:
+            from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+                apply_canonical_next_slot_to_decision,
+            )
+
+            apply_canonical_next_slot_to_decision(ctx, decision)
+            nxt = str(
+                getattr(decision, "next_slot", "")
+                or (decision.args or {}).get("next_slot")
+                or ""
+            ).strip()
+            if nxt and nxt != "none":
+                contract_missing = list((decision.args or {}).get("missing_fields") or [])
+                missing = [nxt] + [m for m in contract_missing if m != nxt]
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical slot overlay must not block checkout
+            logger.debug(
+                "[ORDER FLOW] canonical next_slot overlay skipped tenant=%s",
+                ctx.tenant_id,
+                exc_info=True,
+            )
         prep.missing_fields = missing
 
         # ── Verbose checkpoint: show exactly what's collected vs. missing ──────
@@ -601,6 +639,10 @@ class DraftOrderHandler:
                     "product": product_info,
                     "needs_collection": True,
                     "missing_fields": missing,
+                    "next_slot": str(
+                        getattr(decision, "next_slot", "")
+                        or (missing[0] if missing else "")
+                    ),
                     "question": _checkout_question(missing[0], is_sa=is_sa),
                     "is_first_ask": _is_first_ask,
                     "order_prep": _order_prep_export_dict(prep),

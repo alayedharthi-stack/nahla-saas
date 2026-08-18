@@ -373,10 +373,15 @@ def build_order_slot_instruction(
     product: Optional[Dict[str, Any]] = None,
     is_first_ask: bool = True,
     inbound_text: str = "",
+    next_missing_field: Optional[str] = None,
+    missing_fields: Optional[List[str]] = None,
 ) -> ReplyInstruction:
     facts: Dict[str, Any] = {
         "missing_slot": slot,
         "is_first_ask": is_first_ask,
+        "next_missing_field": next_missing_field or slot or "none",
+        "missing_fields": list(missing_fields or ([slot] if slot else [])),
+        "constrained_compose_decides_slot": False,
     }
     if product:
         facts["selected_product"] = product.get("title") or product.get("name")

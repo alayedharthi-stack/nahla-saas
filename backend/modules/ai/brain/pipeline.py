@@ -2378,6 +2378,19 @@ class MerchantBrain:
                 )
 
         try:
+            from .commerce.commerce_turn_contract import (  # noqa: PLC0415
+                apply_canonical_next_slot_to_decision,
+            )
+
+            decision = apply_canonical_next_slot_to_decision(ctx, decision)
+        except Exception as _nxt_slot_exc:  # noqa: BLE001  # noqa: silent-ok — next_slot stamp must not block decide
+            logger.debug(
+                "[COMMERCE_TURN_CONTRACT] next_slot stamp skipped tenant=%s err=%s",
+                tenant_id,
+                _nxt_slot_exc,
+            )
+
+        try:
             from .turn.shadow import complete_turn_shadow_telemetry  # noqa: PLC0415
 
             complete_turn_shadow_telemetry(
@@ -6854,6 +6867,40 @@ def _build_reply_state(
                 getattr(ctx, "tenant_id", None),
                 _cn2_exc,
             )
+
+    try:
+        from .commerce.commerce_turn_contract import canonical_checkout_next_slot  # noqa: PLC0415
+
+        _contract = getattr(ctx, "commerce_turn_contract", None)
+        if _contract is not None:
+            _checkout_facts = dict(known_facts.get("checkout_identity_shipping") or {})
+            _cf = dict(getattr(_contract, "known_facts", None) or {})
+            for _key in (
+                "next_missing_field",
+                "checkout_missing_fields",
+                "saved_address_complete",
+                "saved_address_available",
+                "location_link_persisted",
+                "checkout_location_evidence_known",
+                "saved_location_link",
+            ):
+                if _key in _cf and _cf.get(_key) not in (None, ""):
+                    _checkout_facts[_key] = _cf[_key]
+            _contract_goal = str(getattr(_contract, "next_goal", "") or "").strip()
+            if _contract_goal:
+                _checkout_facts["next_goal"] = _contract_goal
+            _missing, _nxt = canonical_checkout_next_slot(ctx)
+            _checkout_facts["missing_fields"] = list(_missing)
+            _checkout_facts["next_missing_field"] = _nxt
+            known_facts["checkout_identity_shipping"] = _checkout_facts
+            known_facts["next_missing_field"] = _nxt
+            known_facts["checkout_missing_fields"] = list(_missing)
+    except Exception as _ctc_facts_exc:  # noqa: BLE001  # noqa: silent-ok — contract overlay must not block compose
+        logger.debug(
+            "[CHECKOUT_COMPOSE_FACTS] contract overlay skipped tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            _ctc_facts_exc,
+        )
 
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 

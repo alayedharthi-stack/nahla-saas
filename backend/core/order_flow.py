@@ -1975,6 +1975,20 @@ def persist_checkout_location_outcome(
         )
         return False, "empty_patch"
     try:
+        from core.wa_order_lifecycle import (  # noqa: PLC0415
+            sync_funnel_status_after_accepted_delivery,
+        )
+
+        refreshed = sync_funnel_status_after_accepted_delivery(patch)
+        if refreshed:
+            patch["order_status"] = refreshed
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — funnel refresh must not block location persist
+        logger.debug(
+            "[ORDER_FLOW_STATE] funnel status refresh skipped tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+    try:
         ok = bool(
             apply_state_patch(
                 db,

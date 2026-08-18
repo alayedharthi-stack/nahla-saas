@@ -428,6 +428,27 @@ def attach_commerce_turn_contract(ctx: BrainContext, contract: CommerceTurnContr
         profile["commerce_turn_contract"] = contract.to_dict()
 
 
+def canonical_checkout_next_slot(ctx: BrainContext) -> tuple[List[str], str]:
+    """Return ``(missing_fields, next_missing_field)`` from the pre-decide contract.
+
+    Falls back to empty/none when no checkout contract is attached.
+    """
+    contract = getattr(ctx, "commerce_turn_contract", None)
+    if contract is None:
+        return [], "none"
+    missing = list(getattr(contract, "missing_fields", None) or [])
+    facts = dict(getattr(contract, "known_facts", None) or {})
+    nxt = str(facts.get("next_missing_field") or "").strip() or "none"
+    if nxt == "none":
+        try:
+            from modules.ai.order_flow_v2.missing_fields import next_missing_field  # noqa: PLC0415
+
+            nxt = next_missing_field(missing) or "none"
+        except Exception:  # noqa: BLE001
+            nxt = "none"
+    return missing, nxt
+
+
 def _inbound_metadata(ctx: BrainContext) -> Dict[str, Any]:
     profile = getattr(ctx, "profile", None)
     if not isinstance(profile, dict):
@@ -785,6 +806,34 @@ def build_commerce_turn_contract(
                 prep_d = asdict(order_prep_obj)
             elif isinstance(order_prep_obj, dict):
                 prep_d = dict(order_prep_obj)
+        try:
+            from modules.ai.order_flow_v2.missing_fields import (  # noqa: PLC0415
+                compute_v2_missing_fields,
+            )
+
+            brain_state: Dict[str, Any] = {}
+            if state is not None:
+                focus = getattr(state, "current_product_focus", None)
+                if isinstance(focus, dict) and focus:
+                    brain_state["current_product_focus"] = focus
+            v2_missing = compute_v2_missing_fields(
+                prep_d,
+                brain_state=brain_state or None,
+                whatsapp_phone=phone or None,
+                db=db,
+                tenant_id=int(getattr(ctx, "tenant_id", 0) or 0) or None,
+                inbound_metadata=meta,
+            )
+            missing_fields = _filter_phone_from_missing(
+                list(v2_missing),
+                phone_known=phone_known,
+            )
+            reasons.append("canonical_v2_missing_fields_owner")
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[COMMERCE_TURN_CONTRACT] canonical missing-fields owner failed tenant=%s",
+                getattr(ctx, "tenant_id", None),
+            )
         customer_row = None
         if order_context is not None and getattr(order_context, "customer_id", None) and db is not None:
             try:
@@ -828,6 +877,7 @@ def build_commerce_turn_contract(
         try:
             from core.order_context_prefill import (  # noqa: PLC0415
                 apply_saved_address_to_checkout_contract,
+                checkout_location_evidence_known,
             )
 
             goal_before = next_goal
@@ -838,9 +888,31 @@ def build_commerce_turn_contract(
                 order_prep=prep_d,
             )
             known_facts["next_goal_before_hydration"] = goal_before
-            if _address_collect_goal_is_stale(next_goal, missing_fields):
-                if known_facts.get("saved_address_complete") and not prep_d.get(
-                    "customer_confirmed_previous_address"
+            from modules.ai.order_flow_v2.missing_fields import (  # noqa: PLC0415
+                next_missing_field,
+            )
+
+            location_known = checkout_location_evidence_known(prep_d)
+            known_facts["checkout_location_evidence_known"] = location_known
+            known_facts["next_missing_field"] = next_missing_field(missing_fields) or "none"
+            if location_known and (
+                next_goal in _ADDRESS_COLLECT_GOALS
+                or next_goal == "confirm_known_address"
+                or next_goal in {
+                    "continue_checkout",
+                    "collect_next_whatsapp_order_field",
+                }
+            ):
+                next_goal = _derive_active_checkout_next_goal(
+                    str(getattr(ctx, "message", "") or ""),
+                    missing_fields,
+                )
+                reasons.append("accepted_location_outranks_stale_address_goal")
+            elif _address_collect_goal_is_stale(next_goal, missing_fields):
+                if (
+                    known_facts.get("saved_address_complete")
+                    and not prep_d.get("customer_confirmed_previous_address")
+                    and not location_known
                 ):
                     next_goal = "confirm_known_address"
                 else:
@@ -851,6 +923,7 @@ def build_commerce_turn_contract(
                 reasons.append("saved_address_next_goal_refreshed_after_hydration")
             known_facts["next_goal_after_hydration"] = next_goal
             known_facts["checkout_missing_fields"] = list(missing_fields)
+            known_facts["next_missing_field"] = next_missing_field(missing_fields) or "none"
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[COMMERCE_TURN_CONTRACT] saved address apply failed tenant=%s",
@@ -1034,7 +1107,7 @@ def maybe_enforce_commerce_turn_contract_decision(
                 enforced.action,
                 contract.next_goal,
             )
-        return enforced
+        return apply_canonical_next_slot_to_decision(ctx, enforced)
 
     if raw_action not in _CATALOG_ORDER_OVERRIDE_ACTIONS:
         return decision
@@ -1062,7 +1135,33 @@ def maybe_enforce_commerce_turn_contract_decision(
         catalog_decision.action,
         contract.next_goal,
     )
-    return catalog_decision
+    return apply_canonical_next_slot_to_decision(ctx, catalog_decision)
+
+
+def apply_canonical_next_slot_to_decision(
+    ctx: BrainContext,
+    decision: Decision,
+) -> Decision:
+    """Stamp ``decision.next_slot`` from the pre-decide checkout contract.
+
+    Compose must not choose the slot. ``confirm_known_address`` stays a
+    confirm path, not a recollection slot.
+    """
+    if str(getattr(decision, "action", "") or "") != ACTION_PROPOSE_DRAFT_ORDER:
+        return decision
+    contract = getattr(ctx, "commerce_turn_contract", None)
+    next_goal = str(getattr(contract, "next_goal", "") or "") if contract is not None else ""
+    if next_goal == "confirm_known_address":
+        return decision
+    missing, nxt = canonical_checkout_next_slot(ctx)
+    if not nxt or nxt == "none":
+        return decision
+    decision.next_slot = nxt
+    args = dict(getattr(decision, "args", None) or {})
+    args["next_slot"] = nxt
+    args["missing_fields"] = list(missing)
+    decision.args = args
+    return decision
 
 
 def is_address_on_file_claim(message: str) -> bool:
@@ -1082,6 +1181,8 @@ __all__ = [
     "CommerceTurnContract",
     "attach_commerce_turn_contract",
     "build_commerce_turn_contract",
+    "canonical_checkout_next_slot",
+    "apply_canonical_next_slot_to_decision",
     "decision_owned_by_existing_order_support",
     "is_address_on_file_claim",
     "is_placed_order_statement",

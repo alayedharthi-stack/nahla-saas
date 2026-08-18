@@ -1117,6 +1117,7 @@ class Decision:
     args: Dict[str, Any] = field(default_factory=dict)
     reason: str = ""    # human-readable explainability string
     confidence: float = 1.0
+    next_slot: Optional[str] = None
 
 
 @dataclass

@@ -1136,13 +1136,21 @@ class DefaultComposer:
                     )
 
                     _missing = list(data.get("missing_fields") or [])
-                    _slot = str(_missing[0] if _missing else "")
+                    _slot = str(
+                        data.get("next_slot")
+                        or getattr(decision, "next_slot", None)
+                        or ((decision.args or {}).get("next_slot") if decision is not None else "")
+                        or (_missing[0] if _missing else "")
+                        or ""
+                    )
                     _instr = build_order_slot_instruction(
                         slot=_slot,
                         legacy_copy=legacy_reply,
                         product=data.get("product", {}),
                         is_first_ask=bool(data.get("is_first_ask", True)),
                         inbound_text=(ctx.message or ""),
+                        next_missing_field=_slot or "none",
+                        missing_fields=_missing,
                     )
                     _hist: list = []
                     for _row in (ctx.history or [])[-6:]:
