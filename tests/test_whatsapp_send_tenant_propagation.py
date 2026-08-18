@@ -378,3 +378,58 @@ class TestAutoRegisterSelfHeal:
         finally:
             db.close()
             engine.dispose()
+
+    def test_coexistence_graph_100_33_never_calls_register(self, monkeypatch) -> None:
+        wh._AUTO_REREGISTERED_PHONE_IDS.clear()
+        db, engine = _make_db()
+        try:
+            _seed_tenant(db, tenant_id=11)
+            conn = _seed_wa_conn(
+                db,
+                tenant_id=11,
+                phone_number_id="PHONE-COEX",
+                connection_type="embedded",
+            )
+            conn.provider = "meta"
+            conn.extra_metadata = {"connection_mode": "coexistence"}
+            db.commit()
+
+            ctx = _CapturingCtx(source="merchant_oauth", token="T-COEX-SECRET")
+            attempts = {"n": 0}
+
+            async def fake_provider(db, conn, *, tenant_id, operation,
+                                    phone_id, payload, prefer_platform=False,
+                                    timeout=15, **_kw):
+                attempts["n"] += 1
+                return ({
+                    "error": {
+                        "message": "Unsupported post request",
+                        "type": "GraphMethodException",
+                        "code": 100,
+                        "error_subcode": 33,
+                    },
+                }, ctx)
+
+            monkeypatch.setattr(wh, "provider_send_message", fake_provider)
+            import observability.rate_limiter as rl  # noqa: PLC0415
+            monkeypatch.setattr(rl, "check_rate_limit", lambda *_a, **_kw: True)
+
+            register_calls: list[tuple] = []
+
+            def fake_register(phone_id, token, tenant_id):
+                register_calls.append((phone_id, token, tenant_id))
+                return True, None
+
+            import services.whatsapp_connection_service as wa_svc  # noqa: PLC0415
+            monkeypatch.setattr(wa_svc, "register_phone_number", fake_register)
+
+            _run(wh._send_whatsapp_message(
+                phone_id="PHONE-COEX", to="966555000000", text="hi",
+                _tenant_id=11, _db=db,
+            ))
+
+            assert register_calls == []
+            assert attempts["n"] == 1
+        finally:
+            db.close()
+            engine.dispose()

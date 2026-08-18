@@ -75,7 +75,7 @@ def assert_phone_id_not_claimed(
         .filter(
             WhatsAppConnection.phone_number_id == phone_number_id,
             WhatsAppConnection.tenant_id != claiming_tenant_id,
-            WhatsAppConnection.status == "connected",
+            WhatsAppConnection.status.in_(("connected", "configuring", "authorizing")),
         )
         .first()
     )
@@ -120,7 +120,7 @@ def assert_waba_id_not_claimed(
         .filter(
             WhatsAppConnection.whatsapp_business_account_id == waba_id,
             WhatsAppConnection.tenant_id != claiming_tenant_id,
-            WhatsAppConnection.status == "connected",
+            WhatsAppConnection.status.in_(("connected", "configuring", "authorizing")),
         )
         .first()
     )

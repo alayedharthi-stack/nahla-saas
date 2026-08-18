@@ -262,10 +262,6 @@ def summarize_headers(
         summary["auth_header_tail"] = _mask_token_tail(lowered["d360-api-key"])
     elif "authorization" in lowered:
         summary["auth_header_name"] = "Authorization"
-        raw = lowered["authorization"] or ""
-        # Strip "Bearer " prefix so the masked tail compares with
-        # what's stored on the connection row.
-        token_part = raw.split(" ", 1)[-1] if raw else ""
-        summary["auth_header_tail"] = _mask_token_tail(token_part)
+        summary["auth_header_tail"] = None
     summary["content_type"] = lowered.get("content-type")
     return summary

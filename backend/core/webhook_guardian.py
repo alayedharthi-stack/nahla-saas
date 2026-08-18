@@ -96,9 +96,15 @@ async def _scan_all_connections() -> None:
         return
 
     try:
+        from sqlalchemy import or_  # noqa: PLC0415
         connections: List[WhatsAppConnection] = (
             db.query(WhatsAppConnection)
-            .filter(WhatsAppConnection.status == "connected")
+            .filter(
+                or_(
+                    WhatsAppConnection.status == "connected",
+                    WhatsAppConnection.status.in_(("configuring", "authorizing")),
+                )
+            )
             .all()
         )
 
@@ -142,6 +148,36 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
     tenant_id = conn.tenant_id
     phone_id  = conn.phone_number_id or "?"
     waba_id   = conn.whatsapp_business_account_id
+
+    try:
+        from services.meta_coexistence import (  # noqa: PLC0415
+            apply_smb_sync_results,
+            initiate_smb_app_data,
+            is_coexistence_mode,
+            maybe_fail_sync_deadline,
+            missing_smb_syncs,
+            smb_syncs_accepted,
+        )
+        from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
+        if is_coexistence_mode(conn):
+            if maybe_fail_sync_deadline(conn, now):
+                db.commit()
+                return "critical"
+            meta = dict(getattr(conn, "extra_metadata", None) or {})
+            missing = missing_smb_syncs(meta)
+            token = read_access_token(conn)
+            if missing and token and conn.phone_number_id and str(conn.status or "") == "configuring":
+                results = initiate_smb_app_data(
+                    conn.phone_number_id, token, tenant_id, sync_types=missing,
+                )
+                apply_smb_sync_results(conn, results)
+                if smb_syncs_accepted(dict(conn.extra_metadata or {})) and conn.webhook_verified:
+                    conn.status = "connected"
+                    conn.sending_enabled = True
+                    conn.last_error = None
+                db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Guardian] coexistence sync retry failed tenant=%s: %s", tenant_id, exc)
 
     # ── Rule 1: CRITICAL — webhook_verified=false while status=connected ──────
     if not conn.webhook_verified and conn.status == "connected":
@@ -288,10 +324,14 @@ async def _check_all_merchant_wabas() -> None:
         return
 
     try:
+        from sqlalchemy import or_  # noqa: PLC0415
         conns: List[WhatsAppConnection] = (
             db.query(WhatsAppConnection)
             .filter(
-                WhatsAppConnection.status == "connected",
+                or_(
+                    WhatsAppConnection.status == "connected",
+                    WhatsAppConnection.status.in_(("configuring", "authorizing")),
+                ),
                 WhatsAppConnection.access_token.isnot(None),
                 WhatsAppConnection.whatsapp_business_account_id.isnot(None),
             )
@@ -363,6 +403,7 @@ async def _check_all_merchant_wabas() -> None:
                     connection_type=getattr(conn, "connection_type", None),
                     token_source=token_ctx.source,
                     tenant_id=conn.tenant_id,
+                    extra_metadata=dict(getattr(conn, "extra_metadata", None) or {}),
                 )
                 if subscribed:
                     if not conn.webhook_verified:
@@ -384,6 +425,7 @@ async def _check_all_merchant_wabas() -> None:
                     connection_type=getattr(conn, "connection_type", None),
                     token_source=token_ctx.source,
                     tenant_id=conn.tenant_id,
+                    extra_metadata=dict(getattr(conn, "extra_metadata", None) or {}),
                 )
                 success = result.success
                 _guardian_log(
@@ -443,6 +485,7 @@ async def _check_subscribed(
     connection_type: Optional[str] = None,
     token_source: Optional[str] = None,
     tenant_id: Optional[int] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     GET /{target_id}/subscribed_apps using the connection's correct target order
@@ -466,11 +509,30 @@ async def _check_subscribed(
             if resp.status_code == 200:
                 data = resp.json()
                 apps: List[Dict[str, Any]] = data.get("data", [])
-                subscribed = (
-                    bool(apps)
-                    if not app_id
-                    else any(str(a.get("id") or a.get("app_id", "")) == app_id for a in apps)
-                )
+                required = _subscribed_fields_for(connection_type, extra_metadata)
+                default_fields = ["messages", "messaging_postbacks", "message_echoes"]
+                coexistence_fields = required != default_fields
+                if coexistence_fields and not app_id:
+                    subscribed = False
+                else:
+                    def _app_identity(app: Dict[str, Any]) -> set[str]:
+                        nested = app.get("whatsapp_business_api_data")
+                        ids = {
+                            str(app.get("id") or ""),
+                            str(app.get("app_id") or ""),
+                        }
+                        if isinstance(nested, dict):
+                            ids.add(str(nested.get("id") or ""))
+                        return {item for item in ids if item}
+
+                    matched_apps = (
+                        apps
+                        if not app_id
+                        else [app for app in apps if app_id in _app_identity(app)]
+                    )
+                    subscribed = bool(matched_apps)
+                    if subscribed and coexistence_fields:
+                        subscribed = _subscription_covers_required_fields(matched_apps, required)
                 logger.info(
                     "[Guardian] subscribed_apps check tenant=%s subscribe_target=%s "
                     "connection_type=%s token_source=%s waba_id=%s subscribed=%s "
@@ -555,6 +617,7 @@ async def _subscribe_phone(
     connection_type: Optional[str] = None,
     token_source: Optional[str] = None,
     tenant_id: Optional[int] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> SubscriptionAttemptResult:
     """
     POST /{target_id}/subscribed_apps using the connection's correct target order.
@@ -582,7 +645,7 @@ async def _subscribe_phone(
                 resp = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
-                    json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+                    json={"subscribed_fields": _subscribed_fields_for(connection_type, extra_metadata)},
                 )
             data = resp.json()
             success = resp.status_code == 200 and bool(data.get("success"))
@@ -747,7 +810,57 @@ async def _resubscribe(db, conn) -> SubscriptionAttemptResult:
         connection_type=getattr(conn, "connection_type", None),
         token_source=token_ctx.source,
         tenant_id=conn.tenant_id,
+        extra_metadata=dict(getattr(conn, "extra_metadata", None) or {}),
     )
+
+
+def _subscribed_fields_for(
+    connection_type: Optional[str] = None,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    mode = str((extra_metadata or {}).get("connection_mode") or "").strip().lower()
+    if mode == "coexistence" and _normalize_connection_type(connection_type) == "embedded":
+        from services.meta_coexistence import coexistence_webhook_fields  # noqa: PLC0415
+        return coexistence_webhook_fields()
+    return ["messages", "messaging_postbacks", "message_echoes"]
+
+
+def _extract_subscribed_fields(app: Dict[str, Any]) -> Optional[List[str]]:
+    if not isinstance(app, dict):
+        return None
+    nested = app.get("whatsapp_business_api_data")
+    payload = nested if isinstance(nested, dict) else app
+    raw = payload.get("subscribed_fields")
+    if raw is None and payload is not app:
+        raw = app.get("subscribed_fields")
+    if not isinstance(raw, list):
+        return None
+    return [str(item) for item in raw]
+
+
+def _subscription_covers_required_fields(
+    apps: List[Dict[str, Any]],
+    required_fields: List[str],
+) -> bool:
+    """True when at least one app lists every required field.
+
+    If Graph omits ``subscribed_fields`` entirely, return True so the
+    Guardian does not flap-resubscribe. Incomplete listed fields fail.
+    """
+    if not required_fields:
+        return True
+    saw_fields = False
+    for app in apps or []:
+        listed = _extract_subscribed_fields(app)
+        if listed is None:
+            continue
+        saw_fields = True
+        have = set(listed)
+        if all(field in have for field in required_fields):
+            return True
+    if not saw_fields:
+        return True
+    return False
 
 
 def _normalize_connection_type(connection_type: Optional[str]) -> str:

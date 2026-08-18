@@ -19,6 +19,8 @@ from core.webhook_guardian import (  # noqa: E402
     SubscriptionAttemptResult,
     _classify_connection_health,
     _inspect_connection,
+    _subscribed_fields_for,
+    _subscription_covers_required_fields,
     _subscription_targets,
 )
 
@@ -109,3 +111,101 @@ def test_inspect_connection_recovers_after_successful_resubscribe():
 
         health = asyncio.run(_run_inspect_critical())
         assert health == "active"
+
+
+def test_embedded_coexistence_subscribes_expanded_fields():
+    fields = _subscribed_fields_for("embedded", {"connection_mode": "coexistence"})
+    assert "history" in fields
+    assert "smb_app_state_sync" in fields
+    assert "smb_message_echoes" in fields
+    assert "account_update" in fields
+    assert _subscribed_fields_for("embedded", {}) == [
+        "messages",
+        "messaging_postbacks",
+        "message_echoes",
+    ]
+
+
+def test_inspect_fails_expired_coexistence_smb_deadline():
+    import asyncio
+
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(hours=25)).isoformat()
+    conn = _conn(
+        status="configuring",
+        sending_enabled=False,
+        webhook_verified=True,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "smb_sync_deadline_at": past,
+            "smb_sync": {},
+        },
+    )
+    db = SimpleNamespace(commit=lambda: None)
+    health = asyncio.run(_inspect_connection(db, conn, now, now - timedelta(minutes=15)))
+    assert health == "critical"
+    assert conn.status == "failed"
+    assert conn.sending_enabled is False
+
+
+def test_inspect_retries_missing_smb_app_data_until_connected():
+    import asyncio
+
+    now = datetime.now(timezone.utc)
+    future = (now + timedelta(hours=12)).isoformat()
+    conn = _conn(
+        status="configuring",
+        sending_enabled=False,
+        webhook_verified=True,
+        last_webhook_received_at=now,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "smb_sync_deadline_at": future,
+            "smb_sync": {},
+        },
+    )
+    db = SimpleNamespace(commit=lambda: None)
+    results = {
+        "smb_app_state_sync": {"accepted": True, "request_id": "a"},
+        "history": {"accepted": True, "request_id": "b"},
+    }
+    with patch(
+        "services.whatsapp_platform.wa_connection_secrets.read_access_token",
+        return_value="tok",
+    ), patch(
+        "services.meta_coexistence.initiate_smb_app_data",
+        return_value=results,
+    ) as mock_sync:
+        health = asyncio.run(_inspect_connection(db, conn, now, now - timedelta(minutes=15)))
+    assert mock_sync.called
+    assert conn.status == "connected"
+    assert conn.sending_enabled is True
+    assert health == "active"
+
+
+def test_guardian_requires_all_coexistence_webhook_fields_when_listed():
+    required = _subscribed_fields_for("embedded", {"connection_mode": "coexistence"})
+    complete = [{
+        "id": "app",
+        "subscribed_fields": required,
+    }]
+    missing_history = [{
+        "id": "app",
+        "subscribed_fields": [f for f in required if f != "history"],
+    }]
+    omitted = [{"id": "app"}]
+    ours_missing_history = [{
+        "id": "ours",
+        "subscribed_fields": [f for f in required if f != "history"],
+    }]
+    other_complete = [{
+        "id": "other-app",
+        "subscribed_fields": required,
+    }]
+    assert _subscription_covers_required_fields(complete, required) is True
+    assert _subscription_covers_required_fields(missing_history, required) is False
+    assert _subscription_covers_required_fields(omitted, required) is True
+    assert _subscription_covers_required_fields(ours_missing_history, required) is False
+    # Mixing a foreign complete app must not be used by Guardian; it filters first.
+    assert _subscription_covers_required_fields(ours_missing_history, required) is False
+    assert _subscription_covers_required_fields(other_complete, required) is True

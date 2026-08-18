@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import anthropic
@@ -1038,9 +1038,27 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
     # untraced — they go through the campaign delivery audit path.
     from core.inbound_lifecycle import inbound_lifecycle_trace  # noqa: PLC0415
     for entry in body.get("entry", []):
+        waba_entry_id = str(entry.get("id") or "")
         for change in entry.get("changes", []):
-            value = change.get("value", {})
-            phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+            field = str(change.get("field") or "")
+            value = change.get("value", {}) or {}
+            phone_number_id = (value.get("metadata") or {}).get("phone_number_id", "")
+
+            if field in {"smb_message_echoes", "history", "smb_app_state_sync", "account_update"}:
+                try:
+                    await _handle_meta_coexistence_change(
+                        field=field,
+                        value=value,
+                        phone_number_id=str(phone_number_id or ""),
+                        waba_id=waba_entry_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[webhook/meta] coexistence field=%s failed phone_id=%s",
+                        field, phone_number_id,
+                    )
+                continue
+
             for msg in value.get("messages", []):
                 with inbound_lifecycle_trace(
                     provider="meta",
@@ -1050,6 +1068,180 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
                     await _dispatch_message(phone_number_id, msg, value)
             for status in value.get("statuses", []):
                 await _handle_message_status(status)
+
+
+async def _handle_meta_coexistence_change(
+    *,
+    field: str,
+    value: Dict[str, Any],
+    phone_number_id: str,
+    waba_id: str,
+) -> None:
+    db = next(get_db(), None)
+    if not db:
+        return
+    try:
+        wa_conn = None
+        if phone_number_id:
+            wa_conn = (
+                db.query(WhatsAppConnection)
+                .filter(WhatsAppConnection.phone_number_id == str(phone_number_id))
+                .first()
+            )
+        if wa_conn is None and waba_id:
+            wa_conn = (
+                db.query(WhatsAppConnection)
+                .filter(WhatsAppConnection.whatsapp_business_account_id == str(waba_id))
+                .first()
+            )
+        if wa_conn is None:
+            logger.info(
+                "[webhook/meta] coexistence field=%s dropped — unknown phone_id=%s waba=%s",
+                field, phone_number_id, waba_id,
+            )
+            return
+
+        provider = str(getattr(wa_conn, "provider", "") or "").strip().lower()
+        ctype = str(getattr(wa_conn, "connection_type", "") or "").strip().lower()
+        if provider != "meta" or ctype != "embedded":
+            logger.info(
+                "[webhook/meta] coexistence field=%s dropped — not Meta embedded tenant=%s provider=%s type=%s",
+                field, wa_conn.tenant_id, provider, ctype,
+            )
+            return
+
+        from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+        if field in {"history", "smb_app_state_sync", "smb_message_echoes", "account_update"} and not is_coexistence_mode(wa_conn):
+            logger.info(
+                "[webhook/meta] coexistence field=%s dropped — not Meta coexistence tenant=%s",
+                field, wa_conn.tenant_id,
+            )
+            return
+
+        if field == "smb_message_echoes":
+            # Reuse 360dialog echo ingest; stamp provider from the connection.
+            await _ingest_smb_message_echoes(db, wa_conn, value)
+            db.commit()
+            return
+
+        if field == "history":
+            _ingest_coexistence_history(db, wa_conn, value)
+            db.commit()
+            return
+
+        if field == "smb_app_state_sync":
+            contacts = value.get("state_sync") or []
+            meta = dict(getattr(wa_conn, "extra_metadata", None) or {})
+            meta["last_state_sync_at"] = datetime.now(timezone.utc).isoformat()
+            meta["last_state_sync_count"] = len(contacts) if isinstance(contacts, list) else 0
+            wa_conn.extra_metadata = meta
+            db.commit()
+            return
+
+        if field == "account_update":
+            event = str((value or {}).get("event") or "").strip().upper()
+            if event == "PARTNER_REMOVED":
+                wa_conn.status = "disconnected"
+                wa_conn.sending_enabled = False
+                wa_conn.last_error = "تم فصل حساب واتساب الأعمال من التطبيق."
+                meta = dict(getattr(wa_conn, "extra_metadata", None) or {})
+                meta["failure_code"] = "partner_removed"
+                meta["partner_removed_at"] = datetime.now(timezone.utc).isoformat()
+                wa_conn.extra_metadata = meta
+                db.commit()
+                logger.info(
+                    "[webhook/meta] PARTNER_REMOVED tenant=%s phone_id=%s",
+                    wa_conn.tenant_id, wa_conn.phone_number_id,
+                )
+            return
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _ingest_coexistence_history(db, wa_conn: WhatsAppConnection, value: Dict[str, Any]) -> None:
+    """Persist history webhooks without Brain / automation / order mutation."""
+    from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+    from services.meta_coexistence import merge_coexistence_metadata  # noqa: PLC0415
+
+    history = value.get("history") or []
+    if not isinstance(history, list):
+        return
+    for chunk in history:
+        errors = (chunk or {}).get("errors") or []
+        if errors:
+            codes = [err.get("code") for err in errors if isinstance(err, dict)]
+            merge_coexistence_metadata(
+                wa_conn,
+                history_share_declined=2593109 in codes,
+                history_share_errors=codes,
+            )
+            continue
+        threads = (chunk or {}).get("threads") or []
+        for thread in threads:
+            customer_phone = str((thread or {}).get("id") or "")
+            if not customer_phone:
+                continue
+            convo = _get_or_create_conversation(
+                db, wa_conn.tenant_id, customer_phone,
+                source="whatsapp_history_sync",
+            )
+            for msg in (thread or {}).get("messages") or []:
+                wamid = str(msg.get("id") or "")
+                if wamid:
+                    try:
+                        exists = (
+                            db.query(MessageEvent)
+                            .filter(
+                                MessageEvent.tenant_id == wa_conn.tenant_id,
+                                MessageEvent.event_type == "coexistence_history",
+                            )
+                            .order_by(MessageEvent.id.desc())
+                            .limit(50)
+                            .all()
+                        )
+                        if any(
+                            str((row.extra_metadata or {}).get("message_id") or "") == wamid
+                            for row in exists
+                        ):
+                            continue
+                    except Exception:
+                        pass
+                msg_type = str(msg.get("type") or "text")
+                body_text = ""
+                if msg_type == "text":
+                    body_text = str(((msg.get("text") or {}).get("body")) or "")
+                elif msg_type != "media_placeholder":
+                    body_text = str(((msg.get(msg_type) or {}).get("caption")) or "") or f"[{msg_type}]"
+                from_phone = str(msg.get("from") or "")
+                direction = "outbound" if from_phone and from_phone != customer_phone else "inbound"
+                db.add(MessageEvent(
+                    conversation_id=convo.id,
+                    tenant_id=wa_conn.tenant_id,
+                    direction=direction,
+                    body=body_text,
+                    event_type="coexistence_history",
+                    extra_metadata={
+                        "message_id": wamid,
+                        "source": "coexistence_history",
+                        "historical_only": True,
+                        "historical_import": True,
+                        "message_origin": "coexistence_history",
+                        "phone_number_id": wa_conn.phone_number_id,
+                    },
+                ))
+    merge_coexistence_metadata(
+        wa_conn,
+        last_history_sync_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _sanitize_status_webhook_errors(errors: Any) -> List[Dict[str, Any]]:
@@ -2762,7 +2954,7 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
         extra: Dict[str, Any] = {
             "customer_phone": to_phone,
             "phone": to_phone,
-            "provider": WHATSAPP_PROVIDER_360DIALOG,
+            "provider": getattr(wa_conn, "provider", None) or WHATSAPP_PROVIDER_360DIALOG,
             "phone_number_id": phone_number_id,
             "message_id": echo.get("id"),
             "source": "merchant_mobile_app",
@@ -14751,10 +14943,10 @@ async def _post_wa(
                 allow_manual=_allow_manual,
                 blocked_path=_blocked_path or "post_wa",
             )
-            token_tail = ctx.token[-6:] if ctx.token and len(ctx.token) >= 6 else "EMPTY"
+            token_source = ctx.source if ctx else None
             logger.info(
-                "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s token_tail=%s to=%s",
-                _tenant_id, _store_name, phone_id, ctx.source, token_tail, payload.get("to", "?"),
+                "[SEND_DEBUG] tenant_id=%s store=%s phone_number_id=%s token_source=%s to=%s",
+                _tenant_id, _store_name, phone_id, token_source, payload.get("to", "?"),
             )
             logger.info(
                 "[SEND_DEBUG] provider response | tenant=%s phone_number_id=%s provider_payload=%s",
@@ -14854,22 +15046,31 @@ async def _post_wa(
                     and ctx
                     and ctx.token
                 ):
-                    _AUTO_REREGISTERED_PHONE_IDS.add(phone_id)
-                    logger.warning(
-                        "[WA] auto-register attempt — tenant=%s phone_id=%s "
-                        "token_source=%s (response was code=100/subcode=33; "
-                        "phone likely not registered or token lacks WABA scope)",
-                        _tenant_id, phone_id, ctx.source,
-                    )
-                    try:
-                        from services.whatsapp_connection_service import (  # noqa: PLC0415
-                            register_phone_number,
+                    from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+                    if wa_conn is not None and is_coexistence_mode(wa_conn):
+                        logger.warning(
+                            "[WA] auto-register SKIPPED — Meta coexistence "
+                            "tenant=%s phone_id=%s",
+                            _tenant_id, phone_id,
                         )
-                        reg_ok, reg_err = register_phone_number(
-                            phone_id, ctx.token, _tenant_id or 0,
+                        reg_ok, reg_err = False, "coexistence_skip_register"
+                    else:
+                        _AUTO_REREGISTERED_PHONE_IDS.add(phone_id)
+                        logger.warning(
+                            "[WA] auto-register attempt — tenant=%s phone_id=%s "
+                            "token_source=%s (response was code=100/subcode=33; "
+                            "phone likely not registered or token lacks WABA scope)",
+                            _tenant_id, phone_id, ctx.source,
                         )
-                    except Exception as reg_exc:  # noqa: BLE001
-                        reg_ok, reg_err = False, str(reg_exc)
+                        try:
+                            from services.whatsapp_connection_service import (  # noqa: PLC0415
+                                register_phone_number,
+                            )
+                            reg_ok, reg_err = register_phone_number(
+                                phone_id, ctx.token, _tenant_id or 0,
+                            )
+                        except Exception as reg_exc:  # noqa: BLE001
+                            reg_ok, reg_err = False, str(reg_exc)
                     if reg_ok:
                         logger.info(
                             "[WA] auto-register OK — retrying send tenant=%s phone_id=%s",

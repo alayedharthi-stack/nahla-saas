@@ -133,6 +133,8 @@ def commit_connection(
     display_name: str = "",
     sending_enabled: bool = True,
     actor: str = "system",
+    skip_phone_register: bool = False,
+    subscribed_fields: Optional[list] = None,
 ) -> ConnectionResult:
     """
     THE single canonical write entry point for all final WhatsApp connection writes.
@@ -330,8 +332,17 @@ def commit_connection(
     # from "Pending" to "Active" on the Cloud API.  We run this only when the
     # phone_number_id is brand-new or just changed, so it is never called on
     # server restarts or credential-only refreshes.
+    from services.meta_coexistence import coexistence_webhook_fields, is_coexistence_mode  # noqa: PLC0415
+
     phone_is_new = (action == "created") or (old_phone_id != phone_number_id)
-    if phone_is_new:
+    skip_register = skip_phone_register or is_coexistence_mode(conn)
+    if skip_register:
+        result.phone_registered = True
+        logger.info(
+            "[WASvc] phone registration SKIPPED — coexistence tenant=%s phone=%s",
+            tenant_id, phone_number_id,
+        )
+    elif phone_is_new:
         reg_ok, reg_err = register_phone_number(phone_number_id, access_token, tenant_id)
         result.phone_registered         = reg_ok
         result.phone_registration_error = reg_err
@@ -347,8 +358,14 @@ def commit_connection(
     # Per Meta Cloud API docs: subscription happens on the PHONE_NUMBER_ID,
     # not the WABA_ID. The WABA endpoint returns "Unsupported post request"
     # for many tokens. We pass waba_id only as a defensive fallback.
+    if subscribed_fields is None and is_coexistence_mode(conn):
+        subscribed_fields = coexistence_webhook_fields()
     webhook_ok, webhook_err = subscribe_phone_webhook(
-        phone_number_id, access_token, tenant_id, waba_id=waba_id,
+        phone_number_id,
+        access_token,
+        tenant_id,
+        waba_id=waba_id,
+        subscribed_fields=subscribed_fields,
     )
     result.webhook_subscribed = webhook_ok
     result.webhook_error      = webhook_err
@@ -704,6 +721,7 @@ def subscribe_phone_webhook(
     tenant_id: int,
     *,
     waba_id: Optional[str] = None,
+    subscribed_fields: Optional[list] = None,
 ) -> tuple[bool, Optional[str]]:
     """
     Subscribe Nahla's Meta app to receive webhooks for a specific WhatsApp
@@ -734,6 +752,9 @@ def subscribe_phone_webhook(
         target_id = phone_number_id or waba_id
         target_kind = "phone" if phone_number_id else "waba"
 
+        fields = list(subscribed_fields) if subscribed_fields else [
+            "messages", "messaging_postbacks", "message_echoes",
+        ]
         url = (
             f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
             f"/{target_id}/subscribed_apps"
@@ -741,7 +762,7 @@ def subscribe_phone_webhook(
         resp = httpx.post(
             url,
             params={"access_token": access_token},
-            json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+            json={"subscribed_fields": fields},
             timeout=10,
         )
         data = resp.json()
@@ -777,7 +798,7 @@ def subscribe_phone_webhook(
             fb_resp = httpx.post(
                 fallback_url,
                 params={"access_token": access_token},
-                json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
+                json={"subscribed_fields": fields},
                 timeout=10,
             )
             fb_data = fb_resp.json()

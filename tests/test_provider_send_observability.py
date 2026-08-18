@@ -198,15 +198,13 @@ class TestSummarizeHeaders:
         assert "secret_tail" not in summary["auth_header_tail"]
         assert summary["token_source"] == "merchant_oauth"
 
-    def test_meta_bearer_strips_prefix_and_masks_tail(self):
+    def test_meta_bearer_does_not_retain_access_token_tail(self):
         from core.wa_provider_observability import summarize_headers
         summary = summarize_headers(
             {"Authorization": "Bearer EAAJ_secret_XYZW", "Content-Type": "application/json"},
         )
         assert summary["auth_header_name"] == "Authorization"
-        # Tail extracted from the token part, not the "Bearer " prefix.
-        assert summary["auth_header_tail"].endswith("XYZW")
-        assert "Bearer" not in (summary["auth_header_tail"] or "")
+        assert summary["auth_header_tail"] is None
 
 
 # ── services.whatsapp_platform.service helpers ─────────────────────

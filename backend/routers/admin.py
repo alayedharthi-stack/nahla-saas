@@ -1475,15 +1475,13 @@ async def admin_whatsapp_set_token(
     audit(
         "admin.whatsapp.set_token",
         tenant_id=tenant_id,
-        from_token_tail=old_tail,
-        to_token_tail=new_tail,
         token_type=body.token_type,
         token_status=validation.token_status,
         production_ready=validation.production_ready,
     )
     logger.warning(
-        "[admin] WhatsApp token replaced tenant_id=%s old_tail=%s new_tail=%s type=%s status=%s prod_ready=%s",
-        tenant_id, old_tail, new_tail, body.token_type, validation.token_status, validation.production_ready,
+        "[admin] WhatsApp token replaced tenant_id=%s type=%s status=%s prod_ready=%s",
+        tenant_id, body.token_type, validation.token_status, validation.production_ready,
     )
     return {
         "status": "ok",
