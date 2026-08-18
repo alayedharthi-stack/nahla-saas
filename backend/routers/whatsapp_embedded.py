@@ -865,7 +865,7 @@ async def _finalize_coexistence_exchange(
         try:
             from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
             stamp_whatsapp_ai_live_since_if_empty(conn)
-        except Exception:
+        except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
             pass
         db.commit()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))

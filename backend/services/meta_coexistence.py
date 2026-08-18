@@ -202,7 +202,7 @@ def parse_deadline(meta: Dict[str, Any]) -> Optional[datetime]:
         return None
     try:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except Exception:
+    except Exception:  # noqa: silent-ok — malformed deadline must not fail onboarding
         return None
 
 
