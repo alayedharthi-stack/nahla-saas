@@ -145,6 +145,16 @@ def test_meta_oauth_07_state_binds_start_redirect_uri():
     assert parsed.redirect_uri == CANONICAL_SLASH
 
 
+def test_meta_oauth_bound_redirect_uri_reused_without_strip():
+    from routers.whatsapp_embedded import _sign_oauth_state, _verify_oauth_state
+
+    exact = "https://api.example.test/whatsapp/embedded/oauth/callback "
+    issued_at = int(datetime.now(timezone.utc).timestamp())
+    parsed = _verify_oauth_state(_sign_oauth_state(4, "n", issued_at, exact))
+    assert parsed.redirect_uri == exact
+    assert parsed.redirect_uri != exact.strip()
+
+
 def test_meta_oauth_08_tampered_state_cannot_supply_other_redirect():
     from routers.whatsapp_embedded import _sign_oauth_state, _verify_oauth_state
 

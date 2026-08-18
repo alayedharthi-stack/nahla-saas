@@ -1207,7 +1207,7 @@ def _verify_oauth_state(state: str) -> _OAuthState:
             raise ValueError("state payload is not an object")
         tenant_id = int(payload["t"])
         issued_at = int(payload["iat"])
-        redirect_uri = str(payload.get("ru") or "").strip()
+        redirect_uri = str(payload.get("ru") or "")
         if not redirect_uri:
             raise ValueError("state missing bound redirect_uri")
     except HTTPException:
