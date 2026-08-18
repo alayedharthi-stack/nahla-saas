@@ -384,9 +384,14 @@ class TestMetaFailureUsesHonestFallbackOnly:
         product = _Product(id=9, title="Rejected", meta_retailer_id="bad-rid")
         db = MagicMock()
         db.query.return_value.filter.return_value.all.return_value = [product]
-        cleared = invalidate_meta_catalog_publish_for_retailer_id(db, 7, "bad-rid")
+        with patch(
+            "core.native_catalog_capability.invalidate_meta_catalog_membership",
+            return_value=1,
+        ):
+            cleared = invalidate_meta_catalog_publish_for_retailer_id(
+                db, 7, "bad-rid", catalog_id="CAT-1",
+            )
         assert cleared == 1
-        assert product.meta_catalog_published_at is None
 
 
 class TestCheckoutRouteCatalogSendRequest:

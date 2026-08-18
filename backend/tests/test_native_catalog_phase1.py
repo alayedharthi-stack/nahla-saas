@@ -125,7 +125,14 @@ class TestNativeCatalogCapability:
             product,
         ]
         db.query.return_value.filter.return_value.limit.return_value.first.return_value = None
-        cap = evaluate_native_catalog_capability(db, 1, connection=_Conn())
+        with patch(
+            "core.native_catalog_capability.count_memberships_for_catalog",
+            return_value=1,
+        ), patch(
+            "core.native_catalog_capability.first_membership_retailer_id",
+            return_value="sku-a",
+        ):
+            cap = evaluate_native_catalog_capability(db, 1, connection=_Conn())
         assert cap.eligible is True
         assert cap.reason == "ok"
         assert cap.thumbnail_retailer_id == "sku-a"
@@ -184,7 +191,11 @@ class TestNativeCatalogCapability:
         variant_q.order_by.return_value.limit.return_value.all.return_value = [good_variant]
         db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = []
 
-        rid = pick_thumbnail_retailer_id(db, 1)
+        with patch(
+            "core.native_catalog_capability.first_membership_retailer_id",
+            return_value="real-rid-11",
+        ):
+            rid = pick_thumbnail_retailer_id(db, 1)
         assert rid == "real-rid-11"
 
 

@@ -20,6 +20,10 @@ for _p in (str(_BACKEND), str(_REPO)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from core.meta_catalog_membership import (  # noqa: E402
+    PROVENANCE_GRAPH_RECONCILE,
+    MetaCatalogMembershipFact,
+)
 from core.native_catalog_capability import (  # noqa: E402
     REASON_CATALOG_ID_MISMATCH,
     REASON_META_CATALOG_UNVERIFIED,
@@ -71,7 +75,28 @@ def _product(
         in_stock=True,
         catalog_status="active",
         meta_catalog_published_at=_PUBLISHED if published else None,
-        meta_membership_catalog_id=membership_catalog_id,
+        has_variants=False,
+        default_variant_id=None,
+    )
+
+
+def _membership(
+    *,
+    retailer_id: str = "meta-rid-101",
+    product_id: int = 101,
+    variant_id: int | None = None,
+    catalog_id: str = _CATALOG_A,
+    tenant_id: int = 7,
+) -> MetaCatalogMembershipFact:
+    return MetaCatalogMembershipFact(
+        tenant_id=tenant_id,
+        catalog_id=catalog_id,
+        retailer_id=retailer_id,
+        product_id=product_id,
+        variant_id=variant_id,
+        meta_item_id="mg-1",
+        verified_at=_PUBLISHED,
+        provenance=PROVENANCE_GRAPH_RECONCILE,
     )
 
 
@@ -104,20 +129,21 @@ class TestR2A01ExternalIdIsNotMembership:
 
 
 class TestR2A02VerifiedMappingIsEligible:
-    def test_published_stamp_plus_catalog_id_is_eligible(self):
+    def test_canonical_membership_is_eligible(self):
         product = _product(
             meta_retailer_id="meta-rid-101",
             published=True,
-            membership_catalog_id=_CATALOG_A,
         )
         cap = evaluate_native_catalog_product_capability(
             product,
             catalog_id=_CATALOG_A,
+            membership=_membership(),
+            tenant_id=7,
         )
         assert cap.available is True
         assert cap.retailer_id == "meta-rid-101"
         assert cap.mapping_status == "verified"
-        assert cap.provenance == "meta_catalog_published_at"
+        assert cap.provenance == PROVENANCE_GRAPH_RECONCILE
 
 
 class TestR2A03CatalogScopedMembership:
@@ -125,11 +151,12 @@ class TestR2A03CatalogScopedMembership:
         product = _product(
             meta_retailer_id="meta-rid-101",
             published=True,
-            membership_catalog_id=_CATALOG_A,
         )
         cap = evaluate_native_catalog_product_capability(
             product,
             catalog_id=_CATALOG_B,
+            membership=_membership(catalog_id=_CATALOG_A),
+            tenant_id=7,
         )
         assert cap.available is False
         assert cap.mapping_status == "catalog_mismatch"
@@ -199,6 +226,8 @@ class TestR2A07VariantUsesExactMapping:
             product,
             catalog_id=_CATALOG_A,
             variant={"id": 9, "retailer_id": "variant-rid-9"},
+            membership=_membership(retailer_id="variant-rid-9", variant_id=9),
+            tenant_id=7,
         )
         assert cap.available is True
         assert cap.retailer_id == "variant-rid-9"
@@ -314,13 +343,13 @@ class TestR2AOrchestratorVerifiedSend:
         product = _product(
             meta_retailer_id="meta-rid-101",
             published=True,
-            membership_catalog_id=_CATALOG_A,
         )
         d = evaluate_product_card_send(
             tenant_id=7,
             connection=_conn(),
             attachment=_attachment(),
             product_row=product,
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.retailer_id == "meta-rid-101"

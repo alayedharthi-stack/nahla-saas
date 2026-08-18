@@ -31,6 +31,10 @@ from core.catalog import (  # noqa: E402
     evaluate_tenant_catalog_send_readiness,
     whatsapp_commerce_diagnostics_readiness,
 )
+from core.meta_catalog_membership import (  # noqa: E402
+    PROVENANCE_GRAPH_RECONCILE,
+    MetaCatalogMembershipFact,
+)
 from services.catalog_product_orchestrator import (  # noqa: E402
     ProductCardSendAction,
     REASON_CATALOG_NOT_ELIGIBLE,
@@ -79,6 +83,26 @@ def _attachment(**kw):
 
 
 _PUBLISHED = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def _membership(
+    *,
+    retailer_id: str = "ext-10",
+    product_id: int = 10,
+    variant_id: int | None = None,
+    catalog_id: str = "CAT-1",
+    tenant_id: int = 1,
+) -> MetaCatalogMembershipFact:
+    return MetaCatalogMembershipFact(
+        tenant_id=tenant_id,
+        catalog_id=catalog_id,
+        retailer_id=retailer_id,
+        product_id=product_id,
+        variant_id=variant_id,
+        meta_item_id="mg-1",
+        verified_at=_PUBLISHED,
+        provenance=PROVENANCE_GRAPH_RECONCILE,
+    )
 
 
 @dataclass
@@ -142,6 +166,7 @@ class TestOrchestratorDecisions:
                     meta_catalog_published_at=_PUBLISHED,
                 )
             ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -180,6 +205,7 @@ class TestOrchestratorDecisions:
                     meta_catalog_published_at=_PUBLISHED,
                 )
             ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
 
@@ -248,6 +274,7 @@ class TestOrchestratorDecisions:
                     meta_catalog_published_at=_PUBLISHED,
                 )
             ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -469,6 +496,7 @@ class TestAttachmentImmutability:
                     meta_catalog_published_at=_PUBLISHED,
                 )
             ],
+            membership=_membership(),
         )
         assert att == snapshot
         assert catalog_send_retailer_id(d) == "ext-10"
@@ -495,6 +523,7 @@ class TestPhaseBWiringContract:
                     meta_catalog_published_at=_PUBLISHED,
                 )
             ],
+            membership=_membership(),
         )
         assert should_attempt_catalog_send(ok) is True
 

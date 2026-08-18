@@ -107,8 +107,11 @@ def test_reconcile_dry_run_does_not_write():
     db.query.side_effect = _query
 
     with patch(
-        "services.meta_catalog_reconcile.fetch_meta_catalog_retailer_ids",
-        return_value=({"in-meta"}, {"pages": 1, "items": 1}),
+        "services.meta_catalog_reconcile.fetch_meta_catalog_live_products",
+        return_value=(
+            {"in-meta": {"meta_product_id": "mg-1"}},
+            {"complete": True, "error": None, "pages": 1, "items": 1},
+        ),
     ):
         report = reconcile_meta_catalog_publish_stamps(db, 5, apply=False)
 
@@ -146,15 +149,21 @@ def test_reconcile_apply_stamps_only_meta_live_ids():
     db.query.side_effect = _query
 
     with patch(
-        "services.meta_catalog_reconcile.fetch_meta_catalog_retailer_ids",
-        return_value=({"live-1"}, {"pages": 1}),
+        "services.meta_catalog_reconcile.fetch_meta_catalog_live_products",
+        return_value=(
+            {"live-1": {"meta_product_id": "mg-live"}},
+            {"complete": True, "error": None, "pages": 1, "items": 1},
+        ),
+    ), patch(
+        "core.meta_catalog_membership.apply_membership_snapshot",
+        return_value={"upserted": 1, "removed": 1},
     ):
         report = reconcile_meta_catalog_publish_stamps(db, 8, apply=True)
 
-    assert report.applied_stamp_count == 1
-    assert report.applied_clear_count == 1
-    assert p_ok.meta_catalog_published_at is not None
-    assert p_bad.meta_catalog_published_at is None
+    assert report.snapshot_applied is True
+    assert report.memberships_upserted == 1
+    assert report.memberships_removed == 1
+    assert report.error is None
 
 
 def test_reconcile_apply_clears_stale_stamps():
@@ -182,13 +191,20 @@ def test_reconcile_apply_clears_stale_stamps():
     db.query.side_effect = _query
 
     with patch(
-        "services.meta_catalog_reconcile.fetch_meta_catalog_retailer_ids",
-        return_value=(set(), {"pages": 1}),
+        "services.meta_catalog_reconcile.fetch_meta_catalog_live_products",
+        return_value=(
+            {},
+            {"complete": True, "error": None, "pages": 1, "items": 0},
+        ),
+    ), patch(
+        "core.meta_catalog_membership.apply_membership_snapshot",
+        return_value={"upserted": 0, "removed": 1},
     ):
         report = reconcile_meta_catalog_publish_stamps(db, 4, apply=True)
 
-    assert report.applied_clear_count == 1
-    assert stale.meta_catalog_published_at is None
+    assert report.snapshot_applied is True
+    assert report.memberships_removed == 1
+    assert report.error is None
 
 
 def test_fetch_meta_catalog_retailer_ids_paginates():
@@ -244,7 +260,14 @@ def test_ghost_retailer_id_not_eligible_for_native_catalog():
         [products[1]],
         products,
     ]
-    cap = evaluate_native_catalog_capability(db, 7, connection=conn)
+    with patch(
+        "core.native_catalog_capability.count_memberships_for_catalog",
+        return_value=1,
+    ), patch(
+        "core.native_catalog_capability.first_membership_retailer_id",
+        return_value="verified-live",
+    ):
+        cap = evaluate_native_catalog_capability(db, 7, connection=conn)
     assert cap.eligible is True
     assert cap.thumbnail_retailer_id == "verified-live"
 
@@ -275,7 +298,14 @@ def test_native_catalog_true_with_one_verified_id():
         [verified],
         [verified],
     ]
-    cap = evaluate_native_catalog_capability(db, 7, connection=conn)
+    with patch(
+        "core.native_catalog_capability.count_memberships_for_catalog",
+        return_value=1,
+    ), patch(
+        "core.native_catalog_capability.first_membership_retailer_id",
+        return_value="live-ok",
+    ):
+        cap = evaluate_native_catalog_capability(db, 7, connection=conn)
     assert cap.eligible is True
     assert cap.thumbnail_retailer_id == "live-ok"
 
@@ -344,3 +374,27 @@ def test_reconcile_plan_is_platform_generic():
     assert len(local_missing) == 1
     assert local_missing[0].meta_retailer_id == "x2"
     assert meta_unstamped == [{"retailer_id": "x1"}]
+
+
+def test_incomplete_graph_fetch_does_not_apply_snapshot():
+    db = MagicMock()
+    conn = _Conn(tenant_id=6)
+
+    def _query(model):
+        q = MagicMock()
+        if model.__name__ == "WhatsAppConnection":
+            q.filter.return_value.first.return_value = conn
+        else:
+            q.filter.return_value.all.return_value = []
+            q.filter.return_value.order_by.return_value.all.return_value = []
+        return q
+
+    db.query.side_effect = _query
+    with patch(
+        "services.meta_catalog_reconcile.fetch_meta_catalog_live_products",
+        return_value=({"x": {"meta_product_id": "1"}}, {"complete": False, "error": "timeout", "pages": 1}),
+    ), patch("core.meta_catalog_membership.apply_membership_snapshot") as apply_mock:
+        report = reconcile_meta_catalog_publish_stamps(db, 6, apply=True)
+    assert report.snapshot_applied is False
+    assert report.error
+    apply_mock.assert_not_called()

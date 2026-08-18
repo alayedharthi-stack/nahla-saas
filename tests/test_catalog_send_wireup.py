@@ -150,6 +150,31 @@ def _seed_product(
     return p
 
 
+def _seed_membership(
+    db,
+    *,
+    tenant_id=77,
+    catalog_id="CAT-PROD-123",
+    retailer_id="ext-501",
+    product_id=501,
+    variant_id=None,
+):
+    from models import MetaCatalogMembership
+    row = MetaCatalogMembership(
+        tenant_id=tenant_id,
+        catalog_id=catalog_id,
+        retailer_id=retailer_id,
+        product_id=product_id,
+        variant_id=variant_id,
+        meta_item_id="mg-ext-501",
+        verified_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        provenance="meta_graph_reconcile",
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
 def _attachment(
     *,
     product_id=501,
@@ -310,6 +335,7 @@ class TestCatalogHappyPath:
             db, meta_catalog_id="CAT-PROD-123", catalog_enabled=True,
         )
         _seed_product(db, product_id=501, external_id="ext-501", published=True)
+        _seed_membership(db, retailer_id="ext-501", product_id=501)
 
         captured = {}
 
@@ -364,6 +390,7 @@ class TestRetailerIdOverride:
             meta_retailer_id="custom-retailer-9",
             published=True,
         )
+        _seed_membership(db, retailer_id="custom-retailer-9", product_id=501)
 
         captured = {}
 
@@ -393,7 +420,7 @@ class TestRetailerIdOverride:
         """Verified membership may still project retailer_id from external_id.
 
         Coincidence between upstream commerce id and Meta retailer id is
-        allowed only after ``meta_catalog_published_at`` proves membership.
+        allowed only after canonical Meta catalog membership is verified.
         """
         helper = _get_helper()
         db = _make_db()
@@ -406,6 +433,7 @@ class TestRetailerIdOverride:
             meta_retailer_id=None,
             published=True,
         )
+        _seed_membership(db, retailer_id="ext-501", product_id=501)
 
         captured = {}
 

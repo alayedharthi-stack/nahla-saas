@@ -21,6 +21,12 @@ from core.catalog import (
     is_catalog_active,
     is_synthetic_retailer_id,
 )
+from core.meta_catalog_membership import (
+    count_memberships_for_catalog,
+    first_membership_retailer_id,
+    invalidate_meta_catalog_membership,
+    membership_authorizes_send,
+)
 
 logger = logging.getLogger("nahla.native_catalog")
 
@@ -189,44 +195,32 @@ def evaluate_native_catalog_product_capability(
     *,
     catalog_id: str,
     variant: Any = None,
-    membership_catalog_id: Optional[str] = None,
+    membership: Any = None,
+    intended_retailer_id: str = "",
+    tenant_id: Optional[int] = None,
 ) -> NativeCatalogProductCapability:
     """Return native-catalog send capability for one canonical referent.
 
-    Fail closed unless ``meta_catalog_published_at`` proves membership.
-    Does not treat ``external_id`` as Meta membership. Does not substitute
-    a same-title sibling or a different variant SKU.
+    Fail closed unless a canonical ``MetaCatalogMembership`` fact matches
+    tenant + catalog + retailer_id + product (+ exact variant when selected).
+    ``meta_catalog_published_at`` and ``external_id`` are not authorization.
+    Does not substitute a same-title sibling or a different variant SKU.
     """
     requested = str(catalog_id or "").strip()
     product_id = _optional_int(
         product.get("id") if isinstance(product, dict) else getattr(product, "id", None)
     )
-    stamped = membership_catalog_id
-    if stamped is None:
-        stamped = getattr(product, "meta_membership_catalog_id", None)
-        if stamped is None and isinstance(product, dict):
-            stamped = product.get("meta_membership_catalog_id")
-    stamped_id = str(stamped or "").strip()
-
-    if not requested:
-        return NativeCatalogProductCapability(
-            available=False,
-            product_id=product_id,
-            mapping_status="unverified",
-            provenance="none",
-            reason=REASON_CATALOG_ID_MISSING,
+    row_tenant = tenant_id
+    if row_tenant is None:
+        raw_tid = (
+            product.get("tenant_id")
+            if isinstance(product, dict)
+            else getattr(product, "tenant_id", None)
         )
-    if stamped_id and stamped_id != requested:
-        return NativeCatalogProductCapability(
-            available=False,
-            catalog_id=requested,
-            product_id=product_id,
-            mapping_status="catalog_mismatch",
-            provenance="meta_catalog_published_at",
-            reason=REASON_CATALOG_ID_MISMATCH,
-        )
-
-    if variant is not None:
+        row_tenant = _optional_int(raw_tid) or 0
+    explicit_variant = variant is not None
+    variant_id = None
+    if explicit_variant:
         variant_id = _optional_int(
             variant.get("id") if isinstance(variant, dict) else getattr(variant, "id", None)
         )
@@ -241,28 +235,76 @@ def evaluate_native_catalog_product_capability(
                 provenance="none",
                 reason=REASON_VARIANT_MAPPING_MISSING,
             )
-        if is_synthetic_retailer_id(rid):
-            return NativeCatalogProductCapability(
-                available=False,
-                catalog_id=requested,
-                retailer_id=rid,
-                product_id=product_id,
-                variant_id=variant_id,
-                mapping_status="synthetic",
-                provenance="none",
-                reason=REASON_SYNTHETIC_RETAILER_ID,
-            )
-        if not _is_meta_catalog_published(product):
-            return NativeCatalogProductCapability(
-                available=False,
-                catalog_id=requested,
-                retailer_id=rid,
-                product_id=product_id,
-                variant_id=variant_id,
-                mapping_status="unverified",
-                provenance="none",
-                reason=REASON_META_CATALOG_UNVERIFIED,
-            )
+    else:
+        rid = str(intended_retailer_id or "").strip() or _trusted_retailer_id(product)
+        if not rid:
+            rid = str(
+                (
+                    product.get("external_id")
+                    if isinstance(product, dict)
+                    else getattr(product, "external_id", "")
+                    or ""
+                )
+            ).strip()
+
+    if not requested:
+        return NativeCatalogProductCapability(
+            available=False,
+            product_id=product_id,
+            variant_id=variant_id,
+            retailer_id=rid,
+            mapping_status="unverified",
+            provenance="none",
+            reason=REASON_CATALOG_ID_MISSING,
+        )
+
+    fact_catalog = str(getattr(membership, "catalog_id", "") or "").strip() if membership is not None else ""
+    if fact_catalog and fact_catalog != requested:
+        return NativeCatalogProductCapability(
+            available=False,
+            catalog_id=requested,
+            retailer_id=rid,
+            product_id=product_id,
+            variant_id=variant_id,
+            mapping_status="catalog_mismatch",
+            provenance="none",
+            reason=REASON_CATALOG_ID_MISMATCH,
+        )
+
+    if rid and is_synthetic_retailer_id(rid):
+        return NativeCatalogProductCapability(
+            available=False,
+            catalog_id=requested,
+            retailer_id=rid,
+            product_id=product_id,
+            variant_id=variant_id,
+            mapping_status="synthetic",
+            provenance="none",
+            reason=REASON_SYNTHETIC_RETAILER_ID,
+        )
+
+    has_variants = bool(
+        product.get("has_variants")
+        if isinstance(product, dict)
+        else getattr(product, "has_variants", False)
+    )
+    default_variant_id = _optional_int(
+        product.get("default_variant_id")
+        if isinstance(product, dict)
+        else getattr(product, "default_variant_id", None)
+    )
+    authorized = membership_authorizes_send(
+        membership,
+        tenant_id=int(row_tenant or 0),
+        catalog_id=requested,
+        retailer_id=rid,
+        product_id=product_id,
+        bound_variant_id=variant_id,
+        explicit_variant=explicit_variant,
+        product_has_variants=has_variants,
+        canonical_default_variant_id=default_variant_id,
+    )
+    if authorized:
         return NativeCatalogProductCapability(
             available=True,
             catalog_id=requested,
@@ -270,25 +312,11 @@ def evaluate_native_catalog_product_capability(
             product_id=product_id,
             variant_id=variant_id,
             mapping_status="verified",
-            provenance="meta_catalog_published_at",
+            provenance=str(getattr(membership, "provenance", "") or "meta_graph_reconcile"),
             reason="ok",
         )
 
-    confirmed = _meta_confirmed_retailer_id(product)
-    if confirmed:
-        return NativeCatalogProductCapability(
-            available=True,
-            catalog_id=requested,
-            retailer_id=confirmed,
-            product_id=product_id,
-            mapping_status="verified",
-            provenance="meta_catalog_published_at",
-            reason="ok",
-        )
-
-    parent_rid = _trusted_retailer_id(product) or str(
-        (product.get("external_id") if isinstance(product, dict) else getattr(product, "external_id", "") or "")
-    ).strip()
+    parent_rid = rid or _trusted_retailer_id(product)
     status = "synthetic" if is_synthetic_retailer_id(parent_rid) else "unverified"
     reason = (
         REASON_SYNTHETIC_RETAILER_ID
@@ -298,11 +326,15 @@ def evaluate_native_catalog_product_capability(
     if not parent_rid:
         status = "missing"
         reason = REASON_META_CATALOG_UNVERIFIED
+    if explicit_variant and not _variant_retailer_id(variant):
+        status = "missing"
+        reason = REASON_VARIANT_MAPPING_MISSING
     return NativeCatalogProductCapability(
         available=False,
         catalog_id=requested,
         retailer_id=parent_rid,
         product_id=product_id,
+        variant_id=variant_id,
         mapping_status=status,
         provenance="none",
         reason=reason,
@@ -340,8 +372,6 @@ def _inventory_from_products(products: Any) -> _CatalogRetailerInventory:
         source = _classify_product_retailer_source(row)
         if source == "trusted":
             trusted += 1
-            if _meta_confirmed_retailer_id(row):
-                meta_confirmed += 1
         elif source == "synthetic":
             synthetic += 1
         elif source == "sku_only":
@@ -434,88 +464,57 @@ def _iter_meta_confirmed_variant_retailer_ids(
         )
 
 
-def count_matchable_catalog_products(db: Any, tenant_id: int) -> int:
-    """Count active catalog products with a Meta-confirmed retailer id."""
-    inv = _scan_catalog_retailer_inventory(db, tenant_id)
-    return inv.meta_confirmed_products
+def count_matchable_catalog_products(
+    db: Any,
+    tenant_id: int,
+    catalog_id: str = "",
+) -> int:
+    """Count canonical Meta memberships for the connected catalog."""
+    cid = str(catalog_id or "").strip()
+    if not cid:
+        conn = load_whatsapp_connection(db, tenant_id)
+        cid = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
+    if not cid:
+        return 0
+    return count_memberships_for_catalog(db, tenant_id=int(tenant_id), catalog_id=cid)
 
 
-def pick_thumbnail_retailer_id(db: Any, tenant_id: int) -> str:
-    """First Meta-confirmed retailer id for catalog_message thumbnail."""
-    if db is None or not tenant_id:
+def pick_thumbnail_retailer_id(
+    db: Any,
+    tenant_id: int,
+    catalog_id: str = "",
+) -> str:
+    """First canonical membership retailer id for catalog_message thumbnail."""
+    cid = str(catalog_id or "").strip()
+    if not cid:
+        conn = load_whatsapp_connection(db, tenant_id)
+        cid = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
+    if not cid:
         return ""
-    try:
-        from models import Product  # noqa: PLC0415
-
-        for rid in _iter_meta_confirmed_variant_retailer_ids(db, tenant_id, limit=50):
-            return rid
-
-        for row in (
-            db.query(Product)
-            .filter(
-                Product.tenant_id == int(tenant_id),
-                Product.meta_catalog_published_at.isnot(None),
-            )
-            .order_by(Product.id.asc())
-            .limit(100)
-            .all()
-        ):
-            if not is_catalog_active(row):
-                continue
-            rid = _meta_confirmed_retailer_id(row)
-            if rid:
-                return rid
-    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — thumbnail pick is best-effort
-        logger.debug(
-            "[NATIVE_CATALOG] thumbnail pick failed tenant=%s err=%s",
-            tenant_id,
-            exc,
-        )
-    return ""
+    return first_membership_retailer_id(db, tenant_id=int(tenant_id), catalog_id=cid)
 
 
 def invalidate_meta_catalog_publish_for_retailer_id(
     db: Any,
     tenant_id: int,
     retailer_id: str,
+    *,
+    catalog_id: str = "",
 ) -> int:
-    """Clear publish stamps when Meta rejects a catalog send for *retailer_id*."""
-    rid = str(retailer_id or "").strip()
-    if db is None or not tenant_id or not rid:
-        return 0
-    cleared = 0
-    try:
-        from models import Product  # noqa: PLC0415
+    """Invalidate exact catalog membership after Meta products-not-found.
 
-        rows = (
-            db.query(Product)
-            .filter(
-                Product.tenant_id == int(tenant_id),
-                Product.meta_catalog_published_at.isnot(None),
-            )
-            .all()
-        )
-        for row in rows:
-            if _trusted_retailer_id(row) != rid and effective_retailer_id(row) != rid:
-                continue
-            row.meta_catalog_published_at = None
-            cleared += 1
-        if cleared:
-            db.flush()
-            logger.info(
-                "[NATIVE_CATALOG] publish_stamp_cleared tenant=%s retailer_id=%s count=%d",
-                tenant_id,
-                rid,
-                cleared,
-            )
-    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — publish stamp clear is best-effort
-        logger.debug(
-            "[NATIVE_CATALOG] publish_stamp_clear_failed tenant=%s retailer_id=%s err=%s",
-            tenant_id,
-            rid,
-            exc,
-        )
-    return cleared
+    Requires catalog_id. Does not clear sibling SKUs or other catalogs.
+    Dashboard stamp is derived inside the membership owner.
+    """
+    cid = str(catalog_id or "").strip()
+    if not cid:
+        return 0
+    return invalidate_meta_catalog_membership(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=cid,
+        retailer_id=str(retailer_id or "").strip(),
+    )
 
 
 def evaluate_native_catalog_capability(
@@ -558,9 +557,11 @@ def evaluate_native_catalog_capability(
         return NativeCatalogCapability(eligible=False, reason="catalog_id_missing")
 
     inventory = _scan_catalog_retailer_inventory(db, tenant_id)
-    matchable = inventory.meta_confirmed_products
+    matchable = count_matchable_catalog_products(db, tenant_id, catalog_id)
     if matchable <= 0:
         reason = _ineligibility_reason_from_inventory(inventory)
+        if reason == "ok":
+            reason = REASON_META_CATALOG_UNPUBLISHED
         logger.info(
             "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=%s "
             "active=%d trusted=%d meta_confirmed=%d synthetic=%d sku_only=%d",
@@ -568,13 +569,13 @@ def evaluate_native_catalog_capability(
             reason,
             inventory.active_products,
             inventory.trusted_products,
-            inventory.meta_confirmed_products,
+            matchable,
             inventory.synthetic_only_products,
             inventory.sku_only_products,
         )
         return NativeCatalogCapability(eligible=False, reason=reason)
 
-    thumbnail = pick_thumbnail_retailer_id(db, tenant_id)
+    thumbnail = pick_thumbnail_retailer_id(db, tenant_id, catalog_id)
     if not thumbnail:
         reason = _ineligibility_reason_from_inventory(inventory)
         if reason == "ok":

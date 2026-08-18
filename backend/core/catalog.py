@@ -38,8 +38,9 @@ def effective_retailer_id(product: Any) -> str:
        coincide with a Meta ``product_retailer_id`` when a provider
        auto-publishes that way, but coincidence is not membership
        proof. Native catalog send must still require
-       ``meta_catalog_published_at`` (see
+       canonical MetaCatalogMembership (see
        :func:`core.native_catalog_capability.evaluate_native_catalog_product_capability`).
+       ``meta_catalog_published_at`` is dashboard/legacy observability only.
 
     Returns an empty string when neither source is populated — callers
     MUST treat that as "not eligible for catalog send" and route to the

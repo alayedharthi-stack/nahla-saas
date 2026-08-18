@@ -302,6 +302,7 @@ def evaluate_product_card_send(
     tenant_products: Optional[List[Any]] = None,
     block_commerce_escalation: bool = False,
     positive_commerce_intent: bool = False,
+    membership: Optional[Any] = None,
 ) -> ProductCardSendDecision:
     """Pure decision function — no I/O, no sends, no side effects.
 
@@ -481,6 +482,9 @@ def evaluate_product_card_send(
         product_target,
         catalog_id=catalog_id,
         variant=_bound_variant_from_attachment(attachment),
+        membership=membership,
+        intended_retailer_id=retailer_id,
+        tenant_id=tenant_id,
     )
     bound_product_id = capability.product_id
     if bound_product_id is None:
