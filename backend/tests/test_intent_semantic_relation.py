@@ -187,13 +187,17 @@ class TestTax08NoExecutionOrLanguageOwnership:
         assert "decision.actions" not in src
 
 
-class TestRegistryDoesNotChangeClassifierRuntime:
-    def test_classifier_does_not_import_semantic_relation(self) -> None:
+class TestRegistryClassifierConsumptionBoundary:
+    def test_classifier_consumes_direct_broader_relation_only(self) -> None:
         from modules.ai.brain.intent import classifier as classifier_mod
 
         src = inspect.getsource(classifier_mod)
-        assert "semantic_relation" not in src
-        assert "is_direct_broader_relation" not in src
+        assert "from .semantic_relation import is_direct_broader_relation" in src
+        assert "get_intent_semantic_relation" not in src
+        assert "LAYER2_PRODUCT_DOMAIN_HINTS" not in src
+        assert "LAYER2_INTENT_HINT_VOCABULARY" not in inspect.getsource(
+            classifier_mod.layer2_is_compatible_broader_evidence
+        )
 
     def test_slot_extractor_prompt_unchanged_by_this_module(self) -> None:
         from modules.ai.brain.intent import slot_extractor as slot_mod

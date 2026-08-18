@@ -11,8 +11,11 @@ Phase 1 hybrid strategy:
      Merge the LLM's intent_hint into the result if the LLM's hint is
      more specific than the rules result. ``general`` is the documented
      non-authoritative Layer 2 fallback and must not erase a supported
-     rule candidate. Any other non-empty Layer 2 hint is the
-     authoritative semantic owner.
+     rule candidate. A non-empty non-general Layer 2 hint is evidence:
+     a genuinely different operational label is an authoritative override;
+     a Layer 2 hint that the canonical semantic-relation registry proves is
+     the direct broader label of the rule candidate is compatible evidence
+     and must not erase that more-specific rule candidate.
 
 This keeps the "happy path" (clear Arabic greeting / product ask / buy)
 at zero extra latency while falling through to LLM only for ambiguous input.
@@ -34,6 +37,7 @@ from ..types import (
 from . import rules
 from . import slot_extractor as _slot_mod
 from .ordering_extractor import extract_ordering_slots
+from .semantic_relation import is_direct_broader_relation
 
 logger = logging.getLogger("nahla.brain.classifier")
 
@@ -54,17 +58,36 @@ PROVENANCE_RULE_CANDIDATE_CONFIRMED = "RULE_CANDIDATE_CONFIRMED"
 PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2 = (
     "RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2"
 )
+PROVENANCE_COMPATIBLE_BROADER_EVIDENCE = "COMPATIBLE_BROADER_EVIDENCE"
+
+SEMANTIC_RELATION_SAME_LABEL = "same_label"
+SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE = "authoritative_override"
+SEMANTIC_RELATION_COMPATIBLE_BROADER = "compatible_broader_evidence"
+SEMANTIC_RELATION_NON_AUTHORITATIVE = "non_authoritative_layer2"
+SEMANTIC_RELATION_NO_AUTHORITATIVE = "no_authoritative_layer2"
 
 
 def is_authoritative_layer2_intent(hint: Any) -> bool:
-    """True when Layer 2 returned a more-specific semantic result than general.
+    """True when Layer 2 returned a non-empty, non-general hint.
 
     The slot extractor always emits ``intent_hint``, defaulting to
     ``general`` when it has no usable operational label. That fallback is
-    not an authoritative owner. Any other non-empty hint is.
+    not an authoritative owner. A non-general hint is Layer 2 evidence —
+    precedence still decides whether it overrides or is compatible broader
+    evidence for a more-specific rule candidate.
     """
     name = str(hint or "").strip()
     return bool(name) and name != INTENT_GENERAL
+
+
+def layer2_is_compatible_broader_evidence(rule_name: Any, layer2_hint: Any) -> bool:
+    """True only when the canonical registry proves a direct broader relation.
+
+    Classifier ownership consumes ``is_direct_broader_relation``; it does not
+    infer hierarchy from Layer 2 vocabulary, out-of-vocabulary status, shared
+    domain, or shared downstream actions. Unknown relationships fail closed.
+    """
+    return is_direct_broader_relation(rule_name, layer2_hint)
 
 
 def _stamp_classifier_precedence(
@@ -74,10 +97,13 @@ def _stamp_classifier_precedence(
     layer2_hint: str,
     winner: str,
     provenance: str,
+    semantic_relation: str = "",
 ) -> None:
     slots["semantic_owner"] = "brain_classifier"
     slots["classification_provenance"] = provenance
     slots["precedence_winner"] = winner
+    if semantic_relation:
+        slots["semantic_relation"] = semantic_relation
     if rule_intent is not None and str(rule_intent.name or "").strip():
         slots["rule_candidate"] = str(rule_intent.name)
     if str(layer2_hint or "").strip():
@@ -89,11 +115,12 @@ def _resolve_layer2_rule_precedence(
     rule_intent: Intent | None,
     llm_hint: str,
     base_conf: float,
-) -> tuple[str, float, str, str, str]:
+) -> tuple[str, float, str, str, str, str]:
     """Apply the canonical Layer 2 vs raw-rule ownership contract.
 
-    Returns ``(name, confidence, extraction_method, provenance, winner)``.
-    This is classifier ownership, not a visual/product-media feature.
+    Returns ``(name, confidence, extraction_method, provenance, winner,
+    semantic_relation)``. This is classifier ownership, not a visual
+    feature and not a second intent router.
     """
     layer2 = str(llm_hint or "").strip() or INTENT_GENERAL
     rule_name = str(rule_intent.name) if rule_intent is not None else ""
@@ -106,6 +133,16 @@ def _resolve_layer2_rule_precedence(
                 "hybrid",
                 PROVENANCE_RULE_CANDIDATE_CONFIRMED,
                 "rule_candidate",
+                SEMANTIC_RELATION_SAME_LABEL,
+            )
+        if layer2_is_compatible_broader_evidence(rule_name, layer2):
+            return (
+                rule_name,
+                float(base_conf or 0.72),
+                "hybrid",
+                PROVENANCE_COMPATIBLE_BROADER_EVIDENCE,
+                "rule_candidate",
+                SEMANTIC_RELATION_COMPATIBLE_BROADER,
             )
         return (
             layer2,
@@ -113,6 +150,7 @@ def _resolve_layer2_rule_precedence(
             "llm",
             PROVENANCE_LAYER2_SEMANTIC_OVERRIDE,
             "layer2",
+            SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE,
         )
     if rule_intent is not None:
         return (
@@ -121,6 +159,7 @@ def _resolve_layer2_rule_precedence(
             "hybrid",
             PROVENANCE_RULE_CANDIDATE_CONFIRMED,
             "rule_candidate",
+            SEMANTIC_RELATION_NON_AUTHORITATIVE,
         )
     return (
         INTENT_GENERAL,
@@ -128,6 +167,7 @@ def _resolve_layer2_rule_precedence(
         "llm",
         PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
         "layer2",
+        SEMANTIC_RELATION_NO_AUTHORITATIVE,
     )
 
 
@@ -148,6 +188,7 @@ def _brain_owned_product_visual_intent(
         layer2_hint=layer2_hint,
         winner="rule_candidate",
         provenance=provenance,
+        semantic_relation=SEMANTIC_RELATION_NO_AUTHORITATIVE,
     )
     return Intent(
         name=INTENT_PRODUCT_VISUAL_REQUEST,
@@ -306,7 +347,7 @@ class DefaultIntentClassifier:
                 )
                 llm_hint = base_intent  # keep rule intent (likely general)
 
-        resolved_name, resolved_conf, method, provenance, winner = (
+        resolved_name, resolved_conf, method, provenance, winner, relation = (
             _resolve_layer2_rule_precedence(
                 rule_intent=rule_intent,
                 llm_hint=str(llm_hint or INTENT_GENERAL),
@@ -322,6 +363,7 @@ class DefaultIntentClassifier:
             layer2_hint=str(llm_hint or ""),
             winner=winner,
             provenance=provenance,
+            semantic_relation=relation,
         )
 
         try:

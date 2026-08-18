@@ -121,6 +121,25 @@ _EXTRACT_SCHEMA: Dict[str, Any] = {
     "intent_hint": "general",
 }
 
+# Closed Layer 2 intent_hint vocabulary. Mirrors `_SYSTEM` above.
+# Do not edit `_SYSTEM` in this Family 3 recovery — the prompt is read-only.
+LAYER2_INTENT_HINT_VOCABULARY = frozenset({
+    "greeting",
+    "who_are_you",
+    "ask_product",
+    "ask_price",
+    "start_order",
+    "pay_now",
+    "ask_shipping",
+    "ask_store_info",
+    "ask_owner_contact",
+    "ask_payment_info",
+    "hesitation",
+    "talk_to_human",
+    "track_order",
+    "general",
+})
+
 
 async def extract_slots(
     message: str,
