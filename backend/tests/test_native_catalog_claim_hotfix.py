@@ -26,6 +26,7 @@ from core.native_catalog_fallback import (  # noqa: E402
     is_native_catalog_claim_text,
 )
 from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: E402
+    MINIMAL_CATALOG_BODY,
     TECHNICAL_CATALOG_BODY,
     is_minimal_catalog_body,
 )
@@ -103,7 +104,8 @@ class TestCatalogNavigateDoesNotPreclaim:
         body = result.data["native_catalog_entry"].get("body_text") or ""
         assert body != ctx.message
         assert is_minimal_catalog_body(body)
-        assert body == TECHNICAL_CATALOG_BODY
+        assert body == MINIMAL_CATALOG_BODY
+        assert body != TECHNICAL_CATALOG_BODY
         assert "تفضّل، اختر من الكتالوج" not in body
 
 

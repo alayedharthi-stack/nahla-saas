@@ -17,6 +17,7 @@ from core.fallback_policy import (  # noqa: E402
     is_compose_failure_fallback,
 )
 from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: E402
+    MINIMAL_CATALOG_BODY,
     TECHNICAL_CATALOG_BODY,
     is_unsafe_catalog_body,
     resolve_catalog_body_text,
@@ -51,7 +52,7 @@ class TestCatalogBodyMustNotUseComposeFallback:
         assert is_unsafe_catalog_body(COMPOSE_FALLBACK) is True
         body = resolve_catalog_body_text("", context_reply=COMPOSE_FALLBACK)
         assert COMPOSE_FALLBACK not in body
-        assert body == TECHNICAL_CATALOG_BODY
+        assert body == MINIMAL_CATALOG_BODY
 
     def test_native_catalog_body_rejects_compose_failure_with_emoji(self) -> None:
         body = resolve_native_catalog_body_text(
@@ -59,7 +60,7 @@ class TestCatalogBodyMustNotUseComposeFallback:
             inbound_customer_message=BROWSE_INPUT,
         )
         assert "تعذّرت صياغة" not in body
-        assert body == TECHNICAL_CATALOG_BODY
+        assert body == MINIMAL_CATALOG_BODY
 
     def test_catalog_message_payload_uses_neutral_body_not_fallback(self) -> None:
         payload = build_catalog_message_payload(
@@ -69,7 +70,7 @@ class TestCatalogBodyMustNotUseComposeFallback:
         )
         interactive_body = payload["interactive"]["body"]["text"]
         assert "تعذّرت صياغة" not in interactive_body
-        assert interactive_body == TECHNICAL_CATALOG_BODY
+        assert interactive_body == MINIMAL_CATALOG_BODY
 
     def test_valid_context_reply_still_used(self) -> None:
         ctx = "المنتجات متاحة في الكتالوج"
@@ -120,7 +121,7 @@ class TestExplicitBrowseCatalogDispatchPath:
             )
         send_mock.assert_awaited_once()
         sent_body = send_mock.await_args.kwargs.get("body_text") or send_mock.await_args[1].get("body_text")
-        assert sent_body == TECHNICAL_CATALOG_BODY
+        assert sent_body == MINIMAL_CATALOG_BODY
         assert "تعذّرت صياغة" not in str(sent_body)
 
 

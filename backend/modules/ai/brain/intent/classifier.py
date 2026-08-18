@@ -5,10 +5,14 @@ IntentClassifier — the single entry point consumed by MerchantBrain.
 
 Phase 1 hybrid strategy:
   1. Run rules.match() synchronously (0 latency).
-  2. If confidence >= RULES_ONLY_THRESHOLD: return immediately.
+  2. If confidence >= RULES_ONLY_THRESHOLD: return immediately,
+     except Family 3 product-visual (Brain semantic ownership required).
   3. Otherwise: run slot_extractor.extract_slots() (fast Haiku call).
      Merge the LLM's intent_hint into the result if the LLM's hint is
-     more specific than the rules result.
+     more specific than the rules result. ``general`` is the documented
+     non-authoritative Layer 2 fallback and must not erase a supported
+     rule candidate. Any other non-empty Layer 2 hint is the
+     authoritative semantic owner.
 
 This keeps the "happy path" (clear Arabic greeting / product ask / buy)
 at zero extra latency while falling through to LLM only for ambiguous input.
@@ -22,6 +26,7 @@ from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 from ..types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_TALK_HUMAN,
     Intent,
     MerchantConversationState,
@@ -34,6 +39,123 @@ logger = logging.getLogger("nahla.brain.classifier")
 
 # Rules with confidence >= this bypass LLM slot extraction
 RULES_ONLY_THRESHOLD = 0.85
+
+# Family 3: product-media need is Brain-semantic. Legacy visual regex may
+# remain a compatibility candidate via rules.match(), but it must not
+# rules-only short-circuit customer runtime and skip Layer 2 extraction.
+_BRAIN_SEMANTIC_REQUIRED_INTENTS = frozenset({
+    INTENT_PRODUCT_VISUAL_REQUEST,
+})
+
+# Closed classifier-ownership provenance. Distinguishes the merge winner
+# without a second intent classifier or a visual-specific allowlist.
+PROVENANCE_LAYER2_SEMANTIC_OVERRIDE = "LAYER2_SEMANTIC_OVERRIDE"
+PROVENANCE_RULE_CANDIDATE_CONFIRMED = "RULE_CANDIDATE_CONFIRMED"
+PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2 = (
+    "RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2"
+)
+
+
+def is_authoritative_layer2_intent(hint: Any) -> bool:
+    """True when Layer 2 returned a more-specific semantic result than general.
+
+    The slot extractor always emits ``intent_hint``, defaulting to
+    ``general`` when it has no usable operational label. That fallback is
+    not an authoritative owner. Any other non-empty hint is.
+    """
+    name = str(hint or "").strip()
+    return bool(name) and name != INTENT_GENERAL
+
+
+def _stamp_classifier_precedence(
+    slots: Dict[str, Any],
+    *,
+    rule_intent: Intent | None,
+    layer2_hint: str,
+    winner: str,
+    provenance: str,
+) -> None:
+    slots["semantic_owner"] = "brain_classifier"
+    slots["classification_provenance"] = provenance
+    slots["precedence_winner"] = winner
+    if rule_intent is not None and str(rule_intent.name or "").strip():
+        slots["rule_candidate"] = str(rule_intent.name)
+    if str(layer2_hint or "").strip():
+        slots["layer2_result"] = str(layer2_hint)
+
+
+def _resolve_layer2_rule_precedence(
+    *,
+    rule_intent: Intent | None,
+    llm_hint: str,
+    base_conf: float,
+) -> tuple[str, float, str, str, str]:
+    """Apply the canonical Layer 2 vs raw-rule ownership contract.
+
+    Returns ``(name, confidence, extraction_method, provenance, winner)``.
+    This is classifier ownership, not a visual/product-media feature.
+    """
+    layer2 = str(llm_hint or "").strip() or INTENT_GENERAL
+    rule_name = str(rule_intent.name) if rule_intent is not None else ""
+
+    if is_authoritative_layer2_intent(layer2):
+        if rule_name and layer2 == rule_name:
+            return (
+                rule_name,
+                float(base_conf or 0.72),
+                "hybrid",
+                PROVENANCE_RULE_CANDIDATE_CONFIRMED,
+                "rule_candidate",
+            )
+        return (
+            layer2,
+            0.72,
+            "llm",
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE,
+            "layer2",
+        )
+    if rule_intent is not None:
+        return (
+            rule_name,
+            float(base_conf or 0.72),
+            "hybrid",
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED,
+            "rule_candidate",
+        )
+    return (
+        INTENT_GENERAL,
+        0.72,
+        "llm",
+        PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+        "layer2",
+    )
+
+
+def _brain_owned_product_visual_intent(
+    *,
+    message: str,
+    slots: Dict[str, Any],
+    confidence: float,
+    method: str = "hybrid",
+    provenance: str = PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+    layer2_hint: str = "",
+    rule_intent: Intent | None = None,
+) -> Intent:
+    clean = {k: v for k, v in (slots or {}).items() if v not in ("", {}, None)}
+    _stamp_classifier_precedence(
+        clean,
+        rule_intent=rule_intent,
+        layer2_hint=layer2_hint,
+        winner="rule_candidate",
+        provenance=provenance,
+    )
+    return Intent(
+        name=INTENT_PRODUCT_VISUAL_REQUEST,
+        confidence=confidence,
+        slots=clean,
+        raw_message=message,
+        extraction_method=method,
+    )
 
 # Stages where we MUST run slot extraction even for high-confidence rules.
 # A customer mid-checkout sending "تركي الحارثي" matches the rules-only
@@ -97,6 +219,7 @@ class DefaultIntentClassifier:
             rule_intent
             and rule_intent.confidence >= RULES_ONLY_THRESHOLD
             and not in_order_flow
+            and str(rule_intent.name or "") not in _BRAIN_SEMANTIC_REQUIRED_INTENTS
         ):
             logger.debug(
                 "[Classifier] rules-only | intent=%s conf=%.2f",
@@ -132,7 +255,22 @@ class DefaultIntentClassifier:
             pass
 
         if not slots:
-            # LLM unavailable or empty — fall back to rules or general
+            # LLM unavailable or empty — fall back to rules or general.
+            # Product-visual still cannot return as a rules-only owner after
+            # Layer 2 was attempted.
+            if (
+                rule_intent
+                and str(rule_intent.name or "") in _BRAIN_SEMANTIC_REQUIRED_INTENTS
+            ):
+                return _brain_owned_product_visual_intent(
+                    message=message,
+                    slots=dict(rule_intent.slots or {}),
+                    confidence=float(rule_intent.confidence or 0.72),
+                    method="hybrid",
+                    provenance=PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+                    layer2_hint="",
+                    rule_intent=rule_intent,
+                )
             if rule_intent:
                 return rule_intent
             return Intent(
@@ -168,19 +306,23 @@ class DefaultIntentClassifier:
                 )
                 llm_hint = base_intent  # keep rule intent (likely general)
 
-        # If the LLM disagrees with rules and it's a high-confidence rules
-        # signal we keep the rules result; otherwise trust LLM
-        if rule_intent and base_conf >= 0.75:
-            resolved_name = base_intent
-            resolved_conf = base_conf
-            method        = "hybrid"
-        else:
-            resolved_name = llm_hint
-            resolved_conf = 0.72   # moderate confidence for pure-LLM result
-            method        = "llm"
+        resolved_name, resolved_conf, method, provenance, winner = (
+            _resolve_layer2_rule_precedence(
+                rule_intent=rule_intent,
+                llm_hint=str(llm_hint or INTENT_GENERAL),
+                base_conf=float(base_conf or 0.50),
+            )
+        )
 
         # Remove empty string values from slots
         clean_slots = {k: v for k, v in slots.items() if v not in ("", {}, None)}
+        _stamp_classifier_precedence(
+            clean_slots,
+            rule_intent=rule_intent,
+            layer2_hint=str(llm_hint or ""),
+            winner=winner,
+            provenance=provenance,
+        )
 
         try:
             from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415

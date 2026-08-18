@@ -3172,7 +3172,22 @@ class DefaultDecisionEngine:
                     reason="non-commerce block overrides product_visual on social OCR",
                     confidence=0.94,
                 )
-            focus = state.current_product_focus or {}
+            from ..commerce.commerce_focus_owner import (  # noqa: PLC0415
+                canonical_product_referent,
+                has_structured_catalog_identity,
+            )
+            try:
+                from ..commerce.catalog_order_checkout import (  # noqa: PLC0415
+                    is_active_catalog_checkout,
+                )
+
+                _canon = canonical_product_referent(
+                    state,
+                    checkout_active=bool(is_active_catalog_checkout(ctx)),
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — visual owner must still run
+                _canon = canonical_product_referent(state) or state.current_product_focus or {}
+            focus = _canon if isinstance(_canon, dict) else {}
             focus_title = str(focus.get("title") or "").strip()
             query = (
                 extract_visual_product_query(ctx.message or "")
@@ -3182,18 +3197,14 @@ class DefaultDecisionEngine:
             deictic = is_deictic_visual_request(ctx.message or "")
             if query and (deictic or is_invalid_visual_product_query(query)):
                 query = ""
-            if deictic:
+            if isinstance(focus, dict) and has_structured_catalog_identity(focus):
+                focus_title = str(focus.get("title") or focus_title).strip()
+            elif deictic:
                 from ..commerce.product_visual import (  # noqa: PLC0415
                     resolve_trusted_focus_for_deictic,
                 )
                 trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
-                _possessive = re.search(
-                    r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
-                    ctx.message or "",
-                )
-                if trusted.reason == "ambiguous_presented" and _possessive:
-                    focus_title = ""
-                elif trusted.title:
+                if trusted.title:
                     focus_title = trusted.title
             try:
                 from ..commerce.visual_delivery_capability import (  # noqa: PLC0415
@@ -3224,57 +3235,17 @@ class DefaultDecisionEngine:
                     reason=f"customer wants image of {query!r}",
                     confidence=0.90,
                 )
-            if deictic:
-                from ..commerce.product_visual import (  # noqa: PLC0415
-                    resolve_trusted_focus_for_deictic,
-                )
-                trusted = resolve_trusted_focus_for_deictic(state, ctx.message or "")
-                _possessive = re.search(
-                    r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
-                    ctx.message or "",
-                )
-                if trusted.reason == "ambiguous_presented" and _possessive:
-                    return Decision(
-                        action=ACTION_LLM_REPLY,
-                        args={
-                            "topic": "product_visual",
-                            "response_goal": "resolve_visual_referent",
-                            "presented_products": list(
-                                getattr(state, "last_presented_products", None) or []
-                            )[:8],
-                        },
-                        reason="deictic visual → ambiguous presented products",
-                        confidence=0.88,
-                    )
-                if not trusted.title:
-                    return Decision(
-                        action=ACTION_CLARIFY,
-                        args={
-                            "topic": "product_visual",
-                            "question": "أي منتج تقصد صورته؟",
-                        },
-                        reason=trusted.reason or "deictic visual ask without trusted focus",
-                        confidence=0.88,
-                    )
-                return Decision(
-                    action=ACTION_LLM_REPLY,
-                    args={
-                        "topic": "product_visual",
-                        "focus_product": trusted.title,
-                        "product_query": trusted.title,
-                        "response_goal": "send_product_visual",
-                    },
-                    reason=f"deictic visual → trusted focus ({trusted.reason})",
-                    confidence=0.90,
-                )
+            presented = list(getattr(state, "last_presented_products", None) or [])[:8]
             return Decision(
-                action=ACTION_CLARIFY,
+                action=ACTION_LLM_REPLY,
                 args={
                     "topic": "product_visual",
-                    "question": "أي منتج تبغى صورته؟",
+                    "response_goal": "resolve_visual_referent",
+                    "presented_products": presented,
+                    "missing_structured_referent": True,
                 },
-                reason="product visual ask without resolved SKU",
-                confidence=0.85,
+                reason="product visual ask without structured referent — Brain clarifies",
+                confidence=0.88,
             )
 
         # ── 3.8u Unified discovery entry (Phase 1) ────────────────────────

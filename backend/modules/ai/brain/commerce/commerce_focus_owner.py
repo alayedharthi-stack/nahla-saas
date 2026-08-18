@@ -40,10 +40,46 @@ _ORDINAL_REJECT_RE = re.compile(
 )
 
 
+_STRUCTURED_IDENTITY_KEYS = (
+    "external_id",
+    "product_retailer_id",
+    "sku",
+    "id",
+    "product_id",
+    "variant_id",
+)
+
+_STRUCTURED_FACT_KEYS = (
+    "id",
+    "product_id",
+    "variant_id",
+    "external_id",
+    "sku",
+    "product_retailer_id",
+    "title",
+    "price",
+    "sale_price",
+    "currency",
+    "in_stock",
+    "can_checkout",
+    "orderable",
+    "product_url",
+    "image_url",
+    "image",
+    "thumbnail_url",
+    "media_count",
+    "media_type",
+    "provenance",
+    "customer_selected",
+    "from_catalog_order",
+    "from_native_catalog_order",
+)
+
+
 def product_focus_identity(product: Any) -> str:
     if not isinstance(product, dict):
         return ""
-    for key in ("external_id", "id", "product_id", "sku"):
+    for key in _STRUCTURED_IDENTITY_KEYS:
         val = str(product.get(key) or "").strip()
         if val:
             return val
@@ -51,11 +87,215 @@ def product_focus_identity(product: Any) -> str:
     return title
 
 
+def has_structured_catalog_identity(product: Any) -> bool:
+    """True when a catalog row already carries a non-title identity."""
+    if not isinstance(product, dict):
+        return False
+    for key in _STRUCTURED_IDENTITY_KEYS:
+        if str(product.get(key) or "").strip():
+            return True
+    return False
+
+
+def is_customer_selected_checkout_referent(product: Any) -> bool:
+    """Family 2 customer-selected catalog item — not assistant recommendation."""
+    if not isinstance(product, dict) or not product:
+        return False
+    if product.get("customer_selected"):
+        return True
+    if str(product.get("provenance") or "") == "catalog_order_selected":
+        return True
+    if product.get("from_catalog_order") or product.get("from_native_catalog_order"):
+        return True
+    return False
+
+
+def normalize_structured_product_referent(
+    product: Any,
+    *,
+    provenance: str = "",
+    customer_selected: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Copy known structured catalog facts only — never invent price or media."""
+    if not isinstance(product, dict) or not has_structured_catalog_identity(product):
+        return None
+    row: Dict[str, Any] = {}
+    for key in _STRUCTURED_FACT_KEYS:
+        if key not in product:
+            continue
+        val = product.get(key)
+        if val is None or val == "":
+            continue
+        row[key] = val
+    title = str(product.get("title") or product.get("name") or product.get("display_label") or "").strip()
+    if title:
+        row["title"] = title
+    if provenance:
+        row["provenance"] = provenance
+    elif not row.get("provenance"):
+        row["provenance"] = "structured_catalog"
+    if customer_selected or row.get("customer_selected"):
+        row["customer_selected"] = True
+    return row
+
+
+def checkout_selected_referent(state: Any) -> Optional[Dict[str, Any]]:
+    """Consume Family 2 selected-product persistence — do not re-own it."""
+    if state is None:
+        return None
+    try:
+        from .assistant_presented_provenance import (  # noqa: PLC0415
+            structured_selected_referent,
+        )
+
+        ref = structured_selected_referent(state)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — selected referent probe must not block focus
+        ref = None
+    if isinstance(ref, dict) and has_structured_catalog_identity(ref):
+        return dict(ref)
+    focus = getattr(state, "current_product_focus", None)
+    if is_customer_selected_checkout_referent(focus) and has_structured_catalog_identity(focus):
+        return dict(focus)
+    return None
+
+
+def canonical_product_referent(
+    state: Any,
+    *,
+    checkout_active: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Single conversational catalog referent.
+
+    Customer-selected checkout referent outranks recommendation/discovery
+    while checkout is active. Otherwise effective focus, then a unique
+    structured recommendation.
+    """
+    selected = checkout_selected_referent(state)
+    if selected and (checkout_active or is_customer_selected_checkout_referent(selected)):
+        return dict(selected)
+
+    focus = get_effective_product_focus(state)
+    if focus and has_structured_catalog_identity(focus):
+        return dict(focus)
+
+    recommended = [
+        dict(row)
+        for row in (getattr(state, "last_recommended_products", None) or [])
+        if isinstance(row, dict) and has_structured_catalog_identity(row)
+    ]
+    if len(recommended) == 1:
+        return recommended[0]
+
+    presented = [
+        dict(row)
+        for row in (getattr(state, "last_presented_products", None) or [])
+        if isinstance(row, dict) and has_structured_catalog_identity(row)
+    ]
+    unique_presented = [
+        row for row in presented
+        if not is_customer_selected_checkout_referent(row)
+    ]
+    selected_presented = [
+        row for row in presented
+        if is_customer_selected_checkout_referent(row)
+    ]
+    if len(selected_presented) == 1:
+        return selected_presented[0]
+    if len(unique_presented) == 1 and len(presented) == 1:
+        return unique_presented[0]
+
+    if selected:
+        return dict(selected)
+    return dict(focus) if focus else None
+
+
+def bind_structured_catalog_referent(
+    state: Any,
+    product: Optional[Dict[str, Any]],
+    *,
+    reason: str,
+    turn: int = 0,
+    customer_selected: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Bind a product that already has catalog identity via set_product_focus.
+
+    Conversational recommendation must not overwrite a Family 2 selected
+    checkout referent.
+    """
+    if state is None:
+        return None
+    row = normalize_structured_product_referent(
+        product,
+        provenance=str((product or {}).get("provenance") or reason or "structured_catalog"),
+        customer_selected=customer_selected,
+    )
+    if not row:
+        return None
+
+    selected = checkout_selected_referent(state)
+    if (
+        selected
+        and is_customer_selected_checkout_referent(selected)
+        and not customer_selected
+        and product_focus_identity(selected) != product_focus_identity(row)
+    ):
+        logger.info(
+            "[COMMERCE_FOCUS] skip_conversational_overwrite checkout_selected=%r "
+            "candidate=%r reason=%s",
+            product_focus_identity(selected),
+            product_focus_identity(row),
+            reason,
+        )
+        try:
+            from .assistant_presented_provenance import (  # noqa: PLC0415
+                stamp_structured_presented_products,
+            )
+
+            stamp_structured_presented_products(
+                state,
+                [row],
+                provenance=str(row.get("provenance") or "assistant_presented"),
+                customer_selected=False,
+                turn=turn,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — presentation stamp must not block selected referent
+            pass
+        return dict(selected)
+
+    set_product_focus(state, row, reason=reason, turn=turn)
+    try:
+        from .assistant_presented_provenance import (  # noqa: PLC0415
+            stamp_structured_presented_products,
+        )
+
+        stamp_structured_presented_products(
+            state,
+            [row],
+            provenance=str(row.get("provenance") or reason),
+            customer_selected=bool(row.get("customer_selected")),
+            turn=turn,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — presentation stamp is best-effort after focus write
+        pass
+    return row
+
+
 def should_preserve_focus_after_product_list_display(
     focus: Any,
     candidates: Sequence[Any],
+    state: Any = None,
 ) -> bool:
-    """Preserve focus when a single displayed candidate matches the current focus identity."""
+    """Preserve focus for checkout-selected items or a matching single search hit."""
+    if is_customer_selected_checkout_referent(focus):
+        return True
+    if state is not None:
+        selected = checkout_selected_referent(state)
+        if (
+            selected
+            and product_focus_identity(selected)
+            and product_focus_identity(selected) == product_focus_identity(focus)
+        ):
+            return True
     if not isinstance(focus, dict) or not focus:
         return False
     if len(candidates) != 1:
@@ -312,9 +552,15 @@ __all__ = [
     "FOCUS_SHIPPING_POLICY",
     "apply_commerce_focus_lifecycle",
     "archive_current_product_focus",
+    "bind_structured_catalog_referent",
     "bind_variant_to_focus",
+    "canonical_product_referent",
+    "checkout_selected_referent",
     "clear_order_tracking_focus",
     "get_effective_product_focus",
+    "has_structured_catalog_identity",
+    "is_customer_selected_checkout_referent",
+    "normalize_structured_product_referent",
     "product_focus_identity",
     "restore_suspended_product_focus",
     "revert_to_previous_product_focus",

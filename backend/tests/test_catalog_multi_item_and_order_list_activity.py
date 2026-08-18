@@ -27,7 +27,7 @@ from core.wa_native_catalog_order import build_line_items_from_payload, parse_na
 from models import Base, Conversation, Customer, Order, Tenant  # noqa: E402
 from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: E402
     FORBIDDEN_CATALOG_INTRO_MARKERS,
-    TECHNICAL_CATALOG_BODY,
+    MINIMAL_CATALOG_BODY,
     is_unsafe_catalog_body,
     resolve_native_catalog_body_text,
 )
@@ -113,13 +113,12 @@ def _flags(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestNativeCatalogBody:
-    def test_native_catalog_body_not_dot_when_safe_catalog_copy_enabled(self):
+    def test_native_catalog_body_uses_protocol_minimum_when_no_brain_copy(self):
         body = resolve_native_catalog_body_text(
             context_reply="",
             inbound_customer_message="وش عندكم منتجات؟",
         )
-        assert body == TECHNICAL_CATALOG_BODY
-        assert body != "."
+        assert body == MINIMAL_CATALOG_BODY
         assert body != "وش عندكم منتجات؟"
         for marker in FORBIDDEN_CATALOG_INTRO_MARKERS:
             assert marker not in body
@@ -131,7 +130,7 @@ class TestNativeCatalogBody:
             context_reply=unsafe,
             inbound_customer_message="مرحبا",
         )
-        assert body == TECHNICAL_CATALOG_BODY
+        assert body == MINIMAL_CATALOG_BODY
 
 
 class TestCatalogMultiItem:

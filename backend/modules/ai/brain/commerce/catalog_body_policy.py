@@ -42,6 +42,7 @@ _UNSAFE_CATALOG_BODY_MARKERS = (
     "أي نوع تبيه",
     "أي نوع تبي",
     "أي نوع تبغ",
+    TECHNICAL_CATALOG_BODY,
 )
 
 
@@ -82,7 +83,7 @@ def resolve_catalog_body_text(
         if len(c) > MAX_CATALOG_BODY_LEN:
             return c[: MAX_CATALOG_BODY_LEN - 1] + "…"
         return c
-    return TECHNICAL_CATALOG_BODY
+    return MINIMAL_CATALOG_BODY
 
 
 def resolve_native_catalog_body_text(

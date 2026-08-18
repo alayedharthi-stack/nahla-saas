@@ -267,6 +267,21 @@ def stamp_assistant_named_catalog_from_reply(
         recommended.get("id") or recommended.get("external_id"),
         recommended.get("title"),
     )
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            bind_structured_catalog_referent,
+            has_structured_catalog_identity,
+        )
+
+        if has_structured_catalog_identity(recommended):
+            bind_structured_catalog_referent(
+                state,
+                recommended,
+                reason="assistant_recommended_structured",
+                turn=turn,
+            )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — focus bind must not block presented stamp
+        logger.exception("[PRESENTED_PROVENANCE] structured focus bind failed")
     return [recommended]
 
 
@@ -319,6 +334,34 @@ def restore_selected_product_focus(state: Any) -> Optional[Dict[str, Any]]:
         or focus.get("from_native_catalog_order")
     ):
         return ref
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            bind_structured_catalog_referent,
+        )
+
+        bound = bind_structured_catalog_referent(
+            state,
+            {
+                "id": ref.get("id"),
+                "title": str(ref.get("title") or ref.get("product_name") or "").strip(),
+                "price": ref.get("price"),
+                "external_id": str(ref.get("external_id") or "").strip(),
+                "product_retailer_id": str(
+                    ref.get("external_id") or ref.get("product_retailer_id") or ""
+                ).strip(),
+                "from_catalog_order": True,
+                "from_native_catalog_order": True,
+                "customer_selected": True,
+                "restored_from_structured_referent": True,
+            },
+            reason="restore_selected_product_focus",
+            turn=int(getattr(state, "turn", 0) or 0),
+            customer_selected=True,
+        )
+        if bound:
+            return bound
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — restore must still pin selected identity
+        pass
     state.current_product_focus = {
         "id": ref.get("id"),
         "title": str(ref.get("title") or ref.get("product_name") or "").strip(),
@@ -382,10 +425,80 @@ def stamp_structured_presented_products(
     return list(getattr(state, "last_presented_products", None) or [])
 
 
+def apply_turn_catalog_referent_binding(
+    *,
+    state: Any,
+    reply: str,
+    catalog_candidates: Optional[Sequence[Any]] = None,
+    intent_name: str = "",
+    turn: int = 0,
+    structured_product: Optional[Dict[str, Any]] = None,
+    customer_selected: bool = False,
+) -> List[Dict[str, Any]]:
+    """Bind structured identity first; title matching is compatibility fallback only."""
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            bind_structured_catalog_referent,
+            has_structured_catalog_identity,
+        )
+
+        if isinstance(structured_product, dict) and has_structured_catalog_identity(
+            structured_product
+        ):
+            bound = bind_structured_catalog_referent(
+                state,
+                structured_product,
+                reason="structured_turn_product",
+                turn=turn,
+                customer_selected=customer_selected,
+            )
+            return [bound] if bound else []
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — structured bind must not block fallback stamp
+        logger.exception("[PRESENTED_PROVENANCE] structured turn bind failed")
+    return stamp_assistant_named_catalog_from_reply(
+        state=state,
+        reply=reply,
+        catalog_candidates=catalog_candidates,
+        intent_name=intent_name,
+        turn=turn,
+    )
+
+
+def structured_product_from_turn(decision: Any = None, result: Any = None) -> Optional[Dict[str, Any]]:
+    """Identity already known on the decision/result — not inferred from reply text."""
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            has_structured_catalog_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
+        return None
+    args = dict(getattr(decision, "args", None) or {})
+    data = dict(getattr(result, "data", None) or {})
+    for container in (args, data):
+        for key in ("recommended_product", "product"):
+            cand = container.get(key)
+            if isinstance(cand, dict) and has_structured_catalog_identity(cand):
+                return dict(cand)
+        focus_product = container.get("focus_product")
+        if isinstance(focus_product, dict) and has_structured_catalog_identity(focus_product):
+            return dict(focus_product)
+        products = container.get("replay_candidates") or container.get("products")
+        if (
+            isinstance(products, list)
+            and len(products) == 1
+            and isinstance(products[0], dict)
+            and has_structured_catalog_identity(products[0])
+        ):
+            return dict(products[0])
+    return None
+
+
 __all__ = [
+    "apply_turn_catalog_referent_binding",
     "map_named_catalog_entities",
     "restore_selected_product_focus",
     "stamp_assistant_named_catalog_from_reply",
     "stamp_structured_presented_products",
+    "structured_product_from_turn",
     "structured_selected_referent",
 ]

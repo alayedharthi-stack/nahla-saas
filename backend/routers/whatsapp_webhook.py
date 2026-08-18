@@ -12693,6 +12693,7 @@ async def _handle_merchant_message(
             )
         elif _native_catalog_entry.get("thumbnail_product_retailer_id"):
             _outbound_wire_boundary_done = True
+            _brain_reply_before_native = str(reply or "").strip()
             _native_send_result = await _try_send_native_catalog_entry(
                 db=db,
                 tenant_id=tenant_id,
@@ -12717,6 +12718,19 @@ async def _handle_merchant_message(
                 if isinstance(_delivery_audit, dict):
                     _delivery_audit["native_catalog_sent"] = True
                     _delivery_audit["text_sent"] = True
+                    try:
+                        from modules.ai.media.customer_turn_completion import (  # noqa: PLC0415
+                            native_catalog_send_completion,
+                        )
+
+                        _delivery_audit.update(
+                            native_catalog_send_completion(
+                                sent=True,
+                                has_brain_text=bool(_brain_reply_before_native),
+                            )
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — completion stamp must not block send
+                        pass
                 if _outbound_text_tracker is not None:
                     _outbound_text_tracker.set_native_catalog(body=reply or "")
                 try:

@@ -112,8 +112,30 @@ def visual_delivery_available(capability: Any) -> bool:
 
 
 def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
-    """Send real product media when a visual ask has imageable catalog evidence."""
+    """Send real product media for the canonical referent when imageable."""
     state = getattr(ctx, "state", None)
+    checkout_active = False
+    try:
+        from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+            is_active_catalog_checkout,
+        )
+
+        checkout_active = bool(is_active_catalog_checkout(ctx))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — checkout probe must not block visual capability
+        checkout_active = False
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+            product_focus_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual owner must still run without focus import
+        return None
+
+    referent = canonical_product_referent(state, checkout_active=checkout_active)
+    if not referent or not has_structured_catalog_identity(referent):
+        return None
+
     cap = collect_visual_delivery_capability(
         state=state,
         facts=getattr(ctx, "facts", None),
@@ -122,74 +144,16 @@ def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
     if not visual_delivery_available(cap):
         return None
     products = list(cap.get("products") or [])
-    title = ""
-    trusted_title = ""
-    try:
-        from modules.ai.brain.commerce.product_visual import (  # noqa: PLC0415
-            is_deictic_visual_request,
-            resolve_trusted_focus_for_deictic,
-        )
-
-        trusted = resolve_trusted_focus_for_deictic(
-            state,
-            str(getattr(ctx, "message", "") or ""),
-        )
-        trusted_title = str(trusted.title or "").strip()
-        trusted_id = str(getattr(trusted, "product_id", "") or "").strip()
-        if trusted.reason == "ambiguous_presented":
-            import re as _re  # noqa: PLC0415
-
-            _possessive = _re.search(
-                r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
-                str(getattr(ctx, "message", "") or ""),
-            )
-            if _possessive:
-                return None
-        elif trusted_title or trusted_id:
-            matched = None
-            if trusted_id:
-                for row in products:
-                    rid = str(
-                        row.get("id") or row.get("product_id") or row.get("external_id") or ""
-                    ).strip()
-                    if rid and rid == trusted_id:
-                        matched = row
-                        break
-            if matched is None and trusted_title:
-                title_hits = [
-                    row for row in products
-                    if str(row.get("title") or "").strip() == trusted_title
-                ]
-                if len(title_hits) == 1:
-                    matched = title_hits[0]
-            if matched is not None:
-                title = str(matched.get("title") or trusted_title).strip()
-                products = [matched] + [p for p in products if p is not matched]
-            elif str(getattr(trusted, "origin", "") or "") in {
-                "last_recommended_products",
-                "last_presented_products",
-                "current_product_focus",
-            }:
-                # Unique referent exists but is not imageable. Do not send
-                # a different SKU's media as if it belonged to the referent.
-                return None
-            elif trusted_title:
-                title = trusted_title
-        elif is_deictic_visual_request(str(getattr(ctx, "message", "") or "")):
-            import re as _re  # noqa: PLC0415
-
-            _possessive = _re.search(
-                r"صور(?:ه|ة)?(?:ته|تها|هم|هن)",
-                str(getattr(ctx, "message", "") or ""),
-            )
-            if _possessive:
-                # Possessive image follow-up without presented/focus context
-                # must not silently send an unrelated first catalog SKU.
-                return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual focus probe must not block capability send
-        title = ""
-    if not title:
-        title = str((products[0] or {}).get("title") or "").strip()
+    rid = product_focus_identity(referent)
+    matched = None
+    for row in products:
+        if product_focus_identity(row) == rid:
+            matched = row
+            break
+    if matched is None:
+        # Unique referent exists but is not imageable. Do not send another SKU.
+        return None
+    title = str(matched.get("title") or referent.get("title") or "").strip()
     if not title:
         return None
     from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: PLC0415
@@ -201,10 +165,12 @@ def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
             "query": title,
             "after_search": "product_visual",
             "force_product_card": True,
-            "replay_candidates": products,
+            "replay_candidates": [matched],
             "visual_delivery": cap,
+            "recommended_product": matched,
+            "product": matched,
         },
-        reason="product visual — imageable catalog candidates",
+        reason="product visual — canonical referent is imageable",
         confidence=0.90,
     )
 
