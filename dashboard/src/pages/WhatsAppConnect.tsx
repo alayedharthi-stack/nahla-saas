@@ -26,7 +26,14 @@ import {
 } from 'lucide-react'
 import { apiCall } from '../api/client'
 import { whatsappConnectApi, type WaConnection } from '../api/whatsappConnect'
-import { buildEmbeddedSignupFbLoginOptions } from '../lib/metaEmbeddedSignupLogin'
+import {
+  buildCoexistenceEmbeddedSignupFbLoginOptions,
+  buildEmbeddedSignupFbLoginOptions,
+  isCoexistenceFinishEvent,
+  isMigrationOrUnsafeEvent,
+  subscribeEmbeddedSignupSessionListener,
+  type ParsedEmbeddedSignupMessage,
+} from '../lib/metaEmbeddedSignupLogin'
 import { useLanguage } from '../i18n/context'
 import type { Translations } from '../i18n/types'
 
@@ -324,6 +331,10 @@ function MetaEmbeddedOptionCard({
 
       <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
 
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
+        {s.coexistenceSafetyNote}
+      </div>
+
       <div className="mt-auto pt-1 space-y-3">
         <ManualSetupGuideButton label={s.manualSetupLink} />
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
@@ -487,6 +498,13 @@ function explainWhatsAppError(msg: unknown, err: Translations['whatsappConnect']
   return raw
 }
 
+interface EmbeddedExchangeSession {
+  connectionMode: 'coexistence' | 'cloud_api'
+  finishEvent?: string
+  wabaId?: string
+  phoneNumberId?: string
+}
+
 function EmbeddedSignupFlow({
   onConnected,
   embeddedInCard = false,
@@ -505,6 +523,11 @@ function EmbeddedSignupFlow({
   const [busy, setBusy]         = useState(false)
   const sdkLoaded               = useRef(false)
   const embeddedStatusChecked   = useRef(false)
+  const sessionSnapshot         = useRef<{
+    finish_event?: string
+    waba_id?: string
+    phone_number_id?: string
+  }>({})
 
   const [configId, setConfigId] = useState('')
 
@@ -594,7 +617,7 @@ function EmbeddedSignupFlow({
       return
     }
 
-    if (res.status === 'review_pending' || res.status === 'activation_pending') {
+    if (res.status === 'review_pending' || res.status === 'activation_pending' || res.status === 'configuring' || res.status === 'authorizing') {
       setStage('syncing-phone')
       return
     }
@@ -652,18 +675,30 @@ function EmbeddedSignupFlow({
     refreshEmbeddedStatus().catch(() => {})
   }, [stage, refreshEmbeddedStatus])
 
-  const handleExchange = useCallback((code?: string, accessToken?: string) => {
+  const handleExchange = useCallback((code: string, session?: EmbeddedExchangeSession) => {
     setBusy(true); setStage('exchanging')
-    const payload: Record<string, string> = {}
-    if (code) payload.code = code
-    if (accessToken) payload.access_token = accessToken
-    apiCall<{ waba_id: string; phones: EmbeddedPhone[]; message: string }>(
+    const connectionMode = session?.connectionMode ?? 'cloud_api'
+    const payload: Record<string, string> = {
+      code,
+      connection_mode: connectionMode,
+    }
+    if (session?.finishEvent) payload.finish_event = session.finishEvent
+    if (session?.wabaId) payload.waba_id = session.wabaId
+    if (session?.phoneNumberId) payload.phone_number_id = session.phoneNumberId
+    apiCall<EmbeddedStatusPayload & { waba_id: string; phones: EmbeddedPhone[]; message: string }>(
       '/whatsapp/embedded/exchange',
       { method: 'POST', body: JSON.stringify(payload) }
     ).then(result => {
       setStatusHint(result.message || '')
-      setWabaId(result.waba_id)
-      setPhones(result.phones)
+      if (result.waba_id) setWabaId(result.waba_id)
+      if (Array.isArray(result.phones)) setPhones(result.phones)
+      if (
+        result.connected
+        || ['connected', 'configuring', 'authorizing', 'activation_pending', 'review_pending', 'failed', 'error'].includes(result.status)
+      ) {
+        applyEmbeddedStatus(result)
+        return
+      }
       setStage('select-phone')
     }).catch(err => {
       const raw = err instanceof Error ? err.message : emb.exchangeFailed
@@ -681,18 +716,175 @@ function EmbeddedSignupFlow({
         : explainWhatsAppError(raw, waErr))
       setStage('ready')
     }).finally(() => setBusy(false))
-  }, [emb.bspNotEnabled, emb.exchangeFailed])
+  }, [emb.bspNotEnabled, emb.exchangeFailed, waErr])
+
+  const applySessionMessage = useCallback((msg: ParsedEmbeddedSignupMessage) => {
+    if (msg.event) sessionSnapshot.current.finish_event = msg.event
+    if (msg.waba_id) sessionSnapshot.current.waba_id = msg.waba_id
+    if (msg.phone_number_id) sessionSnapshot.current.phone_number_id = msg.phone_number_id
+  }, [])
+
+  const abortIfUnsafeSession = useCallback((msg: ParsedEmbeddedSignupMessage, unsubscribe: () => void): boolean => {
+    if (isMigrationOrUnsafeEvent(msg.event, msg.error_message)) {
+      unsubscribe()
+      setError(simp.errMigrationUnsafe)
+      setBusy(false)
+      return true
+    }
+    if (msg.event === 'CANCEL') {
+      unsubscribe()
+      setError(simp.errPopupClosed)
+      setBusy(false)
+      return true
+    }
+    if (msg.event === 'ERROR') {
+      unsubscribe()
+      setError(msg.error_message || simp.errMigrationUnsafe)
+      setBusy(false)
+      return true
+    }
+    return false
+  }, [simp.errMigrationUnsafe, simp.errPopupClosed])
+
+  const waitForCoexistenceFinish = useCallback(async (timeoutMs = 2500) => {
+    if (isCoexistenceFinishEvent(sessionSnapshot.current.finish_event)) return true
+    const started = Date.now()
+    return await new Promise<boolean>((resolve) => {
+      const timer = window.setInterval(() => {
+        if (isCoexistenceFinishEvent(sessionSnapshot.current.finish_event)) {
+          window.clearInterval(timer)
+          resolve(true)
+          return
+        }
+        if (Date.now() - started >= timeoutMs) {
+          window.clearInterval(timer)
+          resolve(false)
+        }
+      }, 50)
+    })
+  }, [])
+
+  const launchCoexistenceSignup = useCallback(() => {
+    if (!window.FB || !sdkLoaded.current) { setError(emb.sdkNotReady); return }
+    setError('')
+    setBusy(true)
+    sessionSnapshot.current = {}
+    let aborted = false
+
+    const unsubscribe = subscribeEmbeddedSignupSessionListener((msg) => {
+      applySessionMessage(msg)
+      if (abortIfUnsafeSession(msg, unsubscribe)) aborted = true
+    })
+
+    window.FB.login((response: any) => {
+      void (async () => {
+        try {
+          if (aborted) return
+          if (!response?.authResponse) {
+            setError(simp.errPopupClosed)
+            return
+          }
+          if (response.error?.message) {
+            const denied = /permission|denied|declined/i.test(String(response.error.message))
+            setError(denied ? simp.errPermissionsDenied : explainWhatsAppError(response.error.message, waErr))
+            return
+          }
+          const code = response.authResponse.code
+          if (!code) {
+            setError(simp.errMissingCode)
+            return
+          }
+          if (isMigrationOrUnsafeEvent(sessionSnapshot.current.finish_event)) {
+            setError(simp.errMigrationUnsafe)
+            return
+          }
+          if (
+            sessionSnapshot.current.finish_event
+            && !isCoexistenceFinishEvent(sessionSnapshot.current.finish_event)
+            && sessionSnapshot.current.finish_event !== 'CANCEL'
+            && sessionSnapshot.current.finish_event !== 'ERROR'
+          ) {
+            setError(simp.errMigrationUnsafe)
+            return
+          }
+          if (!isCoexistenceFinishEvent(sessionSnapshot.current.finish_event)) {
+            const gotFinish = await waitForCoexistenceFinish()
+            if (aborted) return
+            if (isMigrationOrUnsafeEvent(sessionSnapshot.current.finish_event)) {
+              setError(simp.errMigrationUnsafe)
+              return
+            }
+            if (!gotFinish) {
+              console.info('[WhatsApp] coexistence code-only exchange; session finish event not received')
+            }
+          }
+          handleExchange(code, {
+            connectionMode: 'coexistence',
+            finishEvent: sessionSnapshot.current.finish_event,
+            wabaId: sessionSnapshot.current.waba_id,
+            phoneNumberId: sessionSnapshot.current.phone_number_id,
+          })
+        } finally {
+          unsubscribe()
+          setBusy(false)
+        }
+      })()
+    }, buildCoexistenceEmbeddedSignupFbLoginOptions(configId))
+  }, [
+    applySessionMessage,
+    abortIfUnsafeSession,
+    waitForCoexistenceFinish,
+    configId,
+    emb.sdkNotReady,
+    handleExchange,
+    simp.errMissingCode,
+    simp.errMissingSessionEvent,
+    simp.errMigrationUnsafe,
+    simp.errPermissionsDenied,
+    simp.errPopupClosed,
+    waErr,
+  ])
 
   const launchSignup = useCallback(() => {
     if (!window.FB || !sdkLoaded.current) { setError(emb.sdkNotReady); return }
     setError('')
+    setBusy(true)
+    sessionSnapshot.current = {}
+
+    const unsubscribe = subscribeEmbeddedSignupSessionListener((msg) => {
+      applySessionMessage(msg)
+      abortIfUnsafeSession(msg, unsubscribe)
+    })
+
     window.FB.login((response: any) => {
-      if (!response?.authResponse) { setError(emb.linkCancelled); return }
+      unsubscribe()
+      setBusy(false)
+      if (!response?.authResponse) { setError(simp.errPopupClosed); return }
+      if (response.error?.message) {
+        const denied = /permission|denied|declined/i.test(String(response.error.message))
+        setError(denied ? simp.errPermissionsDenied : explainWhatsAppError(response.error.message, waErr))
+        return
+      }
       const code = response.authResponse.code
-      if (!code) { setError(emb.exchangeFailed); return }
+      if (!code) { setError(simp.errMissingCode); return }
+      if (isMigrationOrUnsafeEvent(sessionSnapshot.current.finish_event, undefined)) {
+        setError(simp.errMigrationUnsafe)
+        return
+      }
       handleExchange(code, undefined)
     }, buildEmbeddedSignupFbLoginOptions(configId))
-  }, [handleExchange, configId, emb.sdkNotReady, emb.linkCancelled, emb.exchangeFailed])
+  }, [
+    applySessionMessage,
+    abortIfUnsafeSession,
+    configId,
+    emb.sdkNotReady,
+    handleExchange,
+    simp.errMissingCode,
+    simp.errMigrationUnsafe,
+    simp.errPermissionsDenied,
+    simp.errPopupClosed,
+    waErr,
+  ])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
@@ -1012,7 +1204,7 @@ function EmbeddedSignupFlow({
         )}
         <button
           type="button"
-          onClick={launchSignup}
+          onClick={launchCoexistenceSignup}
           disabled={stage !== 'ready' || busy}
           className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
         >
@@ -1025,6 +1217,14 @@ function EmbeddedSignupFlow({
                 {simp.metaConnectBtn}
               </>
           }
+        </button>
+        <button
+          type="button"
+          onClick={launchSignup}
+          disabled={stage !== 'ready' || busy}
+          className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
+        >
+          {simp.metaCloudApiConnectBtn}
         </button>
       </div>
     )
@@ -1063,13 +1263,17 @@ function EmbeddedSignupFlow({
         {emb.initHint}
       </div>
 
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
+        {simp.coexistenceSafetyNote}
+      </div>
+
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
       )}
 
-      {/* Main CTA */}
+      {/* Main CTA — coexistence (WhatsApp Business App on phone) */}
       <button
-        onClick={launchSignup}
+        onClick={launchCoexistenceSignup}
         disabled={stage !== 'ready' || busy}
         className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
       >
@@ -1079,9 +1283,18 @@ function EmbeddedSignupFlow({
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
               </svg>
-              {emb.connectBtn}
+              {simp.metaConnectBtn}
             </>
         }
+      </button>
+
+      <button
+        type="button"
+        onClick={launchSignup}
+        disabled={stage !== 'ready' || busy}
+        className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
+      >
+        {simp.metaCloudApiConnectBtn}
       </button>
 
       <p className="text-center text-xs text-slate-400">

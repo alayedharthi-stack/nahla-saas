@@ -1663,13 +1663,12 @@ def _import_from_meta_body(
 
     logger.info(
         "[META_IMPORT][READY] tenant=%s catalog_id=%s graph_api_version=%s "
-        "provider=%s connection_type=%s token_source=%s token_tail=%s "
+        "provider=%s connection_type=%s token_source=%s "
         "token_len=%d page_size=%d max_pages=%d timeout=%.1fs",
         tenant_id, catalog_id, META_GRAPH_API_VERSION,
         token_pick["provider"] or "<unset>",
         token_pick["connection_type"] or "<unset>",
         token_pick["token_source"],
-        token_pick["token_tail"],
         token_pick["token_len"],
         PAGE_SIZE, MAX_PAGES, REQUEST_TIMEOUT,
     )
@@ -1694,10 +1693,10 @@ def _import_from_meta_body(
             log_url = _mask_url(next_url)
             logger.info(
                 "[META_IMPORT][REQ] page=%d tenant=%s catalog_id=%s "
-                "edge=%s graph_url=%s has_first_params=%s token=%s "
+                "edge=%s graph_url=%s has_first_params=%s token_present=%s "
                 "edge_candidate_idx=%d first_real_attempt=%s",
                 page_idx, tenant_id, catalog_id, current_edge, log_url,
-                first_params is not None, _mask_token(token),
+                first_params is not None, bool(token),
                 edge_candidate_idx, _first_real_attempt,
             )
 

@@ -1012,6 +1012,13 @@ export interface Translations {
       metaApprovalNotice:       string
       metaExistingAccountHint:  string
       metaConnectBtn:           string
+      metaCloudApiConnectBtn:   string
+      coexistenceSafetyNote:    string
+      errPopupClosed:           string
+      errPermissionsDenied:     string
+      errMissingCode:           string
+      errMigrationUnsafe:       string
+      errMissingSessionEvent:   string
       manualSetupLink:          string
     }
     assisted: {

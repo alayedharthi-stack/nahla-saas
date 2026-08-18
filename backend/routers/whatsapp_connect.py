@@ -532,6 +532,9 @@ def _reconcile_coexistence_status(
     """
     if conn is None:
         return False
+    from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+    if is_coexistence_mode(conn):
+        return False
     db_status = (conn.status or "").lower()
     if db_status in _HARD_FAIL_DB_STATUSES:
         logger.info(
@@ -4237,6 +4240,12 @@ async def direct_verify_otp(
     graph     = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
     phone_id  = body.phone_number_id.strip()
     conn_for_token = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+    if conn_for_token is not None and is_coexistence_mode(conn_for_token):
+        raise HTTPException(
+            status_code=400,
+            detail="هذا الرقم مربوط بمسار واتساب الأعمال على الجوال. لا تستخدم تفعيل OTP المباشر.",
+        )
     token_ctx = await get_token_for_operation(
         db,
         conn_for_token,
@@ -4244,15 +4253,14 @@ async def direct_verify_otp(
         operation="phone_verify",
         prefer_platform=True,
     )
-    token_tail = token_ctx.token[-8:] if token_ctx.token else "EMPTY"
     headers   = {
         "Authorization": f"Bearer {token_ctx.token}",
         "Content-Type":  "application/json",
     }
 
     logger.info(
-        "[WA verify] ▶ START | tenant=%s phone_number_id=%s waba=%s token_tail=...%s",
-        tenant_id, phone_id, WA_BUSINESS_ACCOUNT_ID, token_tail,
+        "[WA verify] ▶ START | tenant=%s phone_number_id=%s waba=%s token_present=%s",
+        tenant_id, phone_id, WA_BUSINESS_ACCOUNT_ID, bool(token_ctx.token),
     )
 
     # ── Pre-check: confirm phone_number_id belongs to our WABA & token ────────
@@ -4320,8 +4328,8 @@ async def direct_verify_otp(
             else:
                 logger.error(
                     "[WA verify] phone_number_id=%s not accessible and no fresh ID found | "
-                    "WABA=%s token_tail=...%s",
-                    phone_id, WA_BUSINESS_ACCOUNT_ID, token_tail,
+                    "WABA=%s token_present=%s",
+                    phone_id, WA_BUSINESS_ACCOUNT_ID, bool(token_ctx.token),
                 )
                 raise HTTPException(
                     status_code=400,
@@ -4716,8 +4724,10 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         tenant_id, phone_id, verification_status,
     )
 
-    # If NOT_VERIFIED: attempt register to re-activate
-    if verification_status != "VERIFIED":
+    # If NOT_VERIFIED: attempt register to re-activate, except Meta Coexistence.
+    from services.meta_coexistence import is_coexistence_mode, smb_syncs_accepted  # noqa: PLC0415
+    coexistence = is_coexistence_mode(conn)
+    if verification_status != "VERIFIED" and not coexistence:
         from routers.whatsapp_embedded import _resolve_register_pin as _rrp  # noqa: PLC0415
         _refresh_pin = _rrp(conn) if conn else "000000"
         if conn:
@@ -4744,6 +4754,16 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     sync_state = _bps(data if isinstance(data, dict) else {})
 
     if sync_state.get("connected"):
+        if coexistence and not smb_syncs_accepted(dict(conn.extra_metadata or {})):
+            conn.status = "configuring"
+            conn.sending_enabled = False
+            db.commit()
+            return {
+                "updated": False,
+                "meta_response": data,
+                "message": "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال.",
+                **_build_wa_status(conn),
+            }
         from datetime import datetime, timezone as _tz  # noqa: PLC0415
         conn.status                = "connected"
         conn.provider              = WHATSAPP_PROVIDER_META
