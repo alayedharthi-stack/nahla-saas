@@ -866,16 +866,12 @@ async def _finalize_coexistence_exchange(
     apply_smb_sync_results(conn, sync_results)
     meta = dict(conn.extra_metadata or {})
     if smb_syncs_accepted(meta):
-        conn.status = "connected"
         conn.sending_enabled = True
-        conn.connected_at = conn.connected_at or datetime.now(timezone.utc)
         conn.last_error = None
-        try:
-            from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
-            stamp_whatsapp_ai_live_since_if_empty(conn)
-        except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
-            pass
-        db.commit()
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            finalize_successful_whatsapp_connection,
+        )
+        finalize_successful_whatsapp_connection(db, conn)
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["message"] = (
             "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
@@ -1056,6 +1052,11 @@ async def sync_embedded_connection_from_meta(
         conn.extra_metadata = meta
 
     db.commit()
+    if str(getattr(conn, "status", "") or "") == "connected":
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            finalize_successful_whatsapp_connection,
+        )
+        finalize_successful_whatsapp_connection(db, conn)
     return _build_embedded_status_payload(conn)
 
 

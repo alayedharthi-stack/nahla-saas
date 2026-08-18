@@ -3,11 +3,14 @@ services/whatsapp_connection_service.py
 ────────────────────────────────────────
 Canonical write-layer for ALL WhatsApp connection flows.
 
-Every code path that creates or updates a WhatsAppConnection row and marks it
-"connected" MUST go through commit_connection().  Intermediate state before a
-phone number is selected (embedded signup "exchange" step) goes through
-begin_waba_session() which does not mark the row connected but still enforces
-WABA uniqueness.
+Credential writes that mark a row connected go through commit_connection().
+Intermediate state before a phone number is selected (embedded signup
+"exchange" step) goes through begin_waba_session() which does not mark the
+row connected but still enforces WABA uniqueness.
+
+Every path that promotes a connection to genuinely connected/usable MUST
+then call finalize_successful_whatsapp_connection() so post-connect
+lifecycle (connected_at once, trial start) has a single owner.
 
 Guarantees enforced here so routers never have to duplicate them:
 
@@ -220,7 +223,8 @@ def commit_connection(
     conn.status                       = "connected"
     conn.webhook_verified             = False   # must be earned by subscription
     conn.last_error                   = None
-    conn.connected_at                 = now
+    if getattr(conn, "connected_at", None) is None:
+        conn.connected_at             = now
     conn.updated_at                   = now
     conn.disconnect_reason            = None
     conn.disconnected_at              = None
@@ -309,11 +313,15 @@ def commit_connection(
     )
 
     try:
-        from core.trial_lifecycle import start_trial_on_whatsapp_connect  # noqa: PLC0415
-        start_trial_on_whatsapp_connect(db, tenant_id, connected_at=now)
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            finalize_successful_whatsapp_connection,
+        )
+        finalize_successful_whatsapp_connection(
+            db, conn, connected_at=conn.connected_at or now,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[WASvc] trial start hook failed (non-fatal) tenant=%s: %s",
+            "[WASvc] connection finalization failed (non-fatal) tenant=%s: %s",
             tenant_id, exc,
         )
 

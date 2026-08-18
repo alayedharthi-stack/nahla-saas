@@ -59,6 +59,7 @@ from core.coexistence_client_id import (
 from core.database import get_db
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
 from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty
+from core.whatsapp_connection_finalization import finalize_successful_whatsapp_connection
 from services.whatsapp_platform.provider_utils import (
     WHATSAPP_CONNECTION_TYPE_ASSISTED,
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
@@ -558,26 +559,30 @@ def _reconcile_coexistence_status(
 
     prev_status = conn.status
     prev_sending = bool(conn.sending_enabled)
-    conn.status = "connected"
     conn.sending_enabled = True
-    if not conn.connected_at:
-        conn.connected_at = datetime.now(timezone.utc)
-    _set_coexistence_state(conn, status="connected")
-    try:
-        stamp_whatsapp_ai_live_since_if_empty(conn)
-    except Exception:
-        pass
     conn.last_error = None
+    _set_coexistence_state(conn, status="connected")
     if db is not None:
         try:
-            db.commit()
+            finalize_successful_whatsapp_connection(db, conn)
         except Exception as exc:  # noqa: BLE001
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(
-                "[coexistence_reconcile] tenant=%s source=%s commit FAILED: %s",
+                "[coexistence_reconcile] tenant=%s source=%s finalize FAILED: %s",
                 tenant_id, source, exc,
             )
             return False
+    else:
+        conn.status = "connected"
+        if not conn.connected_at:
+            conn.connected_at = datetime.now(timezone.utc)
+        try:
+            stamp_whatsapp_ai_live_since_if_empty(conn)
+        except Exception:
+            pass
     logger.info(
         "[coexistence_reconcile] tenant=%s source=%s PROMOTED prev_status=%r prev_sending=%s "
         "→ status=connected sending_enabled=True (ops health green)",
@@ -2062,11 +2067,8 @@ async def coexistence_partner_connect(
         if channel_ok or waba_ok:
             conn.webhook_verified = True
             if channel_status == "ready":
-                conn.status = "connected"
                 conn.sending_enabled = True
-                conn.connected_at = datetime.now(timezone.utc)
                 _set_coexistence_state(conn, status="connected")
-                stamp_whatsapp_ai_live_since_if_empty(conn)
         meta["last_webhook_setup"] = webhook_result
         meta["last_waba_webhook_setup"] = waba_webhook_result
     else:
@@ -2085,7 +2087,10 @@ async def coexistence_partner_connect(
         )
 
     conn.extra_metadata = meta
-    db.commit()
+    if api_key and channel_status == "ready" and conn.sending_enabled:
+        finalize_successful_whatsapp_connection(db, conn)
+    else:
+        db.commit()
 
     return {
         "status": conn.status,
@@ -2169,6 +2174,7 @@ async def admin_activate_coexistence(
 
     webhook_result = None
     waba_webhook_result: Optional[Dict[str, Any]] = None
+    should_finalize = False
     if body.configure_webhook:
         try:
             webhook_result = await dialog360_configure_webhook(
@@ -2208,11 +2214,10 @@ async def admin_activate_coexistence(
                 action_required_message=body.action_required_message or "فشل إعداد webhook لدى المزود ويحتاج تدخل فريق نحلة.",
             )
         else:
-            conn.status = "connected"
             conn.webhook_verified = True
-            conn.connected_at = datetime.now(timezone.utc)
+            conn.sending_enabled = True
             _set_coexistence_state(conn, status="connected")
-            stamp_whatsapp_ai_live_since_if_empty(conn)
+            should_finalize = True
 
     # ── Auto-resolve missing WABA ID / phone metadata at activation time ──
     # The activation form treats waba_id as optional ("الحقول الاختيارية")
@@ -2229,7 +2234,10 @@ async def admin_activate_coexistence(
         except Exception as exc:
             logger.warning("[coexistence/activate] auto-resolve failed tenant=%s err=%s", body.tenant_id, exc)
 
-    db.commit()
+    if should_finalize:
+        finalize_successful_whatsapp_connection(db, conn)
+    else:
+        db.commit()
     _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_activate", request_id=request_id)
 
     return {
@@ -2334,19 +2342,16 @@ async def admin_coexistence_sync_record(
     # merchant page no longer shows the "غير متصل فعليًا" banner.
     after = _coexistence_integration_complete(conn)
     if after["truly_connected"]:
-        conn.status = "connected"
         conn.sending_enabled = True
-        if not conn.connected_at:
-            conn.connected_at = datetime.now(timezone.utc)
         _set_coexistence_state(conn, status="connected")
-        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.last_error = None
-    elif after.get("missing_fields"):
-        conn.last_error = (
-            f"sync_incomplete: missing {', '.join(after['missing_fields'])}"
-        )
-
-    db.commit()
+        finalize_successful_whatsapp_connection(db, conn)
+    else:
+        if after.get("missing_fields"):
+            conn.last_error = (
+                f"sync_incomplete: missing {', '.join(after['missing_fields'])}"
+            )
+        db.commit()
     _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_sync", request_id=request_id)
     audit(
         "admin_coexistence_sync_record",
@@ -2451,15 +2456,12 @@ async def admin_coexistence_edit_record(
 
     completeness = _coexistence_integration_complete(conn)
     if body.promote_to_connected and completeness["truly_connected"]:
-        conn.status = "connected"
         conn.sending_enabled = True
-        if not conn.connected_at:
-            conn.connected_at = datetime.now(timezone.utc)
         _set_coexistence_state(conn, status="connected")
-        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.last_error = None
-
-    db.commit()
+        finalize_successful_whatsapp_connection(db, conn)
+    else:
+        db.commit()
     _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_edit", request_id=request_id)
     audit(
         "admin_coexistence_edit_record",
@@ -2668,7 +2670,7 @@ async def admin_coexistence_verify_webhook(
     # AND the row is operationally healthy, promote a stale status to
     # ``connected`` so the owner banner stops showing status_invalid.
     reconciled = _reconcile_coexistence_status(
-        conn, tenant_id=body.tenant_id, source="admin_verify_webhook",
+        conn, tenant_id=body.tenant_id, source="admin_verify_webhook", db=db,
     )
     db.commit()
 
@@ -2891,7 +2893,7 @@ async def admin_coexistence_auto_configure(
     # green, promote the row out of any stale ``action_required``
     # state so the owner panel and merchant page agree.
     reconciled = _reconcile_coexistence_status(
-        conn, tenant_id=body.tenant_id, source="admin_auto_configure",
+        conn, tenant_id=body.tenant_id, source="admin_auto_configure", db=db,
     )
     db.commit()
 
@@ -4483,7 +4485,6 @@ async def direct_verify_otp(
     conn.token_expires_at             = None
     conn.webhook_verified             = bool(sync_state.get("connected"))
     conn.sending_enabled              = bool(sync_state.get("sending_enabled"))
-    conn.connected_at                 = datetime.now(timezone.utc) if sync_state.get("connected") else None
     conn.last_verified_at             = datetime.now(timezone.utc) if meta_status == "VERIFIED" else conn.last_verified_at
     conn.last_error                   = None if conn.sending_enabled else sync_state.get("message")
     conn.extra_metadata               = {
@@ -4503,7 +4504,10 @@ async def direct_verify_otp(
         oauth_session_message=None,
     )
 
-    db.commit()
+    if sync_state.get("connected"):
+        finalize_successful_whatsapp_connection(db, conn)
+    else:
+        db.commit()
 
     logger.info(
         "[WA Direct] ✅ Finalized | tenant=%s phone=%s name=%s meta_verification=%s db_status=%s sending_enabled=%s",
@@ -4764,15 +4768,11 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
                 "message": "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال.",
                 **_build_wa_status(conn),
             }
-        from datetime import datetime, timezone as _tz  # noqa: PLC0415
-        conn.status                = "connected"
         conn.provider              = WHATSAPP_PROVIDER_META
         conn.sending_enabled       = True
         conn.phone_number          = display_phone
         conn.business_display_name = verified_name or conn.business_display_name
-        conn.connected_at          = datetime.now(_tz.utc)
         conn.last_error            = None
-        stamp_whatsapp_ai_live_since_if_empty(conn)
         conn.extra_metadata        = {
             **(conn.extra_metadata or {}),
             "meta_code_verification_status": sync_state.get("verification_status"),
@@ -4781,7 +4781,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             "meta_quality_rating": sync_state.get("quality_rating"),
             "embedded_status_message": sync_state.get("message"),
         }
-        db.commit()
+        finalize_successful_whatsapp_connection(db, conn)
         logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
         return {
             "updated": True,
