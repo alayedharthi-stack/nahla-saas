@@ -238,6 +238,7 @@ def _try_native_catalog_entry_decision(
             "native_catalog_entry": {
                 "thumbnail_product_retailer_id": cap.thumbnail_retailer_id,
                 "matchable_product_count": cap.matchable_product_count,
+                "catalog_id": cap.catalog_id,
             },
             "navigation_state_patch": {
                 "selected_collection": "",

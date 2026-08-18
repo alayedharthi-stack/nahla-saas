@@ -15274,6 +15274,47 @@ async def _try_send_native_catalog_entry(
             reason="connection_missing",
         )
 
+    catalog_id = str(getattr(connection, "meta_catalog_id", "") or "").strip()
+    bound_catalog = str(entry.get("catalog_id") or "").strip()
+    if bound_catalog and catalog_id and bound_catalog != catalog_id:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=catalog_id_mismatch",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="catalog_id_mismatch",
+        )
+    if not catalog_id:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=catalog_id_missing",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="catalog_id_missing",
+        )
+    from core.meta_catalog_membership import load_meta_catalog_membership  # noqa: PLC0415
+
+    membership = load_meta_catalog_membership(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=catalog_id,
+        retailer_id=thumbnail,
+    )
+    if membership is None:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=meta_catalog_unverified",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="meta_catalog_unverified",
+        )
+
     from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
         resolve_native_catalog_body_text,
     )

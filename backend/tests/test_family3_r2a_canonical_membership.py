@@ -253,6 +253,36 @@ class TestAmbiguity:
         assert report.desired[0].variant_id == 99
         assert report.ambiguous == []
 
+    def test_parent_and_non_default_variant_same_retailer_is_ambiguous(self):
+        db = MagicMock()
+        product = SimpleNamespace(
+            id=10, tenant_id=7, meta_retailer_id="R", external_id=None,
+            has_variants=True, default_variant_id=1,
+        )
+        default_v = SimpleNamespace(
+            id=1, product_id=10, tenant_id=7, retailer_id="OTHER", is_default=True,
+        )
+        other_v = SimpleNamespace(
+            id=2, product_id=10, tenant_id=7, retailer_id="R", is_default=False,
+        )
+
+        def _query(model):
+            q = MagicMock()
+            name = getattr(model, "__name__", "")
+            if name == "Product":
+                q.filter.return_value.all.return_value = [product]
+            else:
+                q.filter.return_value.all.return_value = [default_v, other_v]
+            return q
+
+        db.query.side_effect = _query
+        report = join_graph_to_local_memberships(
+            db, tenant_id=7, live_products={"R": {"meta_product_id": "m1"}},
+        )
+        assert report.desired == []
+        assert report.ambiguous
+        assert report.ambiguous[0]["diagnostic"] == DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING
+
 
 class TestProviderContradiction:
     def test_invalidation_requires_catalog_id(self):

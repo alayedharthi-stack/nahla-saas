@@ -438,17 +438,18 @@ async def send_single_product_message(
 
     message_id = _extract_message_id(resp)
     if not message_id:
+        reason, err_text = _classify_catalog_provider_failure(resp or {})
         logger.error(
             "[CATALOG_SEND_FAILED] tenant=%s to=*%s kind=single "
-            "reason=provider_error response=%r",
-            tenant_id, _phone_suffix(to), (resp or {}).get("error") or resp,
+            "reason=%s response=%r",
+            tenant_id, _phone_suffix(to), reason, (resp or {}).get("error") or resp,
         )
         return CatalogSendResult(
             success=False,
             fallback_recommended=True,
-            reason="provider_error",
+            reason=reason,
             raw_response=resp or {},
-            error=str((resp or {}).get("error") or ""),
+            error=err_text,
         )
 
     logger.info(

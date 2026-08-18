@@ -66,6 +66,7 @@ class NativeCatalogCapability:
     reason: str
     thumbnail_retailer_id: str = ""
     matchable_product_count: int = 0
+    catalog_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -592,6 +593,7 @@ def evaluate_native_catalog_capability(
         reason="ok",
         thumbnail_retailer_id=thumbnail,
         matchable_product_count=matchable,
+        catalog_id=catalog_id,
     )
 
 

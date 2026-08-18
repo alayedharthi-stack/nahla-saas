@@ -102,12 +102,17 @@ class TestExplicitBrowseCatalogDispatchPath:
 
         mock_result = type("R", (), {"success": True, "reason": "ok", "error": None})()
 
+        from types import SimpleNamespace
+
         with patch(
             "services.whatsapp_platform.catalog_sender.send_catalog_message",
             new=AsyncMock(return_value=mock_result),
         ) as send_mock, patch(
             "core.native_catalog_capability.load_whatsapp_connection",
-            return_value=object(),
+            return_value=SimpleNamespace(meta_catalog_id="CAT-1"),
+        ), patch(
+            "core.meta_catalog_membership.load_meta_catalog_membership",
+            return_value=SimpleNamespace(catalog_id="CAT-1", retailer_id="sku-1"),
         ):
             asyncio.run(
                 wh._try_send_native_catalog_entry(
@@ -115,7 +120,7 @@ class TestExplicitBrowseCatalogDispatchPath:
                     tenant_id=33,
                     phone_id="pid",
                     to="966500000000",
-                    entry={"thumbnail_product_retailer_id": "sku-1"},
+                    entry={"thumbnail_product_retailer_id": "sku-1", "catalog_id": "CAT-1"},
                     fallback_body=COMPOSE_FALLBACK_WITH_EMOJI,
                 )
             )
@@ -125,7 +130,79 @@ class TestExplicitBrowseCatalogDispatchPath:
         assert "تعذّرت صياغة" not in str(sent_body)
 
 
+    def test_try_send_native_catalog_entry_fails_closed_on_catalog_switch(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from routers import whatsapp_webhook as wh
+
+        send_mock = AsyncMock()
+        with patch(
+            "services.whatsapp_platform.catalog_sender.send_catalog_message",
+            new=send_mock,
+        ), patch(
+            "core.native_catalog_capability.load_whatsapp_connection",
+            return_value=SimpleNamespace(meta_catalog_id="CAT-B"),
+        ), patch(
+            "core.meta_catalog_membership.load_meta_catalog_membership",
+            return_value=SimpleNamespace(catalog_id="CAT-A", retailer_id="sku-1"),
+        ):
+            result = asyncio.run(
+                wh._try_send_native_catalog_entry(
+                    db=object(),
+                    tenant_id=33,
+                    phone_id="pid",
+                    to="966500000000",
+                    entry={
+                        "thumbnail_product_retailer_id": "sku-1",
+                        "catalog_id": "CAT-A",
+                    },
+                    fallback_body="ok",
+                )
+            )
+        assert result.success is False
+        assert result.reason == "catalog_id_mismatch"
+        send_mock.assert_not_awaited()
+
+    def test_try_send_native_catalog_entry_fails_closed_without_membership(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from routers import whatsapp_webhook as wh
+
+        send_mock = AsyncMock()
+        with patch(
+            "services.whatsapp_platform.catalog_sender.send_catalog_message",
+            new=send_mock,
+        ), patch(
+            "core.native_catalog_capability.load_whatsapp_connection",
+            return_value=SimpleNamespace(meta_catalog_id="CAT-A"),
+        ), patch(
+            "core.meta_catalog_membership.load_meta_catalog_membership",
+            return_value=None,
+        ):
+            result = asyncio.run(
+                wh._try_send_native_catalog_entry(
+                    db=object(),
+                    tenant_id=33,
+                    phone_id="pid",
+                    to="966500000000",
+                    entry={
+                        "thumbnail_product_retailer_id": "sku-1",
+                        "catalog_id": "CAT-A",
+                    },
+                    fallback_body="ok",
+                )
+            )
+        assert result.success is False
+        assert result.reason == "meta_catalog_unverified"
+        send_mock.assert_not_awaited()
+
+
 class TestPhase31ShadowOnlyUnchanged:
+
     def test_final_turn_audit_does_not_mutate_reply(self) -> None:
         contract = FinalTurnContract(
             response_purpose="discovery",

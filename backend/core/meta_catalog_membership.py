@@ -252,9 +252,20 @@ def _collapse_alias_claims(
     if has_variants:
         concrete = [c for c in claims if c.variant_id is not None]
         concrete_ids = {c.variant_id for c in concrete}
-        if len(concrete_ids) == 1:
-            return [concrete[0]]
-        return list(claims)
+        parent_rows = [c for c in claims if c.variant_id is None]
+        if len(concrete_ids) != 1:
+            return list(claims)
+        chosen = concrete[0]
+        is_canonical_default = bool(
+            chosen.is_default
+            or (
+                default_variant_id is not None
+                and int(chosen.variant_id) == int(default_variant_id)
+            )
+        )
+        if parent_rows and not is_canonical_default:
+            return list(claims)
+        return [chosen]
     default_rows = [
         c
         for c in claims
