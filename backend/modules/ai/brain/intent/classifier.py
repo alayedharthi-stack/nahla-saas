@@ -13,9 +13,9 @@ Phase 1 hybrid strategy:
      non-authoritative Layer 2 fallback and must not erase a supported
      rule candidate. A non-empty non-general Layer 2 hint is evidence:
      a genuinely different operational label is an authoritative override;
-     a coarser product-domain hint (Layer 2 closed vocabulary) is compatible
-     broader evidence and must not erase a more-specific rule candidate
-     that Layer 2 cannot name.
+     a Layer 2 hint that the canonical semantic-relation registry proves is
+     the direct broader label of the rule candidate is compatible evidence
+     and must not erase that more-specific rule candidate.
 
 This keeps the "happy path" (clear Arabic greeting / product ask / buy)
 at zero extra latency while falling through to LLM only for ambiguous input.
@@ -37,6 +37,7 @@ from ..types import (
 from . import rules
 from . import slot_extractor as _slot_mod
 from .ordering_extractor import extract_ordering_slots
+from .semantic_relation import is_direct_broader_relation
 
 logger = logging.getLogger("nahla.brain.classifier")
 
@@ -80,22 +81,13 @@ def is_authoritative_layer2_intent(hint: Any) -> bool:
 
 
 def layer2_is_compatible_broader_evidence(rule_name: Any, layer2_hint: Any) -> bool:
-    """True when Layer 2 named a coarser product-domain hint than the rule.
+    """True only when the canonical registry proves a direct broader relation.
 
-    Uses the existing Layer 2 closed vocabulary (slot extractor) and its
-    product-inquiry subset. A rule intent that Layer 2 cannot name is more
-    specific; a product-domain Layer 2 hint is compatible evidence, not an
-    operational override. Does not consult phrase text or intent-pair tables.
+    Classifier ownership consumes ``is_direct_broader_relation``; it does not
+    infer hierarchy from Layer 2 vocabulary, out-of-vocabulary status, shared
+    domain, or shared downstream actions. Unknown relationships fail closed.
     """
-    rule = str(rule_name or "").strip()
-    hint = str(layer2_hint or "").strip()
-    if not rule or not hint or hint == INTENT_GENERAL or rule == hint:
-        return False
-    vocab = _slot_mod.LAYER2_INTENT_HINT_VOCABULARY
-    domain = _slot_mod.LAYER2_PRODUCT_DOMAIN_HINTS
-    if rule in vocab:
-        return False
-    return hint in domain
+    return is_direct_broader_relation(rule_name, layer2_hint)
 
 
 def _stamp_classifier_precedence(

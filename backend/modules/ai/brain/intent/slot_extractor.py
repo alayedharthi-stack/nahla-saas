@@ -140,14 +140,6 @@ LAYER2_INTENT_HINT_VOCABULARY = frozenset({
     "general",
 })
 
-# Product-inquiry coarse labels inside that closed vocabulary. Layer 2 cannot
-# name more-specific product needs that sit outside the vocabulary.
-# Decision-engine product/price search already groups these two labels.
-LAYER2_PRODUCT_DOMAIN_HINTS = frozenset({
-    "ask_product",
-    "ask_price",
-})
-
 
 async def extract_slots(
     message: str,

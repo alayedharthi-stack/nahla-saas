@@ -64,13 +64,21 @@ from modules.ai.brain.intent.classifier import (  # noqa: E402
     layer2_is_compatible_broader_evidence,
 )
 from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
+from modules.ai.brain.intent.semantic_relation import (  # noqa: E402
+    is_direct_broader_relation,
+)
 from modules.ai.brain.types import (  # noqa: E402
+    INTENT_ASK_LOCATION,
     INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PRICE,
     INTENT_ASK_PRODUCT,
     INTENT_GENERAL,
+    INTENT_PLATFORM_INQUIRY,
     INTENT_PRODUCT_VISUAL_REQUEST,
+    INTENT_SOCIAL,
     INTENT_START_ORDER,
     INTENT_TRACK_ORDER,
+    INTENT_WHO_ARE_YOU,
     BrainContext,
     CommerceFacts,
     Decision,
@@ -803,12 +811,15 @@ class TestF3R1ClassifierCanonicalPrecedence:
         assert INTENT_START_ORDER not in compat_src
         assert INTENT_ASK_OWNER_CONTACT not in compat_src
         assert "if layer2" not in compat_src
+        assert "LAYER2_PRODUCT_DOMAIN_HINTS" not in classifier_src
+        assert "LAYER2_INTENT_HINT_VOCABULARY" not in compat_src
+        assert "is_direct_broader_relation" in classifier_src
         assert layer2_is_compatible_broader_evidence(
             INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT
         ) is True
         assert layer2_is_compatible_broader_evidence(
-            INTENT_PRODUCT_VISUAL_REQUEST, "ask_price"
-        ) is True
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRICE
+        ) is False
         assert layer2_is_compatible_broader_evidence(
             INTENT_PRODUCT_VISUAL_REQUEST, INTENT_START_ORDER
         ) is False
@@ -831,9 +842,9 @@ class TestF3R1ClassifierCanonicalPrecedence:
     def test_r1_layer2_vocab_mirrors_prompt_and_excludes_visual(self) -> None:
         import re
 
+        from modules.ai.brain.intent import slot_extractor as slot_extractor_mod
         from modules.ai.brain.intent.slot_extractor import (
             LAYER2_INTENT_HINT_VOCABULARY,
-            LAYER2_PRODUCT_DOMAIN_HINTS,
             _SYSTEM,
         )
 
@@ -843,8 +854,207 @@ class TestF3R1ClassifierCanonicalPrecedence:
         assert prompt_labels == set(LAYER2_INTENT_HINT_VOCABULARY)
         assert INTENT_PRODUCT_VISUAL_REQUEST not in LAYER2_INTENT_HINT_VOCABULARY
         assert INTENT_PRODUCT_VISUAL_REQUEST not in _SYSTEM
-        assert LAYER2_PRODUCT_DOMAIN_HINTS <= LAYER2_INTENT_HINT_VOCABULARY
-        assert INTENT_ASK_PRODUCT in LAYER2_PRODUCT_DOMAIN_HINTS
+        assert not hasattr(slot_extractor_mod, "LAYER2_PRODUCT_DOMAIN_HINTS")
+
+
+class TestF3R1B1CanonicalSemanticRelation:
+    """R1-B1: compatible-broader requires the canonical registry, not Layer 2 vocab."""
+
+    @staticmethod
+    def _resolve(rule_name: str, layer2_hint: str):
+        from modules.ai.brain.intent.classifier import _resolve_layer2_rule_precedence
+
+        return _resolve_layer2_rule_precedence(
+            rule_intent=Intent(name=rule_name, confidence=0.93, slots={}),
+            llm_hint=layer2_hint,
+            base_conf=0.93,
+        )
+
+    def test_r1_b1_01_visual_plus_ask_product_is_direct_broader(self) -> None:
+        assert is_direct_broader_relation(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT
+        ) is True
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT
+        ) is True
+        name, _conf, method, provenance, winner, relation = self._resolve(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT
+        )
+        assert name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert method == "hybrid"
+        assert provenance == PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        assert winner == "rule_candidate"
+        assert relation == SEMANTIC_RELATION_COMPATIBLE_BROADER
+        intent, state, decision, bound_id = (
+            TestF3R1ClassifierCanonicalPrecedence()._bound_visual_decision(
+                tenant_id=9301,
+                bound=ITEM_A,
+                others=[ITEM_B, ITEM_C],
+                message=TestF3R1ClassifierCanonicalPrecedence._MEDIA_NEED,
+            )
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert canonical_product_referent(state)["id"] == bound_id
+        assert decision.reason == "product visual — canonical referent is imageable"
+        replay_ids = [row["id"] for row in (decision.args.get("replay_candidates") or [])]
+        assert replay_ids == [bound_id]
+        assert ITEM_B["id"] not in replay_ids
+
+    def test_r1_b1_02_ask_location_plus_ask_product_is_not_compatible(self) -> None:
+        assert is_direct_broader_relation(
+            INTENT_ASK_LOCATION, INTENT_ASK_PRODUCT
+        ) is False
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_ASK_LOCATION, INTENT_ASK_PRODUCT
+        ) is False
+        name, _conf, _method, provenance, winner, relation = self._resolve(
+            INTENT_ASK_LOCATION, INTENT_ASK_PRODUCT
+        )
+        assert provenance != PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        assert relation != SEMANTIC_RELATION_COMPATIBLE_BROADER
+        assert name == INTENT_ASK_PRODUCT
+        assert winner == "layer2"
+        assert provenance == PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+
+    def test_r1_b1_03_platform_inquiry_plus_ask_product_is_not_compatible(self) -> None:
+        assert is_direct_broader_relation(
+            INTENT_PLATFORM_INQUIRY, INTENT_ASK_PRODUCT
+        ) is False
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PLATFORM_INQUIRY, INTENT_ASK_PRODUCT
+        ) is False
+        name, _conf, _method, provenance, winner, relation = self._resolve(
+            INTENT_PLATFORM_INQUIRY, INTENT_ASK_PRODUCT
+        )
+        assert provenance != PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        assert relation != SEMANTIC_RELATION_COMPATIBLE_BROADER
+        assert name == INTENT_ASK_PRODUCT
+        assert winner == "layer2"
+
+    def test_r1_b1_04_social_plus_ask_product_is_not_compatible(self) -> None:
+        for rule in (INTENT_SOCIAL, INTENT_WHO_ARE_YOU):
+            assert is_direct_broader_relation(rule, INTENT_ASK_PRODUCT) is False
+            assert layer2_is_compatible_broader_evidence(rule, INTENT_ASK_PRODUCT) is False
+            name, _conf, _method, provenance, winner, relation = self._resolve(
+                rule, INTENT_ASK_PRODUCT
+            )
+            assert provenance != PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+            assert relation != SEMANTIC_RELATION_COMPATIBLE_BROADER
+            assert name == INTENT_ASK_PRODUCT
+            assert winner == "layer2"
+
+    def test_r1_b1_05_visual_plus_ask_price_is_sibling_not_parent(self) -> None:
+        assert is_direct_broader_relation(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRICE
+        ) is False
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRICE
+        ) is False
+        name, _conf, _method, provenance, winner, relation = self._resolve(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRICE
+        )
+        assert provenance != PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        assert relation != SEMANTIC_RELATION_COMPATIBLE_BROADER
+        assert name == INTENT_ASK_PRICE
+        assert winner == "layer2"
+        assert provenance == PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+
+    def test_r1_b1_06_start_order_remains_authoritative_override(self) -> None:
+        name, _conf, method, provenance, winner, relation = self._resolve(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_START_ORDER
+        )
+        assert name == INTENT_START_ORDER
+        assert method == "llm"
+        assert provenance == PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        assert winner == "layer2"
+        assert relation == SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE
+
+    def test_r1_b1_07_ask_owner_contact_remains_authoritative_override(self) -> None:
+        name, _conf, method, provenance, winner, relation = self._resolve(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_OWNER_CONTACT
+        )
+        assert name == INTENT_ASK_OWNER_CONTACT
+        assert method == "llm"
+        assert provenance == PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        assert winner == "layer2"
+        assert relation == SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE
+
+    def test_r1_b1_08_general_and_empty_layer2_unchanged(self) -> None:
+        name, _conf, method, provenance, winner, relation = self._resolve(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_GENERAL
+        )
+        assert name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert method == "hybrid"
+        assert provenance == PROVENANCE_RULE_CANDIDATE_CONFIRMED
+        assert winner == "rule_candidate"
+        assert relation == SEMANTIC_RELATION_NON_AUTHORITATIVE
+        r1 = TestF3R1ClassifierCanonicalPrecedence()
+        general = r1._classify_with_layer2(r1._MEDIA_NEED, {"intent_hint": INTENT_GENERAL})
+        assert general.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert general.extraction_method == "hybrid"
+        assert general.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED
+        )
+        empty = r1._classify_with_layer2(r1._MEDIA_NEED, {})
+        assert empty.extraction_method != "rules"
+        assert empty.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2
+        )
+
+    def test_r1_b1_09_no_intent_pair_allowlist_or_fallback_table(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+
+        classifier_src = inspect.getsource(intent_classifier)
+        compat_src = inspect.getsource(intent_classifier.layer2_is_compatible_broader_evidence)
+        resolve_src = inspect.getsource(intent_classifier._resolve_layer2_rule_precedence)
+        assert "LAYER2_PRODUCT_DOMAIN_HINTS" not in classifier_src
+        assert "frozenset({(" not in classifier_src
+        assert "(INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT)" not in classifier_src
+        assert "product_visual_request" not in compat_src
+        assert "ask_product" not in compat_src
+        assert "ask_price" not in compat_src
+        assert "ask_location" not in compat_src
+        assert INTENT_START_ORDER not in resolve_src
+        assert INTENT_ASK_OWNER_CONTACT not in resolve_src
+        assert "is_direct_broader_relation" in compat_src
+        assert "is_direct_broader_relation" in classifier_src
+
+    def test_r1_b1_10_no_phrase_keyword_or_regex_repair(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+        from modules.ai.brain.intent import semantic_relation as semantic_relation_mod
+
+        for src in (
+            inspect.getsource(intent_classifier),
+            inspect.getsource(semantic_relation_mod),
+        ):
+            assert "re.compile" not in src
+            assert "ورني شكله" not in src
+            assert "ورني" not in src
+            assert "شكله" not in src
+            assert "tenant_id" not in src
+            assert "*6901" not in src
+
+    def test_r1_b1_11_customer_ai_prompt_model_provider_unchanged(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+        from modules.ai.brain.intent.slot_extractor import _SYSTEM
+
+        classifier_src = inspect.getsource(intent_classifier)
+        assert INTENT_PRODUCT_VISUAL_REQUEST not in _SYSTEM
+        assert "gpt-" not in classifier_src
+        assert "temperature" not in classifier_src
+        assert "response_goal" not in classifier_src
+        assert "openai" not in classifier_src.lower()
+
+    def test_r1_b1_12_r2_and_r3_untouched(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+
+        classifier_src = inspect.getsource(intent_classifier)
+        assert "visual_product_dispatch" not in classifier_src
+        assert "pick_best_candidate_title" not in classifier_src
+        assert "compact_whatsapp_product_button_title" not in classifier_src
+        assert "build_standard_pick_buttons" not in classifier_src
+        assert "meta_errors" not in classifier_src
+        assert "131009" not in classifier_src
 
 
 class TestF309NativeCatalogCompletion:
