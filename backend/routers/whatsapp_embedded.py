@@ -21,11 +21,12 @@ from __future__ import annotations
 import base64 as _b64
 import hashlib as _hashlib
 import hmac as _hmac
+import json
 import logging
 import os
 import secrets as _secrets
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -59,6 +60,12 @@ from routers.whatsapp_connect import (
     _merchant_channel_label,
     _provider_label,
     _wa_provider,
+)
+from services.meta_oauth_redirect import (
+    canonical_meta_redirect_uri,
+    graph_oauth_token_params,
+    js_sdk_token_exchange_redirect_uri,
+    token_exchange_log_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,32 +119,33 @@ def resolve_tenant_id(request: Request) -> int:
     return int(tid)
 
 
-_JS_SDK_REDIRECT_URI = "https://www.facebook.com/connect/login_success.html"
+class _OAuthState(NamedTuple):
+    tenant_id: int
+    redirect_uri: str
 
 
-async def _exchange_code_for_token(code: str, redirect_uri: str = "") -> dict:
+async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None) -> dict:
     """Exchange a short-lived code for a user access token.
 
-    When using FB.login() JS SDK the internal redirect_uri Meta uses is
-    https://www.facebook.com/connect/login_success.html — it must always be
-    included in the exchange request or Meta will reject with 'redirect_uri mismatch'.
+    Server-side OAuth must pass the exact redirect_uri bound into ``state``.
+    FB.login JS SDK / Coexistence must pass ``None`` so Graph omits
+    ``redirect_uri`` — Meta did not issue that code against a Nahlah URI.
     """
-    params: dict = {
-        "client_id":    META_APP_ID,
-        "client_secret": META_APP_SECRET,
-        "code":         code,
-        "redirect_uri": redirect_uri or _JS_SDK_REDIRECT_URI,
-    }
+    params = graph_oauth_token_params(code=code, redirect_uri=redirect_uri)
+    safe = token_exchange_log_fields(params)
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(f"{GRAPH}/oauth/access_token", params=params)
         data = resp.json()
 
     logger.info(
-        "[EmbeddedSignup] token exchange: http=%s keys=%s has_token=%s",
+        "[EmbeddedSignup] token exchange: http=%s keys=%s has_token=%s "
+        "redirect_uri_present=%s redirect_uri=%s",
         resp.status_code,
         sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
         bool(isinstance(data, dict) and data.get("access_token")),
+        safe["redirect_uri_present"],
+        safe["redirect_uri"],
     )
     if "error" in data:
         raise HTTPException(
@@ -1057,6 +1065,8 @@ class ExchangeRequest(BaseModel):
     # Accept either a raw access_token (from JS SDK) or a code (legacy)
     access_token: Optional[str] = None
     code: Optional[str] = None
+    # Ignored. JS SDK exchange omits Graph redirect_uri; server-side OAuth
+    # reuses the URI bound into ``state``. Never accept a browser URL here.
     redirect_uri: Optional[str] = None
     connection_mode: Optional[str] = None
     finish_event: Optional[str] = None
@@ -1149,27 +1159,41 @@ async def get_config():
 _OAUTH_STATE_TTL_SECONDS = 600
 
 
-def _sign_oauth_state(tenant_id: int, nonce: str, issued_at: int) -> str:
+def _sign_oauth_state(
+    tenant_id: int,
+    nonce: str,
+    issued_at: int,
+    redirect_uri: str,
+) -> str:
     """Return a compact, URL-safe HMAC-signed state token.
 
-    Format: ``b64(tenant_id:nonce:issued_at).b64(hmac_sha256)``. Uses
-    JWT_SECRET as the signing key because it's already required to be
-    present in production and rotating it invalidates all open
-    OAuth sessions (which is the correct security behaviour).
+    Payload binds tenant + the exact canonical redirect_uri used to start
+    the dialog so token exchange cannot reconstruct a different value.
+    Format: ``b64(json).b64(hmac_sha256)``. Uses JWT_SECRET as the signing
+    key because it's already required in production; rotating it invalidates
+    open OAuth sessions (correct security behaviour).
     """
-    body = f"{tenant_id}:{nonce}:{issued_at}".encode("utf-8")
+    body = json.dumps(
+        {
+            "v": 1,
+            "t": int(tenant_id),
+            "n": nonce,
+            "iat": int(issued_at),
+            "ru": redirect_uri,
+        },
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
     sig = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
     return f"{_b64.urlsafe_b64encode(body).rstrip(b'=').decode()}." \
            f"{_b64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
 
 
-def _verify_oauth_state(state: str) -> int:
-    """Verify the signed state and return the tenant_id.
+def _verify_oauth_state(state: str) -> _OAuthState:
+    """Verify the signed state and return tenant_id + bound redirect_uri.
 
     Raises HTTPException(400) on malformed input, tampered signature,
-    or expired token. We log the failure mode so ops can distinguish
-    "expired link / merchant took too long" from "someone is replaying
-    a captured state value".
+    missing redirect binding, or expired token.
     """
     try:
         body_b64, sig_b64 = state.split(".", 1)
@@ -1178,9 +1202,16 @@ def _verify_oauth_state(state: str) -> int:
         expected = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
         if not _hmac.compare_digest(sig, expected):
             raise ValueError("state signature mismatch")
-        parts = body.decode("utf-8").split(":")
-        tenant_id = int(parts[0])
-        issued_at = int(parts[2])
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("state payload is not an object")
+        tenant_id = int(payload["t"])
+        issued_at = int(payload["iat"])
+        redirect_uri = str(payload.get("ru") or "")
+        if not redirect_uri:
+            raise ValueError("state missing bound redirect_uri")
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("[EmbeddedSignup] oauth/callback rejected — bad state: %s", exc)
         raise HTTPException(
@@ -1201,10 +1232,10 @@ def _verify_oauth_state(state: str) -> int:
                 "أعد فتح صفحة ربط واتساب في نحلة وأعد المحاولة."
             ),
         )
-    return tenant_id
+    return _OAuthState(tenant_id=tenant_id, redirect_uri=redirect_uri)
 
 
-def _build_meta_oauth_authorize_url(state: str) -> str:
+def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
     """Build the canonical FB Login for Business / WhatsApp Embedded
     Signup authorize URL.
 
@@ -1221,9 +1252,9 @@ def _build_meta_oauth_authorize_url(state: str) -> str:
                           which doesn't include WABA management →
                           BSP/TP entitlement error.
       * ``response_type=code`` — server-side exchange path.
-      * ``redirect_uri`` — must exactly match the value in Meta's
-                          "Valid OAuth Redirect URIs" list.
-      * ``state``      — HMAC-signed tenant_id (see _sign_oauth_state).
+      * ``redirect_uri`` — exact canonical config value, also bound
+                          into ``state`` for token exchange.
+      * ``state``      — HMAC-signed tenant_id + redirect_uri.
       * ``scope``      — explicit list; Meta will still apply the
                           config_id's allowed scopes on top.
     """
@@ -1231,7 +1262,7 @@ def _build_meta_oauth_authorize_url(state: str) -> str:
 
     params = {
         "client_id": META_APP_ID,
-        "redirect_uri": META_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
         "scope": ",".join([
@@ -1261,13 +1292,19 @@ async def oauth_start(request: Request):
                    or "الربط المباشر مع Meta غير مفعّل بعد.",
         )
     tenant_id = resolve_tenant_id(request)
+    redirect_uri = canonical_meta_redirect_uri()
+    if "://" not in redirect_uri:
+        raise HTTPException(
+            status_code=503,
+            detail="عنوان رجوع OAuth لـ Meta غير مُعد على الخادم.",
+        )
     nonce = _secrets.token_urlsafe(16)
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(tenant_id, nonce, issued_at)
-    url = _build_meta_oauth_authorize_url(state)
+    state = _sign_oauth_state(tenant_id, nonce, issued_at, redirect_uri)
+    url = _build_meta_oauth_authorize_url(state, redirect_uri)
     logger.info(
         "[EmbeddedSignup] oauth/start tenant=%s redirect_uri=%s",
-        tenant_id, META_REDIRECT_URI,
+        tenant_id, redirect_uri,
     )
     return RedirectResponse(url=url, status_code=302)
 
@@ -1289,7 +1326,7 @@ async def oauth_callback(
       2. Surface BSP/TP entitlement errors gracefully (no raw Meta
          English copy reaches the merchant).
       3. Exchange ``code`` for a user token using the SAME redirect_uri
-         that started the flow (Meta requires byte-for-byte match).
+         bound into ``state`` at start (Meta requires byte-for-byte match).
       4. Discover the merchant's WABA + persist credentials via the
          shared service path used by the JS-SDK ``/exchange`` endpoint.
       5. Redirect the browser back to the dashboard with a result
@@ -1298,7 +1335,9 @@ async def oauth_callback(
     """
     if not state:
         raise HTTPException(status_code=400, detail="رابط الربط مع Meta ناقص (state).")
-    tenant_id = _verify_oauth_state(state)
+    oauth_state = _verify_oauth_state(state)
+    tenant_id = oauth_state.tenant_id
+    redirect_uri = oauth_state.redirect_uri
 
     # Meta sometimes redirects back with error= when the merchant
     # cancels or our app lacks the right entitlement. Translate
@@ -1322,7 +1361,7 @@ async def oauth_callback(
         )
 
     try:
-        token_data = await _exchange_code_for_token(code, META_REDIRECT_URI)
+        token_data = await _exchange_code_for_token(code, redirect_uri)
     except HTTPException as exc:
         # Catch the BSP/TP variant explicitly so the merchant lands
         # on the "use 360dialog" message instead of a raw Meta error.
@@ -1451,7 +1490,15 @@ async def exchange_code(
         short_token = body.access_token
         logger.info("[EmbeddedSignup] using access_token from JS SDK tenant=%s", tenant_id)
     elif body.code:
-        token_data = await _exchange_code_for_token(body.code, body.redirect_uri or "")
+        if body.redirect_uri:
+            logger.warning(
+                "[EmbeddedSignup] ignoring client-supplied redirect_uri tenant=%s",
+                tenant_id,
+            )
+        token_data = await _exchange_code_for_token(
+            body.code,
+            js_sdk_token_exchange_redirect_uri(),
+        )
         short_token = token_data["access_token"]
     else:
         raise HTTPException(status_code=400, detail="يجب إرسال access_token أو code")
