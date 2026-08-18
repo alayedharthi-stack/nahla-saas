@@ -349,6 +349,49 @@ class TestF3B1BrainOwnsProductVisualSemanticIntent:
             assert intent.slots.get("semantic_owner") == "brain_classifier"
             assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
 
+    def test_empty_layer2_does_not_return_rules_only_visual(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        slot_extract = AsyncMock(return_value={})
+
+        async def _classify():
+            with patch(
+                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                slot_extract,
+            ):
+                return await DefaultIntentClassifier().classify(
+                    sample,
+                    [],
+                    _state(),
+                )
+
+        intent = asyncio.run(_classify())
+        assert slot_extract.await_count == 1
+        assert intent.extraction_method != "rules"
+        assert intent.extraction_method == "hybrid"
+        assert intent.slots.get("semantic_owner") == "brain_classifier"
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+
+    def test_layer2_operational_override_is_brain_llm_not_regex(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        slot_extract = AsyncMock(return_value={"intent_hint": "talk_to_human"})
+
+        async def _classify():
+            with patch(
+                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                slot_extract,
+            ):
+                return await DefaultIntentClassifier().classify(
+                    sample,
+                    [],
+                    _state(),
+                )
+
+        intent = asyncio.run(_classify())
+        assert slot_extract.await_count == 1
+        assert intent.extraction_method == "llm"
+        assert intent.name == "talk_to_human"
+        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+
     def test_brain_semantic_visual_intent_still_targets_canonical_referent(self) -> None:
         sample = self._MEDIA_NEED_SAMPLES[0]
         slot_extract = AsyncMock(return_value={"intent_hint": "general"})

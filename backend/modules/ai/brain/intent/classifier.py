@@ -44,6 +44,42 @@ _BRAIN_SEMANTIC_REQUIRED_INTENTS = frozenset({
     INTENT_PRODUCT_VISUAL_REQUEST,
 })
 
+# Layer 2 may replace a visual regex candidate only with a conflicting
+# operational intent. general/ask_product is not a replacement owner.
+_PRODUCT_VISUAL_LLM_OVERRIDE = frozenset({
+    INTENT_TALK_HUMAN,
+    "greeting",
+    "farewell",
+    "track_order",
+    "pay_now",
+    "ask_payment_info",
+    "ask_cod",
+    "ask_shipping",
+    "complaint_refund",
+    "who_are_you",
+    "platform_inquiry",
+    "persona_interaction",
+    "pick_list_item",
+})
+
+
+def _brain_owned_product_visual_intent(
+    *,
+    message: str,
+    slots: Dict[str, Any],
+    confidence: float,
+    method: str = "hybrid",
+) -> Intent:
+    clean = {k: v for k, v in (slots or {}).items() if v not in ("", {}, None)}
+    clean["semantic_owner"] = "brain_classifier"
+    return Intent(
+        name=INTENT_PRODUCT_VISUAL_REQUEST,
+        confidence=confidence,
+        slots=clean,
+        raw_message=message,
+        extraction_method=method,
+    )
+
 # Stages where we MUST run slot extraction even for high-confidence rules.
 # A customer mid-checkout sending "تركي الحارثي" matches the rules-only
 # greeting/general bucket, but we need to surface customer_name etc. to the
@@ -142,7 +178,19 @@ class DefaultIntentClassifier:
             pass
 
         if not slots:
-            # LLM unavailable or empty — fall back to rules or general
+            # LLM unavailable or empty — fall back to rules or general.
+            # Product-visual still cannot return as a rules-only owner after
+            # Layer 2 was attempted.
+            if (
+                rule_intent
+                and str(rule_intent.name or "") in _BRAIN_SEMANTIC_REQUIRED_INTENTS
+            ):
+                return _brain_owned_product_visual_intent(
+                    message=message,
+                    slots=dict(rule_intent.slots or {}),
+                    confidence=float(rule_intent.confidence or 0.72),
+                    method="hybrid",
+                )
             if rule_intent:
                 return rule_intent
             return Intent(
@@ -178,9 +226,23 @@ class DefaultIntentClassifier:
                 )
                 llm_hint = base_intent  # keep rule intent (likely general)
 
-        # If the LLM disagrees with rules and it's a high-confidence rules
-        # signal we keep the rules result; otherwise trust LLM
-        if rule_intent and base_conf >= 0.75:
+        # Family 3: after Layer 2, Brain confirms visual need unless the
+        # extractor selected a conflicting operational intent.
+        if (
+            rule_intent
+            and str(rule_intent.name or "") == INTENT_PRODUCT_VISUAL_REQUEST
+        ):
+            if str(llm_hint or "") in _PRODUCT_VISUAL_LLM_OVERRIDE:
+                resolved_name = llm_hint
+                resolved_conf = 0.72
+                method = "llm"
+            else:
+                resolved_name = INTENT_PRODUCT_VISUAL_REQUEST
+                resolved_conf = max(float(base_conf or 0.72), 0.72)
+                method = "hybrid"
+        elif rule_intent and base_conf >= 0.75:
+            # If the LLM disagrees with rules and it's a high-confidence rules
+            # signal we keep the rules result; otherwise trust LLM
             resolved_name = base_intent
             resolved_conf = base_conf
             method        = "hybrid"
