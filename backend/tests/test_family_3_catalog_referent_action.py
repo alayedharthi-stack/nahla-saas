@@ -50,12 +50,18 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent.classifier import (  # noqa: E402
     DefaultIntentClassifier,
+    PROVENANCE_COMPATIBLE_BROADER_EVIDENCE,
     PROVENANCE_LAYER2_SEMANTIC_OVERRIDE,
     PROVENANCE_RULE_CANDIDATE_CONFIRMED,
     PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
     RULES_ONLY_THRESHOLD,
+    SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE,
+    SEMANTIC_RELATION_COMPATIBLE_BROADER,
+    SEMANTIC_RELATION_NON_AUTHORITATIVE,
+    SEMANTIC_RELATION_NO_AUTHORITATIVE,
     _BRAIN_SEMANTIC_REQUIRED_INTENTS,
     is_authoritative_layer2_intent,
+    layer2_is_compatible_broader_evidence,
 )
 from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
@@ -528,6 +534,317 @@ class TestF3B1BrainOwnsProductVisualSemanticIntent:
         assert intent.extraction_method == "hybrid"
         assert intent.slots.get("semantic_owner") == "brain_classifier"
         assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+
+
+_SAME_TITLE = "Classic Canvas Item"
+ITEM_A = {
+    "id": 801,
+    "external_id": "sku-canvas-a",
+    "title": _SAME_TITLE,
+    "price": 80,
+    "currency": "SAR",
+    "in_stock": True,
+    "can_checkout": True,
+    "image_url": "https://cdn.example.test/canvas-a.jpg",
+    "product_url": "https://shop.example.test/p/canvas-a",
+    "provenance": "catalog_db",
+}
+ITEM_B = {
+    "id": 802,
+    "external_id": "sku-canvas-b",
+    "title": _SAME_TITLE,
+    "price": 80,
+    "currency": "SAR",
+    "in_stock": True,
+    "can_checkout": True,
+    "image_url": "https://cdn.example.test/canvas-b.jpg",
+    "product_url": "https://shop.example.test/p/canvas-b",
+    "provenance": "catalog_db",
+}
+ITEM_C = {
+    "id": 803,
+    "external_id": "sku-canvas-c",
+    "title": _SAME_TITLE,
+    "price": 80,
+    "currency": "SAR",
+    "in_stock": True,
+    "can_checkout": True,
+    "image_url": "https://cdn.example.test/canvas-c.jpg",
+    "product_url": "https://shop.example.test/p/canvas-c",
+    "provenance": "catalog_db",
+}
+
+
+class TestF3R1ClassifierCanonicalPrecedence:
+    """R1: specific product-media need stays compatible with broader Layer 2."""
+
+    # Existing visual-need phrasing used only as classifier input.
+    # Contract does not depend on the live production sentence.
+    _MEDIA_NEED = "وين الصوره"
+
+    def _classify_with_layer2(self, message: str, layer2_slots: dict) -> Intent:
+        slot_extract = AsyncMock(return_value=dict(layer2_slots))
+
+        async def _run() -> Intent:
+            with patch(
+                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                slot_extract,
+            ):
+                return await DefaultIntentClassifier().classify(
+                    message,
+                    [],
+                    _state(),
+                )
+
+        intent = asyncio.run(_run())
+        assert slot_extract.await_count == 1
+        return intent
+
+    def _bound_visual_decision(self, *, tenant_id: int, bound: dict, others: list[dict], message: str):
+        intent = self._classify_with_layer2(message, {"intent_hint": INTENT_ASK_PRODUCT})
+        state = _state()
+        bind_structured_catalog_referent(state, dict(bound), reason="assistant_recommended", turn=4)
+        bound_id = bound["id"]
+        ctx = _ctx(
+            intent_name=intent.name,
+            state=state,
+            facts=_facts(bound, *others),
+            message=message,
+            tenant_id=tenant_id,
+        )
+        ctx.intent = intent
+        decision = DefaultDecisionEngine().decide(ctx)
+        return intent, state, decision, bound_id
+
+    def test_r1_01_broader_layer2_product_domain_keeps_specific_media_need(self) -> None:
+        from modules.ai.brain.intent.classifier import _resolve_layer2_rule_precedence
+
+        synthetic = Intent(name=INTENT_PRODUCT_VISUAL_REQUEST, confidence=0.93, slots={})
+        name, _conf, method, provenance, winner, relation = _resolve_layer2_rule_precedence(
+            rule_intent=synthetic,
+            llm_hint=INTENT_ASK_PRODUCT,
+            base_conf=0.93,
+        )
+        assert name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert name != INTENT_ASK_PRODUCT
+        assert method == "hybrid"
+        assert provenance == PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        assert winner == "rule_candidate"
+        assert relation == SEMANTIC_RELATION_COMPATIBLE_BROADER
+
+        candidate = intent_rules.match(self._MEDIA_NEED)
+        assert candidate is not None
+        assert candidate.name == INTENT_PRODUCT_VISUAL_REQUEST
+        intent = self._classify_with_layer2(
+            self._MEDIA_NEED, {"intent_hint": INTENT_ASK_PRODUCT}
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.name != INTENT_ASK_PRODUCT
+        assert intent.extraction_method == "hybrid"
+        assert intent.extraction_method != "rules"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        )
+        assert intent.slots.get("semantic_relation") == SEMANTIC_RELATION_COMPATIBLE_BROADER
+        assert intent.slots.get("precedence_winner") == "rule_candidate"
+        assert intent.slots.get("rule_candidate") == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("layer2_result") == INTENT_ASK_PRODUCT
+
+    def test_r1_02_same_title_siblings_resolve_bound_structured_id(self) -> None:
+        intent, state, decision, bound_id = self._bound_visual_decision(
+            tenant_id=9101,
+            bound=ITEM_A,
+            others=[ITEM_B, ITEM_C],
+            message=self._MEDIA_NEED,
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        referent = canonical_product_referent(state)
+        assert referent["id"] == bound_id
+        assert referent["id"] != ITEM_B["id"]
+        assert referent["id"] != ITEM_C["id"]
+        assert referent["title"] == ITEM_B["title"] == ITEM_C["title"]
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay[0]["id"] == bound_id
+        assert replay[0]["id"] != ITEM_B["id"]
+
+    def test_r1_03_ask_product_search_not_selected_when_bound_referent_satisfies(self) -> None:
+        intent, _state_obj, decision, bound_id = self._bound_visual_decision(
+            tenant_id=9101,
+            bound=ITEM_A,
+            others=[ITEM_B, ITEM_C],
+            message=self._MEDIA_NEED,
+        )
+        assert intent.name != INTENT_ASK_PRODUCT
+        assert decision.reason == "product visual — canonical referent is imageable"
+        assert decision.args.get("after_search") == "product_visual"
+        assert list(decision.args.get("replay_candidates") or [])[0]["id"] == bound_id
+        visual = try_visual_catalog_send_decision(
+            _ctx(
+                intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
+                state=_state_obj,
+                facts=_facts(ITEM_A, ITEM_B, ITEM_C),
+                message=self._MEDIA_NEED,
+                tenant_id=9101,
+            )
+        )
+        assert visual is not None
+        assert visual.reason == decision.reason
+
+    def test_r1_04_canonical_focus_not_rebound_by_same_title_search(self) -> None:
+        intent, state, decision, bound_id = self._bound_visual_decision(
+            tenant_id=9101,
+            bound=ITEM_A,
+            others=[ITEM_B, ITEM_C],
+            message=self._MEDIA_NEED,
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert canonical_product_referent(state)["id"] == bound_id
+        assert canonical_product_referent(state)["external_id"] == ITEM_A["external_id"]
+        replay_ids = [row["id"] for row in (decision.args.get("replay_candidates") or [])]
+        assert replay_ids == [bound_id]
+        assert ITEM_B["id"] not in replay_ids
+        assert ITEM_C["id"] not in replay_ids
+
+    def test_r1_05_start_order_still_authoritative_override(self) -> None:
+        intent = self._classify_with_layer2(
+            self._MEDIA_NEED, {"intent_hint": INTENT_START_ORDER}
+        )
+        assert intent.name == INTENT_START_ORDER
+        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.extraction_method == "llm"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert intent.slots.get("semantic_relation") == (
+            SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE
+        )
+        assert intent.slots.get("precedence_winner") == "layer2"
+
+    def test_r1_06_ask_owner_contact_still_authoritative_override(self) -> None:
+        intent = self._classify_with_layer2(
+            self._MEDIA_NEED, {"intent_hint": INTENT_ASK_OWNER_CONTACT}
+        )
+        assert intent.name == INTENT_ASK_OWNER_CONTACT
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert intent.slots.get("semantic_relation") == (
+            SEMANTIC_RELATION_AUTHORITATIVE_OVERRIDE
+        )
+
+    def test_r1_07_general_does_not_erase_supported_specific_candidate(self) -> None:
+        intent = self._classify_with_layer2(
+            self._MEDIA_NEED, {"intent_hint": INTENT_GENERAL}
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.extraction_method == "hybrid"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED
+        )
+        assert intent.slots.get("semantic_relation") == SEMANTIC_RELATION_NON_AUTHORITATIVE
+        assert is_authoritative_layer2_intent(INTENT_GENERAL) is False
+
+    def test_r1_08_empty_layer2_is_not_rules_only_owner(self) -> None:
+        intent = self._classify_with_layer2(self._MEDIA_NEED, {})
+        assert intent.extraction_method != "rules"
+        assert intent.extraction_method == "hybrid"
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2
+        )
+        assert intent.slots.get("semantic_relation") == SEMANTIC_RELATION_NO_AUTHORITATIVE
+
+    def test_r1_09_provenance_identifies_winner_and_canonical_product_id(self) -> None:
+        intent, state, decision, bound_id = self._bound_visual_decision(
+            tenant_id=9101,
+            bound=ITEM_A,
+            others=[ITEM_B, ITEM_C],
+            message=self._MEDIA_NEED,
+        )
+        assert intent.slots.get("rule_candidate") == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("layer2_result") == INTENT_ASK_PRODUCT
+        assert intent.slots.get("precedence_winner") == "rule_candidate"
+        assert intent.slots.get("semantic_relation") == SEMANTIC_RELATION_COMPATIBLE_BROADER
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_COMPATIBLE_BROADER_EVIDENCE
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert canonical_product_referent(state)["id"] == bound_id
+        assert decision.args["replay_candidates"][0]["id"] == bound_id
+
+    def test_r1_10_generic_second_tenant_category(self) -> None:
+        intent, state, decision, bound_id = self._bound_visual_decision(
+            tenant_id=9202,
+            bound=PERFUME,
+            others=[SHIRT],
+            message=self._MEDIA_NEED,
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert canonical_product_referent(state)["id"] == PERFUME["id"]
+        assert canonical_product_referent(state)["id"] == bound_id
+        assert decision.args["replay_candidates"][0]["id"] == PERFUME["id"]
+        assert decision.args["replay_candidates"][0]["id"] != SHIRT["id"]
+
+    def test_r1_11_no_phrase_regex_or_intent_pair_allowlist(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+
+        classifier_src = inspect.getsource(intent_classifier)
+        resolve_src = inspect.getsource(intent_classifier._resolve_layer2_rule_precedence)
+        compat_src = inspect.getsource(intent_classifier.layer2_is_compatible_broader_evidence)
+        assert "re.compile" not in classifier_src
+        assert "ورني شكله" not in classifier_src
+        assert "ورني" not in classifier_src
+        assert "شكله" not in classifier_src
+        assert "_PRODUCT_VISUAL_LLM_OVERRIDE" not in classifier_src
+        assert "product_visual_request" not in compat_src
+        assert "ask_product" not in compat_src
+        assert INTENT_START_ORDER not in resolve_src
+        assert INTENT_ASK_OWNER_CONTACT not in resolve_src
+        assert INTENT_START_ORDER not in compat_src
+        assert INTENT_ASK_OWNER_CONTACT not in compat_src
+        assert "if layer2" not in compat_src
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_ASK_PRODUCT
+        ) is True
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PRODUCT_VISUAL_REQUEST, "ask_price"
+        ) is True
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_PRODUCT_VISUAL_REQUEST, INTENT_START_ORDER
+        ) is False
+        assert layer2_is_compatible_broader_evidence(
+            INTENT_ASK_PRODUCT, INTENT_TRACK_ORDER
+        ) is False
+
+    def test_r1_12_no_duplicate_intent_or_referent_resolver(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+
+        classifier_src = inspect.getsource(intent_classifier)
+        assert classifier_src.count("class ") == 1
+        assert "def _resolve_layer2_rule_precedence" in classifier_src
+        assert "def canonical_product_referent" not in classifier_src
+        assert "def resolve_trusted_focus" not in classifier_src
+        assert "visual_product_dispatch" not in classifier_src
+        assert "product_presentation_selection" not in classifier_src
+        assert "pick_best_candidate_title" not in classifier_src
+
+    def test_r1_layer2_vocab_mirrors_prompt_and_excludes_visual(self) -> None:
+        import re
+
+        from modules.ai.brain.intent.slot_extractor import (
+            LAYER2_INTENT_HINT_VOCABULARY,
+            LAYER2_PRODUCT_DOMAIN_HINTS,
+            _SYSTEM,
+        )
+
+        match = re.search(r"intent_hint:.*?:\s*([a-z_|]+)", _SYSTEM)
+        assert match is not None
+        prompt_labels = set(match.group(1).split("|"))
+        assert prompt_labels == set(LAYER2_INTENT_HINT_VOCABULARY)
+        assert INTENT_PRODUCT_VISUAL_REQUEST not in LAYER2_INTENT_HINT_VOCABULARY
+        assert INTENT_PRODUCT_VISUAL_REQUEST not in _SYSTEM
+        assert LAYER2_PRODUCT_DOMAIN_HINTS <= LAYER2_INTENT_HINT_VOCABULARY
+        assert INTENT_ASK_PRODUCT in LAYER2_PRODUCT_DOMAIN_HINTS
 
 
 class TestF309NativeCatalogCompletion:
