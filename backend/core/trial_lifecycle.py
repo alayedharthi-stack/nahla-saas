@@ -110,9 +110,11 @@ def start_trial_on_whatsapp_connect(
         return False
 
     now = _coerce_utc(connected_at) or datetime.now(timezone.utc)
+    first_wa_stamped = False
 
     if not tenant.first_whatsapp_connected_at:
         tenant.first_whatsapp_connected_at = now.replace(tzinfo=None)
+        first_wa_stamped = True
 
     if tenant.trial_started_at is not None:
         logger.info(
@@ -120,6 +122,8 @@ def start_trial_on_whatsapp_connect(
             tenant_id,
             tenant.trial_started_at,
         )
+        if first_wa_stamped:
+            db.commit()
         return False
 
     if get_tenant_subscription(db, tenant_id):
@@ -127,6 +131,8 @@ def start_trial_on_whatsapp_connect(
             "[TrialLifecycle] skip start — active paid subscription tenant=%s",
             tenant_id,
         )
+        if first_wa_stamped:
+            db.commit()
         return False
 
     tenant.trial_started_at = now.replace(tzinfo=None)

@@ -311,6 +311,7 @@ def test_wa_life_06_paid_tenant_remains_paid(db):
     assert started is False
     assert t.trial_started_at is None
     assert t.subscription_status == "active"
+    assert t.first_whatsapp_connected_at is not None
     assert conn.status == "connected"
 
 
