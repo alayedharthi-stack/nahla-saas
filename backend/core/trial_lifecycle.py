@@ -97,11 +97,15 @@ def start_trial_on_whatsapp_connect(
     tenant_id: int,
     *,
     connected_at: Optional[datetime] = None,
+    commit: bool = True,
 ) -> bool:
     """
     Start the free trial once, on first successful WhatsApp connection.
 
     Returns True when trial was started by this call, False when idempotent skip.
+
+    ``commit=False`` applies the same mutations without committing so a
+    caller can persist connection + trial in one transaction.
     """
     from models import Tenant  # noqa: PLC0415
 
@@ -110,9 +114,15 @@ def start_trial_on_whatsapp_connect(
         return False
 
     now = _coerce_utc(connected_at) or datetime.now(timezone.utc)
+    first_wa_stamped = False
 
     if not tenant.first_whatsapp_connected_at:
         tenant.first_whatsapp_connected_at = now.replace(tzinfo=None)
+        first_wa_stamped = True
+
+    def _persist_skip() -> None:
+        if commit and first_wa_stamped:
+            db.commit()
 
     if tenant.trial_started_at is not None:
         logger.info(
@@ -120,6 +130,7 @@ def start_trial_on_whatsapp_connect(
             tenant_id,
             tenant.trial_started_at,
         )
+        _persist_skip()
         return False
 
     if get_tenant_subscription(db, tenant_id):
@@ -127,12 +138,14 @@ def start_trial_on_whatsapp_connect(
             "[TrialLifecycle] skip start — active paid subscription tenant=%s",
             tenant_id,
         )
+        _persist_skip()
         return False
 
     tenant.trial_started_at = now.replace(tzinfo=None)
     tenant.trial_ends_at = (now + timedelta(days=FREE_TRIAL_DAYS)).replace(tzinfo=None)
     tenant.subscription_status = TRIAL_STATUS_ACTIVE
-    db.commit()
+    if commit:
+        db.commit()
 
     logger.info(
         "[TrialLifecycle] trial started tenant=%s ends_at=%s",

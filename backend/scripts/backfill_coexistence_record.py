@@ -171,13 +171,19 @@ def backfill(
         flag_modified(conn, "extra_metadata")
 
         if promoted:
-            conn.status = "connected"
             conn.sending_enabled = True
-            if not conn.connected_at:
-                conn.connected_at = datetime.now(timezone.utc)
             conn.last_error = None
-
-        db.commit()
+            from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+                WhatsAppConnectionFinalizationError,
+                finalize_successful_whatsapp_connection,
+            )
+            try:
+                finalize_successful_whatsapp_connection(db, conn)
+            except WhatsAppConnectionFinalizationError as exc:
+                log.error("✗ Canonical finalization failed: %s", exc)
+                return 1
+        else:
+            db.commit()
         log.info("✓ Backfill applied.")
         return 0
     finally:

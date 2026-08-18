@@ -668,19 +668,23 @@ def _apply_embedded_state(
     conn.provider = WHATSAPP_PROVIDER_META
     conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
     conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
-    conn.status = sync_state["db_status"]
     conn.sending_enabled = bool(sync_state["sending_enabled"])
+
+    ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+    if ready:
+        conn.last_error = None
+    else:
+        projected = str(sync_state.get("db_status") or "activation_pending")
+        if projected == "connected":
+            projected = "activation_pending"
+        conn.status = projected
+        if conn.status == "error":
+            conn.last_error = sync_state["message"]
+        else:
+            conn.last_error = None
 
     if sync_state.get("verification_status") == "VERIFIED":
         conn.last_verified_at = now
-
-    if sync_state["connected"]:
-        conn.connected_at = conn.connected_at or now
-        conn.last_error = None
-    elif conn.status == "error":
-        conn.last_error = sync_state["message"]
-    else:
-        conn.last_error = None
 
 
 def _build_embedded_status_payload(
@@ -866,16 +870,19 @@ async def _finalize_coexistence_exchange(
     apply_smb_sync_results(conn, sync_results)
     meta = dict(conn.extra_metadata or {})
     if smb_syncs_accepted(meta):
-        conn.status = "connected"
         conn.sending_enabled = True
-        conn.connected_at = conn.connected_at or datetime.now(timezone.utc)
         conn.last_error = None
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            WhatsAppConnectionFinalizationError,
+            finalize_successful_whatsapp_connection,
+        )
         try:
-            from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
-            stamp_whatsapp_ai_live_since_if_empty(conn)
-        except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
-            pass
-        db.commit()
+            finalize_successful_whatsapp_connection(db, conn)
+        except WhatsAppConnectionFinalizationError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="تعذر إتمام ربط واتساب بعد اكتمال مزامنة التطبيق.",
+            ) from exc
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["message"] = (
             "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
@@ -1054,8 +1061,24 @@ async def sync_embedded_connection_from_meta(
         meta = dict(conn.extra_metadata or {})
         meta["webhook_subscription_error"] = wh_err
         conn.extra_metadata = meta
+        if not wh_ok:
+            sync_state = {**sync_state, "connected": False, "db_status": "activation_pending"}
 
-    db.commit()
+    ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+    if ready:
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            WhatsAppConnectionFinalizationError,
+            finalize_successful_whatsapp_connection,
+        )
+        try:
+            finalize_successful_whatsapp_connection(db, conn)
+        except WhatsAppConnectionFinalizationError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="تعذر إتمام ربط واتساب.",
+            ) from exc
+    else:
+        db.commit()
     return _build_embedded_status_payload(conn)
 
 
@@ -1825,6 +1848,8 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
     if conn.phone_number_id:
         try:
             return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.warning("[EmbeddedSignup] status sync failed tenant=%s: %s", tenant_id, exc)
             conn.last_error = str(exc)[:500]

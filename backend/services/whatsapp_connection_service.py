@@ -3,11 +3,14 @@ services/whatsapp_connection_service.py
 ────────────────────────────────────────
 Canonical write-layer for ALL WhatsApp connection flows.
 
-Every code path that creates or updates a WhatsAppConnection row and marks it
-"connected" MUST go through commit_connection().  Intermediate state before a
-phone number is selected (embedded signup "exchange" step) goes through
-begin_waba_session() which does not mark the row connected but still enforces
-WABA uniqueness.
+Credential writes go through commit_connection(). That write is not
+canonical successful-connected truth. Ordinary Meta Cloud API readiness
+(register + webhook + inbound_usable) must be proven first, then
+finalize_successful_whatsapp_connection() owns status=connected.
+
+Intermediate state before a phone number is selected (embedded signup
+"exchange" step) goes through begin_waba_session() which does not mark the
+row connected but still enforces WABA uniqueness.
 
 Guarantees enforced here so routers never have to duplicate them:
 
@@ -15,14 +18,16 @@ Guarantees enforced here so routers never have to duplicate them:
   2. waba_id          — globally unique across tenants (active rows only).
   3. Stale disconnected rows on other tenants are evicted before writing.
   4. The target tenant_id exists in the tenants table (caller must verify).
-  5. Phone registration via Meta Cloud API — called ONCE when the phone_number_id
-     is new or changed, to lift Meta's "Pending" state to "Active".
+  5. Phone registration via Meta Cloud API — /register is the ordinary-path
+     proof that the current phone identity is active. Unchanged phone id is
+     not proof. The call is idempotent (including Meta 80007 already-registered).
   6. Meta webhook subscription is attempted synchronously inside the write.
   7. The result carries four explicit readiness flags:
        credentials_saved  – credentials written to DB.
-       phone_registered   – Meta /register API returned 200 OK.
+       phone_registered   – this attempt proved Cloud /register, or Cloud
+                            /register is not required for the provider mode.
        webhook_subscribed – Meta app subscription confirmed.
-       inbound_usable     – registered + webhook active + sending enabled.
+       inbound_usable     – ordinary Meta Cloud path is fully ready.
 
 Callers are responsible for:
   - Resolving the tenant_id from the authenticated JWT (not from fallback).
@@ -85,7 +90,9 @@ class ConnectionResult:
     def to_api_dict(self) -> dict:
         return {
             "ok":                       self.credentials_saved,
-            "status":                   "connected" if self.credentials_saved else "error",
+            "status":                   "connected" if self.inbound_usable else (
+                "pending" if self.credentials_saved else "error"
+            ),
             "tenant_id":                self.tenant_id,
             "phone_number_id":          self.phone_number_id,
             "waba_id":                  self.waba_id,
@@ -148,12 +155,13 @@ def commit_connection(
       6. Register the phone number (POST /{phone_number_id}/register) if new/changed.
       7. Attempt Meta webhook subscription (POST /{waba_id}/subscribed_apps).
       8. Persist webhook_verified flag based on step 7 result.
-      9. Return ConnectionResult with all four readiness flags.
+      9. If inbound_usable, call the canonical successful-connection finalizer.
+     10. Return ConnectionResult with all four readiness flags.
 
     Raises:
       WhatsAppConnectionConflict — if phone_number_id or waba_id is owned elsewhere,
                                    OR if phone→waba mismatch is detected.
-      WhatsAppConnectionError    — on unexpected DB failure.
+      WhatsAppConnectionError    — on unexpected DB failure or canonical finalization failure.
     """
     from database.models import WhatsAppConnection  # noqa: PLC0415
     from core.tenant_integrity import (              # noqa: PLC0415
@@ -204,23 +212,39 @@ def commit_connection(
         )
 
     # ── Step 5: Write ─────────────────────────────────────────────────────────
-    # Capture old phone_number_id BEFORE overwriting so we can detect a change.
+    # Capture previous identity BEFORE overwriting so a replacement cannot
+    # inherit the old row's connected truth.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     action        = "updated" if conn else "created"
-    old_phone_id  = conn.phone_number_id if conn else None   # used for registration gate
+    old_phone_id  = conn.phone_number_id if conn else None
+    old_waba_id   = getattr(conn, "whatsapp_business_account_id", None) if conn else None
+    old_provider  = getattr(conn, "provider", None) if conn else None
+    old_conn_type = getattr(conn, "connection_type", None) if conn else None
     if not conn:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
     now = datetime.now(timezone.utc)
+    same_identity = (
+        action == "updated"
+        and (old_phone_id or "") == (phone_number_id or "")
+        and (old_waba_id or "") == (waba_id or "")
+        and (old_provider or "meta") == (provider or "meta")
+        and (old_conn_type or "") == (connection_type or "")
+    )
+    already_successfully_connected = (
+        same_identity
+        and str(getattr(conn, "status", "") or "") == "connected"
+        and getattr(conn, "connected_at", None) is not None
+    )
     conn.phone_number_id              = phone_number_id
     conn.whatsapp_business_account_id = waba_id
     conn.connection_type              = connection_type
     conn.provider                     = provider
-    conn.status                       = "connected"
+    if not already_successfully_connected:
+        conn.status                   = "pending"
     conn.webhook_verified             = False   # must be earned by subscription
     conn.last_error                   = None
-    conn.connected_at                 = now
     conn.updated_at                   = now
     conn.disconnect_reason            = None
     conn.disconnected_at              = None
@@ -256,11 +280,6 @@ def commit_connection(
             conn.token_type = "long_lived"
     store_access_token(conn, access_token)
     conn.sending_enabled = effective_sending
-    try:
-        from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty  # noqa: PLC0415
-        stamp_whatsapp_ai_live_since_if_empty(conn)
-    except Exception:
-        pass
     if hasattr(conn, "disconnected_by_user_id"):
         conn.disconnected_by_user_id = None
     if phone_number:
@@ -269,11 +288,12 @@ def commit_connection(
         conn.business_display_name = display_name
 
     # ── Auto-fill display fields from Meta if the caller did not supply them ──
-    # Why this lives BEFORE the commit:
+    # Why this lives BEFORE the credential commit:
     #   We want the persisted row to never reach `status="connected"` while
     #   `phone_number` / `business_display_name` are NULL — that combination
     #   is the "half-bootstrapped" bug observed on tenant=1 (see
-    #   docs/runbooks/whatsapp-half-bootstrap-rca.md).
+    #   docs/runbooks/whatsapp-half-bootstrap-rca.md). Canonical connected
+    #   is minted later by finalize_successful_whatsapp_connection().
     # Why it is best-effort:
     #   Meta is allowed to be slow or rate-limited, and we never want a
     #   transient Graph hiccup to block a successful credential write.
@@ -308,15 +328,6 @@ def commit_connection(
         action, tenant_id, phone_number_id, waba_id, conn.id, actor,
     )
 
-    try:
-        from core.trial_lifecycle import start_trial_on_whatsapp_connect  # noqa: PLC0415
-        start_trial_on_whatsapp_connect(db, tenant_id, connected_at=now)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[WASvc] trial start hook failed (non-fatal) tenant=%s: %s",
-            tenant_id, exc,
-        )
-
     result = ConnectionResult(
         tenant_id       = tenant_id,
         wa_conn_id      = conn.id,
@@ -327,32 +338,26 @@ def commit_connection(
         action          = action,
     )
 
-    # ── Step 6: Phone registration (once per new/changed phone_number_id) ────
-    # Meta requires a POST /{phone_number_id}/register call to lift the phone
-    # from "Pending" to "Active" on the Cloud API.  We run this only when the
-    # phone_number_id is brand-new or just changed, so it is never called on
-    # server restarts or credential-only refreshes.
+    # ── Step 6: Phone registration ───────────────────────────────────────────
+    # Ordinary Meta Cloud API: /register is idempotent and is the authoritative
+    # proof for THIS attempt. Unchanged phone_number_id is not proof.
+    # Coexistence / skip_phone_register: Cloud /register is not required and
+    # does not make commit_connection the successful-readiness owner.
     from services.meta_coexistence import coexistence_webhook_fields, is_coexistence_mode  # noqa: PLC0415
 
-    phone_is_new = (action == "created") or (old_phone_id != phone_number_id)
-    skip_register = skip_phone_register or is_coexistence_mode(conn)
-    if skip_register:
+    cloud_register_not_required = skip_phone_register or is_coexistence_mode(conn)
+    if cloud_register_not_required:
         result.phone_registered = True
         logger.info(
-            "[WASvc] phone registration SKIPPED — coexistence tenant=%s phone=%s",
+            "[WASvc] Cloud /register not required — coexistence/skip tenant=%s phone=%s",
             tenant_id, phone_number_id,
         )
-    elif phone_is_new:
+    else:
         reg_ok, reg_err = register_phone_number(phone_number_id, access_token, tenant_id)
         result.phone_registered         = reg_ok
         result.phone_registration_error = reg_err
-    else:
-        # Phone unchanged — assume already registered; preserve previous status.
-        result.phone_registered = True
-        logger.info(
-            "[WASvc] phone registration SKIPPED — phone unchanged tenant=%s phone=%s",
-            tenant_id, phone_number_id,
-        )
+        if not reg_ok:
+            conn.last_error = (reg_err or "phone register failed")[:500]
 
     # ── Step 7–8: Webhook subscription ───────────────────────────────────────
     # Per Meta Cloud API docs: subscription happens on the PHONE_NUMBER_ID,
@@ -372,10 +377,6 @@ def commit_connection(
 
     if webhook_ok:
         conn.webhook_verified = True
-        try:
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[WASvc] webhook_verified commit failed: %s", exc)
         logger.info(
             "[WASvc] webhook subscribed — tenant=%s phone=%s waba=%s",
             tenant_id, phone_number_id, waba_id,
@@ -386,14 +387,42 @@ def commit_connection(
             "tenant=%s phone=%s waba=%s error=%r",
             tenant_id, phone_number_id, waba_id, webhook_err,
         )
+        if not conn.last_error:
+            conn.last_error = (webhook_err or "webhook subscription failed")[:500]
 
-    # ── Step 9: Compute inbound_usable ────────────────────────────────────────
+    # ── Step 9: Compute inbound_usable then canonical successful finalization ─
+    # Coexistence credential persistence may skip Cloud /register, but that is
+    # not ordinary Meta readiness. Successful Coexistence finalization stays
+    # with the Coexistence provider path (eligibility, webhook, SMB).
     result.inbound_usable = (
-        result.credentials_saved
+        (not cloud_register_not_required)
+        and result.credentials_saved
         and result.phone_registered
         and result.webhook_subscribed
-        and conn.sending_enabled
+        and bool(conn.sending_enabled)
     )
+
+    if result.inbound_usable:
+        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+            WhatsAppConnectionFinalizationError,
+            finalize_successful_whatsapp_connection,
+        )
+        try:
+            finalize_successful_whatsapp_connection(db, conn)
+        except WhatsAppConnectionFinalizationError as exc:
+            logger.error(
+                "[WASvc] canonical finalization failed tenant=%s: %s", tenant_id, exc,
+            )
+            raise WhatsAppConnectionError(
+                f"WhatsApp connection finalization failed: {exc}"
+            ) from exc
+    else:
+        if not already_successfully_connected:
+            conn.status = "pending"
+        try:
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[WASvc] pending-readiness commit failed: %s", exc)
 
     logger.info(
         "[WASvc] RESULT — tenant=%s readiness=%s creds=%s registered=%s webhook=%s inbound=%s",

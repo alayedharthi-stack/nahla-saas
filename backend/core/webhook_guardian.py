@@ -172,10 +172,22 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
                 )
                 apply_smb_sync_results(conn, results)
                 if smb_syncs_accepted(dict(conn.extra_metadata or {})) and conn.webhook_verified:
-                    conn.status = "connected"
                     conn.sending_enabled = True
                     conn.last_error = None
-                db.commit()
+                    from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+                        WhatsAppConnectionFinalizationError,
+                        finalize_successful_whatsapp_connection,
+                    )
+                    try:
+                        finalize_successful_whatsapp_connection(db, conn)
+                    except WhatsAppConnectionFinalizationError as exc:
+                        logger.warning(
+                            "[Guardian] canonical finalization failed tenant=%s: %s",
+                            tenant_id, exc,
+                        )
+                        return "critical"
+                else:
+                    db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Guardian] coexistence sync retry failed tenant=%s: %s", tenant_id, exc)
 
