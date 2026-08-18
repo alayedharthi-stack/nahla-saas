@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,9 @@ def _attachment(**kw):
     return base
 
 
+_PUBLISHED = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
 @dataclass
 class _Product:
     id: int
@@ -86,6 +90,7 @@ class _Product:
     in_stock: bool = True
     catalog_status: str = CATALOG_STATUS_ACTIVE
     merchant_hidden_at: object | None = None
+    meta_catalog_published_at: object | None = None
 
 
 class TestSharedReadiness:
@@ -123,8 +128,20 @@ class TestOrchestratorDecisions:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -149,8 +166,20 @@ class TestOrchestratorDecisions:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(confidence="weak"),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
 
@@ -211,8 +240,14 @@ class TestOrchestratorDecisions:
             attachment=_attachment(in_stock=True),
             product_row=_Product(
                 id=10, tenant_id=1, external_id="ext-10", in_stock=True,
+                meta_catalog_published_at=_PUBLISHED,
             ),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            tenant_products=[
+                _Product(
+                    id=10, tenant_id=1, external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -420,8 +455,20 @@ class TestAttachmentImmutability:
             tenant_id=1,
             connection=_conn(),
             attachment=att,
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
         )
         assert att == snapshot
         assert catalog_send_retailer_id(d) == "ext-10"
@@ -434,8 +481,20 @@ class TestPhaseBWiringContract:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
         )
         assert should_attempt_catalog_send(ok) is True
 

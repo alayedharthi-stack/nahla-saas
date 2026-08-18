@@ -34,12 +34,12 @@ def effective_retailer_id(product: Any) -> str:
 
     1. ``product.meta_retailer_id`` — explicit override populated by the
        merchant (or a future "publish to Meta" job).
-    2. ``product.external_id`` — the platform-side id. This matches the
-       Salla Commerce auto-publish convention: when Salla pushes a
-       product to a linked Meta catalog the retailer id Salla writes is
-       the Salla product id, which is exactly what we already store on
-       ``Product.external_id``. Treating that as the default means 95%
-       of merchants get catalog rendering with zero manual mapping.
+    2. ``product.external_id`` — upstream commerce identity. This MAY
+       coincide with a Meta ``product_retailer_id`` when a provider
+       auto-publishes that way, but coincidence is not membership
+       proof. Native catalog send must still require
+       ``meta_catalog_published_at`` (see
+       :func:`core.native_catalog_capability.evaluate_native_catalog_product_capability`).
 
     Returns an empty string when neither source is populated — callers
     MUST treat that as "not eligible for catalog send" and route to the

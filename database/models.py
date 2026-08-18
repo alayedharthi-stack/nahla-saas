@@ -201,10 +201,11 @@ class Product(Base):
     # 95% of merchants need zero manual mapping. Populate this column
     # only when a merchant publishes products to Meta with custom ids.
     meta_retailer_id = Column(String(255), nullable=True)
-    # Last time we observed / verified this product is live in the
-    # merchant's Meta Catalog. Stays NULL until a future "publish to Meta"
-    # job populates it. Reading code MUST tolerate NULL — absence here
-    # never blocks a send attempt, it only suppresses the freshness badge.
+    # Last time reconcile observed this product in the merchant's Meta
+    # Catalog. NULL means membership is unverified. Native WhatsApp
+    # catalog product send must fail closed when this stamp is absent;
+    # legacy visual fallback may still run for the same canonical
+    # product. The stamp is not by itself a catalog-id-scoped mapping.
     meta_catalog_published_at = Column(DateTime(timezone=True), nullable=True)
     # ── Product source (migration 0062) ────────────────────────────────────
     # Which adapter / channel produced this row. The catalog feature is

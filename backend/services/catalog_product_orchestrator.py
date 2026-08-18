@@ -75,6 +75,10 @@ from core.catalog import (
     is_catalog_eligible,
     is_synthetic_retailer_id,
 )
+from core.native_catalog_capability import (
+    REASON_META_CATALOG_UNVERIFIED,
+    evaluate_native_catalog_product_capability,
+)
 
 logger = logging.getLogger("nahla.catalog_orchestrator")
 
@@ -178,6 +182,22 @@ def _decision(
         product_ready=product_ready,
         diagnostics=diagnostics or {},
     )
+
+
+def _bound_variant_from_attachment(attachment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Exact bound variant referent, or None when the parent product is bound.
+
+    Never invents a sibling variant just to obtain a Meta-compatible id.
+    A bound variant with an empty retailer id still counts as bound so
+    native send fails closed instead of substituting the parent SKU.
+    """
+    picked = (attachment.get("picked_variant_retailer_id") or "").strip()
+    vid = attachment.get("picked_variant_id") or attachment.get("selected_variant_id")
+    if picked:
+        return {"id": vid, "retailer_id": picked}
+    if vid not in (None, ""):
+        return {"id": vid, "retailer_id": ""}
+    return None
 
 
 def resolve_attachment_retailer_id(
@@ -456,6 +476,29 @@ def evaluate_product_card_send(
             diagnostics={"eligibility_reason": elig.reason},
         )
 
+    catalog_id = str(getattr(connection, "meta_catalog_id", "") or "").strip()
+    capability = evaluate_native_catalog_product_capability(
+        product_target,
+        catalog_id=catalog_id,
+        variant=_bound_variant_from_attachment(attachment),
+    )
+    bound_product_id = capability.product_id
+    if bound_product_id is None:
+        raw_pid = attachment.get("id")
+        if raw_pid is not None:
+            try:
+                bound_product_id = int(raw_pid)
+            except (TypeError, ValueError):
+                bound_product_id = raw_pid
+    capability_diag = {
+        "native_catalog_available": capability.available,
+        "mapping_status": capability.mapping_status,
+        "mapping_provenance": capability.provenance,
+        "capability_reason": capability.reason,
+        "canonical_product_id": bound_product_id,
+        "canonical_variant_id": capability.variant_id,
+    }
+
     # ── Stock warning (diagnostics only when catalog send proceeds) ───
     in_stock = attachment.get("in_stock")
     if in_stock is None and product_row is not None:
@@ -472,6 +515,17 @@ def evaluate_product_card_send(
     elif not has_image:
         action = ProductCardSendAction.FALLBACK_CTA_ONLY
 
+    if action == ProductCardSendAction.SEND_CATALOG:
+        if not capability.available:
+            return _decision(
+                ProductCardSendAction.FALLBACK_LEGACY,
+                capability.reason or REASON_META_CATALOG_UNVERIFIED,
+                tenant_send_ready=True,
+                retailer_id=retailer_id,
+                diagnostics=capability_diag,
+            )
+        retailer_id = capability.retailer_id or retailer_id
+
     return _decision(
         action,
         REASON_OK,
@@ -479,7 +533,7 @@ def evaluate_product_card_send(
         stock_warning=stock_warning,
         tenant_send_ready=True,
         product_ready=True,
-        diagnostics={"has_image_url": has_image},
+        diagnostics={"has_image_url": has_image, **capability_diag},
     )
 
 

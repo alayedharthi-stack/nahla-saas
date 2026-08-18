@@ -332,6 +332,8 @@ def _classify_catalog_provider_failure(resp: Dict[str, Any]) -> tuple[str, str]:
     msg = " ".join(parts).strip().lower()
     raw = str(resp or "").lower()
     haystack = f"{msg} {raw}".strip()
+    if "duplicate button title" in haystack:
+        return "provider_error", " ".join(parts) or raw[:200]
     if (
         code == 131009
         or "131009" in haystack

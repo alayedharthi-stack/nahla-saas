@@ -27,6 +27,29 @@ logger = logging.getLogger("nahla.native_catalog")
 REASON_SYNTHETIC_RETAILER_ID = "synthetic_retailer_id"
 REASON_SKU_ONLY_RETAILER_ID = "sku_only_retailer_id"
 REASON_META_CATALOG_UNPUBLISHED = "meta_catalog_unpublished"
+REASON_META_CATALOG_UNVERIFIED = "meta_catalog_unverified"
+REASON_CATALOG_ID_MISMATCH = "catalog_id_mismatch"
+REASON_CATALOG_ID_MISSING = "catalog_id_missing"
+REASON_VARIANT_MAPPING_MISSING = "variant_mapping_missing"
+
+
+@dataclass(frozen=True)
+class NativeCatalogProductCapability:
+    """Per-referent native catalog send eligibility.
+
+    ``available`` is true only when the exact product/variant has
+    authoritative Meta membership evidence for the requested catalog.
+    ``external_id`` / copied ``meta_retailer_id`` alone is not enough.
+    """
+
+    available: bool
+    catalog_id: str = ""
+    retailer_id: str = ""
+    product_id: Optional[int] = None
+    variant_id: Optional[int] = None
+    mapping_status: str = "unverified"
+    provenance: str = "none"
+    reason: str = REASON_META_CATALOG_UNVERIFIED
 
 
 @dataclass(frozen=True)
@@ -121,6 +144,8 @@ def _is_trusted_meta_retailer_id(retailer_id: str) -> bool:
 
 
 def _is_meta_catalog_published(product: Any) -> bool:
+    if isinstance(product, dict):
+        return bool(product.get("meta_catalog_published_at"))
     return bool(getattr(product, "meta_catalog_published_at", None))
 
 
@@ -140,6 +165,148 @@ def _meta_confirmed_retailer_id(product: Any) -> str:
     if not _is_meta_catalog_published(product):
         return ""
     return _trusted_retailer_id(product)
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _variant_retailer_id(variant: Any) -> str:
+    if variant is None:
+        return ""
+    if isinstance(variant, dict):
+        return str(variant.get("retailer_id") or "").strip()
+    return str(getattr(variant, "retailer_id", "") or "").strip()
+
+
+def evaluate_native_catalog_product_capability(
+    product: Any,
+    *,
+    catalog_id: str,
+    variant: Any = None,
+    membership_catalog_id: Optional[str] = None,
+) -> NativeCatalogProductCapability:
+    """Return native-catalog send capability for one canonical referent.
+
+    Fail closed unless ``meta_catalog_published_at`` proves membership.
+    Does not treat ``external_id`` as Meta membership. Does not substitute
+    a same-title sibling or a different variant SKU.
+    """
+    requested = str(catalog_id or "").strip()
+    product_id = _optional_int(
+        product.get("id") if isinstance(product, dict) else getattr(product, "id", None)
+    )
+    stamped = membership_catalog_id
+    if stamped is None:
+        stamped = getattr(product, "meta_membership_catalog_id", None)
+        if stamped is None and isinstance(product, dict):
+            stamped = product.get("meta_membership_catalog_id")
+    stamped_id = str(stamped or "").strip()
+
+    if not requested:
+        return NativeCatalogProductCapability(
+            available=False,
+            product_id=product_id,
+            mapping_status="unverified",
+            provenance="none",
+            reason=REASON_CATALOG_ID_MISSING,
+        )
+    if stamped_id and stamped_id != requested:
+        return NativeCatalogProductCapability(
+            available=False,
+            catalog_id=requested,
+            product_id=product_id,
+            mapping_status="catalog_mismatch",
+            provenance="meta_catalog_published_at",
+            reason=REASON_CATALOG_ID_MISMATCH,
+        )
+
+    if variant is not None:
+        variant_id = _optional_int(
+            variant.get("id") if isinstance(variant, dict) else getattr(variant, "id", None)
+        )
+        rid = _variant_retailer_id(variant)
+        if not rid:
+            return NativeCatalogProductCapability(
+                available=False,
+                catalog_id=requested,
+                product_id=product_id,
+                variant_id=variant_id,
+                mapping_status="missing",
+                provenance="none",
+                reason=REASON_VARIANT_MAPPING_MISSING,
+            )
+        if is_synthetic_retailer_id(rid):
+            return NativeCatalogProductCapability(
+                available=False,
+                catalog_id=requested,
+                retailer_id=rid,
+                product_id=product_id,
+                variant_id=variant_id,
+                mapping_status="synthetic",
+                provenance="none",
+                reason=REASON_SYNTHETIC_RETAILER_ID,
+            )
+        if not _is_meta_catalog_published(product):
+            return NativeCatalogProductCapability(
+                available=False,
+                catalog_id=requested,
+                retailer_id=rid,
+                product_id=product_id,
+                variant_id=variant_id,
+                mapping_status="unverified",
+                provenance="none",
+                reason=REASON_META_CATALOG_UNVERIFIED,
+            )
+        return NativeCatalogProductCapability(
+            available=True,
+            catalog_id=requested,
+            retailer_id=rid,
+            product_id=product_id,
+            variant_id=variant_id,
+            mapping_status="verified",
+            provenance="meta_catalog_published_at",
+            reason="ok",
+        )
+
+    confirmed = _meta_confirmed_retailer_id(product)
+    if confirmed:
+        return NativeCatalogProductCapability(
+            available=True,
+            catalog_id=requested,
+            retailer_id=confirmed,
+            product_id=product_id,
+            mapping_status="verified",
+            provenance="meta_catalog_published_at",
+            reason="ok",
+        )
+
+    parent_rid = _trusted_retailer_id(product) or str(
+        (product.get("external_id") if isinstance(product, dict) else getattr(product, "external_id", "") or "")
+    ).strip()
+    status = "synthetic" if is_synthetic_retailer_id(parent_rid) else "unverified"
+    reason = (
+        REASON_SYNTHETIC_RETAILER_ID
+        if status == "synthetic"
+        else REASON_META_CATALOG_UNVERIFIED
+    )
+    if not parent_rid:
+        status = "missing"
+        reason = REASON_META_CATALOG_UNVERIFIED
+    return NativeCatalogProductCapability(
+        available=False,
+        catalog_id=requested,
+        retailer_id=parent_rid,
+        product_id=product_id,
+        mapping_status=status,
+        provenance="none",
+        reason=reason,
+    )
 
 
 def _classify_product_retailer_source(product: Any) -> str:
@@ -429,9 +596,14 @@ def evaluate_native_catalog_capability(
 
 __all__ = [
     "NativeCatalogCapability",
+    "NativeCatalogProductCapability",
+    "REASON_CATALOG_ID_MISMATCH",
+    "REASON_CATALOG_ID_MISSING",
     "REASON_META_CATALOG_UNPUBLISHED",
+    "REASON_META_CATALOG_UNVERIFIED",
     "REASON_SKU_ONLY_RETAILER_ID",
     "REASON_SYNTHETIC_RETAILER_ID",
+    "REASON_VARIANT_MAPPING_MISSING",
     "_CatalogRetailerInventory",
     "_classify_product_retailer_source",
     "_ineligibility_reason_from_inventory",
@@ -440,6 +612,7 @@ __all__ = [
     "_scan_catalog_retailer_inventory",
     "count_matchable_catalog_products",
     "evaluate_native_catalog_capability",
+    "evaluate_native_catalog_product_capability",
     "invalidate_meta_catalog_publish_for_retailer_id",
     "load_whatsapp_connection",
     "pick_thumbnail_retailer_id",

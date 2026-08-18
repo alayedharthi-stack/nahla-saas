@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,6 +24,9 @@ from services.catalog_product_orchestrator import (  # noqa: E402
     evaluate_product_card_send,
     should_attempt_catalog_send,
 )
+
+
+_PUBLISHED = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 def _conn(**kw):
@@ -62,7 +66,11 @@ class TestOrchestratorVariantOwnership:
             connection=_conn(),
             attachment=_attachment(),
             product_row=SimpleNamespace(
-                id=28, tenant_id=1, external_id="1921568272", in_stock=True,
+                id=28,
+                tenant_id=1,
+                external_id="1921568272",
+                in_stock=True,
+                meta_catalog_published_at=_PUBLISHED,
             ),
             positive_commerce_intent=True,
         )
@@ -98,7 +106,11 @@ class TestOrchestratorVariantOwnership:
                 variants=[{"id": 2, "label": "M", "in_stock": True}],
             ),
             product_row=SimpleNamespace(
-                id=28, tenant_id=1, external_id="1921568272", in_stock=True,
+                id=28,
+                tenant_id=1,
+                external_id="1921568272",
+                in_stock=True,
+                meta_catalog_published_at=_PUBLISHED,
             ),
             positive_commerce_intent=True,
         )
