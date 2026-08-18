@@ -200,6 +200,91 @@ class TestExplicitBrowseCatalogDispatchPath:
         assert result.reason == "meta_catalog_unverified"
         send_mock.assert_not_awaited()
 
+    def test_try_send_native_catalog_entry_fails_closed_without_bound_catalog(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from routers import whatsapp_webhook as wh
+
+        send_mock = AsyncMock()
+        with patch(
+            "services.whatsapp_platform.catalog_sender.send_catalog_message",
+            new=send_mock,
+        ), patch(
+            "core.native_catalog_capability.load_whatsapp_connection",
+            return_value=SimpleNamespace(meta_catalog_id="CAT-A"),
+        ), patch(
+            "core.meta_catalog_membership.load_meta_catalog_membership",
+            return_value=SimpleNamespace(catalog_id="CAT-A", retailer_id="sku-1"),
+        ):
+            result = asyncio.run(
+                wh._try_send_native_catalog_entry(
+                    db=object(),
+                    tenant_id=33,
+                    phone_id="pid",
+                    to="966500000000",
+                    entry={
+                        "thumbnail_product_retailer_id": "sku-1",
+                    },
+                    fallback_body="ok",
+                )
+            )
+        assert result.success is False
+        assert result.reason == "catalog_id_missing"
+        send_mock.assert_not_awaited()
+
+    def test_try_send_native_catalog_entry_invalidates_on_products_not_found(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from routers import whatsapp_webhook as wh
+
+        from unittest.mock import Mock
+
+        failed = SimpleNamespace(
+            success=False,
+            reason="meta_products_not_found",
+            error=None,
+        )
+        invalidate = Mock(return_value=1)
+        with patch(
+            "services.whatsapp_platform.catalog_sender.send_catalog_message",
+            new=AsyncMock(return_value=failed),
+        ) as send_mock, patch(
+            "core.native_catalog_capability.load_whatsapp_connection",
+            return_value=SimpleNamespace(meta_catalog_id="CAT-A"),
+        ), patch(
+            "core.meta_catalog_membership.load_meta_catalog_membership",
+            return_value=SimpleNamespace(catalog_id="CAT-A", retailer_id="sku-1"),
+        ), patch(
+            "core.native_catalog_capability.invalidate_meta_catalog_publish_for_retailer_id",
+            invalidate,
+        ):
+            result = asyncio.run(
+                wh._try_send_native_catalog_entry(
+                    db=object(),
+                    tenant_id=33,
+                    phone_id="pid",
+                    to="966500000000",
+                    entry={
+                        "thumbnail_product_retailer_id": "sku-1",
+                        "catalog_id": "CAT-A",
+                    },
+                    fallback_body="ok",
+                )
+            )
+        assert result.success is False
+        assert result.reason == "meta_products_not_found"
+        send_mock.assert_awaited_once()
+        invalidate.assert_called_once()
+        kwargs = invalidate.call_args.kwargs
+        args = invalidate.call_args.args
+        assert args[1] == 33
+        assert args[2] == "sku-1"
+        assert kwargs.get("catalog_id") == "CAT-A"
+
 
 class TestPhase31ShadowOnlyUnchanged:
 
