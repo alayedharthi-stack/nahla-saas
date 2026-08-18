@@ -470,7 +470,7 @@ def structured_product_from_turn(decision: Any = None, result: Any = None) -> Op
         from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
             has_structured_catalog_identity,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
         return None
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})

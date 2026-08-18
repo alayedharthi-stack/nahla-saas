@@ -129,7 +129,7 @@ def try_visual_catalog_send_decision(ctx: Any) -> Optional[Any]:
             has_structured_catalog_identity,
             product_focus_identity,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — visual owner must still run without focus import
         return None
 
     referent = canonical_product_referent(state, checkout_active=checkout_active)
