@@ -157,6 +157,20 @@ if (!connectPage.includes("connection_mode: 'coexistence'") && !connectPage.incl
   console.log('OK   coexistence connection_mode present')
 }
 
+if ('redirect_uri' in opts || 'redirect_uri' in coexistenceOpts) {
+  failed++
+  console.error('FAIL FB.login options must not set redirect_uri (SDK popup owns the dialog)')
+} else {
+  console.log('OK   FB.login options omit redirect_uri')
+}
+
+if (connectPage.includes('payload.redirect_uri') || /redirect_uri:\s*(window\.|location\.|document\.)/.test(connectPage)) {
+  failed++
+  console.error('FAIL WhatsAppConnect.tsx must not send browser-derived redirect_uri on exchange')
+} else {
+  console.log('OK   exchange payload omits client redirect_uri')
+}
+
 if (failed > 0) {
   console.error(`\n${failed} check(s) failed`)
   process.exit(1)
