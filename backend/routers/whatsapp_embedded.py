@@ -1848,6 +1848,8 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
     if conn.phone_number_id:
         try:
             return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+        except HTTPException:
+            raise
         except Exception as exc:
             logger.warning("[EmbeddedSignup] status sync failed tenant=%s: %s", tenant_id, exc)
             conn.last_error = str(exc)[:500]

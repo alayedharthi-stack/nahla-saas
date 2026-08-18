@@ -18,14 +18,16 @@ Guarantees enforced here so routers never have to duplicate them:
   2. waba_id          — globally unique across tenants (active rows only).
   3. Stale disconnected rows on other tenants are evicted before writing.
   4. The target tenant_id exists in the tenants table (caller must verify).
-  5. Phone registration via Meta Cloud API — called ONCE when the phone_number_id
-     is new or changed, to lift Meta's "Pending" state to "Active".
+  5. Phone registration via Meta Cloud API — /register is the ordinary-path
+     proof that the current phone identity is active. Unchanged phone id is
+     not proof. The call is idempotent (including Meta 80007 already-registered).
   6. Meta webhook subscription is attempted synchronously inside the write.
   7. The result carries four explicit readiness flags:
        credentials_saved  – credentials written to DB.
-       phone_registered   – Meta /register API returned 200 OK.
+       phone_registered   – this attempt proved Cloud /register, or Cloud
+                            /register is not required for the provider mode.
        webhook_subscribed – Meta app subscription confirmed.
-       inbound_usable     – registered + webhook active + sending enabled.
+       inbound_usable     – ordinary Meta Cloud path is fully ready.
 
 Callers are responsible for:
   - Resolving the tenant_id from the authenticated JWT (not from fallback).
@@ -210,17 +212,29 @@ def commit_connection(
         )
 
     # ── Step 5: Write ─────────────────────────────────────────────────────────
-    # Capture old phone_number_id BEFORE overwriting so we can detect a change.
+    # Capture previous identity BEFORE overwriting so a replacement cannot
+    # inherit the old row's connected truth.
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     action        = "updated" if conn else "created"
-    old_phone_id  = conn.phone_number_id if conn else None   # used for registration gate
+    old_phone_id  = conn.phone_number_id if conn else None
+    old_waba_id   = getattr(conn, "whatsapp_business_account_id", None) if conn else None
+    old_provider  = getattr(conn, "provider", None) if conn else None
+    old_conn_type = getattr(conn, "connection_type", None) if conn else None
     if not conn:
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
     now = datetime.now(timezone.utc)
+    same_identity = (
+        action == "updated"
+        and (old_phone_id or "") == (phone_number_id or "")
+        and (old_waba_id or "") == (waba_id or "")
+        and (old_provider or "meta") == (provider or "meta")
+        and (old_conn_type or "") == (connection_type or "")
+    )
     already_successfully_connected = (
-        str(getattr(conn, "status", "") or "") == "connected"
+        same_identity
+        and str(getattr(conn, "status", "") or "") == "connected"
         and getattr(conn, "connected_at", None) is not None
     )
     conn.phone_number_id              = phone_number_id
@@ -324,34 +338,26 @@ def commit_connection(
         action          = action,
     )
 
-    # ── Step 6: Phone registration (once per new/changed phone_number_id) ────
-    # Meta requires a POST /{phone_number_id}/register call to lift the phone
-    # from "Pending" to "Active" on the Cloud API.  We run this only when the
-    # phone_number_id is brand-new or just changed, so it is never called on
-    # server restarts or credential-only refreshes.
+    # ── Step 6: Phone registration ───────────────────────────────────────────
+    # Ordinary Meta Cloud API: /register is idempotent and is the authoritative
+    # proof for THIS attempt. Unchanged phone_number_id is not proof.
+    # Coexistence / skip_phone_register: Cloud /register is not required and
+    # does not make commit_connection the successful-readiness owner.
     from services.meta_coexistence import coexistence_webhook_fields, is_coexistence_mode  # noqa: PLC0415
 
-    phone_is_new = (action == "created") or (old_phone_id != phone_number_id)
-    skip_register = skip_phone_register or is_coexistence_mode(conn)
-    if skip_register:
+    cloud_register_not_required = skip_phone_register or is_coexistence_mode(conn)
+    if cloud_register_not_required:
         result.phone_registered = True
         logger.info(
-            "[WASvc] phone registration SKIPPED — coexistence tenant=%s phone=%s",
+            "[WASvc] Cloud /register not required — coexistence/skip tenant=%s phone=%s",
             tenant_id, phone_number_id,
         )
-    elif phone_is_new:
+    else:
         reg_ok, reg_err = register_phone_number(phone_number_id, access_token, tenant_id)
         result.phone_registered         = reg_ok
         result.phone_registration_error = reg_err
         if not reg_ok:
             conn.last_error = (reg_err or "phone register failed")[:500]
-    else:
-        # Phone unchanged — assume already registered; preserve previous status.
-        result.phone_registered = True
-        logger.info(
-            "[WASvc] phone registration SKIPPED — phone unchanged tenant=%s phone=%s",
-            tenant_id, phone_number_id,
-        )
 
     # ── Step 7–8: Webhook subscription ───────────────────────────────────────
     # Per Meta Cloud API docs: subscription happens on the PHONE_NUMBER_ID,
@@ -385,8 +391,12 @@ def commit_connection(
             conn.last_error = (webhook_err or "webhook subscription failed")[:500]
 
     # ── Step 9: Compute inbound_usable then canonical successful finalization ─
+    # Coexistence credential persistence may skip Cloud /register, but that is
+    # not ordinary Meta readiness. Successful Coexistence finalization stays
+    # with the Coexistence provider path (eligibility, webhook, SMB).
     result.inbound_usable = (
-        result.credentials_saved
+        (not cloud_register_not_required)
+        and result.credentials_saved
         and result.phone_registered
         and result.webhook_subscribed
         and bool(conn.sending_enabled)

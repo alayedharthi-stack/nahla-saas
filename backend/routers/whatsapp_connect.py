@@ -517,6 +517,21 @@ def _finalize_connected_or_http(db: Session, conn: WhatsAppConnection) -> bool:
         raise HTTPException(status_code=502, detail="تعذر إتمام ربط واتساب.") from exc
 
 
+def _reconcile_connected_or_http(
+    conn: Optional[WhatsAppConnection],
+    *,
+    tenant_id: int,
+    source: str,
+    db: Session,
+) -> bool:
+    try:
+        return _reconcile_coexistence_status(
+            conn, tenant_id=tenant_id, source=source, db=db,
+        )
+    except WhatsAppConnectionFinalizationError as exc:
+        raise HTTPException(status_code=502, detail="تعذر إتمام ربط واتساب.") from exc
+
+
 def _sync_state_ready(sync_state: Dict[str, Any]) -> bool:
     return bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
 
@@ -582,14 +597,7 @@ def _reconcile_coexistence_status(
     conn.sending_enabled = True
     conn.last_error = None
     _set_coexistence_state(conn, status="connected")
-    try:
-        finalize_successful_whatsapp_connection(db, conn)
-    except WhatsAppConnectionFinalizationError as exc:
-        logger.warning(
-            "[coexistence_reconcile] tenant=%s source=%s finalize FAILED: %s",
-            tenant_id, source, exc,
-        )
-        return False
+    finalize_successful_whatsapp_connection(db, conn)
     logger.info(
         "[coexistence_reconcile] tenant=%s source=%s PROMOTED prev_status=%r prev_sending=%s "
         "→ status=connected sending_enabled=True (ops health green)",
@@ -2694,10 +2702,11 @@ async def admin_coexistence_verify_webhook(
     # Operational-health auto-heal: when verify confirms the URL matches
     # AND the row is operationally healthy, promote a stale status to
     # ``connected`` so the owner banner stops showing status_invalid.
-    reconciled = _reconcile_coexistence_status(
+    reconciled = _reconcile_connected_or_http(
         conn, tenant_id=body.tenant_id, source="admin_verify_webhook", db=db,
     )
-    db.commit()
+    if not reconciled:
+        db.commit()
 
     audit(
         "admin_coexistence_verify_webhook",
@@ -2747,7 +2756,7 @@ async def admin_coexistence_reconcile_status(
     before_sending = bool(conn.sending_enabled)
     before_complete = _coexistence_integration_complete(conn)
 
-    reconciled = _reconcile_coexistence_status(
+    reconciled = _reconcile_connected_or_http(
         conn, tenant_id=body.tenant_id, source="admin_manual_reconcile", db=db,
     )
 
@@ -2917,10 +2926,11 @@ async def admin_coexistence_auto_configure(
     # Auto-heal: if the configure succeeded AND operational health is
     # green, promote the row out of any stale ``action_required``
     # state so the owner panel and merchant page agree.
-    reconciled = _reconcile_coexistence_status(
+    reconciled = _reconcile_connected_or_http(
         conn, tenant_id=body.tenant_id, source="admin_auto_configure", db=db,
     )
-    db.commit()
+    if not reconciled:
+        db.commit()
 
     audit(
         "admin_coexistence_auto_configure",
@@ -3467,7 +3477,7 @@ async def admin_coexistence_diagnose(
     # ``conn.status`` is stale, promote it now. Running diagnose is the
     # canonical "tell me the truth" action, so it is also the right place
     # to bring the stored truth into agreement with reality.
-    reconciled = _reconcile_coexistence_status(
+    reconciled = _reconcile_connected_or_http(
         conn, tenant_id=tenant_id, source="admin_diagnose", db=db,
     )
 
@@ -4657,11 +4667,15 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
                 payload = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
                 payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
                 return payload
+            except HTTPException:
+                raise
             except Exception as exc:
                 logger.warning("[whatsapp/status] embedded sync failed tenant=%s: %s", tenant_id, exc)
         payload = _build_wa_status(conn)
         payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
         return payload
+    except HTTPException:
+        raise
     except Exception as exc:
         import traceback
         logger.error("[whatsapp/status] unhandled error tenant=%s: %s\n%s",

@@ -716,6 +716,7 @@ def test_wa_life_18_reconcile_has_no_independent_connected_writer():
     assert "db: Optional[Session]" not in body
     assert "if db is None" not in body
     assert "finalize_successful_whatsapp_connection" in body
+    assert "except WhatsAppConnectionFinalizationError" not in body
 
 
 def test_wa_life_19_finalizer_persist_failure_raises(db):
@@ -958,3 +959,286 @@ def test_wa_life_28_production_writer_audit():
     assert 'conn.status = "connected"' in finalizer
     assert "raise WhatsAppConnectionFinalizationError" in finalizer
     assert "return False" not in finalizer or "False is never a failed persist" in finalizer
+
+
+def test_wa_life_29_unchanged_phone_does_not_infer_registration(monkeypatch, db):
+    calls = []
+
+    def _register(*_a, **_k):
+        calls.append("register")
+        return (False, "graph register failed")
+
+    wa_svc = _patch_commit_connection(
+        monkeypatch, register=(False, "graph register failed"), subscribe=(True, None),
+    )
+    monkeypatch.setattr(wa_svc, "register_phone_number", _register)
+    t = _tenant(db, name="متجر تجريبي عام")
+    db.commit()
+    kwargs = dict(
+        tenant_id=t.id,
+        phone_number_id="PHONE-RETRY-1",
+        waba_id="WABA-RETRY-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000040",
+        display_name="متجر تجريبي عام",
+    )
+    wa_svc.commit_connection(db, **kwargs)
+    wa_svc.commit_connection(db, **kwargs)
+    db.refresh(t)
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    assert calls == ["register", "register"]
+    assert row.status == "pending"
+    assert t.trial_started_at is None
+
+
+def test_wa_life_30_retry_after_failed_register_requires_proof(monkeypatch, db):
+    outcomes = [(False, "graph register failed"), (True, None)]
+
+    def _register(*_a, **_k):
+        return outcomes.pop(0)
+
+    wa_svc = _patch_commit_connection(monkeypatch, subscribe=(True, None))
+    monkeypatch.setattr(wa_svc, "register_phone_number", _register)
+    t = _tenant(db, name="حذاء رياضي أبيض")
+    db.commit()
+    kwargs = dict(
+        tenant_id=t.id,
+        phone_number_id="PHONE-RETRY-2",
+        waba_id="WABA-RETRY-2",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000041",
+        display_name="حذاء رياضي أبيض",
+    )
+    wa_svc.commit_connection(db, **kwargs)
+    db.refresh(t)
+    assert t.trial_started_at is None
+    wa_svc.commit_connection(db, **kwargs)
+    db.refresh(t)
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    assert row.status == "connected"
+    assert t.subscription_status == TRIAL_STATUS_ACTIVE
+    assert outcomes == []
+
+
+def test_wa_life_31_same_identity_may_reuse_prior_canonical_success(monkeypatch, db):
+    wa_svc = _patch_commit_connection(monkeypatch)
+    t = _tenant(db, name="قميص قطني أزرق")
+    db.commit()
+    kwargs = dict(
+        tenant_id=t.id,
+        phone_number_id="PHONE-SAME-1",
+        waba_id="WABA-SAME-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000042",
+        display_name="قميص قطني أزرق",
+    )
+    wa_svc.commit_connection(db, **kwargs)
+    db.refresh(t)
+    started = t.trial_started_at
+    first_wa = t.first_whatsapp_connected_at
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    connected_at = row.connected_at
+    wa_svc.commit_connection(db, **kwargs)
+    db.refresh(t)
+    db.refresh(row)
+    assert row.status == "connected"
+    assert t.trial_started_at == started
+    assert t.first_whatsapp_connected_at == first_wa
+    assert row.connected_at == connected_at
+
+
+def test_wa_life_32_new_phone_demotes_before_new_identity_finalizes(monkeypatch, db):
+    wa_svc = _patch_commit_connection(monkeypatch)
+    t = _tenant(db, name="عطر ورد 100ml")
+    db.commit()
+    wa_svc.commit_connection(
+        db,
+        tenant_id=t.id,
+        phone_number_id="PHONE-OLD-1",
+        waba_id="WABA-OLD-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000043",
+        display_name="عطر ورد 100ml",
+    )
+    monkeypatch.setattr(wa_svc, "register_phone_number", lambda *_a, **_k: (False, "new phone not registered"))
+    wa_svc.commit_connection(
+        db,
+        tenant_id=t.id,
+        phone_number_id="PHONE-NEW-1",
+        waba_id="WABA-OLD-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000044",
+        display_name="عطر ورد 100ml",
+    )
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    assert row.phone_number_id == "PHONE-NEW-1"
+    assert row.status == "pending"
+
+
+def test_wa_life_33_replaced_waba_cannot_use_old_connected_truth(monkeypatch, db):
+    wa_svc = _patch_commit_connection(monkeypatch)
+    t = _tenant(db, name="أحمد سالم")
+    db.commit()
+    wa_svc.commit_connection(
+        db,
+        tenant_id=t.id,
+        phone_number_id="PHONE-WABA-1",
+        waba_id="WABA-ORIG-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000045",
+        display_name="أحمد سالم",
+    )
+    monkeypatch.setattr(wa_svc, "register_phone_number", lambda *_a, **_k: (False, "new waba not registered"))
+    wa_svc.commit_connection(
+        db,
+        tenant_id=t.id,
+        phone_number_id="PHONE-WABA-1",
+        waba_id="WABA-REPLACED-1",
+        access_token="tok",
+        connection_type="cloud_api",
+        phone_number="+966500000045",
+        display_name="أحمد سالم",
+    )
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    assert row.whatsapp_business_account_id == "WABA-REPLACED-1"
+    assert row.status == "pending"
+
+
+def test_wa_life_34_failed_replacement_does_not_leave_new_identity_connected(monkeypatch, db):
+    test_wa_life_32_new_phone_demotes_before_new_identity_finalizes(monkeypatch, db)
+
+
+def test_wa_life_35_coexistence_skip_register_is_not_readiness_owner(monkeypatch, db):
+    wa_svc = _patch_commit_connection(monkeypatch)
+    t = _tenant(db, name="نورة عبدالله")
+    db.commit()
+    result = wa_svc.commit_connection(
+        db,
+        tenant_id=t.id,
+        phone_number_id="PHONE-COEX-1",
+        waba_id="WABA-COEX-1",
+        access_token="tok",
+        connection_type="embedded",
+        phone_number="+966500000046",
+        display_name="نورة عبدالله",
+        skip_phone_register=True,
+    )
+    db.refresh(t)
+    row = db.query(WhatsAppConnection).filter_by(tenant_id=t.id).first()
+    assert result.inbound_usable is False
+    assert row.status == "pending"
+    assert t.trial_started_at is None
+    assert t.first_whatsapp_connected_at is None
+
+
+def test_wa_life_36_coexistence_still_finalizes_after_smb_and_webhook(db):
+    test_wa_life_02_coexistence_finalization_starts_trial_once(db)
+
+
+def test_wa_life_37_normal_meta_fully_ready_finalizes_once(monkeypatch, db):
+    test_wa_life_15_normal_meta_fully_ready_finalizes_once(monkeypatch, db)
+
+
+def test_wa_life_38_reconcile_finalizer_failure_raises(monkeypatch, db):
+    from routers.whatsapp_connect import _reconcile_coexistence_status  # noqa: PLC0415
+
+    t = _tenant(db, name="الرياض-RRRD1234")
+    conn = _conn(
+        db,
+        t.id,
+        status="action_required",
+        extra_metadata={},
+        sending_enabled=False,
+    )
+    conn.access_token = "tok"
+    db.commit()
+    monkeypatch.setattr("services.meta_coexistence.is_coexistence_mode", lambda *_a, **_k: False)
+    monkeypatch.setattr("routers.whatsapp_connect._operational_health_ok", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "routers.whatsapp_connect.finalize_successful_whatsapp_connection",
+        lambda *_a, **_k: (_ for _ in ()).throw(WhatsAppConnectionFinalizationError("persist failed")),
+    )
+    with pytest.raises(WhatsAppConnectionFinalizationError):
+        _reconcile_coexistence_status(
+            conn, tenant_id=t.id, source="test_manual", db=db,
+        )
+
+
+def test_wa_life_39_admin_verify_webhook_cannot_http_success_after_failure():
+    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    start = src.index("async def admin_coexistence_verify_webhook(")
+    end = src.index("\n@router.", start + 1)
+    body = src[start:end]
+    assert "_reconcile_connected_or_http(" in body
+    assert "_reconcile_coexistence_status(" not in body
+
+
+def test_wa_life_40_admin_auto_configure_cannot_http_success_after_failure():
+    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    start = src.index("async def admin_coexistence_auto_configure(")
+    end = src.index("\n@router.", start + 1)
+    body = src[start:end]
+    assert "_reconcile_connected_or_http(" in body
+    assert "_reconcile_coexistence_status(" not in body
+
+
+def test_wa_life_41_admin_manual_reconcile_and_diagnose_same_contract():
+    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    for name in (
+        "async def admin_coexistence_reconcile_status(",
+        "async def admin_coexistence_diagnose(",
+    ):
+        start = src.index(name)
+        end = src.index("\n@router.", start + 1)
+        body = src[start:end]
+        assert "_reconcile_connected_or_http(" in body, name
+        assert "_reconcile_coexistence_status(" not in body, name
+
+
+def test_wa_life_42_embedded_finalization_http_not_swallowed():
+    embedded = (BACKEND_DIR / "routers" / "whatsapp_embedded.py").read_text(encoding="utf-8")
+    connect = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    start = embedded.index("async def get_status(")
+    end = embedded.index("\n@router.", start + 1)
+    body = embedded[start:end]
+    assert "except HTTPException:\n            raise" in body
+    status_fn = connect[connect.index("async def whatsapp_status("):connect.index("async def direct_status(")]
+    assert "except HTTPException:\n                raise" in status_fn
+    assert "except HTTPException:\n        raise" in status_fn
+
+
+def test_wa_life_43_no_route_reports_success_after_finalizer_failure():
+    connect = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    embedded = (BACKEND_DIR / "routers" / "whatsapp_embedded.py").read_text(encoding="utf-8")
+    for src in (connect, embedded):
+        assert "except WhatsAppConnectionFinalizationError" not in src or (
+            "raise HTTPException" in src
+        )
+    recon = connect[connect.index("def _reconcile_coexistence_status("):connect.index("def _has_recent_webhook_traffic(")]
+    assert "return False" not in recon.split("finalize_successful_whatsapp_connection")[1]
+
+
+def test_wa_life_44_no_success_commit_after_typed_finalization_failure():
+    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
+    recon = src[src.index("def _reconcile_coexistence_status("):src.index("def _has_recent_webhook_traffic(")]
+    assert "except WhatsAppConnectionFinalizationError" not in recon
+    verify = src[src.index("async def admin_coexistence_verify_webhook("):src.index("async def admin_coexistence_reconcile_status(")]
+    assert "if not reconciled:\n        db.commit()" in verify
+
+
+def test_wa_life_45_guardian_finalization_failure_remains_retryable(monkeypatch, db):
+    test_wa_life_22_guardian_finalization_failure_is_retryable(monkeypatch, db)
+
+
+def test_wa_life_46_backfill_finalization_failure_remains_non_success(monkeypatch, db):
+    test_wa_life_23_backfill_finalization_failure_fails_operation(monkeypatch, db)
+
+
+def test_wa_life_47_canonical_writer_audit_still_closed():
+    test_wa_life_28_production_writer_audit()
