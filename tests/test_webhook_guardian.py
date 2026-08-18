@@ -169,15 +169,24 @@ def test_inspect_retries_missing_smb_app_data_until_connected():
         "smb_app_state_sync": {"accepted": True, "request_id": "a"},
         "history": {"accepted": True, "request_id": "b"},
     }
+
+    def _finalize(_db, connection, **_kw):
+        connection.status = "connected"
+        return True
+
     with patch(
         "services.whatsapp_platform.wa_connection_secrets.read_access_token",
         return_value="tok",
     ), patch(
         "services.meta_coexistence.initiate_smb_app_data",
         return_value=results,
-    ) as mock_sync:
+    ) as mock_sync, patch(
+        "core.whatsapp_connection_finalization.finalize_successful_whatsapp_connection",
+        side_effect=_finalize,
+    ) as mock_finalize:
         health = asyncio.run(_inspect_connection(db, conn, now, now - timedelta(minutes=15)))
     assert mock_sync.called
+    assert mock_finalize.called
     assert conn.status == "connected"
     assert conn.sending_enabled is True
     assert health == "active"

@@ -175,9 +175,17 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
                     conn.sending_enabled = True
                     conn.last_error = None
                     from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+                        WhatsAppConnectionFinalizationError,
                         finalize_successful_whatsapp_connection,
                     )
-                    finalize_successful_whatsapp_connection(db, conn)
+                    try:
+                        finalize_successful_whatsapp_connection(db, conn)
+                    except WhatsAppConnectionFinalizationError as exc:
+                        logger.warning(
+                            "[Guardian] canonical finalization failed tenant=%s: %s",
+                            tenant_id, exc,
+                        )
+                        return "critical"
                 else:
                     db.commit()
     except Exception as exc:  # noqa: BLE001

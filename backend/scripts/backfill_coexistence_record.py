@@ -174,9 +174,14 @@ def backfill(
             conn.sending_enabled = True
             conn.last_error = None
             from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+                WhatsAppConnectionFinalizationError,
                 finalize_successful_whatsapp_connection,
             )
-            finalize_successful_whatsapp_connection(db, conn)
+            try:
+                finalize_successful_whatsapp_connection(db, conn)
+            except WhatsAppConnectionFinalizationError as exc:
+                log.error("✗ Canonical finalization failed: %s", exc)
+                return 1
         else:
             db.commit()
         log.info("✓ Backfill applied.")

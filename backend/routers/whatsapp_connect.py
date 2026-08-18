@@ -58,8 +58,10 @@ from core.coexistence_client_id import (
 )
 from core.database import get_db
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
-from core.whatsapp_ai_live import stamp_whatsapp_ai_live_since_if_empty
-from core.whatsapp_connection_finalization import finalize_successful_whatsapp_connection
+from core.whatsapp_connection_finalization import (
+    WhatsAppConnectionFinalizationError,
+    finalize_successful_whatsapp_connection,
+)
 from services.whatsapp_platform.provider_utils import (
     WHATSAPP_CONNECTION_TYPE_ASSISTED,
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
@@ -508,12 +510,30 @@ def _operational_health_ok(conn: Optional[WhatsAppConnection]) -> bool:
     return _has_recent_webhook_traffic(conn)
 
 
+def _finalize_connected_or_http(db: Session, conn: WhatsAppConnection) -> bool:
+    try:
+        return bool(finalize_successful_whatsapp_connection(db, conn))
+    except WhatsAppConnectionFinalizationError as exc:
+        raise HTTPException(status_code=502, detail="تعذر إتمام ربط واتساب.") from exc
+
+
+def _sync_state_ready(sync_state: Dict[str, Any]) -> bool:
+    return bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+
+
+def _non_success_db_status(sync_state: Dict[str, Any], default: str = "activation_pending") -> str:
+    raw = str(sync_state.get("db_status") or default)
+    if raw == "connected":
+        return default
+    return raw
+
+
 def _reconcile_coexistence_status(
     conn: Optional[WhatsAppConnection],
     *,
     tenant_id: int,
     source: str,
-    db: Optional[Session] = None,
+    db: Session,
 ) -> bool:
     """If the row is operationally healthy but its DB status field is
     stale (e.g. ``action_required`` left over from an earlier failed
@@ -562,27 +582,14 @@ def _reconcile_coexistence_status(
     conn.sending_enabled = True
     conn.last_error = None
     _set_coexistence_state(conn, status="connected")
-    if db is not None:
-        try:
-            finalize_successful_whatsapp_connection(db, conn)
-        except Exception as exc:  # noqa: BLE001
-            try:
-                db.rollback()
-            except Exception:  # noqa: silent-ok — rollback after failed finalize must not hide the original error
-                pass
-            logger.warning(
-                "[coexistence_reconcile] tenant=%s source=%s finalize FAILED: %s",
-                tenant_id, source, exc,
-            )
-            return False
-    else:
-        conn.status = "connected"
-        if not conn.connected_at:
-            conn.connected_at = datetime.now(timezone.utc)
-        try:
-            stamp_whatsapp_ai_live_since_if_empty(conn)
-        except Exception:  # noqa: silent-ok — AI-live stamp is best-effort after connect
-            pass
+    try:
+        finalize_successful_whatsapp_connection(db, conn)
+    except WhatsAppConnectionFinalizationError as exc:
+        logger.warning(
+            "[coexistence_reconcile] tenant=%s source=%s finalize FAILED: %s",
+            tenant_id, source, exc,
+        )
+        return False
     logger.info(
         "[coexistence_reconcile] tenant=%s source=%s PROMOTED prev_status=%r prev_sending=%s "
         "→ status=connected sending_enabled=True (ops health green)",
@@ -1427,6 +1434,8 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
                 "status": payload.get("status"),
                 "reason": payload.get("message") or payload.get("last_error"),
             }
+        except HTTPException:
+            raise
         except Exception as exc:
             conn.last_error = str(exc)[:500]
             db.commit()
@@ -1474,21 +1483,32 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
             data = resp.json()
             from routers.whatsapp_embedded import _build_phone_sync_state  # noqa: PLC0415
             sync_state = _build_phone_sync_state(data if isinstance(data, dict) else {})
-            conn.sending_enabled  = bool(sync_state.get("sending_enabled"))
-            conn.status           = sync_state.get("db_status") or "activation_pending"
-            conn.last_verified_at = datetime.now(timezone.utc)
-            conn.last_error       = None if conn.sending_enabled else sync_state.get("message")
-            conn.extra_metadata   = {
-                **(conn.extra_metadata or {}),
-                "meta_code_verification_status": sync_state.get("verification_status"),
-                "meta_name_status": sync_state.get("name_status"),
-                "meta_phone_status": sync_state.get("meta_phone_status"),
-                "meta_quality_rating": sync_state.get("quality_rating"),
-                "embedded_status_message": sync_state.get("message"),
-            }
-            if str(conn.status or "") == "connected":
-                finalize_successful_whatsapp_connection(db, conn)
+            if _sync_state_ready(sync_state):
+                conn.sending_enabled  = bool(sync_state.get("sending_enabled"))
+                conn.last_verified_at = datetime.now(timezone.utc)
+                conn.last_error       = None if conn.sending_enabled else sync_state.get("message")
+                conn.extra_metadata   = {
+                    **(conn.extra_metadata or {}),
+                    "meta_code_verification_status": sync_state.get("verification_status"),
+                    "meta_name_status": sync_state.get("name_status"),
+                    "meta_phone_status": sync_state.get("meta_phone_status"),
+                    "meta_quality_rating": sync_state.get("quality_rating"),
+                    "embedded_status_message": sync_state.get("message"),
+                }
+                _finalize_connected_or_http(db, conn)
             else:
+                conn.sending_enabled  = bool(sync_state.get("sending_enabled"))
+                conn.status           = _non_success_db_status(sync_state)
+                conn.last_verified_at = datetime.now(timezone.utc)
+                conn.last_error       = None if conn.sending_enabled else sync_state.get("message")
+                conn.extra_metadata   = {
+                    **(conn.extra_metadata or {}),
+                    "meta_code_verification_status": sync_state.get("verification_status"),
+                    "meta_name_status": sync_state.get("name_status"),
+                    "meta_phone_status": sync_state.get("meta_phone_status"),
+                    "meta_quality_rating": sync_state.get("quality_rating"),
+                    "embedded_status_message": sync_state.get("message"),
+                }
                 db.commit()
             return {
                 "verified": bool(conn.sending_enabled),
@@ -1500,6 +1520,8 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
         db.commit()
         return {"verified": False, "reason": conn.last_error}
 
+    except HTTPException:
+        raise
     except Exception as exc:
         conn.last_error = str(exc)[:500]
         db.commit()
@@ -2091,7 +2113,7 @@ async def coexistence_partner_connect(
 
     conn.extra_metadata = meta
     if api_key and channel_status == "ready" and conn.sending_enabled:
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
     else:
         db.commit()
 
@@ -2238,7 +2260,7 @@ async def admin_activate_coexistence(
             logger.warning("[coexistence/activate] auto-resolve failed tenant=%s err=%s", body.tenant_id, exc)
 
     if should_finalize:
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
     else:
         db.commit()
     _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_activate", request_id=request_id)
@@ -2348,7 +2370,7 @@ async def admin_coexistence_sync_record(
         conn.sending_enabled = True
         _set_coexistence_state(conn, status="connected")
         conn.last_error = None
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
     else:
         if after.get("missing_fields"):
             conn.last_error = (
@@ -2462,7 +2484,7 @@ async def admin_coexistence_edit_record(
         conn.sending_enabled = True
         _set_coexistence_state(conn, status="connected")
         conn.last_error = None
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
     else:
         db.commit()
     _log_integration_state(conn, tenant_id=body.tenant_id, source="admin_edit", request_id=request_id)
@@ -4476,7 +4498,10 @@ async def direct_verify_otp(
     from routers.whatsapp_embedded import _build_phone_sync_state  # noqa: PLC0415
     sync_state = _build_phone_sync_state(info if isinstance(info, dict) else {})
 
-    conn.status                       = sync_state.get("db_status") or "activation_pending"
+    conn.status                       = (
+        "activation_pending" if _sync_state_ready(sync_state)
+        else _non_success_db_status(sync_state)
+    )
     conn.phone_number_id              = phone_id
     conn.phone_number                 = phone_number
     conn.business_display_name        = display_name
@@ -4508,7 +4533,7 @@ async def direct_verify_otp(
     )
 
     if sync_state.get("connected"):
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
     else:
         db.commit()
 
@@ -4784,7 +4809,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             "meta_quality_rating": sync_state.get("quality_rating"),
             "embedded_status_message": sync_state.get("message"),
         }
-        finalize_successful_whatsapp_connection(db, conn)
+        _finalize_connected_or_http(db, conn)
         logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
         return {
             "updated": True,
@@ -4794,7 +4819,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         }
 
     # Not verified yet — return full Meta response for diagnosis
-    conn.status          = sync_state.get("db_status") or "activation_pending"
+    conn.status          = _non_success_db_status(sync_state)
     conn.sending_enabled = bool(sync_state.get("sending_enabled"))
     conn.last_error      = sync_state.get("message")
     conn.extra_metadata  = {

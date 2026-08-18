@@ -9,6 +9,14 @@ Provider / onboarding paths decide WHEN a connection is ready
   - start_trial_on_whatsapp_connect() via the existing trial owner
 
 Do not put provider eligibility, webhook subscription, or SMB sync here.
+
+Return contract:
+  True  — this call newly started the free trial
+  False — successful persist of connected truth, but trial did not newly
+          start (already active, paid tenant, or reconnect)
+
+Persistence / required lifecycle failure RAISES
+WhatsAppConnectionFinalizationError. False is never a failed persist.
 """
 from __future__ import annotations
 
@@ -24,6 +32,10 @@ from core.trial_lifecycle import start_trial_on_whatsapp_connect
 logger = logging.getLogger("nahla.whatsapp_connection_finalization")
 
 
+class WhatsAppConnectionFinalizationError(Exception):
+    """Canonical successful-connection persist or required post-connect lifecycle failed."""
+
+
 def finalize_successful_whatsapp_connection(
     db: Session,
     conn: Any,
@@ -32,10 +44,19 @@ def finalize_successful_whatsapp_connection(
 ) -> bool:
     """Apply platform post-connect lifecycle for a ready WhatsApp row.
 
-    Returns True when this call started the free trial, False on
-    idempotent skip or non-fatal trial failure.
+    Connection transition and trial/first-connect timestamps are applied
+    in one transaction so callers cannot observe connected + trial_pending.
     """
     tenant_id = int(getattr(conn, "tenant_id", 0) or 0)
+    if tenant_id <= 0:
+        raise WhatsAppConnectionFinalizationError("missing tenant_id for WhatsApp finalization")
+
+    from models import Tenant  # noqa: PLC0415
+    if db.query(Tenant).filter(Tenant.id == tenant_id).first() is None:
+        raise WhatsAppConnectionFinalizationError(
+            f"tenant={tenant_id} not found for WhatsApp finalization"
+        )
+
     now = _coerce_utc(connected_at) or datetime.now(timezone.utc)
     naive_now = now.replace(tzinfo=None) if now.tzinfo else now
 
@@ -51,11 +72,28 @@ def finalize_successful_whatsapp_connection(
             "[WAFinalize] ai-live stamp skipped tenant=%s", tenant_id, exc_info=True,
         )
 
+    trial_at = getattr(conn, "connected_at", None) or naive_now
+    try:
+        trial_started = bool(
+            start_trial_on_whatsapp_connect(
+                db, tenant_id, connected_at=trial_at, commit=False,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WAFinalize] trial lifecycle apply failed tenant=%s: %s", tenant_id, exc,
+        )
+        _rollback_finalization(db, conn)
+        raise WhatsAppConnectionFinalizationError(
+            f"trial lifecycle failed for tenant={tenant_id}"
+        ) from exc
+
     logger.info(
-        "[WAFinalize] successful connection tenant=%s conn_id=%s connected_at=%s",
+        "[WAFinalize] successful connection tenant=%s conn_id=%s connected_at=%s trial_started=%s",
         tenant_id,
         getattr(conn, "id", None),
         getattr(conn, "connected_at", None),
+        trial_started,
     )
 
     try:
@@ -64,21 +102,23 @@ def finalize_successful_whatsapp_connection(
         logger.warning(
             "[WAFinalize] connection commit failed tenant=%s: %s", tenant_id, exc,
         )
-        try:
-            db.rollback()
-        except Exception:  # noqa: silent-ok — rollback after failed persist must not hide the original error
-            pass
-        return False
+        _rollback_finalization(db, conn)
+        raise WhatsAppConnectionFinalizationError(
+            f"failed to persist successful WhatsApp connection for tenant={tenant_id}"
+        ) from exc
 
-    trial_at = getattr(conn, "connected_at", None) or naive_now
+    return trial_started
+
+
+def _rollback_finalization(db: Session, conn: Any) -> None:
     try:
-        return bool(
-            start_trial_on_whatsapp_connect(db, tenant_id, connected_at=trial_at)
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[WAFinalize] trial start hook failed (non-fatal) tenant=%s: %s",
-            tenant_id,
-            exc,
-        )
-        return False
+        db.rollback()
+    except Exception:  # noqa: silent-ok — rollback after failed persist must not hide the original error
+        pass
+    try:
+        db.expire_all()
+    except Exception:  # noqa: silent-ok — expire is best-effort after rollback
+        try:
+            db.expire(conn)
+        except Exception:  # noqa: silent-ok — expire is best-effort after rollback
+            pass
