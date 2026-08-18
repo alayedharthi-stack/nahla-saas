@@ -50,12 +50,21 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.intent.classifier import (  # noqa: E402
     DefaultIntentClassifier,
+    PROVENANCE_LAYER2_SEMANTIC_OVERRIDE,
+    PROVENANCE_RULE_CANDIDATE_CONFIRMED,
+    PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
     RULES_ONLY_THRESHOLD,
     _BRAIN_SEMANTIC_REQUIRED_INTENTS,
+    is_authoritative_layer2_intent,
 )
 from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
+    INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_PRODUCT,
+    INTENT_GENERAL,
     INTENT_PRODUCT_VISUAL_REQUEST,
+    INTENT_START_ORDER,
+    INTENT_TRACK_ORDER,
     BrainContext,
     CommerceFacts,
     Decision,
@@ -319,6 +328,26 @@ class TestF3B1BrainOwnsProductVisualSemanticIntent:
     # Existing visual-need phrasings used only as classifier input.
     # Assertions are owner/provenance, not a specific customer sentence.
     _MEDIA_NEED_SAMPLES = ("وين الصوره", "ورني شكله")
+    # Non-visual strong rule that still reaches Layer 2 (conf < 0.85).
+    _NON_VISUAL_LAYER2_MESSAGE = "show me the product image"
+
+    def _classify_with_layer2(self, message: str, layer2_slots: dict) -> Intent:
+        slot_extract = AsyncMock(return_value=dict(layer2_slots))
+
+        async def _run() -> Intent:
+            with patch(
+                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                slot_extract,
+            ):
+                return await DefaultIntentClassifier().classify(
+                    message,
+                    [],
+                    _state(),
+                )
+
+        intent = asyncio.run(_run())
+        assert slot_extract.await_count == 1
+        return intent
 
     def test_classifier_does_not_rules_only_short_circuit_visual(self) -> None:
         assert INTENT_PRODUCT_VISUAL_REQUEST in _BRAIN_SEMANTIC_REQUIRED_INTENTS
@@ -329,85 +358,124 @@ class TestF3B1BrainOwnsProductVisualSemanticIntent:
             assert candidate.extraction_method == "rules"
             assert candidate.confidence >= RULES_ONLY_THRESHOLD
 
-            slot_extract = AsyncMock(return_value={"intent_hint": "general"})
-
-            async def _classify(message: str = sample):
-                with patch(
-                    "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
-                    slot_extract,
-                ):
-                    return await DefaultIntentClassifier().classify(
-                        message,
-                        [],
-                        _state(),
-                    )
-
-            intent = asyncio.run(_classify())
-            assert slot_extract.await_count == 1
+            intent = self._classify_with_layer2(sample, {"intent_hint": INTENT_GENERAL})
             assert intent.extraction_method != "rules"
             assert intent.extraction_method == "hybrid"
             assert intent.slots.get("semantic_owner") == "brain_classifier"
             assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
 
-    def test_empty_layer2_does_not_return_rules_only_visual(self) -> None:
+    def test_f3_b1_p1_authoritative_layer2_start_order_wins(self) -> None:
         sample = self._MEDIA_NEED_SAMPLES[0]
-        slot_extract = AsyncMock(return_value={})
+        candidate = intent_rules.match(sample)
+        assert candidate is not None
+        assert candidate.name == INTENT_PRODUCT_VISUAL_REQUEST
+        intent = self._classify_with_layer2(
+            sample, {"intent_hint": INTENT_START_ORDER}
+        )
+        assert intent.name == INTENT_START_ORDER
+        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.extraction_method == "llm"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert intent.slots.get("precedence_winner") == "layer2"
+        assert intent.slots.get("rule_candidate") == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("layer2_result") == INTENT_START_ORDER
 
-        async def _classify():
-            with patch(
-                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
-                slot_extract,
-            ):
-                return await DefaultIntentClassifier().classify(
-                    sample,
-                    [],
-                    _state(),
-                )
+    def test_f3_b1_p2_authoritative_layer2_ask_owner_contact_wins(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        intent = self._classify_with_layer2(
+            sample, {"intent_hint": INTENT_ASK_OWNER_CONTACT}
+        )
+        assert intent.name == INTENT_ASK_OWNER_CONTACT
+        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.extraction_method == "llm"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert intent.slots.get("precedence_winner") == "layer2"
 
-        intent = asyncio.run(_classify())
-        assert slot_extract.await_count == 1
+    def test_f3_b1_p3_general_does_not_erase_visual_need(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[1]
+        intent = self._classify_with_layer2(
+            sample, {"intent_hint": INTENT_GENERAL}
+        )
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.extraction_method == "hybrid"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED
+        )
+        assert intent.slots.get("precedence_winner") == "rule_candidate"
+        assert is_authoritative_layer2_intent(INTENT_GENERAL) is False
+
+    def test_f3_b1_p4_empty_layer2_is_not_rules_only_owner(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        intent = self._classify_with_layer2(sample, {})
         assert intent.extraction_method != "rules"
         assert intent.extraction_method == "hybrid"
-        assert intent.slots.get("semantic_owner") == "brain_classifier"
         assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("semantic_owner") == "brain_classifier"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2
+        )
+        assert intent.slots.get("precedence_winner") == "rule_candidate"
 
-    def test_layer2_operational_override_is_brain_llm_not_regex(self) -> None:
+    def test_f3_b1_p5_semantic_provenance_distinguishes_winner(self) -> None:
         sample = self._MEDIA_NEED_SAMPLES[0]
-        slot_extract = AsyncMock(return_value={"intent_hint": "talk_to_human"})
+        confirmed = self._classify_with_layer2(
+            sample, {"intent_hint": INTENT_GENERAL}
+        )
+        override = self._classify_with_layer2(
+            sample, {"intent_hint": INTENT_START_ORDER}
+        )
+        fallback = self._classify_with_layer2(sample, {})
+        assert confirmed.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED
+        )
+        assert override.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert fallback.slots.get("classification_provenance") == (
+            PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2
+        )
+        assert confirmed.extraction_method == "hybrid"
+        assert override.extraction_method == "llm"
+        assert fallback.extraction_method == "hybrid"
 
-        async def _classify():
-            with patch(
-                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
-                slot_extract,
-            ):
-                return await DefaultIntentClassifier().classify(
-                    sample,
-                    [],
-                    _state(),
-                )
+    def test_f3_b1_p6_no_phrase_regex_or_visual_operational_allowlist(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+        from modules.ai.brain.intent import rules as rules_mod
 
-        intent = asyncio.run(_classify())
-        assert slot_extract.await_count == 1
-        assert intent.extraction_method == "llm"
-        assert intent.name == "talk_to_human"
-        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+        classifier_src = inspect.getsource(intent_classifier)
+        resolve_src = inspect.getsource(intent_classifier._resolve_layer2_rule_precedence)
+        auth_src = inspect.getsource(intent_classifier.is_authoritative_layer2_intent)
+        assert "re.compile" not in classifier_src
+        assert r"(?:show|send)" not in classifier_src
+        assert "_PRODUCT_VISUAL_LLM_OVERRIDE" not in classifier_src
+        assert INTENT_START_ORDER not in resolve_src
+        assert INTENT_ASK_OWNER_CONTACT not in resolve_src
+        assert INTENT_START_ORDER not in auth_src
+        assert INTENT_ASK_OWNER_CONTACT not in auth_src
+        visual_rule = next(
+            rs for rs, _compiled in rules_mod._RULES
+            if rs.intent == INTENT_PRODUCT_VISUAL_REQUEST
+        )
+        assert len(visual_rule.patterns) == 8
 
-    def test_brain_semantic_visual_intent_still_targets_canonical_referent(self) -> None:
+    def test_f3_b1_p7_precedence_is_not_tenant_or_phone_specific(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+
+        classify_src = inspect.getsource(intent_classifier.DefaultIntentClassifier.classify)
+        resolve_src = inspect.getsource(intent_classifier._resolve_layer2_rule_precedence)
+        for src in (classify_src, resolve_src):
+            assert "tenant_id" not in src
+            assert "customer_phone" not in src
+            assert "phone_number" not in src
+            assert "merchant_id" not in src
+
+    def test_f3_b1_p8_canonical_referent_structured_visual_still_targets_sku(self) -> None:
         sample = self._MEDIA_NEED_SAMPLES[0]
-        slot_extract = AsyncMock(return_value={"intent_hint": "general"})
-
-        async def _classify():
-            with patch(
-                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
-                slot_extract,
-            ):
-                return await DefaultIntentClassifier().classify(
-                    sample,
-                    [],
-                    _state(),
-                )
-
-        intent = asyncio.run(_classify())
+        intent = self._classify_with_layer2(sample, {"intent_hint": INTENT_GENERAL})
         state = _state()
         bind_structured_catalog_referent(state, dict(SHOE), reason="recommend", turn=4)
         ctx = _ctx(
@@ -422,18 +490,44 @@ class TestF3B1BrainOwnsProductVisualSemanticIntent:
         assert decision.args["replay_candidates"][0]["id"] == 501
         assert decision.args["replay_candidates"][0]["id"] != SHIRT["id"]
 
-    def test_no_new_visual_regex_or_phrase_repair(self) -> None:
-        from modules.ai.brain.intent import classifier as intent_classifier
-        from modules.ai.brain.intent import rules as rules_mod
-
-        classifier_src = inspect.getsource(intent_classifier)
-        assert "re.compile" not in classifier_src
-        assert r"(?:show|send)" not in classifier_src
-        visual_rule = next(
-            rs for rs, _compiled in rules_mod._RULES
-            if rs.intent == INTENT_PRODUCT_VISUAL_REQUEST
+    def test_f3_b1_case_e_same_precedence_for_non_visual_rule_candidate(self) -> None:
+        message = self._NON_VISUAL_LAYER2_MESSAGE
+        candidate = intent_rules.match(message)
+        assert candidate is not None
+        assert candidate.name == INTENT_ASK_PRODUCT
+        assert candidate.name != INTENT_PRODUCT_VISUAL_REQUEST
+        assert candidate.confidence < RULES_ONLY_THRESHOLD
+        intent = self._classify_with_layer2(
+            message, {"intent_hint": INTENT_TRACK_ORDER}
         )
-        assert len(visual_rule.patterns) == 8
+        assert intent.name == INTENT_TRACK_ORDER
+        assert intent.name != candidate.name
+        assert intent.extraction_method == "llm"
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+        assert intent.slots.get("precedence_winner") == "layer2"
+        assert intent.slots.get("rule_candidate") == INTENT_ASK_PRODUCT
+
+    def test_layer2_operational_override_is_brain_llm_not_regex(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        intent = self._classify_with_layer2(
+            sample, {"intent_hint": "talk_to_human"}
+        )
+        assert intent.extraction_method == "llm"
+        assert intent.name == "talk_to_human"
+        assert intent.name != INTENT_PRODUCT_VISUAL_REQUEST
+        assert intent.slots.get("classification_provenance") == (
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE
+        )
+
+    def test_empty_layer2_does_not_return_rules_only_visual(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        intent = self._classify_with_layer2(sample, {})
+        assert intent.extraction_method != "rules"
+        assert intent.extraction_method == "hybrid"
+        assert intent.slots.get("semantic_owner") == "brain_classifier"
+        assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
 
 
 class TestF309NativeCatalogCompletion:

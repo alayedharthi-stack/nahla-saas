@@ -9,7 +9,10 @@ Phase 1 hybrid strategy:
      except Family 3 product-visual (Brain semantic ownership required).
   3. Otherwise: run slot_extractor.extract_slots() (fast Haiku call).
      Merge the LLM's intent_hint into the result if the LLM's hint is
-     more specific than the rules result.
+     more specific than the rules result. ``general`` is the documented
+     non-authoritative Layer 2 fallback and must not erase a supported
+     rule candidate. Any other non-empty Layer 2 hint is the
+     authoritative semantic owner.
 
 This keeps the "happy path" (clear Arabic greeting / product ask / buy)
 at zero extra latency while falling through to LLM only for ambiguous input.
@@ -44,23 +47,88 @@ _BRAIN_SEMANTIC_REQUIRED_INTENTS = frozenset({
     INTENT_PRODUCT_VISUAL_REQUEST,
 })
 
-# Layer 2 may replace a visual regex candidate only with a conflicting
-# operational intent. general/ask_product is not a replacement owner.
-_PRODUCT_VISUAL_LLM_OVERRIDE = frozenset({
-    INTENT_TALK_HUMAN,
-    "greeting",
-    "farewell",
-    "track_order",
-    "pay_now",
-    "ask_payment_info",
-    "ask_cod",
-    "ask_shipping",
-    "complaint_refund",
-    "who_are_you",
-    "platform_inquiry",
-    "persona_interaction",
-    "pick_list_item",
-})
+# Closed classifier-ownership provenance. Distinguishes the merge winner
+# without a second intent classifier or a visual-specific allowlist.
+PROVENANCE_LAYER2_SEMANTIC_OVERRIDE = "LAYER2_SEMANTIC_OVERRIDE"
+PROVENANCE_RULE_CANDIDATE_CONFIRMED = "RULE_CANDIDATE_CONFIRMED"
+PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2 = (
+    "RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2"
+)
+
+
+def is_authoritative_layer2_intent(hint: Any) -> bool:
+    """True when Layer 2 returned a more-specific semantic result than general.
+
+    The slot extractor always emits ``intent_hint``, defaulting to
+    ``general`` when it has no usable operational label. That fallback is
+    not an authoritative owner. Any other non-empty hint is.
+    """
+    name = str(hint or "").strip()
+    return bool(name) and name != INTENT_GENERAL
+
+
+def _stamp_classifier_precedence(
+    slots: Dict[str, Any],
+    *,
+    rule_intent: Intent | None,
+    layer2_hint: str,
+    winner: str,
+    provenance: str,
+) -> None:
+    slots["semantic_owner"] = "brain_classifier"
+    slots["classification_provenance"] = provenance
+    slots["precedence_winner"] = winner
+    if rule_intent is not None and str(rule_intent.name or "").strip():
+        slots["rule_candidate"] = str(rule_intent.name)
+    if str(layer2_hint or "").strip():
+        slots["layer2_result"] = str(layer2_hint)
+
+
+def _resolve_layer2_rule_precedence(
+    *,
+    rule_intent: Intent | None,
+    llm_hint: str,
+    base_conf: float,
+) -> tuple[str, float, str, str, str]:
+    """Apply the canonical Layer 2 vs raw-rule ownership contract.
+
+    Returns ``(name, confidence, extraction_method, provenance, winner)``.
+    This is classifier ownership, not a visual/product-media feature.
+    """
+    layer2 = str(llm_hint or "").strip() or INTENT_GENERAL
+    rule_name = str(rule_intent.name) if rule_intent is not None else ""
+
+    if is_authoritative_layer2_intent(layer2):
+        if rule_name and layer2 == rule_name:
+            return (
+                rule_name,
+                float(base_conf or 0.72),
+                "hybrid",
+                PROVENANCE_RULE_CANDIDATE_CONFIRMED,
+                "rule_candidate",
+            )
+        return (
+            layer2,
+            0.72,
+            "llm",
+            PROVENANCE_LAYER2_SEMANTIC_OVERRIDE,
+            "layer2",
+        )
+    if rule_intent is not None:
+        return (
+            rule_name,
+            float(base_conf or 0.72),
+            "hybrid",
+            PROVENANCE_RULE_CANDIDATE_CONFIRMED,
+            "rule_candidate",
+        )
+    return (
+        INTENT_GENERAL,
+        0.72,
+        "llm",
+        PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+        "layer2",
+    )
 
 
 def _brain_owned_product_visual_intent(
@@ -69,9 +137,18 @@ def _brain_owned_product_visual_intent(
     slots: Dict[str, Any],
     confidence: float,
     method: str = "hybrid",
+    provenance: str = PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+    layer2_hint: str = "",
+    rule_intent: Intent | None = None,
 ) -> Intent:
     clean = {k: v for k, v in (slots or {}).items() if v not in ("", {}, None)}
-    clean["semantic_owner"] = "brain_classifier"
+    _stamp_classifier_precedence(
+        clean,
+        rule_intent=rule_intent,
+        layer2_hint=layer2_hint,
+        winner="rule_candidate",
+        provenance=provenance,
+    )
     return Intent(
         name=INTENT_PRODUCT_VISUAL_REQUEST,
         confidence=confidence,
@@ -190,6 +267,9 @@ class DefaultIntentClassifier:
                     slots=dict(rule_intent.slots or {}),
                     confidence=float(rule_intent.confidence or 0.72),
                     method="hybrid",
+                    provenance=PROVENANCE_RULE_FALLBACK_AFTER_NO_AUTHORITATIVE_LAYER2,
+                    layer2_hint="",
+                    rule_intent=rule_intent,
                 )
             if rule_intent:
                 return rule_intent
@@ -226,33 +306,23 @@ class DefaultIntentClassifier:
                 )
                 llm_hint = base_intent  # keep rule intent (likely general)
 
-        # Family 3: after Layer 2, Brain confirms visual need unless the
-        # extractor selected a conflicting operational intent.
-        if (
-            rule_intent
-            and str(rule_intent.name or "") == INTENT_PRODUCT_VISUAL_REQUEST
-        ):
-            if str(llm_hint or "") in _PRODUCT_VISUAL_LLM_OVERRIDE:
-                resolved_name = llm_hint
-                resolved_conf = 0.72
-                method = "llm"
-            else:
-                resolved_name = INTENT_PRODUCT_VISUAL_REQUEST
-                resolved_conf = max(float(base_conf or 0.72), 0.72)
-                method = "hybrid"
-        elif rule_intent and base_conf >= 0.75:
-            # If the LLM disagrees with rules and it's a high-confidence rules
-            # signal we keep the rules result; otherwise trust LLM
-            resolved_name = base_intent
-            resolved_conf = base_conf
-            method        = "hybrid"
-        else:
-            resolved_name = llm_hint
-            resolved_conf = 0.72   # moderate confidence for pure-LLM result
-            method        = "llm"
+        resolved_name, resolved_conf, method, provenance, winner = (
+            _resolve_layer2_rule_precedence(
+                rule_intent=rule_intent,
+                llm_hint=str(llm_hint or INTENT_GENERAL),
+                base_conf=float(base_conf or 0.50),
+            )
+        )
 
         # Remove empty string values from slots
         clean_slots = {k: v for k, v in slots.items() if v not in ("", {}, None)}
+        _stamp_classifier_precedence(
+            clean_slots,
+            rule_intent=rule_intent,
+            layer2_hint=str(llm_hint or ""),
+            winner=winner,
+            provenance=provenance,
+        )
 
         try:
             from modules.ai.brain.commerce.order_tracking_intent_guard import (  # noqa: PLC0415
@@ -270,9 +340,6 @@ class DefaultIntentClassifier:
                 method = "order_tracking_guard"
         except Exception:  # noqa: BLE001  # noqa: silent-ok — guard must not block classify
             pass
-
-        if str(resolved_name) == INTENT_PRODUCT_VISUAL_REQUEST:
-            clean_slots["semantic_owner"] = "brain_classifier"
 
         intent = Intent(
             name=resolved_name,
