@@ -390,6 +390,7 @@ class TestProductMediaCapability:
     def test_visual_ask_executes_when_capability_exists(self) -> None:
         state = MerchantConversationState(stage="exploring", turn=5, greeted=True)
         state.last_presented_products = list(_facts().discovery_products)
+        state.last_recommended_products = [dict(_facts().discovery_products[0])]
         ctx = _ctx(
             "نعم ارسل صور",
             intent_name=INTENT_PRODUCT_VISUAL_REQUEST,
@@ -399,14 +400,18 @@ class TestProductMediaCapability:
         assert decision.action == ACTION_SEARCH_PRODUCTS
         assert decision.args.get("after_search") == "product_visual"
         assert decision.args.get("force_product_card") is True
-        assert decision.args.get("replay_candidates")
+        replay = list(decision.args.get("replay_candidates") or [])
+        assert replay[0]["id"] == 11
         assert decision.action != ACTION_TRACK_ORDER
 
     def test_visual_helper_returns_search_when_imageable(self) -> None:
-        ctx = _ctx("نعم ارسل صور", intent_name=INTENT_PRODUCT_VISUAL_REQUEST)
+        state = MerchantConversationState(stage="exploring", turn=4, greeted=True)
+        state.last_presented_products = [dict(_facts().discovery_products[0])]
+        ctx = _ctx("نعم ارسل صور", intent_name=INTENT_PRODUCT_VISUAL_REQUEST, state=state)
         decision = try_visual_catalog_send_decision(ctx)
         assert decision is not None
         assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args["replay_candidates"][0]["id"] == 11
 
 
 class TestActionPromiseGrounding:
@@ -552,6 +557,7 @@ class TestTopicSwitchingLongConversation:
                     turn=8,
                     greeted=True,
                     last_presented_products=list(facts.discovery_products),
+                    last_recommended_products=[dict(facts.discovery_products[0])],
                 ),
             ),
         )
@@ -708,7 +714,7 @@ class TestAssistantPresentedProvenance:
         assert recommended[0]["id"] == 12
         assert recommended[0]["provenance"] == "assistant_recommended"
         assert recommended[0].get("customer_selected") is False
-        assert state.current_product_focus in (None, {})
+        assert (state.current_product_focus or {}).get("id") == 12
 
     def test_price_disambiguates_same_title_family(self) -> None:
         state = MerchantConversationState(stage="exploring", turn=3, greeted=True)
@@ -821,7 +827,7 @@ class TestAssistantPresentedProvenance:
         )
         text = src.read_text(encoding="utf-8")
         persist = text.find("self._state_store.save(")
-        stamp = text.find("stamp_assistant_named_catalog_from_reply(")
+        stamp = text.find("apply_turn_catalog_referent_binding(")
         assert 0 <= stamp < persist
 
 

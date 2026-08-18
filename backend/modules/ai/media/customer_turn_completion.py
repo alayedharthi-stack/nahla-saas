@@ -206,6 +206,46 @@ def maybe_restore_catalog_order_semantic_text(
     )
 
 
+def native_catalog_send_completion(
+    *,
+    sent: bool,
+    has_brain_text: bool = False,
+) -> Dict[str, Any]:
+    """Observable completion for a native WhatsApp catalog_message send."""
+    if not sent:
+        return _completion_trace(
+            input_type="native_catalog",
+            semantic_owner="brain",
+            structured_action_owner="whatsapp_catalog_message",
+            completion_class=COMPLETION_ORPHAN,
+            state_persisted=False,
+            brain_called=True,
+            compose_called=True,
+            outbound_created=False,
+            provider_called=True,
+            customer_visible=False,
+            suppression_reason="native_catalog_send_failed",
+        )
+    completion = (
+        COMPLETION_STRUCTURED_AND_CONTINUATION
+        if has_brain_text
+        else COMPLETION_STRUCTURED_VISIBLE
+    )
+    return _completion_trace(
+        input_type="native_catalog",
+        semantic_owner="brain",
+        structured_action_owner="whatsapp_catalog_message",
+        completion_class=completion,
+        state_persisted=True,
+        brain_called=True,
+        compose_called=True,
+        outbound_created=True,
+        provider_called=True,
+        customer_visible=True,
+        extra={"native_catalog_structured_event": True},
+    )
+
+
 def classify_empty_text_early_return(
     *,
     inbound_metadata: Optional[Dict[str, Any]] = None,
@@ -462,6 +502,7 @@ __all__ = [
     "customer_authored_location_continue_text",
     "is_structured_catalog_order_inbound",
     "maybe_restore_catalog_order_semantic_text",
+    "native_catalog_send_completion",
     "resolve_checkout_location_persist_turn",
     "should_continue_checkout_location_persist_failure",
     "should_continue_structured_catalog_order",

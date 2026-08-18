@@ -3097,6 +3097,7 @@ class MerchantBrain:
                 if should_preserve_focus_after_product_list_display(
                     new_state.current_product_focus,
                     new_state.last_search_candidates,
+                    state=new_state,
                 ):
                     logger.info(
                         "[ORDER FLOW] preserving current_product_focus after single exact search hit | "
@@ -4078,13 +4079,14 @@ class MerchantBrain:
 
         try:
             from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
-                stamp_assistant_named_catalog_from_reply,
+                apply_turn_catalog_referent_binding,
+                structured_product_from_turn,
             )
             from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
                 collect_catalog_reasoning_candidates,
             )
 
-            stamp_assistant_named_catalog_from_reply(
+            apply_turn_catalog_referent_binding(
                 state=new_state,
                 reply=reply or "",
                 catalog_candidates=collect_catalog_reasoning_candidates(
@@ -4094,6 +4096,7 @@ class MerchantBrain:
                 ),
                 intent_name=str(getattr(intent, "name", "") or ""),
                 turn=int(getattr(new_state, "turn", 0) or 0),
+                structured_product=structured_product_from_turn(decision, result),
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
             logger.exception("[PRESENTED_PROVENANCE] stamp failed")
@@ -4973,13 +4976,14 @@ class MerchantBrain:
 
         try:
             from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
-                stamp_assistant_named_catalog_from_reply,
+                apply_turn_catalog_referent_binding,
+                structured_product_from_turn,
             )
             from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
                 collect_catalog_reasoning_candidates,
             )
 
-            stamp_assistant_named_catalog_from_reply(
+            apply_turn_catalog_referent_binding(
                 state=new_state,
                 reply=reply or "",
                 catalog_candidates=collect_catalog_reasoning_candidates(
@@ -4989,6 +4993,7 @@ class MerchantBrain:
                 ),
                 intent_name=str(getattr(intent, "name", "") or ""),
                 turn=int(getattr(new_state, "turn", 0) or 0),
+                structured_product=structured_product_from_turn(decision, result),
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
             logger.exception("[PRESENTED_PROVENANCE] stamp failed")
