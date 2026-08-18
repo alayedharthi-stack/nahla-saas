@@ -4,10 +4,12 @@ Asserts identity, capability, and completion — not exact customer Arabic.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
@@ -46,6 +48,12 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_SEARCH_PRODUCTS,
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
+from modules.ai.brain.intent.classifier import (  # noqa: E402
+    DefaultIntentClassifier,
+    RULES_ONLY_THRESHOLD,
+    _BRAIN_SEMANTIC_REQUIRED_INTENTS,
+)
+from modules.ai.brain.intent import rules as intent_rules  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     INTENT_PRODUCT_VISUAL_REQUEST,
     BrainContext,
@@ -305,6 +313,84 @@ class TestF307F308NoPhraseRouterOrCannedClarify:
         assert "أي منتج" not in question
         assert decision.args.get("topic") == "product_visual"
         assert decision.args.get("missing_structured_referent") is True
+
+
+class TestF3B1BrainOwnsProductVisualSemanticIntent:
+    # Existing visual-need phrasings used only as classifier input.
+    # Assertions are owner/provenance, not a specific customer sentence.
+    _MEDIA_NEED_SAMPLES = ("وين الصوره", "ورني شكله")
+
+    def test_classifier_does_not_rules_only_short_circuit_visual(self) -> None:
+        assert INTENT_PRODUCT_VISUAL_REQUEST in _BRAIN_SEMANTIC_REQUIRED_INTENTS
+        for sample in self._MEDIA_NEED_SAMPLES:
+            candidate = intent_rules.match(sample)
+            assert candidate is not None
+            assert candidate.name == INTENT_PRODUCT_VISUAL_REQUEST
+            assert candidate.extraction_method == "rules"
+            assert candidate.confidence >= RULES_ONLY_THRESHOLD
+
+            slot_extract = AsyncMock(return_value={"intent_hint": "general"})
+
+            async def _classify(message: str = sample):
+                with patch(
+                    "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                    slot_extract,
+                ):
+                    return await DefaultIntentClassifier().classify(
+                        message,
+                        [],
+                        _state(),
+                    )
+
+            intent = asyncio.run(_classify())
+            assert slot_extract.await_count == 1
+            assert intent.extraction_method != "rules"
+            assert intent.extraction_method == "hybrid"
+            assert intent.slots.get("semantic_owner") == "brain_classifier"
+            assert intent.name == INTENT_PRODUCT_VISUAL_REQUEST
+
+    def test_brain_semantic_visual_intent_still_targets_canonical_referent(self) -> None:
+        sample = self._MEDIA_NEED_SAMPLES[0]
+        slot_extract = AsyncMock(return_value={"intent_hint": "general"})
+
+        async def _classify():
+            with patch(
+                "modules.ai.brain.intent.classifier._slot_mod.extract_slots",
+                slot_extract,
+            ):
+                return await DefaultIntentClassifier().classify(
+                    sample,
+                    [],
+                    _state(),
+                )
+
+        intent = asyncio.run(_classify())
+        state = _state()
+        bind_structured_catalog_referent(state, dict(SHOE), reason="recommend", turn=4)
+        ctx = _ctx(
+            intent_name=intent.name,
+            state=state,
+            facts=_facts(SHOE, SHIRT),
+            message=sample,
+        )
+        ctx.intent = intent
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args["replay_candidates"][0]["id"] == 501
+        assert decision.args["replay_candidates"][0]["id"] != SHIRT["id"]
+
+    def test_no_new_visual_regex_or_phrase_repair(self) -> None:
+        from modules.ai.brain.intent import classifier as intent_classifier
+        from modules.ai.brain.intent import rules as rules_mod
+
+        classifier_src = inspect.getsource(intent_classifier)
+        assert "re.compile" not in classifier_src
+        assert r"(?:show|send)" not in classifier_src
+        visual_rule = next(
+            rs for rs, _compiled in rules_mod._RULES
+            if rs.intent == INTENT_PRODUCT_VISUAL_REQUEST
+        )
+        assert len(visual_rule.patterns) == 8
 
 
 class TestF309NativeCatalogCompletion:

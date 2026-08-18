@@ -5,7 +5,8 @@ IntentClassifier — the single entry point consumed by MerchantBrain.
 
 Phase 1 hybrid strategy:
   1. Run rules.match() synchronously (0 latency).
-  2. If confidence >= RULES_ONLY_THRESHOLD: return immediately.
+  2. If confidence >= RULES_ONLY_THRESHOLD: return immediately,
+     except Family 3 product-visual (Brain semantic ownership required).
   3. Otherwise: run slot_extractor.extract_slots() (fast Haiku call).
      Merge the LLM's intent_hint into the result if the LLM's hint is
      more specific than the rules result.
@@ -22,6 +23,7 @@ from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 from ..types import (
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
+    INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_TALK_HUMAN,
     Intent,
     MerchantConversationState,
@@ -34,6 +36,13 @@ logger = logging.getLogger("nahla.brain.classifier")
 
 # Rules with confidence >= this bypass LLM slot extraction
 RULES_ONLY_THRESHOLD = 0.85
+
+# Family 3: product-media need is Brain-semantic. Legacy visual regex may
+# remain a compatibility candidate via rules.match(), but it must not
+# rules-only short-circuit customer runtime and skip Layer 2 extraction.
+_BRAIN_SEMANTIC_REQUIRED_INTENTS = frozenset({
+    INTENT_PRODUCT_VISUAL_REQUEST,
+})
 
 # Stages where we MUST run slot extraction even for high-confidence rules.
 # A customer mid-checkout sending "تركي الحارثي" matches the rules-only
@@ -97,6 +106,7 @@ class DefaultIntentClassifier:
             rule_intent
             and rule_intent.confidence >= RULES_ONLY_THRESHOLD
             and not in_order_flow
+            and str(rule_intent.name or "") not in _BRAIN_SEMANTIC_REQUIRED_INTENTS
         ):
             logger.debug(
                 "[Classifier] rules-only | intent=%s conf=%.2f",
@@ -198,6 +208,9 @@ class DefaultIntentClassifier:
                 method = "order_tracking_guard"
         except Exception:  # noqa: BLE001  # noqa: silent-ok — guard must not block classify
             pass
+
+        if str(resolved_name) == INTENT_PRODUCT_VISUAL_REQUEST:
+            clean_slots["semantic_owner"] = "brain_classifier"
 
         intent = Intent(
             name=resolved_name,
