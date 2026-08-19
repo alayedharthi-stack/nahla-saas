@@ -251,3 +251,106 @@ def maybe_fail_sync_deadline(conn: Any, now: Optional[datetime] = None) -> bool:
     )
     merge_coexistence_metadata(conn, failure_code="smb_sync_deadline")
     return True
+
+
+_PHONE_HARD_FAIL_TOKENS = ("RESTRICT", "DISABLE", "BLOCK", "DELETE", "FLAG")
+_CONFIGURING_MESSAGE = "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال."
+_READY_MESSAGE = (
+    "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
+    "أبقِ التطبيق مفتوحاً لإكمال المزامنة."
+)
+
+
+def _meta_token(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def coexistence_phone_hard_fail(phone_data: Optional[Dict[str, Any]]) -> bool:
+    """True only for real Meta phone restriction/disable — not Cloud OTP."""
+    flag = _meta_token((phone_data or {}).get("status"))
+    return any(token in flag for token in _PHONE_HARD_FAIL_TOKENS)
+
+
+def coexistence_identity_matches(conn: Any, phone_data: Optional[Dict[str, Any]]) -> bool:
+    graph_id = str((phone_data or {}).get("id") or "").strip()
+    stored_id = str(getattr(conn, "phone_number_id", "") or "").strip()
+    if not stored_id:
+        return False
+    if not graph_id:
+        return True
+    return graph_id == stored_id
+
+
+def project_coexistence_sync_state(
+    conn: Any,
+    *,
+    phone_data: Optional[Dict[str, Any]] = None,
+    cloud_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Project Coexistence readiness from canonical Coexistence facts.
+
+    Cloud OTP / ``code_verification_status`` / ``/{phone}/register`` are not
+    readiness for this flow. This helper never writes ``status=connected``;
+    callers still go through ``finalize_successful_whatsapp_connection``.
+    """
+    cloud = dict(cloud_state or {})
+    data = dict(phone_data or {})
+    observed = {
+        "verification_status": cloud.get("verification_status") or _meta_token(
+            data.get("code_verification_status")
+        ) or None,
+        "name_status": cloud.get("name_status") or _meta_token(data.get("name_status")) or None,
+        "meta_phone_status": cloud.get("meta_phone_status") or _meta_token(data.get("status")) or None,
+        "quality_rating": cloud.get("quality_rating") if "quality_rating" in cloud else data.get("quality_rating"),
+        "otp_required": False,
+    }
+
+    if coexistence_phone_hard_fail(data):
+        return {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "error",
+            "projection_reason": "phone_restricted",
+            "message": cloud.get("message") or "Meta أوقفت هذا الرقم أو قيّدته، لذلك لا يمكن تفعيله حاليًا.",
+        }
+
+    if not coexistence_identity_matches(conn, data):
+        return {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "configuring",
+            "projection_reason": "identity_mismatch",
+            "message": _CONFIGURING_MESSAGE,
+        }
+
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    if not smb_syncs_accepted(meta):
+        return {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "configuring",
+            "projection_reason": "smb_incomplete",
+            "message": getattr(conn, "last_error", None) or _CONFIGURING_MESSAGE,
+        }
+
+    if not bool(getattr(conn, "webhook_verified", False)):
+        return {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "configuring",
+            "projection_reason": "webhook_unverified",
+            "message": getattr(conn, "last_error", None) or _CONFIGURING_MESSAGE,
+        }
+
+    return {
+        **observed,
+        "connected": True,
+        "sending_enabled": True,
+        "db_status": "connected",
+        "projection_reason": "ready",
+        "message": _READY_MESSAGE,
+    }
