@@ -119,22 +119,35 @@ def lookup_conversation_for_phone(
         return None
 
 
+def _map_gate_reason_to_send(reason: str, convo: Optional[Conversation]) -> str:
+    text = str(reason or "").strip()
+    if text in {REASON_STORE_AI_DISABLED, REASON_STORE_AI_TEST_MODE_NOT_ALLOWED}:
+        return text
+    if text == REASON_BLOCKED_NUMBER:
+        return REASON_BLOCKED_NUMBER
+    if bool(getattr(convo, "ai_paused", False)) or text in {
+        REASON_AI_DISABLED,
+        "ai_paused",
+        "manual_pause",
+    }:
+        return REASON_AI_DISABLED
+    return REASON_HUMAN_TAKEOVER
+
+
 def _human_supervision_reason(convo: Conversation) -> str:
+    """Fallback row check when the aggregate gate cannot run.
+
+    Advisory queue flags must not drop a customer-visible reply. Genuine
+    pause / takeover still block.
+    """
+    from core.ai_disabled_gate import disabled_reason_for_conversation  # noqa: PLC0415
+
+    reason = disabled_reason_for_conversation(convo)
+    if not reason:
+        return ""
     if bool(getattr(convo, "ai_paused", False)):
         return REASON_AI_DISABLED
-    if bool(getattr(convo, "is_human_handoff", False)):
-        return REASON_HUMAN_TAKEOVER
-    if bool(getattr(convo, "needs_human", False)):
-        return REASON_REQUIRES_HUMAN
-    if bool(getattr(convo, "handoff_active", False)):
-        return REASON_HUMAN_TAKEOVER
-    if getattr(convo, "taken_over_at", None) is not None:
-        return REASON_HUMAN_TAKEOVER
-    if bool(getattr(convo, "paused_by_human", False)):
-        return REASON_HUMAN_TAKEOVER
-    if str(getattr(convo, "status", "") or "").strip().lower() == "human":
-        return REASON_HUMAN_TAKEOVER
-    return ""
+    return REASON_HUMAN_TAKEOVER
 
 
 def should_block_automation_for_conversation(
@@ -182,6 +195,28 @@ def should_block_automation_for_conversation(
         convo = None
     if convo is None:
         convo = lookup_conversation_for_phone(db, tenant_id, customer_phone)
+
+    try:
+        from core.ai_disabled_gate import is_ai_disabled_for_conversation  # noqa: PLC0415
+
+        gate = is_ai_disabled_for_conversation(
+            db,
+            tenant_id=int(tenant_id),
+            customer_phone=customer_phone,
+            conversation=convo,
+            source="automation_send_guard",
+        )
+        if gate.disabled:
+            return AutomationBlockDecision(
+                block=True,
+                reason=_map_gate_reason_to_send(
+                    gate.reason, gate.conversation or convo,
+                ),
+            )
+        return AutomationBlockDecision(block=False)
+    except Exception:
+        logger.exception("[AUTOMATION_SEND_GUARD] aggregate gate failed")
+
     if convo is None:
         return AutomationBlockDecision(block=False)
 

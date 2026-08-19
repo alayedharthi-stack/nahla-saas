@@ -284,6 +284,8 @@ def coupon_policy_for_compose(
         ),
         "generation_authorized": False,
         "invented_codes": False,
+        "customer_must_supply_code": False,
+        "eligibility_unknown": bool(getattr(facts, "has_coupons", False)),
         "no_valid_promotions": (
             outcome == NO_VALID_PROMOTIONS and not query_failed
         ),

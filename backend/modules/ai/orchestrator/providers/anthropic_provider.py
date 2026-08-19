@@ -31,7 +31,10 @@ from modules.ai.orchestrator.llm_cost_audit import (
     resolve_model_from_audit,
     resolve_model_for_provider,
 )
-from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_anthropic
+from modules.ai.orchestrator.ai_usage_ledger import (
+    extract_provider_completion_telemetry,
+    record_ai_usage_from_anthropic,
+)
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
 logger = logging.getLogger("nahla.ai.orchestrator.engine")  # same logger as engine
@@ -226,12 +229,6 @@ class AnthropicProvider(BaseAIProvider):
                     elif hasattr(block, "text") and block.text:
                         reply = block.text
 
-                logger.info(
-                    "[engine] Modular path used — Claude SDK%s | "
-                    "provider=anthropic model=%s reply_len=%d",
-                    " + tools" if tools else "",
-                    model, len(reply),
-                )
                 record_ai_usage_from_anthropic(
                     audit_extra=audit_extra,
                     model=model,
@@ -239,12 +236,22 @@ class AnthropicProvider(BaseAIProvider):
                     reply_text=reply,
                     total_prompt_chars=total_prompt_chars,
                 )
+                _telemetry = extract_provider_completion_telemetry(
+                    reply_text=reply, response=response,
+                )
+                logger.info(
+                    "[engine] Modular path used — Claude SDK%s | "
+                    "provider=anthropic model=%s reply_len=%d finish_reason=%s",
+                    " + tools" if tools else "",
+                    model, len(reply), _telemetry.get("finish_reason") or "-",
+                )
                 return {
                     "provider":   "anthropic",
                     "model":      model,
                     "reply_text": reply,
                     "status":     "ok",
                     "actions":    actions,
+                    "completion_telemetry": _telemetry,
                 }
 
             except _anthropic_sdk.AuthenticationError:
@@ -319,11 +326,14 @@ class AnthropicProvider(BaseAIProvider):
                 elif block.get("type") == "text":
                     reply = block.get("text", "")
 
+            _telemetry = extract_provider_completion_telemetry(
+                reply_text=reply, httpx_data=data,
+            )
             logger.info(
                 "[engine] Modular path used — Claude httpx%s | "
-                "provider=anthropic model=%s reply_len=%d",
+                "provider=anthropic model=%s reply_len=%d finish_reason=%s",
                 " + tools" if tools else "",
-                model, len(reply),
+                model, len(reply), _telemetry.get("finish_reason") or "-",
             )
             record_ai_usage_from_anthropic(
                 audit_extra=audit_extra,
@@ -338,6 +348,7 @@ class AnthropicProvider(BaseAIProvider):
                 "reply_text": reply,
                 "status":     "ok",
                 "actions":    actions,
+                "completion_telemetry": _telemetry,
             }
 
         except Exception as exc:

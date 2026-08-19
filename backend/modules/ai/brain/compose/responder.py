@@ -566,6 +566,33 @@ class DefaultComposer:
                 return discovery_text
 
             if not result.success or data.get("message") == "no_products_in_catalog":
+                try:
+                    from ..commerce.inbound_fragment_guard import (  # noqa: PLC0415
+                        should_block_catalog_grounding_fallback,
+                    )
+
+                    _blocked_miss, _miss_reason = should_block_catalog_grounding_fallback(
+                        inbound_text=str(getattr(ctx, "message", "") or ""),
+                        inbound_metadata=(
+                            dict(getattr(ctx, "inbound_metadata", None) or {})
+                            if isinstance(getattr(ctx, "inbound_metadata", None), dict)
+                            else None
+                        ),
+                        intent=getattr(ctx, "intent", None),
+                        decision_topic=str((decision.args or {}).get("topic") or ""),
+                        facts=getattr(ctx, "facts", None),
+                    )
+                    if _blocked_miss and _miss_reason == "promotion_facts_present":
+                        logger.info(
+                            "[RESPONDER] catalog_search_miss yielded to LLM "
+                            "reason=promotion_facts tenant=%s",
+                            getattr(ctx, "tenant_id", None),
+                        )
+                        return await self._llm_compose(ctx, result, decision=decision)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[RESPONDER] catalog_search_miss promotion yield failed",
+                    )
                 query = str((decision.args or {}).get("query") or "").strip()
                 inquiry_query = ""
                 try:
@@ -2781,6 +2808,37 @@ class DefaultComposer:
                 _payload_meta.get("usage")
                 if isinstance(_payload_meta.get("usage"), dict)
                 else {}
+            )
+            _telemetry = (
+                _payload_meta.get("completion_telemetry")
+                if isinstance(_payload_meta.get("completion_telemetry"), dict)
+                else {}
+            )
+            if not _telemetry:
+                _raw_out = getattr(payload, "raw_model_output", None)
+                if isinstance(_raw_out, dict) and isinstance(
+                    _raw_out.get("completion_telemetry"), dict,
+                ):
+                    _telemetry = dict(_raw_out.get("completion_telemetry") or {})
+            result.data["llm_finish_reason"] = (
+                _telemetry.get("finish_reason")
+                or _payload_meta.get("finish_reason")
+            )
+            result.data["llm_output_tokens"] = (
+                _telemetry.get("output_tokens")
+                or _payload_meta.get("output_tokens")
+            )
+            result.data["llm_raw_char_count"] = (
+                _telemetry.get("raw_char_count")
+                or _payload_meta.get("raw_char_count")
+            )
+            from modules.ai.orchestrator.ai_usage_ledger import (  # noqa: PLC0415
+                classify_truncation_first_layer,
+            )
+
+            result.data["truncation_first_layer"] = classify_truncation_first_layer(
+                finish_reason=result.data.get("llm_finish_reason"),
+                raw_model_text=str(getattr(payload, "reply_text", "") or ""),
             )
             _record_default_compose_llm(
                 duration_ms=int(

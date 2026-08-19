@@ -25,7 +25,10 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from modules.ai.orchestrator.ai_usage_ledger import record_ai_usage_from_gemini
+from modules.ai.orchestrator.ai_usage_ledger import (
+    extract_provider_completion_telemetry,
+    record_ai_usage_from_gemini,
+)
 from modules.ai.orchestrator.llm_cost_audit import approx_tokens_from_chars, emit_llm_cost_audit
 from modules.ai.orchestrator.providers.base import BaseAIProvider
 
@@ -162,6 +165,9 @@ class GeminiProvider(BaseAIProvider):
                 "model":      _MODEL,
                 "reply_text": reply,
                 "status":     "ok",
+                "completion_telemetry": extract_provider_completion_telemetry(
+                    reply_text=reply, httpx_data=data,
+                ),
             }
 
         except Exception as exc:

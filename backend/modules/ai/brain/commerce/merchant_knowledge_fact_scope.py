@@ -80,6 +80,33 @@ def knowledge_turn_suppressed_fact_keys(
     return frozenset(out)
 
 
+def store_story_capability_args(facts: Any = None) -> Dict[str, Any]:
+    """Brain-owned store-story retrieval request — not a raw-text topic router."""
+    status = str(getattr(facts, "store_story_status", "") or "UNKNOWN")
+    if status not in {"KNOWN_PRESENT", "UNKNOWN"}:
+        status = "UNKNOWN"
+    return {
+        "topic": "merchant_knowledge_store_story",
+        "policy_surface": _POLICY_SURFACE,
+        "question_kind": "store_story",
+        "knowledge_kind": "store_story",
+        "merchant_policy_status": status,
+        "block_catalog_navigation": True,
+    }
+
+
+def should_request_store_story_knowledge(
+    *,
+    intent_name: str = "",
+    facts: Any = None,
+) -> bool:
+    """True when platform should retrieve tenant store_story for this intent."""
+    if str(getattr(facts, "store_story_status", "") or "") != "KNOWN_PRESENT":
+        return False
+    name = str(intent_name or "").strip()
+    return name == "ask_store_info"
+
+
 def should_inject_shipping_knowledge_facts(
     decision_args: Optional[Mapping[str, Any]],
 ) -> bool:
@@ -286,4 +313,6 @@ __all__ = [
     "scope_merchant_profiles_failsafe",
     "scope_merchant_profiles_for_knowledge_turn",
     "should_inject_shipping_knowledge_facts",
+    "should_request_store_story_knowledge",
+    "store_story_capability_args",
 ]

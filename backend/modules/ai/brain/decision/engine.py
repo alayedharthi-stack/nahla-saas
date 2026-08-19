@@ -628,6 +628,16 @@ class DefaultDecisionEngine:
                 or _product_correction_or_info_blocks_checkout()
             )
 
+        def _current_intent_yields_ordering() -> bool:
+            try:
+                from ..state.state_relevance import (  # noqa: PLC0415
+                    current_intent_outranks_ordering_safety_net,
+                )
+
+                return current_intent_outranks_ordering_safety_net(ctx)
+            except Exception:  # noqa: BLE001
+                return False
+
         def _block_stale_resume(workflow: str, *, reason: str = "semantic_mismatch") -> bool:
             try:
                 from ..state.state_relevance import (  # noqa: PLC0415
@@ -2114,6 +2124,7 @@ class DefaultDecisionEngine:
             and intent.name not in (INTENT_TALK_HUMAN, INTENT_TRACK_ORDER)
             and not _explicit_commerce_switch
             and not _checkout_topic_blocks()
+            and not (_current_intent_yields_ordering() and not _is_confirm)
             and not getattr(_current_social_nc, "matched", False)
             and not _is_search_continue
         ):
@@ -3105,6 +3116,7 @@ class DefaultDecisionEngine:
             and not _explicit_commerce_switch
             and not _is_global_browse
             and not _checkout_topic_blocks()
+            and not (_current_intent_yields_ordering() and not _is_confirm)
             and not getattr(_current_social_nc, "matched", False)
             and (
                 intent.name in _CONTINUATION_INTENTS
@@ -3586,6 +3598,28 @@ class DefaultDecisionEngine:
                         return _story_dec
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — A3 story fallback optional
                     pass
+                try:
+                    from ..commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+                        should_request_store_story_knowledge,
+                        store_story_capability_args,
+                    )
+
+                    if should_request_store_story_knowledge(
+                        intent_name=intent.name,
+                        facts=getattr(ctx, "facts", None),
+                    ):
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args=store_story_capability_args(
+                                getattr(ctx, "facts", None),
+                            ),
+                            reason=(
+                                "store-info intent — retrieve tenant store_story "
+                                "without raw-text topic regex"
+                            ),
+                        )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — store_story capability optional
+                    pass
                 if intent.name == INTENT_ONLINE_STORE_INQUIRY:
                     return Decision(
                         action=ACTION_FAQ_REPLY,
@@ -3594,17 +3628,6 @@ class DefaultDecisionEngine:
                     )
 
         if intent.name == INTENT_ASK_LOCATION:
-            try:
-                from ..order_context_gate import (  # noqa: PLC0415
-                    has_active_order_context,
-                    try_order_context_update_decision,
-                )
-                if has_active_order_context(ctx):
-                    _loc_update = try_order_context_update_decision(ctx)
-                    if _loc_update is not None:
-                        return _loc_update
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — order context gate optional; location FAQ may proceed
-                pass
             if _maps_url:
                 from ..execution.faq import TOPIC_LOCATION  # noqa: PLC0415
 
@@ -4410,7 +4433,24 @@ class DefaultDecisionEngine:
         except Exception:  # noqa: BLE001
             pass
 
-        if state.stage in (STAGE_ORDERING, STAGE_DECIDING):
+        _yield_stale_ordering = False
+        try:
+            _yield_stale_ordering = _current_intent_yields_ordering() and not _is_confirm
+            if _yield_stale_ordering:
+                logger.info(
+                    "[ORDER FLOW] current intent outranks stale ordering state "
+                    "| tenant=%s intent=%s pending=%r",
+                    ctx.tenant_id,
+                    intent.name,
+                    getattr(state, "pending_action", "") or "",
+                )
+        except Exception:  # noqa: BLE001
+            _yield_stale_ordering = False
+
+        if (
+            not _yield_stale_ordering
+            and state.stage in (STAGE_ORDERING, STAGE_DECIDING)
+        ):
             if (
                 state.current_product_focus
                 and facts.orderable
@@ -4689,8 +4729,24 @@ class DefaultDecisionEngine:
         if _qty_dec is not None:
             return _qty_dec
 
+        _fallback_args: Dict[str, Any] = {}
+        try:
+            from ..commerce.merchant_knowledge_fact_scope import (  # noqa: PLC0415
+                should_request_store_story_knowledge,
+                store_story_capability_args,
+            )
+
+            if should_request_store_story_knowledge(
+                intent_name=intent.name,
+                facts=facts,
+            ):
+                _fallback_args = store_story_capability_args(facts)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — knowledge capability optional
+            _fallback_args = {}
+
         return Decision(
             action=ACTION_LLM_REPLY,
+            args=_fallback_args,
             reason=f"no rule matched for intent={intent.name} — LLM fallback",
             confidence=0.50,
         )

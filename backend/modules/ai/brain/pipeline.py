@@ -5024,6 +5024,18 @@ class MerchantBrain:
                 else:
                     _cpgg_meta = dict((profile or {}).get("inbound_metadata") or {})
                     _cpgg_meta["decision_topic"] = str((decision.args or {}).get("topic") or "")
+                    _cpgg_meta["decision_action"] = str(getattr(decision, "action", "") or "")
+                    _cpgg_known = dict(
+                        getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}
+                    )
+                    if _cpgg_known.get("trusted_coupon_offer_facts"):
+                        _cpgg_meta["trusted_coupon_offer_facts"] = dict(
+                            _cpgg_known.get("trusted_coupon_offer_facts") or {}
+                        )
+                    if _cpgg_known.get("customer_conditional_coupon_facts"):
+                        _cpgg_meta["customer_conditional_coupon_facts"] = dict(
+                            _cpgg_known.get("customer_conditional_coupon_facts") or {}
+                        )
                     if _turn_owner_contract_meta:
                         _cpgg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
                     for _flag in (
@@ -5072,6 +5084,7 @@ class MerchantBrain:
                         order_state=new_state,
                         inbound_metadata=_cpgg_meta,
                         intent=intent,
+                        facts=getattr(ctx, "facts", None),
                     )
                     if _cpgg.replaced:
                         reply = _cpgg.reply
@@ -5202,6 +5215,7 @@ class MerchantBrain:
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
+                _crqg_meta["decision_action"] = str(getattr(decision, "action", "") or "")
                 _tc_offer_facts = dict(
                     (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
                         "trusted_coupon_offer_facts",
@@ -5244,6 +5258,8 @@ class MerchantBrain:
                     llm_candidate_present=bool(
                         result.data.get("llm_candidate_present")
                     ),
+                    facts=getattr(ctx, "facts", None),
+                    intent=intent,
                 )
                 if _crqg.requires_grounded_recompose:
                     result.data["quality_guard_recompose_attempted"] = True
@@ -5351,6 +5367,8 @@ class MerchantBrain:
                             llm_candidate_present=bool(
                                 result.data.get("llm_candidate_present")
                             ),
+                            facts=getattr(ctx, "facts", None),
+                            intent=intent,
                         )
                     if _crqg.requires_grounded_recompose:
                         if decision.action == ACTION_SEARCH_PRODUCTS:
@@ -5550,9 +5568,25 @@ class MerchantBrain:
         except Exception as _gag_exc:  # noqa: BLE001
             logger.warning(
                 "[GENDER_AGREEMENT_GUARD] pipeline hook failed tenant=%s err=%s",
-                tenant_id, _gag_exc,
+                tenant_id,             _gag_exc,
             )
             _crh = None
+
+        try:
+            from modules.ai.orchestrator.ai_usage_ledger import (  # noqa: PLC0415
+                classify_truncation_first_layer,
+            )
+
+            _prior_layer = str(result.data.get("truncation_first_layer") or "")
+            if _prior_layer != "provider":
+                result.data["truncation_first_layer"] = classify_truncation_first_layer(
+                    finish_reason=result.data.get("llm_finish_reason"),
+                    raw_model_text=str(result.data.get("compose_reply_candidate") or ""),
+                    composed_text=str(result.data.get("compose_reply_candidate") or ""),
+                    postprocess_text=str(reply or ""),
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — truncation trace must not block outbound
+            pass
 
         try:
             from modules.ai.brain.final_reply_source import (  # noqa: PLC0415
@@ -6351,6 +6385,19 @@ def _build_reply_state(
         )
         if _order_evidence:
             known_facts["customer_order_evidence"] = _order_evidence
+            _history_flags = {
+                "registered_customer": bool(
+                    _order_evidence.get("registered_customer")
+                    or getattr(ctx, "customer_id", None)
+                ),
+                "has_historical_orders": bool(
+                    _order_evidence.get("has_historical_orders")
+                ),
+                "historical_order_details_available": bool(
+                    _order_evidence.get("historical_order_details_available")
+                ),
+            }
+            known_facts["customer_history_facts"] = _history_flags
             try:
                 from modules.ai.brain.commerce.customer_order_evidence import (  # noqa: PLC0415
                     stamp_last_discussed_order_ref,
@@ -6515,10 +6562,23 @@ def _build_reply_state(
     if _social_identity_defocus:
         selected_product = None
         known_facts["checkout_preparation"] = {}
+        _kept_history = dict(known_facts.get("customer_history_facts") or {})
+        if not _kept_history:
+            _ev = known_facts.get("customer_order_evidence")
+            if isinstance(_ev, dict):
+                _kept_history = {
+                    "registered_customer": bool(_ev.get("registered_customer")),
+                    "has_historical_orders": bool(_ev.get("has_historical_orders")),
+                    "historical_order_details_available": bool(
+                        _ev.get("historical_order_details_available")
+                    ),
+                }
         known_facts.pop("customer_order_evidence", None)
         known_facts.pop("catalog_reasoning_candidates", None)
         known_facts.pop("last_presented_products", None)
         known_facts.pop("last_recommended_products", None)
+        if _kept_history:
+            known_facts["customer_history_facts"] = _kept_history
     try:
         from .commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
             merchant_customer_record_facts,
@@ -6540,6 +6600,16 @@ def _build_reply_state(
         _identity_facts = merchant_customer_record_facts(_identity)
         if _identity_facts:
             known_facts.update(_identity_facts)
+            _hist = dict(known_facts.get("customer_history_facts") or {})
+            _record = _identity_facts.get("merchant_customer_record")
+            if isinstance(_record, dict) and _hist:
+                _record["has_historical_orders"] = bool(
+                    _hist.get("has_historical_orders")
+                )
+                _record["historical_order_details_available"] = bool(
+                    _hist.get("historical_order_details_available")
+                )
+                known_facts["merchant_customer_record"] = _record
         if not _social_identity_defocus and _identity.prep_patch:
             known_facts["checkout_preparation"] = merge_prep_with_customer_identity(
                 dict(known_facts.get("checkout_preparation") or {}),
@@ -7199,10 +7269,13 @@ def _compose_base_response_goal(
     _mk_topic = str(_mk_args.get("topic") or "")
     _mk_surface = str(_mk_args.get("policy_surface") or "")
     _mk_goal = str(_mk_args.get("response_goal") or "").strip()
-    if _mk_goal and (
+    if (
         _mk_surface == "merchant_knowledge_section"
         or _mk_topic.startswith("merchant_knowledge_")
     ):
+        # Structured knowledge ownership: do not inherit checkout next_goal.
+        # Existing decision response_goal (if any) is unchanged; never add
+        # repair-specific customer-prompt prose here.
         return _mk_goal
     if _mk_goal and isinstance(_mk_args.get("answer_contract"), dict):
         return _mk_goal

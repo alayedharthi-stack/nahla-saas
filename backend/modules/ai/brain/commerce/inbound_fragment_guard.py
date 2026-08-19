@@ -20,7 +20,7 @@ _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
 
-_FRAGMENT_MAX_LEN = 48
+_FRAGMENT_MAX_LEN = 12
 _PRAYER_FRAGMENT_MAX_LEN = 16
 _FRAGMENT_TTL_SECONDS = 90.0
 _FRAGMENT_CLARIFY_ONCE = (
@@ -94,6 +94,11 @@ def is_catalog_fallback_reply(text: str) -> bool:
 
 
 def is_discount_coupon_inquiry(message: str) -> bool:
+    """Legacy coupon-wording probe.
+
+    Must not own customer-runtime routing or postprocess. Kept for
+    diagnostics, historical tests, and non-customer tooling only.
+    """
     raw = (message or "").strip()
     if not raw:
         return False
@@ -135,10 +140,54 @@ def is_unsupported_media_turn(
 
 
 def build_discount_coupon_support_reply(*, customer_has_code: bool = True) -> str:
-    """Cautious coupon support — never catalog. TODO: policy-aware ask vs verify."""
+    """Historical canned coupon copy — not a customer-runtime owner.
+
+    Customer replies must come from Brain + structured promotion facts.
+    Do not call this from routing, compose, or postprocess.
+    """
     if customer_has_code:
         return "أرسل لي كود الخصم اللي عندك وأتحقق منه لك."
     return "أتحقق من أكواد الخصم المتاحة وأرجع لك."
+
+
+_PROMOTION_DECISION_TOPICS = frozenset({
+    "promotion_inquiry",
+    "coupon_offer",
+    "trusted_coupon_offer",
+    "customer_conditional_coupon",
+    "suggest_coupon",
+})
+_PROMOTION_INTENT_NAMES = frozenset({
+    "suggest_coupon",
+    "ask_promotion",
+    "apply_coupon",
+})
+
+
+def _structured_promotion_turn_owned(
+    *,
+    intent: Any = None,
+    decision_topic: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when Brain already owns this turn as a promotion/coupon turn."""
+    meta = dict(inbound_metadata or {})
+    if meta.get("trusted_coupon_offer_facts") or meta.get(
+        "customer_conditional_coupon_facts",
+    ):
+        return True
+    action = str(meta.get("decision_action") or "").strip().lower()
+    if action == "suggest_coupon":
+        return True
+    topic = str(
+        decision_topic or meta.get("decision_topic") or meta.get("topic") or "",
+    ).strip().lower()
+    if topic in _PROMOTION_DECISION_TOPICS:
+        return True
+    intent_name = str(getattr(intent, "name", "") or "").strip().lower()
+    if intent_name in _PROMOTION_INTENT_NAMES:
+        return True
+    return False
 
 
 def _has_explicit_catalog_browse_intent(
@@ -170,6 +219,7 @@ def should_block_catalog_grounding_fallback(
     intent: Any = None,
     decision_topic: str = "",
     protected_final_reply: bool = False,
+    facts: Any = None,
 ) -> Tuple[bool, str]:
     """Return (blocked, reason) when catalog fallback must not replace the reply."""
     if protected_final_reply:
@@ -191,8 +241,13 @@ def should_block_catalog_grounding_fallback(
     ):
         return False, ""
 
-    if is_discount_coupon_inquiry(inbound_text):
-        return True, "discount_coupon_inquiry"
+    if getattr(facts, "has_coupons", False) or getattr(facts, "shareable_promotions", None):
+        if _structured_promotion_turn_owned(
+            intent=intent,
+            decision_topic=decision_topic,
+            inbound_metadata=inbound_metadata,
+        ):
+            return True, "promotion_facts_present"
 
     if is_prayer_social_fragment(inbound_text):
         return True, "prayer_social_fragment"
@@ -301,8 +356,7 @@ def duplicate_fragment_clarification_reply(
     *,
     inbound_text: str = "",
 ) -> str:
-    if is_discount_coupon_inquiry(inbound_text):
-        return build_discount_coupon_support_reply()
+    del inbound_text
     return _FRAGMENT_CLARIFY_ONCE
 
 

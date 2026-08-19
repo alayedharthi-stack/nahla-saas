@@ -375,6 +375,7 @@ def apply_catalog_product_grounding_guard(
     order_state: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
     intent: Any = None,
+    facts: Any = None,
 ) -> CatalogProductGroundingGuardResult:
     mode = catalog_product_grounding_guard_mode()
     original = str(reply or "")
@@ -510,6 +511,7 @@ def apply_catalog_product_grounding_guard(
             protected_final_reply=bool(
                 contract is not None and contract.protected_final_reply
             ),
+            facts=facts,
         )
         if _block_catalog:
             logger.info(

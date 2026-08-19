@@ -572,5 +572,25 @@ class AIOrchestratorEngine:
                 "provider_chain_fallback_used": bool(
                     raw.get("provider_chain_fallback_used")
                 ),
+                "finish_reason": (
+                    (raw.get("completion_telemetry") or {}).get("finish_reason")
+                    if isinstance(raw.get("completion_telemetry"), dict)
+                    else None
+                ),
+                "output_tokens": (
+                    (raw.get("completion_telemetry") or {}).get("output_tokens")
+                    if isinstance(raw.get("completion_telemetry"), dict)
+                    else None
+                ),
+                "raw_char_count": (
+                    (raw.get("completion_telemetry") or {}).get("raw_char_count")
+                    if isinstance(raw.get("completion_telemetry"), dict)
+                    else len(reply_text)
+                ),
+                "completion_telemetry": (
+                    dict(raw.get("completion_telemetry") or {})
+                    if isinstance(raw.get("completion_telemetry"), dict)
+                    else {}
+                ),
             },
         )
