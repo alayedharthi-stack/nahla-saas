@@ -350,6 +350,74 @@ def _meta_has_token(value: str, *tokens: str) -> bool:
     return any(token in value for token in tokens)
 
 
+_TRANSIENT_META_FETCH_CODES = frozenset({
+    1, 2, 4, 17, 32, 130429,
+    131000, 131016, 131042, 131056, 131057,
+    133004, 133005, 133006, 133008, 133009, 133015,
+    135000,
+})
+_GRAPH_OBJECT_MISSING_SUBCODE = 33
+_AUTHORITATIVE_META_FETCH_CODES = frozenset({_GRAPH_OBJECT_MISSING_SUBCODE, 803})
+# Unambiguous deletion only. Graph "Unsupported get request" / "does not exist"
+# is also used for missing permissions, so those tokens are not proof.
+_AUTHORITATIVE_FETCH_MESSAGE_TOKENS = (
+    "HAS BEEN DELETED",
+    "PHONE NUMBER HAS BEEN DELETED",
+    "WABA HAS BEEN DELETED",
+)
+
+
+def _meta_fetch_failure_kind(err: Dict[str, Any]) -> str:
+    """Classify a Meta phone-GET failure as transient or authoritative.
+
+    Transient means verification is unavailable (timeout, code 2, 5xx,
+    rate limit, permission-ambiguous Graph get). That must not prove
+    the connection itself ended.
+    Authoritative means Meta proved the phone/object is gone via Graph
+    object-missing subcode, code 803, or an unambiguous deleted token.
+    Unknown fetch errors default to transient because they do not prove
+    the connection ended.
+    """
+    raw_err = err if isinstance(err, dict) else {}
+    try:
+        code = int(raw_err.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    try:
+        subcode = int(raw_err.get("error_subcode") or 0)
+    except (TypeError, ValueError):
+        subcode = 0
+    try:
+        http_status = int(raw_err.get("http_status") or raw_err.get("status_code") or 0)
+    except (TypeError, ValueError):
+        http_status = 0
+    kind = str(raw_err.get("type") or raw_err.get("failure_kind") or "").strip().lower()
+    blob = " ".join(
+        str(part) for part in (code, subcode, raw_err.get("message") or "", kind)
+    ).upper().replace("_", " ")
+
+    if http_status >= 500 or http_status == 429:
+        return "transient"
+    if kind in {"timeout", "network", "connect", "httpx"}:
+        return "transient"
+    if "TIMEOUT" in blob or "TIMED OUT" in blob or "NETWORK" in blob:
+        return "transient"
+    if code in _TRANSIENT_META_FETCH_CODES or subcode in _TRANSIENT_META_FETCH_CODES:
+        return "transient"
+    if code in _AUTHORITATIVE_META_FETCH_CODES or subcode in _AUTHORITATIVE_META_FETCH_CODES:
+        return "authoritative"
+    if any(token in blob for token in _AUTHORITATIVE_FETCH_MESSAGE_TOKENS):
+        return "authoritative"
+    return "transient"
+
+
+def _is_canonical_connected(conn: "WhatsAppConnection") -> bool:
+    return (
+        str(getattr(conn, "status", "") or "") == "connected"
+        and getattr(conn, "connected_at", None) is not None
+    )
+
+
 def _is_bsp_tp_entitlement_error(error: Dict[str, Any]) -> bool:
     """Return True iff Meta is rejecting our app because it's not
     onboarded as a BSP/Tech Provider with the WhatsApp Embedded
@@ -524,7 +592,12 @@ async def _register_phone_with_fallback(
 
 
 def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Map raw Meta phone state to Nahla's connection state machine."""
+    """Map raw Meta Cloud / Embedded phone state to Nahla's connection state machine.
+
+    Cloud OTP (``code_verification_status``) is a readiness fact for Embedded
+    Cloud registration only. Meta Coexistence must use
+    ``_project_phone_sync_state`` / ``project_coexistence_sync_state``.
+    """
     code_status = _meta_flag(phone_data.get("code_verification_status"))
     name_status = _meta_flag(phone_data.get("name_status"))
     phone_status = _meta_flag(phone_data.get("status"))
@@ -643,15 +716,36 @@ def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _project_phone_sync_state(
+    conn: WhatsAppConnection,
+    phone_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Select the readiness contract for this row, then project Meta phone facts."""
+    cloud = _build_phone_sync_state(phone_data)
+    cloud["otp_required"] = cloud.get("db_status") == "otp_pending"
+    if not _is_coexistence_conn(conn):
+        return cloud
+    from services.meta_coexistence import project_coexistence_sync_state  # noqa: PLC0415
+    return project_coexistence_sync_state(conn, phone_data=phone_data, cloud_state=cloud)
+
+
 def _apply_embedded_state(
     conn: WhatsAppConnection,
     phone_data: Dict[str, Any],
     sync_state: Dict[str, Any],
     register_data: Optional[Dict[str, Any]] = None,
+    *,
+    allow_demotion: bool = True,
 ) -> None:
-    """Persist the normalized Meta state into the WhatsAppConnection row."""
+    """Persist the normalized Meta state into the WhatsAppConnection row.
+
+    Observational Cloud fields (quality, name, OTP status) may always be stored.
+    Canonical ``status`` / ``sending_enabled`` are not demoted from inapplicable
+    Cloud OTP. ``status=connected`` is still owned by the canonical finalizer.
+    """
     now = datetime.now(timezone.utc)
     meta = dict(conn.extra_metadata or {})
+    connection_mode = meta.get("connection_mode")
     meta.update({
         "meta_code_verification_status": sync_state.get("verification_status"),
         "meta_name_status": sync_state.get("name_status"),
@@ -660,28 +754,44 @@ def _apply_embedded_state(
         "embedded_status_message": sync_state.get("message"),
         "last_meta_sync_at": now.isoformat(),
     })
+    if connection_mode:
+        meta["connection_mode"] = connection_mode
+    if sync_state.get("projection_reason"):
+        meta["status_projection_reason"] = sync_state.get("projection_reason")
     if register_data is not None:
         meta["meta_register_response"] = register_data
 
     conn.extra_metadata = meta
     conn.connection_type = "embedded"
     conn.provider = WHATSAPP_PROVIDER_META
-    conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
-    conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
-    conn.sending_enabled = bool(sync_state["sending_enabled"])
+    from services.meta_coexistence import coexistence_identity_matches  # noqa: PLC0415
+    if coexistence_identity_matches(conn, phone_data) or not _is_coexistence_conn(conn):
+        conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
+        conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
 
     ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+    already_connected = (
+        str(conn.status or "") == "connected"
+        and getattr(conn, "connected_at", None) is not None
+    )
     if ready:
+        conn.sending_enabled = bool(sync_state["sending_enabled"])
         conn.last_error = None
     else:
         projected = str(sync_state.get("db_status") or "activation_pending")
         if projected == "connected":
             projected = "activation_pending"
-        conn.status = projected
-        if conn.status == "error":
-            conn.last_error = sync_state["message"]
-        else:
-            conn.last_error = None
+        if _is_coexistence_conn(conn) and projected == "otp_pending":
+            projected = "configuring"
+        hard_fail = projected == "error"
+        protect_connected = already_connected and not allow_demotion and not hard_fail
+        if not protect_connected:
+            conn.sending_enabled = bool(sync_state["sending_enabled"])
+            conn.status = projected
+            if conn.status == "error":
+                conn.last_error = sync_state["message"]
+            else:
+                conn.last_error = None
 
     if sync_state.get("verification_status") == "VERIFIED":
         conn.last_verified_at = now
@@ -696,11 +806,14 @@ def _build_embedded_status_payload(
 
     meta = dict(conn.extra_metadata or {})
     oauth_status, oauth_message = _get_oauth_session_state(conn)
+    coexistence = _is_coexistence_conn(conn)
     payload: Dict[str, Any] = {
         "connected": bool(conn.status == "connected" and conn.sending_enabled),
         "status": conn.status,
         "connection_status": conn.status,
         "connection_type": conn.connection_type,
+        "connection_mode": meta.get("connection_mode"),
+        "otp_required": bool((not coexistence) and conn.status == "otp_pending"),
         "provider": _wa_provider(conn),
         "provider_label": _provider_label(conn),
         "merchant_channel_label": _merchant_channel_label(conn),
@@ -906,10 +1019,15 @@ async def sync_embedded_connection_from_meta(
     db: Session,
     *,
     attempt_register: bool = True,
+    allow_demotion: bool = True,
 ) -> Dict[str, Any]:
     """
     Pull the live phone state from Meta and persist it.
-    When the OTP is already verified, also attempts the final Cloud API register step.
+
+    Provider fetch/project is separated from canonical demotion:
+    GET callers pass ``allow_demotion=False`` so opening the dashboard cannot
+    destroy a working connection from stale Cloud OTP fields.
+    When the OTP is already verified on Embedded Cloud, also attempts register.
     """
     if not conn.phone_number_id:
         return _build_embedded_status_payload(conn)
@@ -926,19 +1044,30 @@ async def sync_embedded_connection_from_meta(
         )
 
         err_code = int(err.get("code") or 0)
-        if err_code == 190:
-            _update_oauth_state(
-                conn,
-                status="expired",
-                message=transient_msg,
-                token_source=token_source,
-            )
-            meta["embedded_status_message"] = (
-                "الرقم ما زال مربوطًا في Meta ونحلة، لكن جلسة Meta الإدارية انتهت. "
-                "قد تحتاج فقط إلى إعادة التفويض لإدارة الحساب من داخل نحلة."
-            )
+        failure_kind = _meta_fetch_failure_kind(err)
+        protect_connected = (
+            _is_canonical_connected(conn)
+            and not allow_demotion
+            and failure_kind != "authoritative"
+        )
+        if err_code == 190 or protect_connected:
+            if err_code == 190:
+                _update_oauth_state(
+                    conn,
+                    status="expired",
+                    message=transient_msg,
+                    token_source=token_source,
+                )
+                meta["embedded_status_message"] = (
+                    "الرقم ما زال مربوطًا في Meta ونحلة، لكن جلسة Meta الإدارية انتهت. "
+                    "قد تحتاج فقط إلى إعادة التفويض لإدارة الحساب من داخل نحلة."
+                )
+            else:
+                meta["embedded_status_message"] = transient_msg
             meta["last_meta_sync_error"] = err
             meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
+            meta["meta_verification_unavailable"] = True
+            meta["meta_fetch_failure_kind"] = "transient" if err_code != 190 else "oauth_expired"
             conn.extra_metadata = meta
             conn.last_error = None
             db.commit()
@@ -960,11 +1089,13 @@ async def sync_embedded_connection_from_meta(
             meta["last_meta_sync_error"] = err
 
         meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
+        meta["meta_fetch_failure_kind"] = failure_kind
+        meta["meta_verification_unavailable"] = failure_kind != "authoritative"
         conn.extra_metadata = meta
         db.commit()
         return _build_embedded_status_payload(conn)
 
-    sync_state = _build_phone_sync_state(phone_data)
+    sync_state = _project_phone_sync_state(conn, phone_data)
     register_data: Optional[Dict[str, Any]] = None
 
     should_register = (
@@ -999,36 +1130,32 @@ async def sync_embedded_connection_from_meta(
                     "db_status": "error",
                     "message": f"فشل تفعيل الرقم في Meta: {reg_msg}",
                 }
-            _apply_embedded_state(conn, phone_data, sync_state, register_data)
+            _apply_embedded_state(
+                conn, phone_data, sync_state, register_data, allow_demotion=allow_demotion,
+            )
             db.commit()
             return _build_embedded_status_payload(conn)
 
         refreshed, _ = await _get_phone_details_with_fallback(conn, db)
         if "error" not in refreshed:
             phone_data = refreshed
-            sync_state = _build_phone_sync_state(phone_data)
+            sync_state = _project_phone_sync_state(conn, phone_data)
 
     if _is_coexistence_conn(conn):
-        from services.meta_coexistence import (  # noqa: PLC0415
-            maybe_fail_sync_deadline,
-            smb_syncs_accepted,
-        )
+        from services.meta_coexistence import maybe_fail_sync_deadline  # noqa: PLC0415
         if maybe_fail_sync_deadline(conn):
             db.commit()
             return _build_embedded_status_payload(conn)
-        if not smb_syncs_accepted(dict(conn.extra_metadata or {})):
-            sync_state = {
-                **sync_state,
-                "connected": False,
-                "sending_enabled": False,
-                "db_status": "configuring",
-                "message": (
-                    conn.last_error
-                    or "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال."
-                ),
-            }
+        sync_state = _project_phone_sync_state(conn, phone_data)
 
-    _apply_embedded_state(conn, phone_data, sync_state, register_data)
+    hard_fail = str(sync_state.get("db_status") or "") == "error"
+    _apply_embedded_state(
+        conn,
+        phone_data,
+        sync_state,
+        register_data,
+        allow_demotion=True if hard_fail else allow_demotion,
+    )
 
     # When the connection finalises (status=connected), attempt webhook subscription
     # if it hasn't been done yet, and persist the verified flag explicitly.
@@ -1847,7 +1974,12 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
 
     if conn.phone_number_id:
         try:
-            return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+            return await sync_embedded_connection_from_meta(
+                conn,
+                db,
+                attempt_register=not _is_coexistence_conn(conn),
+                allow_demotion=not _is_coexistence_conn(conn),
+            )
         except HTTPException:
             raise
         except Exception as exc:

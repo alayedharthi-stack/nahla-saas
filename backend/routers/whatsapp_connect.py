@@ -1489,8 +1489,8 @@ async def verify_connection(request: Request, db: Session = Depends(get_db)):
 
         if resp.status_code == 200:
             data = resp.json()
-            from routers.whatsapp_embedded import _build_phone_sync_state  # noqa: PLC0415
-            sync_state = _build_phone_sync_state(data if isinstance(data, dict) else {})
+            from routers.whatsapp_embedded import _project_phone_sync_state  # noqa: PLC0415
+            sync_state = _project_phone_sync_state(conn, data if isinstance(data, dict) else {})
             if _sync_state_ready(sync_state):
                 conn.sending_enabled  = bool(sync_state.get("sending_enabled"))
                 conn.last_verified_at = datetime.now(timezone.utc)
@@ -4625,6 +4625,11 @@ def _build_wa_status(conn: Optional[WhatsAppConnection]) -> dict:
         "provider_label":        _provider_label(conn),
         "merchant_channel_label": _merchant_channel_label(conn),
         "connection_type":       conn.connection_type,
+        "connection_mode":       meta.get("connection_mode"),
+        "otp_required":          bool(
+            str(meta.get("connection_mode") or "").strip().lower() != "coexistence"
+            and conn.status == "otp_pending"
+        ),
     }
     if meta.get("meta_name_status") is not None:
         resp["name_status"] = meta.get("meta_name_status")
@@ -4664,7 +4669,9 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
         if conn and conn.connection_type == "embedded" and conn.phone_number_id:
             try:
                 from routers.whatsapp_embedded import sync_embedded_connection_from_meta  # noqa: PLC0415
-                payload = await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+                payload = await sync_embedded_connection_from_meta(
+                    conn, db, attempt_register=False, allow_demotion=False,
+                )
                 payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
                 return payload
             except HTTPException:
@@ -4796,8 +4803,8 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             logger.error("[WA refresh] re-register error: %s", exc)
             reg_data = {}
 
-    from routers.whatsapp_embedded import _build_phone_sync_state as _bps  # noqa: PLC0415
-    sync_state = _bps(data if isinstance(data, dict) else {})
+    from routers.whatsapp_embedded import _project_phone_sync_state as _bps  # noqa: PLC0415
+    sync_state = _bps(conn, data if isinstance(data, dict) else {})
 
     if sync_state.get("connected"):
         if coexistence and not smb_syncs_accepted(dict(conn.extra_metadata or {})):
