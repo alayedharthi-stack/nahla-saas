@@ -22,6 +22,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 
 from models import (  # noqa: E402
     Base,
+    BillingPayment,
     BillingPlan,
     BillingSubscription,
     Integration,
@@ -253,6 +254,46 @@ class TestProtectedLifecyclesUnchanged:
         assert result["reason"] == RECONCILE_SKIP_PAID_HISTORY
         assert t.trial_started_at is None
 
+    def test_paid_payment_without_subscription_id_does_not_become_trial(self, db):
+        t = _tenant(db, name="متجر إكسسوارات تجريبي")
+        now = datetime.now(timezone.utc)
+        db.add(BillingPayment(
+            tenant_id=t.id,
+            subscription_id=None,
+            amount_sar=899,
+            currency="SAR",
+            gateway="moyasar",
+            status="paid",
+            paid_at=now.replace(tzinfo=None),
+        ))
+        _wa(db, t.id)
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_PAID_HISTORY
+        assert t.trial_started_at is None
+
+    def test_paid_payment_with_orphan_subscription_id_does_not_become_trial(self, db):
+        t = _tenant(db, name="متجر هدايا تجريبي")
+        now = datetime.now(timezone.utc)
+        db.add(BillingPayment(
+            tenant_id=t.id,
+            subscription_id=99999,
+            amount_sar=899,
+            currency="SAR",
+            gateway="moyasar",
+            status="paid",
+            paid_at=now.replace(tzinfo=None),
+        ))
+        _wa(db, t.id)
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_PAID_HISTORY
+        assert t.trial_started_at is None
+
     def test_salla_managed_unchanged(self, db):
         t = _tenant(db)
         _wa(db, t.id)
@@ -261,6 +302,30 @@ class TestProtectedLifecyclesUnchanged:
             provider="salla",
             external_store_id="store-gen",
             config={"billing_status": "active"},
+            enabled=True,
+        ))
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_SALLA_MANAGED
+        assert t.trial_started_at is None
+
+    def test_any_protected_salla_row_blocks_even_if_first_row_is_unprotected(self, db):
+        t = _tenant(db, name="متجر أحذية رياضي تجريبي")
+        _wa(db, t.id)
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-unprotected",
+            config={"billing_status": "cancelled"},
+            enabled=True,
+        ))
+        db.add(Integration(
+            tenant_id=t.id,
+            provider="salla",
+            external_store_id="store-protected",
+            config={"billing_status": "trial"},
             enabled=True,
         ))
         db.commit()
@@ -400,6 +465,33 @@ class TestIdempotencyAndEvidence:
         assert t.first_whatsapp_connected_at is None
         assert t.subscription_status == TRIAL_STATUS_PENDING_WHATSAPP
         assert any(row["reason"] == "skip_reconcile_error" for row in report["skipped"])
+        assert any(row.get("persist_state") == "rolled_back" for row in report["skipped"])
+
+    def test_refresh_failure_after_commit_does_not_claim_rollback(self, db, monkeypatch):
+        t = _tenant(db, name="متجر قمصان قطني تجريبي")
+        _wa(db, t.id)
+        db.commit()
+        tenant_id = t.id
+
+        original_refresh = db.refresh
+
+        def boom(obj):
+            if getattr(obj, "id", None) == tenant_id and getattr(obj, "trial_started_at", None):
+                raise RuntimeError("refresh failed after persist")
+            return original_refresh(obj)
+
+        monkeypatch.setattr(db, "refresh", boom)
+        result = reconcile_missing_trial_after_whatsapp_connect(db, tenant_id)
+        assert result["applied"] is True
+        assert result.get("refresh_failed") is True
+        assert result.get("persist_state") == "committed_refresh_failed"
+        db.expire_all()
+        persisted = db.query(Tenant).filter_by(id=tenant_id).one()
+        assert persisted.trial_started_at is not None
+        assert persisted.first_whatsapp_connected_at is not None
+
+        report = reconcile_missing_trials_after_whatsapp_connect(db, dry_run=False)
+        assert not any(row.get("persist_state") == "rolled_back" for row in report["skipped"] if row["tenant_id"] == tenant_id)
 
     def test_does_not_change_ai_settings(self, db):
         t = _tenant(db)
@@ -508,6 +600,27 @@ class TestPositiveAllowlistAndPartialLifecycle:
                     "partner_testing_override": {
                         "enabled": True,
                         "expires_at": (now + timedelta(days=14)).isoformat(),
+                    }
+                }
+            },
+        ))
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_PARTNER_OVERRIDE
+        assert t.trial_started_at is None
+
+    def test_malformed_partner_override_expiry_is_still_protected(self, db):
+        t = _tenant(db, name="متجر عطور تجريبي عام")
+        _wa(db, t.id)
+        db.add(TenantSettings(
+            tenant_id=t.id,
+            extra_metadata={
+                "billing": {
+                    "partner_testing_override": {
+                        "enabled": True,
+                        "expires_at": "not-a-date",
                     }
                 }
             },

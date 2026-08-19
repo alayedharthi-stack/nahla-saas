@@ -269,32 +269,59 @@ def _gift_grant_is_active(blob: Optional[Dict[str, Any]]) -> bool:
 
 
 def _partner_override_is_active(blob: Optional[Dict[str, Any]]) -> bool:
+    """Match canonical billing: enabled + unexpired.
+
+    Malformed ``expires_at`` is treated as no expiry (still active), the same
+    as ``core.billing_override.is_partner_testing_override_active``.
+    """
     if not isinstance(blob, dict) or not blob.get("enabled"):
         return False
     raw = blob.get("expires_at")
-    if not raw:
-        return True
-    try:
-        expires = _coerce_utc(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
-    except (TypeError, ValueError):
-        return False
+    expires = None
+    if raw:
+        try:
+            expires = _coerce_utc(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+        except (TypeError, ValueError):
+            expires = None
     if expires and expires <= datetime.now(timezone.utc):
         return False
     return True
 
 
-def _salla_billing_status(db: Session, tenant_id: int) -> str:
+def _protected_salla_billing_status(db: Session, tenant_id: int) -> str:
+    """Return a protected Salla billing_status if ANY integration row has one.
+
+    Tenant+provider uniqueness is not enforced in the schema, so the first
+    row is not authoritative.
+    """
     from models import Integration  # noqa: PLC0415
 
-    integration = (
+    rows = (
         db.query(Integration)
         .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .all()
+    )
+    for integration in rows:
+        cfg = integration.config or {}
+        status = str(cfg.get("billing_status") or "").strip().lower()
+        if status in _SALLA_PROTECTED_BILLING:
+            return status
+    return ""
+
+
+def _tenant_has_paid_billing_payment(db: Session, tenant_id: int) -> bool:
+    """True when any paid BillingPayment exists, even without a subscription."""
+    from models import BillingPayment  # noqa: PLC0415
+
+    row = (
+        db.query(BillingPayment.id)
+        .filter(
+            BillingPayment.tenant_id == tenant_id,
+            BillingPayment.status == "paid",
+        )
         .first()
     )
-    if not integration:
-        return ""
-    cfg = integration.config or {}
-    return str(cfg.get("billing_status") or "").strip().lower()
+    return row is not None
 
 
 def classify_missing_trial_after_whatsapp(db: Session, tenant) -> Dict[str, Any]:
@@ -347,12 +374,12 @@ def classify_missing_trial_after_whatsapp(db: Session, tenant) -> Dict[str, Any]
     if get_tenant_subscription(db, tenant_id):
         result["reason"] = RECONCILE_SKIP_PAID
         return result
-    if get_latest_paid_subscription(db, tenant_id):
+    if get_latest_paid_subscription(db, tenant_id) or _tenant_has_paid_billing_payment(db, tenant_id):
         result["reason"] = RECONCILE_SKIP_PAID_HISTORY
         return result
 
-    salla_status = _salla_billing_status(db, tenant_id)
-    if salla_status in _SALLA_PROTECTED_BILLING:
+    salla_status = _protected_salla_billing_status(db, tenant_id)
+    if salla_status:
         result["reason"] = RECONCILE_SKIP_SALLA_MANAGED
         result["evidence"] = {"salla_billing_status": salla_status}
         return result
@@ -421,6 +448,17 @@ def discover_missing_trial_after_whatsapp(db: Session) -> List[Dict[str, Any]]:
     return rows
 
 
+def _reconcile_apply_payload(classification: Dict[str, Any], tenant, started: bool) -> Dict[str, Any]:
+    return {
+        **classification,
+        "applied": bool(started),
+        "subscription_status": tenant.subscription_status,
+        "trial_started_at": _iso(_coerce_utc(tenant.trial_started_at)),
+        "trial_ends_at": _iso(_coerce_utc(tenant.trial_ends_at)),
+        "first_whatsapp_connected_at": _iso(_coerce_utc(tenant.first_whatsapp_connected_at)),
+    }
+
+
 def reconcile_missing_trial_after_whatsapp_connect(
     db: Session,
     tenant_id: int,
@@ -465,28 +503,39 @@ def reconcile_missing_trial_after_whatsapp_connect(
         if trial_end and trial_end <= now:
             tenant.subscription_status = TRIAL_STATUS_EXPIRED
 
-    if commit:
-        db.commit()
+    payload = _reconcile_apply_payload(classification, tenant, started)
+    if not commit:
+        payload["persist_state"] = "uncommitted"
+        return payload
+
+    db.flush()
+    payload = _reconcile_apply_payload(classification, tenant, started)
+    db.commit()
+    payload["persist_state"] = "committed"
+    try:
         db.refresh(tenant)
+        payload = _reconcile_apply_payload(classification, tenant, started)
+        payload["persist_state"] = "committed"
+    except Exception:
+        logger.exception(
+            "[TrialLifecycle] reconcile committed; refresh failed tenant=%s",
+            tenant_id,
+        )
+        payload["refresh_failed"] = True
+        payload["persist_state"] = "committed_refresh_failed"
 
     logger.info(
         "[TrialLifecycle] reconcile tenant=%s reason=%s started=%s "
-        "first_wa=%s trial_end=%s status=%s",
+        "first_wa=%s trial_end=%s status=%s persist_state=%s",
         tenant_id,
         classification["reason"],
         started,
-        tenant.first_whatsapp_connected_at,
-        tenant.trial_ends_at,
-        tenant.subscription_status,
+        payload.get("first_whatsapp_connected_at"),
+        payload.get("trial_ends_at"),
+        payload.get("subscription_status"),
+        payload.get("persist_state"),
     )
-    return {
-        **classification,
-        "applied": bool(started),
-        "subscription_status": tenant.subscription_status,
-        "trial_started_at": _iso(_coerce_utc(tenant.trial_started_at)),
-        "trial_ends_at": _iso(_coerce_utc(tenant.trial_ends_at)),
-        "first_whatsapp_connected_at": _iso(_coerce_utc(tenant.first_whatsapp_connected_at)),
-    }
+    return payload
 
 
 def reconcile_missing_trials_after_whatsapp_connect(
@@ -524,13 +573,14 @@ def reconcile_missing_trials_after_whatsapp_connect(
         except Exception:
             db.rollback()
             logger.exception(
-                "[TrialLifecycle] reconcile failed tenant=%s; rolled back",
+                "[TrialLifecycle] reconcile failed tenant=%s before persist; rolled back",
                 tenant_id,
             )
             skipped.append({
                 **row,
                 "reason": "skip_reconcile_error",
                 "decision": RECONCILE_DECISION_SKIP,
+                "persist_state": "rolled_back",
             })
 
     return {
