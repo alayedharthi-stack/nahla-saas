@@ -45,6 +45,12 @@ async def analytics_dashboard(request: Request, db: Session = Depends(get_db)):
     get_or_create_tenant(db, tenant_id)
 
     now = datetime.now(timezone.utc)
+    kpis = None
+    try:
+        from core.merchant_overview_analytics import compute_overview_kpis  # noqa: PLC0415
+        kpis = compute_overview_kpis(db, tenant_id, "this_month", now=now)
+    except Exception:
+        kpis = None
 
     # ── Revenue + orders (last 7 days) ───────────────────────────────────────
     order_rows = (
@@ -151,15 +157,26 @@ async def analytics_dashboard(request: Request, db: Session = Depends(get_db)):
 
     return {
         "summary": {
-            "current_month_revenue_sar": round(today_revenue if total_orders else sum(r["revenue"] for r in revenue_trend), 2),
+            "current_month_revenue_sar": (
+                kpis["revenue"] if kpis is not None
+                else round(today_revenue if total_orders else sum(r["revenue"] for r in revenue_trend), 2)
+            ),
             "conversion_rate_pct": conversion_rate,
-            "current_month_orders": total_orders,
-            "current_month_conversations": monthly_conversations,
+            "current_month_orders": kpis["orders"] if kpis is not None else total_orders,
+            "current_month_conversations": (
+                kpis["conversations"] if kpis is not None else monthly_conversations
+            ),
             "today_revenue_sar": round(today_revenue, 2),
             "pending_orders": pending_count,
             "completed_today": completed_today,
         },
-        "revenue_trend": revenue_trend,
+        "revenue_trend": (
+            [
+                {"month": row.get("day") or row.get("day_key"), "revenue": row["revenue"]}
+                for row in kpis["revenue_chart"]
+            ]
+            if kpis is not None else revenue_trend
+        ),
         "conversion_trend": conversion_trend,
         "source_breakdown": source_breakdown,
         "top_products": top_products,

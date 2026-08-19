@@ -15,7 +15,6 @@ import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { apiCall } from '../api/client'
-import { customersApi } from '../api/customers'
 import { trackPlatformEvent } from '../lib/platformTelemetry'
 
 // UI_ONLY_GUARD: only static labels use t(); merchant/customer data stays as API values.
@@ -48,6 +47,10 @@ interface OverviewStats {
    *  surfaced as its own KPI so a big blast is visible even when the
    *  conversation counter barely moves (recipients with open windows). */
   messages_sent?: number
+  new_customers?: number
+  ai_rate_numerator?: number
+  ai_rate_denominator?: number
+  period_label_en?: string
   /** Legacy names — still returned by backend for backwards compat; the
    *  values now reflect the SELECTED period, not literally today. */
   conversations_today: number
@@ -58,12 +61,12 @@ interface OverviewStats {
   metric_kind_conversations?: string
   metric_kind_messages?: string
   analytics_timezone?: string
-  ai_rate: number
+  ai_rate: number | null
   ai_revenue: number
   ai_orders: number
   recent_conversations: any[]
   recent_orders: any[]
-  revenue_chart: { day: string; revenue: number }[]
+  revenue_chart: { day: string; day_en?: string; revenue: number }[]
 }
 
 interface WaUsage {
@@ -144,7 +147,6 @@ export default function Overview() {
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
   const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
-  const [newCustomers, setNewCustomers] = useState<number | null>(null)
   const [tierRefreshing, setTierRefreshing] = useState(false)
   // Single timeframe controller — every KPI card + the recent lists
   // re-fetch when this changes. We keep ``today`` as the default so the
@@ -199,16 +201,9 @@ export default function Overview() {
   }
 
   useEffect(() => {
-    // WhatsApp usage is timeframe-independent (always "this month" per
-    // Meta's billing window), so we fetch it once on mount only.
+    // WhatsApp plan-limit usage is billing-period scoped, not Overview
+    // timeframe scoped — fetch once on mount only.
     apiCall<WaUsage>('/whatsapp/usage').then(setWaUsage).catch(() => null)
-    customersApi
-      .metrics()
-      .then(m => {
-        if (typeof m.newCustomers === 'number') setNewCustomers(m.newCustomers)
-        else setNewCustomers(null)
-      })
-      .catch(() => setNewCustomers(null))
   }, [])
 
   useEffect(() => {
@@ -233,10 +228,14 @@ export default function Overview() {
           orders:               syncStatus.orders         ?? syncStatus.orders_today        ?? 0,
           revenue:              syncStatus.revenue        ?? syncStatus.revenue_today       ?? 0,
           messages_sent:        syncStatus.messages_sent  ?? 0,
+          new_customers:        syncStatus.new_customers,
           conversations_today:  syncStatus.conversations_today ?? 0,
           orders_today:         syncStatus.orders_today        ?? 0,
           revenue_today:        syncStatus.revenue_today       ?? 0,
-          ai_rate:              syncStatus.ai_rate             ?? 0,
+          ai_rate:              syncStatus.ai_rate             ?? null,
+          ai_rate_numerator:    syncStatus.ai_rate_numerator,
+          ai_rate_denominator:  syncStatus.ai_rate_denominator,
+          period_label_en:      syncStatus.period_label_en,
           ai_revenue:           syncStatus.ai_revenue          ?? 0,
           ai_orders:            syncStatus.ai_orders           ?? 0,
           recent_conversations: syncStatus.recent_conversations ?? [],
@@ -249,7 +248,12 @@ export default function Overview() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period])
 
-  const revenueData         = stats?.revenue_chart        ?? chartPlaceholder
+  const revenueData = (stats?.revenue_chart?.length
+    ? stats.revenue_chart.map(row => ({
+        ...row,
+        day: lang === 'en' ? (row.day_en ?? row.day) : row.day,
+      }))
+    : chartPlaceholder)
   const recentConversations = stats?.recent_conversations ?? []
   const recentOrders        = stats?.recent_orders        ?? []
   const hasRealData         = (stats?.orders_today ?? 0) > 0 || recentOrders.length > 0
@@ -271,8 +275,13 @@ export default function Overview() {
   const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
   const kpiMessagesSent  = stats?.messages_sent ?? 0
   const periodLabelDisplay = lang === 'en'
-    ? periodLabel(period)
+    ? (stats?.period_label_en ?? periodLabel(period))
     : (stats?.period_label_ar ?? periodLabel(period))
+  const kpiNewCustomers = stats?.new_customers
+  const kpiAiRate = stats?.ai_rate
+  const kpiAiRateLabel = kpiAiRate === null || kpiAiRate === undefined
+    ? (loading ? '—' : t(tr => tr.common.noData))
+    : `${kpiAiRate.toFixed(1)}%`
 
   const statusLabel = (s: string) => {
     if (s === 'paid')    return ov.statusPaid
@@ -715,7 +724,8 @@ export default function Overview() {
         />
         <StatCard
           label={ov.kpiNewCustomers}
-          value={newCustomers === null ? '—' : newCustomers.toLocaleString(locale)}
+          subLabel={periodLabelDisplay}
+          value={loading || kpiNewCustomers === undefined ? '—' : kpiNewCustomers.toLocaleString(locale)}
           icon={Users}
           iconColor="text-teal-600"
           iconBg="bg-teal-50"
@@ -723,23 +733,19 @@ export default function Overview() {
         <StatCard
           label={ov.kpiAiRate}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : `${(stats?.ai_rate ?? 0).toFixed(1)}%`}
+          value={loading ? '—' : kpiAiRateLabel}
           icon={TrendingUp}
           iconColor="text-purple-600"
           iconBg="bg-purple-50"
         />
       </div>
 
-      {/* Revenue Chart — always 7-day rolling regardless of the KPI
-          timeframe above. The framing here is intentionally fixed: the
-          area chart's job is "how did the last week feel", not "answer
-          the same question the KPI cards do". A separate selector here
-          would invite two timeframes drifting out of sync. */}
+      {/* Revenue chart — same selectedRange as the KPI cards. */}
       <div className="card p-5">
         <div className="flex items-center justify-between mb-5">
           <div>
             <h2 className="text-sm font-semibold text-slate-900">{ov.chartTitle}</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{ov.chartSubtitle}</p>
+            <p className="text-xs text-slate-400 mt-0.5">{periodLabelDisplay}</p>
           </div>
         </div>
         <ResponsiveContainer width="100%" height={220}>
