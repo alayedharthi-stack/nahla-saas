@@ -42,12 +42,9 @@ def _tz(dt):
 
 
 def _sync_instance_stamp(customer, iso: str) -> None:
-    try:
-        meta = dict(getattr(customer, "extra_metadata", None) or {})
-        meta[STAMP_KEY] = iso
-        customer.extra_metadata = meta
-    except Exception:
-        return
+    meta = dict(getattr(customer, "extra_metadata", None) or {})
+    meta[STAMP_KEY] = iso
+    customer.extra_metadata = meta
 
 
 def _claim_stamp(db, *, tenant_id: int, customer, now: datetime) -> bool:

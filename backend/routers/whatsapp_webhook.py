@@ -3519,7 +3519,7 @@ async def _dispatch_message(
                         customer=_lead,
                     )
                 except Exception as _hist_stamp_exc:
-                    logger.debug(
+                    logger.warning(
                         "[Webhook] history first-contact suppress failed: %s",
                         _hist_stamp_exc,
                     )
@@ -3783,7 +3783,7 @@ async def _dispatch_message(
                         log_notification=_log_notification,
                     )
                 except Exception as _em:
-                    logger.debug("[Webhook] first-contact email error: %s", _em)
+                    logger.warning("[Webhook] first-contact email error: %s", _em)
 
             if _unsub_short_circuit:
                 # Skip automation / AI for unsubscribe-related events.
