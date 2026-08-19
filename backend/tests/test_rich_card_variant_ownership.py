@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +17,10 @@ _backend = _here.parent
 if str(_backend) not in sys.path:
     sys.path.insert(0, str(_backend))
 
+from core.meta_catalog_membership import (  # noqa: E402
+    PROVENANCE_GRAPH_RECONCILE,
+    MetaCatalogMembershipFact,
+)
 from services.catalog_product_orchestrator import (  # noqa: E402
     ProductCardSendAction,
     REASON_TENANT_MISMATCH,
@@ -23,6 +28,9 @@ from services.catalog_product_orchestrator import (  # noqa: E402
     evaluate_product_card_send,
     should_attempt_catalog_send,
 )
+
+
+_PUBLISHED = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 def _conn(**kw):
@@ -62,9 +70,25 @@ class TestOrchestratorVariantOwnership:
             connection=_conn(),
             attachment=_attachment(),
             product_row=SimpleNamespace(
-                id=28, tenant_id=1, external_id="1921568272", in_stock=True,
+                id=28,
+                tenant_id=1,
+                external_id="1921568272",
+                in_stock=True,
+                has_variants=False,
+                default_variant_id=None,
+                meta_catalog_published_at=_PUBLISHED,
             ),
             positive_commerce_intent=True,
+            membership=MetaCatalogMembershipFact(
+                tenant_id=1,
+                catalog_id="CAT-1",
+                retailer_id="1921568272",
+                product_id=28,
+                variant_id=None,
+                meta_item_id="mg-28",
+                verified_at=_PUBLISHED,
+                provenance=PROVENANCE_GRAPH_RECONCILE,
+            ),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert should_attempt_catalog_send(d) is True
@@ -95,12 +119,28 @@ class TestOrchestratorVariantOwnership:
             attachment=_attachment(
                 needs_variant_choice=True,
                 picked_variant_retailer_id="var-rid-40",
+                picked_variant_id=2,
                 variants=[{"id": 2, "label": "M", "in_stock": True}],
             ),
             product_row=SimpleNamespace(
-                id=28, tenant_id=1, external_id="1921568272", in_stock=True,
+                id=28,
+                tenant_id=1,
+                external_id="1921568272",
+                in_stock=True,
+                has_variants=True,
+                meta_catalog_published_at=_PUBLISHED,
             ),
             positive_commerce_intent=True,
+            membership=MetaCatalogMembershipFact(
+                tenant_id=1,
+                catalog_id="CAT-1",
+                retailer_id="var-rid-40",
+                product_id=28,
+                variant_id=2,
+                meta_item_id="mg-v2",
+                verified_at=_PUBLISHED,
+                provenance=PROVENANCE_GRAPH_RECONCILE,
+            ),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert should_attempt_catalog_send(d) is True

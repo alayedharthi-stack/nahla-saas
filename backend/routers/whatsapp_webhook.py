@@ -12796,6 +12796,7 @@ async def _handle_merchant_message(
                             db,
                             int(tenant_id),
                             str(_native_catalog_entry.get("thumbnail_product_retailer_id") or ""),
+                            catalog_id=str(_native_catalog_entry.get("catalog_id") or ""),
                         )
                     _nc_fallback = compose_native_catalog_failure_decision(
                         db,
@@ -15273,6 +15274,57 @@ async def _try_send_native_catalog_entry(
             reason="connection_missing",
         )
 
+    catalog_id = str(getattr(connection, "meta_catalog_id", "") or "").strip()
+    bound_catalog = str(entry.get("catalog_id") or "").strip()
+    if not bound_catalog:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=catalog_id_missing",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="catalog_id_missing",
+        )
+    if not catalog_id:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=catalog_id_missing",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="catalog_id_missing",
+        )
+    if bound_catalog != catalog_id:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=catalog_id_mismatch",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="catalog_id_mismatch",
+        )
+    from core.meta_catalog_membership import load_meta_catalog_membership  # noqa: PLC0415
+
+    membership = load_meta_catalog_membership(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=catalog_id,
+        retailer_id=thumbnail,
+    )
+    if membership is None:
+        logger.info(
+            "[NATIVE_CATALOG] native_catalog_entry_fallback tenant=%s reason=meta_catalog_unverified",
+            tenant_id,
+        )
+        return CatalogSendResult(
+            success=False,
+            fallback_recommended=True,
+            reason="meta_catalog_unverified",
+        )
+
     from modules.ai.brain.commerce.catalog_body_policy import (  # noqa: PLC0415
         resolve_native_catalog_body_text,
     )
@@ -15297,6 +15349,24 @@ async def _try_send_native_catalog_entry(
             tenant_id,
             result.reason,
         )
+        if result.reason == "meta_products_not_found":
+            try:
+                from core.native_catalog_capability import (  # noqa: PLC0415
+                    invalidate_meta_catalog_publish_for_retailer_id,
+                )
+
+                invalidate_meta_catalog_publish_for_retailer_id(
+                    db,
+                    int(tenant_id),
+                    str(thumbnail or ""),
+                    catalog_id=catalog_id,
+                )
+            except Exception as inv_exc:  # noqa: BLE001
+                logger.debug(
+                    "[NATIVE_CATALOG] tenant=%s membership invalidate failed: %s",
+                    tenant_id,
+                    inv_exc,
+                )
     return result
 
 
@@ -15489,6 +15559,27 @@ async def _try_send_catalog_product(
                 exclude_product_id=int(attachment.get("id")),
                 limit=2,
             )
+        membership = None
+        catalog_id = str(getattr(connection, "meta_catalog_id", "") or "").strip()
+        if db is not None and catalog_id and candidate_rid:
+            try:
+                from core.meta_catalog_membership import (  # noqa: PLC0415
+                    load_meta_catalog_membership,
+                )
+
+                membership = load_meta_catalog_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=candidate_rid,
+                )
+            except Exception as mem_exc:  # noqa: BLE001
+                logger.debug(
+                    "[CATALOG] tenant=%s membership load failed: %s",
+                    tenant_id,
+                    mem_exc,
+                )
+                membership = None
         decision = evaluate_product_card_send(
             tenant_id=int(tenant_id),
             connection=connection,
@@ -15497,6 +15588,7 @@ async def _try_send_catalog_product(
             collision_peer_ids=peer_ids or None,
             block_commerce_escalation=block_commerce_escalation,
             positive_commerce_intent=positive_commerce_intent,
+            membership=membership,
         )
         log_product_card_decision(
             decision, tenant_id=tenant_id, attachment=attachment,
@@ -15565,6 +15657,25 @@ async def _try_send_catalog_product(
 
     if result.success:
         return True
+
+    if getattr(result, "reason", "") == "meta_products_not_found":
+        try:
+            from core.native_catalog_capability import (  # noqa: PLC0415
+                invalidate_meta_catalog_publish_for_retailer_id,
+            )
+
+            invalidate_meta_catalog_publish_for_retailer_id(
+                db,
+                int(tenant_id),
+                str(retailer_id or ""),
+                catalog_id=str(getattr(connection, "meta_catalog_id", "") or ""),
+            )
+        except Exception as inv_exc:  # noqa: BLE001
+            logger.debug(
+                "[CATALOG] tenant=%s membership invalidate failed: %s",
+                tenant_id,
+                inv_exc,
+            )
 
     logger.info(
         "[CATALOG_FALLBACK_TEXT] tenant=%s product_id=%s reason=%s "

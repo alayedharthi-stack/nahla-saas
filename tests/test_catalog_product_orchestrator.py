@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,10 @@ from core.catalog import (  # noqa: E402
     CATALOG_STATUS_REMOVED_FROM_META,
     evaluate_tenant_catalog_send_readiness,
     whatsapp_commerce_diagnostics_readiness,
+)
+from core.meta_catalog_membership import (  # noqa: E402
+    PROVENANCE_GRAPH_RECONCILE,
+    MetaCatalogMembershipFact,
 )
 from services.catalog_product_orchestrator import (  # noqa: E402
     ProductCardSendAction,
@@ -77,6 +82,29 @@ def _attachment(**kw):
     return base
 
 
+_PUBLISHED = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def _membership(
+    *,
+    retailer_id: str = "ext-10",
+    product_id: int = 10,
+    variant_id: int | None = None,
+    catalog_id: str = "CAT-1",
+    tenant_id: int = 1,
+) -> MetaCatalogMembershipFact:
+    return MetaCatalogMembershipFact(
+        tenant_id=tenant_id,
+        catalog_id=catalog_id,
+        retailer_id=retailer_id,
+        product_id=product_id,
+        variant_id=variant_id,
+        meta_item_id="mg-1",
+        verified_at=_PUBLISHED,
+        provenance=PROVENANCE_GRAPH_RECONCILE,
+    )
+
+
 @dataclass
 class _Product:
     id: int
@@ -86,6 +114,7 @@ class _Product:
     in_stock: bool = True
     catalog_status: str = CATALOG_STATUS_ACTIVE
     merchant_hidden_at: object | None = None
+    meta_catalog_published_at: object | None = None
 
 
 class TestSharedReadiness:
@@ -123,8 +152,21 @@ class TestOrchestratorDecisions:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -149,8 +191,21 @@ class TestOrchestratorDecisions:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(confidence="weak"),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
 
@@ -211,8 +266,15 @@ class TestOrchestratorDecisions:
             attachment=_attachment(in_stock=True),
             product_row=_Product(
                 id=10, tenant_id=1, external_id="ext-10", in_stock=True,
+                meta_catalog_published_at=_PUBLISHED,
             ),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            tenant_products=[
+                _Product(
+                    id=10, tenant_id=1, external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
+            membership=_membership(),
         )
         assert d.action == ProductCardSendAction.SEND_CATALOG
         assert d.reason == REASON_OK
@@ -420,8 +482,21 @@ class TestAttachmentImmutability:
             tenant_id=1,
             connection=_conn(),
             attachment=att,
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
+            membership=_membership(),
         )
         assert att == snapshot
         assert catalog_send_retailer_id(d) == "ext-10"
@@ -434,8 +509,21 @@ class TestPhaseBWiringContract:
             tenant_id=1,
             connection=_conn(),
             attachment=_attachment(),
-            product_row=_Product(id=10, tenant_id=1, external_id="ext-10"),
-            tenant_products=[_Product(id=10, tenant_id=1, external_id="ext-10")],
+            product_row=_Product(
+                id=10,
+                tenant_id=1,
+                external_id="ext-10",
+                meta_catalog_published_at=_PUBLISHED,
+            ),
+            tenant_products=[
+                _Product(
+                    id=10,
+                    tenant_id=1,
+                    external_id="ext-10",
+                    meta_catalog_published_at=_PUBLISHED,
+                )
+            ],
+            membership=_membership(),
         )
         assert should_attempt_catalog_send(ok) is True
 

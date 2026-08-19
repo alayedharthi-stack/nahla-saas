@@ -117,7 +117,14 @@ class TestMetaConfirmedReadiness:
         db = _db_with_products([
             _Product(id=2, title="Published", meta_retailer_id="meta-rid-2"),
         ])
-        cap = evaluate_native_catalog_capability(db, 7, connection=_Conn())
+        with patch(
+            "core.native_catalog_capability.count_memberships_for_catalog",
+            return_value=1,
+        ), patch(
+            "core.native_catalog_capability.first_membership_retailer_id",
+            return_value="meta-rid-2",
+        ):
+            cap = evaluate_native_catalog_capability(db, 7, connection=_Conn())
         assert cap.eligible is True
         assert cap.thumbnail_retailer_id == "meta-rid-2"
 
@@ -131,13 +138,24 @@ class TestMetaConfirmedReadiness:
             ),
             _Product(id=4, title="Published", meta_retailer_id="good-rid"),
         ])
-        assert pick_thumbnail_retailer_id(db, 7) == "good-rid"
+        with patch(
+            "core.native_catalog_capability.first_membership_retailer_id",
+            return_value="good-rid",
+        ):
+            assert pick_thumbnail_retailer_id(db, 7) == "good-rid"
 
     def test_no_tenant_or_catalog_hardcode(self):
         db = _db_with_products([
             _Product(id=5, title="Any tenant", meta_retailer_id="rid-any"),
         ])
-        cap = evaluate_native_catalog_capability(db, 999, connection=_Conn(meta_catalog_id="ANY-CAT"))
+        with patch(
+            "core.native_catalog_capability.count_memberships_for_catalog",
+            return_value=1,
+        ), patch(
+            "core.native_catalog_capability.first_membership_retailer_id",
+            return_value="rid-any",
+        ):
+            cap = evaluate_native_catalog_capability(db, 999, connection=_Conn(meta_catalog_id="ANY-CAT"))
         assert cap.eligible is True
         assert cap.thumbnail_retailer_id == "rid-any"
 
@@ -235,10 +253,14 @@ class TestInvalidatePublishStamp:
         product = _Product(id=9, title="Rejected", meta_retailer_id="bad-rid")
         db = MagicMock()
         db.query.return_value.filter.return_value.all.return_value = [product]
-        cleared = invalidate_meta_catalog_publish_for_retailer_id(db, 7, "bad-rid")
+        with patch(
+            "core.native_catalog_capability.invalidate_meta_catalog_membership",
+            return_value=1,
+        ):
+            cleared = invalidate_meta_catalog_publish_for_retailer_id(
+                db, 7, "bad-rid", catalog_id="CAT-1",
+            )
         assert cleared == 1
-        assert product.meta_catalog_published_at is None
-        db.flush.assert_called_once()
 
 
 class TestBrowseIntentCapabilityRouting:

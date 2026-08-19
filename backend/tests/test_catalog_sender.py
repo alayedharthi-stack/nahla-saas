@@ -345,6 +345,27 @@ def test_send_single_provider_returns_error(monkeypatch) -> None:
     assert "bad catalog" in (result.error or "")
 
 
+def test_send_single_131009_products_not_found(monkeypatch) -> None:
+    async def fake_send(*args, **kwargs):
+        return {
+            "error": {
+                "code": 131009,
+                "message": "(#131009) Parameter value is not valid",
+                "error_data": {"details": "products not found: product_retailer_id R1"},
+            }
+        }, None
+
+    monkeypatch.setattr(cs, "provider_send_message", fake_send)
+    conn = _Conn(meta_catalog_id="CAT1", catalog_enabled=True)
+    result = _run(cs.send_single_product_message(
+        db=None, connection=conn,
+        tenant_id=1, to="966555", phone_id="PH",
+        retailer_id="R1", body_text="x",
+    ))
+    assert result.success is False
+    assert result.reason == "meta_products_not_found"
+
+
 def test_send_single_transport_exception(monkeypatch) -> None:
     async def fake_send(*args, **kwargs):
         raise ConnectionError("upstream timeout")

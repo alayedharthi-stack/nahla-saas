@@ -201,10 +201,12 @@ class Product(Base):
     # 95% of merchants need zero manual mapping. Populate this column
     # only when a merchant publishes products to Meta with custom ids.
     meta_retailer_id = Column(String(255), nullable=True)
-    # Last time we observed / verified this product is live in the
-    # merchant's Meta Catalog. Stays NULL until a future "publish to Meta"
-    # job populates it. Reading code MUST tolerate NULL — absence here
-    # never blocks a send attempt, it only suppresses the freshness badge.
+    # Dashboard / badge / legacy observability only (migration 0061).
+    # This stamp is NOT an authorization source for native Meta catalog
+    # send. Authoritative membership lives on MetaCatalogMembership
+    # (tenant + catalog_id + retailer_id → product/variant), written
+    # only by a complete successful Graph reconcile. Do not treat a
+    # non-NULL stamp as proof that the SKU exists in the connected catalog.
     meta_catalog_published_at = Column(DateTime(timezone=True), nullable=True)
     # ── Product source (migration 0062) ────────────────────────────────────
     # Which adapter / channel produced this row. The catalog feature is
@@ -377,6 +379,54 @@ class ProductVariant(Base):
         UniqueConstraint('product_id', 'salla_variant_id',
                          name='uq_variants_product_salla'),
         Index('ix_variants_tenant_retailer', 'tenant_id', 'retailer_id'),
+    )
+
+
+class MetaCatalogMembership(Base):
+    """Derived Meta Graph catalog membership for one retailer_id.
+
+    Commerce identity remains Product / ProductVariant. This row only
+    records that Graph verified retailer_id R exists in catalog C for
+    tenant T and maps unambiguously to one local product/variant.
+    It does not replace Product.id, ProductVariant.id, external_id,
+    meta_retailer_id, canonical_retailer_id, or source_external_id.
+    """
+
+    __tablename__ = "meta_catalog_memberships"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    catalog_id = Column(String(64), nullable=False)
+    retailer_id = Column(String(255), nullable=False)
+    product_id = Column(
+        Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    variant_id = Column(
+        Integer, ForeignKey("product_variants.id", ondelete="CASCADE"), nullable=True
+    )
+    meta_item_id = Column(String(128), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+    provenance = Column(String(64), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "catalog_id",
+            "retailer_id",
+            name="uq_meta_catalog_memberships_tenant_catalog_retailer",
+        ),
+        Index("ix_meta_catalog_memberships_tenant_catalog", "tenant_id", "catalog_id"),
+        Index(
+            "ix_meta_catalog_memberships_lookup",
+            "tenant_id",
+            "catalog_id",
+            "retailer_id",
+        ),
+        Index(
+            "ix_meta_catalog_memberships_product",
+            "tenant_id",
+            "catalog_id",
+            "product_id",
+        ),
     )
 
 
