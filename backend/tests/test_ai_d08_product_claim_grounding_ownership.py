@@ -21,6 +21,7 @@ from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa
     ProductClaimGroundingGuardResult,
     apply_product_claim_grounding_guard,
     resolve_product_claim_second_pass_reply,
+    should_skip_quality_recompose_after_product_claim,
     stamp_product_claim_guard_provenance,
 )
 
@@ -73,8 +74,24 @@ class TestSecondPassReplyResolution:
             second_pass=second,
             recomposed_reply="fallback line",
             compose_source="fallback_deterministic",
+            fallback_reason="llm_compose_failed",
         )
         assert resolved == "fallback line"
+
+    def test_empty_strip_fallback_source_without_reason_keeps_empty(self) -> None:
+        second = ProductClaimGroundingGuardResult(
+            reply="",
+            action="stripped_empty",
+            replaced=True,
+            stripped=True,
+            scrubbed_empty=True,
+        )
+        resolved = resolve_product_claim_second_pass_reply(
+            second_pass=second,
+            recomposed_reply="fallback line",
+            compose_source="fallback_deterministic",
+        )
+        assert resolved == ""
 
     def test_empty_strip_without_fallback_keeps_empty(self) -> None:
         second = ProductClaimGroundingGuardResult(
@@ -234,3 +251,52 @@ class TestPipelineComposeOnce:
         assert composer.compose.await_count == 1
         assert reply == recomposed
         assert result_data["product_claim_recompose_performed"] is True
+
+
+class TestQualityRecomposeSkipAndExport:
+    def test_quality_recompose_skipped_after_product_claim_recompose(self) -> None:
+        assert should_skip_quality_recompose_after_product_claim(
+            {"product_claim_recompose_performed": True},
+        )
+        assert should_skip_quality_recompose_after_product_claim({}) is False
+
+    def test_compose_failed_restores_recomposed_text(self) -> None:
+        second = ProductClaimGroundingGuardResult(
+            reply="",
+            action="stripped_empty",
+            replaced=True,
+            stripped=True,
+            scrubbed_empty=True,
+        )
+        resolved = resolve_product_claim_second_pass_reply(
+            second_pass=second,
+            recomposed_reply="constitutional fallback line",
+            compose_source="persona_llm",
+            compose_failed=True,
+        )
+        assert resolved == "constitutional fallback line"
+
+    def test_export_includes_product_claim_provenance_flags(self) -> None:
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            extract_reply_metadata_export,
+        )
+
+        exported = extract_reply_metadata_export(
+            {
+                "compose_source": "persona_llm",
+                "response_mode": "llm",
+                "chosen_path": "llm_reply",
+                "llm_candidate_present": True,
+                "final_text_transformed": True,
+                "final_transform_reasons": ["product_claim_grounding_guard"],
+                "product_claim_stripped": True,
+                "product_claim_blocked": True,
+                "product_claim_blocked_kinds": ["ungrounded_comparison"],
+                "product_claim_recompose_requested": True,
+                "product_claim_recompose_performed": True,
+            },
+        )
+        assert exported["product_claim_stripped"] is True
+        assert exported["product_claim_recompose_requested"] is True
+        assert exported["product_claim_recompose_performed"] is True
+        assert exported["product_claim_blocked"] is True

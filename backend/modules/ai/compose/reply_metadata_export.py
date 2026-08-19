@@ -29,6 +29,11 @@ BRAIN_REPLY_METADATA_EXPORT_KEYS: Tuple[str, ...] = (
     "presentation_candidate_count",
     "pending_product_card_count",
     "pending_product_card_ids",
+    "product_claim_stripped",
+    "product_claim_blocked",
+    "product_claim_blocked_kinds",
+    "product_claim_recompose_requested",
+    "product_claim_recompose_performed",
 )
 
 PERSONA_ROUTE_PROVENANCE_FIELDS: Tuple[str, ...] = (

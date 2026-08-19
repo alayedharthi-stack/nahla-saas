@@ -4968,6 +4968,13 @@ class MerchantBrain:
                     stamp_product_claim_guard_provenance(result.data, _pcgg)
                     if _pcgg.requires_grounded_recompose:
                         result.data["product_claim_recompose_requested"] = True
+                        if "compose_reply_candidate" in result.data:
+                            result.data.setdefault(
+                                "product_claim_original_compose_candidate",
+                                result.data.get("compose_reply_candidate"),
+                            )
+                        _pcgg_recomposed = None
+                        _pcgg_compose_failed = False
                         try:
                             from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
 
@@ -4978,11 +4985,18 @@ class MerchantBrain:
                                     decision, result, ctx,
                                 )
                         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                            _pcgg_recomposed = await self._composer.compose(
-                                decision, result, ctx,
-                            )
+                            if _pcgg_recomposed is None:
+                                try:
+                                    _pcgg_recomposed = await self._composer.compose(
+                                        decision, result, ctx,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    _pcgg_compose_failed = True
+                                    _pcgg_recomposed = ""
+                        if not (_pcgg_recomposed or "").strip():
+                            _pcgg_compose_failed = True
                         if (_pcgg_recomposed or "").strip():
-                            result.data["compose_reply_candidate"] = (
+                            result.data["product_claim_recompose_candidate"] = (
                                 _pcgg_recomposed or ""
                             ).strip()
                         result.data["product_claim_recompose_performed"] = True
@@ -5014,6 +5028,10 @@ class MerchantBrain:
                                 compose_source=str(
                                     result.data.get("compose_source") or ""
                                 ),
+                                fallback_reason=str(
+                                    result.data.get("fallback_reason") or ""
+                                ),
+                                compose_failed=_pcgg_compose_failed,
                             )
                             _guard_replaced["product_claim_grounding_guard"] = True
                         elif (_pcgg_recomposed or "").strip():
@@ -5296,7 +5314,10 @@ class MerchantBrain:
                         result.data.get("llm_candidate_present")
                     ),
                 )
-                if _crqg.requires_grounded_recompose:
+                if (
+                    _crqg.requires_grounded_recompose
+                    and not result.data.get("product_claim_recompose_performed")
+                ):
                     result.data["quality_guard_recompose_attempted"] = True
                     _cards_before_recompose = list(
                         result.data.get("pending_product_cards") or []

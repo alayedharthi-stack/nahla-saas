@@ -488,15 +488,33 @@ def resolve_product_claim_second_pass_reply(
     second_pass: ProductClaimGroundingGuardResult,
     recomposed_reply: str,
     compose_source: str = "",
+    fallback_reason: str = "",
+    compose_failed: bool = False,
 ) -> str:
-    """Choose final reply after one grounded recompose and strip-only second pass."""
+    """Choose final reply after one grounded recompose and strip-only second pass.
+
+    Evidence-rejected recomposed text is not restored unless this pass had a
+    genuine compose failure (empty/exception) or constitutional fallback
+    metadata is present.
+    """
     if second_pass.replaced or second_pass.stripped:
         if not second_pass.scrubbed_empty:
             return second_pass.reply
-        if str(compose_source or "") == "fallback_deterministic":
+        genuine_fallback = bool(compose_failed) or (
+            str(compose_source or "") == "fallback_deterministic"
+            and bool(str(fallback_reason or "").strip())
+        )
+        if genuine_fallback:
             return (recomposed_reply or "").strip()
         return second_pass.reply
     return (recomposed_reply or "").strip()
+
+
+def should_skip_quality_recompose_after_product_claim(
+    result_data: Optional[Dict[str, Any]],
+) -> bool:
+    """True when this turn already consumed the single product-claim recompose."""
+    return bool((result_data or {}).get("product_claim_recompose_performed"))
 
 
 def log_product_claim_grounding_guard(
