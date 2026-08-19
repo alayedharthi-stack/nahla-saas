@@ -1001,6 +1001,9 @@ class Customer(Base):
     acquisition_channel = Column(String, nullable=True, index=True)
     first_seen_at       = Column(DateTime(timezone=True), nullable=True)
     last_interaction_at = Column(DateTime(timezone=True), nullable=True)
+    # Set once when the merchant is emailed for this tenant-scoped first contact.
+    # Survives conversation archive/delete; never used as conversation SoT.
+    first_contact_notified_at = Column(DateTime(timezone=True), nullable=True)
 
 class CustomerAddress(Base):
     __tablename__ = 'customer_addresses'
@@ -2041,7 +2044,7 @@ class NotificationLog(Base):
 
     Rules:
     - type: 'email' | 'in_app' | 'sms'
-    - event: 'new_whatsapp_message' | 'returning_customer' | 'new_order' | 'support_request'
+    - event: 'first_customer_contact' | 'new_whatsapp_message' | 'returning_customer' | 'new_order' | 'support_request'
     - status: 'sent' | 'skipped'
     - reason: optional human-readable reason (Arabic) stored when status='skipped'
     """
