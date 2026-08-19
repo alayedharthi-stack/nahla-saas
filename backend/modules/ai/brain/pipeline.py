@@ -4999,6 +4999,9 @@ class MerchantBrain:
                             result.data["product_claim_recompose_candidate"] = (
                                 _pcgg_recomposed or ""
                             ).strip()
+                            result.data["compose_reply_candidate"] = (
+                                _pcgg_recomposed or ""
+                            ).strip()
                         result.data["product_claim_recompose_performed"] = True
                         _pcgg_meta["product_claim_recompose_performed"] = True
                         _pcgg_second = apply_product_claim_grounding_guard(

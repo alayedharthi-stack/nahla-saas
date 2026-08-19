@@ -300,3 +300,30 @@ class TestQualityRecomposeSkipAndExport:
         assert exported["product_claim_recompose_requested"] is True
         assert exported["product_claim_recompose_performed"] is True
         assert exported["product_claim_blocked"] is True
+
+    def test_finalize_uses_recompose_candidate_not_original(self) -> None:
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            finalize_post_guard_compose_provenance,
+        )
+
+        original = "الفستان أحلى من البديل."
+        recomposed = "أقدر أرسل لك الخيارات المتوفرة."
+        data = {
+            "compose_source": "persona_llm",
+            "llm_candidate_present": True,
+            "compose_reply_candidate": original,
+            "product_claim_original_compose_candidate": original,
+            "product_claim_recompose_candidate": recomposed,
+            "product_claim_recompose_performed": True,
+        }
+        data["compose_reply_candidate"] = recomposed
+        finalize_post_guard_compose_provenance(
+            data,
+            final_text=recomposed,
+            guard_replaced={"product_claim_grounding_guard": True},
+        )
+        assert data.get("final_customer_text_source") in {
+            "persona_llm_postprocess",
+            "llm_postprocess",
+        }
+        assert data["product_claim_original_compose_candidate"] == original
