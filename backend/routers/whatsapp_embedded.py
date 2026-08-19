@@ -358,13 +358,12 @@ _TRANSIENT_META_FETCH_CODES = frozenset({
 })
 _GRAPH_OBJECT_MISSING_SUBCODE = 33
 _AUTHORITATIVE_META_FETCH_CODES = frozenset({_GRAPH_OBJECT_MISSING_SUBCODE, 803})
+# Unambiguous deletion only. Graph "Unsupported get request" / "does not exist"
+# is also used for missing permissions, so those tokens are not proof.
 _AUTHORITATIVE_FETCH_MESSAGE_TOKENS = (
-    "DOES NOT EXIST",
-    "DOES_NOT_EXIST",
     "HAS BEEN DELETED",
-    "OBJECT DOES NOT EXIST",
-    "UNSUPPORTED GET REQUEST",
     "PHONE NUMBER HAS BEEN DELETED",
+    "WABA HAS BEEN DELETED",
 )
 
 
@@ -372,8 +371,10 @@ def _meta_fetch_failure_kind(err: Dict[str, Any]) -> str:
     """Classify a Meta phone-GET failure as transient or authoritative.
 
     Transient means verification is unavailable (timeout, code 2, 5xx,
-    rate limit). That must not prove the connection itself ended.
-    Authoritative means Meta proved the phone/object is gone.
+    rate limit, permission-ambiguous Graph get). That must not prove
+    the connection itself ended.
+    Authoritative means Meta proved the phone/object is gone via Graph
+    object-missing subcode, code 803, or an unambiguous deleted token.
     Unknown fetch errors default to transient because they do not prove
     the connection ended.
     """

@@ -624,13 +624,26 @@ def test_wa2_16_authoritative_hard_failure_can_demote(monkeypatch, db):
     assert conn.sending_enabled is False
 
 
+_AMBIGUOUS_UNSUPPORTED_GET = {
+    "code": 100,
+    "message": (
+        "Unsupported get request. Object with ID '123' does not exist, "
+        "cannot be loaded due to missing permissions, or does not support this operation"
+    ),
+}
+
+
 def test_wa2_16b_classifier_keeps_transient_and_hard_split():
     assert _meta_fetch_failure_kind({"code": 2}) == "transient"
     assert _meta_fetch_failure_kind({"http_status": 502, "message": "Bad Gateway"}) == "transient"
     assert _meta_fetch_failure_kind({"type": "timeout", "message": "timed out"}) == "transient"
     assert _meta_fetch_failure_kind({"code": 100, "message": "Invalid parameter"}) == "transient"
-    assert _meta_fetch_failure_kind({"code": 100, "message": "Unsupported get request"}) == "authoritative"
+    assert _meta_fetch_failure_kind({"code": 100, "message": "Unsupported get request"}) == "transient"
+    assert _meta_fetch_failure_kind(_AMBIGUOUS_UNSUPPORTED_GET) == "transient"
+    assert _meta_fetch_failure_kind({"code": 803}) == "authoritative"
+    assert _meta_fetch_failure_kind({"error_subcode": _GRAPH_OBJECT_MISSING_SUBCODE}) == "authoritative"
     assert _meta_fetch_failure_kind({"code": _GRAPH_OBJECT_MISSING_SUBCODE, "message": "Object does not exist"}) == "authoritative"
+    assert _meta_fetch_failure_kind({"message": "Phone number has been deleted"}) == "authoritative"
 
 
 def test_wa2_17_embedded_cloud_connected_transient_does_not_demote(monkeypatch, db):
@@ -660,3 +673,32 @@ def test_wa2_17_embedded_cloud_connected_transient_does_not_demote(monkeypatch, 
     assert conn.sending_enabled is sending
     assert conn.connected_at == connected_at
     assert (conn.extra_metadata or {}).get("connection_mode") != "coexistence"
+
+
+def test_wa2_18_permission_ambiguous_unsupported_get_does_not_demote(monkeypatch, db):
+    _t, conn = _connected_coexistence(db)
+    sending = conn.sending_enabled
+    connected_at = conn.connected_at
+    _patch_phone_error(monkeypatch, _AMBIGUOUS_UNSUPPORTED_GET)
+    payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    assert payload["status"] == "connected"
+    assert conn.status == "connected"
+    assert conn.sending_enabled is sending
+    assert conn.connected_at == connected_at
+
+
+def test_wa2_16c_graph_object_missing_subcode_can_demote(monkeypatch, db):
+    err = {
+        "code": 100,
+        "error_subcode": _GRAPH_OBJECT_MISSING_SUBCODE,
+        "message": _AMBIGUOUS_UNSUPPORTED_GET["message"],
+    }
+    assert _meta_fetch_failure_kind(err) == "authoritative"
+    _t, conn = _connected_coexistence(db)
+    _patch_phone_error(monkeypatch, err)
+    payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    assert payload["status"] == "error"
+    assert conn.status == "error"
+    assert conn.sending_enabled is False
