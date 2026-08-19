@@ -3508,6 +3508,21 @@ async def _dispatch_message(
             )
             if _lead:
                 _inbound_customer_id = _lead.id
+            if _lead and _hist_skip_live:
+                try:
+                    from services.merchant_first_contact import (  # noqa: PLC0415
+                        suppress_first_contact,
+                    )
+                    suppress_first_contact(
+                        db=db,
+                        tenant_id=resolved_tenant_id,
+                        customer=_lead,
+                    )
+                except Exception as _hist_stamp_exc:
+                    logger.debug(
+                        "[Webhook] history first-contact suppress failed: %s",
+                        _hist_stamp_exc,
+                    )
 
             # ── Delivery Quality: auto-reinstate suppression on inbound ──
             # If this phone was previously auto-suppressed (e.g. after
@@ -3748,21 +3763,8 @@ async def _dispatch_message(
             except Exception as _unsub_exc:
                 logger.warning("[Webhook] Unsubscribe gate error: %s", _unsub_exc)
 
-            if _unsub_short_circuit:
-                # Skip automation / AI for unsubscribe-related events.
-                try:
-                    from core.inbound_lifecycle import (  # noqa: PLC0415
-                        EVENT_UNSUB_SHORT_CIRCUIT, EVENT_END_DROPPED,
-                        record_lifecycle,
-                    )
-                    record_lifecycle(EVENT_UNSUB_SHORT_CIRCUIT)
-                    record_lifecycle(EVENT_END_DROPPED)
-                except Exception:
-                    pass
-                return
-
-            # ── Email: first tenant-scoped customer contact only ────────────
-            # Not per conversation, not after 24h silence, not per inbound.
+            # First-contact email before unsubscribe return so a new customer's
+            # first inbound (even an opt-out keyword) still notifies the merchant.
             if not _hist_skip_live:
                 try:
                     from services.merchant_first_contact import (  # noqa: PLC0415
@@ -3783,13 +3785,26 @@ async def _dispatch_message(
                 except Exception as _em:
                     logger.debug("[Webhook] first-contact email error: %s", _em)
 
-                track_conversation(
-                    db,
-                    resolved_tenant_id,
-                    normalized_sender,
-                    source="inbound",
-                    category="service",
-                )
+            if _unsub_short_circuit:
+                # Skip automation / AI for unsubscribe-related events.
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_UNSUB_SHORT_CIRCUIT, EVENT_END_DROPPED,
+                        record_lifecycle,
+                    )
+                    record_lifecycle(EVENT_UNSUB_SHORT_CIRCUIT)
+                    record_lifecycle(EVENT_END_DROPPED)
+                except Exception:
+                    pass
+                return
+
+            track_conversation(
+                db,
+                resolved_tenant_id,
+                normalized_sender,
+                source="inbound",
+                category="service",
+            )
         except Exception as exc:
             logger.warning(
                 "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",

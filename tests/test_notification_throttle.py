@@ -17,6 +17,7 @@ for _p in (str(_BACKEND), str(_DB_DIR), str(_BACKEND.parent)):
 
 from models import Base, Customer, Tenant  # noqa: E402
 from routers.whatsapp_webhook import _should_notify_merchant_email  # noqa: E402
+from services.merchant_first_contact import STAMP_KEY  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
 
@@ -46,7 +47,9 @@ def _cust(db, *, channel="whatsapp_inbound", notified=None, last=None):
         acquisition_channel=channel,
         first_seen_at=NOW - timedelta(minutes=2),
         last_interaction_at=last or NOW - timedelta(minutes=2),
-        first_contact_notified_at=notified,
+        extra_metadata=(
+            {STAMP_KEY: notified.isoformat()} if notified is not None else None
+        ),
     )
     db.add(row)
     db.commit()

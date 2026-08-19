@@ -1001,9 +1001,6 @@ class Customer(Base):
     acquisition_channel = Column(String, nullable=True, index=True)
     first_seen_at       = Column(DateTime(timezone=True), nullable=True)
     last_interaction_at = Column(DateTime(timezone=True), nullable=True)
-    # Set once when the merchant is emailed for this tenant-scoped first contact.
-    # Survives conversation archive/delete; never used as conversation SoT.
-    first_contact_notified_at = Column(DateTime(timezone=True), nullable=True)
 
 class CustomerAddress(Base):
     __tablename__ = 'customer_addresses'

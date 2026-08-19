@@ -20,7 +20,10 @@ for _p in (REPO_ROOT, BACKEND_DIR, REPO_ROOT / "database"):
 from models import Base, Customer, Tenant, User  # noqa: E402
 from services.merchant_first_contact import (  # noqa: E402
     EVENT_FIRST_CUSTOMER_CONTACT,
+    STAMP_KEY,
     maybe_notify_first_customer,
+    stamp_value,
+    suppress_first_contact,
     try_claim_first_contact,
 )
 from services.email_service import _render  # noqa: E402
@@ -73,16 +76,28 @@ def _merchant(db, tenant: Tenant, *, email: str, username: str) -> User:
     return row
 
 
-def _customer(db, tenant: Tenant, *, phone: str, channel="whatsapp_inbound", notified=None):
+def _customer(
+    db,
+    tenant: Tenant,
+    *,
+    phone: str,
+    channel="whatsapp_inbound",
+    notified=None,
+    first_seen=None,
+):
+    meta = None
+    if notified is not None:
+        stamp = notified.isoformat() if hasattr(notified, "isoformat") else str(notified)
+        meta = {STAMP_KEY: stamp}
     row = Customer(
         tenant_id=tenant.id,
         phone=phone,
         normalized_phone=phone,
         name="أحمد سالم",
         acquisition_channel=channel,
-        first_seen_at=NOW,
+        first_seen_at=first_seen if first_seen is not None else NOW,
         last_interaction_at=NOW,
-        first_contact_notified_at=notified,
+        extra_metadata=meta,
     )
     db.add(row)
     db.commit()
@@ -111,7 +126,7 @@ def test_new_whatsapp_customer_sends_one_email(db):
     assert kwargs["template"] == "first_whatsapp_message"
     assert "عميل جديد" in kwargs["subject"]
     db.refresh(cust)
-    assert cust.first_contact_notified_at is not None
+    assert stamp_value(cust) is not None
 
 
 def test_second_message_does_not_email(db):
@@ -168,7 +183,7 @@ def test_near_simultaneous_claims_only_one_wins(db):
         phone="+966500000005",
         normalized_phone="+966500000005",
         acquisition_channel="whatsapp_inbound",
-        first_contact_notified_at=None,
+        extra_metadata={},
     )
     stale.id = cust.id
     second = try_claim_first_contact(db=db, tenant_id=t.id, customer=stale)
@@ -221,11 +236,7 @@ def test_archive_does_not_reset_first_contact(db):
     assert result["reason"] == "already_notified"
     assert enq.call_count == 0
     db.refresh(cust)
-    assert cust.first_contact_notified_at is not None
-    got = cust.first_contact_notified_at
-    if getattr(got, "tzinfo", None) is None:
-        got = got.replace(tzinfo=timezone.utc)
-    assert got == notified_at
+    assert stamp_value(cust) == notified_at.isoformat()
 
 
 def test_imported_customer_does_not_get_new_customer_email(db):
@@ -240,7 +251,11 @@ def test_imported_customer_does_not_get_new_customer_email(db):
     assert result["reason"] == "existing_relationship"
     assert enq.call_count == 0
     db.refresh(cust)
-    assert cust.first_contact_notified_at is None
+    assert stamp_value(cust) is not None
+    again = maybe_notify_first_customer(
+        db=db, tenant_id=t.id, customer=cust, customer_phone="+966500000008",
+    )
+    assert again["send"] is False
 
 
 def test_salla_synced_customer_does_not_get_new_customer_email(db):
@@ -268,12 +283,56 @@ def test_silence_does_not_reemail(db):
     assert enq.call_count == 0
 
 
+def test_preexisting_whatsapp_customer_is_not_new_now(db):
+    t = _tenant(db, "متجر قديم")
+    _merchant(db, t, email="owner@example.com", username="نورة")
+    cust = _customer(
+        db, t, phone="+966500000011",
+        first_seen=NOW - timedelta(days=12),
+    )
+    with patch("services.email_service.enqueue_email") as enq:
+        result = maybe_notify_first_customer(
+            db=db, tenant_id=t.id, customer=cust, customer_phone="+966500000011",
+        )
+    assert result["send"] is False
+    assert result["reason"] == "existing_relationship"
+    assert enq.call_count == 0
+    db.refresh(cust)
+    assert stamp_value(cust) is not None
+
+
+def test_history_suppress_then_live_inbound_does_not_email(db):
+    t = _tenant(db, "متجر تاريخي")
+    _merchant(db, t, email="owner@example.com", username="نورة")
+    cust = _customer(db, t, phone="+966500000012")
+    suppressed = suppress_first_contact(db=db, tenant_id=t.id, customer=cust)
+    assert suppressed["send"] is False
+    with patch("services.email_service.enqueue_email") as enq:
+        live = maybe_notify_first_customer(
+            db=db, tenant_id=t.id, customer=cust, customer_phone="+966500000012",
+        )
+    assert live["send"] is False
+    assert live["reason"] == "already_notified"
+    assert enq.call_count == 0
+
+
+def test_notify_runs_before_unsubscribe_short_circuit():
+    text = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(encoding="utf-8")
+    notify_at = text.index("maybe_notify_first_customer(")
+    unsub_return_at = text.index("if _unsub_short_circuit:")
+    assert notify_at < unsub_return_at
+    assert "suppress_first_contact" in text
+    assert text.count("maybe_notify_first_customer(") == 1
+
+
 def test_history_gate_still_wraps_notify_in_webhook():
     text = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(encoding="utf-8")
-    inbound = text[text.index("# ── Email: first tenant-scoped"):text.index("track_conversation(")]
-    assert "if not _hist_skip_live:" in inbound
-    assert "maybe_notify_first_customer" in inbound
-    assert inbound.count("maybe_notify_first_customer(") == 1
+    notify_block = text[
+        text.index("# First-contact email before unsubscribe return"):
+        text.index("if _unsub_short_circuit:")
+    ]
+    assert "if not _hist_skip_live:" in notify_block
+    assert "maybe_notify_first_customer" in notify_block
 
 
 def test_ai_outbound_does_not_send_first_contact_email():
@@ -313,3 +372,6 @@ def test_long_email_does_not_overflow_layout():
     assert "عميل جديد بدأ محادثة عبر واتساب" in html
     assert "عرض المحادثة" in html
     assert "دخل تلقائيًا في حملة" not in html
+    customer_cell = html[html.index("العميل"): html.index("الهاتف")]
+    assert "font-weight:600" in customer_cell
+    assert "font-size:15px" in customer_cell
