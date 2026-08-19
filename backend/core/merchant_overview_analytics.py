@@ -382,7 +382,7 @@ def compute_overview_kpis(
     if inbound_eligible == 0:
         ai_rate: Optional[float] = None
     else:
-        ai_rate = round(min(ai_outbound, inbound_eligible) / inbound_eligible * 100.0, 1)
+        ai_rate = round((ai_outbound / inbound_eligible) * 100.0, 1)
 
     recent_conversations_out: List[Dict[str, Any]] = []
     try:

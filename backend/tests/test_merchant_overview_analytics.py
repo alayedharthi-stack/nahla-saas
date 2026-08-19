@@ -303,6 +303,20 @@ def test_existing_customer_not_counted_as_new(db):
     assert kpis["new_customers"] == 0
 
 
+def test_ai_rate_follows_numerator_over_denominator(db):
+    tenant = _tenant(db, "uncapped-rate")
+    t = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+    for _ in range(2):
+        _inbound(db, tenant.id, t)
+    for _ in range(5):
+        _ai_out(db, tenant.id, t)
+    db.commit()
+    kpis = compute_overview_kpis(db, tenant.id, "today", now=NOW)
+    assert kpis["ai_rate_numerator"] == 5
+    assert kpis["ai_rate_denominator"] == 2
+    assert kpis["ai_rate"] == 250.0
+
+
 def test_human_outbound_does_not_inflate_ai_rate(db):
     tenant = _tenant(db, "human-takeover")
     t = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)

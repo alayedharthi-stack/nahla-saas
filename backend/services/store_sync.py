@@ -1,13 +1,13 @@
 """
 services/store_sync.py
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+───────────────────────
 Store Knowledge Sync Service.
 
 Responsibilities
-  â€¢ Initial full sync â€” fetch everything from the store adapter after connection
-  â€¢ Incremental sync  â€” called by platform webhooks for individual entity updates
-  â€¢ Snapshot update   â€” maintain StoreKnowledgeSnapshot so AI always has fresh data
-  â€¢ Job tracking      â€” write StoreSyncJob rows so dashboard can show progress
+  • Initial full sync — fetch everything from the store adapter after connection
+  • Incremental sync  — called by platform webhooks for individual entity updates
+  • Snapshot update   — maintain StoreKnowledgeSnapshot so AI always has fresh data
+  • Job tracking      — write StoreSyncJob rows so dashboard can show progress
 
 Usage
   svc = StoreSyncService(db, tenant_id)
@@ -88,17 +88,17 @@ from core.catalog_image import (  # noqa: E402
 logger = logging.getLogger("nahla-backend")
 
 
-# â”€â”€ Data normalisation helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Data normalisation helpers ────────────────────────────────────────────────
 
 import re as _re
 
 def _normalize_phone(raw_phone) -> str:
-    """Returns E.164 or '' â€” backward-compat wrapper."""
+    """Returns E.164 or '' — backward-compat wrapper."""
     return intelligence_normalize_phone(raw_phone)
 
 
 def _e164(raw_phone) -> Optional[str]:
-    """Returns E.164 or None â€” used for normalized_phone column."""
+    """Returns E.164 or None — used for normalized_phone column."""
     return _normalize_to_e164(str(raw_phone or "").strip())
 
 
@@ -167,24 +167,24 @@ def _preserve_existing_product_images(
             normalised["additional_images"] = list(previous_extra)
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Parent / variant catalog layer (migration 0064 â€” Phase 2)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ─────────────────────────────────────────────────────────────────────────────
+# Parent / variant catalog layer (migration 0064 — Phase 2)
+# ─────────────────────────────────────────────────────────────────────────────
 #
 # Every parent ``Product`` row must end up with at least one sellable
 # ``ProductVariant`` row after a sync. There are three cases we handle:
 #
-#   1. Salla returned a non-empty ``variants`` array â€” one variant row
+#   1. Salla returned a non-empty ``variants`` array — one variant row
 #      per element. Match by ``salla_variant_id`` (== the platform
 #      variant id) so a re-sync updates in place instead of duplicating.
 #
-#   2. Salla returned an empty array â€” we create exactly one
+#   2. Salla returned an empty array — we create exactly one
 #      ``is_default=True`` synthetic variant mirroring the parent. This
 #      keeps the downstream contract simple: senders / brain / Google
 #      feed always go through ``product_variants``, never through
 #      "the parent itself".
 #
-#   3. A variant that used to be there disappears from Salla â€” we
+#   3. A variant that used to be there disappears from Salla — we
 #      SOFT-DELETE (``in_stock=False``) rather than ``db.delete`` so:
 #         * order_items.variant_id history stays referentially clean
 #           once that FK lands later, and
@@ -193,7 +193,7 @@ def _preserve_existing_product_images(
 #
 # This helper is invoked from ``sync_products`` AFTER the parent row
 # has been flushed (so ``product.id`` is populated for the FK). Soft-
-# disabled via the ``CATALOG_VARIANT_SYNC`` env flag â€” flip to "false"
+# disabled via the ``CATALOG_VARIANT_SYNC`` env flag — flip to "false"
 # to roll back variant writes without touching the parent path.
 
 
@@ -280,7 +280,7 @@ def _coerce_variant_dict(raw: Any) -> Dict[str, Any]:
             pass
     if isinstance(raw, dict):
         return dict(raw)
-    # Bare object â€” best-effort attribute scrape.
+    # Bare object — best-effort attribute scrape.
     return {
         k: getattr(raw, k, None)
         for k in ("id", "title", "price", "sale_price", "regular_price",
@@ -298,7 +298,7 @@ def _resolve_variant_retailer_id(parent: Any, variant_id: Optional[int],
       1. The merchant's parent-level override (``meta_retailer_id``)
          when it carries a hyphenated shape like ``parent-variant``;
          we split it so per-variant ids round-trip cleanly.
-      2. ``{parent.external_id}-{salla_variant_id}`` when both exist â€”
+      2. ``{parent.external_id}-{salla_variant_id}`` when both exist —
          the convention Salla's Meta Commerce auto-publish uses.
       3. ``nahla_v_{variant_id}`` synthetic fallback so a send never
          goes out without a retailer_id.
@@ -307,7 +307,7 @@ def _resolve_variant_retailer_id(parent: Any, variant_id: Optional[int],
     parent_ext = (getattr(parent, "external_id", "") or "").strip()
     parent_override = (getattr(parent, "meta_retailer_id", "") or "").strip()
     if parent_override and "-" in parent_override and salla_id:
-        # Merchant put a ``parent-variant`` shape on the parent â€”
+        # Merchant put a ``parent-variant`` shape on the parent —
         # respect it by swapping in the per-variant suffix.
         head, _, _tail = parent_override.partition("-")
         if head:
@@ -330,14 +330,14 @@ def _upsert_variants_for(db: Session, product: Any,
       * Variants present in ``normalised['variants']`` are upserted
         keyed by ``(product_id, salla_variant_id)``.
       * Variants previously persisted but not in this run are SOFT-
-        PRUNED â€” ``in_stock=False`` rather than deleted.
+        PRUNED — ``in_stock=False`` rather than deleted.
       * If the adapter returned an empty array we ensure exactly one
         ``is_default=True`` synthetic row exists.
       * Parent flags ``has_variants`` / ``default_variant_id`` are
         re-stamped at the end.
 
     No-op when the env flag is off. Tolerant of partial / malformed
-    variant payloads â€” we log and skip individual rows rather than
+    variant payloads — we log and skip individual rows rather than
     abort the whole sync.
     """
     if not _variant_sync_enabled():
@@ -355,7 +355,7 @@ def _upsert_variants_for(db: Session, product: Any,
     parent_image = coerce_image_url(normalised.get("image_url")) or ""
 
     # Index existing rows for O(1) lookup. ``salla_variant_id`` may be
-    # NULL (synthetic default rows) â€” we match those by ``is_default``.
+    # NULL (synthetic default rows) — we match those by ``is_default``.
     existing_rows = (
         db.query(ProductVariant)
           .filter(ProductVariant.product_id == product.id)
@@ -372,12 +372,12 @@ def _upsert_variants_for(db: Session, product: Any,
     seen_salla_ids: set = set()
 
     if raw_variants:
-        # â”€â”€ Case 1: real variants from the adapter â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Case 1: real variants from the adapter ──────────────────
         for raw_v in raw_variants:
             v_dict = _coerce_variant_dict(raw_v)
             sid = str(v_dict.get("id") or "").strip() or None
             if not sid:
-                # No platform id â€” we can't upsert reliably. Skip.
+                # No platform id — we can't upsert reliably. Skip.
                 logger.warning(
                     "[catalog/variants] tenant=%s product=%s skipping "
                     "variant without id: %r",
@@ -449,18 +449,18 @@ def _upsert_variants_for(db: Session, product: Any,
                 row.in_stock = False
         # If a synthetic default existed earlier (e.g. the product
         # used to be option-less and now sprouted variants) flag it
-        # as out of stock so it doesn't pollute sends â€” but DON'T
+        # as out of stock so it doesn't pollute sends — but DON'T
         # delete it; orders may still reference it.
         if default_row is not None:
             default_row.in_stock = False
     else:
-        # â”€â”€ Case 2: no variants â†’ ensure one synthetic default exists.
+        # ── Case 2: no variants → ensure one synthetic default exists.
         if default_row is None and not existing_rows:
             new_default_rid = _resolve_variant_retailer_id(
                 product, None, None,
             )
             if not new_default_rid:
-                # Fall back to the canonical chain â€” this never returns
+                # Fall back to the canonical chain — this never returns
                 # empty for a flushed parent (synthesises nahla_p_<id>).
                 try:
                     from core.catalog import canonical_retailer_id  # noqa: PLC0415
@@ -664,12 +664,12 @@ def _compute_one_product_sync_diff(
 def _extract_status_string(status: Any, fallback: str = "unknown") -> str:
     """
     Salla (and some other platforms) return order/product status as either:
-      â€¢ a plain string  e.g. "under_review"
-      â€¢ a dict          e.g. {"id": 566146469, "name": "ط¨ط¥ظ†طھط¸ط§ط± ط§ظ„ظ…ط±ط§ط¬ط¹ط©",
+      • a plain string  e.g. "under_review"
+      • a dict          e.g. {"id": 566146469, "name": "بإنتظار المراجعة",
                                "slug": "under_review", "customized": {...}}
 
-    The DB column is VARCHAR â€” always return a plain string.
-    Priority: slug â†’ name â†’ str(fallback)
+    The DB column is VARCHAR — always return a plain string.
+    Priority: slug → name → str(fallback)
     """
     if isinstance(status, dict):
         return str(status.get("slug") or status.get("name") or fallback)
@@ -682,9 +682,9 @@ def _extract_status_string(status: Any, fallback: str = "unknown") -> str:
 def _extract_amount_string(value: Any) -> str:
     """
     Salla sometimes sends monetary fields as:
-      â€¢ a plain number/string  â†’ return as-is
-      â€¢ a dict {"amount": 100, "currency": "SAR"} â†’ extract amount
-      â€¢ an ``amounts`` container â†’ extract grand total
+      • a plain number/string  → return as-is
+      • a dict {"amount": 100, "currency": "SAR"} → extract amount
+      • an ``amounts`` container → extract grand total
 
     Always returns a string safe for the VARCHAR `total` column.
     """
@@ -734,7 +734,7 @@ def _normalise_order(raw: Any) -> Dict:
         raw_total = raw.get("total") or raw.get("sub_total") or raw.get("amounts", {})
 
     external_id = str(raw.get("id", raw.get("external_id", ""))).strip()
-    # Human-visible order number â€” prefer the platform's explicit
+    # Human-visible order number — prefer the platform's explicit
     # reference_id (Salla), fall back to a few common synonyms (Zid uses
     # `code`, Shopify uses `name`/`order_number`), and finally to the
     # external_id so the column is never blank.
@@ -795,7 +795,7 @@ def _record_external_lifecycle_shadow_best_effort(
     normalized_order: Dict[str, Any],
     raw_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Isolated best-effort PR 2C shadow write â€” never fails order ingestion."""
+    """Isolated best-effort PR 2C shadow write — never fails order ingestion."""
     try:
         from core.commerce_lifecycle.external_shadow_producer import (  # noqa: PLC0415
             record_external_order_transition_shadow,
@@ -923,16 +923,16 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
 
       * The cart's primary key is ``id`` (small integer).
       * ``total`` is ``{"amount": <number>, "currency": "SAR"}``.
-      * ``customer`` carries ``{id, name, mobile, email, ...}`` â€” the
+      * ``customer`` carries ``{id, name, mobile, email, ...}`` — the
         phone is in ``mobile``, not ``phone``.
       * ``checkout_url`` is the resume-cart URL we surface to the dashboard
-        and to the WhatsApp recovery flow â€” never compute it ourselves.
+        and to the WhatsApp recovery flow — never compute it ourselves.
       * ``items`` is the line-item list; we keep it verbatim so the cart
         editor / recovery message can render product names.
       * ``created_at`` and ``updated_at`` are nested objects
         ``{date, timezone, timezone_type}``, NOT plain strings. The old
         normalizer fell through ``str(dict)`` here and produced a row
-        with an unparseable timestamp â€” handled now via
+        with an unparseable timestamp — handled now via
         ``_flatten_salla_datetime``.
 
     We intentionally prefix the external_id with ``cart-`` so an abandoned
@@ -974,7 +974,7 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
     customer_name = str(customer_name).strip()
 
     # Flatten the Salla nested {date, timezone} shape BEFORE handing
-    # the dict to ``_extract_order_datetime`` â€” that function does
+    # the dict to ``_extract_order_datetime`` — that function does
     # ``str(value)`` on whatever is at ``raw["created_at"]`` and would
     # otherwise produce a literal "{'date': ...}" string that no parser
     # accepts. We mutate a copy so we never alter the adapter's payload.
@@ -1048,7 +1048,7 @@ def _normalise_coupon(raw: Any) -> Dict:
 # classification decisions.
 
 
-# â”€â”€ Sync service â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Sync service ──────────────────────────────────────────────────────────────
 
 class StoreSyncService:
     """
@@ -1070,7 +1070,7 @@ class StoreSyncService:
         self._adapter  = adapter   # lazy-loaded when None
         self._customer_intelligence = CustomerIntelligenceService(db, tenant_id)
 
-    # â”€â”€ Adapter access â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Adapter access ─────────────────────────────────────────────────────────
 
     def _get_adapter(self):
         if self._adapter is None:
@@ -1127,7 +1127,7 @@ class StoreSyncService:
                 link_outcome="exception",
             )
 
-    # â”€â”€ Job helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Job helpers ────────────────────────────────────────────────────────────
 
     def _start_job(self, sync_type: str, triggered_by: str = "system") -> StoreSyncJob:
         job = StoreSyncJob(
@@ -1155,7 +1155,7 @@ class StoreSyncService:
         job.error_message = error[:2000]
         self.db.commit()
 
-    # â”€â”€ Snapshot builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Snapshot builder ───────────────────────────────────────────────────────
 
     def _rebuild_snapshot(self, products_count: int, orders_count: int, coupons_count: int):
         """Rebuild the AI-ready knowledge snapshot from DB contents."""
@@ -1222,7 +1222,7 @@ class StoreSyncService:
         )
         store_cfg  = (settings.store_settings or {}) if settings else {}
 
-        # Pack A1: Salla /store/info lands namespaced â€” never silently flatten
+        # Pack A1: Salla /store/info lands namespaced — never silently flatten
         # into manual store_settings fields without provenance.
         salla_store_info = dict(store_cfg.get("salla_store_info") or {})
         # Pages index only (bodies live in MerchantKnowledgeSection).
@@ -1248,11 +1248,11 @@ class StoreSyncService:
             # Physical-location URL (Google / Apple / Waze maps).
             # Mirrored here so the merchant brain can deliver the maps
             # link deterministically without hitting the relational
-            # store every turn â€” see May 2026 #36 maps stack.
+            # store every turn — see May 2026 #36 maps stack.
             "maps_url":      store_cfg.get("google_maps_location", ""),
             "logo_url":      store_cfg.get("logo_url", ""),
             "description":   store_cfg.get("store_description", ""),
-            # Pack A2: public profile phone only â€” never WhatsApp owner number.
+            # Pack A2: public profile phone only — never WhatsApp owner number.
             "contact_phone": (
                 store_cfg.get("store_phone")
                 or store_cfg.get("public_phone")
@@ -1261,10 +1261,10 @@ class StoreSyncService:
             ),
             "contact_email": store_cfg.get("contact_email", ""),
             # Legacy pages index (if any). Pack A1 does NOT refresh this from
-            # Salla /pages â€” that Merchant API route is unproven (404).
+            # Salla /pages — that Merchant API route is unproven (404).
             "pages":         pages_index,
             # Pack A1 namespaced Salla profile (source of truth for Salla-owned facts).
-            # Manual fields above remain the Nahla override surface â€” no silent merge.
+            # Manual fields above remain the Nahla override surface — no silent merge.
             "salla_store_info": salla_store_info,
         }
         snap.catalog_summary = {
@@ -1301,7 +1301,7 @@ class StoreSyncService:
         snap.updated_at        = datetime.now(timezone.utc)
         self.db.commit()
 
-    # â”€â”€ Incremental timestamp helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Incremental timestamp helper ─────────────────────────────────────────
 
     def _last_sync_timestamp(self) -> Optional[str]:
         """Return ISO timestamp of the last successful full sync, or None if never synced."""
@@ -1314,7 +1314,7 @@ class StoreSyncService:
             return snap.last_full_sync_at.isoformat()
         return None
 
-    # â”€â”€ Products sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Products sync ──────────────────────────────────────────────────────────
 
     async def _enrich_normalised_variants_from_adapter(
         self,
@@ -1391,7 +1391,7 @@ class StoreSyncService:
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "[StoreSync] native-product guard check failed tenant=%s "
-                    "product=%s external_id=%s â€” continuing normal upsert",
+                    "product=%s external_id=%s — continuing normal upsert",
                     self.tenant_id,
                     getattr(existing, "id", None),
                     ext_id,
@@ -1421,7 +1421,7 @@ class StoreSyncService:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "[catalog/variants] tenant=%s product=%s upsert "
-                    "failed â€” continuing parent sync",
+                    "failed — continuing parent sync",
                     self.tenant_id, existing.id,
                 )
             product_row = existing
@@ -1452,7 +1452,7 @@ class StoreSyncService:
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "[catalog/variants] tenant=%s product=%s "
-                    "(new) variant upsert failed â€” continuing",
+                    "(new) variant upsert failed — continuing",
                     self.tenant_id, product_row.id,
                 )
             action = "created"
@@ -1576,16 +1576,16 @@ class StoreSyncService:
         created = 0
         updated = 0
         # (product_id, external_id, title) for products that just transitioned
-        # from out-of-stock â†’ in-stock. Fan-out is performed once after the
+        # from out-of-stock → in-stock. Fan-out is performed once after the
         # loop so we don't slow down each iteration with ProductInterest queries
         # for products no one is waiting on.
         restocked: List[Dict[str, Any]] = []
-        # Resolve the product source for THIS sync run once â€” the value is
+        # Resolve the product source for THIS sync run once — the value is
         # the same for every row coming out of a given adapter. Falls back
         # to the registered adapter platform name (salla/zid/shopify) so
         # that even adapters that forget to stamp ``source`` on normalised
         # rows still get a meaningful column value. We deliberately do NOT
-        # default to ``"manual"`` here â€” a sync that can't identify itself
+        # default to ``"manual"`` here — a sync that can't identify itself
         # is still a sync, not a hand-entered product. The diagnostics
         # endpoint reads ``Product.source`` exclusively, so getting this
         # right at intake means we never have to scan ``extra_metadata``
@@ -1608,7 +1608,7 @@ class StoreSyncService:
         self.db.flush()
         # Auto-map retailer ids on freshly-created rows. We do this
         # after ``flush()`` so the synthetic-id fallback can read
-        # ``p.id`` (newly assigned by Postgres). Idempotent â€” only
+        # ``p.id`` (newly assigned by Postgres). Idempotent — only
         # touches rows whose meta_retailer_id is still NULL.
         try:
             from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
@@ -1624,7 +1624,7 @@ class StoreSyncService:
         except Exception:  # noqa: BLE001
             pass
 
-        # â”€â”€ Back-in-stock fan-out â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Back-in-stock fan-out ─────────────────────────────────────────────
         # For each product that just came back, emit one
         # `product_back_in_stock` AutomationEvent per pending ProductInterest
         # row. The engine then processes each event as a normal single-customer
@@ -1634,7 +1634,7 @@ class StoreSyncService:
             self._fan_out_back_in_stock(restocked)
 
         logger.info(
-            "tenant=%s products sync done â€” created=%d updated=%d total_upserted=%d restocked=%d",
+            "tenant=%s products sync done — created=%d updated=%d total_upserted=%d restocked=%d",
             self.tenant_id, created, updated, created + updated, len(restocked),
         )
         return created + updated
@@ -1648,7 +1648,7 @@ class StoreSyncService:
         from core.automation_engine import emit_automation_event  # noqa: PLC0415
 
         # Look up the merchant's store URL once so we can synthesize a
-        # clickable product URL in the event payload â€” the named slot
+        # clickable product URL in the event payload — the named slot
         # `product_url` is the contract every back_in_stock_* template uses.
         store_cfg = (
             self.db.query(TenantSettings)
@@ -1694,7 +1694,7 @@ class StoreSyncService:
                 )
                 # Mark the interest as notified up-front. If the engine fails
                 # to actually send (no template, no WA connection), the
-                # AutomationExecution row records the failure â€” re-arming the
+                # AutomationExecution row records the failure — re-arming the
                 # waitlist on every restock would double-spam customers.
                 interest.notified = True
                 interest.notified_at = now
@@ -1702,11 +1702,11 @@ class StoreSyncService:
         if emitted:
             self.db.flush()
             logger.info(
-                "tenant=%s back-in-stock fan-out â€” products=%d events=%d",
+                "tenant=%s back-in-stock fan-out — products=%d events=%d",
                 self.tenant_id, len(restocked), emitted,
             )
 
-    # â”€â”€ Orders sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Orders sync ────────────────────────────────────────────────────────────
 
     async def sync_orders(
         self,
@@ -1758,11 +1758,11 @@ class StoreSyncService:
 
             # If the normalised status looks like a Python repr, that means
             # the upstream was a dict the adapter failed to unwrap. Surface
-            # loudly â€” historically this corruption silently mapped every
-            # order to "ظ…ظ„ط؛ظٹ" in the dashboard.
+            # loudly — historically this corruption silently mapped every
+            # order to "ملغي" in the dashboard.
             if normalised_status.startswith("{"):
                 logger.warning(
-                    "tenant=%s order=%s status looks like a repr (%r) â€” adapter "
+                    "tenant=%s order=%s status looks like a repr (%r) — adapter "
                     "failed to extract slug from raw=%r",
                     self.tenant_id, ext_id, normalised_status, raw_status,
                 )
@@ -1852,7 +1852,7 @@ class StoreSyncService:
                 from core.order_delivered_stamp import stamp_order_delivered_at_if_needed  # noqa: PLC0415
                 stamp_order_delivered_at_if_needed(new_row, previous_status=None)
 
-                # â”€â”€ Fire automation events for new orders found via API poll â”€â”€
+                # ── Fire automation events for new orders found via API poll ──
                 # Mirrors handle_order_webhook so confirmation messages are sent
                 # even when the webhook was missed or delayed by Salla.
                 if not normalised.get("is_abandoned"):
@@ -1883,7 +1883,7 @@ class StoreSyncService:
                             commit=False,
                         )
 
-                        _COD_METHODS = {"cod", "cash_on_delivery", "cash", "ط§ظ„ط¯ظپط¹ ط¹ظ†ط¯ ط§ظ„ط§ط³طھظ„ط§ظ…"}
+                        _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
                         _is_cod = bool(
                             _pm and any(_pm == m or m in _pm for m in _COD_METHODS)
                         )
@@ -1957,7 +1957,7 @@ class StoreSyncService:
                 created += 1
 
         logger.info(
-            "tenant=%s orders sync done â€” created=%d updated=%d total_upserted=%d "
+            "tenant=%s orders sync done — created=%d updated=%d total_upserted=%d "
             "status_distribution=%s zero_total=%d",
             self.tenant_id, created, updated, created + updated,
             status_counter, zero_total_count,
@@ -1965,12 +1965,12 @@ class StoreSyncService:
         self.db.flush()
         return created + updated
 
-    # â”€â”€ Abandoned carts sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Abandoned carts sync ──────────────────────────────────────────────────
     #
     # Salla's abandoned carts live behind a SEPARATE endpoint (/admin/v2/carts).
     # The /orders endpoint never returns them, so until we wired this method
-    # in the dashboard read at /autopilot/queues â€” which filters
-    # `Order.is_abandoned == True` â€” was always empty regardless of how many
+    # in the dashboard read at /autopilot/queues — which filters
+    # `Order.is_abandoned == True` — was always empty regardless of how many
     # carts the merchant had abandoned in Salla. That is the root cause of
     # the "Salla shows 2, Nahla shows 0" inconsistency the merchant reported.
     #
@@ -2006,7 +2006,7 @@ class StoreSyncService:
         }
         if not adapter or not hasattr(adapter, "get_abandoned_carts"):
             logger.info(
-                "tenant=%s abandoned-cart sync skipped â€” adapter missing get_abandoned_carts",
+                "tenant=%s abandoned-cart sync skipped — adapter missing get_abandoned_carts",
                 self.tenant_id,
             )
             return result
@@ -2016,13 +2016,13 @@ class StoreSyncService:
             result["fetched"] = True
         except Exception as exc:
             logger.warning(
-                "tenant=%s abandoned-cart fetch failed (%s) â€” KEEPING existing rows visible",
+                "tenant=%s abandoned-cart fetch failed (%s) — KEEPING existing rows visible",
                 self.tenant_id, exc,
             )
             return result
 
         result["salla_count"] = len(raw_list)
-        # â”€â”€ BEFORE-normalization log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── BEFORE-normalization log ──────────────────────────────────────
         # Print the raw cart count + the first few external ids verbatim
         # so an operator grepping logs can confirm the adapter actually
         # delivered carts to the sync layer (separately from how many
@@ -2042,7 +2042,7 @@ class StoreSyncService:
         result["save_errors"]      = 0   # type: ignore[assignment]
         normalised_external_ids: List[str] = []
 
-        # Existing cart rows for this tenant â€” keyed by external_id so we
+        # Existing cart rows for this tenant — keyed by external_id so we
         # can both upsert and reconcile in a single pass.
         existing_carts: Dict[str, Order] = {
             o.external_id: o
@@ -2052,11 +2052,11 @@ class StoreSyncService:
         }
         previous_count = len(existing_carts)
 
-        # â”€â”€ SILENT-FAIL guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── SILENT-FAIL guard ──────────────────────────────────────────────
         if previous_count > 0 and result["salla_count"] == 0:
             logger.warning(
-                "tenant=%s âڑ ï¸ڈ abandoned-cart sync returned ZERO from Salla "
-                "but %d carts were previously saved â€” KEEPING existing rows "
+                "tenant=%s ⚠️ abandoned-cart sync returned ZERO from Salla "
+                "but %d carts were previously saved — KEEPING existing rows "
                 "to avoid wiping the merchant dashboard on a transient empty "
                 "response. Investigate adapter / token / Salla state.",
                 self.tenant_id, previous_count,
@@ -2066,19 +2066,19 @@ class StoreSyncService:
         seen_external_ids = set()
 
         for raw in raw_list:
-            # â”€â”€ Per-cart isolation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── Per-cart isolation ─────────────────────────────────────
             # Wrap each cart's normalization+persist in its own try block.
             # Without this, ONE malformed cart from Salla (unexpected
-            # field shape, NaN, infinite recursion in nested totalsâ€¦)
+            # field shape, NaN, infinite recursion in nested totals…)
             # crashed the whole loop and silently wiped the rest of the
-            # batch â€” exactly the "Salla shows N, Nahla shows 0" symptom
+            # batch — exactly the "Salla shows N, Nahla shows 0" symptom
             # we're trying to eradicate.
             try:
                 normalised = _normalise_abandoned_cart(raw)
             except Exception as exc:
                 result["normalize_errors"] += 1
                 logger.exception(
-                    "[StoreSync] tenant=%s NORMALIZE_FAILED â€” skipping one "
+                    "[StoreSync] tenant=%s NORMALIZE_FAILED — skipping one "
                     "cart, continuing batch | error=%s | raw_keys=%s | "
                     "raw_preview=%s",
                     self.tenant_id, exc,
@@ -2091,7 +2091,7 @@ class StoreSyncService:
             if not ext_id:
                 result["skipped_no_id"] += 1
                 logger.warning(
-                    "[StoreSync] tenant=%s SKIPPED_NO_ID â€” abandoned cart had "
+                    "[StoreSync] tenant=%s SKIPPED_NO_ID — abandoned cart had "
                     "no usable id field | raw_keys=%s | raw_preview=%s",
                     self.tenant_id,
                     sorted(list(raw.keys())) if isinstance(raw, dict) else type(raw).__name__,
@@ -2103,7 +2103,7 @@ class StoreSyncService:
 
             # NOTE: previously this loop also dropped carts where BOTH
             # customer_info and line_items were empty. That filter is
-            # gone â€” we now persist any cart that has a stable id, even
+            # gone — we now persist any cart that has a stable id, even
             # if it's a bare draft. The recovery flow can decide later
             # whether it's actionable; the dashboard should never lose
             # visibility into a real cart just because the customer
@@ -2111,7 +2111,7 @@ class StoreSyncService:
             if not normalised["customer_info"] and not normalised["line_items"]:
                 logger.info(
                     "[StoreSync] tenant=%s PERSISTING_EMPTY_SHELL ext_id=%s "
-                    "(no customer + no items) â€” kept for dashboard visibility",
+                    "(no customer + no items) — kept for dashboard visibility",
                     self.tenant_id, ext_id,
                 )
 
@@ -2187,14 +2187,14 @@ class StoreSyncService:
                 result["save_errors"] += 1
                 self.db.rollback()
                 logger.exception(
-                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s â€” "
+                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s — "
                     "rolling back this cart only, continuing batch | "
                     "error=%s",
                     self.tenant_id, ext_id, exc,
                 )
 
-        # â”€â”€ Reconcile: clear is_abandoned on rows Salla no longer lists â”€
-        # The customer either resumed â†’ became a real order, or Salla aged
+        # ── Reconcile: clear is_abandoned on rows Salla no longer lists ─
+        # The customer either resumed → became a real order, or Salla aged
         # the cart out. Either way the dashboard must stop showing it.
         for ext_id, row in existing_carts.items():
             if ext_id in seen_external_ids:
@@ -2207,7 +2207,7 @@ class StoreSyncService:
 
         self.db.flush()
 
-        # â”€â”€ Kick off the recovery automation for newly-seen carts â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Kick off the recovery automation for newly-seen carts ─────────
         # Idempotent on ``Order.extra_metadata.recovery_event_id`` so a
         # cart that already produced an event (via the webhook path or a
         # previous sweep) does NOT double-emit. The emit happens AFTER
@@ -2275,7 +2275,7 @@ class StoreSyncService:
         result["recovery_events_emitted"] = emit_count    # type: ignore[assignment]
         result["recovery_emit_failures"] = emit_failures  # type: ignore[assignment]
 
-        # â”€â”€ AFTER-normalization log + structured summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── AFTER-normalization log + structured summary ─────────────────
         # Single grep-friendly line so the operator can answer
         # "did this run succeed end-to-end?" with one log search.
         # If raw_cart_count > 0 but saved+updated == 0, the bug is
@@ -2302,7 +2302,7 @@ class StoreSyncService:
         result["normalized_count"] = len(normalised_external_ids)  # type: ignore[assignment]
         return result
 
-    # â”€â”€ Coupons sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Coupons sync ───────────────────────────────────────────────────────────
 
     async def sync_coupons(self) -> int:
         adapter = self._get_adapter()
@@ -2392,18 +2392,18 @@ class StoreSyncService:
                 created += 1
         self.db.flush()
         logger.info(
-            "tenant=%s coupons sync done â€” created=%d updated=%d",
+            "tenant=%s coupons sync done — created=%d updated=%d",
             self.tenant_id, created, updated,
         )
         return created + updated
 
-    # â”€â”€ Store profile sync (Pack A1 â€” Salla /store/info) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Store profile sync (Pack A1 — Salla /store/info) ───────────────────────
 
     async def sync_store_info(self) -> bool:
         """Fetch customer-facing store profile from Salla GET /store/info.
 
         Persists under store_settings['salla_store_info'] with provenance.
-        Failure preserves prior profile and records source_error (failure â‰  empty).
+        Failure preserves prior profile and records source_error (failure ≠ empty).
         """
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
@@ -2412,7 +2412,7 @@ class StoreSyncService:
             return False
         if not hasattr(adapter, "get_store_info_profile"):
             logger.info(
-                "tenant=%s adapter does not support get_store_info_profile â€” skipping",
+                "tenant=%s adapter does not support get_store_info_profile — skipping",
                 self.tenant_id,
             )
             return False
@@ -2460,7 +2460,7 @@ class StoreSyncService:
                 "precedence": (
                     "For Salla-connected tenants, salla_store_info owns "
                     "Salla-sourced profile facts. Manual store_settings remain "
-                    "a separate Nahla override surface â€” no silent contradictory merge."
+                    "a separate Nahla override surface — no silent contradictory merge."
                 ),
             }
             current["salla_store_info"] = profile
@@ -2498,7 +2498,7 @@ class StoreSyncService:
         )
         return bool(outcome.get("ok"))
 
-    # â”€â”€ Pages sync (DEFERRED â€” Salla Merchant API has no proven /pages source) â”€
+    # ── Pages sync (DEFERRED — Salla Merchant API has no proven /pages source) ─
 
     async def sync_pages(self) -> int:
         """No-op for Pack A1 profile-only.
@@ -2509,13 +2509,13 @@ class StoreSyncService:
         MerchantKnowledgeSection; structured profile uses GET /store/info.
         """
         logger.info(
-            "tenant=%s sync_pages deferred â€” Salla CMS auto-import not in Pack A1 "
+            "tenant=%s sync_pages deferred — Salla CMS auto-import not in Pack A1 "
             "(no proven Merchant API /pages source)",
             self.tenant_id,
         )
         return 0
 
-    # â”€â”€ Checkout profile sync (Pack B merchant-enabled shipping/payment) â”€â”€â”€â”€â”€â”€â”€
+    # ── Checkout profile sync (Pack B merchant-enabled shipping/payment) ───────
 
     async def sync_checkout_profile(self) -> bool:
         """Fetch merchant-enabled Salla shipping/payment capabilities.
@@ -2532,7 +2532,7 @@ class StoreSyncService:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "sync_store_checkout_profile"):
             logger.info(
-                "tenant=%s checkout_profile sync skipped â€” no Salla adapter",
+                "tenant=%s checkout_profile sync skipped — no Salla adapter",
                 self.tenant_id,
             )
             return False
@@ -2578,7 +2578,7 @@ class StoreSyncService:
                 pass
             return False
 
-    # â”€â”€ Customers sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Customers sync ─────────────────────────────────────────────────────────
 
     def _upsert_legacy_customer_from_salla_sync_payload(
         self,
@@ -2784,12 +2784,12 @@ class StoreSyncService:
             self._upsert_a1_external_profile_side_effect(raw)
         self.db.flush()
         logger.info(
-            "tenant=%s customers sync done â€” created=%d updated=%d",
+            "tenant=%s customers sync done — created=%d updated=%d",
             self.tenant_id, created, updated,
         )
         return created + updated
 
-    # â”€â”€ Customer profile builder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Customer profile builder ─────────────────────────────────────────────
 
     def _build_customer_profiles(self) -> int:
         """Create/update CustomerProfile for every customer using unified intelligence rules."""
@@ -2799,7 +2799,7 @@ class StoreSyncService:
             emit_event=True,
         )
 
-    # â”€â”€ Full sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Full sync ──────────────────────────────────────────────────────────────
 
     async def full_sync(self, triggered_by: str = "merchant", incremental: bool = False) -> Dict:
         """Sync store data into the local DB.
@@ -2809,18 +2809,18 @@ class StoreSyncService:
             incremental: if True, only fetch items updated since last full sync.
                          First sync is always full regardless of this flag.
         """
-        # â”€â”€ Pre-sync guard: refuse if binding is invalid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Pre-sync guard: refuse if binding is invalid ──────────────────
         try:
             from services.salla_guard import validate_before_sync  # noqa: PLC0415
             ok, reason = validate_before_sync(self.db, self.tenant_id)
             if not ok:
                 logger.warning(
-                    "tenant=%s â›” SYNC_BLOCKED â€” %s (triggered_by=%s)",
+                    "tenant=%s ⛔ SYNC_BLOCKED — %s (triggered_by=%s)",
                     self.tenant_id, reason, triggered_by,
                 )
                 # Persist a failed job so the frontend can show a meaningful error.
                 blocked_job = self._start_job("full", triggered_by)
-                self._fail_job(blocked_job, f"ظ…ط²ط§ظ…ظ†ط© ظ…ط­ط¸ظˆط±ط©: {reason}")
+                self._fail_job(blocked_job, f"مزامنة محظورة: {reason}")
                 return {"status": "blocked", "message": reason}
         except Exception as guard_exc:
             logger.warning("tenant=%s salla_guard check failed (non-fatal): %s", self.tenant_id, guard_exc)
@@ -2831,7 +2831,7 @@ class StoreSyncService:
         sync_type = "incremental" if is_incremental else "full"
         job = self._start_job(sync_type, triggered_by)
         logger.info(
-            "tenant=%s â–¶ %s sync started (triggered_by=%s, has_previous=%s)",
+            "tenant=%s ▶ %s sync started (triggered_by=%s, has_previous=%s)",
             self.tenant_id, sync_type.upper(), triggered_by, has_previous,
         )
 
@@ -2842,14 +2842,14 @@ class StoreSyncService:
             # (/admin/v2/carts), not from /orders. We sync them right after
             # orders so any customer who just resumed their cart into a
             # real order is reconciled correctly (sync_orders runs first
-            # â†’ row exists with is_abandoned=False; then sync_abandoned_carts
+            # → row exists with is_abandoned=False; then sync_abandoned_carts
             # only re-flags rows Salla still lists as abandoned).
             try:
                 carts_result = await self.sync_abandoned_carts()
                 abandoned_n  = carts_result.get("saved", 0) + carts_result.get("updated", 0)
             except Exception as cart_exc:
                 logger.warning(
-                    "tenant=%s abandoned-cart sync raised â€” orders pipeline kept alive: %s",
+                    "tenant=%s abandoned-cart sync raised — orders pipeline kept alive: %s",
                     self.tenant_id, cart_exc,
                 )
                 carts_result = {}
@@ -2899,13 +2899,13 @@ class StoreSyncService:
             total_items = products_n + orders_n + coupons_n + customers_n
             if total_items == 0:
                 logger.warning(
-                    "tenant=%s âڑ ï¸ڈ %s sync completed but ALL counts are ZERO â€” "
+                    "tenant=%s ⚠️ %s sync completed but ALL counts are ZERO — "
                     "store may be empty or token may lack permissions",
                     self.tenant_id, sync_type.upper(),
                 )
             else:
                 logger.info(
-                    "tenant=%s âœ… %s sync completed â€” products=%d orders=%d coupons=%d customers=%d profiles=%d",
+                    "tenant=%s ✅ %s sync completed — products=%d orders=%d coupons=%d customers=%d profiles=%d",
                     self.tenant_id, sync_type.upper(), products_n, orders_n, coupons_n, customers_n, profiles_n,
                 )
 
@@ -2924,16 +2924,16 @@ class StoreSyncService:
             }
             if total_items == 0:
                 result["message"] = (
-                    "طھظ… ط§ظ„ط±ط¨ط· ط¨ظ†ط¬ط§ط­ ظ„ظƒظ† ط§ظ„ظ…طھط¬ط± ظ„ط§ ظٹط­طھظˆظٹ ط¹ظ„ظ‰ ط¨ظٹط§ظ†ط§طھ ظ‚ط§ط¨ظ„ط© ظ„ظ„ظ…ط²ط§ظ…ظ†ط© ط­ط§ظ„ظٹط§ظ‹. "
-                    "ط£ط¶ظپ ظ…ظ†طھط¬ط§طھ ظپظٹ ط³ظ„ط© ط«ظ… ط£ط¹ط¯ ط§ظ„ظ…ط²ط§ظ…ظ†ط©."
+                    "تم الربط بنجاح لكن المتجر لا يحتوي على بيانات قابلة للمزامنة حالياً. "
+                    "أضف منتجات في سلة ثم أعد المزامنة."
                 )
             return result
         except Exception as exc:
             self._fail_job(job, str(exc))
-            logger.error("tenant=%s â‌Œ %s sync error: %s", self.tenant_id, sync_type.upper(), exc)
+            logger.error("tenant=%s ❌ %s sync error: %s", self.tenant_id, sync_type.upper(), exc)
             return {"status": "failed", "error": str(exc), "job_id": job.id}
 
-    # â”€â”€ Incremental product update (called by webhook) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Incremental product update (called by webhook) ─────────────────────────
 
     async def handle_product_webhook(self, payload: Dict) -> None:
         """Process a single product update from a platform webhook."""
@@ -2999,7 +2999,7 @@ class StoreSyncService:
             snap.updated_at                = datetime.now(timezone.utc)
             self.db.commit()
 
-    # â”€â”€ Incremental order update (called by webhook) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Incremental order update (called by webhook) ────────────────────────
 
     async def handle_abandoned_cart_webhook(self, payload: Dict) -> None:
         """
@@ -3015,7 +3015,7 @@ class StoreSyncService:
         ext_id     = normalised["external_id"]
         if not ext_id:
             logger.info(
-                "tenant=%s abandoned_cart webhook ignored â€” payload had no cart id",
+                "tenant=%s abandoned_cart webhook ignored — payload had no cart id",
                 self.tenant_id,
             )
             return
@@ -3082,7 +3082,7 @@ class StoreSyncService:
         # Fire the recovery flow. Idempotent on
         # ``Order.extra_metadata.recovery_event_id`` so concurrent
         # webhook + sweep calls cannot double-emit. Failures here log
-        # at WARNING but never break the webhook ingest path â€” the cart
+        # at WARNING but never break the webhook ingest path — the cart
         # row is already durably stored.
         try:
             from services.cart_recovery_emitter import (  # noqa: PLC0415
@@ -3111,7 +3111,7 @@ class StoreSyncService:
         """
         Process a single order create/update from a platform webhook.
 
-        Idempotent by ``(tenant_id, external_id)`` â€” the DB enforces this via
+        Idempotent by ``(tenant_id, external_id)`` — the DB enforces this via
         the partial unique index ``uq_orders_tenant_external_id`` added in
         migration 0023. Concurrent webhooks can no longer double-insert.
         """
@@ -3190,7 +3190,7 @@ class StoreSyncService:
                 self.db.commit()
                 is_new = True
             except IntegrityError:
-                # Concurrent writer beat us to it â€” fall back to UPDATE path.
+                # Concurrent writer beat us to it — fall back to UPDATE path.
                 self.db.rollback()
                 log_event(
                     EVENTS.ORDER_UPSERT_CONFLICT,
@@ -3270,9 +3270,9 @@ class StoreSyncService:
                 _payment_method = str(normalised.get("payment_method") or "").lower()
                 _order_status   = str(normalised.get("status") or "").lower()
 
-                # â”€â”€ order_notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── order_notifications ──────────────────────────────────────
                 # Fire for every new order regardless of payment method or status.
-                # This is the universal order-confirmation trigger â€” the
+                # This is the universal order-confirmation trigger — the
                 # order_notifications SmartAutomation sends the merchant's
                 # chosen confirmation template (order summary, COD confirmation,
                 # etc.) to the customer as soon as their order lands in Nahla.
@@ -3303,7 +3303,7 @@ class StoreSyncService:
                     self.tenant_id, ext_id, _order_status, _payment_method or "unknown",
                 )
 
-                # â”€â”€ order_created (legacy / backward compat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── order_created (legacy / backward compat) ─────────────────
                 # Keep emitting order_created so any custom automations wired
                 # to that event string continue to work.
                 emit_automation_event(
@@ -3325,14 +3325,14 @@ class StoreSyncService:
                     commit=True,
                 )
 
-                # â”€â”€ COD-specific: also emit order_cod_pending â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                # ── COD-specific: also emit order_cod_pending ─────────────────
                 # When the payment method is COD AND the order has arrived in a
                 # confirmed/active state (in_progress, under_review, etc.), emit
                 # order_cod_pending so the dedicated cod_confirmation automation
                 # fires alongside the general order_notifications one.  The COD
                 # template typically includes a QUICK_REPLY button for the
                 # customer to confirm receipt intention.
-                _COD_METHODS = {"cod", "cash_on_delivery", "cash", "ط§ظ„ط¯ظپط¹ ط¹ظ†ط¯ ط§ظ„ط§ط³طھظ„ط§ظ…"}
+                _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
                 _is_cod = bool(
                     _payment_method
                     and any(
@@ -3381,7 +3381,7 @@ class StoreSyncService:
 
             except Exception as exc:
                 # Automation failures are logged at ERROR so they are visible,
-                # but do not fail the whole webhook â€” the order is already
+                # but do not fail the whole webhook — the order is already
                 # durably stored and the dispatcher will retry this webhook
                 # if we re-raise, potentially double-inserting automation rows.
                 logger.exception(
@@ -3389,14 +3389,14 @@ class StoreSyncService:
                     self.tenant_id, getattr(order_row, "id", ext_id), exc,
                 )
 
-        # â”€â”€ P0: Cancel any in-flight abandoned-cart recovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── P0: Cancel any in-flight abandoned-cart recovery ──────────────
         # The single worst UX bug the cart-recovery flow can ship is a
         # "you forgot your cart" reminder that arrives AFTER the customer
         # has already paid. We have three layers of defence
         # (pre-send conversion-layer guard, sweeper guard, and this hook)
         # but the event-driven cancellation here is what kills any
         # already-queued future-dated AutomationEvent before it ever
-        # reaches the engine â€” which the other two guards cannot do for
+        # reaches the engine — which the other two guards cannot do for
         # rescheduled events that have a future ``created_at``.
         #
         # Triggered on every webhook that lands a "real purchase" status
@@ -3450,7 +3450,7 @@ class StoreSyncService:
         _SHIPPED_STATUSES = {"shipped", "in_transit", "out_for_delivery", "delivering"}
         prev_status = None
         if order_row is not None and not is_new:
-            # The status has already been overwritten on the row â€” check
+            # The status has already been overwritten on the row — check
             # extra_metadata for the previously recorded status.
             prev_status = (order_row.extra_metadata or {}).get("prev_status")
         if (
@@ -3518,7 +3518,7 @@ class StoreSyncService:
             )
 
             # Close the offer-decision attribution loop. We do this on every
-            # *new* order â€” not only on `order_paid` â€” because Salla orders
+            # *new* order — not only on `order_paid` — because Salla orders
             # frequently arrive already paid, and waiting for `order_paid`
             # would miss them. Idempotent on re-runs.
             try:
@@ -3568,7 +3568,7 @@ class StoreSyncService:
                 emit_event=True,
             )
 
-    # â”€â”€ Incremental customer update (called by webhook) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Incremental customer update (called by webhook) ───────────────────
 
     async def handle_customer_webhook(
         self,
@@ -3634,7 +3634,7 @@ class StoreSyncService:
             snap.updated_at = datetime.now(timezone.utc)
             self.db.commit()
 
-    # â”€â”€ Product deletion (called by webhook) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Product deletion (called by webhook) ──────────────────────────────
 
     async def handle_product_deleted(self, external_id: str) -> None:
         """Remove a product that was deleted in the store."""
@@ -3661,7 +3661,7 @@ class StoreSyncService:
                 self.db.commit()
             logger.info("tenant=%s product deleted | external_id=%s", self.tenant_id, external_id)
 
-    # â”€â”€ Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Status ─────────────────────────────────────────────────────────────────
 
     def _compute_live_totals(self) -> Dict:
         """
@@ -3696,7 +3696,7 @@ class StoreSyncService:
         # when they look at their integration health card). We compute
         # `active` in Python so we honour the optional
         # ``extra_metadata.active`` override the same way ``GET /coupons``
-        # does â€” keeping the two surfaces consistent.
+        # does — keeping the two surfaces consistent.
         coupon_rows = (
             self.db.query(Coupon).filter_by(tenant_id=self.tenant_id).all()
         )
@@ -3783,8 +3783,8 @@ class StoreSyncService:
         for stale in stale_jobs:
             stale.status        = "timed_out"
             stale.error_message = (
-                f"طھط¬ط§ظˆط² ط§ظ„ط­ط¯ ط§ظ„ط²ظ…ظ†ظٹ ({_SYNC_JOB_TIMEOUT_MINUTES} ط¯ظ‚ظٹظ‚ط©). "
-                "ظ‚ط¯ ظٹظƒظˆظ† ط§ظ„ط®ط§ط¯ظ… ط£ظڈط¹ظٹط¯ طھط´ط؛ظٹظ„ظ‡ ط£ط«ظ†ط§ط، ط§ظ„ظ…ط²ط§ظ…ظ†ط©."
+                f"تجاوز الحد الزمني ({_SYNC_JOB_TIMEOUT_MINUTES} دقيقة). "
+                "قد يكون الخادم أُعيد تشغيله أثناء المزامنة."
             )
             stale.completed_at  = datetime.now(timezone.utc)
         if stale_jobs:
@@ -3796,7 +3796,7 @@ class StoreSyncService:
             .first()
         )
 
-        # â”€â”€ Real-time dashboard KPIs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Real-time dashboard KPIs ──────────────────────────────────────────
         # These are shown in the Overview page (revenue, orders, conversations).
         # We reuse the same date-extraction logic as the orders router so the
         # numbers match exactly what the merchant sees in /orders.
@@ -3815,7 +3815,7 @@ class StoreSyncService:
             "coupon_count":           live["coupon_count"],
             "coupon_total":           live["coupon_total"],
             "customer_count":         live["customer_count"],
-            # Last-sync deltas (NOT totals) â€” useful to know how the most
+            # Last-sync deltas (NOT totals) — useful to know how the most
             # recent sync run performed. Frontends should not display these
             # as "your store has X items"; use the live counts above.
             "snapshot_product_count": snap.product_count  if snap else 0,
@@ -3833,7 +3833,7 @@ class StoreSyncService:
         }
 
     def _compute_dashboard_kpis(self, period: str = "today") -> Dict:
-        """Overview KPIs — owned by `core.merchant_overview_analytics`."""
+        """Overview KPIs — owned by core.merchant_overview_analytics."""
         from core.merchant_overview_analytics import compute_overview_kpis  # noqa: PLC0415
 
         return compute_overview_kpis(self.db, self.tenant_id, period)
