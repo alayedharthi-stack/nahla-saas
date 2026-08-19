@@ -88,11 +88,14 @@ def _ai_settings(db, tenant_id, *, mode="on", enabled=True):
     return row
 
 
-def _smb_meta(**extra):
+def _smb_meta(*, stamp_identity: bool = True, **extra):
     meta = {
         "connection_mode": "coexistence",
         "smb_sync": dict(SMB_READY),
     }
+    if stamp_identity:
+        meta["readiness_phone_number_id"] = PHONE_ID
+        meta["readiness_waba_id"] = WABA_ID
     meta.update(extra)
     return meta
 
@@ -323,6 +326,7 @@ def test_wa2_06b_reopen_status_does_not_change_canonical_ready_row(monkeypatch, 
 def test_wa2_07_old_readiness_does_not_grant_new_identity():
     conn = SimpleNamespace(
         phone_number_id=PHONE_ID,
+        whatsapp_business_account_id=WABA_ID,
         webhook_verified=True,
         extra_metadata=_smb_meta(),
         last_error=None,
@@ -351,6 +355,75 @@ def test_wa2_07b_apply_does_not_rewrite_identity_from_foreign_phone(db):
     db.refresh(conn)
     assert conn.phone_number_id == PHONE_ID
     assert conn.status != "connected"
+
+
+def test_wa2_07c_replaced_identity_cannot_reuse_unstamped_smb_and_webhook():
+    conn = SimpleNamespace(
+        phone_number_id="old-phone",
+        whatsapp_business_account_id="old-waba",
+        provider="meta",
+        connection_type="embedded",
+        webhook_verified=True,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "smb_sync": {
+                "smb_app_state_sync": {"accepted": True, "request_id": "old-sync"},
+                "history": {"accepted": True, "request_id": "old-history"},
+            },
+        },
+        last_error=None,
+        status="connected",
+    )
+    conn.phone_number_id = "new-phone"
+    conn.whatsapp_business_account_id = "new-waba"
+    projected = project_coexistence_sync_state(
+        conn,
+        phone_data={
+            "id": "new-phone",
+            "code_verification_status": "NOT_VERIFIED",
+            "status": "CONNECTED",
+        },
+    )
+    assert projected["connected"] is False
+    assert projected["otp_required"] is False
+    assert projected["projection_reason"] == "identity_mismatch"
+    assert projected["db_status"] != "connected"
+
+
+def test_wa2_07e_stamped_old_identity_does_not_follow_new_phone():
+    conn = SimpleNamespace(
+        phone_number_id="new-phone",
+        whatsapp_business_account_id="new-waba",
+        webhook_verified=True,
+        extra_metadata=_smb_meta(),
+        last_error=None,
+        status="connected",
+        connected_at=datetime.now(timezone.utc),
+    )
+    projected = project_coexistence_sync_state(
+        conn,
+        phone_data=_cloud_phone(verified=False, phone_id="new-phone"),
+    )
+    assert projected["connected"] is False
+    assert projected["projection_reason"] == "identity_mismatch"
+
+
+def test_wa2_07d_unstamped_legacy_demotion_repairs_same_identity_only():
+    conn = SimpleNamespace(
+        phone_number_id=PHONE_ID,
+        whatsapp_business_account_id=WABA_ID,
+        webhook_verified=True,
+        connected_at=datetime(2026, 8, 18, 18, 4, 30, 138454, tzinfo=timezone.utc),
+        extra_metadata=_smb_meta(stamp_identity=False),
+        last_error=None,
+        status="otp_pending",
+    )
+    projected = project_coexistence_sync_state(
+        conn,
+        phone_data=_cloud_phone(verified=False),
+    )
+    assert projected["connected"] is True
+    assert projected["otp_required"] is False
 
 
 def test_wa2_08_reconnect_does_not_restart_trial(monkeypatch, db):
@@ -433,6 +506,7 @@ def test_wa2_no_frontend_sms_hide_hack():
 def test_wa2_cloud_otp_projection_not_used_as_coexistence_readiness():
     conn = SimpleNamespace(
         phone_number_id=PHONE_ID,
+        whatsapp_business_account_id=WABA_ID,
         webhook_verified=True,
         extra_metadata=_smb_meta(),
         last_error=None,

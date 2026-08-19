@@ -206,15 +206,68 @@ def parse_deadline(meta: Dict[str, Any]) -> Optional[datetime]:
         return None
 
 
+def bind_coexistence_readiness_identity(conn: Any) -> Dict[str, Any]:
+    """Stamp the identity that earned Coexistence SMB/webhook readiness."""
+    return merge_coexistence_metadata(
+        conn,
+        readiness_phone_number_id=str(getattr(conn, "phone_number_id", "") or "").strip() or None,
+        readiness_waba_id=str(getattr(conn, "whatsapp_business_account_id", "") or "").strip() or None,
+    )
+
+
+def coexistence_readiness_identity_matches(conn: Any) -> bool:
+    """True when stored Coexistence readiness facts belong to the current identity."""
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    bound_phone = str(meta.get("readiness_phone_number_id") or "").strip()
+    bound_waba = str(meta.get("readiness_waba_id") or "").strip()
+    phone = str(getattr(conn, "phone_number_id", "") or "").strip()
+    waba = str(getattr(conn, "whatsapp_business_account_id", "") or "").strip()
+    if not bound_phone and not bound_waba:
+        return False
+    if bound_phone and bound_phone != phone:
+        return False
+    if bound_waba and bound_waba != waba:
+        return False
+    return True
+
+
+_LEGACY_DEMOTION_STATUSES = frozenset({
+    "otp_pending",
+    "configuring",
+    "activation_pending",
+    "review_pending",
+    "disconnected",
+})
+
+
+def _legacy_unstamped_demotion_repair(conn: Any, phone_data: Optional[Dict[str, Any]]) -> bool:
+    """Allow unstamped historical Coexistence facts only to repair a demoted same-identity row.
+
+    Replacement that overwrites phone/WABA while leaving leftover SMB/webhook must
+    not inherit readiness. A still-``connected`` row with unstamped facts is not
+    granted either — it must re-earn identity-scoped readiness.
+    """
+    if getattr(conn, "connected_at", None) is None:
+        return False
+    if str(getattr(conn, "status", "") or "") not in _LEGACY_DEMOTION_STATUSES:
+        return False
+    return coexistence_identity_matches(conn, phone_data)
+
+
 def apply_smb_sync_results(conn: Any, results: Dict[str, Any]) -> Dict[str, Any]:
     meta = dict(getattr(conn, "extra_metadata", None) or {})
     sync = dict(meta.get("smb_sync") or {})
+    accepted_any = False
     for kind, payload in results.items():
         prev = dict(sync.get(kind) or {})
         prev.update(payload)
         sync[kind] = prev
+        if _smb_entry_complete(prev):
+            accepted_any = True
     meta["smb_sync"] = sync
     conn.extra_metadata = meta
+    if accepted_any:
+        meta = bind_coexistence_readiness_identity(conn)
     return meta
 
 
@@ -326,6 +379,17 @@ def project_coexistence_sync_state(
         }
 
     meta = dict(getattr(conn, "extra_metadata", None) or {})
+    identity_scoped = coexistence_readiness_identity_matches(conn)
+    if not identity_scoped and not _legacy_unstamped_demotion_repair(conn, data):
+        return {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "configuring",
+            "projection_reason": "identity_mismatch",
+            "message": _CONFIGURING_MESSAGE,
+        }
+
     if not smb_syncs_accepted(meta):
         return {
             **observed,
