@@ -335,6 +335,14 @@ def test_history_gate_still_wraps_notify_in_webhook():
     assert "maybe_notify_first_customer" in notify_block
 
 
+def test_history_inbound_does_not_track_conversation():
+    text = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(encoding="utf-8")
+    after_unsub = text.split("if _unsub_short_circuit:", 1)[1]
+    after_unsub = after_unsub.split("# Emit automation event", 1)[0]
+    assert "track_conversation(" in after_unsub
+    assert "if not _hist_skip_live:" in after_unsub.split("track_conversation(")[0]
+
+
 def test_ai_outbound_does_not_send_first_contact_email():
     text = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(encoding="utf-8")
     assert text.count("maybe_notify_first_customer(") == 1

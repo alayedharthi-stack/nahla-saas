@@ -3798,13 +3798,14 @@ async def _dispatch_message(
                     pass
                 return
 
-            track_conversation(
-                db,
-                resolved_tenant_id,
-                normalized_sender,
-                source="inbound",
-                category="service",
-            )
+            if not _hist_skip_live:
+                track_conversation(
+                    db,
+                    resolved_tenant_id,
+                    normalized_sender,
+                    source="inbound",
+                    category="service",
+                )
         except Exception as exc:
             logger.warning(
                 "[Webhook] Failed to sync inbound customer lead | tenant=%s sender=%s err=%s",
