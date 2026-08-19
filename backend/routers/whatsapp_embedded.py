@@ -350,6 +350,72 @@ def _meta_has_token(value: str, *tokens: str) -> bool:
     return any(token in value for token in tokens)
 
 
+_TRANSIENT_META_FETCH_CODES = frozenset({
+    1, 2, 4, 17, 32, 130429,
+    131000, 131016, 131042, 131056, 131057,
+    133004, 133005, 133006, 133008, 133009, 133015,
+    135000,
+})
+_AUTHORITATIVE_META_FETCH_CODES = frozenset({33, 803})
+_AUTHORITATIVE_FETCH_MESSAGE_TOKENS = (
+    "DOES NOT EXIST",
+    "DOES_NOT_EXIST",
+    "HAS BEEN DELETED",
+    "OBJECT DOES NOT EXIST",
+    "UNSUPPORTED GET REQUEST",
+    "PHONE NUMBER HAS BEEN DELETED",
+)
+
+
+def _meta_fetch_failure_kind(err: Dict[str, Any]) -> str:
+    """Classify a Meta phone-GET failure as transient or authoritative.
+
+    Transient means verification is unavailable (timeout, code 2, 5xx,
+    rate limit). That must not prove the connection itself ended.
+    Authoritative means Meta proved the phone/object is gone.
+    Unknown fetch errors default to transient because they do not prove
+    the connection ended.
+    """
+    raw_err = err if isinstance(err, dict) else {}
+    try:
+        code = int(raw_err.get("code") or 0)
+    except (TypeError, ValueError):
+        code = 0
+    try:
+        subcode = int(raw_err.get("error_subcode") or 0)
+    except (TypeError, ValueError):
+        subcode = 0
+    try:
+        http_status = int(raw_err.get("http_status") or raw_err.get("status_code") or 0)
+    except (TypeError, ValueError):
+        http_status = 0
+    kind = str(raw_err.get("type") or raw_err.get("failure_kind") or "").strip().lower()
+    blob = " ".join(
+        str(part) for part in (code, subcode, raw_err.get("message") or "", kind)
+    ).upper().replace("_", " ")
+
+    if http_status >= 500 or http_status == 429:
+        return "transient"
+    if kind in {"timeout", "network", "connect", "httpx"}:
+        return "transient"
+    if "TIMEOUT" in blob or "TIMED OUT" in blob or "NETWORK" in blob:
+        return "transient"
+    if code in _TRANSIENT_META_FETCH_CODES or subcode in _TRANSIENT_META_FETCH_CODES:
+        return "transient"
+    if code in _AUTHORITATIVE_META_FETCH_CODES or subcode in _AUTHORITATIVE_META_FETCH_CODES:
+        return "authoritative"
+    if any(token in blob for token in _AUTHORITATIVE_FETCH_MESSAGE_TOKENS):
+        return "authoritative"
+    return "transient"
+
+
+def _is_canonical_connected(conn: "WhatsAppConnection") -> bool:
+    return (
+        str(getattr(conn, "status", "") or "") == "connected"
+        and getattr(conn, "connected_at", None) is not None
+    )
+
+
 def _is_bsp_tp_entitlement_error(error: Dict[str, Any]) -> bool:
     """Return True iff Meta is rejecting our app because it's not
     onboarded as a BSP/Tech Provider with the WhatsApp Embedded
@@ -976,19 +1042,30 @@ async def sync_embedded_connection_from_meta(
         )
 
         err_code = int(err.get("code") or 0)
-        if err_code == 190:
-            _update_oauth_state(
-                conn,
-                status="expired",
-                message=transient_msg,
-                token_source=token_source,
-            )
-            meta["embedded_status_message"] = (
-                "الرقم ما زال مربوطًا في Meta ونحلة، لكن جلسة Meta الإدارية انتهت. "
-                "قد تحتاج فقط إلى إعادة التفويض لإدارة الحساب من داخل نحلة."
-            )
+        failure_kind = _meta_fetch_failure_kind(err)
+        protect_connected = (
+            _is_canonical_connected(conn)
+            and not allow_demotion
+            and failure_kind != "authoritative"
+        )
+        if err_code == 190 or protect_connected:
+            if err_code == 190:
+                _update_oauth_state(
+                    conn,
+                    status="expired",
+                    message=transient_msg,
+                    token_source=token_source,
+                )
+                meta["embedded_status_message"] = (
+                    "الرقم ما زال مربوطًا في Meta ونحلة، لكن جلسة Meta الإدارية انتهت. "
+                    "قد تحتاج فقط إلى إعادة التفويض لإدارة الحساب من داخل نحلة."
+                )
+            else:
+                meta["embedded_status_message"] = transient_msg
             meta["last_meta_sync_error"] = err
             meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
+            meta["meta_verification_unavailable"] = True
+            meta["meta_fetch_failure_kind"] = "transient" if err_code != 190 else "oauth_expired"
             conn.extra_metadata = meta
             conn.last_error = None
             db.commit()
@@ -1010,6 +1087,8 @@ async def sync_embedded_connection_from_meta(
             meta["last_meta_sync_error"] = err
 
         meta["last_meta_sync_at"] = datetime.now(timezone.utc).isoformat()
+        meta["meta_fetch_failure_kind"] = failure_kind
+        meta["meta_verification_unavailable"] = failure_kind != "authoritative"
         conn.extra_metadata = meta
         db.commit()
         return _build_embedded_status_payload(conn)

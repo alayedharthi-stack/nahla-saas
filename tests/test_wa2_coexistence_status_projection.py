@@ -31,6 +31,7 @@ from core.whatsapp_connection_finalization import (  # noqa: E402
 from routers.whatsapp_embedded import (  # noqa: E402
     _apply_embedded_state,
     _build_phone_sync_state,
+    _meta_fetch_failure_kind,
     _project_phone_sync_state,
     sync_embedded_connection_from_meta,
 )
@@ -138,6 +139,16 @@ def _cloud_phone(*, verified=False, phone_id=PHONE_ID, status="CONNECTED"):
 def _patch_phone(monkeypatch, phone):
     async def _fake(_conn, _db):
         return dict(phone), "platform"
+
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._get_phone_details_with_fallback",
+        _fake,
+    )
+
+
+def _patch_phone_error(monkeypatch, err):
+    async def _fake(_conn, _db):
+        return {"error": dict(err)}, "platform"
 
     monkeypatch.setattr(
         "routers.whatsapp_embedded._get_phone_details_with_fallback",
@@ -518,3 +529,104 @@ def test_wa2_cloud_otp_projection_not_used_as_coexistence_readiness():
     assert projected["db_status"] == "connected"
     assert projected["otp_required"] is False
     assert projected["connected"] is True
+
+
+def _connected_coexistence(db):
+    t = _tenant(db, name="متجر تجريبي عام")
+    _ai_settings(db, t.id)
+    conn = _conn(db, t.id)
+    db.commit()
+    assert finalize_successful_whatsapp_connection(db, conn) is True
+    db.refresh(conn)
+    db.refresh(t)
+    conn.sending_enabled = True
+    db.commit()
+    return t, conn
+
+
+def test_wa2_13_transient_meta_code_2_does_not_demote_connected(monkeypatch, db):
+    t, conn = _connected_coexistence(db)
+    started = t.trial_started_at
+    ended = t.trial_ends_at
+    first_wa = t.first_whatsapp_connected_at
+    connected_at = conn.connected_at
+    phone = conn.phone_number_id
+    waba = conn.whatsapp_business_account_id
+    sending = conn.sending_enabled
+    ai_before = dict(db.query(TenantSettings).filter_by(tenant_id=t.id).one().ai_settings)
+    _patch_phone_error(monkeypatch, {"code": 2, "message": "Service temporarily unavailable"})
+    payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    db.refresh(t)
+    assert payload["status"] == "connected"
+    assert payload["connected"] is True
+    assert conn.status == "connected"
+    assert conn.sending_enabled is sending
+    assert conn.connected_at == connected_at
+    assert conn.phone_number_id == phone
+    assert conn.whatsapp_business_account_id == waba
+    assert t.trial_started_at == started
+    assert t.trial_ends_at == ended
+    assert t.first_whatsapp_connected_at == first_wa
+    assert dict(db.query(TenantSettings).filter_by(tenant_id=t.id).one().ai_settings) == ai_before
+    assert (conn.extra_metadata or {}).get("meta_fetch_failure_kind") == "transient"
+    assert (conn.extra_metadata or {}).get("meta_verification_unavailable") is True
+
+
+def test_wa2_14_repeated_transient_refresh_does_not_demote(monkeypatch, db):
+    t, conn = _connected_coexistence(db)
+    sending = conn.sending_enabled
+    _patch_phone_error(monkeypatch, {"code": 2, "message": "An unexpected error has occurred."})
+    for _ in range(3):
+        payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+        db.refresh(conn)
+        assert payload["status"] == "connected"
+        assert conn.status == "connected"
+        assert conn.sending_enabled is sending
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        {"code": 2, "message": "Service temporarily unavailable"},
+        {"code": 1, "http_status": 503, "message": "Unknown error"},
+        {"code": 0, "type": "timeout", "message": "Read timeout"},
+        {"code": 131000, "message": "Something went wrong"},
+        {"code": 4, "message": "Application request limit reached"},
+    ],
+)
+def test_wa2_15_transient_fetch_shapes_do_not_demote(monkeypatch, db, err):
+    assert _meta_fetch_failure_kind(err) == "transient"
+    _t, conn = _connected_coexistence(db)
+    sending = conn.sending_enabled
+    _patch_phone_error(monkeypatch, err)
+    _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    assert conn.status == "connected"
+    assert conn.sending_enabled is sending
+
+
+def test_wa2_16_authoritative_hard_failure_can_demote(monkeypatch, db):
+    err = {
+        "code": 803,
+        "error_subcode": 33,
+        "message": "Unsupported get request. Object does not exist",
+    }
+    assert _meta_fetch_failure_kind(err) == "authoritative"
+    _t, conn = _connected_coexistence(db)
+    _patch_phone_error(monkeypatch, err)
+    payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    assert payload["status"] == "error"
+    assert payload["connected"] is False
+    assert conn.status == "error"
+    assert conn.sending_enabled is False
+
+
+def test_wa2_16b_classifier_keeps_transient_and_hard_split():
+    assert _meta_fetch_failure_kind({"code": 2}) == "transient"
+    assert _meta_fetch_failure_kind({"http_status": 502, "message": "Bad Gateway"}) == "transient"
+    assert _meta_fetch_failure_kind({"type": "timeout", "message": "timed out"}) == "transient"
+    assert _meta_fetch_failure_kind({"code": 100, "message": "Invalid parameter"}) == "transient"
+    assert _meta_fetch_failure_kind({"code": 100, "message": "Unsupported get request"}) == "authoritative"
+    assert _meta_fetch_failure_kind({"code": 33, "message": "Object does not exist"}) == "authoritative"
