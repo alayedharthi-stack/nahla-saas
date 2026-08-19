@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from core.database import get_db
 from core.tenant import get_or_create_tenant, resolve_tenant_id
+from core.merchant_overview_analytics import compute_overview_kpis, order_created_at
 from models import ConversationLog, Order
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -45,6 +46,7 @@ async def analytics_dashboard(request: Request, db: Session = Depends(get_db)):
     get_or_create_tenant(db, tenant_id)
 
     now = datetime.now(timezone.utc)
+    kpis = compute_overview_kpis(db, tenant_id, "this_month", now=now)
 
     # ── Revenue + orders (last 7 days) ───────────────────────────────────────
     order_rows = (
@@ -65,9 +67,9 @@ async def analytics_dashboard(request: Request, db: Session = Depends(get_db)):
     source_counts = {"AI": 0, "manual": 0}
 
     for order in order_rows:
-        created_at = getattr(order, "created_at", None) or now
-        if getattr(created_at, "tzinfo", None) is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = order_created_at(order)
+        if created_at is None:
+            continue
         day_key = created_at.strftime("%a")
 
         amount = _to_float_sar(order.total)
@@ -151,15 +153,18 @@ async def analytics_dashboard(request: Request, db: Session = Depends(get_db)):
 
     return {
         "summary": {
-            "current_month_revenue_sar": round(today_revenue if total_orders else sum(r["revenue"] for r in revenue_trend), 2),
+            "current_month_revenue_sar": kpis["revenue"],
             "conversion_rate_pct": conversion_rate,
-            "current_month_orders": total_orders,
-            "current_month_conversations": monthly_conversations,
+            "current_month_orders": kpis["orders"],
+            "current_month_conversations": kpis["conversations"],
             "today_revenue_sar": round(today_revenue, 2),
             "pending_orders": pending_count,
             "completed_today": completed_today,
         },
-        "revenue_trend": revenue_trend,
+        "revenue_trend": [
+            {"month": row.get("day") or row.get("day_key"), "revenue": row["revenue"]}
+            for row in kpis["revenue_chart"]
+        ],
         "conversion_trend": conversion_trend,
         "source_breakdown": source_breakdown,
         "top_products": top_products,
