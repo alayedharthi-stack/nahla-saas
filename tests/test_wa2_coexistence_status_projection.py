@@ -29,6 +29,7 @@ from core.whatsapp_connection_finalization import (  # noqa: E402
     finalize_successful_whatsapp_connection,
 )
 from routers.whatsapp_embedded import (  # noqa: E402
+    _GRAPH_OBJECT_MISSING_SUBCODE,
     _apply_embedded_state,
     _build_phone_sync_state,
     _meta_fetch_failure_kind,
@@ -609,7 +610,7 @@ def test_wa2_15_transient_fetch_shapes_do_not_demote(monkeypatch, db, err):
 def test_wa2_16_authoritative_hard_failure_can_demote(monkeypatch, db):
     err = {
         "code": 803,
-        "error_subcode": 33,
+        "error_subcode": _GRAPH_OBJECT_MISSING_SUBCODE,
         "message": "Unsupported get request. Object does not exist",
     }
     assert _meta_fetch_failure_kind(err) == "authoritative"
@@ -629,4 +630,33 @@ def test_wa2_16b_classifier_keeps_transient_and_hard_split():
     assert _meta_fetch_failure_kind({"type": "timeout", "message": "timed out"}) == "transient"
     assert _meta_fetch_failure_kind({"code": 100, "message": "Invalid parameter"}) == "transient"
     assert _meta_fetch_failure_kind({"code": 100, "message": "Unsupported get request"}) == "authoritative"
-    assert _meta_fetch_failure_kind({"code": 33, "message": "Object does not exist"}) == "authoritative"
+    assert _meta_fetch_failure_kind({"code": _GRAPH_OBJECT_MISSING_SUBCODE, "message": "Object does not exist"}) == "authoritative"
+
+
+def test_wa2_17_embedded_cloud_connected_transient_does_not_demote(monkeypatch, db):
+    t = _tenant(db, name="حذاء رياضي أبيض")
+    _ai_settings(db, t.id)
+    conn = _conn(
+        db,
+        t.id,
+        extra_metadata={},
+        webhook_verified=True,
+        status="activation_pending",
+        sending_enabled=False,
+    )
+    db.commit()
+    _patch_phone(monkeypatch, _cloud_phone(verified=True, status="CONNECTED"))
+    with patch("routers.whatsapp_embedded.subscribe_phone_webhook", create=True):
+        _sync(conn, db, attempt_register=False, allow_demotion=True)
+    db.refresh(conn)
+    assert conn.status == "connected"
+    sending = conn.sending_enabled
+    connected_at = conn.connected_at
+    _patch_phone_error(monkeypatch, {"code": 2, "message": "Service temporarily unavailable"})
+    payload = _sync(conn, db, attempt_register=False, allow_demotion=False)
+    db.refresh(conn)
+    assert payload["status"] == "connected"
+    assert conn.status == "connected"
+    assert conn.sending_enabled is sending
+    assert conn.connected_at == connected_at
+    assert (conn.extra_metadata or {}).get("connection_mode") != "coexistence"
