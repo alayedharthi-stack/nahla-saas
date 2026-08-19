@@ -94,6 +94,8 @@ export interface Translations {
     adminOwner:    string
     storeBadge:    { plan: string }
     logoTagline:   string
+    back:          string
+    backTo:        string
   }
 
   /** Topbar */

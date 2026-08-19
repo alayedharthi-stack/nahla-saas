@@ -3,6 +3,7 @@ import { Bell, ChevronDown, Menu, LogOut, User, Shield, ShieldOff, ShieldCheck, 
 import { useNavigate } from 'react-router-dom'
 import { useLanguage } from '../../i18n/context'
 import { useTheme, type ThemeMode } from '../../hooks/useTheme'
+import BackNavigation from '../ui/BackNavigation'
 import {
   logout,
   getEmail,
@@ -352,6 +353,7 @@ export default function Header({ title, subtitle, onMenuClick }: HeaderProps) {
       <div className="h-14 md:h-16 flex items-center justify-between gap-2 px-3 md:px-6 min-w-0">
       {/* Left side */}
       <div className="flex items-center gap-2 min-w-0 flex-1">
+        <BackNavigation currentTitle={title} />
         <button
           className="lg:hidden shrink-0 w-9 h-9 flex items-center justify-center rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-300 transition-colors"
           onClick={onMenuClick}
