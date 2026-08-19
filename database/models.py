@@ -2041,7 +2041,7 @@ class NotificationLog(Base):
 
     Rules:
     - type: 'email' | 'in_app' | 'sms'
-    - event: 'new_whatsapp_message' | 'returning_customer' | 'new_order' | 'support_request'
+    - event: 'first_customer_contact' | 'new_whatsapp_message' | 'returning_customer' | 'new_order' | 'support_request'
     - status: 'sent' | 'skipped'
     - reason: optional human-readable reason (Arabic) stored when status='skipped'
     """
