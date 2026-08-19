@@ -283,6 +283,66 @@ class TestAmbiguity:
         assert report.ambiguous
         assert report.ambiguous[0]["diagnostic"] == DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING
 
+    def test_parent_and_is_default_variant_not_pointed_to_is_ambiguous(self):
+        db = MagicMock()
+        product = SimpleNamespace(
+            id=10, tenant_id=7, meta_retailer_id="R", external_id=None,
+            has_variants=True, default_variant_id=1,
+        )
+        pointed = SimpleNamespace(
+            id=1, product_id=10, tenant_id=7, retailer_id="OTHER", is_default=False,
+        )
+        flagged = SimpleNamespace(
+            id=2, product_id=10, tenant_id=7, retailer_id="R", is_default=True,
+        )
+
+        def _query(model):
+            q = MagicMock()
+            name = getattr(model, "__name__", "")
+            if name == "Product":
+                q.filter.return_value.all.return_value = [product]
+            else:
+                q.filter.return_value.all.return_value = [pointed, flagged]
+            return q
+
+        db.query.side_effect = _query
+        report = join_graph_to_local_memberships(
+            db, tenant_id=7, live_products={"R": {"meta_product_id": "m1"}},
+        )
+        assert report.desired == []
+        assert report.ambiguous
+        assert report.ambiguous[0]["diagnostic"] == DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING
+
+    def test_multiple_is_default_variants_same_retailer_are_ambiguous(self):
+        db = MagicMock()
+        product = SimpleNamespace(
+            id=10, tenant_id=7, meta_retailer_id="R", external_id=None,
+            has_variants=False, default_variant_id=None,
+        )
+        v1 = SimpleNamespace(
+            id=11, product_id=10, tenant_id=7, retailer_id="R", is_default=True,
+        )
+        v2 = SimpleNamespace(
+            id=12, product_id=10, tenant_id=7, retailer_id="R", is_default=True,
+        )
+
+        def _query(model):
+            q = MagicMock()
+            name = getattr(model, "__name__", "")
+            if name == "Product":
+                q.filter.return_value.all.return_value = [product]
+            else:
+                q.filter.return_value.all.return_value = [v1, v2]
+            return q
+
+        db.query.side_effect = _query
+        report = join_graph_to_local_memberships(
+            db, tenant_id=7, live_products={"R": {"meta_product_id": "m1"}},
+        )
+        assert report.desired == []
+        assert report.ambiguous
+        assert report.ambiguous[0]["diagnostic"] == DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING
+
 
 class TestProviderContradiction:
     def test_invalidation_requires_catalog_id(self):

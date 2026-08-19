@@ -285,6 +285,65 @@ class TestExplicitBrowseCatalogDispatchPath:
         assert args[2] == "sku-1"
         assert kwargs.get("catalog_id") == "CAT-A"
 
+    def test_try_send_catalog_product_invalidates_on_single_product_131009(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, Mock, patch
+
+        from routers import whatsapp_webhook as wh
+        from services.catalog_product_orchestrator import (
+            ProductCardSendAction,
+            ProductCardSendDecision,
+        )
+
+        failed = SimpleNamespace(
+            success=False,
+            reason="meta_products_not_found",
+            error=None,
+        )
+        invalidate = Mock(return_value=1)
+        decision = ProductCardSendDecision(
+            action=ProductCardSendAction.SEND_CATALOG,
+            reason="ok",
+            retailer_id="sku-1",
+            tenant_send_ready=True,
+            product_ready=True,
+        )
+        with patch(
+            "services.whatsapp_platform.catalog_sender.send_single_product_message",
+            new=AsyncMock(return_value=failed),
+        ) as send_mock, patch(
+            "services.catalog_product_orchestrator.evaluate_product_card_send",
+            return_value=decision,
+        ), patch(
+            "core.native_catalog_capability.invalidate_meta_catalog_publish_for_retailer_id",
+            invalidate,
+        ):
+            handled = asyncio.run(
+                wh._try_send_catalog_product(
+                    db=None,
+                    connection=SimpleNamespace(meta_catalog_id="CAT-A"),
+                    tenant_id=33,
+                    phone_id="pid",
+                    to="966500000000",
+                    attachment={
+                        "kind": "product_card",
+                        "id": 28,
+                        "title": "Generic cotton shirt",
+                        "external_id": "sku-1",
+                    },
+                    positive_commerce_intent=True,
+                )
+            )
+        assert handled is False
+        send_mock.assert_awaited_once()
+        invalidate.assert_called_once()
+        args = invalidate.call_args.args
+        kwargs = invalidate.call_args.kwargs
+        assert args[1] == 33
+        assert args[2] == "sku-1"
+        assert kwargs.get("catalog_id") == "CAT-A"
+
 
 class TestPhase31ShadowOnlyUnchanged:
 

@@ -234,10 +234,27 @@ def membership_authorizes_send(
     return int(fact.variant_id) == int(canonical_default_variant_id)
 
 
+def _is_canonical_default_alias(
+    claim: LocalRetailerClaim,
+    default_variant_id: Optional[int],
+) -> bool:
+    """True only for the product's canonical default variant alias.
+
+    ``Product.default_variant_id`` is the source of truth when set.
+    ``is_default`` is a fallback only when that pointer is absent.
+    A default-marked variant that is not the pointed-to variant is not canonical.
+    """
+    if claim.variant_id is None:
+        return False
+    if default_variant_id is not None:
+        return int(claim.variant_id) == int(default_variant_id)
+    return bool(claim.is_default)
+
+
 def _collapse_alias_claims(
     claims: Sequence[LocalRetailerClaim],
 ) -> List[LocalRetailerClaim]:
-    """Collapse parent + canonical default-variant alias of the same SKU."""
+    """Collapse parent + the sole canonical default-variant alias of the same SKU."""
     if len(claims) <= 1:
         return list(claims)
     product_ids = {c.product_id for c in claims}
@@ -249,41 +266,27 @@ def _collapse_alias_claims(
         c.default_variant_id for c in claims if c.default_variant_id is not None
     }
     default_variant_id = next(iter(default_ids)) if len(default_ids) == 1 else None
+    parent_rows = [c for c in claims if c.variant_id is None]
+    canonical_rows = [
+        c for c in claims if _is_canonical_default_alias(c, default_variant_id)
+    ]
+    canonical_ids = {c.variant_id for c in canonical_rows}
+    if len(canonical_ids) > 1:
+        return list(claims)
     if has_variants:
         concrete = [c for c in claims if c.variant_id is not None]
         concrete_ids = {c.variant_id for c in concrete}
-        parent_rows = [c for c in claims if c.variant_id is None]
         if len(concrete_ids) != 1:
             return list(claims)
         chosen = concrete[0]
-        is_canonical_default = bool(
-            chosen.is_default
-            or (
-                default_variant_id is not None
-                and int(chosen.variant_id) == int(default_variant_id)
-            )
-        )
-        if parent_rows and not is_canonical_default:
+        if parent_rows and not _is_canonical_default_alias(chosen, default_variant_id):
             return list(claims)
         return [chosen]
-    default_rows = [
-        c
-        for c in claims
-        if c.variant_id is not None
-        and (
-            c.is_default
-            or (
-                default_variant_id is not None
-                and int(c.variant_id) == int(default_variant_id)
-            )
-        )
-    ]
-    parent_rows = [c for c in claims if c.variant_id is None]
-    other = [c for c in claims if c not in default_rows and c not in parent_rows]
+    other = [c for c in claims if c not in canonical_rows and c not in parent_rows]
     if other:
         return list(claims)
-    if default_rows and not other:
-        chosen = default_rows[0]
+    if canonical_rows:
+        chosen = canonical_rows[0]
         return [
             LocalRetailerClaim(
                 product_id=product_id,
@@ -293,7 +296,7 @@ def _collapse_alias_claims(
                 default_variant_id=chosen.variant_id,
             )
         ]
-    if parent_rows and not default_rows:
+    if parent_rows:
         return [parent_rows[0]]
     return list(claims)
 
