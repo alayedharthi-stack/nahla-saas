@@ -18,9 +18,12 @@ from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # n
     scan_recent_catalog_miss_signals,
 )
 from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
+    ProductClaimGroundingGuardResult,
     _detect_violations,
     apply_product_claim_grounding_guard,
     product_claim_grounding_guard_mode,
+    stamp_product_claim_guard_provenance,
+    strip_ungrounded_product_claim_sentences,
 )
 
 
@@ -203,7 +206,7 @@ class TestVariantPriceGrounding:
 
 
 class TestApplyGuard:
-    def test_enforce_rewrites_ungrounded_comparison(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_enforce_strips_ungrounded_comparison(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
         assert product_claim_grounding_guard_mode() == "enforce"
 
@@ -214,12 +217,19 @@ class TestApplyGuard:
             "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
             _fake_build,
         )
+        original = "المنتج أ أقل حلاوة من المنتج ب."
         result = apply_product_claim_grounding_guard(
-            reply="المنتج أ أقل حلاوة من المنتج ب.",
+            reply=original,
             tenant_id=1,
         )
         assert result.replaced is True
-        assert "يختلف الطعم" in result.reply
+        assert result.stripped is True
+        assert "أقل حلاوة" not in result.reply
+        assert "يختلف الطعم" not in result.reply
+        assert "مرعى" not in result.reply
+        assert "الطعم حسب" not in result.reply
+        assert result.scrubbed_empty is True
+        assert result.requires_grounded_recompose is True
 
     def test_variant_pricing_path_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
@@ -337,7 +347,7 @@ class TestCatalogFactPriceGrounding:
         assert "387" in result.reply
         assert "ما ظهر عندي سعر مؤكد" not in result.reply
 
-    def test_generic_ungrounded_price_still_rewrites(
+    def test_generic_ungrounded_price_still_stripped(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -356,7 +366,11 @@ class TestCatalogFactPriceGrounding:
             chosen_path="search_products",
         )
         assert result.replaced is True
-        assert "ما ظهر عندي سعر مؤكد" in result.reply
+        assert result.stripped is True
+        assert "999" not in result.reply
+        assert "ما ظهر عندي سعر مؤكد" not in result.reply
+        assert result.scrubbed_empty is True
+        assert result.requires_grounded_recompose is True
 
     def test_pipeline_catalog_price_facts_survive_guard_with_miss_history(
         self,
@@ -500,3 +514,214 @@ class TestCatalogFactPriceGrounding:
         guard = _apply_catalog_product_answer_guards("سعر الطلح 500", facts)
         assert guard.passed is False
         assert guard.failed_reason == "invented_price_amount"
+
+
+class TestStripFirstOwnership:
+    _HONEY_MARKERS = ("مرعى", "الطعم حسب", "يختلف الطعم", "موسم")
+
+    def _fake_build(self, monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+        def _build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+            return _evidence(**overrides)
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+            _build,
+        )
+
+    def test_fashion_partial_strip_keeps_valid_sentence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(monkeypatch)
+        valid = "أقدر أرسل لك صور الأحذية المتوفرة"
+        original = f"الحذاء الأبيض أحلى من الأسود. {valid}."
+        result = apply_product_claim_grounding_guard(
+            reply=original,
+            tenant_id=35,
+        )
+        assert result.stripped is True
+        assert valid in result.reply
+        assert "أحلى" not in result.reply
+        assert result.scrubbed_empty is False
+        assert result.requires_grounded_recompose is False
+        for marker in self._HONEY_MARKERS:
+            assert marker not in result.reply
+
+    def test_honey_comparison_strip_no_domain_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(
+            monkeypatch,
+            unavailable_products=(
+                {"id": 3, "title": "عسل سدر", "can_checkout": False},
+            ),
+        )
+        result = apply_product_claim_grounding_guard(
+            reply="السدر أقل حلاوة من الطلح.",
+            tenant_id=33,
+        )
+        assert result.stripped is True
+        assert "أقل حلاوة" not in result.reply
+        for marker in self._HONEY_MARKERS:
+            assert marker not in result.reply
+
+    def test_electronics_strip_no_foreign_domain_prose(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(
+            monkeypatch,
+            available_products=(
+                {"id": 1, "title": "سماعة بلوتوث", "can_checkout": True},
+            ),
+            unavailable_products=(),
+        )
+        result = apply_product_claim_grounding_guard(
+            reply="هذه السماعة أقوى من البديل.",
+            tenant_id=42,
+        )
+        assert result.stripped is True
+        assert "أقوى" not in result.reply
+        for marker in self._HONEY_MARKERS:
+            assert marker not in result.reply
+
+    def test_tenant_isolation_strip_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        def _fashion_build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+            return _evidence(
+                available_products=(
+                    {"id": 1, "title": "فستان صيفي", "can_checkout": True},
+                ),
+                unavailable_products=(),
+                grounded_text_corpus="",
+            )
+
+        def _honey_build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+            return _evidence(
+                available_products=(
+                    {"id": 1, "title": "عسل طلح", "can_checkout": True},
+                ),
+                unavailable_products=(
+                    {"id": 3, "title": "عسل سدر", "can_checkout": False},
+                ),
+            )
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+            _fashion_build,
+        )
+        fashion = apply_product_claim_grounding_guard(
+            reply="الفستان أحلى من البديل.",
+            tenant_id=35,
+        )
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+            _honey_build,
+        )
+        honey = apply_product_claim_grounding_guard(
+            reply="السدر أقل حلاوة من الطلح.",
+            tenant_id=33,
+        )
+        assert "عسل" not in fashion.reply
+        assert "فستان" not in honey.reply
+        for marker in self._HONEY_MARKERS:
+            assert marker not in fashion.reply
+
+    def test_partial_strip_two_sentences(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(monkeypatch)
+        valid = "أقدر أرسل لك الخيارات المتوفرة"
+        result = apply_product_claim_grounding_guard(
+            reply=f"المنتج أ أقل حلاوة من المنتج ب. {valid}.",
+            tenant_id=1,
+        )
+        assert valid in result.reply
+        assert "أقل حلاوة" not in result.reply
+        assert result.requires_grounded_recompose is False
+
+    def test_empty_after_strip_requests_recompose(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(monkeypatch)
+        result = apply_product_claim_grounding_guard(
+            reply="المنتج أ أقل حلاوة من المنتج ب.",
+            tenant_id=1,
+        )
+        assert result.scrubbed_empty is True
+        assert result.requires_grounded_recompose is True
+        assert result.action == "stripped_empty"
+
+    def test_recompose_loop_disabled_after_performed_flag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+        self._fake_build(monkeypatch)
+        result = apply_product_claim_grounding_guard(
+            reply="المنتج أ أقل حلاوة من المنتج ب.",
+            tenant_id=1,
+            inbound_metadata={"product_claim_recompose_performed": True},
+            allow_recompose=False,
+        )
+        assert result.scrubbed_empty is True
+        assert result.requires_grounded_recompose is False
+
+    def test_provenance_stamp_after_strip(self) -> None:
+        data: Dict[str, Any] = {}
+        guard = ProductClaimGroundingGuardResult(
+            reply="أقدر أرسل لك الخيارات.",
+            action="stripped",
+            replaced=True,
+            reason="ungrounded_comparison",
+            blocked_claims=("ungrounded_comparison",),
+            stripped=True,
+        )
+        stamp_product_claim_guard_provenance(data, guard)
+        assert data["product_claim_stripped"] is True
+        assert data.get("product_claim_recompose_requested") is not True
+        assert data.get("product_claim_recompose_performed") is not True
+        assert data["product_claim_blocked"] is True
+
+    def test_provenance_stamp_after_empty_strip_recompose(self) -> None:
+        data: Dict[str, Any] = {}
+        guard = ProductClaimGroundingGuardResult(
+            reply="",
+            action="stripped_empty",
+            replaced=True,
+            reason="ungrounded_comparison",
+            blocked_claims=("ungrounded_comparison",),
+            stripped=True,
+            scrubbed_empty=True,
+            requires_grounded_recompose=True,
+        )
+        stamp_product_claim_guard_provenance(
+            data,
+            guard,
+            recompose_requested=True,
+            recompose_performed=True,
+        )
+        assert data["product_claim_stripped"] is True
+        assert data["product_claim_recompose_requested"] is True
+        assert data["product_claim_recompose_performed"] is True
+
+    def test_strip_unit_removes_price_chunk_only(self) -> None:
+        violations = [("ungrounded_price", "999")]
+        stripped = strip_ungrounded_product_claim_sentences(
+            "سعر المنتج 999 ريال. أقدر أرسل الخيارات.",
+            violations,
+        )
+        assert "999" not in stripped
+        assert "أقدر أرسل الخيارات" in stripped

@@ -4840,6 +4840,8 @@ class MerchantBrain:
             from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
                 apply_product_claim_grounding_guard,
                 product_claim_grounding_guard_mode,
+                resolve_product_claim_second_pass_reply,
+                stamp_product_claim_guard_provenance,
             )
             if product_claim_grounding_guard_mode() != "off" and not _navigator_owner_locked:
                 from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
@@ -4960,14 +4962,63 @@ class MerchantBrain:
                         order_state=new_state,
                         inbound_metadata=_pcgg_meta,
                     )
-                    if _pcgg.replaced:
+                    if _pcgg.replaced or _pcgg.stripped:
                         reply = _pcgg.reply
                         _guard_replaced["product_claim_grounding_guard"] = True
-                    if _pcgg.blocked_claims:
-                        result.data["product_claim_blocked"] = True
-                        result.data["product_claim_blocked_kinds"] = list(_pcgg.blocked_claims)
-                        if _pcgg.reason:
-                            result.data["product_claim_guard_reason"] = _pcgg.reason
+                    stamp_product_claim_guard_provenance(result.data, _pcgg)
+                    if _pcgg.requires_grounded_recompose:
+                        result.data["product_claim_recompose_requested"] = True
+                        try:
+                            from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
+
+                            with safe_compose_role_scope(
+                                "product_claim_grounding_recompose",
+                            ):
+                                _pcgg_recomposed = await self._composer.compose(
+                                    decision, result, ctx,
+                                )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+                            _pcgg_recomposed = await self._composer.compose(
+                                decision, result, ctx,
+                            )
+                        if (_pcgg_recomposed or "").strip():
+                            result.data["compose_reply_candidate"] = (
+                                _pcgg_recomposed or ""
+                            ).strip()
+                        result.data["product_claim_recompose_performed"] = True
+                        _pcgg_meta["product_claim_recompose_performed"] = True
+                        _pcgg_second = apply_product_claim_grounding_guard(
+                            reply=_pcgg_recomposed or "",
+                            db=db,
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                            availability_context=_availability_ctx,
+                            executor_products=list(result.data.get("products") or []),
+                            catalog_fact_products=_pcgg_catalog_facts,
+                            chosen_path=_pcgg_chosen_path,
+                            history=history,
+                            order_state=new_state,
+                            inbound_metadata=_pcgg_meta,
+                            allow_recompose=False,
+                        )
+                        stamp_product_claim_guard_provenance(
+                            result.data,
+                            _pcgg_second,
+                            recompose_requested=True,
+                            recompose_performed=True,
+                        )
+                        if _pcgg_second.replaced or _pcgg_second.stripped:
+                            reply = resolve_product_claim_second_pass_reply(
+                                second_pass=_pcgg_second,
+                                recomposed_reply=_pcgg_recomposed or "",
+                                compose_source=str(
+                                    result.data.get("compose_source") or ""
+                                ),
+                            )
+                            _guard_replaced["product_claim_grounding_guard"] = True
+                        elif (_pcgg_recomposed or "").strip():
+                            reply = (_pcgg_recomposed or "").strip()
+                            _guard_replaced["product_claim_grounding_guard"] = True
         except Exception as _pcgg_exc:  # noqa: BLE001
             logger.warning(
                 "[PRODUCT_CLAIM_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
