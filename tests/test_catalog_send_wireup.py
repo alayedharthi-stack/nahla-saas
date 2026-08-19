@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -129,6 +130,7 @@ def _seed_product(
     external_id="ext-501",
     meta_retailer_id=None,
     title="عسل السدر الأصلي",
+    published=False,
 ):
     from models import Product
     p = Product(
@@ -139,10 +141,38 @@ def _seed_product(
         title=title,
         price="150",
         in_stock=True,
+        meta_catalog_published_at=(
+            datetime(2026, 6, 1, tzinfo=timezone.utc) if published else None
+        ),
     )
     db.add(p)
     db.commit()
     return p
+
+
+def _seed_membership(
+    db,
+    *,
+    tenant_id=77,
+    catalog_id="CAT-PROD-123",
+    retailer_id="ext-501",
+    product_id=501,
+    variant_id=None,
+):
+    from models import MetaCatalogMembership
+    row = MetaCatalogMembership(
+        tenant_id=tenant_id,
+        catalog_id=catalog_id,
+        retailer_id=retailer_id,
+        product_id=product_id,
+        variant_id=variant_id,
+        meta_item_id="mg-ext-501",
+        verified_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        provenance="meta_graph_reconcile",
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 def _attachment(
@@ -304,7 +334,8 @@ class TestCatalogHappyPath:
         conn = _seed_connection(
             db, meta_catalog_id="CAT-PROD-123", catalog_enabled=True,
         )
-        _seed_product(db, product_id=501, external_id="ext-501")
+        _seed_product(db, product_id=501, external_id="ext-501", published=True)
+        _seed_membership(db, retailer_id="ext-501", product_id=501)
 
         captured = {}
 
@@ -334,9 +365,8 @@ class TestCatalogHappyPath:
         inter = captured["payload"]["interactive"]
         assert inter["type"] == "product"
         assert inter["action"]["catalog_id"] == "CAT-PROD-123"
-        # external_id falls through as the retailer_id (Salla
-        # auto-publish convention), since the product has no
-        # explicit meta_retailer_id override.
+        # After membership is verified, external_id may still be the
+        # projected retailer_id when no explicit meta_retailer_id exists.
         assert inter["action"]["product_retailer_id"] == "ext-501"
         # Body uses the caption produced by the resolver.
         assert "عسل السدر" in inter["body"]["text"]
@@ -358,7 +388,9 @@ class TestRetailerIdOverride:
             db, product_id=501,
             external_id="ext-501",
             meta_retailer_id="custom-retailer-9",
+            published=True,
         )
+        _seed_membership(db, retailer_id="custom-retailer-9", product_id=501)
 
         captured = {}
 
@@ -385,15 +417,23 @@ class TestRetailerIdOverride:
         assert captured["payload"]["interactive"]["action"]["product_retailer_id"] == "custom-retailer-9"
 
     def test_external_id_used_when_no_meta_retailer_id_set(self):
-        """The Salla auto-publish convention: when a merchant uses
-        Salla's automatic Meta catalog sync, retailer_id == salla id
-        == ``Product.external_id``. The helper must honour this."""
+        """Verified membership may still project retailer_id from external_id.
+
+        Coincidence between upstream commerce id and Meta retailer id is
+        allowed only after canonical Meta catalog membership is verified.
+        """
         helper = _get_helper()
         db = _make_db()
         _seed_tenant(db)
         conn = _seed_connection(db)
-        _seed_product(db, product_id=501, external_id="ext-501",
-                      meta_retailer_id=None)
+        _seed_product(
+            db,
+            product_id=501,
+            external_id="ext-501",
+            meta_retailer_id=None,
+            published=True,
+        )
+        _seed_membership(db, retailer_id="ext-501", product_id=501)
 
         captured = {}
 
@@ -504,25 +544,24 @@ class TestProviderFailureFallsBack:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 5. Resolver-only attachment (no DB row) still works via fallback
+# 5. Resolver-only attachment (no DB row) fails closed without membership
 # ──────────────────────────────────────────────────────────────────────
 
 class TestAttachmentOnlyPath:
-    def test_attachment_external_id_used_when_product_row_missing(self):
-        """Edge case: the resolver attached a product whose ORM row
-        is no longer in the DB (deleted between resolve and send).
-        The helper must still try the catalog send using the
-        attachment's external_id."""
+    def test_attachment_external_id_is_not_membership_without_product_row(self):
+        """Resolver-only attachment with an external_id is not verified
+        Meta catalog membership. Native send fails closed and the caller
+        must use legacy fallback for the same canonical attachment."""
         helper = _get_helper()
         db = _make_db()
         _seed_tenant(db)
         conn = _seed_connection(db)
         # NB: no product seeded → DB lookup returns None.
 
-        captured = {}
+        hit = {"n": 0}
 
         async def fake_send(db_, conn_, *, tenant_id, operation, phone_id, payload, timeout):
-            captured["payload"] = payload
+            hit["n"] += 1
             return {"messages": [{"id": "wamid.OK"}]}, None
 
         with patch(
@@ -538,8 +577,8 @@ class TestAttachmentOnlyPath:
                 attachment=_attachment(external_id="ext-LOST"),
             ))
 
-        assert result is True
-        assert captured["payload"]["interactive"]["action"]["product_retailer_id"] == "ext-LOST"
+        assert result is False
+        assert hit["n"] == 0
 
 
 # ──────────────────────────────────────────────────────────────────────

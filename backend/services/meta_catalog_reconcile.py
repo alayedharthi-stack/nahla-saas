@@ -54,6 +54,10 @@ class MetaCatalogReconcileReport:
     applied_clear_count: int = 0
     meta_fetch: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    snapshot_applied: bool = False
+    memberships_upserted: int = 0
+    memberships_removed: int = 0
+    ambiguous_local_mapping: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         def _rows(rows: Iterable[ReconcileRowRef]) -> List[Dict[str, Any]]:
@@ -91,6 +95,10 @@ class MetaCatalogReconcileReport:
             "meta_not_stamped": self.meta_not_stamped[:SAMPLE_LIMIT],
             "meta_fetch": self.meta_fetch,
             "error": self.error,
+            "snapshot_applied": self.snapshot_applied,
+            "memberships_upserted": self.memberships_upserted,
+            "memberships_removed": self.memberships_removed,
+            "ambiguous_local_mapping": self.ambiguous_local_mapping[:SAMPLE_LIMIT],
         }
 
 
@@ -108,6 +116,7 @@ def fetch_meta_catalog_live_products(
         "items": 0,
         "http_status": None,
         "error": None,
+        "complete": False,
     }
     live: Dict[str, Dict[str, Any]] = {}
     if not catalog_id:
@@ -132,6 +141,9 @@ def fetch_meta_catalog_live_products(
             meta_info["error"] = resp.text[:500]
             return False
         body = resp.json() or {}
+        if body.get("error"):
+            meta_info["error"] = str(body.get("error"))[:500]
+            return False
         rows = body.get("data") or []
         meta_info["pages"] += 1
         for row in rows:
@@ -147,23 +159,32 @@ def fetch_meta_catalog_live_products(
         meta_info["items"] = len(live)
         return True
 
-    if client is not None:
-        while url:
-            resp = client.get(url, params=params if "graph.facebook.com" in url else None)
-            if not _consume(resp):
-                break
-            url = (resp.json() or {}).get("paging", {}).get("next")
-            params = None
-        return live, meta_info
+    try:
+        if client is not None:
+            while url:
+                resp = client.get(url, params=params if "graph.facebook.com" in url else None)
+                if not _consume(resp):
+                    meta_info["complete"] = False
+                    return live, meta_info
+                url = (resp.json() or {}).get("paging", {}).get("next")
+                params = None
+            meta_info["complete"] = meta_info.get("error") is None
+            return live, meta_info
 
-    with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
-        while url:
-            resp = owned.get(url, params=params if "graph.facebook.com" in url else None)
-            if not _consume(resp):
-                break
-            url = (resp.json() or {}).get("paging", {}).get("next")
-            params = None
-    return live, meta_info
+        with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
+            while url:
+                resp = owned.get(url, params=params if "graph.facebook.com" in url else None)
+                if not _consume(resp):
+                    meta_info["complete"] = False
+                    return live, meta_info
+                url = (resp.json() or {}).get("paging", {}).get("next")
+                params = None
+        meta_info["complete"] = meta_info.get("error") is None
+        return live, meta_info
+    except Exception as exc:  # noqa: BLE001
+        meta_info["error"] = str(exc)[:500]
+        meta_info["complete"] = False
+        return live, meta_info
 
 
 def fetch_meta_catalog_retailer_ids(
@@ -309,15 +330,26 @@ def reconcile_meta_catalog_publish_stamps(
         report.error = "catalog_id_missing"
         return report
 
-    meta_live, meta_fetch = fetch_meta_catalog_retailer_ids(
+    live, meta_fetch = fetch_meta_catalog_live_products(
         conn, catalog_id, client=client,
     )
     report.meta_fetch = meta_fetch
-    report.meta_live_count = len(meta_live)
-    if meta_fetch.get("error"):
-        report.error = str(meta_fetch["error"])
+    report.meta_live_count = len(live)
+    if meta_fetch.get("error") or not meta_fetch.get("complete"):
+        report.error = str(meta_fetch.get("error") or "incomplete_graph_fetch")
         return report
 
+    from core.meta_catalog_membership import (  # noqa: PLC0415
+        apply_membership_snapshot,
+        join_graph_to_local_memberships,
+    )
+
+    join = join_graph_to_local_memberships(
+        db, tenant_id=int(tenant_id), live_products=live,
+    )
+    report.ambiguous_local_mapping = list(join.ambiguous)
+
+    meta_live = set(live.keys())
     to_stamp, to_clear, local_not_in_meta, meta_not_stamped, counts = (
         build_meta_catalog_reconcile_plan(db, tenant_id, meta_live)
     )
@@ -331,42 +363,32 @@ def reconcile_meta_catalog_publish_stamps(
 
     if not apply:
         logger.info(
-            "[META_CATALOG_RECONCILE] dry_run tenant=%s catalog=%s stamp=%d clear=%d",
+            "[META_CATALOG_RECONCILE] dry_run tenant=%s catalog=%s "
+            "desired_memberships=%d ambiguous=%d",
             tenant_id,
             catalog_id,
-            len(to_stamp),
-            len(to_clear),
+            len(join.desired),
+            len(join.ambiguous),
         )
         return report
 
-    now = datetime.now(timezone.utc)
-    stamp_ids = {ref.product_id for ref in to_stamp}
-    clear_ids = {ref.product_id for ref in to_clear}
-    if not stamp_ids and not clear_ids:
-        return report
-
-    rows = (
-        db.query(Product)
-        .filter(Product.tenant_id == int(tenant_id))
-        .filter(Product.id.in_(sorted(stamp_ids | clear_ids)))
-        .all()
+    stats = apply_membership_snapshot(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=catalog_id,
+        desired=join.desired,
     )
-    for row in rows:
-        pid = int(row.id)
-        if pid in stamp_ids:
-            row.meta_catalog_published_at = now
-            report.applied_stamp_count += 1
-        elif pid in clear_ids:
-            row.meta_catalog_published_at = None
-            report.applied_clear_count += 1
-
-    db.flush()
+    report.snapshot_applied = True
+    report.memberships_upserted = int(stats.get("upserted") or 0)
+    report.memberships_removed = int(stats.get("removed") or 0)
     logger.info(
-        "[META_CATALOG_RECONCILE] apply tenant=%s catalog=%s stamped=%d cleared=%d",
+        "[META_CATALOG_RECONCILE] apply tenant=%s catalog=%s "
+        "memberships_upserted=%d memberships_removed=%d ambiguous=%d",
         tenant_id,
         catalog_id,
-        report.applied_stamp_count,
-        report.applied_clear_count,
+        report.memberships_upserted,
+        report.memberships_removed,
+        len(join.ambiguous),
     )
     return report
 
