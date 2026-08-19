@@ -90,6 +90,8 @@ const ar: Translations = {
     adminOwner:   'مالك المنصة',
     storeBadge:   { plan: 'خطة النمو' },
     logoTagline:  'طيار المبيعات الآلي',
+    back:         'رجوع',
+    backTo:       'العودة إلى {parent}',
   },
 
   topbar: {

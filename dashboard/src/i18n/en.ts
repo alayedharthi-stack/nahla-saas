@@ -86,6 +86,8 @@ const en: Translations = {
     adminOwner:   'Platform Owner',
     storeBadge:   { plan: 'Growth Plan' },
     logoTagline:  'Sales Autopilot',
+    back:         'Back',
+    backTo:       'Back to {parent}',
   },
 
   topbar: {
