@@ -7,9 +7,7 @@
  * Image assets live under dashboard/public/help/whatsapp-manual-setup/ (see README there).
  */
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
-  ArrowLeft,
   ChevronDown,
   ChevronUp,
   ExternalLink,
@@ -248,19 +246,8 @@ function InfoSection({ title, children }: { title: string; children: React.React
 }
 
 export default function WhatsAppManualSetup() {
-  const navigate = useNavigate()
-
   return (
     <div className="max-w-3xl mx-auto px-4 py-8 space-y-8" dir="rtl">
-
-      <button
-        type="button"
-        onClick={() => navigate(-1)}
-        className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 transition"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        رجوع
-      </button>
 
       <div className="space-y-4">
         <div className="flex items-center gap-3">

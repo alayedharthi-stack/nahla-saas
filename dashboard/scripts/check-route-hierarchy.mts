@@ -10,7 +10,7 @@ import {
   listTopLevelPaths,
   resolveRouteHierarchy,
 } from '../src/navigation/routeHierarchy.ts'
-import { parentHref, recordLocationContext, shouldUseHistoryBack } from '../src/navigation/upNavigation.ts'
+import { parentHref, recordLocationContext } from '../src/navigation/upNavigation.ts'
 
 function assert(cond: boolean, message: string) {
   if (!cond) {
@@ -52,36 +52,6 @@ assert(
   'customer import is deep_child',
 )
 
-assert(
-  shouldUseHistoryBack({
-    historyIdx: 0,
-    referrer: 'https://app.nahlah.ai/settings-hub',
-    currentOrigin: 'https://app.nahlah.ai',
-    parentPath: '/settings-hub',
-  }) === false,
-  'direct URL / idx 0 must not use history.back',
-)
-
-assert(
-  shouldUseHistoryBack({
-    historyIdx: 2,
-    referrer: 'https://mail.example/message',
-    currentOrigin: 'https://app.nahlah.ai',
-    parentPath: '/settings-hub',
-  }) === false,
-  'external referrer must not use history.back',
-)
-
-assert(
-  shouldUseHistoryBack({
-    historyIdx: 3,
-    referrer: 'https://app.nahlah.ai/settings-hub',
-    currentOrigin: 'https://app.nahlah.ai',
-    parentPath: '/settings-hub',
-  }) === true,
-  'in-app parent referrer may use history.back',
-)
-
 const mem = globalThis as typeof globalThis & { sessionStorage?: Storage }
 const store = new Map<string, string>()
 mem.sessionStorage = {
@@ -109,11 +79,29 @@ assert(backNav.includes('data-testid="platform-up-nav"'), 'up nav must be testab
 assert(backNav.includes('hidden lg:flex'), 'breadcrumb is desktop-only')
 assert(!backNav.includes('history.back'), 'Up control must not call history.back()')
 
+const hook = readFileSync(
+  new URL('../src/navigation/useUpNavigation.ts', import.meta.url),
+  'utf8',
+)
+assert(hook.includes('parentHref(match.parentPath)'), 'Up always navigates to canonical parent')
+assert(!hook.includes('navigate(-1)'), 'Up must not pop history')
+assert(!hook.includes('document.referrer'), 'Up must not trust SPA-stale referrer')
+
 const modalHint = readFileSync(
   new URL('../src/navigation/routeHierarchy.ts', import.meta.url),
   'utf8',
 )
 assert(modalHint.includes('Modals/sheets are not routes'), 'modals stay Close, not Back')
+
+for (const page of [
+  'OrderDetail.tsx',
+  'OperationsCenterBranchDetail.tsx',
+  'WhatsAppManualSetup.tsx',
+]) {
+  const src = readFileSync(new URL(`../src/pages/${page}`, import.meta.url), 'utf8')
+  assert(!src.includes('navigate(-1)'), `${page} must not use navigate(-1)`)
+  assert(!src.includes('useUpNavigation'), `${page} must not own a second Up control`)
+}
 
 const parameterizedDeep = [
   '/orders/42',

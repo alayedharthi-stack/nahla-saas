@@ -1,7 +1,7 @@
 import { useCallback, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { resolveRouteHierarchy } from './routeHierarchy'
-import { parentHref, recordLocationContext, shouldUseHistoryBack } from './upNavigation'
+import { parentHref, recordLocationContext } from './upNavigation'
 
 export function useUpNavigation() {
   const location = useLocation()
@@ -14,16 +14,8 @@ export function useUpNavigation() {
 
   const goUp = useCallback(() => {
     if (!match.parentPath) return
-    const useHistory = shouldUseHistoryBack({
-      historyIdx: window.history.state?.idx,
-      referrer: document.referrer,
-      currentOrigin: window.location.origin,
-      parentPath: match.parentPath,
-    })
-    if (useHistory) {
-      navigate(-1)
-      return
-    }
+    // Always the canonical in-app parent. Browser Back remains native and
+    // separate; this Up action must not pop to an external site or Home.
     navigate(parentHref(match.parentPath))
   }, [match.parentPath, navigate])
 

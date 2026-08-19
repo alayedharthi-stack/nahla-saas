@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import {
-  ArrowRight, Pencil, Phone, Plus, Star, Trash2,
+  Pencil, Phone, Plus, Star, Trash2,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import Badge from '../components/ui/Badge'
@@ -39,7 +39,6 @@ const TABS: { id: TabId; label: string }[] = [
 export default function OperationsCenterBranchDetail() {
   const { branchId } = useParams()
   const id = Number(branchId)
-  const navigate = useNavigate()
   const location = useLocation()
   const branchesListPath = location.pathname.startsWith('/sales-channels')
     ? '/sales-channels/branches'
@@ -251,12 +250,6 @@ export default function OperationsCenterBranchDetail() {
       <PageHeader
         title={branch?.name || 'تفاصيل الفرع'}
         subtitle="إدارة بيانات الفرع وجهات التواصل وسلسلة التصعيد"
-        action={
-          <button type="button" className="btn-secondary flex items-center gap-2" onClick={() => navigate(branchesListPath)}>
-            <ArrowRight className="w-4 h-4" />
-            رجوع
-          </button>
-        }
       />
 
       {error && (

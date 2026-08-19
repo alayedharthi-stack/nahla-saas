@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   AlertTriangle,
-  ArrowRight,
   Bell,
   Bot,
   CheckCircle2,
@@ -242,9 +241,6 @@ export default function OrderDetail() {
     return (
       <div className="card p-12 text-center space-y-4">
         <p className="text-sm text-slate-500">{error || 'الطلب غير موجود'}</p>
-        <button onClick={() => navigate(-1)} className="btn-secondary text-xs">
-          العودة
-        </button>
       </div>
     )
   }
@@ -265,9 +261,6 @@ export default function OrderDetail() {
       {/* Header */}
       <div className="flex flex-wrap items-start gap-3 justify-between">
         <div className="space-y-1">
-          <Link to="/orders" className="inline-flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700">
-            <ArrowRight className="w-3 h-3" /> العودة إلى الطلبات
-          </Link>
           <h1 className="text-xl font-semibold text-slate-900" dir="ltr">
             {formatOrderNumberLabel(order)}
           </h1>
