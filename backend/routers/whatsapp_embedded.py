@@ -1223,19 +1223,24 @@ async def sync_embedded_connection_from_meta(
         allow_demotion=True if hard_fail else allow_demotion,
     )
 
-    # When the connection finalises (status=connected), attempt webhook subscription
-    # if it hasn't been done yet, and persist the verified flag explicitly.
-    if sync_state.get("connected") and not conn.webhook_verified:
+    # Sending is not proven until webhook subscription succeeds (or was already
+    # verified). `_apply_embedded_state` may mirror Cloud "connected" flags
+    # before that proof exists.
+    projected_ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+    if projected_ready and not conn.webhook_verified:
+        conn.sending_enabled = False
         from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
         from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
         from services.meta_coexistence import coexistence_webhook_fields, is_coexistence_mode  # noqa: PLC0415
-        fields = coexistence_webhook_fields() if is_coexistence_mode(conn) else None
+        coexistence = is_coexistence_mode(conn)
+        fields = coexistence_webhook_fields() if coexistence else None
         wh_ok, wh_err = subscribe_phone_webhook(
             conn.phone_number_id or "",
             read_access_token(conn),
             conn.tenant_id,
             waba_id=conn.whatsapp_business_account_id or None,
             subscribed_fields=fields,
+            prefer_waba=not coexistence,
         )
         if wh_ok:
             conn.webhook_verified = True
@@ -1255,10 +1260,26 @@ async def sync_embedded_connection_from_meta(
         meta["webhook_subscription_error"] = wh_err
         conn.extra_metadata = meta
         if not wh_ok:
-            sync_state = {**sync_state, "connected": False, "db_status": "activation_pending"}
+            sync_state = {
+                **sync_state,
+                "connected": False,
+                "sending_enabled": False,
+                "db_status": "activation_pending",
+            }
+            conn.sending_enabled = False
+            already_connected = (
+                str(conn.status or "") == "connected"
+                and getattr(conn, "connected_at", None) is not None
+            )
+            if not (already_connected and not allow_demotion):
+                conn.status = "activation_pending"
 
-    ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
+    ready = (
+        (bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected")
+        and bool(conn.webhook_verified)
+    )
     if ready:
+        conn.sending_enabled = True
         from core.whatsapp_connection_finalization import (  # noqa: PLC0415
             WhatsAppConnectionFinalizationError,
             finalize_successful_whatsapp_connection,
@@ -1271,6 +1292,8 @@ async def sync_embedded_connection_from_meta(
                 detail="تعذر إتمام ربط واتساب.",
             ) from exc
     else:
+        if not conn.webhook_verified:
+            conn.sending_enabled = False
         db.commit()
     return _build_embedded_status_payload(conn)
 
@@ -2070,6 +2093,7 @@ async def confirm_standard_cloud_api(
 
     Does not silently convert a Coexistence choice. The merchant must confirm.
     Mutates only the authenticated tenant's canonical WhatsApp connection.
+    Live Graph eligibility outranks persisted ``is_on_biz_app``.
     """
     if not body.confirm_standard_cloud_api:
         raise HTTPException(status_code=400, detail="confirm_standard_cloud_api required")
@@ -2083,20 +2107,45 @@ async def confirm_standard_cloud_api(
 
     from services.meta_coexistence import (  # noqa: PLC0415
         clear_obsolete_coexistence_state,
+        is_coexistence_mode,
+        persist_provider_phone_truth,
         provider_is_on_biz_app,
     )
 
-    on_app = provider_is_on_biz_app(None, dict(conn.extra_metadata or {}))
-    if on_app is True:
+    already_standard = (
+        str(conn.status or "") == "connected"
+        and bool(conn.sending_enabled)
+        and getattr(conn, "connected_at", None) is not None
+        and not is_coexistence_mode(conn)
+    )
+    if already_standard:
+        return await sync_embedded_connection_from_meta(
+            conn, db, attempt_register=True, allow_demotion=False,
+        )
+
+    phone_data, _ = await _get_phone_details_with_fallback(conn, db)
+    if not phone_data or "error" in phone_data:
+        raise HTTPException(
+            status_code=502,
+            detail="تعذر التحقق من أهلية الرقم لدى Meta قبل التحويل إلى Cloud API.",
+        )
+    persist_provider_phone_truth(conn, phone_data)
+    live_on_app = provider_is_on_biz_app(phone_data, None)
+    if live_on_app is True:
+        db.commit()
         raise HTTPException(
             status_code=409,
             detail="هذا الرقم ما زال على تطبيق واتساب الأعمال. استخدم مسار Coexistence.",
         )
+    if is_coexistence_mode(conn) and live_on_app is not False:
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail="لا يمكن تحويل مسار Coexistence دون إثبات Meta أن الرقم ليس على تطبيق واتساب الأعمال.",
+        )
 
     clear_obsolete_coexistence_state(conn)
     conn.sending_enabled = False
-    if str(conn.status or "") == "connected":
-        conn.status = "activation_pending"
     db.commit()
     return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
 

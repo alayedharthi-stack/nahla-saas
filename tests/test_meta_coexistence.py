@@ -120,6 +120,42 @@ def test_subscribe_sends_coexistence_fields(mock_post):
     sent = mock_post.call_args.kwargs["json"]["subscribed_fields"]
     assert "smb_message_echoes" in sent
     assert "history" in sent
+    url = mock_post.call_args.args[0]
+    assert "/111/subscribed_apps" in url
+
+
+@patch("services.whatsapp_connection_service.httpx.post")
+def test_standard_subscribe_prefers_waba_then_phone(mock_post):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.json.return_value = {"success": True}
+    ok, err = subscribe_phone_webhook(
+        "pn-generic-cloud-1",
+        "token",
+        9,
+        waba_id="waba-generic-cloud-1",
+        prefer_waba=True,
+    )
+    assert ok is True
+    assert err is None
+    url = mock_post.call_args.args[0]
+    assert "/waba-generic-cloud-1/subscribed_apps" in url
+    assert mock_post.call_count == 1
+
+
+@patch("services.whatsapp_connection_service.httpx.post")
+def test_default_subscribe_stays_phone_first(mock_post):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.json.return_value = {"success": True}
+    ok, err = subscribe_phone_webhook(
+        "pn-generic-cloud-1",
+        "token",
+        9,
+        waba_id="waba-generic-cloud-1",
+    )
+    assert ok is True
+    assert err is None
+    url = mock_post.call_args.args[0]
+    assert "/pn-generic-cloud-1/subscribed_apps" in url
 
 
 @patch("services.whatsapp_connection_service.httpx.post")

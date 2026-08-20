@@ -487,9 +487,9 @@ def test_confirm_is_tenant_scoped(monkeypatch, db):
     assert other_conn.status == "configuring"
 
 
-def test_confirm_refuses_live_business_app_number(db):
+def test_confirm_refuses_live_business_app_number(monkeypatch, db):
     tenant = _tenant(db, name="عطر ورد 100ml")
-    _conn(
+    conn = _conn(
         db,
         tenant.id,
         phone_number_id=BIZ_APP_PHONE_ID,
@@ -498,6 +498,7 @@ def test_confirm_refuses_live_business_app_number(db):
         status="configuring",
     )
     db.commit()
+    _patch_phone(monkeypatch, _biz_app_phone())
     with pytest.raises(HTTPException) as exc:
         asyncio.run(confirm_standard_cloud_api(
             ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
@@ -505,6 +506,8 @@ def test_confirm_refuses_live_business_app_number(db):
             db,
         ))
     assert exc.value.status_code == 409
+    db.refresh(conn)
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
 
 
 def test_guardian_skips_smb_retry_for_non_business_app(monkeypatch, db):
@@ -580,3 +583,150 @@ def test_tenant1_shape_routes_to_standard_completion_not_smb(monkeypatch, db):
     assert conn.status == "connected"
     assert (conn.extra_metadata or {}).get("connection_mode") != "coexistence"
     assert "smb_sync_deadline_at" not in (conn.extra_metadata or {})
+
+
+def test_confirm_refuses_stale_false_when_live_graph_is_business_app(monkeypatch, db):
+    tenant = _tenant(db, name="قميص قطني أزرق")
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"connection_mode": "coexistence", "is_on_biz_app": False},
+        status="configuring",
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_biz_app_phone(), "id": PHONE_ID})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 409
+    db.refresh(conn)
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert conn.status == "configuring"
+    assert conn.sending_enabled is False
+
+
+def test_confirm_graph_error_fails_closed(monkeypatch, db):
+    tenant = _tenant(db, name="عطر ورد 100ml")
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"connection_mode": "coexistence", "is_on_biz_app": False},
+        status="configuring",
+    )
+    db.commit()
+
+    async def _graph_error(_conn, _db, phone_number_id=None):
+        return {"error": {"code": 2, "message": "Service temporarily unavailable"}}, "platform"
+
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._get_phone_details_with_fallback",
+        _graph_error,
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert conn.status == "configuring"
+
+
+def test_confirm_already_connected_standard_is_idempotent(monkeypatch, db):
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    _ai_settings(db, tenant.id)
+    connected_at = datetime.now(timezone.utc)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"is_on_biz_app": False, "recommended_mode": "cloud_api"},
+        status="connected",
+        sending_enabled=True,
+        webhook_verified=True,
+        connected_at=connected_at,
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    payload = asyncio.run(confirm_standard_cloud_api(
+        ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+        _req(tenant.id),
+        db,
+    ))
+    db.refresh(conn)
+    assert payload["connected"] is True
+    assert conn.status == "connected"
+    assert conn.sending_enabled is True
+    assert conn.connected_at is not None
+    assert conn.webhook_verified is True
+    assert conn.status != "activation_pending"
+
+
+def test_confirm_webhook_failure_does_not_enable_sending(monkeypatch, db):
+    tenant = _tenant(db, name="حذاء رياضي أبيض")
+    _ai_settings(db, tenant.id)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"connection_mode": "coexistence", "is_on_biz_app": False},
+        status="configuring",
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._register_phone_with_fallback",
+        AsyncMock(return_value=({"success": True}, "platform")),
+    )
+    monkeypatch.setattr(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        lambda *a, **k: (False, "Unsupported post request"),
+    )
+    payload = asyncio.run(confirm_standard_cloud_api(
+        ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+        _req(tenant.id),
+        db,
+    ))
+    db.refresh(conn)
+    assert payload["connected"] is False
+    assert conn.sending_enabled is False
+    assert conn.webhook_verified is False
+    assert conn.status != "connected"
+    assert conn.status == "activation_pending"
+
+
+def test_confirm_standard_subscribe_prefers_waba(monkeypatch, db):
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    _ai_settings(db, tenant.id)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"is_on_biz_app": False},
+        status="configuring",
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._register_phone_with_fallback",
+        AsyncMock(return_value=({"success": True}, "platform")),
+    )
+    captured = {}
+
+    def _subscribe(*a, **k):
+        captured.update(k)
+        return True, None
+
+    monkeypatch.setattr(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        _subscribe,
+    )
+    asyncio.run(confirm_standard_cloud_api(
+        ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+        _req(tenant.id),
+        db,
+    ))
+    assert captured.get("prefer_waba") is True
+    assert captured.get("waba_id") == WABA_ID
