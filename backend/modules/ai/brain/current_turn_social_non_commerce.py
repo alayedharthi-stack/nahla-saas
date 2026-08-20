@@ -356,6 +356,30 @@ def _has_product_evidence(message: str) -> bool:
     return bool(_PRODUCT_EVIDENCE_RE.search(norm))
 
 
+def _has_canonical_structured_product_referent(state: Any) -> bool:
+    """True when canonical structured catalog identity is the active referent.
+
+    Quantity follow-ups must not require the customer to repeat the product
+    title. Fail closed (False) if the existing focus owner cannot be probed.
+    """
+    if state is None:
+        return False
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+
+        referent = canonical_product_referent(state)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "[CURRENT_TURN_SOCIAL_NON_COMMERCE] canonical_referent_probe_failed err=%s",
+            exc,
+        )
+        return False
+    return has_structured_catalog_identity(referent)
+
+
 def is_colloquial_social_inventory_message(message: str) -> bool:
     """Colloquial smalltalk inventory asks — not product commerce."""
     norm = _norm(message or "")
@@ -556,10 +580,14 @@ def resolve_current_turn_social_non_commerce(
     if _is_staff_contact_non_product(raw, intent=intent):
         return CurrentTurnSocialNonCommerce(True, "staff_contact", "staff_contact_non_product", 0.88)
     if _QUANTITY_LIKE_RE.search(norm):
-        if not _has_product_evidence(norm) and not _quantity_slot_expected(
-            state=state,
-            last_question=last_question,
-            inbound_metadata=inbound_metadata,
+        if (
+            not _has_product_evidence(norm)
+            and not _quantity_slot_expected(
+                state=state,
+                last_question=last_question,
+                inbound_metadata=inbound_metadata,
+            )
+            and not _has_canonical_structured_product_referent(state)
         ):
             return CurrentTurnSocialNonCommerce(
                 True,

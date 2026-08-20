@@ -112,10 +112,11 @@ def collect_catalog_reasoning_candidates(
     """Return a bounded, tenant-scoped catalog evidence set for compose.
 
     Preference order:
-    1. facts.discovery_products (existence-capable active catalog)
-    2. facts.top_products (synced/orderable subset)
-    3. merchant_context.products
-    4. state.last_search_candidates / last_recommended_products
+    1. canonical structured product referent (current focus identity)
+    2. facts.discovery_products (existence-capable active catalog)
+    3. facts.top_products (synced/orderable subset)
+    4. merchant_context.products
+    5. state.last_search_candidates / last_recommended_products
     """
     cap = max(1, min(int(limit or _DEFAULT_LIMIT), 12))
     ctx = merchant_context if isinstance(merchant_context, dict) else {}
@@ -124,6 +125,19 @@ def collect_catalog_reasoning_candidates(
         return list(cached)[:cap]
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
+
+    if state is not None:
+        try:
+            from .commerce_focus_owner import (  # noqa: PLC0415
+                canonical_product_referent,
+                has_structured_catalog_identity,
+            )
+
+            referent = canonical_product_referent(state)
+            if has_structured_catalog_identity(referent):
+                _extend_unique(out, [referent], seen=seen, limit=cap)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — referent probe must not block catalog facts
+            pass
 
     if facts is not None:
         _extend_unique(

@@ -787,18 +787,29 @@ def apply_product_claim_grounding_guard(
             last_question=last_question,
         )
         if current_turn.matched:
+            claimed_prices = extract_reply_prices(original)
+            if not claimed_prices:
+                logger.info(
+                    "[PRODUCT_CLAIM_GROUNDING_GUARD] allow_social_noncommerce "
+                    "tenant=%s conv=%s category=%s reason=%s",
+                    tenant_id,
+                    conversation_id,
+                    current_turn.category or "-",
+                    current_turn.reason or "-",
+                )
+                return ProductClaimGroundingGuardResult(
+                    reply=original,
+                    action="allowed_social_noncommerce",
+                    reason=current_turn.reason or "current_turn_social_non_commerce",
+                )
             logger.info(
-                "[PRODUCT_CLAIM_GROUNDING_GUARD] allow_social_noncommerce "
-                "tenant=%s conv=%s category=%s reason=%s",
+                "[PRODUCT_CLAIM_GROUNDING_GUARD] social_noncommerce_price_claims "
+                "tenant=%s conv=%s category=%s reason=%s prices=%s",
                 tenant_id,
                 conversation_id,
                 current_turn.category or "-",
                 current_turn.reason or "-",
-            )
-            return ProductClaimGroundingGuardResult(
-                reply=original,
-                action="allowed_social_noncommerce",
-                reason=current_turn.reason or "current_turn_social_non_commerce",
+                sorted(claimed_prices),
             )
     except Exception:  # noqa: BLE001
         logger.exception("[PRODUCT_CLAIM_GROUNDING_GUARD] social_non_commerce_probe_failed")
