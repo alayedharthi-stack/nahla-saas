@@ -19,6 +19,11 @@ logger = logging.getLogger("nahla.meta_coexistence")
 COEXISTENCE_FINISH_EVENT = "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING"
 UNSAFE_FINISH_EVENTS = frozenset({"FINISH_OBO_MIGRATION"})
 CONNECTION_MODE = "coexistence"
+_CONFIGURING_MESSAGE = "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال."
+_READY_MESSAGE = (
+    "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
+    "أبقِ التطبيق مفتوحاً لإكمال المزامنة."
+)
 
 DEFAULT_WEBHOOK_FIELDS: List[str] = [
     "messages",
@@ -34,10 +39,145 @@ COEXISTENCE_WEBHOOK_FIELDS: List[str] = DEFAULT_WEBHOOK_FIELDS + [
 SMB_SYNC_TYPES: Tuple[str, str] = ("smb_app_state_sync", "history")
 SMB_SYNC_DEADLINE = timedelta(hours=24)
 
+COEXISTENCE_NOT_ELIGIBLE = "coexistence_not_eligible"
+STANDARD_CLOUD_API_AVAILABLE = "standard_cloud_api_available"
+RECOMMENDED_MODE_CLOUD_API = "cloud_api"
+RECOMMENDED_MODE_COEXISTENCE = "coexistence"
+
+# Semantic wait keys owned by Coexistence. Unrelated OAuth / phone / WABA
+# history must not be wiped when a merchant confirms STANDARD CLOUD API.
+_OBSOLETE_COEXISTENCE_KEYS = (
+    "connection_mode",
+    "smb_sync",
+    "smb_sync_deadline_at",
+    "coexistence_onboarded_at",
+    "finish_event",
+    "client_phone_hint",
+    "readiness_phone_number_id",
+    "readiness_waba_id",
+)
+_COEXISTENCE_FAILURE_CODES = frozenset({
+    "not_eligible",
+    "smb_sync_deadline",
+    "phone_hint_mismatch",
+    "missing_phone",
+})
+_COEXISTENCE_PROJECTION_REASONS = frozenset({
+    "smb_incomplete",
+    "webhook_unverified",
+    "identity_mismatch",
+    "ready",
+})
+
 
 def is_coexistence_mode(conn: Any) -> bool:
     meta = dict(getattr(conn, "extra_metadata", None) or {})
     return str(meta.get("connection_mode") or "").strip().lower() == CONNECTION_MODE
+
+
+def provider_is_on_biz_app(
+    phone_data: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """Return provider Business App truth, or None when Meta did not say.
+
+    Graph ``is_on_biz_app`` outranks persisted metadata.
+    """
+    data = dict(phone_data or {})
+    if "is_on_biz_app" in data:
+        return bool(data.get("is_on_biz_app"))
+    stored = dict(meta or {})
+    if "is_on_biz_app" in stored:
+        return bool(stored.get("is_on_biz_app"))
+    return None
+
+
+def coexistence_provider_eligible(
+    phone_data: Optional[Dict[str, Any]] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """True only when Meta proves an active Business App Cloud API number.
+
+    False when Meta proves the number is not on the Business App.
+    None when eligibility cannot be decided from available provider fields.
+    """
+    on_app = provider_is_on_biz_app(phone_data, meta)
+    if on_app is False:
+        return False
+    data = dict(phone_data or {})
+    stored = dict(meta or {})
+    platform = str(data.get("platform_type") or stored.get("platform_type") or "").strip().upper()
+    if on_app is True and platform in {"", "CLOUD_API"}:
+        return True
+    if on_app is True and platform == "NOT_APPLICABLE":
+        return False
+    return None
+
+
+def should_project_as_coexistence(
+    conn: Any,
+    phone_data: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True only while local coexistence mode is still provider-eligible.
+
+    ``is_on_biz_app=false`` outranks stale ``connection_mode=coexistence``.
+    A missing provider field keeps current Coexistence projection (T35).
+    """
+    if not is_coexistence_mode(conn):
+        return False
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    return provider_is_on_biz_app(phone_data, meta) is not False
+
+
+def persist_provider_phone_truth(
+    conn: Any,
+    phone_data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Store Graph Business App facts without committing coexistence mode."""
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    data = dict(phone_data or {})
+    if "is_on_biz_app" in data:
+        meta["is_on_biz_app"] = bool(data.get("is_on_biz_app"))
+    if data.get("platform_type"):
+        meta["platform_type"] = data.get("platform_type")
+    conn.extra_metadata = meta
+    return meta
+
+
+def persist_ineligible_coexistence_outcome(
+    conn: Any,
+    phone_data: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Keep the phone/WABA, drop coexistence wait, and recommend Cloud API."""
+    meta = clear_obsolete_coexistence_state(conn)
+    persist_provider_phone_truth(conn, phone_data)
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    meta["last_coexistence_outcome"] = COEXISTENCE_NOT_ELIGIBLE
+    meta["recommended_mode"] = RECOMMENDED_MODE_CLOUD_API
+    meta["standard_cloud_api_available"] = True
+    meta["failure_code"] = "not_eligible"
+    if error_message:
+        meta["embedded_status_message"] = error_message
+    conn.extra_metadata = meta
+    return meta
+
+
+def clear_obsolete_coexistence_state(conn: Any) -> Dict[str, Any]:
+    """Drop Coexistence wait/mode fields without erasing unrelated history."""
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    for key in _OBSOLETE_COEXISTENCE_KEYS:
+        meta.pop(key, None)
+    if str(meta.get("failure_code") or "") in _COEXISTENCE_FAILURE_CODES:
+        meta.pop("failure_code", None)
+    if str(meta.get("status_projection_reason") or "") in _COEXISTENCE_PROJECTION_REASONS:
+        meta.pop("status_projection_reason", None)
+    if str(meta.get("embedded_status_message") or "") in {_CONFIGURING_MESSAGE, _READY_MESSAGE}:
+        meta.pop("embedded_status_message", None)
+    meta["recommended_mode"] = RECOMMENDED_MODE_CLOUD_API
+    meta["last_coexistence_outcome"] = COEXISTENCE_NOT_ELIGIBLE
+    conn.extra_metadata = meta
+    return meta
 
 
 def coexistence_webhook_fields() -> List[str]:
@@ -285,11 +425,13 @@ def start_coexistence_deadline(conn: Any, *, reset: bool = False) -> Dict[str, A
 
 def maybe_fail_sync_deadline(conn: Any, now: Optional[datetime] = None) -> bool:
     """Mark failed if configuring and 24h deadline passed. Returns True if failed."""
-    if not is_coexistence_mode(conn):
+    if not should_project_as_coexistence(conn):
         return False
     if str(getattr(conn, "status", "") or "") not in {"configuring", "authorizing"}:
         return False
     meta = dict(getattr(conn, "extra_metadata", None) or {})
+    if provider_is_on_biz_app(None, meta) is False:
+        return False
     deadline = parse_deadline(meta)
     stamp = now or datetime.now(timezone.utc)
     if deadline is None or stamp < deadline:
@@ -307,11 +449,6 @@ def maybe_fail_sync_deadline(conn: Any, now: Optional[datetime] = None) -> bool:
 
 
 _PHONE_HARD_FAIL_TOKENS = ("RESTRICT", "DISABLE", "BLOCK", "DELETE", "FLAG")
-_CONFIGURING_MESSAGE = "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال."
-_READY_MESSAGE = (
-    "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
-    "أبقِ التطبيق مفتوحاً لإكمال المزامنة."
-)
 
 
 def _meta_token(value: Any) -> str:
@@ -348,6 +485,7 @@ def project_coexistence_sync_state(
     """
     cloud = dict(cloud_state or {})
     data = dict(phone_data or {})
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
     observed = {
         "verification_status": cloud.get("verification_status") or _meta_token(
             data.get("code_verification_status")
@@ -357,6 +495,21 @@ def project_coexistence_sync_state(
         "quality_rating": cloud.get("quality_rating") if "quality_rating" in cloud else data.get("quality_rating"),
         "otp_required": False,
     }
+
+    if provider_is_on_biz_app(data, meta) is False:
+        projected = dict(cloud) if cloud else {
+            **observed,
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "activation_pending",
+            "message": cloud.get("message"),
+        }
+        projected["otp_required"] = projected.get("db_status") == "otp_pending"
+        projected["projection_reason"] = COEXISTENCE_NOT_ELIGIBLE
+        projected["recommended_mode"] = RECOMMENDED_MODE_CLOUD_API
+        projected["standard_cloud_api_available"] = True
+        projected["coexistence_not_eligible"] = True
+        return projected
 
     if coexistence_phone_hard_fail(data):
         return {
@@ -378,7 +531,6 @@ def project_coexistence_sync_state(
             "message": _CONFIGURING_MESSAGE,
         }
 
-    meta = dict(getattr(conn, "extra_metadata", None) or {})
     identity_scoped = coexistence_readiness_identity_matches(conn)
     if not identity_scoped and not _legacy_unstamped_demotion_repair(conn, data):
         return {

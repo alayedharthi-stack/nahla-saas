@@ -1015,7 +1015,12 @@ export interface Translations {
       metaExistingAccountHint:  string
       metaConnectBtn:           string
       metaCloudApiConnectBtn:   string
+      coexistenceConnectBtn:    string
+      coexistenceChoiceLabel:   string
       coexistenceSafetyNote:    string
+      coexistenceNotEligibleTitle: string
+      coexistenceNotEligibleBody:  string
+      coexistenceContinueStandardBtn: string
       errPopupClosed:           string
       errPermissionsDenied:     string
       errMissingCode:           string

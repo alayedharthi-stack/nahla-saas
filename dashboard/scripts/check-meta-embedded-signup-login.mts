@@ -93,30 +93,57 @@ for (const src of [loginLib, connectPage]) {
 
 if (!connectPage.includes('buildEmbeddedSignupFbLoginOptions')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must use buildEmbeddedSignupFbLoginOptions (secondary path)')
+  console.error('FAIL WhatsAppConnect.tsx must use buildEmbeddedSignupFbLoginOptions (primary path)')
 } else {
   console.log('OK   WhatsAppConnect uses default login options helper')
 }
 
 if (!connectPage.includes('buildCoexistenceEmbeddedSignupFbLoginOptions')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must use buildCoexistenceEmbeddedSignupFbLoginOptions (primary path)')
+  console.error('FAIL WhatsAppConnect.tsx must keep buildCoexistenceEmbeddedSignupFbLoginOptions (explicit path)')
 } else {
-  console.log('OK   WhatsAppConnect uses coexistence login options helper')
+  console.log('OK   WhatsAppConnect keeps coexistence login options helper')
+}
+
+if (!connectPage.includes('launchSignup')) {
+  failed++
+  console.error('FAIL WhatsAppConnect.tsx primary Meta CTA must use launchSignup')
+} else {
+  console.log('OK   primary Meta path uses standard Cloud API helper')
 }
 
 if (!connectPage.includes('launchCoexistenceSignup')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx primary Meta CTA must use launchCoexistenceSignup')
+  console.error('FAIL WhatsAppConnect.tsx must keep launchCoexistenceSignup as an explicit choice')
 } else {
-  console.log('OK   primary Meta path uses coexistence helper')
+  console.log('OK   explicit Coexistence path remains available')
+}
+
+const compactCta = connectPage.split('Compact card CTA')[1] || ''
+const compactSignup = compactCta.indexOf('onClick={launchSignup}')
+const compactCoex = compactCta.indexOf('onClick={launchCoexistenceSignup}')
+if (compactSignup < 0 || compactCoex < 0 || compactSignup > compactCoex) {
+  failed++
+  console.error('FAIL compact card primary CTA must be launchSignup, with launchCoexistenceSignup secondary')
+} else {
+  console.log('OK   compact card default CTA is standard Cloud API')
+}
+
+const fullCta = connectPage.split('Main CTA — standard Cloud API')[1] || ''
+const fullSignup = fullCta.indexOf('onClick={launchSignup}')
+const fullCoex = fullCta.indexOf('onClick={launchCoexistenceSignup}')
+if (fullSignup < 0 || fullCoex < 0 || fullSignup > fullCoex) {
+  failed++
+  console.error('FAIL full flow primary CTA must be launchSignup, with launchCoexistenceSignup secondary')
+} else {
+  console.log('OK   full flow default CTA is standard Cloud API')
 }
 
 if (!connectPage.includes('handleExchange(code, undefined)')) {
   failed++
   console.error('FAIL WhatsAppConnect.tsx must call handleExchange(code, undefined) for cloud API path')
 } else {
-  console.log('OK   secondary exchange uses auth code only')
+  console.log('OK   standard exchange uses auth code only')
 }
 
 if (connectPage.includes('access_token = accessToken') || connectPage.includes("payload.access_token")) {
@@ -152,9 +179,29 @@ if (parseEmbeddedSignupWindowMessage({ event: 'FINISH', waba_id: '1' }) !== null
 
 if (!connectPage.includes("connection_mode: 'coexistence'") && !connectPage.includes('connectionMode: \'coexistence\'')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must send connection_mode coexistence on primary exchange')
+  console.error('FAIL WhatsAppConnect.tsx must send connection_mode coexistence on the explicit Coexistence exchange')
 } else {
-  console.log('OK   coexistence connection_mode present')
+  console.log('OK   coexistence connection_mode present on explicit path')
+}
+
+if (!connectPage.includes('confirm-standard-cloud-api')) {
+  failed++
+  console.error('FAIL WhatsAppConnect.tsx must call confirm-standard-cloud-api after coexistence_not_eligible')
+} else {
+  console.log('OK   standard Cloud API confirm path is present')
+}
+
+const safetyNoteIdx = connectPage.indexOf('simp.coexistenceSafetyNote')
+const syncingIdx = connectPage.indexOf("stage === 'syncing-phone'")
+const syncingEnd = connectPage.indexOf('Compact card CTA', syncingIdx)
+if (safetyNoteIdx < 0) {
+  failed++
+  console.error('FAIL coexistence safety copy must remain for the explicit Coexistence choice')
+} else if (syncingIdx >= 0 && safetyNoteIdx > syncingIdx && (syncingEnd < 0 || safetyNoteIdx < syncingEnd)) {
+  failed++
+  console.error('FAIL Business App safety copy must not render inside the generic Cloud API syncing stage')
+} else {
+  console.log('OK   Business App safety copy is not bound to generic Cloud API syncing')
 }
 
 if ('redirect_uri' in opts || 'redirect_uri' in coexistenceOpts) {
