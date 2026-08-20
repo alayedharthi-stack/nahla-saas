@@ -408,6 +408,33 @@ def resolve_best_effort(
     return resolve_by_query_relaxed(db, tenant_id, query, limit=limit)
 
 
+def resolve_by_product_id(
+    db: Session, tenant_id: int, product_id: int,
+) -> Optional[ProductResolution]:
+    """Exact tenant-scoped lookup by local Product.id.
+
+    Used after Meta membership fail-closed so fallback presentation
+    stays on the canonical referent. Never searches by title.
+    """
+    try:
+        pid = int(product_id)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0 or not tenant_id:
+        return None
+    from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
+
+    builder = CatalogContextBuilder(db, tenant_id)
+    raw = builder.get_by_id(pid)
+    if not raw:
+        logger.info(
+            "[CATALOG_PRODUCT_MISS] tenant=%s mode=id product_id=%s",
+            tenant_id, pid,
+        )
+        return None
+    return _dict_to_resolution(raw, confidence="exact")
+
+
 def resolve_by_external_id(
     db: Session, tenant_id: int, external_id: str,
 ) -> Optional[ProductResolution]:
@@ -624,6 +651,7 @@ def format_product_card_caption(
 __all__ = [
     "ProductResolution",
     "resolve_by_query",
+    "resolve_by_product_id",
     "resolve_by_external_id",
     "extract_product_markers",
     "format_product_card_caption",

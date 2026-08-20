@@ -81,6 +81,78 @@ def maybe_enforce_visual_product_card(
     ):
         return attachments, False
 
+    bs = dict(brain_state or {})
+    try:
+        from core.fail_closed_visual_presentation import (  # noqa: PLC0415
+            SOURCE_STRUCTURED_IDENTITY,
+            bind_structured_visual_referent as _bind_structured,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s structured_bind_import_failed: %s",
+            tenant_id,
+            exc,
+        )
+        _bind_structured = None
+        SOURCE_STRUCTURED_IDENTITY = "structured_product_identity"
+
+    if _bind_structured is not None:
+        bound = _bind_structured(
+            db,
+            tenant_id,
+            brain_state=bs,
+            attachments=attachments,
+        )
+        if bound.canonical_present:
+            if not bound.allow_presentation:
+                logger.warning(
+                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s FALLBACK_TEXT_ONLY "
+                    "reason=%s product_id=%s inbound=%r",
+                    tenant_id,
+                    bound.reason,
+                    bound.product_id,
+                    (inbound_message or "")[:80],
+                )
+                return attachments, False
+            try:
+                from services.product_resolver import (  # noqa: PLC0415
+                    format_product_card_caption as _bound_caption,
+                    resolve_by_product_id as _bound_by_id,
+                )
+                resolved = None
+                if bound.product_id is not None:
+                    resolved = _bound_by_id(db, tenant_id, bound.product_id)
+                caption = _bound_caption(resolved, include_description=False) if resolved else bound.title
+            except Exception:  # noqa: BLE001
+                caption = bound.title
+            card: Dict[str, Any] = {
+                "kind": "product_card",
+                "id": bound.product_id,
+                "title": bound.title,
+                "media_type": "image",
+                "file_url": bound.image_url or "",
+                "caption": caption,
+                "product_url": bound.product_url,
+                "in_stock": bound.in_stock,
+                "external_id": bound.external_id,
+                "confidence": "exact",
+                "_enforced": True,
+                "dispatch_source": "visual",
+                "candidate_origin": SOURCE_STRUCTURED_IDENTITY,
+            }
+            attachments.append(card)
+            logger.info(
+                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s ENFORCED product_id=%s title=%r "
+                "image=%s url=%s source=%s",
+                tenant_id,
+                bound.product_id,
+                bound.title,
+                bool(bound.image_url),
+                bool(bound.product_url),
+                SOURCE_STRUCTURED_IDENTITY,
+            )
+            return attachments, True
+
     if len(attachments) >= int(catalog_card_limit or 1):
         logger.info(
             "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP reason=catalog_card_limit "
@@ -92,7 +164,6 @@ def maybe_enforce_visual_product_card(
         )
         return attachments, False
 
-    bs = dict(brain_state or {})
     candidate_title, candidate_source = _pick_candidate(bs, inbound_message or "")
     logger.info(
         "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s TRIGGER inbound=%r brain_action=%s "

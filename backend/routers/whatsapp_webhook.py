@@ -13523,6 +13523,11 @@ async def _handle_merchant_message(
                             attachment=_att,
                             block_commerce_escalation=_commerce_blocked,
                             positive_commerce_intent=_positive_commerce,
+                            delivery_audit=(
+                                _delivery_audit
+                                if isinstance(_delivery_audit, dict)
+                                else None
+                            ),
                         )
                     except Exception as _cat_exc:  # noqa: BLE001
                         # _try_send_catalog_product is documented to
@@ -14032,16 +14037,49 @@ async def _handle_merchant_message(
                             _rescue_url = _u
                             _rescue_title = str(_att.get("title") or "")
                             break
-                    if not _rescue_url and (text or "").strip():
+                    _block_title_rescue = False
+                    try:
+                        from core.fail_closed_visual_presentation import (  # noqa: PLC0415
+                            extract_structured_product_id as _structured_id,
+                            should_block_title_query_substitution as _block_title_sub,
+                        )
+
+                        _focus = (
+                            (_bs_for_nc or {}).get("current_product_focus")
+                            if isinstance(_bs_for_nc, dict)
+                            else None
+                        )
+                        _pid, _ext = _structured_id(
+                            {"id": _delivery_audit.get("canonical_product_id")}
+                            if _delivery_audit.get("canonical_product_id") not in (None, "")
+                            else None,
+                            _focus,
+                            _product_attachments,
+                        )
+                        _block_title_rescue = _block_title_sub(
+                            membership_fail_closed=bool(
+                                _delivery_audit.get("membership_fail_closed")
+                            ),
+                            canonical_product_id=_pid,
+                            canonical_external_id=_ext,
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — fail-closed bind must not crash rescue
+                        _block_title_rescue = bool(
+                            _delivery_audit.get("membership_fail_closed")
+                        )
+                    if not _rescue_url and _block_title_rescue:
+                        logger.warning(
+                            "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s FALLBACK_TEXT_ONLY "
+                            "reason=no_safe_bound_visual inbound=%r",
+                            tenant_id,
+                            (text or "")[:80],
+                        )
+                    elif not _rescue_url and (text or "").strip():
                         try:
-                            # Use the best-effort resolver here — the
-                            # customer asked for a visual product render
-                            # and we're already on the rescue path. If
-                            # the strict resolver missed (e.g. out-of-
-                            # stock honey jar), the relaxed normalized-
-                            # title pass will still find the row and let
-                            # us at least send a CTA URL instead of
-                            # text_only.
+                            # Unstructured visual asks only. After membership
+                            # fail-closed, or when a structured product id is
+                            # already known, title/inbound FTS must not invent
+                            # a different SKU (AD-F3-R2B-1).
                             from services.product_resolver import (  # noqa: PLC0415
                                 resolve_best_effort as _rescue_resolve,
                             )
@@ -15376,6 +15414,7 @@ async def _try_send_catalog_product(
     attachment: Dict[str, Any],
     block_commerce_escalation: bool = False,
     positive_commerce_intent: bool = False,
+    delivery_audit: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Phase 4 — attempt a Meta WhatsApp Catalog send for one product
     attachment. Returns ``True`` iff the catalog message landed at
@@ -15524,6 +15563,14 @@ async def _try_send_catalog_product(
         return False
 
     if not should_attempt_catalog_send(decision):
+        try:
+            from core.fail_closed_visual_presentation import (  # noqa: PLC0415
+                stamp_membership_fail_closed,
+            )
+
+            stamp_membership_fail_closed(delivery_audit, decision)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — audit stamp must not block legacy fallback
+            pass
         return False
 
     retailer_id = catalog_send_retailer_id(decision)
