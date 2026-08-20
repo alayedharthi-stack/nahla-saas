@@ -2112,6 +2112,7 @@ async def confirm_standard_cloud_api(
     Does not silently convert a Coexistence choice. The merchant must confirm.
     Mutates only the authenticated tenant's canonical WhatsApp connection.
     Live Graph eligibility outranks persisted ``is_on_biz_app``.
+    Already-standard rows still require live ``is_on_biz_app == false``.
     """
     if not body.confirm_standard_cloud_api:
         raise HTTPException(status_code=400, detail="confirm_standard_cloud_api required")
@@ -2129,17 +2130,6 @@ async def confirm_standard_cloud_api(
         persist_provider_phone_truth,
         provider_is_on_biz_app,
     )
-
-    already_standard = (
-        str(conn.status or "") == "connected"
-        and bool(conn.sending_enabled)
-        and getattr(conn, "connected_at", None) is not None
-        and not is_coexistence_mode(conn)
-    )
-    if already_standard:
-        return await sync_embedded_connection_from_meta(
-            conn, db, attempt_register=True, allow_demotion=False,
-        )
 
     phone_data, _ = await _get_phone_details_with_fallback(conn, db)
     if not phone_data or "error" in phone_data:
@@ -2160,6 +2150,18 @@ async def confirm_standard_cloud_api(
         raise HTTPException(
             status_code=502,
             detail="تعذر التحقق من أهلية الرقم لدى Meta قبل التحويل إلى Cloud API.",
+        )
+
+    already_standard = (
+        str(conn.status or "") == "connected"
+        and bool(conn.sending_enabled)
+        and getattr(conn, "connected_at", None) is not None
+        and not is_coexistence_mode(conn)
+    )
+    if already_standard:
+        db.commit()
+        return await sync_embedded_connection_from_meta(
+            conn, db, attempt_register=True, allow_demotion=False,
         )
 
     clear_obsolete_coexistence_state(conn)

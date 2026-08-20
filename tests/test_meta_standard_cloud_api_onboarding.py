@@ -673,6 +673,95 @@ def test_confirm_already_connected_standard_is_idempotent(monkeypatch, db):
     assert conn.status != "activation_pending"
 
 
+def _already_standard_conn(db, tenant_id, **overrides):
+    kwargs = {
+        "extra_metadata": {"is_on_biz_app": False, "recommended_mode": "cloud_api"},
+        "status": "connected",
+        "sending_enabled": True,
+        "webhook_verified": True,
+        "connected_at": datetime.now(timezone.utc),
+    }
+    kwargs.update(overrides)
+    return _conn(db, tenant_id, **kwargs)
+
+
+def test_confirm_already_standard_graph_error_fails_closed(monkeypatch, db):
+    tenant = _tenant(db, name="قميص قطني أزرق")
+    conn = _already_standard_conn(db, tenant.id)
+    db.commit()
+
+    async def _graph_error(_conn, _db, phone_number_id=None):
+        return {"error": {"code": 2, "message": "Service temporarily unavailable"}}, "platform"
+
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._get_phone_details_with_fallback",
+        _graph_error,
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert conn.status == "connected"
+    assert conn.sending_enabled is True
+
+
+def test_confirm_already_standard_live_business_app_refused(monkeypatch, db):
+    tenant = _tenant(db, name="عطر ورد 100ml")
+    conn = _already_standard_conn(db, tenant.id)
+    db.commit()
+    _patch_phone(monkeypatch, {**_biz_app_phone(), "id": PHONE_ID})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 409
+    db.refresh(conn)
+    assert conn.status == "connected"
+    assert (conn.extra_metadata or {}).get("is_on_biz_app") is True
+
+
+def test_confirm_already_standard_missing_graph_flag_fails_closed(monkeypatch, db):
+    tenant = _tenant(db, name="حذاء رياضي أبيض")
+    conn = _already_standard_conn(db, tenant.id)
+    db.commit()
+    phone = dict(_t1_shape_phone())
+    phone.pop("is_on_biz_app")
+    _patch_phone(monkeypatch, {**phone, "status": "CONNECTED"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert conn.status == "connected"
+    assert conn.sending_enabled is True
+
+
+def test_confirm_already_standard_null_graph_flag_fails_closed(monkeypatch, db):
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    conn = _already_standard_conn(db, tenant.id)
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "is_on_biz_app": None, "status": "CONNECTED"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert conn.status == "connected"
+    assert conn.sending_enabled is True
+
+
 def test_confirm_webhook_failure_does_not_enable_sending(monkeypatch, db):
     tenant = _tenant(db, name="حذاء رياضي أبيض")
     _ai_settings(db, tenant.id)
