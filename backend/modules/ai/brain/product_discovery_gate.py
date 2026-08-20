@@ -536,6 +536,8 @@ _REFERENT_SCOPE_STOPWORDS = frozenset({
     "من", "اي", "أي", "في", "عن", "على", "هل", "ما", "وش", "ايش",
     "هذا", "هذه", "هذي", "ذلك", "تلك", "عندكم", "عندك", "ال",
     "انواع", "أنواع", "نوع", "types", "type", "the", "of", "what", "which",
+    "متوفر", "متوفره", "متوفرة", "موجود", "موجوده", "موجودة",
+    "available", "سعر", "اسعار", "أسعار", "ثمن", "price",
 })
 _REFERENT_SCOPE_UNIT_TOKENS = frozenset({
     "كيلو", "كيلوغرام", "كجم", "جرام", "kg", "gram", "g",
@@ -612,32 +614,58 @@ def _explicit_category_scope_broadening(message: str) -> bool:
     return False
 
 
-def _turn_scoped_to_canonical_referent(message: str, referent: Dict[str, Any]) -> bool:
-    msg = (message or "").strip()
-    if not msg or not isinstance(referent, dict):
-        return False
-    if _REFERENT_SCOPE_DEICTIC_RE.search(msg):
-        return True
-    title = str(referent.get("title") or referent.get("name") or "").strip()
-    title_tokens = _referent_scope_tokens(title)
-    if not title_tokens:
-        return False
+def _generic_subject_tokens(message: str) -> set[str]:
     generic_subject = ""
     try:
         from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
             extract_browse_category_scope,
         )
 
-        generic_subject = extract_browse_category_scope(msg, "") or ""
+        generic_subject = extract_browse_category_scope(message, "") or ""
     except Exception:  # noqa: BLE001  # noqa: silent-ok — subject probe is optional for overlap
         generic_subject = ""
     if not generic_subject:
-        generic_subject = extract_types_overview_query(msg) or ""
-    generic_tokens = _referent_scope_tokens(generic_subject)
-    distinctive = title_tokens - generic_tokens
-    if not distinctive:
+        generic_subject = extract_types_overview_query(message) or ""
+    return _referent_scope_tokens(generic_subject)
+
+
+def _turn_conflicts_with_canonical_referent(message: str, referent: Dict[str, Any]) -> bool:
+    """True when the turn names a different product/category family than the referent."""
+    title = str(referent.get("title") or referent.get("name") or "").strip()
+    title_tokens = _referent_scope_tokens(title)
+    msg_tokens = _referent_scope_tokens(message)
+    leftover = msg_tokens - title_tokens - _generic_subject_tokens(message)
+    return bool(leftover)
+
+
+def _turn_scoped_to_canonical_referent(
+    message: str,
+    referent: Dict[str, Any],
+    *,
+    state: Any = None,
+) -> bool:
+    msg = (message or "").strip()
+    if not msg or not isinstance(referent, dict):
         return False
-    return bool(distinctive & _referent_scope_tokens(msg))
+    if _turn_conflicts_with_canonical_referent(msg, referent):
+        return False
+    title = str(referent.get("title") or referent.get("name") or "").strip()
+    title_tokens = _referent_scope_tokens(title)
+    generic_tokens = _generic_subject_tokens(msg)
+    distinctive = title_tokens - generic_tokens
+    distinctive_hit = bool(distinctive and (distinctive & _referent_scope_tokens(msg)))
+    deictic_hit = bool(_REFERENT_SCOPE_DEICTIC_RE.search(msg))
+    if not distinctive_hit and not deictic_hit:
+        return False
+    if deictic_hit and not distinctive_hit:
+        try:
+            from .commerce.product_visual import is_focus_fresh  # noqa: PLC0415
+
+            if state is not None and not is_focus_fresh(state):
+                return False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — freshness miss must not trap the referent
+            return False
+    return True
 
 
 def preserve_canonical_referent_over_category_browse(
@@ -667,7 +695,7 @@ def preserve_canonical_referent_over_category_browse(
         return False
     if not _looks_like_generic_category_browse(msg):
         return False
-    return _turn_scoped_to_canonical_referent(msg, referent or {})
+    return _turn_scoped_to_canonical_referent(msg, referent or {}, state=state)
 
 
 def try_referent_scoped_product_reply_decision(ctx: BrainContext) -> Optional[Decision]:

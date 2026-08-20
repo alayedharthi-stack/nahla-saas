@@ -111,6 +111,33 @@ def _extend_unique(
         dest.append(item)
 
 
+_IDENTITY_KEYS = (
+    "id",
+    "product_id",
+    "external_id",
+    "sku",
+    "variant_id",
+    "product_retailer_id",
+)
+_CATALOG_FACT_MERGE_KEYS = (
+    "id",
+    "product_id",
+    "external_id",
+    "sku",
+    "variant_id",
+    "product_retailer_id",
+    "description",
+    "body",
+    "variants",
+    "variants_summary",
+    "title",
+    "price",
+    "in_stock",
+    "can_checkout",
+    "orderable",
+)
+
+
 def _identity_of(row: Any) -> str:
     try:
         from .commerce_focus_owner import product_focus_identity  # noqa: PLC0415
@@ -119,22 +146,47 @@ def _identity_of(row: Any) -> str:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — identity probe must not block catalog facts
         if not isinstance(row, dict):
             return ""
-        for key in ("id", "product_id", "external_id", "sku"):
+        for key in _IDENTITY_KEYS:
             val = str(row.get(key) or "").strip()
             if val:
                 return val
         return ""
 
 
-def _merge_catalog_fact_fields(dest: Dict[str, Any], source: Any) -> Dict[str, Any]:
+def _identity_keys(row: Any) -> set[str]:
+    keys: set[str] = set()
+    if not isinstance(row, dict):
+        return keys
+    for key in _IDENTITY_KEYS:
+        val = str(row.get(key) or "").strip()
+        if val:
+            keys.add(val)
+    primary = _identity_of(row)
+    if primary:
+        keys.add(primary)
+    return keys
+
+
+def _rows_same_identity(left: Any, right: Any) -> bool:
+    return bool(_identity_keys(left) & _identity_keys(right))
+
+
+def _merge_catalog_fact_fields(
+    dest: Dict[str, Any],
+    source: Any,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
     out = dict(dest or {})
     item = _normalize_candidate(source) if isinstance(source, dict) else None
     if not item:
         return out
-    for key in ("description", "body", "variants", "variants_summary", "title", "price"):
-        if key not in out or out.get(key) in (None, "", []):
-            if item.get(key) not in (None, "", []):
-                out[key] = item[key]
+    for key in _CATALOG_FACT_MERGE_KEYS:
+        incoming = item.get(key)
+        if incoming in (None, "", []):
+            continue
+        if overwrite or key not in out or out.get(key) in (None, "", []):
+            out[key] = incoming
     return out
 
 
@@ -159,23 +211,22 @@ def project_canonical_referent_catalog_facts(
     if not has_structured_catalog_identity(referent):
         return None
     projected = dict(referent)
-    rid = _identity_of(projected)
     sources: List[Any] = []
-    if isinstance(catalog_row, dict) and catalog_row:
-        sources.append(catalog_row)
     if facts is not None:
         sources.extend(list(getattr(facts, "discovery_products", None) or []))
         sources.extend(list(getattr(facts, "top_products", None) or []))
     ctx = merchant_context if isinstance(merchant_context, dict) else {}
     cached_proj = ctx.get("_canonical_referent_catalog_facts")
     if isinstance(cached_proj, dict) and cached_proj:
-        sources.insert(0, cached_proj)
+        sources.append(cached_proj)
     sources.extend(list(ctx.get("products") or []))
     for row in sources:
         if not isinstance(row, dict):
             continue
-        if rid and _identity_of(row) == rid:
+        if _rows_same_identity(projected, row):
             projected = _merge_catalog_fact_fields(projected, row)
+    if isinstance(catalog_row, dict) and catalog_row and _rows_same_identity(projected, catalog_row):
+        projected = _merge_catalog_fact_fields(projected, catalog_row, overwrite=True)
     normalized = normalize_structured_product_referent(projected)
     return normalized or projected
 
@@ -269,8 +320,7 @@ def ensure_canonical_referent_catalog_projection(
             for row in (ctx.get("products") or [])
             if isinstance(row, dict)
         ]
-        rid = _identity_of(projected)
-        products = [row for row in products if _identity_of(row) != rid]
+        products = [row for row in products if not _rows_same_identity(row, projected)]
         products.insert(0, dict(projected))
         ctx["products"] = products[:8]
         conversation = dict(ctx.get("conversation") or {})

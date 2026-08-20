@@ -119,11 +119,14 @@ _PERFUME = {
 }
 
 _INCIDENT_FOLLOWUP = "من أي أنواع العسل هذا العسل الصيفي"
+_DEICTIC_TYPES_FOLLOWUP = "من أي أنواع هذا؟"
 _GENERIC_SHOE_FOLLOWUP = "من أي أنواع هذا الحذاء الرياضي"
 _HONEY_BROADEN = "وش أنواع العسل عندكم؟"
+_HONEY_TYPES_BARE = "من أي أنواع العسل؟"
 _SHOE_BROADEN = "وش أنواع الأحذية عندكم؟"
 _HONEY_PRICE_BROWSE = "أسعار العسل"
 _SHOE_PRICE_BROWSE = "أسعار الأحذية"
+_SHOE_AVAIL_ON_HONEY_FOCUS = "هل هذه الأحذية متوفرة؟"
 
 
 def _intent(message: str, name: str = INTENT_ASK_PRODUCT) -> Intent:
@@ -342,6 +345,38 @@ class TestLegitimateBroadening:
         assert types_dec is not None
         assert types_dec.action == ACTION_SEARCH_PRODUCTS
 
+    def test_bare_category_types_ask_is_authorized_broadening(self) -> None:
+        state = _state(_SUMMER_HONEY_1KG)
+        assert preserve_canonical_referent_over_category_browse(state, _HONEY_TYPES_BARE) is False
+        ctx = _ctx(
+            _HONEY_TYPES_BARE,
+            state=state,
+            facts=_facts(_UNRELATED_TALH_1KG, _SUMMER_HONEY_1KG),
+        )
+        types_dec = try_types_overview_decision(ctx)
+        assert types_dec is not None
+        assert types_dec.action == ACTION_SEARCH_PRODUCTS
+
+    def test_deictic_other_category_does_not_keep_old_sku(self) -> None:
+        state = _state(_SUMMER_HONEY_1KG)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _SHOE_AVAIL_ON_HONEY_FOCUS,
+        ) is False
+
+    def test_fresh_deictic_types_followup_keeps_referent(self) -> None:
+        state = _state(_SUMMER_HONEY_1KG)
+        assert preserve_canonical_referent_over_category_browse(state, _DEICTIC_TYPES_FOLLOWUP)
+        ctx = _ctx(
+            _DEICTIC_TYPES_FOLLOWUP,
+            state=state,
+            facts=_facts(_UNRELATED_TALH_1KG, _SUMMER_HONEY_1KG),
+        )
+        types_dec = try_types_overview_decision(ctx)
+        assert types_dec is not None
+        assert types_dec.action == ACTION_LLM_REPLY
+        assert _decision_product_id(types_dec) == 154
+
 
 class TestNoReferentBrowseUnchanged:
     def test_honey_price_browse_without_focus(self) -> None:
@@ -497,6 +532,44 @@ class TestProjectionBind:
         assert merchant_context["products"][0]["id"] == 154
         assert merchant_context["conversation"]["selected_product"]["id"] == 154
         assert "أزهار موسم الصيف" in str(projected.get("description") or "")
+
+    def test_catalog_row_overwrites_stale_focus_price(self) -> None:
+        stale = dict(_SHOE)
+        stale["price"] = 999
+        stale.pop("description", None)
+        state = _state(stale)
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            catalog_row={
+                "id": 501,
+                "external_id": "sku-white-shoe",
+                "title": "حذاء رياضي أبيض",
+                "price": 249,
+                "description": "حذاء رياضي أبيض بخامة شبكية للتنفس اليومي.",
+                "can_checkout": True,
+                "in_stock": True,
+            },
+        )
+        assert projected is not None
+        assert projected["id"] == 501
+        assert projected["price"] == 249
+        assert "شبكية" in str(projected.get("description") or "")
+
+    def test_external_id_matches_numeric_id_row(self) -> None:
+        state = MerchantConversationState(greeted=True, stage=STAGE_DISCOVERY, turn=3)
+        set_product_focus(
+            state,
+            {"external_id": "sku-white-shoe", "title": "حذاء رياضي أبيض"},
+            reason="ai_d03_test_focus",
+            turn=2,
+        )
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            facts=_facts(_SHOE),
+        )
+        assert projected is not None
+        assert projected.get("id") == 501
+        assert "شبكية" in str(projected.get("description") or "")
 
 
 class TestLinkedMerchantKnowledgeOverlay:
