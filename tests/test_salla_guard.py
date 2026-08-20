@@ -2,8 +2,8 @@
 Tests for the Salla integration guard layer.
 
 Verifies that:
-  1. claim_store_for_tenant revokes stale bindings and creates/updates the winner
-  2. Only one enabled integration per store_id can exist
+  1. claim_store_for_tenant fails closed on canonical other-tenant ownership
+  2. Same-tenant claim updates the winner without creating duplicates
   3. token-login never enables without tokens
   4. validate_before_sync blocks when api_key is missing or duplicate exists
   5. has_valid_tokens / can_call_api / is_active_binding classify correctly
@@ -154,45 +154,28 @@ class TestClaimStore:
 
     def test_revokes_stale_on_same_store(self, db):
         """
-        When a different tenant claims the store, `claim_store_for_tenant`
-        revokes the old binding then repurposes the existing Integration row
-        for the new tenant.
-
-        Observable postconditions:
-          • result belongs to new tenant and is enabled
-          • exactly one active integration exists for that store_id
-          • the old tenant has no active binding for that store_id
+        Canonical ownership is fail-closed: a different tenant cannot claim a
+        store already bound on ``external_store_id``, even if the owner tenant
+        has no merchant users.
         """
-        from services.salla_guard import claim_store_for_tenant
+        from services.salla_guard import (
+            claim_store_for_tenant,
+            SallaStoreOwnershipConflictError,
+        )
         old = _integration(db, 1, "S200")
         assert old.enabled is True
 
         _tenant(db, 2)
         cfg = {"store_id": "S200", "api_key": "new_a", "refresh_token": "new_r"}
-        result = claim_store_for_tenant(db, store_id="S200", tenant_id=2, new_config=cfg)
-        db.commit()
+        with pytest.raises(SallaStoreOwnershipConflictError) as exc_info:
+            claim_store_for_tenant(db, store_id="S200", tenant_id=2, new_config=cfg)
 
-        # New tenant is the owner
-        assert result.tenant_id == 2
-        assert result.enabled is True
-
-        # Only one active binding for the store
-        from database.models import Integration as _Int
-        active = db.query(_Int).filter(
-            _Int.provider == "salla",
-            _Int.external_store_id == "S200",
-            _Int.enabled == True,  # noqa: E712
-        ).all()
-        assert len(active) == 1, "Exactly one active binding must exist after claim"
-
-        # Old tenant (1) no longer has an active binding
-        old_active = db.query(_Int).filter(
-            _Int.provider == "salla",
-            _Int.external_store_id == "S200",
-            _Int.tenant_id == 1,
-            _Int.enabled == True,  # noqa: E712
-        ).first()
-        assert old_active is None, "Old tenant must lose its active binding after store transfer"
+        assert exc_info.value.owner_tenant_id == 1
+        assert exc_info.value.requested_tenant_id == 2
+        db.refresh(old)
+        assert old.tenant_id == 1
+        assert old.enabled is True
+        assert old.external_store_id == "S200"
 
     def test_updates_existing_for_same_tenant(self, db):
         from services.salla_guard import claim_store_for_tenant

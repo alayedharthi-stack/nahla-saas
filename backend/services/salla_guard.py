@@ -116,7 +116,6 @@ def claim_store_for_tenant(
         SallaStoreIdentityConflictError,
         resolve_canonical_store_owner,
     )
-    from models import User  # noqa: PLC0415
 
     try:
         owner_tid, documented_owner, matched_via = resolve_canonical_store_owner(
@@ -140,26 +139,19 @@ def claim_store_for_tenant(
         ) from conflict
 
     if documented_owner is not None and documented_owner.tenant_id != tenant_id:
-        has_merchant_users = (
-            db.query(User.id)
-            .filter(User.tenant_id == documented_owner.tenant_id, User.role == "merchant")
-            .limit(1)
-            .first()
-        ) is not None
-        if has_merchant_users:
-            logger.error(
-                "[SallaGuard] CLAIM_BLOCKED | store_id=%s owner_tenant=%s "
-                "requested_tenant=%s matched_via=%s",
-                store_id_str,
-                documented_owner.tenant_id,
-                tenant_id,
-                matched_via,
-            )
-            raise SallaStoreOwnershipConflictError(
-                documented_owner.tenant_id,
-                tenant_id,
-                store_id_str,
-            )
+        logger.error(
+            "[SallaGuard] CLAIM_BLOCKED | store_id=%s owner_tenant=%s "
+            "requested_tenant=%s matched_via=%s",
+            store_id_str,
+            documented_owner.tenant_id,
+            tenant_id,
+            matched_via,
+        )
+        raise SallaStoreOwnershipConflictError(
+            documented_owner.tenant_id,
+            tenant_id,
+            store_id_str,
+        )
 
     # ── Revoke stale bindings ─────────────────────────────────────────────
     stale_rows = (

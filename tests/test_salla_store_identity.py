@@ -835,6 +835,29 @@ class TestCanonicalOAuthOwnership:
         assert owner.external_store_id == PARTNER_CANONICAL_STORE
         assert (owner.config or {}).get("salla_merchant_id_alt") == PARTNER_ALT_MERCHANT
 
+    def test_claim_store_fails_closed_without_merchant_users(self, db):
+        from services.salla_guard import (
+            claim_store_for_tenant,
+            SallaStoreOwnershipConflictError,
+        )
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+        )
+        db.merge(Tenant(id=99, name="متجر تجريبي عام — claimant"))
+        db.commit()
+        with pytest.raises(SallaStoreOwnershipConflictError) as exc_info:
+            claim_store_for_tenant(
+                db,
+                store_id=GENERIC_CANONICAL_STORE,
+                tenant_id=99,
+                new_config={"store_id": GENERIC_CANONICAL_STORE, "api_key": "tok"},
+            )
+        assert exc_info.value.owner_tenant_id == GENERIC_TENANT
+        assert exc_info.value.requested_tenant_id == 99
+
 
 class TestSyncOAuthCallbackAliasNotOwnership:
     def test_sync_callback_does_not_block_on_legacy_merchant_alias(self, db):

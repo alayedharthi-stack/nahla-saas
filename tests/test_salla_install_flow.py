@@ -20,7 +20,7 @@ Covered scenarios
  13. Migration pre-check raises when duplicates exist before constraint
  14. Migration pre-check passes silently when data is clean
  15. claim_store_for_tenant on reinstall (same tenant) reuses the same row
- 16. claim_store_for_tenant revokes old binding when a different tenant claims the store
+ 16. claim_store_for_tenant fails closed when a different tenant claims a canonically owned store
 
 Test design notes
 ─────────────────
@@ -660,56 +660,33 @@ class TestClaimStoreReinstall:
 
     def test_reinstall_different_tenant_revokes_old_binding(self, db):
         """
-        When a store is claimed by a different tenant (e.g. sold / account merged),
-        the guard revokes the old binding and makes the new tenant the sole owner.
-
-        Implementation note: claim_store_for_tenant may REPURPOSE the existing
-        Integration row (changing its tenant_id) rather than creating a new one.
-        We therefore test the observable postconditions rather than the row-level
-        state of the original object:
-          • new_tenant has exactly ONE active binding for the store
-          • old_tenant has NO active binding for the store
-          • the guard returns an integration owned by new_tenant
+        Canonical store ownership cannot be transferred by claim_store_for_tenant
+        when another tenant already owns ``external_store_id``.
         """
-        from services.salla_guard import claim_store_for_tenant
+        from services.salla_guard import (
+            claim_store_for_tenant,
+            SallaStoreOwnershipConflictError,
+        )
 
         old_tenant = _make_tenant(db, "Old Owner")
         new_tenant = _make_tenant(db, "New Owner")
-        _make_integration(db, old_tenant.id, "S031")
+        original = _make_integration(db, old_tenant.id, "S031")
         db.commit()
 
-        result = claim_store_for_tenant(
-            db,
-            store_id="S031",
-            tenant_id=new_tenant.id,
-            new_config={"store_id": "S031", "api_key": "TRANSFERRED_KEY"},
-        )
-        db.commit()
-
-        # New tenant is now the owner
-        assert result.tenant_id == new_tenant.id
-        assert result.enabled is True
-
-        # Exactly one active binding for this store
-        active_count = db.query(Integration).filter_by(
-            provider="salla", external_store_id="S031", enabled=True
-        ).count()
-        assert active_count == 1, "Only one active binding may exist per store at any time"
-
-        # Old tenant must have lost its active binding
-        old_active = (
-            db.query(Integration)
-            .filter(
-                Integration.provider == "salla",
-                Integration.external_store_id == "S031",
-                Integration.tenant_id == old_tenant.id,
-                Integration.enabled == True,  # noqa: E712
+        with pytest.raises(SallaStoreOwnershipConflictError) as exc_info:
+            claim_store_for_tenant(
+                db,
+                store_id="S031",
+                tenant_id=new_tenant.id,
+                new_config={"store_id": "S031", "api_key": "TRANSFERRED_KEY"},
             )
-            .first()
-        )
-        assert old_active is None, (
-            "Old tenant must not retain an active binding after the store was claimed by another tenant"
-        )
+
+        assert exc_info.value.owner_tenant_id == old_tenant.id
+        assert exc_info.value.requested_tenant_id == new_tenant.id
+        db.refresh(original)
+        assert original.tenant_id == old_tenant.id
+        assert original.enabled is True
+        assert original.external_store_id == "S031"
 
     def test_webhook_reinstall_updates_tokens_without_new_tenant(self, db):
         """

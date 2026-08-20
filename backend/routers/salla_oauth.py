@@ -331,20 +331,19 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     )
 
     if identity_source == "merchant_account_only":
-        blocked = reject_merchant_account_only_alias_routing(
+        reject_merchant_account_only_alias_routing(
             db,
             merchant_account_id=lookup_store_id,
             context="token_login",
         )
-        if blocked is not None:
-            raise HTTPException(
-                status_code=403,
-                detail=build_merchant_identity_not_canonical_detail(
-                    identity_source="merchant_account_only",
-                    merchant_account_id=lookup_store_id,
-                    has_canonical_store_id=False,
-                ),
-            )
+        raise HTTPException(
+            status_code=403,
+            detail=build_merchant_identity_not_canonical_detail(
+                identity_source="merchant_account_only",
+                merchant_account_id=lookup_store_id,
+                has_canonical_store_id=False,
+            ),
+        )
 
     # ── Authoritative store owner (canonical store id only) ──
     allow_alias_for_owner = identity_source == "canonical_store_id"
