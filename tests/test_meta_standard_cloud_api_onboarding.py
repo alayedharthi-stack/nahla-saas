@@ -24,6 +24,7 @@ from models import Base, Tenant, TenantSettings, WhatsAppConnection  # noqa: E40
 from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: E402
 from routers.whatsapp_embedded import (  # noqa: E402
     ConfirmStandardCloudApiRequest,
+    _apply_embedded_state,
     _assign_embedded_phone_id,
     _build_embedded_status_payload,
     _finalize_coexistence_exchange,
@@ -35,8 +36,11 @@ from routers.whatsapp_embedded import (  # noqa: E402
 from services.meta_coexistence import (  # noqa: E402
     COEXISTENCE_NOT_ELIGIBLE,
     clear_obsolete_coexistence_state,
+    invalidate_identity_scoped_proof,
     maybe_fail_sync_deadline,
+    persist_provider_phone_truth,
     project_coexistence_sync_state,
+    provider_is_on_biz_app,
     should_project_as_coexistence,
 )
 
@@ -837,6 +841,11 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
             "smb_sync_deadline_at": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
             "readiness_phone_number_id": PHONE_ID,
             "readiness_waba_id": "waba-old-generic",
+            "last_coexistence_outcome": "ready",
+            "status_projection_reason": "ready",
+            "embedded_status_message": "stale",
+            "last_meta_sync_at": "2026-01-01T00:00:00+00:00",
+            "failure_code": "not_eligible",
         },
     )
     db.commit()
@@ -858,6 +867,11 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
     assert "readiness_waba_id" not in meta
     assert "is_on_biz_app" not in meta
     assert "platform_type" not in meta
+    assert "last_coexistence_outcome" not in meta
+    assert "status_projection_reason" not in meta
+    assert "embedded_status_message" not in meta
+    assert "last_meta_sync_at" not in meta
+    assert "failure_code" not in meta
 
 
 def test_assigning_new_phone_clears_webhook_verified(db):
@@ -874,6 +888,11 @@ def test_assigning_new_phone_clears_webhook_verified(db):
             "smb_sync": {"history": {"accepted": True, "request_id": "old"}},
             "smb_sync_deadline_at": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
             "readiness_phone_number_id": PHONE_ID,
+            "last_coexistence_outcome": "ready",
+            "status_projection_reason": "ready",
+            "embedded_status_message": "stale",
+            "last_meta_sync_at": "2026-01-01T00:00:00+00:00",
+            "failure_code": "not_eligible",
         },
     )
     db.commit()
@@ -885,6 +904,9 @@ def test_assigning_new_phone_clears_webhook_verified(db):
     assert "smb_sync_deadline_at" not in meta
     assert "is_on_biz_app" not in meta
     assert "readiness_phone_number_id" not in meta
+    assert "last_coexistence_outcome" not in meta
+    assert "status_projection_reason" not in meta
+    assert "failure_code" not in meta
 
 
 def test_connected_coexistence_live_false_surfaces_standard_confirm(monkeypatch, db):
@@ -975,3 +997,93 @@ def test_confirm_resets_stale_webhook_and_resubscribes(monkeypatch, db):
     assert captured[0].get("prefer_waba") is True
     assert conn.webhook_verified is True
     assert conn.status == "connected"
+
+
+def test_graph_null_is_not_explicit_false():
+    assert provider_is_on_biz_app({"is_on_biz_app": None}, None) is None
+    assert provider_is_on_biz_app({"is_on_biz_app": False}, None) is False
+    assert provider_is_on_biz_app({"is_on_biz_app": True}, None) is True
+    assert provider_is_on_biz_app({}, {"is_on_biz_app": None}) is None
+
+
+def test_confirm_rejects_graph_null_is_on_biz_app(monkeypatch, db):
+    tenant = _tenant(db, name="حذاء رياضي أبيض")
+    conn = _conn(db, tenant.id, extra_metadata={"is_on_biz_app": False}, status="configuring")
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "is_on_biz_app": None, "status": "CONNECTED"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert conn.status != "connected"
+    assert conn.sending_enabled is False
+
+
+def test_unknown_phone_status_does_not_project_connected(db):
+    tenant = _tenant(db)
+    conn = _conn(db, tenant.id, extra_metadata={"is_on_biz_app": False})
+    db.commit()
+    phone = dict(_t1_shape_phone())
+    phone.pop("status", None)
+    projected = _project_phone_sync_state(conn, phone)
+    assert projected["connected"] is False
+    assert projected["sending_enabled"] is False
+    assert projected["db_status"] != "connected"
+
+
+def test_graph_null_is_not_persisted_as_false(db):
+    tenant = _tenant(db)
+    conn = _conn(db, tenant.id, extra_metadata={"is_on_biz_app": True})
+    db.commit()
+    persist_provider_phone_truth(conn, {"is_on_biz_app": None})
+    assert "is_on_biz_app" not in dict(conn.extra_metadata or {})
+    _apply_embedded_state(
+        conn,
+        {"is_on_biz_app": None, "platform_type": "CLOUD_API"},
+        {
+            "connected": False,
+            "sending_enabled": False,
+            "db_status": "activation_pending",
+            "verification_status": "VERIFIED",
+            "name_status": "APPROVED",
+            "meta_phone_status": None,
+            "quality_rating": "GREEN",
+            "message": "pending",
+        },
+    )
+    assert "is_on_biz_app" not in dict(conn.extra_metadata or {})
+    assert provider_is_on_biz_app(None, dict(conn.extra_metadata or {})) is None
+
+
+def test_identity_invalidation_clears_outcome_and_sending(db):
+    tenant = _tenant(db)
+    conn = _conn(
+        db,
+        tenant.id,
+        webhook_verified=True,
+        sending_enabled=True,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "last_coexistence_outcome": "ready",
+            "status_projection_reason": "ready",
+            "embedded_status_message": "stale-ready",
+            "last_meta_sync_at": "2026-01-01T00:00:00+00:00",
+            "failure_code": "not_eligible",
+            "smb_sync": {"history": {"accepted": True, "request_id": "old"}},
+        },
+    )
+    db.commit()
+    invalidate_identity_scoped_proof(conn)
+    meta = dict(conn.extra_metadata or {})
+    assert conn.webhook_verified is False
+    assert conn.sending_enabled is False
+    assert "smb_sync" not in meta
+    assert "last_coexistence_outcome" not in meta
+    assert "status_projection_reason" not in meta
+    assert "embedded_status_message" not in meta
+    assert "last_meta_sync_at" not in meta
+    assert "failure_code" not in meta

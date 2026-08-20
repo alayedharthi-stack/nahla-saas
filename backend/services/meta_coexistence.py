@@ -65,6 +65,11 @@ _STALE_IDENTITY_PROVIDER_KEYS = (
     "meta_quality_rating",
     "last_meta_sync_error",
     "meta_register_response",
+    "last_coexistence_outcome",
+    "status_projection_reason",
+    "embedded_status_message",
+    "last_meta_sync_at",
+    "failure_code",
 )
 _COEXISTENCE_WAIT_KEYS = (
     "smb_sync",
@@ -92,6 +97,15 @@ def is_coexistence_mode(conn: Any) -> bool:
     return str(meta.get("connection_mode") or "").strip().lower() == CONNECTION_MODE
 
 
+def _explicit_bool(value: Any) -> Optional[bool]:
+    """True/False only for JSON booleans. Null, missing, and other values are unknown."""
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
+
+
 def provider_is_on_biz_app(
     phone_data: Optional[Dict[str, Any]] = None,
     meta: Optional[Dict[str, Any]] = None,
@@ -99,13 +113,14 @@ def provider_is_on_biz_app(
     """Return provider Business App truth, or None when Meta did not say.
 
     Graph ``is_on_biz_app`` outranks persisted metadata.
+    Only explicit JSON true/false count; null is unknown.
     """
     data = dict(phone_data or {})
     if "is_on_biz_app" in data:
-        return bool(data.get("is_on_biz_app"))
+        return _explicit_bool(data.get("is_on_biz_app"))
     stored = dict(meta or {})
     if "is_on_biz_app" in stored:
-        return bool(stored.get("is_on_biz_app"))
+        return _explicit_bool(stored.get("is_on_biz_app"))
     return None
 
 
@@ -154,7 +169,11 @@ def persist_provider_phone_truth(
     meta = dict(getattr(conn, "extra_metadata", None) or {})
     data = dict(phone_data or {})
     if "is_on_biz_app" in data:
-        meta["is_on_biz_app"] = bool(data.get("is_on_biz_app"))
+        explicit = _explicit_bool(data.get("is_on_biz_app"))
+        if explicit is None:
+            meta.pop("is_on_biz_app", None)
+        else:
+            meta["is_on_biz_app"] = explicit
     if data.get("platform_type"):
         meta["platform_type"] = data.get("platform_type")
     conn.extra_metadata = meta
@@ -205,6 +224,8 @@ def invalidate_identity_scoped_proof(conn: Any) -> Dict[str, Any]:
         meta.pop(key, None)
     conn.extra_metadata = meta
     conn.webhook_verified = False
+    if hasattr(conn, "sending_enabled"):
+        conn.sending_enabled = False
     return meta
 
 
@@ -301,9 +322,9 @@ def verify_coexistence_phone(
         )
         return False, data, "Meta رفضت التحقق من الرقم. تأكد أن الرقم ما زال على تطبيق واتساب الأعمال."
 
-    on_app = bool(data.get("is_on_biz_app"))
+    on_app = _explicit_bool(data.get("is_on_biz_app")) if "is_on_biz_app" in data else None
     platform = str(data.get("platform_type") or "").strip().upper()
-    if on_app and platform == "CLOUD_API":
+    if on_app is True and platform == "CLOUD_API":
         return True, data, None
     return False, data, (
         "هذا الرقم غير مؤهل لمسار Coexistence. "

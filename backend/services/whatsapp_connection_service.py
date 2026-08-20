@@ -237,6 +237,9 @@ def commit_connection(
         and str(getattr(conn, "status", "") or "") == "connected"
         and getattr(conn, "connected_at", None) is not None
     )
+    if action == "updated" and not same_identity:
+        from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
+        invalidate_identity_scoped_proof(conn)
     conn.phone_number_id              = phone_number_id
     conn.whatsapp_business_account_id = waba_id
     conn.connection_type              = connection_type
@@ -779,8 +782,6 @@ def subscribe_phone_webhook(
         attempts: list[tuple[str, str]] = []
         if prefer_waba and waba_id:
             attempts.append(("waba", waba_id))
-            if phone_number_id:
-                attempts.append(("phone", phone_number_id))
         else:
             if phone_number_id:
                 attempts.append(("phone", phone_number_id))
@@ -813,6 +814,37 @@ def subscribe_phone_webhook(
                 "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
                 tenant_id, target_kind, target_id, resp.status_code, last_msg,
             )
+            if (
+                prefer_waba
+                and target_kind == "waba"
+                and phone_number_id
+                and resp.status_code == 400
+                and "unsupported" in str(last_msg).lower()
+            ):
+                logger.info(
+                    "[WASvc] WABA-level subscribe unsupported — retrying phone-level "
+                    "tenant=%s phone=%s",
+                    tenant_id, phone_number_id,
+                )
+                fallback_url = (
+                    f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                    f"/{phone_number_id}/subscribed_apps"
+                )
+                fb_resp = httpx.post(
+                    fallback_url,
+                    params={"access_token": access_token},
+                    json={"subscribed_fields": fields},
+                    timeout=10,
+                )
+                fb_data = fb_resp.json()
+                if fb_resp.status_code == 200 and fb_data.get("success"):
+                    logger.info(
+                        "[WASvc] subscribed_apps OK via phone fallback — tenant=%s phone=%s",
+                        tenant_id, phone_number_id,
+                    )
+                    return True, None
+                last_msg = (fb_data.get("error") or {}).get("message") or last_msg
+                return False, last_msg
             if (
                 not prefer_waba
                 and target_kind == "phone"

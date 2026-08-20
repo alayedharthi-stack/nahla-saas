@@ -722,14 +722,16 @@ def _build_phone_sync_state(phone_data: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     return {
-        "connected": True,
-        "sending_enabled": True,
-        "db_status": "connected",
+        "connected": False,
+        "sending_enabled": False,
+        "db_status": "activation_pending",
         "verification_status": code_status or None,
         "name_status": name_status or None,
         "meta_phone_status": phone_status or None,
         "quality_rating": quality_rating,
-        "message": "الرقم مفعّل ومتزامن مع Meta وجاهز للإرسال.",
+        "message": (
+            "تم التحقق من الرقم، لكن Meta لم تؤكد أن الرقم مفعّل على Cloud API بعد."
+        ),
     }
 
 
@@ -784,10 +786,6 @@ def _apply_embedded_state(
     })
     if connection_mode:
         meta["connection_mode"] = connection_mode
-    if "is_on_biz_app" in phone_data:
-        meta["is_on_biz_app"] = bool(phone_data.get("is_on_biz_app"))
-    if phone_data.get("platform_type"):
-        meta["platform_type"] = phone_data.get("platform_type")
     if sync_state.get("projection_reason"):
         meta["status_projection_reason"] = sync_state.get("projection_reason")
     if sync_state.get("recommended_mode"):
@@ -796,9 +794,13 @@ def _apply_embedded_state(
         meta["meta_register_response"] = register_data
 
     conn.extra_metadata = meta
+    from services.meta_coexistence import (  # noqa: PLC0415
+        coexistence_identity_matches,
+        persist_provider_phone_truth,
+    )
+    persist_provider_phone_truth(conn, phone_data)
     conn.connection_type = "embedded"
     conn.provider = WHATSAPP_PROVIDER_META
-    from services.meta_coexistence import coexistence_identity_matches  # noqa: PLC0415
     if coexistence_identity_matches(conn, phone_data) or not _is_coexistence_conn(conn):
         conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
         conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name

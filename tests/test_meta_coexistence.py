@@ -159,6 +159,47 @@ def test_default_subscribe_stays_phone_first(mock_post):
 
 
 @patch("services.whatsapp_connection_service.httpx.post")
+def test_standard_subscribe_does_not_fallback_on_waba_forbidden(mock_post):
+    mock_post.return_value.status_code = 403
+    mock_post.return_value.json.return_value = {"error": {"message": "Permissions error"}}
+    ok, err = subscribe_phone_webhook(
+        "pn-generic-cloud-1",
+        "token",
+        9,
+        waba_id="waba-generic-cloud-1",
+        prefer_waba=True,
+    )
+    assert ok is False
+    assert err
+    assert mock_post.call_count == 1
+    url = mock_post.call_args.args[0]
+    assert "/waba-generic-cloud-1/subscribed_apps" in url
+
+
+@patch("services.whatsapp_connection_service.httpx.post")
+def test_standard_subscribe_phone_fallback_only_when_waba_unsupported(mock_post):
+    waba = type("Resp", (), {})()
+    waba.status_code = 400
+    waba.json = lambda: {"error": {"message": "Unsupported post request"}}
+    phone = type("Resp", (), {})()
+    phone.status_code = 200
+    phone.json = lambda: {"success": True}
+    mock_post.side_effect = [waba, phone]
+    ok, err = subscribe_phone_webhook(
+        "pn-generic-cloud-1",
+        "token",
+        9,
+        waba_id="waba-generic-cloud-1",
+        prefer_waba=True,
+    )
+    assert ok is True
+    assert err is None
+    assert mock_post.call_count == 2
+    assert "/waba-generic-cloud-1/subscribed_apps" in mock_post.call_args_list[0].args[0]
+    assert "/pn-generic-cloud-1/subscribed_apps" in mock_post.call_args_list[1].args[0]
+
+
+@patch("services.whatsapp_connection_service.httpx.post")
 def test_register_phone_number_still_callable_for_default_path(mock_post):
     mock_post.return_value.status_code = 200
     mock_post.return_value.json.return_value = {"success": True}
