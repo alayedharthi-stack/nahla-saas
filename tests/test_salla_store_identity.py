@@ -809,6 +809,41 @@ class TestCanonicalOAuthOwnership:
         assert via == "config.store_id"
         assert row is not None
 
+    def test_config_store_id_is_not_ownership_when_external_populated(self, db):
+        from services.salla_store_identity import (
+            find_salla_integration_by_identity,
+            resolve_canonical_store_owner,
+        )
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+            alt_merchant_id=GENERIC_ALT_MERCHANT,
+        )
+        row = (
+            db.query(Integration)
+            .filter_by(tenant_id=GENERIC_TENANT, provider="salla")
+            .one()
+        )
+        cfg = dict(row.config or {})
+        cfg["store_id"] = GENERIC_ALT_MERCHANT
+        row.config = cfg
+        db.commit()
+
+        owner_tid, _, via = resolve_canonical_store_owner(db, GENERIC_ALT_MERCHANT)
+        assert owner_tid is None
+        assert via == ""
+
+        found, matched_via = find_salla_integration_by_identity(
+            db,
+            GENERIC_ALT_MERCHANT,
+            allow_alias_match=True,
+            allow_merchant_alias=False,
+        )
+        assert found is None
+        assert matched_via == ""
+
     def test_claim_store_ignores_merchant_alias(self, db):
         from services.salla_guard import claim_store_for_tenant
 

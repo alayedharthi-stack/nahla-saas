@@ -544,7 +544,8 @@ def find_salla_integration_by_identity(
     may match.
 
     When ``allow_alias_match`` is True:
-      * ``config.store_id`` is a legacy canonical-metadata lookup
+      * ``config.store_id`` is a narrow legacy canonical-metadata bridge and
+        matches only when ``external_store_id`` is empty
       * ``salla_merchant_id_alt`` / ``config.merchant_id`` match only if
         ``allow_merchant_alias`` is True (default, correlation / webhooks).
         Ownership callers must pass ``allow_merchant_alias=False``.
@@ -585,7 +586,10 @@ def find_salla_integration_by_identity(
     alias_matches: List[Tuple[Any, str]] = []
     for row in q.all():
         cfg = row.config or {}
-        if _str_id(cfg.get("store_id")) == sid:
+        if (
+            _str_id(cfg.get("store_id")) == sid
+            and not _str_id(row.external_store_id)
+        ):
             alias_matches.append((row, "config.store_id"))
         elif allow_merchant_alias and _str_id(cfg.get("salla_merchant_id_alt")) == sid:
             alias_matches.append((row, "config.salla_merchant_id_alt"))
