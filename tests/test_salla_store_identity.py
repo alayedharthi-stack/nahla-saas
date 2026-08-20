@@ -1007,3 +1007,67 @@ class TestSyncOAuthCallbackAliasNotOwnership:
         response = asyncio.run(_run())
         assert response.status_code == 302
         assert "merchant_identity_not_canonical" in response.headers["location"]
+
+    def test_sync_callback_store_info_failure_keeps_canonical_external(self, db):
+        from routers.salla_oauth import salla_api_oauth_callback
+        from sqlalchemy.orm.attributes import flag_modified
+
+        row = _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+            alt_merchant_id=GENERIC_ALT_MERCHANT,
+        )
+        cfg = dict(row.config or {})
+        cfg["store_id"] = GENERIC_ALT_MERCHANT
+        row.config = cfg
+        flag_modified(row, "config")
+        db.commit()
+
+        async def _run():
+            request = MagicMock()
+            request.query_params = {}
+            request.cookies = {}
+            request.headers = {}
+            request.client = None
+
+            token_resp = MagicMock()
+            token_resp.status_code = 200
+            token_resp.json.return_value = {
+                "access_token": "acc",
+                "refresh_token": "ref",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+            store_resp = MagicMock()
+            store_resp.status_code = 500
+            store_resp.json.return_value = {}
+
+            with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "cid"):
+                with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_SECRET", "sec"):
+                    with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                        mock_client = AsyncMock()
+                        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                        mock_client.__aexit__ = AsyncMock(return_value=None)
+                        mock_client.post = AsyncMock(return_value=token_resp)
+                        mock_client.get = AsyncMock(return_value=store_resp)
+                        mock_client_cls.return_value = mock_client
+
+                        return await salla_api_oauth_callback(
+                            request,
+                            code="auth-code",
+                            state=f"t{GENERIC_TENANT}_abc_apisync",
+                            error=None,
+                            db=db,
+                        )
+
+        response = asyncio.run(_run())
+        assert response.status_code == 302
+        assert "salla_oauth=success" in response.headers["location"]
+        owner = (
+            db.query(Integration)
+            .filter_by(tenant_id=GENERIC_TENANT, provider="salla")
+            .one()
+        )
+        assert owner.external_store_id == GENERIC_CANONICAL_STORE
+        assert (owner.config or {}).get("salla_merchant_id_alt") == GENERIC_ALT_MERCHANT

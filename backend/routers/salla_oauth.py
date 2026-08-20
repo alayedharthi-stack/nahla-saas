@@ -2645,6 +2645,35 @@ async def salla_api_oauth_callback(
                 status_code=302,
             )
 
+        existing = db.query(Integration).filter(
+            Integration.tenant_id == tenant_id,
+            Integration.provider  == "salla",
+        ).first()
+
+        # store/info missed: reuse the already-canonical binding only.
+        # Never prefer config.store_id over a populated external_store_id.
+        if not salla_store_id and existing:
+            salla_store_id = str(existing.external_store_id or "").strip()
+            if not salla_store_id:
+                salla_store_id = str((existing.config or {}).get("store_id") or "").strip()
+            if salla_store_id:
+                store_identity = SallaStoreIdentity(
+                    store_id=salla_store_id,
+                    merchant_account_id=(
+                        store_identity.merchant_account_id if store_identity else ""
+                    ),
+                    authorizing_user_id=(
+                        store_identity.authorizing_user_id if store_identity else ""
+                    ),
+                    store_name=store_name,
+                    resolved_via="existing_canonical_store",
+                )
+                logger.info(
+                    "[Salla API OAuth] store/info missing; reused existing canonical store | "
+                    "tenant=%s canonical_store_id=%s",
+                    tenant_id, salla_store_id,
+                )
+
         if salla_store_id:
             ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
                 db,
@@ -2668,15 +2697,6 @@ async def salla_api_oauth_callback(
                     status_code=302,
                 )
 
-        existing = db.query(Integration).filter(
-            Integration.tenant_id == tenant_id,
-            Integration.provider  == "salla",
-        ).first()
-
-        # Fall back to whatever store_id we already have on file when Salla's
-        # store/info call did not resolve one in this exchange.
-        if not salla_store_id and existing:
-            salla_store_id = (existing.config or {}).get("store_id", "") or (existing.external_store_id or "")
         if not store_name and existing:
             store_name = (existing.config or {}).get("store_name", "") or store_name
 
