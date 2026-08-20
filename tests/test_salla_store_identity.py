@@ -574,3 +574,378 @@ class TestSyncOAuthCallbackMismatch:
         response = asyncio.run(_run())
         assert response.status_code == 302
         assert "store_owned_by_other_tenant" in response.headers["location"]
+
+
+class TestStoreInfoTypedIdentity:
+    def test_data_id_is_canonical_store_not_nested_merchant(self):
+        from services.salla_store_identity import store_identity_from_store_info
+
+        identity = store_identity_from_store_info({
+            "id": GENERIC_CANONICAL_STORE,
+            "name": GENERIC_STORE_NAME,
+            "merchant": {"id": GENERIC_ALT_MERCHANT},
+            "owner": {"id": "1689171978"},
+        })
+        assert identity.canonical_store_id == GENERIC_CANONICAL_STORE
+        assert identity.merchant_account_id == GENERIC_ALT_MERCHANT
+        assert identity.authorizing_user_id == "1689171978"
+        assert identity.identity_source == "canonical_store_id"
+        assert identity.resolved_via == "store_info"
+
+    def test_merchant_only_payload_is_not_canonical(self):
+        from services.salla_store_identity import store_identity_from_store_info
+
+        identity = store_identity_from_store_info({
+            "merchant": {"id": GENERIC_ALT_MERCHANT, "name": "Account"},
+        })
+        assert identity.canonical_store_id == ""
+        assert identity.merchant_account_id == GENERIC_ALT_MERCHANT
+        assert identity.identity_source == "merchant_account_only"
+
+
+class TestCanonicalOAuthOwnership:
+    """AD-SALLA-ID-1: merchant/legacy aliases must not prove store ownership."""
+
+    def test_canonical_cross_tenant_conflict_blocks(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=9,
+            store_id=GENERIC_CANONICAL_STORE,
+        )
+        assert ok is False
+        assert owner_tid == GENERIC_TENANT
+        assert reason == "store_owned_by_other_tenant"
+
+    def test_legacy_merchant_alias_is_not_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        row = _seed_canonical_integration(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_CANONICAL_STORE,
+            alt_merchant_id=PARTNER_ALT_MERCHANT,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=35,
+            store_id=PARTNER_ALT_MERCHANT,
+        )
+        assert ok is True
+        assert owner_tid is None
+        assert reason == ""
+        db.refresh(row)
+        assert row.external_store_id == PARTNER_CANONICAL_STORE
+        assert (row.config or {}).get("salla_merchant_id_alt") == PARTNER_ALT_MERCHANT
+
+    def test_generic_legacy_alias_is_not_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+            alt_merchant_id=GENERIC_ALT_MERCHANT,
+            store_name=GENERIC_STORE_NAME,
+        )
+        from services.salla_store_identity import SallaStoreIdentity
+
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=9,
+            identity=SallaStoreIdentity(
+                store_id=GENERIC_ALT_MERCHANT,
+                resolved_via="store_info",
+            ),
+        )
+        assert ok is True
+        assert owner_tid is None
+        assert reason == ""
+
+    def test_merchant_id_config_is_not_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        db.merge(Tenant(id=GENERIC_TENANT, name="Generic"))
+        db.add(Integration(
+            tenant_id=GENERIC_TENANT,
+            provider="salla",
+            external_store_id=GENERIC_CANONICAL_STORE,
+            config={
+                "store_id": GENERIC_CANONICAL_STORE,
+                "merchant_id": GENERIC_ALT_MERCHANT,
+            },
+            enabled=True,
+        ))
+        db.commit()
+
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=9,
+            store_id=GENERIC_ALT_MERCHANT,
+        )
+        assert ok is True
+        assert owner_tid is None
+        assert reason == ""
+
+    def test_merchant_account_only_cannot_persist(self, db):
+        from services.salla_store_identity import (
+            SallaStoreIdentity,
+            assert_oauth_tenant_matches_store_owner,
+        )
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+            alt_merchant_id=GENERIC_ALT_MERCHANT,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=9,
+            identity=SallaStoreIdentity(
+                store_id="",
+                merchant_account_id=GENERIC_ALT_MERCHANT,
+                resolved_via="merchant_account_only",
+            ),
+        )
+        assert ok is False
+        assert owner_tid is None
+        assert reason == "merchant_identity_not_canonical"
+
+    def test_same_tenant_canonical_reconnect_allowed(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_CANONICAL_STORE,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=GENERIC_TENANT,
+            store_id=GENERIC_CANONICAL_STORE,
+        )
+        assert ok is True
+        assert owner_tid == GENERIC_TENANT
+        assert reason == ""
+
+    def test_multiple_canonical_owners_fail_closed(self, db):
+        from services.salla_store_identity import (
+            SallaStoreIdentity,
+            SallaStoreIdentityConflictError,
+            assert_oauth_tenant_matches_store_owner,
+            resolve_canonical_store_owner,
+        )
+        from unittest.mock import patch
+
+        row_a = Integration(
+            id=201,
+            tenant_id=GENERIC_TENANT,
+            provider="salla",
+            external_store_id=GENERIC_CANONICAL_STORE,
+            config={"store_id": GENERIC_CANONICAL_STORE},
+            enabled=True,
+        )
+        row_b = Integration(
+            id=202,
+            tenant_id=9,
+            provider="salla",
+            external_store_id=GENERIC_CANONICAL_STORE,
+            config={"store_id": GENERIC_CANONICAL_STORE},
+            enabled=True,
+        )
+
+        class _CanonicalQuery:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def all(self):
+                return [row_a, row_b]
+
+        original_query = db.query
+
+        def _query_wrapper(model):
+            from models import Integration as IntegrationModel
+            if model is IntegrationModel:
+                return _CanonicalQuery()
+            return original_query(model)
+
+        with patch.object(db, "query", side_effect=_query_wrapper):
+            with pytest.raises(SallaStoreIdentityConflictError):
+                resolve_canonical_store_owner(
+                    db, SallaStoreIdentity(store_id=GENERIC_CANONICAL_STORE),
+                )
+            ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+                db,
+                session_tenant_id=35,
+                store_id=GENERIC_CANONICAL_STORE,
+            )
+        assert ok is False
+        assert reason == "store_identity_conflict"
+        assert owner_tid is None
+
+    def test_legacy_config_store_id_bridge_when_external_empty(self, db):
+        from services.salla_store_identity import resolve_canonical_store_owner
+
+        db.merge(Tenant(id=GENERIC_TENANT, name="Generic"))
+        db.add(Integration(
+            tenant_id=GENERIC_TENANT,
+            provider="salla",
+            external_store_id=None,
+            config={"store_id": GENERIC_CANONICAL_STORE},
+            enabled=True,
+        ))
+        db.commit()
+        owner_tid, row, via = resolve_canonical_store_owner(
+            db, GENERIC_CANONICAL_STORE,
+        )
+        assert owner_tid == GENERIC_TENANT
+        assert via == "config.store_id"
+        assert row is not None
+
+    def test_claim_store_ignores_merchant_alias(self, db):
+        from services.salla_guard import claim_store_for_tenant
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_CANONICAL_STORE,
+            alt_merchant_id=PARTNER_ALT_MERCHANT,
+        )
+        db.merge(Tenant(id=35, name="Session tenant"))
+        claimed = claim_store_for_tenant(
+            db,
+            store_id=PARTNER_ALT_MERCHANT,
+            tenant_id=35,
+            new_config={"store_id": PARTNER_ALT_MERCHANT, "api_key": "tok"},
+        )
+        assert claimed.tenant_id == 35
+        assert claimed.external_store_id == PARTNER_ALT_MERCHANT
+        owner = (
+            db.query(Integration)
+            .filter_by(tenant_id=PARTNER_TENANT, provider="salla")
+            .one()
+        )
+        assert owner.external_store_id == PARTNER_CANONICAL_STORE
+        assert (owner.config or {}).get("salla_merchant_id_alt") == PARTNER_ALT_MERCHANT
+
+
+class TestSyncOAuthCallbackAliasNotOwnership:
+    def test_sync_callback_does_not_block_on_legacy_merchant_alias(self, db):
+        from routers.salla_oauth import salla_api_oauth_callback
+
+        _seed_canonical_integration(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_CANONICAL_STORE,
+            alt_merchant_id=PARTNER_ALT_MERCHANT,
+        )
+        db.merge(Tenant(id=35, name="Apparel test tenant"))
+        db.commit()
+
+        async def _run():
+            request = MagicMock()
+            request.query_params = {}
+            request.cookies = {}
+            request.headers = {}
+            request.client = None
+
+            token_resp = MagicMock()
+            token_resp.status_code = 200
+            token_resp.json.return_value = {
+                "access_token": "acc",
+                "refresh_token": "ref",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+            store_resp = MagicMock()
+            store_resp.status_code = 200
+            store_resp.json.return_value = {
+                "data": {"id": PARTNER_ALT_MERCHANT, "name": GENERIC_STORE_NAME},
+            }
+
+            with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "cid"):
+                with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_SECRET", "sec"):
+                    with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                        mock_client = AsyncMock()
+                        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                        mock_client.__aexit__ = AsyncMock(return_value=None)
+                        mock_client.post = AsyncMock(return_value=token_resp)
+                        mock_client.get = AsyncMock(return_value=store_resp)
+                        mock_client_cls.return_value = mock_client
+
+                        return await salla_api_oauth_callback(
+                            request,
+                            code="auth-code",
+                            state="t35_abc_apisync",
+                            error=None,
+                            db=db,
+                        )
+
+        response = asyncio.run(_run())
+        assert response.status_code == 302
+        location = response.headers["location"]
+        assert "store_owned_by_other_tenant" not in location
+        assert "salla_oauth=success" in location
+        owner = (
+            db.query(Integration)
+            .filter_by(tenant_id=PARTNER_TENANT, provider="salla")
+            .one()
+        )
+        assert owner.external_store_id == PARTNER_CANONICAL_STORE
+        assert (owner.config or {}).get("salla_merchant_id_alt") == PARTNER_ALT_MERCHANT
+
+    def test_sync_callback_merchant_only_store_info_fails_closed(self, db):
+        from routers.salla_oauth import salla_api_oauth_callback
+
+        db.merge(Tenant(id=35, name="Apparel test tenant"))
+        db.commit()
+
+        async def _run():
+            request = MagicMock()
+            request.query_params = {}
+            request.cookies = {}
+            request.headers = {}
+            request.client = None
+
+            token_resp = MagicMock()
+            token_resp.status_code = 200
+            token_resp.json.return_value = {
+                "access_token": "acc",
+                "refresh_token": "ref",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+            store_resp = MagicMock()
+            store_resp.status_code = 200
+            store_resp.json.return_value = {
+                "data": {"merchant": {"id": GENERIC_ALT_MERCHANT}},
+            }
+
+            with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "cid"):
+                with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_SECRET", "sec"):
+                    with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                        mock_client = AsyncMock()
+                        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                        mock_client.__aexit__ = AsyncMock(return_value=None)
+                        mock_client.post = AsyncMock(return_value=token_resp)
+                        mock_client.get = AsyncMock(return_value=store_resp)
+                        mock_client_cls.return_value = mock_client
+
+                        return await salla_api_oauth_callback(
+                            request,
+                            code="auth-code",
+                            state="t35_abc_apisync",
+                            error=None,
+                            db=db,
+                        )
+
+        response = asyncio.run(_run())
+        assert response.status_code == 302
+        assert "merchant_identity_not_canonical" in response.headers["location"]

@@ -410,6 +410,44 @@ class TestOAuthWrongSessionTenant:
         assert owner_tid == GENERIC_TENANT
         assert reason == "store_owned_by_other_tenant"
 
+    def test_legacy_alias_does_not_prove_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=WRONG_TENANT,
+            store_id=PARTNER_ALT,
+        )
+        assert ok is True
+        assert owner_tid is None
+        assert reason == ""
+
+    def test_merchant_id_only_config_does_not_prove_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        db.merge(Tenant(id=GENERIC_TENANT, name="Generic"))
+        db.add(Integration(
+            tenant_id=GENERIC_TENANT,
+            provider="salla",
+            external_store_id=GENERIC_STORE,
+            config={"store_id": GENERIC_STORE, "merchant_id": GENERIC_ALT},
+            enabled=True,
+        ))
+        db.commit()
+        ok, _, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=GENERIC_WRONG_TENANT,
+            store_id=GENERIC_ALT,
+        )
+        assert ok is True
+        assert reason == ""
+
 
 class TestLaunchTenantGuard:
     def test_launch_dashboard_missing_store_id_returns_403(self, db):

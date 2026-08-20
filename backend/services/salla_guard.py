@@ -111,15 +111,34 @@ def claim_store_for_tenant(
 
     store_id_str = str(store_id)
 
-    from services.salla_store_identity import find_salla_integration_by_identity  # noqa: PLC0415
+    from services.salla_store_identity import (  # noqa: PLC0415
+        SallaStoreIdentity,
+        SallaStoreIdentityConflictError,
+        resolve_canonical_store_owner,
+    )
     from models import User  # noqa: PLC0415
 
-    documented_owner, matched_via = find_salla_integration_by_identity(
-        db,
-        store_id_str,
-        include_disabled=True,
-        allow_alias_match=True,
-    )
+    try:
+        owner_tid, documented_owner, matched_via = resolve_canonical_store_owner(
+            db,
+            SallaStoreIdentity(store_id=store_id_str),
+            include_disabled=True,
+        )
+    except SallaStoreIdentityConflictError as conflict:
+        logger.error(
+            "[SallaGuard] CLAIM_BLOCKED identity_conflict | store_id=%s tenant_ids=%s "
+            "requested_tenant=%s matched_via=%s",
+            store_id_str,
+            conflict.tenant_ids,
+            tenant_id,
+            conflict.matched_via,
+        )
+        raise SallaStoreOwnershipConflictError(
+            conflict.tenant_ids[0],
+            tenant_id,
+            store_id_str,
+        ) from conflict
+
     if documented_owner is not None and documented_owner.tenant_id != tenant_id:
         has_merchant_users = (
             db.query(User.id)

@@ -4,9 +4,12 @@ services/salla_store_identity.py
 Normalize Salla store identity and resolve Integration rows across
 canonical store_id and known alias IDs (merchant account id, legacy config).
 
-One logical Salla store must map to exactly one Nahla tenant via
-``integrations.external_store_id`` (canonical store id from store/info or
-introspect ``store.id``), never ``merchant.id`` alone.
+AD-SALLA-ID-1 — Canonical store owns tenant.
+``integrations.external_store_id`` is the only primary ownership key.
+``config.store_id`` is a narrow legacy canonical bridge when
+``external_store_id`` is empty. Merchant/account aliases
+(``salla_merchant_id_alt``, ``config.merchant_id``) may correlate identity
+but MUST NOT prove store ownership.
 """
 from __future__ import annotations
 
@@ -268,18 +271,29 @@ def build_merchant_identity_not_canonical_detail(
 
 @dataclass
 class SallaStoreIdentity:
-    """Canonical + auxiliary Salla identifiers for one logical store."""
+    """Typed Salla identifiers for one logical store.
+
+    ``store_id`` / ``canonical_store_id`` is the Salla store identity
+    (store/info ``data.id`` or introspect ``store.id``).
+    ``merchant_account_id`` and ``authorizing_user_id`` are correlation
+    only and never prove tenant ownership.
+    """
 
     store_id: str
     merchant_account_id: str = ""
+    authorizing_user_id: str = ""
     store_name: str = ""
     owner_email: str = ""
     resolved_via: str = ""
     alias_ids: List[str] = field(default_factory=list)
 
     @property
+    def canonical_store_id(self) -> str:
+        return _str_id(self.store_id)
+
+    @property
     def identity_source(self) -> SallaIdentitySource | Literal[""]:
-        if self.store_id:
+        if self.canonical_store_id:
             return "canonical_store_id"
         if self.merchant_account_id or self.resolved_via == "merchant_account_only":
             return "merchant_account_only"
@@ -365,9 +379,8 @@ async def fetch_store_identity_from_api(
             )
             return "", ""
         data = (resp.json() or {}).get("data", {}) or {}
-        store_id = _str_id(data.get("id") or data.get("store_id"))
-        store_name = str(data.get("name") or data.get("store_name") or "").strip()
-        return store_id, store_name
+        identity = store_identity_from_store_info(data)
+        return identity.canonical_store_id, identity.store_name
     except Exception as exc:
         logger.warning("[SallaIdentity] store/info failed: %s", exc)
         return "", ""
@@ -430,6 +443,48 @@ async def resolve_salla_store_identity(
     )
 
 
+def store_identity_from_store_info(data: Dict[str, Any]) -> SallaStoreIdentity:
+    """Typed identity from GET ``/admin/v2/store/info`` ``data``.
+
+    Salla documents ``data.id`` as Store ID. Nested ``merchant.id`` and
+    ``owner.id`` are correlation only and are never used as ``store_id``.
+    """
+    if not isinstance(data, dict):
+        return SallaStoreIdentity(store_id="", resolved_via="store_info")
+
+    store_id = _str_id(data.get("id") or data.get("store_id"))
+    store_name = str(data.get("name") or data.get("store_name") or "").strip()
+
+    merchant_account_id = ""
+    merchant = data.get("merchant")
+    if isinstance(merchant, dict):
+        merchant_account_id = _str_id(merchant.get("id"))
+    else:
+        merchant_account_id = _str_id(merchant)
+
+    authorizing_user_id = ""
+    owner = data.get("owner")
+    if isinstance(owner, dict):
+        authorizing_user_id = _str_id(owner.get("id"))
+
+    alias_ids: List[str] = []
+    if merchant_account_id and merchant_account_id != store_id:
+        alias_ids.append(merchant_account_id)
+
+    resolved_via = "store_info"
+    if not store_id and merchant_account_id:
+        resolved_via = "merchant_account_only"
+
+    return SallaStoreIdentity(
+        store_id=store_id,
+        merchant_account_id=merchant_account_id,
+        authorizing_user_id=authorizing_user_id,
+        store_name=store_name,
+        resolved_via=resolved_via,
+        alias_ids=alias_ids,
+    )
+
+
 def normalize_salla_ids_from_event_data(data: Dict[str, Any]) -> SallaStoreIdentity:
     """Normalize merchant/store ids from webhook or OAuth event payloads."""
     if not isinstance(data, dict):
@@ -481,12 +536,18 @@ def find_salla_integration_by_identity(
     *,
     include_disabled: bool = True,
     allow_alias_match: bool = False,
+    allow_merchant_alias: bool = True,
 ) -> Tuple[Optional[Any], str]:
     """Find a Salla integration by canonical or alias id.
 
-    When ``allow_alias_match`` is False (embedded token-login / session /
-    launch guards), only ``integrations.external_store_id`` may match — never
-    ``salla_merchant_id_alt`` or legacy ``config.merchant_id``.
+    When ``allow_alias_match`` is False, only ``integrations.external_store_id``
+    may match.
+
+    When ``allow_alias_match`` is True:
+      * ``config.store_id`` is a legacy canonical-metadata lookup
+      * ``salla_merchant_id_alt`` / ``config.merchant_id`` match only if
+        ``allow_merchant_alias`` is True (default, correlation / webhooks).
+        Ownership callers must pass ``allow_merchant_alias=False``.
 
     Returns ``(integration, matched_via)`` where ``matched_via`` is one of:
     ``external_store_id``, ``config.store_id``, ``config.salla_merchant_id_alt``,
@@ -526,9 +587,9 @@ def find_salla_integration_by_identity(
         cfg = row.config or {}
         if _str_id(cfg.get("store_id")) == sid:
             alias_matches.append((row, "config.store_id"))
-        elif _str_id(cfg.get("salla_merchant_id_alt")) == sid:
+        elif allow_merchant_alias and _str_id(cfg.get("salla_merchant_id_alt")) == sid:
             alias_matches.append((row, "config.salla_merchant_id_alt"))
-        elif _str_id(cfg.get("merchant_id")) == sid:
+        elif allow_merchant_alias and _str_id(cfg.get("merchant_id")) == sid:
             alias_matches.append((row, "config.merchant_id"))
 
     alias_tenants = sorted({row.tenant_id for row, _ in alias_matches})
@@ -624,6 +685,71 @@ def promote_integration_canonical_store(
     flag_modified(integration, "config")
 
 
+def resolve_canonical_store_owner(
+    db: Session,
+    identity: SallaStoreIdentity | str,
+    *,
+    include_disabled: bool = True,
+) -> Tuple[Optional[int], Optional[Any], str]:
+    """Return canonical owner ``(tenant_id, integration, matched_via)``.
+
+    Ownership may be proven only by:
+      1. ``integrations.external_store_id`` (primary)
+      2. ``config.store_id`` when ``external_store_id`` is empty (legacy
+         canonical-metadata bridge)
+
+    Merchant/account aliases never match. Lookup id must be a canonical
+    store identity — callers must not pass merchant-account-only values.
+    """
+    if isinstance(identity, SallaStoreIdentity):
+        sid = identity.canonical_store_id
+    else:
+        sid = _str_id(identity)
+    if not sid:
+        return None, None, ""
+
+    from models import Integration  # noqa: PLC0415
+
+    q = db.query(Integration).filter(Integration.provider == "salla")
+    if not include_disabled:
+        q = q.filter(Integration.enabled == True)  # noqa: E712
+
+    canonical_rows = list(q.filter(Integration.external_store_id == sid).all())
+    canonical_tenants = sorted({row.tenant_id for row in canonical_rows})
+    if len(canonical_tenants) > 1:
+        logger.error(
+            "[SallaIdentity] canonical ownership conflict | lookup_id=%s "
+            "matched_via=external_store_id tenant_ids=%s",
+            sid,
+            canonical_tenants,
+        )
+        raise SallaStoreIdentityConflictError(sid, canonical_tenants, "external_store_id")
+    if len(canonical_rows) == 1:
+        return canonical_rows[0].tenant_id, canonical_rows[0], "external_store_id"
+
+    bridge_rows: List[Any] = []
+    for row in q.all():
+        if _str_id(row.external_store_id):
+            continue
+        cfg_store = _str_id((row.config or {}).get("store_id"))
+        if cfg_store == sid:
+            bridge_rows.append(row)
+
+    bridge_tenants = sorted({row.tenant_id for row in bridge_rows})
+    if len(bridge_tenants) > 1:
+        logger.error(
+            "[SallaIdentity] canonical ownership conflict | lookup_id=%s "
+            "matched_via=config.store_id tenant_ids=%s",
+            sid,
+            bridge_tenants,
+        )
+        raise SallaStoreIdentityConflictError(sid, bridge_tenants, "config.store_id")
+    if len(bridge_rows) == 1:
+        return bridge_rows[0].tenant_id, bridge_rows[0], "config.store_id"
+
+    return None, None, ""
+
+
 def resolve_tenant_for_salla_store(
     db: Session,
     identity: SallaStoreIdentity,
@@ -647,20 +773,64 @@ def assert_oauth_tenant_matches_store_owner(
     db: Session,
     *,
     session_tenant_id: int,
-    store_id: str,
+    store_id: str = "",
+    identity: Optional[SallaStoreIdentity] = None,
 ) -> Tuple[bool, Optional[int], str]:
     """Guard Sync/Legacy OAuth reconnect from claiming the wrong tenant.
 
+    AD-SALLA-ID-1: only canonical store ownership can return
+    ``store_owned_by_other_tenant``. Merchant/account aliases do not prove
+    ownership. Merchant-account-only identity cannot persist a store.
+
     Returns ``(ok, owner_tenant_id, reason)``.
     """
-    if not store_id or session_tenant_id <= 0:
+    typed = identity if identity is not None else SallaStoreIdentity(store_id=store_id)
+
+    if typed.identity_source == "merchant_account_only" or (
+        not typed.canonical_store_id and typed.merchant_account_id
+    ):
+        result = SallaTenantGuardResult(
+            ok=False,
+            reason="merchant_identity_not_canonical",
+            matched_via="merchant_account_only",
+        )
+        _log_salla_tenant_guard(
+            context="oauth_reconnect",
+            jwt_tenant_id=session_tenant_id,
+            store_id=typed.merchant_account_id,
+            result=result,
+        )
+        return False, None, "merchant_identity_not_canonical"
+
+    sid = typed.canonical_store_id
+    if not sid or session_tenant_id <= 0:
         return True, None, ""
 
-    identity = SallaStoreIdentity(store_id=store_id)
-    owner_tenant_id, integration, matched_via = resolve_tenant_for_salla_store(
-        db, identity, include_disabled=True, allow_alias_match=True,
-    )
+    try:
+        owner_tenant_id, integration, matched_via = resolve_canonical_store_owner(
+            db, typed, include_disabled=True,
+        )
+    except SallaStoreIdentityConflictError as conflict:
+        result = SallaTenantGuardResult(
+            ok=False,
+            reason="store_identity_conflict",
+            matched_via=conflict.matched_via,
+        )
+        _log_salla_tenant_guard(
+            context="oauth_reconnect",
+            jwt_tenant_id=session_tenant_id,
+            store_id=sid,
+            result=result,
+        )
+        return False, None, "store_identity_conflict"
+
     if owner_tenant_id is None:
+        logger.info(
+            "[SallaTenantGuard] oauth_reconnect unowned canonical store | "
+            "session_tenant=%s store_id=%s (merchant aliases ignored)",
+            session_tenant_id,
+            sid,
+        )
         return True, None, ""
 
     if owner_tenant_id != session_tenant_id:
@@ -674,7 +844,7 @@ def assert_oauth_tenant_matches_store_owner(
         _log_salla_tenant_guard(
             context="oauth_reconnect",
             jwt_tenant_id=session_tenant_id,
-            store_id=store_id,
+            store_id=sid,
             result=result,
         )
         return False, owner_tenant_id, "store_owned_by_other_tenant"
@@ -689,7 +859,7 @@ def assert_oauth_tenant_matches_store_owner(
     _log_salla_tenant_guard(
         context="oauth_reconnect",
         jwt_tenant_id=session_tenant_id,
-        store_id=store_id,
+        store_id=sid,
         result=result,
     )
     return True, owner_tenant_id, ""
@@ -706,8 +876,9 @@ def reconcile_salla_oauth_tenant_id(
 
     When Salla drops or replaces the OAuth ``state`` param, the callback must
     not create a ghost tenant or sync orders under a fresh tenant_id if an
-    integration row (including legacy ``config.store_id`` aliases) already
-    documents ownership elsewhere.
+    integration row already documents *canonical* ownership elsewhere
+    (``external_store_id`` or empty-external ``config.store_id``).
+    Merchant/account aliases do not reconcile the session tenant.
 
     Returns ``(effective_tenant_id, reconciliation_reason)``.
     """
@@ -716,11 +887,10 @@ def reconcile_salla_oauth_tenant_id(
         return session_tenant_id or 0, "no_store_id"
 
     try:
-        owner_tid, integration, matched_via = resolve_tenant_for_salla_store(
+        owner_tid, integration, matched_via = resolve_canonical_store_owner(
             db,
             SallaStoreIdentity(store_id=sid),
             include_disabled=True,
-            allow_alias_match=True,
         )
     except SallaStoreIdentityConflictError as conflict:
         logger.error(
