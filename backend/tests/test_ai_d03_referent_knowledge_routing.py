@@ -614,6 +614,24 @@ class TestProjectionBind:
         assert projected.get("id") == 501
         assert "شبكية" in str(projected.get("description") or "")
 
+    def test_shared_sku_does_not_merge_different_internal_ids(self) -> None:
+        state = _state({"id": 501, "sku": "shared-sku", "title": "حذاء رياضي أبيض", "price": 249})
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            facts=_facts(
+                {
+                    "id": 8801,
+                    "sku": "shared-sku",
+                    "title": "عطر ورد 100ml",
+                    "price": 180,
+                    "description": "WRONG PRODUCT FACT",
+                }
+            ),
+        )
+        assert projected is not None
+        assert projected["id"] == 501
+        assert "WRONG PRODUCT FACT" not in str(projected.get("description") or "")
+
 
 class TestLinkedMerchantKnowledgeOverlay:
     def test_product_scoped_section_kept_for_preserved_referent(

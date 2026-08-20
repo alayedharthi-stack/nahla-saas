@@ -172,7 +172,13 @@ def _identity_keys(row: Any) -> set[str]:
 
 
 def _rows_same_identity(left: Any, right: Any) -> bool:
-    return bool(_identity_keys(left) & _identity_keys(right))
+    left_keys = _identity_keys(left)
+    right_keys = _identity_keys(right)
+    left_ids = {key[3:] for key in left_keys if key.startswith("id:")}
+    right_ids = {key[3:] for key in right_keys if key.startswith("id:")}
+    if left_ids and right_ids and left_ids.isdisjoint(right_ids):
+        return False
+    return bool(left_keys & right_keys)
 
 
 def _merge_catalog_fact_fields(
@@ -346,6 +352,14 @@ def ensure_canonical_referent_catalog_projection(
         ctx["_canonical_referent_projected"] = True
     if ctx is not None:
         ctx["_canonical_referent_catalog_facts"] = dict(projected)
+    if state is not None and isinstance(getattr(state, "current_product_focus", None), dict):
+        focus = dict(state.current_product_focus)
+        if _rows_same_identity(focus, projected):
+            state.current_product_focus = _merge_catalog_fact_fields(
+                focus,
+                projected,
+                overwrite=True,
+            )
 
     return projected
 
