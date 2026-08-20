@@ -555,6 +555,49 @@ class TestProjectionBind:
         assert projected["price"] == 249
         assert "شبكية" in str(projected.get("description") or "")
 
+    def test_cached_projection_overwrites_stale_focus_at_decision_time(self) -> None:
+        stale = dict(_SHOE)
+        stale["price"] = 999
+        stale.pop("description", None)
+        state = _state(stale)
+        merchant_context = {
+            "_canonical_referent_catalog_facts": {
+                "id": 501,
+                "external_id": "sku-white-shoe",
+                "title": "حذاء رياضي أبيض",
+                "price": 249,
+                "description": "حذاء رياضي أبيض بخامة شبكية للتنفس اليومي.",
+                "can_checkout": True,
+                "in_stock": True,
+            }
+        }
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            merchant_context=merchant_context,
+        )
+        assert projected is not None
+        assert projected["price"] == 249
+        assert "شبكية" in str(projected.get("description") or "")
+
+    def test_numeric_id_does_not_merge_foreign_external_id(self) -> None:
+        state = _state({"id": 154, "title": "عسل صيفي 1 كيلو", "price": 320})
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            facts=_facts(
+                {
+                    "id": 8801,
+                    "external_id": "154",
+                    "title": "عطر ورد 100ml",
+                    "price": 180,
+                    "description": "must-not-merge",
+                },
+                _SUMMER_HONEY_1KG,
+            ),
+        )
+        assert projected is not None
+        assert projected["id"] == 154
+        assert "must-not-merge" not in str(projected.get("description") or "")
+
     def test_external_id_matches_numeric_id_row(self) -> None:
         state = MerchantConversationState(greeted=True, stage=STAGE_DISCOVERY, turn=3)
         set_product_focus(

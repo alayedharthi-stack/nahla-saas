@@ -157,13 +157,17 @@ def _identity_keys(row: Any) -> set[str]:
     keys: set[str] = set()
     if not isinstance(row, dict):
         return keys
-    for key in _IDENTITY_KEYS:
+    for key in ("id", "product_id"):
         val = str(row.get(key) or "").strip()
         if val:
-            keys.add(val)
-    primary = _identity_of(row)
-    if primary:
-        keys.add(primary)
+            keys.add(f"id:{val}")
+    for key in ("external_id", "sku", "product_retailer_id"):
+        val = str(row.get(key) or "").strip()
+        if val:
+            keys.add(f"ext:{val}")
+    variant_id = str(row.get("variant_id") or "").strip()
+    if variant_id:
+        keys.add(f"var:{variant_id}")
     return keys
 
 
@@ -216,17 +220,18 @@ def project_canonical_referent_catalog_facts(
         sources.extend(list(getattr(facts, "discovery_products", None) or []))
         sources.extend(list(getattr(facts, "top_products", None) or []))
     ctx = merchant_context if isinstance(merchant_context, dict) else {}
-    cached_proj = ctx.get("_canonical_referent_catalog_facts")
-    if isinstance(cached_proj, dict) and cached_proj:
-        sources.append(cached_proj)
     sources.extend(list(ctx.get("products") or []))
     for row in sources:
         if not isinstance(row, dict):
             continue
         if _rows_same_identity(projected, row):
             projected = _merge_catalog_fact_fields(projected, row)
-    if isinstance(catalog_row, dict) and catalog_row and _rows_same_identity(projected, catalog_row):
-        projected = _merge_catalog_fact_fields(projected, catalog_row, overwrite=True)
+    cached_proj = ctx.get("_canonical_referent_catalog_facts")
+    authoritative = catalog_row if isinstance(catalog_row, dict) and catalog_row else None
+    if authoritative is None and isinstance(cached_proj, dict) and cached_proj:
+        authoritative = cached_proj
+    if isinstance(authoritative, dict) and _rows_same_identity(projected, authoritative):
+        projected = _merge_catalog_fact_fields(projected, authoritative, overwrite=True)
     normalized = normalize_structured_product_referent(projected)
     return normalized or projected
 
@@ -234,15 +239,25 @@ def project_canonical_referent_catalog_facts(
 def load_tenant_scoped_catalog_row(
     db: Any,
     tenant_id: Any,
-    product_id: Any,
+    product_id: Any = None,
+    *,
+    external_id: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Load one catalog row by tenant + product id. Never cross tenants."""
-    if db is None or tenant_id is None or product_id in (None, ""):
+    """Load one catalog row by tenant + product id or storefront id. Never cross tenants."""
+    if db is None or tenant_id is None:
         return None
     try:
-        pid = int(product_id)
         tid = int(tenant_id)
     except (TypeError, ValueError):
+        return None
+    pid = None
+    if product_id not in (None, ""):
+        try:
+            pid = int(product_id)
+        except (TypeError, ValueError):
+            pid = None
+    ext = str(external_id or "").strip()
+    if pid is None and not ext:
         return None
     try:
         from models import Product  # noqa: PLC0415
@@ -250,11 +265,12 @@ def load_tenant_scoped_catalog_row(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog hydrate is best-effort
         return None
     try:
-        row = (
-            db.query(Product)
-            .filter(Product.tenant_id == tid, Product.id == pid)
-            .first()
-        )
+        query = db.query(Product).filter(Product.tenant_id == tid)
+        if pid is not None:
+            query = query.filter(Product.id == pid)
+        elif ext:
+            query = query.filter(Product.external_id == ext)
+        row = query.first()
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog hydrate must not break the turn
         return None
     if row is None:
@@ -303,6 +319,7 @@ def ensure_canonical_referent_catalog_projection(
         db,
         tenant_id,
         referent.get("id") or referent.get("product_id"),
+        external_id=referent.get("external_id") or referent.get("sku"),
     )
     projected = project_canonical_referent_catalog_facts(
         state=state,
@@ -327,6 +344,7 @@ def ensure_canonical_referent_catalog_projection(
         conversation["selected_product"] = dict(projected)
         ctx["conversation"] = conversation
         ctx["_canonical_referent_projected"] = True
+    if ctx is not None:
         ctx["_canonical_referent_catalog_facts"] = dict(projected)
 
     return projected
