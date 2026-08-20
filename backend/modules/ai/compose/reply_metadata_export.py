@@ -34,6 +34,8 @@ BRAIN_REPLY_METADATA_EXPORT_KEYS: Tuple[str, ...] = (
     "product_claim_blocked_kinds",
     "product_claim_recompose_requested",
     "product_claim_recompose_performed",
+    "product_claim_recompose_count",
+    "product_claim_constitutional_fallback",
     "product_claim_original_compose_candidate",
 )
 

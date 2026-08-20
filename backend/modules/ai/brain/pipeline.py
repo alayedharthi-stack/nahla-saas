@@ -4839,8 +4839,8 @@ class MerchantBrain:
         try:
             from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
                 apply_product_claim_grounding_guard,
+                finalize_product_claim_after_authorized_recompose,
                 product_claim_grounding_guard_mode,
-                resolve_product_claim_second_pass_reply,
                 stamp_product_claim_guard_provenance,
             )
             if product_claim_grounding_guard_mode() != "off" and not _navigator_owner_locked:
@@ -5024,22 +5024,13 @@ class MerchantBrain:
                             recompose_requested=True,
                             recompose_performed=True,
                         )
-                        if _pcgg_second.replaced or _pcgg_second.stripped:
-                            reply = resolve_product_claim_second_pass_reply(
-                                second_pass=_pcgg_second,
-                                recomposed_reply=_pcgg_recomposed or "",
-                                compose_source=str(
-                                    result.data.get("compose_source") or ""
-                                ),
-                                fallback_reason=str(
-                                    result.data.get("fallback_reason") or ""
-                                ),
-                                compose_failed=_pcgg_compose_failed,
-                            )
-                            _guard_replaced["product_claim_grounding_guard"] = True
-                        elif (_pcgg_recomposed or "").strip():
-                            reply = (_pcgg_recomposed or "").strip()
-                            _guard_replaced["product_claim_grounding_guard"] = True
+                        reply = finalize_product_claim_after_authorized_recompose(
+                            second_pass=_pcgg_second,
+                            recomposed_reply=_pcgg_recomposed or "",
+                            result_data=result.data,
+                            compose_failed=_pcgg_compose_failed,
+                        )
+                        _guard_replaced["product_claim_grounding_guard"] = True
         except Exception as _pcgg_exc:  # noqa: BLE001
             logger.warning(
                 "[PRODUCT_CLAIM_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",

@@ -18,8 +18,11 @@ from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # n
     ProductClaimGroundingEvidence,
 )
 from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
+    PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION,
+    PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON,
     ProductClaimGroundingGuardResult,
     apply_product_claim_grounding_guard,
+    finalize_product_claim_after_authorized_recompose,
     resolve_product_claim_second_pass_reply,
     should_skip_quality_recompose_after_product_claim,
     stamp_product_claim_guard_provenance,
@@ -242,15 +245,16 @@ class TestPipelineComposeOnce:
             recompose_requested=True,
             recompose_performed=True,
         )
-        reply = resolve_product_claim_second_pass_reply(
+        reply = finalize_product_claim_after_authorized_recompose(
             second_pass=second,
             recomposed_reply=recomposed,
-            compose_source=str(result_data.get("compose_source") or ""),
+            result_data=result_data,
         )
 
         assert composer.compose.await_count == 1
         assert reply == recomposed
         assert result_data["product_claim_recompose_performed"] is True
+        assert result_data.get("product_claim_constitutional_fallback") is not True
 
 
 class TestQualityRecomposeSkipAndExport:
@@ -327,3 +331,217 @@ class TestQualityRecomposeSkipAndExport:
             "llm_postprocess",
         }
         assert data["product_claim_original_compose_candidate"] == original
+
+
+_UNGROUNDED_FASHION = "الفستان أحلى من البديل."
+_UNGROUNDED_GENERIC = "الحذاء الرياضي أحلى من البديل."
+_HONEY_DOMAIN_MARKERS = ("عسل", "سدر", "طلح", "حلاوة")
+_GUARD_SOURCE_PATH = os.path.join(
+    _backend,
+    "modules",
+    "ai",
+    "brain",
+    "postprocess",
+    "product_claim_grounding_guard.py",
+)
+
+
+def _run_empty_strip_then_failed_recompose(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    tenant_id: int,
+    first_reply: str,
+    recomposed_reply: str,
+    product_title: str,
+) -> tuple[str, Dict[str, Any], MagicMock]:
+    monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+    def _fake_build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+        return _evidence(
+            available_products=(
+                {"id": 1, "title": product_title, "can_checkout": True},
+            ),
+            grounded_text_corpus="",
+        )
+
+    monkeypatch.setattr(
+        "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+        _fake_build,
+    )
+
+    composer = MagicMock()
+    composer.compose = AsyncMock(return_value=recomposed_reply)
+
+    result_data: Dict[str, Any] = {
+        "compose_source": "persona_llm",
+        "response_mode": "llm",
+        "chosen_path": "llm_reply",
+        "compose_reply_candidate": first_reply,
+        "catalog_fact_products": [{"id": 1, "title": product_title, "price": 120}],
+        "products": [{"id": 1, "title": product_title, "price": 120}],
+    }
+    first = apply_product_claim_grounding_guard(
+        reply=first_reply,
+        tenant_id=tenant_id,
+        catalog_fact_products=result_data["catalog_fact_products"],
+        executor_products=result_data["products"],
+    )
+    stamp_product_claim_guard_provenance(result_data, first)
+    assert first.requires_grounded_recompose is True
+    assert first.scrubbed_empty is True
+
+    result_data["product_claim_recompose_requested"] = True
+    result_data["product_claim_original_compose_candidate"] = first_reply
+    import asyncio
+
+    recomposed = asyncio.run(composer.compose(None, None, None))
+    result_data["product_claim_recompose_candidate"] = recomposed
+    result_data["compose_reply_candidate"] = recomposed
+    result_data["product_claim_recompose_performed"] = True
+
+    second = apply_product_claim_grounding_guard(
+        reply=recomposed,
+        tenant_id=tenant_id,
+        catalog_fact_products=result_data["catalog_fact_products"],
+        executor_products=result_data["products"],
+        inbound_metadata={"product_claim_recompose_performed": True},
+        allow_recompose=False,
+    )
+    stamp_product_claim_guard_provenance(
+        result_data,
+        second,
+        recompose_requested=True,
+        recompose_performed=True,
+    )
+    assert second.requires_grounded_recompose is False
+    assert second.scrubbed_empty is True
+
+    final_reply = finalize_product_claim_after_authorized_recompose(
+        second_pass=second,
+        recomposed_reply=recomposed,
+        result_data=result_data,
+    )
+    return final_reply, result_data, composer
+
+
+class TestAID08B1FailedRecomposeConstitutionalFallback:
+    def test_second_pass_empty_uses_existing_constitutional_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+        from modules.ai.compose.constitutional_policy import (  # noqa: PLC0415
+            validate_fallback_metadata,
+        )
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            extract_reply_metadata_export,
+        )
+
+        final_reply, result_data, composer = _run_empty_strip_then_failed_recompose(
+            monkeypatch=monkeypatch,
+            tenant_id=35,
+            first_reply=_UNGROUNDED_FASHION,
+            recomposed_reply=_UNGROUNDED_FASHION,
+            product_title="فستان صيفي",
+        )
+
+        assert (final_reply or "").strip()
+        assert _UNGROUNDED_FASHION not in final_reply
+        assert "أحلى" not in final_reply
+        for marker in _HONEY_DOMAIN_MARKERS:
+            assert marker not in final_reply
+        assert composer.compose.await_count == 1
+        assert result_data["product_claim_recompose_count"] == 1
+        assert result_data["product_claim_recompose_performed"] is True
+        assert result_data["product_claim_constitutional_fallback"] is True
+        assert result_data["compose_source"] == "fallback_deterministic"
+        assert result_data["fallback_reason"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON
+        assert result_data["fallback_action_type"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+        assert result_data["chosen_path"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+        assert result_data["final_customer_text_source"] == "fallback_deterministic"
+        assert is_compose_failure_fallback(final_reply)
+        errors = validate_fallback_metadata(result_data, compose_attempted=True)
+        assert errors == []
+        exported = extract_reply_metadata_export(result_data)
+        assert exported["compose_source"] == "fallback_deterministic"
+        assert exported["product_claim_constitutional_fallback"] is True
+        assert exported["product_claim_recompose_count"] == 1
+        assert exported["fallback_reason"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON
+
+    def test_empty_compose_failure_also_uses_constitutional_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE", "enforce")
+
+        def _fake_build(*_a: Any, **_k: Any) -> ProductClaimGroundingEvidence:
+            return _evidence()
+
+        monkeypatch.setattr(
+            "modules.ai.brain.postprocess.product_claim_grounding_guard.build_product_claim_grounding_evidence",
+            _fake_build,
+        )
+        first = apply_product_claim_grounding_guard(
+            reply=_UNGROUNDED_GENERIC,
+            tenant_id=99,
+        )
+        assert first.requires_grounded_recompose is True
+        result_data: Dict[str, Any] = {
+            "compose_source": "persona_llm",
+            "product_claim_recompose_performed": True,
+        }
+        second = apply_product_claim_grounding_guard(
+            reply="",
+            tenant_id=99,
+            inbound_metadata={"product_claim_recompose_performed": True},
+            allow_recompose=False,
+        )
+        final_reply = finalize_product_claim_after_authorized_recompose(
+            second_pass=second,
+            recomposed_reply="",
+            result_data=result_data,
+            compose_failed=True,
+        )
+        assert (final_reply or "").strip()
+        assert _UNGROUNDED_GENERIC not in final_reply
+        assert result_data["compose_source"] == "fallback_deterministic"
+        assert result_data["product_claim_constitutional_fallback"] is True
+
+    def test_tenant_isolation_and_no_guard_authored_safe_prose(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fashion_reply, fashion_data, fashion_composer = (
+            _run_empty_strip_then_failed_recompose(
+                monkeypatch=monkeypatch,
+                tenant_id=35,
+                first_reply=_UNGROUNDED_FASHION,
+                recomposed_reply=_UNGROUNDED_FASHION,
+                product_title="فستان صيفي",
+            )
+        )
+        generic_reply, generic_data, generic_composer = (
+            _run_empty_strip_then_failed_recompose(
+                monkeypatch=monkeypatch,
+                tenant_id=99,
+                first_reply=_UNGROUNDED_GENERIC,
+                recomposed_reply=_UNGROUNDED_GENERIC,
+                product_title="حذاء رياضي أبيض",
+            )
+        )
+        assert (fashion_reply or "").strip()
+        assert (generic_reply or "").strip()
+        assert "فستان" not in fashion_reply
+        assert "حذاء" not in generic_reply
+        assert _UNGROUNDED_FASHION not in fashion_reply
+        assert _UNGROUNDED_GENERIC not in generic_reply
+        assert fashion_composer.compose.await_count == 1
+        assert generic_composer.compose.await_count == 1
+        assert fashion_data["product_claim_recompose_count"] == 1
+        assert generic_data["product_claim_recompose_count"] == 1
+
+        with open(_GUARD_SOURCE_PATH, encoding="utf-8") as handle:
+            source = handle.read()
+        assert "_SAFE_" not in source
+        assert "SAFE_NO_GROUNDED" not in source
+        assert "أقدر أرسل لك الخيارات" not in source

@@ -7,7 +7,11 @@ catalog-miss / no-synced signals).
 
 Enforce mode strips unsupported claim sentences/chunks only; it does not
 author canned merchant prose. When stripping leaves no usable customer-facing
-content, callers may invoke grounded recompose once.
+content, callers may invoke grounded recompose once. If that single
+authorized recompose cannot produce text that survives grounding, treat the
+outcome as a failed compose contract and route through the existing
+constitutional fallback (``core.fallback_policy``), never a new canned
+sentence in this guard.
 
 Modes (NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE):
   off     — disabled
@@ -38,6 +42,12 @@ from modules.ai.brain.turn_owner_contract import (
 logger = logging.getLogger("nahla.brain.postprocess.product_claim_grounding_guard")
 
 _USABLE_CUSTOMER_CONTENT_RE = re.compile(r"[a-zA-Z0-9\u0600-\u06FF]")
+
+# Existing EX-FALLBACK-GENERIC-001 ownership — not a new customer-facing sentence.
+PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON = (
+    "product_claim_grounding_recompose_ungrounded"
+)
+PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION = "llm_fallback_failed"
 
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "variant_pricing",
@@ -481,6 +491,7 @@ def stamp_product_claim_guard_provenance(
         result_data["product_claim_recompose_requested"] = True
     if recompose_performed:
         result_data["product_claim_recompose_performed"] = True
+        result_data["product_claim_recompose_count"] = 1
 
 
 def resolve_product_claim_second_pass_reply(
@@ -508,6 +519,62 @@ def resolve_product_claim_second_pass_reply(
             return (recomposed_reply or "").strip()
         return second_pass.reply
     return (recomposed_reply or "").strip()
+
+
+def apply_product_claim_failed_compose_fallback(
+    result_data: Dict[str, Any],
+) -> str:
+    """Route a failed grounded-recompose contract through existing emergency fallback.
+
+    Does not author merchant-domain or product prose. Uses the platform
+    compose-error fallback already owned by ``core.fallback_policy``.
+    """
+    from core.fallback_policy import (  # noqa: PLC0415
+        empty_reply_fallback,
+        operational_compose_error_fallback,
+    )
+
+    text = str(operational_compose_error_fallback() or "").strip()
+    if not text:
+        text = str(empty_reply_fallback() or "").strip()
+    result_data["compose_source"] = "fallback_deterministic"
+    result_data["response_mode"] = "fallback_deterministic"
+    result_data["chosen_path"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+    result_data["fallback_reason"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON
+    result_data["fallback_action_type"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+    result_data["final_customer_text_source"] = "fallback_deterministic"
+    result_data["llm_candidate_present"] = True
+    result_data["product_claim_constitutional_fallback"] = True
+    reasons = [
+        str(r)
+        for r in (result_data.get("final_transform_reasons") or [])
+        if str(r or "").strip()
+    ]
+    if "product_claim_grounding_guard" not in reasons:
+        reasons.append("product_claim_grounding_guard")
+    result_data["final_transform_reasons"] = reasons
+    result_data["final_text_transformed"] = True
+    return text
+
+
+def finalize_product_claim_after_authorized_recompose(
+    *,
+    second_pass: ProductClaimGroundingGuardResult,
+    recomposed_reply: str,
+    result_data: Dict[str, Any],
+    compose_failed: bool = False,
+) -> str:
+    """Resolve second-pass text; never leave the turn empty after one recompose."""
+    resolved = resolve_product_claim_second_pass_reply(
+        second_pass=second_pass,
+        recomposed_reply=recomposed_reply,
+        compose_source=str(result_data.get("compose_source") or ""),
+        fallback_reason=str(result_data.get("fallback_reason") or ""),
+        compose_failed=compose_failed,
+    )
+    if _has_usable_customer_content(resolved):
+        return resolved
+    return apply_product_claim_failed_compose_fallback(result_data)
 
 
 def should_skip_quality_recompose_after_product_claim(
