@@ -536,6 +536,19 @@ class CatalogContextBuilder:
         )
         return self._format(p) if p else None
 
+    def get_by_id(self, product_id: int) -> Optional[Dict]:
+        """Exact tenant-scoped product lookup. Title search is not identity."""
+        try:
+            pid = int(product_id)
+        except (TypeError, ValueError):
+            return None
+        p = (
+            self.db.query(Product)
+            .filter_by(tenant_id=self.tenant_id, id=pid)
+            .first()
+        )
+        return self._format(p) if p else None
+
     def get_top_products(self, limit: int = 25) -> List[Dict]:
         """Return top **orderable** products."""
         rows = (

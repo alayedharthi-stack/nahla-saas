@@ -519,8 +519,9 @@ def evaluate_product_card_send(
     elif not has_image:
         action = ProductCardSendAction.FALLBACK_CTA_ONLY
 
-    if action == ProductCardSendAction.SEND_CATALOG:
-        if not capability.available:
+    if not capability.available:
+        capability_diag["membership_fail_closed"] = True
+        if action == ProductCardSendAction.SEND_CATALOG:
             return _decision(
                 ProductCardSendAction.FALLBACK_LEGACY,
                 capability.reason or REASON_META_CATALOG_UNVERIFIED,
@@ -528,6 +529,8 @@ def evaluate_product_card_send(
                 retailer_id=retailer_id,
                 diagnostics=capability_diag,
             )
+
+    if action == ProductCardSendAction.SEND_CATALOG:
         retailer_id = capability.retailer_id or retailer_id
 
     return _decision(
