@@ -828,6 +828,8 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
         sending_enabled=True,
         extra_metadata={
             "connection_mode": "coexistence",
+            "is_on_biz_app": True,
+            "platform_type": "CLOUD_API",
             "smb_sync": {
                 "smb_app_state_sync": {"accepted": True, "request_id": "old-a"},
                 "history": {"accepted": True, "request_id": "old-b"},
@@ -854,15 +856,35 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
     assert "smb_sync_deadline_at" not in meta
     assert "readiness_phone_number_id" not in meta
     assert "readiness_waba_id" not in meta
+    assert "is_on_biz_app" not in meta
+    assert "platform_type" not in meta
 
 
 def test_assigning_new_phone_clears_webhook_verified(db):
     tenant = _tenant(db)
-    conn = _conn(db, tenant.id, webhook_verified=True, phone_number_id=PHONE_ID)
+    conn = _conn(
+        db,
+        tenant.id,
+        webhook_verified=True,
+        phone_number_id=PHONE_ID,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "is_on_biz_app": True,
+            "platform_type": "CLOUD_API",
+            "smb_sync": {"history": {"accepted": True, "request_id": "old"}},
+            "smb_sync_deadline_at": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
+            "readiness_phone_number_id": PHONE_ID,
+        },
+    )
     db.commit()
     _assign_embedded_phone_id(conn, "pn-new-identity")
     assert conn.webhook_verified is False
     assert conn.phone_number_id == "pn-new-identity"
+    meta = dict(conn.extra_metadata or {})
+    assert "smb_sync" not in meta
+    assert "smb_sync_deadline_at" not in meta
+    assert "is_on_biz_app" not in meta
+    assert "readiness_phone_number_id" not in meta
 
 
 def test_connected_coexistence_live_false_surfaces_standard_confirm(monkeypatch, db):
@@ -891,3 +913,65 @@ def test_connected_coexistence_live_false_surfaces_standard_confirm(monkeypatch,
     assert payload.get("coexistence_not_eligible") is True
     assert payload["status"] == COEXISTENCE_NOT_ELIGIBLE
     assert payload.get("standard_cloud_api_available") is True
+
+
+def test_confirm_graph_ambiguity_fails_closed(monkeypatch, db):
+    tenant = _tenant(db, name="قميص قطني أزرق")
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"is_on_biz_app": False},
+        status="configuring",
+    )
+    db.commit()
+    phone = dict(_t1_shape_phone())
+    phone.pop("is_on_biz_app")
+    _patch_phone(monkeypatch, {**phone, "status": "CONNECTED"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(confirm_standard_cloud_api(
+            ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+            _req(tenant.id),
+            db,
+        ))
+    assert exc.value.status_code == 502
+    db.refresh(conn)
+    assert conn.status != "connected"
+    assert conn.sending_enabled is False
+
+
+def test_confirm_resets_stale_webhook_and_resubscribes(monkeypatch, db):
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    _ai_settings(db, tenant.id)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"connection_mode": "coexistence", "is_on_biz_app": False},
+        status="configuring",
+        webhook_verified=True,
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    monkeypatch.setattr(
+        "routers.whatsapp_embedded._register_phone_with_fallback",
+        AsyncMock(return_value=({"success": True}, "platform")),
+    )
+    captured = []
+
+    def _subscribe(*a, **k):
+        captured.append(k)
+        return True, None
+
+    monkeypatch.setattr(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        _subscribe,
+    )
+    asyncio.run(confirm_standard_cloud_api(
+        ConfirmStandardCloudApiRequest(confirm_standard_cloud_api=True),
+        _req(tenant.id),
+        db,
+    ))
+    db.refresh(conn)
+    assert captured
+    assert captured[0].get("prefer_waba") is True
+    assert conn.webhook_verified is True
+    assert conn.status == "connected"

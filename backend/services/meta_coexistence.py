@@ -56,6 +56,16 @@ _OBSOLETE_COEXISTENCE_KEYS = (
     "readiness_phone_number_id",
     "readiness_waba_id",
 )
+_STALE_IDENTITY_PROVIDER_KEYS = (
+    "is_on_biz_app",
+    "platform_type",
+    "meta_phone_status",
+    "meta_code_verification_status",
+    "meta_name_status",
+    "meta_quality_rating",
+    "last_meta_sync_error",
+    "meta_register_response",
+)
 _COEXISTENCE_WAIT_KEYS = (
     "smb_sync",
     "smb_sync_deadline_at",
@@ -185,6 +195,16 @@ def clear_coexistence_wait_state(conn: Any) -> Dict[str, Any]:
     for key in _COEXISTENCE_WAIT_KEYS:
         meta.pop(key, None)
     conn.extra_metadata = meta
+    return meta
+
+
+def invalidate_identity_scoped_proof(conn: Any) -> Dict[str, Any]:
+    """Drop wait + provider facts that belonged to a previous WABA or phone."""
+    meta = clear_coexistence_wait_state(conn)
+    for key in _STALE_IDENTITY_PROVIDER_KEYS:
+        meta.pop(key, None)
+    conn.extra_metadata = meta
+    conn.webhook_verified = False
     return meta
 
 

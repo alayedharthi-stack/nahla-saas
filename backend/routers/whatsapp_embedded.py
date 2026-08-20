@@ -85,10 +85,11 @@ def _is_coexistence_conn(conn: Optional["WhatsAppConnection"]) -> bool:
 
 
 def _assign_embedded_phone_id(conn: "WhatsAppConnection", phone_id: Optional[str]) -> None:
-    """Bind a phone identity and drop webhook proof when the identity changes."""
+    """Bind a phone identity and drop proof that belonged to a previous number."""
     new_id = str(phone_id or "").strip() or None
     if str(conn.phone_number_id or "") != str(new_id or ""):
-        conn.webhook_verified = False
+        from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
+        invalidate_identity_scoped_proof(conn)
     conn.phone_number_id = new_id
 
 
@@ -2152,14 +2153,15 @@ async def confirm_standard_cloud_api(
             status_code=409,
             detail="هذا الرقم ما زال على تطبيق واتساب الأعمال. استخدم مسار Coexistence.",
         )
-    if is_coexistence_mode(conn) and live_on_app is not False:
+    if live_on_app is not False:
         db.commit()
         raise HTTPException(
-            status_code=409,
-            detail="لا يمكن تحويل مسار Coexistence دون إثبات Meta أن الرقم ليس على تطبيق واتساب الأعمال.",
+            status_code=502,
+            detail="تعذر التحقق من أهلية الرقم لدى Meta قبل التحويل إلى Cloud API.",
         )
 
     clear_obsolete_coexistence_state(conn)
+    conn.webhook_verified = False
     conn.sending_enabled = False
     db.commit()
     return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
