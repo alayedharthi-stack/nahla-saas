@@ -48,6 +48,7 @@ REASON_NO_SAFE_VISUAL = "no_safe_bound_visual"
 REASON_UNBOUND = "no_structured_identity"
 REASON_TENANT_MISS = "structured_identity_not_in_tenant"
 REASON_VARIANT_MISS = "structured_variant_not_in_tenant"
+REASON_VARIANT_TITLE_MISS = "structured_variant_title_missing"
 _VARIANT_ID_KEYS = (
     "canonical_variant_id",
     "picked_variant_id",
@@ -312,14 +313,14 @@ def bind_structured_visual_referent(
     focus = bs.get("current_product_focus") if isinstance(bs.get("current_product_focus"), Mapping) else {}
     audit_map = audit if isinstance(audit, Mapping) else {}
     pid, ext = extract_structured_product_id(
-        {"id": audit_map.get("canonical_product_id")} if audit_map.get("canonical_product_id") not in (None, "") else None,
-        focus,
         list(attachments or []),
+        focus,
+        {"id": audit_map.get("canonical_product_id")} if audit_map.get("canonical_product_id") not in (None, "") else None,
     )
     variant_id = extract_structured_variant_id(
-        audit_map,
-        focus,
         list(attachments or []),
+        focus,
+        audit_map,
     )
     if pid is None and not ext:
         return StructuredVisualBind(canonical_present=False, reason=REASON_UNBOUND)
@@ -402,6 +403,15 @@ def bind_structured_visual_referent(
             source=SOURCE_STRUCTURED_IDENTITY,
         )
     summary = str(variant.get("option_summary") or "").strip()
+    if not variant.get("is_default") and not summary:
+        return StructuredVisualBind(
+            canonical_present=True,
+            product_id=int(resolved.id),
+            variant_id=int(variant["variant_id"]),
+            external_id=str(resolved.external_id or ext),
+            reason=REASON_VARIANT_TITLE_MISS,
+            source=SOURCE_STRUCTURED_IDENTITY,
+        )
     title = f"{parent_title} — {summary}" if summary and parent_title else (summary or parent_title)
     if variant.get("is_default"):
         image = str(variant.get("image_url") or parent_image or "").strip()
@@ -454,17 +464,22 @@ def rewrite_queued_card_after_membership_fail_closed(
 ) -> Optional[Dict[str, Any]]:
     """Rewrite a queued product card after Meta membership fail-closed.
 
+    Identity comes only from this attachment. Turn-wide brain_state / audit
+    canonical ids are ignored so a two-card queue cannot retarget card B
+    from card A's stamp.
+
     Returns the original card when no structured id exists (unstructured
     asks keep their existing cascade). Returns ``None`` to fail closed
-    when a structured referent has no safe visual — never the parent photo
-    of a selected non-default variant.
+    when a structured referent has no safe visual or variant title —
+    never the parent photo/title of a selected non-default variant.
     """
+    _ = brain_state, audit
     bound = bind_structured_visual_referent(
         db,
         tenant_id,
-        brain_state=brain_state,
+        brain_state=None,
         attachments=[attachment],
-        audit=audit,
+        audit=None,
     )
     if not bound.canonical_present:
         return dict(attachment)
@@ -480,6 +495,7 @@ __all__ = [
     "REASON_TENANT_MISS",
     "REASON_UNBOUND",
     "REASON_VARIANT_MISS",
+    "REASON_VARIANT_TITLE_MISS",
     "SOURCE_STRUCTURED_IDENTITY",
     "StructuredVisualBind",
     "apply_bound_visual_to_attachment",

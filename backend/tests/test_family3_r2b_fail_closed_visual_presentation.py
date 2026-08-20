@@ -27,6 +27,7 @@ from core.fail_closed_visual_presentation import (  # noqa: E402
     REASON_NO_SAFE_VISUAL,
     REASON_UNBOUND,
     REASON_VARIANT_MISS,
+    REASON_VARIANT_TITLE_MISS,
     SOURCE_STRUCTURED_IDENTITY,
     bind_from_local_facts,
     extract_structured_product_id,
@@ -602,6 +603,115 @@ class TestQueuedCardRewriteAfterMembershipFailClosed:
         assert out is not None
         assert out["file_url"] == queued["file_url"]
         assert out["title"] == queued["title"]
+
+    def test_stale_turn_audit_does_not_retarget_second_card(self):
+        def _by_id(_db, _tenant_id, pid):
+            if int(pid) == 101:
+                return _resolution(
+                    product_id=101,
+                    title="قميص قطني أزرق",
+                    image="https://cdn.example/shirt.jpg",
+                )
+            if int(pid) == 202:
+                return _resolution(
+                    product_id=202,
+                    title="عطر ورد 100ml",
+                    image="https://cdn.example/perfume.jpg",
+                )
+            return None
+
+        def _variant(_db, *, tenant_id, product_id, variant_id):  # noqa: ARG001
+            if int(product_id) == 202 and int(variant_id) == 11:
+                return {
+                    "variant_id": 11,
+                    "image_url": "https://cdn.example/perfume-50.jpg",
+                    "option_summary": "50ml",
+                    "in_stock": True,
+                    "is_default": False,
+                }
+            if int(product_id) == 101 and int(variant_id) == 9:
+                return {
+                    "variant_id": 9,
+                    "image_url": "https://cdn.example/shirt-m.jpg",
+                    "option_summary": "M",
+                    "in_stock": True,
+                    "is_default": False,
+                }
+            return None
+
+        card_b = _attachment(
+            product_id=202,
+            title="عطر ورد 100ml",
+            picked_variant_id=11,
+        )
+        card_b["file_url"] = "https://cdn.example/perfume.jpg"
+        with patch(
+            "services.product_resolver.resolve_by_product_id",
+            side_effect=_by_id,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            side_effect=_variant,
+        ):
+            out = rewrite_queued_card_after_membership_fail_closed(
+                object(),
+                7,
+                card_b,
+                brain_state={"current_product_focus": {"id": 101, "picked_variant_id": 9}},
+                audit={
+                    "membership_fail_closed": True,
+                    "canonical_product_id": 101,
+                    "canonical_variant_id": 9,
+                },
+            )
+        assert out is not None
+        assert out["id"] == 202
+        assert out["picked_variant_id"] == 11
+        assert out["file_url"] == "https://cdn.example/perfume-50.jpg"
+        assert out["title"] == "عطر ورد 100ml — 50ml"
+
+    def test_non_default_variant_without_option_summary_fails_closed(self):
+        parent = _resolution(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            image="https://cdn.example/parent.jpg",
+        )
+        queued = _attachment(product_id=101, picked_variant_id=9)
+        queued["file_url"] = "https://cdn.example/parent.jpg"
+        queued["caption"] = "حذاء رياضي أبيض"
+        with patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value={
+                "variant_id": 9,
+                "image_url": "https://cdn.example/size-42.jpg",
+                "option_summary": "",
+                "in_stock": True,
+                "is_default": False,
+            },
+        ):
+            out = rewrite_queued_card_after_membership_fail_closed(
+                object(),
+                7,
+                queued,
+                audit={
+                    "membership_fail_closed": True,
+                    "canonical_product_id": 101,
+                    "canonical_variant_id": 9,
+                },
+            )
+            from core.fail_closed_visual_presentation import bind_structured_visual_referent
+
+            miss = bind_structured_visual_referent(
+                object(),
+                7,
+                attachments=[queued],
+            )
+        assert out is None
+        assert miss.reason == REASON_VARIANT_TITLE_MISS
+        assert miss.allow_presentation is False
+        assert miss.title == ""
 
 
 def test_inbound_title_rescue_blocked_when_membership_failed_closed():
