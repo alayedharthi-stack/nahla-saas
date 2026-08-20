@@ -13563,6 +13563,7 @@ async def _handle_merchant_message(
                     ):
                         try:
                             from core.fail_closed_visual_presentation import (  # noqa: PLC0415
+                                commit_fail_closed_rewrite as _commit_fc_visual,
                                 rewrite_queued_card_after_membership_fail_closed as _rewrite_fc_visual,
                             )
 
@@ -13575,6 +13576,7 @@ async def _handle_merchant_message(
                                 ),
                                 audit=_delivery_audit,
                             )
+                            _rewrite_ok = _commit_fc_visual(_att, _rewritten)
                         except Exception as _rw_exc:  # noqa: BLE001
                             logger.warning(
                                 "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
@@ -13583,8 +13585,13 @@ async def _handle_merchant_message(
                                 _att.get("id"),
                                 _rw_exc,
                             )
-                            _rewritten = None
-                        if _rewritten is None:
+                            _att["file_url"] = ""
+                            _att["product_url"] = ""
+                            _att["caption"] = ""
+                            _att["title"] = ""
+                            _att["fail_closed_visual_suppressed"] = True
+                            _rewrite_ok = False
+                        if not _rewrite_ok:
                             logger.warning(
                                 "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
                                 "FALLBACK_TEXT_ONLY reason=no_safe_bound_visual "
@@ -13592,8 +13599,9 @@ async def _handle_merchant_message(
                                 tenant_id,
                                 _att.get("id"),
                             )
+                            if isinstance(_delivery_audit, dict):
+                                _delivery_audit["fail_closed_visual_suppressed"] = True
                             continue
-                        _att = _rewritten
                     _image_url = str(_att.get("file_url") or "").strip()
                     _product_url = _safe_cta_http_url(_att.get("product_url"))
                     _factual_body = _product_card_factual_body(_att)
@@ -14069,6 +14077,8 @@ async def _handle_merchant_message(
                     _rescue_url = ""
                     _rescue_title = ""
                     for _att in (_product_attachments or []):
+                        if _att.get("fail_closed_visual_suppressed"):
+                            continue
                         _u = (_att.get("product_url") or "").strip()
                         if _u:
                             _rescue_url = _u

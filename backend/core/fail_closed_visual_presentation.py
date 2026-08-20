@@ -488,6 +488,29 @@ def rewrite_queued_card_after_membership_fail_closed(
     return apply_bound_visual_to_attachment(attachment, bound)
 
 
+def suppress_unsafe_fail_closed_attachment(attachment: Dict[str, Any]) -> None:
+    """Strip parent visual/title/URL so later recovery cannot emit them."""
+    attachment["file_url"] = ""
+    attachment["product_url"] = ""
+    attachment["caption"] = ""
+    attachment["title"] = ""
+    attachment["fail_closed_visual_suppressed"] = True
+
+
+def commit_fail_closed_rewrite(
+    attachment: Dict[str, Any],
+    rewritten: Optional[Mapping[str, Any]],
+) -> bool:
+    """Mutate the queued card in place. False = fail closed / suppressed."""
+    if rewritten is None:
+        suppress_unsafe_fail_closed_attachment(attachment)
+        return False
+    attachment.clear()
+    attachment.update(dict(rewritten))
+    attachment.pop("fail_closed_visual_suppressed", None)
+    return True
+
+
 __all__ = [
     "MEMBERSHIP_FAIL_CLOSED_REASONS",
     "REASON_BOUND",
@@ -501,6 +524,7 @@ __all__ = [
     "apply_bound_visual_to_attachment",
     "bind_from_local_facts",
     "bind_structured_visual_referent",
+    "commit_fail_closed_rewrite",
     "extract_structured_product_id",
     "extract_structured_variant_id",
     "is_membership_fail_closed",
@@ -509,4 +533,5 @@ __all__ = [
     "rewrite_queued_card_after_membership_fail_closed",
     "should_block_title_query_substitution",
     "stamp_membership_fail_closed",
+    "suppress_unsafe_fail_closed_attachment",
 ]

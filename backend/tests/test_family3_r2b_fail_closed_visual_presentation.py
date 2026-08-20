@@ -37,6 +37,8 @@ from core.fail_closed_visual_presentation import (  # noqa: E402
     rewrite_queued_card_after_membership_fail_closed,
     should_block_title_query_substitution,
     stamp_membership_fail_closed,
+    suppress_unsafe_fail_closed_attachment,
+    commit_fail_closed_rewrite,
 )
 from core.meta_catalog_membership import (  # noqa: E402
     PROVENANCE_GRAPH_RECONCILE,
@@ -712,6 +714,59 @@ class TestQueuedCardRewriteAfterMembershipFailClosed:
         assert miss.reason == REASON_VARIANT_TITLE_MISS
         assert miss.allow_presentation is False
         assert miss.title == ""
+
+
+def _rescue_url_from_queued_cards(cards):
+    for att in cards:
+        if att.get("fail_closed_visual_suppressed"):
+            continue
+        url = str(att.get("product_url") or "").strip()
+        if url:
+            return url, str(att.get("title") or "")
+    return "", ""
+
+
+class TestFailClosedRecoveryCannotReplayParent:
+    def test_suppressed_card_is_not_used_as_rescue_url(self):
+        queued = _attachment(product_id=101, picked_variant_id=9)
+        queued["file_url"] = "https://cdn.example/parent.jpg"
+        queued["product_url"] = "https://shop.example/parent"
+        queued["title"] = "حذاء رياضي أبيض"
+        product_attachments = [queued]
+        assert commit_fail_closed_rewrite(queued, None) is False
+        assert queued["fail_closed_visual_suppressed"] is True
+        url, title = _rescue_url_from_queued_cards(product_attachments)
+        assert url == ""
+        assert title == ""
+        assert queued["product_url"] == ""
+        assert queued["title"] == ""
+
+    def test_successful_rewrite_updates_queued_card_for_later_recovery(self):
+        queued = _attachment(product_id=101, picked_variant_id=9)
+        queued["file_url"] = "https://cdn.example/parent.jpg"
+        queued["caption"] = "حذاء رياضي أبيض"
+        rewritten = {
+            "kind": "product_card",
+            "id": 101,
+            "title": "حذاء رياضي أبيض — 42",
+            "file_url": "https://cdn.example/size-42.jpg",
+            "product_url": "https://shop.example/shirt",
+            "caption": "حذاء رياضي أبيض — 42",
+            "picked_variant_id": 9,
+        }
+        assert commit_fail_closed_rewrite(queued, rewritten) is True
+        url, title = _rescue_url_from_queued_cards([queued])
+        assert url == "https://shop.example/shirt"
+        assert title == "حذاء رياضي أبيض — 42"
+        assert queued["file_url"] == "https://cdn.example/size-42.jpg"
+
+    def test_suppress_helper_clears_parent_facts(self):
+        queued = _attachment(product_id=101)
+        suppress_unsafe_fail_closed_attachment(queued)
+        assert queued["fail_closed_visual_suppressed"] is True
+        assert queued["file_url"] == ""
+        assert queued["product_url"] == ""
+        assert queued["title"] == ""
 
 
 def test_inbound_title_rescue_blocked_when_membership_failed_closed():
