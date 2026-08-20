@@ -153,13 +153,13 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
         from services.meta_coexistence import (  # noqa: PLC0415
             apply_smb_sync_results,
             initiate_smb_app_data,
-            is_coexistence_mode,
             maybe_fail_sync_deadline,
             missing_smb_syncs,
             smb_syncs_accepted,
+            should_project_as_coexistence,
         )
         from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
-        if is_coexistence_mode(conn):
+        if should_project_as_coexistence(conn):
             if maybe_fail_sync_deadline(conn, now):
                 db.commit()
                 return "critical"

@@ -90,6 +90,11 @@ interface EmbeddedStatusPayload {
   action_required_message?: string | null
   request_submitted_at?: string | null
   coexistence_available?: boolean
+  coexistence_not_eligible?: boolean
+  standard_cloud_api_available?: boolean
+  recommended_mode?: string | null
+  is_on_biz_app?: boolean | null
+  connection_mode?: string | null
   phones?: EmbeddedPhone[]
 }
 
@@ -331,10 +336,6 @@ function MetaEmbeddedOptionCard({
 
       <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
 
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
-        {s.coexistenceSafetyNote}
-      </div>
-
       <div className="mt-auto pt-1 space-y-3">
         <ManualSetupGuideButton label={s.manualSetupLink} />
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
@@ -516,7 +517,7 @@ function EmbeddedSignupFlow({
   const emb = t(tr => tr.whatsappConnect.embedded)
   const simp = t(tr => tr.whatsappConnect.simplified)
   const waErr = t(tr => tr.whatsappConnect.errors)
-  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'done'>('init')
+  const [stage, setStage]       = useState<'init'|'loading-sdk'|'ready'|'exchanging'|'select-phone'|'add-phone'|'requesting-code'|'verify-phone'|'syncing-phone'|'coexistence-not-eligible'|'done'>('init')
   const [error, setError]       = useState('')
   const [phones, setPhones]     = useState<EmbeddedPhone[]>([])
   const [wabaId, setWabaId]     = useState('')
@@ -617,6 +618,11 @@ function EmbeddedSignupFlow({
       return
     }
 
+    if (res.status === 'coexistence_not_eligible' || res.coexistence_not_eligible) {
+      setStage('coexistence-not-eligible')
+      return
+    }
+
     if (res.status === 'review_pending' || res.status === 'activation_pending' || res.status === 'configuring' || res.status === 'authorizing') {
       setStage('syncing-phone')
       return
@@ -694,7 +700,8 @@ function EmbeddedSignupFlow({
       if (Array.isArray(result.phones)) setPhones(result.phones)
       if (
         result.connected
-        || ['connected', 'configuring', 'authorizing', 'activation_pending', 'review_pending', 'failed', 'error'].includes(result.status)
+        || result.coexistence_not_eligible
+        || ['connected', 'configuring', 'authorizing', 'activation_pending', 'review_pending', 'failed', 'error', 'coexistence_not_eligible'].includes(result.status)
       ) {
         applyEmbeddedStatus(result)
         return
@@ -885,6 +892,22 @@ function EmbeddedSignupFlow({
     simp.errPopupClosed,
     waErr,
   ])
+
+  const confirmStandardCloudApi = useCallback(async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await apiCall<EmbeddedStatusPayload>('/whatsapp/embedded/confirm-standard-cloud-api', {
+        method: 'POST',
+        body: JSON.stringify({ confirm_standard_cloud_api: true }),
+      })
+      applyEmbeddedStatus(res)
+    } catch (err) {
+      setError(explainWhatsAppError(err instanceof Error ? err.message : emb.exchangeFailed, waErr))
+    } finally {
+      setBusy(false)
+    }
+  }, [applyEmbeddedStatus, emb.exchangeFailed, waErr])
 
   const selectPhone = useCallback(async (phoneId: string) => {
     setBusy(true); setError('')
@@ -1192,6 +1215,31 @@ function EmbeddedSignupFlow({
     )
   }
 
+  if (stage === 'coexistence-not-eligible') {
+    return (
+      <div className="space-y-4">
+        <div>
+          <p className="font-semibold text-slate-800">{simp.coexistenceNotEligibleTitle}</p>
+          <p className="text-sm text-slate-600 mt-1 leading-relaxed">{simp.coexistenceNotEligibleBody}</p>
+        </div>
+        {statusHint && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm text-slate-700">
+            {statusHint}
+          </div>
+        )}
+        {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+        <button
+          type="button"
+          onClick={() => { void confirmStandardCloudApi() }}
+          disabled={busy}
+          className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
+        >
+          {busy ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</> : simp.coexistenceContinueStandardBtn}
+        </button>
+      </div>
+    )
+  }
+
   // ── Compact card CTA (simplified merchant page) ─────────────────
   if (
     embeddedInCard
@@ -1202,9 +1250,10 @@ function EmbeddedSignupFlow({
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
         )}
+        {/* Main CTA — standard Cloud API */}
         <button
           type="button"
-          onClick={launchCoexistenceSignup}
+          onClick={launchSignup}
           disabled={stage !== 'ready' || busy}
           className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
         >
@@ -1218,13 +1267,18 @@ function EmbeddedSignupFlow({
               </>
           }
         </button>
+        <p className="text-xs text-slate-500 leading-relaxed">{simp.coexistenceChoiceLabel}</p>
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
+          {simp.coexistenceSafetyNote}
+        </div>
+        {/* Explicit Coexistence — WhatsApp Business App on phone */}
         <button
           type="button"
-          onClick={launchSignup}
+          onClick={launchCoexistenceSignup}
           disabled={stage !== 'ready' || busy}
           className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
         >
-          {simp.metaCloudApiConnectBtn}
+          {simp.coexistenceConnectBtn}
         </button>
       </div>
     )
@@ -1263,17 +1317,13 @@ function EmbeddedSignupFlow({
         {emb.initHint}
       </div>
 
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
-        {simp.coexistenceSafetyNote}
-      </div>
-
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
       )}
 
-      {/* Main CTA — coexistence (WhatsApp Business App on phone) */}
+      {/* Main CTA — standard Cloud API */}
       <button
-        onClick={launchCoexistenceSignup}
+        onClick={launchSignup}
         disabled={stage !== 'ready' || busy}
         className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
       >
@@ -1288,13 +1338,19 @@ function EmbeddedSignupFlow({
         }
       </button>
 
+      <p className="text-xs text-slate-500 leading-relaxed">{simp.coexistenceChoiceLabel}</p>
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
+        {simp.coexistenceSafetyNote}
+      </div>
+
+      {/* Explicit Coexistence — WhatsApp Business App on phone */}
       <button
         type="button"
-        onClick={launchSignup}
+        onClick={launchCoexistenceSignup}
         disabled={stage !== 'ready' || busy}
         className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
       >
-        {simp.metaCloudApiConnectBtn}
+        {simp.coexistenceConnectBtn}
       </button>
 
       <p className="text-center text-xs text-slate-400">

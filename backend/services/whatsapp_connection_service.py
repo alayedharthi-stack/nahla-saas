@@ -237,6 +237,9 @@ def commit_connection(
         and str(getattr(conn, "status", "") or "") == "connected"
         and getattr(conn, "connected_at", None) is not None
     )
+    if action == "updated" and not same_identity:
+        from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
+        invalidate_identity_scoped_proof(conn)
     conn.phone_number_id              = phone_number_id
     conn.whatsapp_business_account_id = waba_id
     conn.connection_type              = connection_type
@@ -496,6 +499,7 @@ def begin_waba_session(
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
+    prior_waba = str(conn.whatsapp_business_account_id or "")
     conn.whatsapp_business_account_id = waba_id
     from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
     store_access_token(conn, access_token)
@@ -503,6 +507,12 @@ def begin_waba_session(
     conn.provider                     = provider
     conn.status                       = "pending"
     conn.sending_enabled              = False
+    conn.webhook_verified             = False
+    if prior_waba and prior_waba != str(waba_id or ""):
+        conn.phone_number_id = None
+        conn.phone_number = None
+        from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
+        invalidate_identity_scoped_proof(conn)
     conn.updated_at                   = datetime.now(timezone.utc)
 
     try:
@@ -751,25 +761,14 @@ def subscribe_phone_webhook(
     *,
     waba_id: Optional[str] = None,
     subscribed_fields: Optional[list] = None,
+    prefer_waba: bool = False,
 ) -> tuple[bool, Optional[str]]:
     """
-    Subscribe Nahla's Meta app to receive webhooks for a specific WhatsApp
-    phone number.
+    Subscribe Nahla's Meta app to receive webhooks for a WhatsApp asset.
 
-    Per Meta WhatsApp Cloud API docs, the correct endpoint is:
-        POST /{PHONE_NUMBER_ID}/subscribed_apps
-
-    The legacy WABA-level endpoint (/{WABA_ID}/subscribed_apps) returns
-    "Unsupported post request (400)" for many tokens/configurations, so we
-    use phone-number-level as the primary path. The WABA endpoint is only
-    used as a last-resort fallback when phone_number_id is missing — for
-    example, during the brief window in Embedded Signup between WABA
-    discovery and phone selection.
-
-    Returns (success: bool, error_detail: str | None).
-    NEVER raises — the caller decides how to handle failure.
-    The caller MUST surface the result to the merchant; it MUST NOT treat a
-    False return as a silent success.
+    Standard Embedded / Cloud API completion prefers
+    ``POST /{WABA_ID}/subscribed_apps`` (same order as Guardian).
+    Direct / legacy callers keep phone-first with a narrow WABA fallback.
     """
     if not phone_number_id and not waba_id:
         return False, "phone_number_id (or waba_id) is required for subscription"
@@ -777,68 +776,106 @@ def subscribe_phone_webhook(
     try:
         from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
 
-        # Prefer phone-number-level subscription (Meta-recommended).
-        target_id = phone_number_id or waba_id
-        target_kind = "phone" if phone_number_id else "waba"
-
         fields = list(subscribed_fields) if subscribed_fields else [
             "messages", "messaging_postbacks", "message_echoes",
         ]
-        url = (
-            f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-            f"/{target_id}/subscribed_apps"
-        )
-        resp = httpx.post(
-            url,
-            params={"access_token": access_token},
-            json={"subscribed_fields": fields},
-            timeout=10,
-        )
-        data = resp.json()
+        attempts: list[tuple[str, str]] = []
+        if prefer_waba and waba_id:
+            attempts.append(("waba", waba_id))
+        else:
+            if phone_number_id:
+                attempts.append(("phone", phone_number_id))
+            elif waba_id:
+                attempts.append(("waba", waba_id))
 
-        if resp.status_code == 200 and data.get("success"):
-            logger.info(
-                "[WASvc] subscribed_apps OK — tenant=%s %s_id=%s",
-                tenant_id, target_kind, target_id,
-            )
-            return True, None
-
-        err = data.get("error", {})
-        msg = err.get("message") or f"HTTP {resp.status_code}"
-        logger.warning(
-            "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
-            tenant_id, target_kind, target_id, resp.status_code, msg,
-        )
-
-        # Defensive fallback: if we attempted phone-level and Meta returned a
-        # legacy "Unsupported post request" we try WABA-level once. This
-        # should only ever fire on misconfigured tokens; it is NOT the
-        # primary path.
-        if target_kind == "phone" and waba_id and resp.status_code == 400 and "unsupported" in msg.lower():
-            logger.info(
-                "[WASvc] phone-level subscribe rejected — retrying WABA-level "
-                "tenant=%s waba=%s",
-                tenant_id, waba_id,
-            )
-            fallback_url = (
+        last_msg: Optional[str] = None
+        for target_kind, target_id in attempts:
+            url = (
                 f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-                f"/{waba_id}/subscribed_apps"
+                f"/{target_id}/subscribed_apps"
             )
-            fb_resp = httpx.post(
-                fallback_url,
+            resp = httpx.post(
+                url,
                 params={"access_token": access_token},
                 json={"subscribed_fields": fields},
                 timeout=10,
             )
-            fb_data = fb_resp.json()
-            if fb_resp.status_code == 200 and fb_data.get("success"):
+            data = resp.json()
+            if resp.status_code == 200 and data.get("success"):
                 logger.info(
-                    "[WASvc] subscribed_apps OK via WABA fallback — tenant=%s waba=%s",
-                    tenant_id, waba_id,
+                    "[WASvc] subscribed_apps OK — tenant=%s %s_id=%s",
+                    tenant_id, target_kind, target_id,
                 )
                 return True, None
 
-        return False, msg
+            err = data.get("error", {})
+            last_msg = err.get("message") or f"HTTP {resp.status_code}"
+            logger.warning(
+                "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
+                tenant_id, target_kind, target_id, resp.status_code, last_msg,
+            )
+            if (
+                prefer_waba
+                and target_kind == "waba"
+                and phone_number_id
+                and resp.status_code == 400
+                and "unsupported" in str(last_msg).lower()
+            ):
+                logger.info(
+                    "[WASvc] WABA-level subscribe unsupported — retrying phone-level "
+                    "tenant=%s phone=%s",
+                    tenant_id, phone_number_id,
+                )
+                fallback_url = (
+                    f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                    f"/{phone_number_id}/subscribed_apps"
+                )
+                fb_resp = httpx.post(
+                    fallback_url,
+                    params={"access_token": access_token},
+                    json={"subscribed_fields": fields},
+                    timeout=10,
+                )
+                fb_data = fb_resp.json()
+                if fb_resp.status_code == 200 and fb_data.get("success"):
+                    logger.info(
+                        "[WASvc] subscribed_apps OK via phone fallback — tenant=%s phone=%s",
+                        tenant_id, phone_number_id,
+                    )
+                    return True, None
+                last_msg = (fb_data.get("error") or {}).get("message") or last_msg
+                return False, last_msg
+            if (
+                not prefer_waba
+                and target_kind == "phone"
+                and waba_id
+                and resp.status_code == 400
+                and "unsupported" in str(last_msg).lower()
+            ):
+                logger.info(
+                    "[WASvc] phone-level subscribe rejected — retrying WABA-level "
+                    "tenant=%s waba=%s",
+                    tenant_id, waba_id,
+                )
+                fallback_url = (
+                    f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                    f"/{waba_id}/subscribed_apps"
+                )
+                fb_resp = httpx.post(
+                    fallback_url,
+                    params={"access_token": access_token},
+                    json={"subscribed_fields": fields},
+                    timeout=10,
+                )
+                fb_data = fb_resp.json()
+                if fb_resp.status_code == 200 and fb_data.get("success"):
+                    logger.info(
+                        "[WASvc] subscribed_apps OK via WABA fallback — tenant=%s waba=%s",
+                        tenant_id, waba_id,
+                    )
+                    return True, None
+
+        return False, last_msg
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(
