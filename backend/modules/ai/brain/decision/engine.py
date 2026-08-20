@@ -4192,6 +4192,16 @@ class DefaultDecisionEngine:
             )
             if _price_dec is not None:
                 return _price_dec
+            try:
+                from ..product_discovery_gate import (  # noqa: PLC0415
+                    try_referent_scoped_product_reply_decision,
+                )
+
+                _referent_dec = try_referent_scoped_product_reply_decision(ctx)
+                if _referent_dec is not None:
+                    return _referent_dec
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — referent scope must not block search
+                pass
             if facts.has_products:
                 query = _resolved_product_query(
                     ctx, _extracted_product_query,
