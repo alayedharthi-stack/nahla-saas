@@ -239,7 +239,7 @@ def test_quantity_like_without_product_does_not_start_catalog_or_checkout(messag
             message,
             intent=Intent(name=INTENT_GENERAL, confidence=0.55, raw_message=message),
             stage=STAGE_ORDERING,
-            product_focus=True,
+            product_focus=False,
         ),
     )
     assert decision.action == ACTION_LLM_REPLY
