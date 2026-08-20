@@ -203,6 +203,22 @@ def test_standard_subscribe_does_not_fallback_on_ambiguous_waba_unsupported(mock
 
 
 @patch("services.whatsapp_connection_service.httpx.post")
+def test_standard_subscribe_requires_waba_id_when_prefer_waba(mock_post):
+    mock_post.return_value.status_code = 200
+    mock_post.return_value.json.return_value = {"success": True}
+    ok, err = subscribe_phone_webhook(
+        "pn-generic-cloud-1",
+        "token",
+        9,
+        waba_id=None,
+        prefer_waba=True,
+    )
+    assert ok is False
+    assert err
+    assert mock_post.call_count == 0
+
+
+@patch("services.whatsapp_connection_service.httpx.post")
 def test_register_phone_number_still_callable_for_default_path(mock_post):
     mock_post.return_value.status_code = 200
     mock_post.return_value.json.return_value = {"success": True}

@@ -500,6 +500,8 @@ def begin_waba_session(
         db.add(conn)
 
     prior_waba = str(conn.whatsapp_business_account_id or "")
+    prior_provider = str(getattr(conn, "provider", None) or "")
+    prior_conn_type = str(getattr(conn, "connection_type", None) or "")
     conn.whatsapp_business_account_id = waba_id
     from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
     store_access_token(conn, access_token)
@@ -508,9 +510,14 @@ def begin_waba_session(
     conn.status                       = "pending"
     conn.sending_enabled              = False
     conn.webhook_verified             = False
-    waba_changed = (prior_waba or "") != str(waba_id or "")
-    if waba_changed:
-        if prior_waba:
+    waba_changed = prior_waba != str(waba_id or "")
+    identity_changed = (
+        waba_changed
+        or prior_provider != str(provider or "")
+        or prior_conn_type != str(connection_type or "")
+    )
+    if identity_changed:
+        if waba_changed and prior_waba:
             conn.phone_number_id = None
             conn.phone_number = None
         from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
@@ -783,7 +790,9 @@ def subscribe_phone_webhook(
             "messages", "messaging_postbacks", "message_echoes",
         ]
         attempts: list[tuple[str, str]] = []
-        if prefer_waba and waba_id:
+        if prefer_waba:
+            if not waba_id:
+                return False, "waba_id is required for Standard WABA subscription"
             attempts.append(("waba", waba_id))
         else:
             if phone_number_id:

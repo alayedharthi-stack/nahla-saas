@@ -1167,6 +1167,8 @@ def test_identity_invalidation_clears_outcome_and_sending(db):
             "meta_verification_unavailable": True,
             "meta_fetch_failure_kind": "transient",
             "webhook_subscription_error": "old",
+            "recommended_mode": "cloud_api",
+            "standard_cloud_api_available": True,
             "smb_sync": {"history": {"accepted": True, "request_id": "old"}},
         },
     )
@@ -1185,6 +1187,8 @@ def test_identity_invalidation_clears_outcome_and_sending(db):
     assert "meta_verification_unavailable" not in meta
     assert "meta_fetch_failure_kind" not in meta
     assert "webhook_subscription_error" not in meta
+    assert "recommended_mode" not in meta
+    assert "standard_cloud_api_available" not in meta
 
 
 def test_standard_exchange_keeps_coexistence_consent(db):
@@ -1283,3 +1287,46 @@ def test_preserved_coexistence_blocks_standard_exchange_register(monkeypatch, db
     assert register_calls == []
     assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
     assert conn.sending_enabled is False
+
+
+def test_same_waba_provider_change_invalidates_identity_proof(monkeypatch, db):
+    from services import whatsapp_connection_service as wa_svc  # noqa: PLC0415
+
+    monkeypatch.setattr(wa_svc, "evict_waba_id_from_other_tenants", lambda *_a, **_kw: None, raising=False)
+    monkeypatch.setattr(wa_svc, "assert_waba_id_not_claimed", lambda *_a, **_kw: None, raising=False)
+    tenant = _tenant(db, name="قميص قطني أزرق")
+    conn = _conn(
+        db,
+        tenant.id,
+        whatsapp_business_account_id=WABA_ID,
+        provider="meta",
+        connection_type="embedded",
+        webhook_verified=True,
+        sending_enabled=True,
+        last_verified_at=datetime.now(timezone.utc),
+        extra_metadata={
+            "recommended_mode": "cloud_api",
+            "standard_cloud_api_available": True,
+            "status_projection_reason": "ready",
+            "webhook_subscription_error": "old",
+        },
+    )
+    db.commit()
+    wa_svc.begin_waba_session(
+        db,
+        tenant_id=tenant.id,
+        waba_id=WABA_ID,
+        access_token="tok",
+        connection_type="cloud_api",
+        provider="meta",
+    )
+    db.refresh(conn)
+    meta = dict(conn.extra_metadata or {})
+    assert conn.phone_number_id == PHONE_ID
+    assert conn.webhook_verified is False
+    assert conn.sending_enabled is False
+    assert conn.last_verified_at is None
+    assert "recommended_mode" not in meta
+    assert "standard_cloud_api_available" not in meta
+    assert "status_projection_reason" not in meta
+    assert "webhook_subscription_error" not in meta

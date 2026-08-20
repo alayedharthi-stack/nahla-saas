@@ -73,6 +73,8 @@ _STALE_IDENTITY_PROVIDER_KEYS = (
     "meta_verification_unavailable",
     "meta_fetch_failure_kind",
     "webhook_subscription_error",
+    "recommended_mode",
+    "standard_cloud_api_available",
 )
 _COEXISTENCE_WAIT_KEYS = (
     "smb_sync",
