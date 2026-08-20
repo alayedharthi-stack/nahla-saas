@@ -888,11 +888,12 @@ def _build_embedded_status_payload(
         "token_health": meta.get("token_health", meta.get("token_status")),
         "is_on_biz_app": on_app,
     }
-    if not_eligible and str(conn.status or "") != "connected":
+    if not_eligible:
         payload["coexistence_not_eligible"] = True
         payload["standard_cloud_api_available"] = True
         payload["recommended_mode"] = meta.get("recommended_mode") or RECOMMENDED_MODE_CLOUD_API
-        payload["status"] = COEXISTENCE_NOT_ELIGIBLE
+        if str(conn.status or "") != "connected" or not conn.sending_enabled:
+            payload["status"] = COEXISTENCE_NOT_ELIGIBLE
     if phones is not None:
         payload["phones"] = phones
     return payload

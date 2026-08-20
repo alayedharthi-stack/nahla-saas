@@ -56,6 +56,13 @@ _OBSOLETE_COEXISTENCE_KEYS = (
     "readiness_phone_number_id",
     "readiness_waba_id",
 )
+_COEXISTENCE_WAIT_KEYS = (
+    "smb_sync",
+    "smb_sync_deadline_at",
+    "coexistence_onboarded_at",
+    "readiness_phone_number_id",
+    "readiness_waba_id",
+)
 _COEXISTENCE_FAILURE_CODES = frozenset({
     "not_eligible",
     "smb_sync_deadline",
@@ -155,7 +162,7 @@ def persist_ineligible_coexistence_outcome(
     ``/register``. The merchant must call confirm-standard-cloud-api.
     """
     meta = dict(getattr(conn, "extra_metadata", None) or {})
-    for key in ("smb_sync", "smb_sync_deadline_at", "coexistence_onboarded_at"):
+    for key in _COEXISTENCE_WAIT_KEYS:
         meta.pop(key, None)
     meta["connection_mode"] = CONNECTION_MODE
     conn.extra_metadata = meta
@@ -168,6 +175,15 @@ def persist_ineligible_coexistence_outcome(
     meta["failure_code"] = "not_eligible"
     if error_message:
         meta["embedded_status_message"] = error_message
+    conn.extra_metadata = meta
+    return meta
+
+
+def clear_coexistence_wait_state(conn: Any) -> Dict[str, Any]:
+    """Drop SMB wait / readiness identity without clearing Coexistence consent."""
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    for key in _COEXISTENCE_WAIT_KEYS:
+        meta.pop(key, None)
     conn.extra_metadata = meta
     return meta
 

@@ -508,6 +508,8 @@ def begin_waba_session(
     if prior_waba and prior_waba != str(waba_id or ""):
         conn.phone_number_id = None
         conn.phone_number = None
+        from services.meta_coexistence import clear_coexistence_wait_state  # noqa: PLC0415
+        clear_coexistence_wait_state(conn)
     conn.updated_at                   = datetime.now(timezone.utc)
 
     try:

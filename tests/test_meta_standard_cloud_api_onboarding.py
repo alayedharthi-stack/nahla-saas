@@ -826,6 +826,16 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
         webhook_verified=True,
         status="connected",
         sending_enabled=True,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "smb_sync": {
+                "smb_app_state_sync": {"accepted": True, "request_id": "old-a"},
+                "history": {"accepted": True, "request_id": "old-b"},
+            },
+            "smb_sync_deadline_at": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+            "readiness_phone_number_id": PHONE_ID,
+            "readiness_waba_id": "waba-old-generic",
+        },
     )
     db.commit()
     wa_svc.begin_waba_session(
@@ -839,6 +849,11 @@ def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
     assert conn.phone_number_id is None
     assert conn.status == "pending"
     assert conn.sending_enabled is False
+    meta = dict(conn.extra_metadata or {})
+    assert "smb_sync" not in meta
+    assert "smb_sync_deadline_at" not in meta
+    assert "readiness_phone_number_id" not in meta
+    assert "readiness_waba_id" not in meta
 
 
 def test_assigning_new_phone_clears_webhook_verified(db):
@@ -848,3 +863,31 @@ def test_assigning_new_phone_clears_webhook_verified(db):
     _assign_embedded_phone_id(conn, "pn-new-identity")
     assert conn.webhook_verified is False
     assert conn.phone_number_id == "pn-new-identity"
+
+
+def test_connected_coexistence_live_false_surfaces_standard_confirm(monkeypatch, db):
+    tenant = _tenant(db, name="عطر ورد 100ml")
+    _ai_settings(db, tenant.id)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"connection_mode": "coexistence", "is_on_biz_app": True},
+        status="connected",
+        sending_enabled=True,
+        webhook_verified=True,
+        connected_at=datetime.now(timezone.utc),
+    )
+    db.commit()
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    payload = asyncio.run(sync_embedded_connection_from_meta(
+        conn,
+        db,
+        attempt_register=False,
+        allow_demotion=False,
+    ))
+    db.refresh(conn)
+    assert conn.sending_enabled is False
+    assert payload["connected"] is False
+    assert payload.get("coexistence_not_eligible") is True
+    assert payload["status"] == COEXISTENCE_NOT_ELIGIBLE
+    assert payload.get("standard_cloud_api_available") is True
