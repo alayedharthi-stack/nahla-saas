@@ -30,6 +30,7 @@ from routers.whatsapp_embedded import (  # noqa: E402
     _finalize_coexistence_exchange,
     _is_coexistence_conn,
     _project_phone_sync_state,
+    _reset_metadata_for_standard_exchange,
     confirm_standard_cloud_api,
     sync_embedded_connection_from_meta,
 )
@@ -1155,6 +1156,7 @@ def test_identity_invalidation_clears_outcome_and_sending(db):
         tenant.id,
         webhook_verified=True,
         sending_enabled=True,
+        last_verified_at=datetime.now(timezone.utc),
         extra_metadata={
             "connection_mode": "coexistence",
             "last_coexistence_outcome": "ready",
@@ -1162,6 +1164,9 @@ def test_identity_invalidation_clears_outcome_and_sending(db):
             "embedded_status_message": "stale-ready",
             "last_meta_sync_at": "2026-01-01T00:00:00+00:00",
             "failure_code": "not_eligible",
+            "meta_verification_unavailable": True,
+            "meta_fetch_failure_kind": "transient",
+            "webhook_subscription_error": "old",
             "smb_sync": {"history": {"accepted": True, "request_id": "old"}},
         },
     )
@@ -1170,9 +1175,111 @@ def test_identity_invalidation_clears_outcome_and_sending(db):
     meta = dict(conn.extra_metadata or {})
     assert conn.webhook_verified is False
     assert conn.sending_enabled is False
+    assert conn.last_verified_at is None
     assert "smb_sync" not in meta
     assert "last_coexistence_outcome" not in meta
     assert "status_projection_reason" not in meta
     assert "embedded_status_message" not in meta
     assert "last_meta_sync_at" not in meta
     assert "failure_code" not in meta
+    assert "meta_verification_unavailable" not in meta
+    assert "meta_fetch_failure_kind" not in meta
+    assert "webhook_subscription_error" not in meta
+
+
+def test_standard_exchange_keeps_coexistence_consent(db):
+    tenant = _tenant(db)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "oauth_keep": "keep-me",
+            "is_on_biz_app": True,
+        },
+    )
+    db.commit()
+    _reset_metadata_for_standard_exchange(conn)
+    meta = dict(conn.extra_metadata or {})
+    assert meta.get("connection_mode") == "coexistence"
+    assert meta.get("oauth_keep") == "keep-me"
+    assert _is_coexistence_conn(conn) is True
+
+
+def test_standard_exchange_clears_non_coexistence_metadata(db):
+    tenant = _tenant(db)
+    conn = _conn(db, tenant.id, extra_metadata={"stale_standard": "drop-me"})
+    db.commit()
+    _reset_metadata_for_standard_exchange(conn)
+    assert dict(conn.extra_metadata or {}) == {}
+
+
+def test_first_waba_assignment_clears_stale_verification_proof(monkeypatch, db):
+    from services import whatsapp_connection_service as wa_svc  # noqa: PLC0415
+
+    monkeypatch.setattr(wa_svc, "evict_waba_id_from_other_tenants", lambda *_a, **_kw: None, raising=False)
+    monkeypatch.setattr(wa_svc, "assert_waba_id_not_claimed", lambda *_a, **_kw: None, raising=False)
+    tenant = _tenant(db)
+    conn = _conn(
+        db,
+        tenant.id,
+        whatsapp_business_account_id=None,
+        webhook_verified=True,
+        sending_enabled=True,
+        last_verified_at=datetime.now(timezone.utc),
+        extra_metadata={
+            "meta_verification_unavailable": True,
+            "meta_fetch_failure_kind": "transient",
+            "webhook_subscription_error": "old",
+        },
+    )
+    db.commit()
+    wa_svc.begin_waba_session(
+        db,
+        tenant_id=tenant.id,
+        waba_id="waba-new-generic",
+        access_token="tok",
+    )
+    db.refresh(conn)
+    meta = dict(conn.extra_metadata or {})
+    assert conn.webhook_verified is False
+    assert conn.sending_enabled is False
+    assert conn.last_verified_at is None
+    assert "meta_verification_unavailable" not in meta
+    assert "meta_fetch_failure_kind" not in meta
+    assert "webhook_subscription_error" not in meta
+
+
+def test_preserved_coexistence_blocks_standard_exchange_register(monkeypatch, db):
+    tenant = _tenant(db, name="حذاء رياضي أبيض")
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "is_on_biz_app": False,
+            "platform_type": "NOT_APPLICABLE",
+        },
+    )
+    db.commit()
+    _reset_metadata_for_standard_exchange(conn)
+    assert _is_coexistence_conn(conn) is True
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    register_calls = []
+
+    async def _register(*_a, **_k):
+        register_calls.append(1)
+        return {"success": True}, "platform"
+
+    monkeypatch.setattr("routers.whatsapp_embedded._register_phone_with_fallback", _register)
+    monkeypatch.setattr(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        lambda *a, **k: (True, None),
+    )
+    asyncio.run(sync_embedded_connection_from_meta(
+        conn, db, attempt_register=not _is_coexistence_conn(conn),
+    ))
+    db.refresh(conn)
+    assert register_calls == []
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert conn.sending_enabled is False
