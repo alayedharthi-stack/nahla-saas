@@ -33,6 +33,7 @@ from core.fail_closed_visual_presentation import (  # noqa: E402
     extract_structured_variant_id,
     is_membership_fail_closed,
     resolved_sku_matches_canonical,
+    rewrite_queued_card_after_membership_fail_closed,
     should_block_title_query_substitution,
     stamp_membership_fail_closed,
 )
@@ -368,10 +369,7 @@ class TestVisualDispatchStructuredBind:
             },
         ), patch(
             "services.product_resolver.resolve_by_query",
-        ) as title_query, patch(
-            "services.product_resolver.format_product_card_caption",
-            return_value="variant-card",
-        ):
+        ) as title_query:
             cards, enforced = maybe_enforce_visual_product_card(
                 **_dispatch_kwargs(
                     brain_state={
@@ -388,6 +386,8 @@ class TestVisualDispatchStructuredBind:
         assert cards[0]["picked_variant_id"] == 9
         assert cards[0]["file_url"] == "https://cdn.example/size-42.jpg"
         assert cards[0]["file_url"] != "https://cdn.example/parent.jpg"
+        assert cards[0]["title"] == "حذاء رياضي أبيض — 42"
+        assert str(cards[0]["caption"]).splitlines()[0] == "حذاء رياضي أبيض — 42"
         title_query.assert_not_called()
 
     def test_missing_variant_row_fails_closed_not_parent_photo(self):
@@ -514,6 +514,94 @@ class TestVisualDispatchStructuredBind:
         assert enforced is True
         assert cards[0]["id"] == 303
         title_query.assert_called_once()
+
+
+class TestQueuedCardRewriteAfterMembershipFailClosed:
+    def test_queued_parent_photo_is_replaced_with_bound_variant(self):
+        parent = _resolution(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            image="https://cdn.example/parent.jpg",
+        )
+        queued = _attachment(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            picked_variant_id=9,
+        )
+        queued["file_url"] = "https://cdn.example/parent.jpg"
+        queued["caption"] = "حذاء رياضي أبيض\nالسعر: 100 ر.س"
+        with patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value={
+                "variant_id": 9,
+                "image_url": "https://cdn.example/size-42.jpg",
+                "option_summary": "42",
+                "in_stock": True,
+                "is_default": False,
+            },
+        ):
+            out = rewrite_queued_card_after_membership_fail_closed(
+                object(),
+                7,
+                queued,
+                audit={
+                    "membership_fail_closed": True,
+                    "canonical_product_id": 101,
+                    "canonical_variant_id": 9,
+                },
+            )
+        assert out is not None
+        assert out["file_url"] == "https://cdn.example/size-42.jpg"
+        assert out["file_url"] != queued["file_url"]
+        assert out["title"] == "حذاء رياضي أبيض — 42"
+        assert out["caption"] == "حذاء رياضي أبيض — 42"
+        assert out["picked_variant_id"] == 9
+
+    def test_queued_missing_variant_fails_closed_not_parent_photo(self):
+        parent = _resolution(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            image="https://cdn.example/parent.jpg",
+        )
+        queued = _attachment(product_id=101, picked_variant_id=9)
+        queued["file_url"] = "https://cdn.example/parent.jpg"
+        with patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value=None,
+        ):
+            out = rewrite_queued_card_after_membership_fail_closed(
+                object(),
+                7,
+                queued,
+                audit={
+                    "membership_fail_closed": True,
+                    "canonical_product_id": 101,
+                    "canonical_variant_id": 9,
+                },
+            )
+        assert out is None
+
+    def test_unstructured_queued_card_without_id_is_unchanged(self):
+        queued = {
+            "kind": "product_card",
+            "title": "حذاء رياضي أبيض",
+            "file_url": "https://cdn.example/fts.jpg",
+        }
+        out = rewrite_queued_card_after_membership_fail_closed(
+            object(),
+            7,
+            queued,
+            audit={"membership_fail_closed": True},
+        )
+        assert out is not None
+        assert out["file_url"] == queued["file_url"]
+        assert out["title"] == queued["title"]
 
 
 def test_inbound_title_rescue_blocked_when_membership_failed_closed():

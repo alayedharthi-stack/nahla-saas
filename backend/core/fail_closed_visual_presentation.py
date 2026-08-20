@@ -16,8 +16,11 @@ and does not select products for unstructured visual asks (AI-D02).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+
+logger = logging.getLogger("nahla.fail_closed_visual")
 
 from core.native_catalog_capability import (
     REASON_CATALOG_ID_MISMATCH,
@@ -250,10 +253,16 @@ def load_bound_variant_facts(
         return None
     try:
         from models import ProductVariant  # noqa: PLC0415
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         try:
             from database.models import ProductVariant  # noqa: PLC0415
-        except Exception:  # noqa: BLE001
+        except Exception as nested:  # noqa: BLE001
+            logger.warning(
+                "[FAIL_CLOSED_VISUAL] variant_model_import_failed tenant=%s err=%s nested=%s",
+                tenant_id,
+                exc,
+                nested,
+            )
             return None
     try:
         row = (
@@ -265,7 +274,15 @@ def load_bound_variant_facts(
             )
             .first()
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[FAIL_CLOSED_VISUAL] variant_load_failed tenant=%s product_id=%s "
+            "variant_id=%s err=%s",
+            tenant_id,
+            product_id,
+            variant_id,
+            exc,
+        )
         return None
     if row is None:
         return None
@@ -402,6 +419,60 @@ def bind_structured_visual_referent(
     )
 
 
+def apply_bound_visual_to_attachment(
+    attachment: Mapping[str, Any],
+    bound: StructuredVisualBind,
+) -> Dict[str, Any]:
+    """Copy a queued card onto bound identity. Caller must already allow presentation."""
+    out = dict(attachment)
+    if bound.product_id is not None:
+        out["id"] = bound.product_id
+    out["title"] = bound.title or str(out.get("title") or "")
+    out["file_url"] = bound.image_url
+    if bound.product_url:
+        out["product_url"] = bound.product_url
+    if bound.external_id:
+        out["external_id"] = bound.external_id
+    out["in_stock"] = bound.in_stock
+    # Bound title replaces any parent-only caption before the wire body is built.
+    out["caption"] = bound.title
+    if bound.variant_id is not None:
+        out["picked_variant_id"] = bound.variant_id
+        out["selected_variant_id"] = bound.variant_id
+    out["candidate_origin"] = SOURCE_STRUCTURED_IDENTITY
+    out["confidence"] = "exact"
+    return out
+
+
+def rewrite_queued_card_after_membership_fail_closed(
+    db: Any,
+    tenant_id: int,
+    attachment: Mapping[str, Any],
+    *,
+    brain_state: Optional[Mapping[str, Any]] = None,
+    audit: Optional[Mapping[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Rewrite a queued product card after Meta membership fail-closed.
+
+    Returns the original card when no structured id exists (unstructured
+    asks keep their existing cascade). Returns ``None`` to fail closed
+    when a structured referent has no safe visual — never the parent photo
+    of a selected non-default variant.
+    """
+    bound = bind_structured_visual_referent(
+        db,
+        tenant_id,
+        brain_state=brain_state,
+        attachments=[attachment],
+        audit=audit,
+    )
+    if not bound.canonical_present:
+        return dict(attachment)
+    if not bound.allow_presentation:
+        return None
+    return apply_bound_visual_to_attachment(attachment, bound)
+
+
 __all__ = [
     "MEMBERSHIP_FAIL_CLOSED_REASONS",
     "REASON_BOUND",
@@ -411,6 +482,7 @@ __all__ = [
     "REASON_VARIANT_MISS",
     "SOURCE_STRUCTURED_IDENTITY",
     "StructuredVisualBind",
+    "apply_bound_visual_to_attachment",
     "bind_from_local_facts",
     "bind_structured_visual_referent",
     "extract_structured_product_id",
@@ -418,6 +490,7 @@ __all__ = [
     "is_membership_fail_closed",
     "load_bound_variant_facts",
     "resolved_sku_matches_canonical",
+    "rewrite_queued_card_after_membership_fail_closed",
     "should_block_title_query_substitution",
     "stamp_membership_fail_closed",
 ]

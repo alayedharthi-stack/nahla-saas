@@ -13557,6 +13557,43 @@ async def _handle_merchant_message(
                 # to skip cards with no image (so we don't try to
                 # send an empty link to Meta).
                 if _is_product:
+                    if (
+                        isinstance(_delivery_audit, dict)
+                        and _delivery_audit.get("membership_fail_closed")
+                    ):
+                        try:
+                            from core.fail_closed_visual_presentation import (  # noqa: PLC0415
+                                rewrite_queued_card_after_membership_fail_closed as _rewrite_fc_visual,
+                            )
+
+                            _rewritten = _rewrite_fc_visual(
+                                db,
+                                tenant_id,
+                                _att,
+                                brain_state=(
+                                    _bs_for_nc if isinstance(_bs_for_nc, dict) else None
+                                ),
+                                audit=_delivery_audit,
+                            )
+                        except Exception as _rw_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                "fail_closed_rewrite_failed product_id=%s err=%s",
+                                tenant_id,
+                                _att.get("id"),
+                                _rw_exc,
+                            )
+                            _rewritten = None
+                        if _rewritten is None:
+                            logger.warning(
+                                "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s "
+                                "FALLBACK_TEXT_ONLY reason=no_safe_bound_visual "
+                                "product_id=%s",
+                                tenant_id,
+                                _att.get("id"),
+                            )
+                            continue
+                        _att = _rewritten
                     _image_url = str(_att.get("file_url") or "").strip()
                     _product_url = _safe_cta_http_url(_att.get("product_url"))
                     _factual_body = _product_card_factual_body(_att)

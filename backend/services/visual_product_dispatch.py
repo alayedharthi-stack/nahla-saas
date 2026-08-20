@@ -115,6 +115,7 @@ def maybe_enforce_visual_product_card(
                 )
                 return attachments, False
             try:
+                from dataclasses import replace as _replace_res
                 from services.product_resolver import (  # noqa: PLC0415
                     format_product_card_caption as _bound_caption,
                     resolve_by_product_id as _bound_by_id,
@@ -122,8 +123,23 @@ def maybe_enforce_visual_product_card(
                 resolved = None
                 if bound.product_id is not None:
                     resolved = _bound_by_id(db, tenant_id, bound.product_id)
-                caption = _bound_caption(resolved, include_description=False) if resolved else bound.title
-            except Exception:  # noqa: BLE001
+                if resolved is not None:
+                    caption = _bound_caption(
+                        _replace_res(
+                            resolved,
+                            title=bound.title,
+                            image_url=bound.image_url or resolved.image_url,
+                        ),
+                        include_description=False,
+                    )
+                else:
+                    caption = bound.title
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s bound_caption_failed: %s",
+                    tenant_id,
+                    exc,
+                )
                 caption = bound.title
             card: Dict[str, Any] = {
                 "kind": "product_card",
