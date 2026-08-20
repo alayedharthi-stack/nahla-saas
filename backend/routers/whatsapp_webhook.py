@@ -14041,6 +14041,7 @@ async def _handle_merchant_message(
                     try:
                         from core.fail_closed_visual_presentation import (  # noqa: PLC0415
                             extract_structured_product_id as _structured_id,
+                            extract_structured_variant_id as _structured_vid,
                             should_block_title_query_substitution as _block_title_sub,
                         )
 
@@ -14056,12 +14057,18 @@ async def _handle_merchant_message(
                             _focus,
                             _product_attachments,
                         )
+                        _vid = _structured_vid(
+                            _delivery_audit,
+                            _focus,
+                            _product_attachments,
+                        )
                         _block_title_rescue = _block_title_sub(
                             membership_fail_closed=bool(
                                 _delivery_audit.get("membership_fail_closed")
                             ),
                             canonical_product_id=_pid,
                             canonical_external_id=_ext,
+                            canonical_variant_id=_vid,
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — fail-closed bind must not crash rescue
                         _block_title_rescue = bool(

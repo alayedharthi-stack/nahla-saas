@@ -140,6 +140,9 @@ def maybe_enforce_visual_product_card(
                 "dispatch_source": "visual",
                 "candidate_origin": SOURCE_STRUCTURED_IDENTITY,
             }
+            if bound.variant_id is not None:
+                card["picked_variant_id"] = bound.variant_id
+                card["selected_variant_id"] = bound.variant_id
             attachments.append(card)
             logger.info(
                 "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s ENFORCED product_id=%s title=%r "

@@ -26,9 +26,11 @@ for _p in (str(_BACKEND), str(_REPO)):
 from core.fail_closed_visual_presentation import (  # noqa: E402
     REASON_NO_SAFE_VISUAL,
     REASON_UNBOUND,
+    REASON_VARIANT_MISS,
     SOURCE_STRUCTURED_IDENTITY,
     bind_from_local_facts,
     extract_structured_product_id,
+    extract_structured_variant_id,
     is_membership_fail_closed,
     resolved_sku_matches_canonical,
     should_block_title_query_substitution,
@@ -225,6 +227,19 @@ class TestMembershipFailClosedDetection:
         assert audit["membership_fail_closed"] is True
         assert audit["canonical_product_id"] == 101
 
+    def test_stamp_preserves_bound_variant_id(self):
+        d = evaluate_product_card_send(
+            tenant_id=7,
+            connection=_conn(),
+            attachment=_attachment(picked_variant_id=9, needs_variant_choice=False),
+            product_row=_product(published=False),
+        )
+        assert d.diagnostics["canonical_variant_id"] == 9
+        audit: dict = {}
+        stamp_membership_fail_closed(audit, d)
+        assert audit["canonical_variant_id"] == 9
+        assert extract_structured_variant_id(audit) == 9
+
 
 class TestFailClosedPresentationBind:
     def test_safe_visual_stays_on_canonical_referent(self):
@@ -252,7 +267,44 @@ class TestFailClosedPresentationBind:
     def test_title_query_blocked_after_membership_fail_closed(self):
         assert should_block_title_query_substitution(membership_fail_closed=True) is True
         assert should_block_title_query_substitution(canonical_product_id=101) is True
+        assert should_block_title_query_substitution(canonical_variant_id=9) is True
         assert should_block_title_query_substitution() is False
+
+    def test_selected_variant_keeps_variant_image_not_parent(self):
+        bound = bind_from_local_facts(
+            product_id=101,
+            variant_id=9,
+            title="حذاء رياضي أبيض — 42",
+            image_url="https://cdn.example/shoe-42.jpg",
+            product_url="https://shop.example/shoe",
+        )
+        assert bound.variant_id == 9
+        assert bound.image_url == "https://cdn.example/shoe-42.jpg"
+        assert resolved_sku_matches_canonical(
+            canonical_product_id=101,
+            resolved_product_id=101,
+            canonical_variant_id=9,
+            resolved_variant_id=9,
+        ) is True
+        assert resolved_sku_matches_canonical(
+            canonical_product_id=101,
+            resolved_product_id=101,
+            canonical_variant_id=9,
+            resolved_variant_id=None,
+        ) is False
+
+    def test_non_default_variant_without_image_fails_closed(self):
+        bound = bind_from_local_facts(
+            product_id=101,
+            variant_id=9,
+            title="حذاء رياضي أبيض — 42",
+            image_url="",
+            product_url="",
+        )
+        assert bound.canonical_present is True
+        assert bound.variant_id == 9
+        assert bound.allow_presentation is False
+        assert bound.reason == REASON_NO_SAFE_VISUAL
 
 
 class TestVisualDispatchStructuredBind:
@@ -289,6 +341,107 @@ class TestVisualDispatchStructuredBind:
         assert cards[0]["id"] == 101
         assert cards[0]["candidate_origin"] == SOURCE_STRUCTURED_IDENTITY
         title_query.assert_not_called()
+
+    def test_selected_variant_dispatch_does_not_emit_parent_only_card(self):
+        parent = _resolution(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            image="https://cdn.example/parent.jpg",
+        )
+        with patch(
+            "modules.observability.customer_wants_product_or_image",
+            return_value=True,
+        ), patch(
+            "modules.observability.has_visual_marker",
+            return_value=False,
+        ), patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value={
+                "variant_id": 9,
+                "image_url": "https://cdn.example/size-42.jpg",
+                "option_summary": "42",
+                "in_stock": True,
+                "is_default": False,
+            },
+        ), patch(
+            "services.product_resolver.resolve_by_query",
+        ) as title_query, patch(
+            "services.product_resolver.format_product_card_caption",
+            return_value="variant-card",
+        ):
+            cards, enforced = maybe_enforce_visual_product_card(
+                **_dispatch_kwargs(
+                    brain_state={
+                        "current_product_focus": {
+                            "id": 101,
+                            "title": "حذاء رياضي أبيض",
+                            "picked_variant_id": 9,
+                        }
+                    }
+                )
+            )
+        assert enforced is True
+        assert cards[0]["id"] == 101
+        assert cards[0]["picked_variant_id"] == 9
+        assert cards[0]["file_url"] == "https://cdn.example/size-42.jpg"
+        assert cards[0]["file_url"] != "https://cdn.example/parent.jpg"
+        title_query.assert_not_called()
+
+    def test_missing_variant_row_fails_closed_not_parent_photo(self):
+        parent = _resolution(
+            product_id=101,
+            title="حذاء رياضي أبيض",
+            image="https://cdn.example/parent.jpg",
+        )
+        with patch(
+            "modules.observability.customer_wants_product_or_image",
+            return_value=True,
+        ), patch(
+            "modules.observability.has_visual_marker",
+            return_value=False,
+        ), patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value=None,
+        ), patch(
+            "services.product_resolver.resolve_by_query",
+        ) as title_query:
+            cards, enforced = maybe_enforce_visual_product_card(
+                **_dispatch_kwargs(
+                    brain_state={
+                        "current_product_focus": {
+                            "id": 101,
+                            "picked_variant_id": 9,
+                        }
+                    }
+                )
+            )
+        assert enforced is False
+        assert cards == []
+        title_query.assert_not_called()
+
+        from core.fail_closed_visual_presentation import bind_structured_visual_referent
+
+        with patch(
+            "services.product_resolver.resolve_by_product_id",
+            return_value=parent,
+        ), patch(
+            "core.fail_closed_visual_presentation.load_bound_variant_facts",
+            return_value=None,
+        ):
+            miss = bind_structured_visual_referent(
+                object(),
+                7,
+                brain_state={"current_product_focus": {"id": 101, "picked_variant_id": 9}},
+            )
+        assert miss.reason == REASON_VARIANT_MISS
+        assert miss.variant_id == 9
+        assert miss.allow_presentation is False
 
     def test_canonical_without_visual_fails_closed_not_title_fts(self):
         empty = _resolution(product_id=101, title="عطر ورد 100ml", image="", url="")

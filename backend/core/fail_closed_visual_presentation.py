@@ -44,6 +44,13 @@ REASON_BOUND = "bound_structured_identity"
 REASON_NO_SAFE_VISUAL = "no_safe_bound_visual"
 REASON_UNBOUND = "no_structured_identity"
 REASON_TENANT_MISS = "structured_identity_not_in_tenant"
+REASON_VARIANT_MISS = "structured_variant_not_in_tenant"
+_VARIANT_ID_KEYS = (
+    "canonical_variant_id",
+    "picked_variant_id",
+    "selected_variant_id",
+    "variant_id",
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,7 @@ class StructuredVisualBind:
 
     canonical_present: bool
     product_id: Optional[int] = None
+    variant_id: Optional[int] = None
     external_id: str = ""
     title: str = ""
     image_url: str = ""
@@ -105,6 +113,31 @@ def extract_structured_product_id(
     return None, ""
 
 
+def extract_structured_variant_id(*sources: Any) -> Optional[int]:
+    """Return a bound variant id from explicit variant fields only.
+
+    Parent ``id`` / ``product_id`` are not variant identity.
+    """
+    for source in sources:
+        if source is None:
+            continue
+        rows: Sequence[Any]
+        if isinstance(source, Mapping):
+            rows = (source,)
+        elif isinstance(source, (list, tuple)):
+            rows = source
+        else:
+            rows = ()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            for key in _VARIANT_ID_KEYS:
+                vid = _optional_int(row.get(key))
+                if vid is not None:
+                    return vid
+    return None
+
+
 def is_membership_fail_closed(decision: Any) -> bool:
     """True when native Meta send was denied by canonical membership/capability."""
     if decision is None:
@@ -134,6 +167,9 @@ def stamp_membership_fail_closed(
     canonical = diagnostics.get("canonical_product_id")
     if canonical is not None and canonical != "":
         audit["canonical_product_id"] = canonical
+    variant = diagnostics.get("canonical_variant_id")
+    if variant is not None and variant != "":
+        audit["canonical_variant_id"] = variant
 
 
 def should_block_title_query_substitution(
@@ -141,11 +177,14 @@ def should_block_title_query_substitution(
     membership_fail_closed: bool = False,
     canonical_product_id: Optional[int] = None,
     canonical_external_id: str = "",
+    canonical_variant_id: Optional[int] = None,
 ) -> bool:
     """Title-FTS / inbound-text rescue must not run when a referent is already known."""
     if membership_fail_closed:
         return True
     if canonical_product_id is not None:
+        return True
+    if canonical_variant_id is not None:
         return True
     return bool(str(canonical_external_id or "").strip())
 
@@ -154,15 +193,24 @@ def resolved_sku_matches_canonical(
     *,
     canonical_product_id: Optional[int],
     resolved_product_id: Optional[int],
+    canonical_variant_id: Optional[int] = None,
+    resolved_variant_id: Optional[int] = None,
 ) -> bool:
     if canonical_product_id is None or resolved_product_id is None:
         return False
-    return int(canonical_product_id) == int(resolved_product_id)
+    if int(canonical_product_id) != int(resolved_product_id):
+        return False
+    if canonical_variant_id is None:
+        return True
+    if resolved_variant_id is None:
+        return False
+    return int(canonical_variant_id) == int(resolved_variant_id)
 
 
 def bind_from_local_facts(
     *,
     product_id: Optional[int] = None,
+    variant_id: Optional[int] = None,
     external_id: str = "",
     title: str = "",
     image_url: str = "",
@@ -179,6 +227,7 @@ def bind_from_local_facts(
     return StructuredVisualBind(
         canonical_present=True,
         product_id=product_id,
+        variant_id=variant_id,
         external_id=ext,
         title=str(title or "").strip(),
         image_url=image,
@@ -187,6 +236,47 @@ def bind_from_local_facts(
         reason=REASON_BOUND if safe else REASON_NO_SAFE_VISUAL,
         source=SOURCE_STRUCTURED_IDENTITY,
     )
+
+
+def load_bound_variant_facts(
+    db: Any,
+    *,
+    tenant_id: int,
+    product_id: int,
+    variant_id: int,
+) -> Optional[Dict[str, Any]]:
+    """Tenant-scoped exact variant belonging to *product_id*. Never a sibling SKU."""
+    if db is None or not tenant_id:
+        return None
+    try:
+        from models import ProductVariant  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        try:
+            from database.models import ProductVariant  # noqa: PLC0415
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        row = (
+            db.query(ProductVariant)
+            .filter(
+                ProductVariant.tenant_id == int(tenant_id),
+                ProductVariant.id == int(variant_id),
+                ProductVariant.product_id == int(product_id),
+            )
+            .first()
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    summary = str(getattr(row, "option_summary", "") or "").strip()
+    return {
+        "variant_id": int(getattr(row, "id")),
+        "image_url": str(getattr(row, "image_url", "") or "").strip(),
+        "option_summary": summary,
+        "in_stock": bool(getattr(row, "in_stock", True)),
+        "is_default": bool(getattr(row, "is_default", False)),
+    }
 
 
 def bind_structured_visual_referent(
@@ -209,15 +299,26 @@ def bind_structured_visual_referent(
         focus,
         list(attachments or []),
     )
+    variant_id = extract_structured_variant_id(
+        audit_map,
+        focus,
+        list(attachments or []),
+    )
     if pid is None and not ext:
         return StructuredVisualBind(canonical_present=False, reason=REASON_UNBOUND)
 
     if db is None or not tenant_id:
         return bind_from_local_facts(
             product_id=pid,
+            variant_id=variant_id,
             external_id=ext,
             title=str(focus.get("title") or "").strip(),
-            image_url=str(focus.get("image_url") or focus.get("image") or "").strip(),
+            image_url=str(
+                focus.get("variant_image_url")
+                or (focus.get("image_url") if variant_id is None else "")
+                or focus.get("image")
+                or ""
+            ).strip(),
             product_url=str(focus.get("product_url") or "").strip(),
         )
 
@@ -230,6 +331,7 @@ def bind_structured_visual_referent(
         return StructuredVisualBind(
             canonical_present=True,
             product_id=pid,
+            variant_id=variant_id,
             external_id=ext,
             reason=REASON_TENANT_MISS,
             source=SOURCE_STRUCTURED_IDENTITY,
@@ -248,17 +350,55 @@ def bind_structured_visual_referent(
         return StructuredVisualBind(
             canonical_present=True,
             product_id=pid,
+            variant_id=variant_id,
             external_id=ext,
             reason=REASON_TENANT_MISS,
             source=SOURCE_STRUCTURED_IDENTITY,
         )
+
+    parent_title = str(resolved.title or "")
+    parent_image = str(resolved.image_url or "")
+    parent_url = str(resolved.product_url or "")
+    if variant_id is None:
+        return bind_from_local_facts(
+            product_id=int(resolved.id),
+            external_id=str(resolved.external_id or ext),
+            title=parent_title,
+            image_url=parent_image,
+            product_url=parent_url,
+            in_stock=bool(resolved.in_stock),
+        )
+
+    variant = load_bound_variant_facts(
+        db,
+        tenant_id=int(tenant_id),
+        product_id=int(resolved.id),
+        variant_id=int(variant_id),
+    )
+    if variant is None:
+        return StructuredVisualBind(
+            canonical_present=True,
+            product_id=int(resolved.id),
+            variant_id=int(variant_id),
+            external_id=str(resolved.external_id or ext),
+            reason=REASON_VARIANT_MISS,
+            source=SOURCE_STRUCTURED_IDENTITY,
+        )
+    summary = str(variant.get("option_summary") or "").strip()
+    title = f"{parent_title} — {summary}" if summary and parent_title else (summary or parent_title)
+    if variant.get("is_default"):
+        image = str(variant.get("image_url") or parent_image or "").strip()
+    else:
+        # Non-default variants must not inherit a parent photo (often another color/size).
+        image = str(variant.get("image_url") or "").strip()
     return bind_from_local_facts(
         product_id=int(resolved.id),
+        variant_id=int(variant["variant_id"]),
         external_id=str(resolved.external_id or ext),
-        title=str(resolved.title or ""),
-        image_url=str(resolved.image_url or ""),
-        product_url=str(resolved.product_url or ""),
-        in_stock=bool(resolved.in_stock),
+        title=title,
+        image_url=image,
+        product_url=parent_url,
+        in_stock=bool(variant.get("in_stock", True)),
     )
 
 
@@ -268,12 +408,15 @@ __all__ = [
     "REASON_NO_SAFE_VISUAL",
     "REASON_TENANT_MISS",
     "REASON_UNBOUND",
+    "REASON_VARIANT_MISS",
     "SOURCE_STRUCTURED_IDENTITY",
     "StructuredVisualBind",
     "bind_from_local_facts",
     "bind_structured_visual_referent",
     "extract_structured_product_id",
+    "extract_structured_variant_id",
     "is_membership_fail_closed",
+    "load_bound_variant_facts",
     "resolved_sku_matches_canonical",
     "should_block_title_query_substitution",
     "stamp_membership_fail_closed",
