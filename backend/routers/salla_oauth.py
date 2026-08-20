@@ -209,8 +209,8 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         find_salla_integration_for_identity,
         promote_integration_canonical_store,
         reject_merchant_account_only_alias_routing,
+        resolve_canonical_store_owner,
         resolve_salla_store_identity,
-        resolve_tenant_for_salla_store,
         verify_jwt_tenant_owns_salla_store,
         SallaStoreIdentity,
     )
@@ -331,22 +331,21 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
     )
 
     if identity_source == "merchant_account_only":
-        blocked = reject_merchant_account_only_alias_routing(
+        reject_merchant_account_only_alias_routing(
             db,
             merchant_account_id=lookup_store_id,
             context="token_login",
         )
-        if blocked is not None:
-            raise HTTPException(
-                status_code=403,
-                detail=build_merchant_identity_not_canonical_detail(
-                    identity_source="merchant_account_only",
-                    merchant_account_id=lookup_store_id,
-                    has_canonical_store_id=False,
-                ),
-            )
+        raise HTTPException(
+            status_code=403,
+            detail=build_merchant_identity_not_canonical_detail(
+                identity_source="merchant_account_only",
+                merchant_account_id=lookup_store_id,
+                has_canonical_store_id=False,
+            ),
+        )
 
-    # ── Authoritative store owner (integration row wins over provisioning) ──
+    # ── Authoritative store owner (canonical store id only) ──
     allow_alias_for_owner = identity_source == "canonical_store_id"
     identity_for_lookup = store_identity if canonical_store_id else SallaStoreIdentity(
         store_id="",
@@ -354,13 +353,12 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         resolved_via="merchant_account_only",
     )
     owner_tenant_id, owner_integration, owner_matched_via = (
-        resolve_tenant_for_salla_store(
+        resolve_canonical_store_owner(
             db,
             identity_for_lookup,
             include_disabled=True,
-            allow_alias_match=allow_alias_for_owner,
         )
-        if lookup_store_id
+        if canonical_store_id
         else (None, None, "")
     )
     if owner_tenant_id is not None:
@@ -398,6 +396,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
             issued_via        = "salla_token_login",
             request_ip        = client_ip,
             allow_alias_match = allow_alias_for_owner,
+            allow_merchant_alias = False,
         )
         tenant_id   = provision.tenant_id
         owner_email = provision.email   # canonical, may have been remapped
@@ -2464,6 +2463,9 @@ async def salla_api_oauth_callback(
 
     # ── Token exchange ──────────────────────────────────────────────────────
     normalized_redirect = (SALLA_OAUTH_REDIRECT_URI or "").strip().rstrip("/")
+    salla_store_id = ""
+    store_name = ""
+    store_identity = None
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             token_resp = await client.post(
@@ -2522,9 +2524,12 @@ async def salla_api_oauth_callback(
                     status_code=302,
                 )
 
-            # ── Fetch store info to get the external store_id ───────────────
-            salla_store_id = ""
-            store_name     = ""
+            # ── Fetch store info → typed canonical identity ─────────────────
+            from services.salla_store_identity import (  # noqa: PLC0415
+                SallaStoreIdentity as _SallaStoreIdentity,
+                store_identity_from_store_info,
+            )
+            store_identity = _SallaStoreIdentity(store_id="")
             store_resp = await client.get(
                 "https://api.salla.dev/admin/v2/store/info",
                 headers={
@@ -2534,13 +2539,26 @@ async def salla_api_oauth_callback(
             )
             if store_resp.status_code == 200:
                 store_data = (store_resp.json() or {}).get("data", {}) or {}
-                salla_store_id = str(store_data.get("id") or store_data.get("store_id") or "")
-                store_name     = store_data.get("name") or store_data.get("store_name") or ""
+                store_identity = store_identity_from_store_info(store_data)
+                logger.info(
+                    "[Salla API OAuth] store identity | canonical_store_id=%s "
+                    "merchant_account_id=%s authorizing_user_id=%s "
+                    "identity_source=%s resolved_via=%s store_name_present=%s keys=%s",
+                    store_identity.canonical_store_id or "-",
+                    store_identity.merchant_account_id or "-",
+                    store_identity.authorizing_user_id or "-",
+                    store_identity.identity_source or "-",
+                    store_identity.resolved_via or "-",
+                    bool(store_identity.store_name),
+                    list(store_data.keys()) if isinstance(store_data, dict) else [],
+                )
             else:
                 logger.warning(
                     "[Salla API OAuth] store/info fetch failed: %s — will fall back to existing store_id",
                     store_resp.status_code,
                 )
+            salla_store_id = store_identity.canonical_store_id
+            store_name = store_identity.store_name
 
     except httpx.TimeoutException as exc:
         logger.error("[Salla API OAuth] token exchange timed out: %s", exc)
@@ -2562,7 +2580,7 @@ async def salla_api_oauth_callback(
         from services.salla_store_identity import (  # noqa: PLC0415
             assert_oauth_tenant_matches_store_owner,
             promote_integration_canonical_store,
-            resolve_tenant_for_salla_store,
+            resolve_canonical_store_owner,
             SallaStoreIdentity,
         )
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
@@ -2577,11 +2595,10 @@ async def salla_api_oauth_callback(
                     status_code=302,
                 )
 
-            owner_tid, _, _ = resolve_tenant_for_salla_store(
+            owner_tid, _, _ = resolve_canonical_store_owner(
                 db,
                 SallaStoreIdentity(store_id=salla_store_id, store_name=store_name),
                 include_disabled=True,
-                allow_alias_match=False,
             )
             if owner_tid:
                 tenant_id = owner_tid
@@ -2614,35 +2631,72 @@ async def salla_api_oauth_callback(
                     tenant_id, salla_store_id, provision.is_brand_new,
                 )
 
-        if salla_store_id:
-            ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
-                db,
-                session_tenant_id=tenant_id,
-                store_id=salla_store_id,
+        if store_identity is not None and store_identity.identity_source == "merchant_account_only":
+            logger.error(
+                "[Salla API OAuth] merchant-account-only identity cannot persist canonical store | "
+                "session_tenant=%s merchant_account_id=%s",
+                tenant_id, store_identity.merchant_account_id,
             )
-            if not ok:
-                logger.error(
-                    "[Salla API OAuth] tenant/store mismatch blocked | session_tenant=%s "
-                    "owner_tenant=%s store_id=%s reason=%s",
-                    tenant_id, owner_tenant_id, salla_store_id, reason,
-                )
-                return RedirectResponse(
-                    url=_api_oauth_redirect_url(
-                        "error",
-                        reason="store_owned_by_other_tenant",
-                    ),
-                    status_code=302,
-                )
+            return RedirectResponse(
+                url=_api_oauth_redirect_url(
+                    "error",
+                    reason="merchant_identity_not_canonical",
+                ),
+                status_code=302,
+            )
 
         existing = db.query(Integration).filter(
             Integration.tenant_id == tenant_id,
             Integration.provider  == "salla",
         ).first()
 
-        # Fall back to whatever store_id we already have on file when Salla's
-        # store/info call did not resolve one in this exchange.
+        # store/info missed: reuse the already-canonical binding only.
+        # Never prefer config.store_id over a populated external_store_id.
         if not salla_store_id and existing:
-            salla_store_id = (existing.config or {}).get("store_id", "") or (existing.external_store_id or "")
+            salla_store_id = str(existing.external_store_id or "").strip()
+            if not salla_store_id:
+                salla_store_id = str((existing.config or {}).get("store_id") or "").strip()
+            if salla_store_id:
+                store_identity = SallaStoreIdentity(
+                    store_id=salla_store_id,
+                    merchant_account_id=(
+                        store_identity.merchant_account_id if store_identity else ""
+                    ),
+                    authorizing_user_id=(
+                        store_identity.authorizing_user_id if store_identity else ""
+                    ),
+                    store_name=store_name,
+                    resolved_via="existing_canonical_store",
+                )
+                logger.info(
+                    "[Salla API OAuth] store/info missing; reused existing canonical store | "
+                    "tenant=%s canonical_store_id=%s",
+                    tenant_id, salla_store_id,
+                )
+
+        if salla_store_id:
+            ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
+                db,
+                session_tenant_id=tenant_id,
+                identity=store_identity,
+            )
+            if not ok:
+                logger.error(
+                    "[Salla API OAuth] tenant/store mismatch blocked | session_tenant=%s "
+                    "owner_tenant=%s store_id=%s reason=%s identity_source=%s",
+                    tenant_id, owner_tenant_id, salla_store_id, reason,
+                    store_identity.identity_source,
+                )
+                redirect_reason = reason if reason in (
+                    "store_owned_by_other_tenant",
+                    "merchant_identity_not_canonical",
+                    "store_identity_conflict",
+                ) else "store_owned_by_other_tenant"
+                return RedirectResponse(
+                    url=_api_oauth_redirect_url("error", reason=redirect_reason),
+                    status_code=302,
+                )
+
         if not store_name and existing:
             store_name = (existing.config or {}).get("store_name", "") or store_name
 
@@ -2693,7 +2747,17 @@ async def salla_api_oauth_callback(
                 integration,
                 SallaStoreIdentity(
                     store_id=salla_store_id,
+                    merchant_account_id=(
+                        store_identity.merchant_account_id if store_identity else ""
+                    ),
+                    authorizing_user_id=(
+                        store_identity.authorizing_user_id if store_identity else ""
+                    ),
                     store_name=store_name,
+                    resolved_via=(
+                        store_identity.resolved_via if store_identity else "store_info"
+                    ),
+                    alias_ids=list(store_identity.alias_ids) if store_identity else [],
                 ),
             )
             flag_modified(integration, "config")
@@ -2963,6 +3027,12 @@ async def salla_oauth_callback(
 
             # ── Step 3: Fetch store info ───────────────────────────────────────
             logger.info("[Salla OAuth] Fetching store info...")
+            from services.salla_store_identity import (  # noqa: PLC0415
+                SallaStoreIdentity as _LegacySallaStoreIdentity,
+                store_identity_from_store_info,
+            )
+
+            store_identity_legacy = _LegacySallaStoreIdentity(store_id="")
             salla_store_id = ""
             store_name     = ""
             merchant_id    = ""
@@ -2978,32 +3048,52 @@ async def salla_oauth_callback(
 
             if store_resp.status_code == 200:
                 store_json     = store_resp.json()
-                store_data     = store_json.get("data", {})
-                salla_store_id = str(store_data.get("id", "") or store_data.get("store_id", ""))
-                store_name     = store_data.get("name", "") or store_data.get("store_name", "")
-                merchant_id    = str(store_data.get("merchant", {}).get("id", "")) if isinstance(
-                    store_data.get("merchant"), dict
-                ) else str(store_data.get("merchant", ""))
+                store_data     = store_json.get("data", {}) or {}
+                store_identity_legacy = store_identity_from_store_info(store_data)
+                salla_store_id = store_identity_legacy.canonical_store_id
+                store_name     = store_identity_legacy.store_name
+                merchant_id    = store_identity_legacy.merchant_account_id
                 logger.info(
-                    "[Salla OAuth] ✅ Store info: id=%s name=%r merchant_id=%s full_keys=%s",
-                    salla_store_id, store_name, merchant_id, list(store_data.keys()),
+                    "[Salla OAuth] store identity | canonical_store_id=%s "
+                    "merchant_account_id=%s authorizing_user_id=%s identity_source=%s keys=%s",
+                    salla_store_id or "-",
+                    merchant_id or "-",
+                    store_identity_legacy.authorizing_user_id or "-",
+                    store_identity_legacy.identity_source or "-",
+                    list(store_data.keys()) if isinstance(store_data, dict) else [],
                 )
             else:
                 logger.warning(
                     "[Salla OAuth] ⚠️ Store info fetch failed: %s %.300s",
                     store_resp.status_code, store_resp.text,
                 )
-                # Attempt fallback: try merchant/info endpoint
+                # merchant/info is account identity — correlation only, never store_id.
                 try:
                     fallback_resp = await client.get(
                         "https://api.salla.dev/admin/v2/merchant/info",
                         headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
                     )
                     if fallback_resp.status_code == 200:
-                        fb_data = fallback_resp.json().get("data", {})
-                        salla_store_id = str(fb_data.get("id", "") or fb_data.get("store_id", ""))
-                        store_name = fb_data.get("name", "") or fb_data.get("store_name", "")
-                        logger.info("[Salla OAuth] ✅ Fallback store info: id=%s name=%r", salla_store_id, store_name)
+                        fb_data = fallback_resp.json().get("data", {}) or {}
+                        merchant_id = str(
+                            (fb_data.get("id") if not isinstance(fb_data.get("merchant"), dict)
+                             else fb_data.get("merchant", {}).get("id"))
+                            or fb_data.get("merchant_id")
+                            or ""
+                        )
+                        if not store_name:
+                            store_name = str(fb_data.get("name") or fb_data.get("store_name") or "")
+                        store_identity_legacy = _LegacySallaStoreIdentity(
+                            store_id="",
+                            merchant_account_id=str(merchant_id or ""),
+                            store_name=store_name,
+                            resolved_via="merchant_account_only",
+                        )
+                        logger.info(
+                            "[Salla OAuth] merchant/info correlation only | "
+                            "merchant_account_id=%s (not used as store_id)",
+                            merchant_id or "-",
+                        )
                     else:
                         logger.warning("[Salla OAuth] ⚠️ Fallback also failed: %s", fallback_resp.status_code)
                 except Exception as fb_exc:
@@ -3062,6 +3152,7 @@ async def salla_oauth_callback(
                     store_name        = store_name or "",
                     is_email_derived  = email_is_derived_legacy,
                     issued_via        = "salla_oauth_callback",
+                    allow_merchant_alias = False,
                 )
             except Exception as exc:
                 logger.exception("[Salla OAuth] provisioning helper failed: %s", exc)
@@ -3177,6 +3268,7 @@ async def salla_oauth_callback(
                     is_email_derived=True,
                     issued_via="salla_oauth_callback_state_lost",
                     allow_alias_match=True,
+                    allow_merchant_alias=False,
                 )
                 tenant_id = provision_state_lost.tenant_id
                 owner_email = provision_state_lost.email
@@ -3258,11 +3350,22 @@ async def salla_oauth_callback(
             "connected_at":  datetime.now(timezone.utc).isoformat(),
         }
 
+        if store_identity_legacy.identity_source == "merchant_account_only":
+            logger.error(
+                "[Salla OAuth] merchant-account-only identity cannot persist canonical store | "
+                "session_tenant=%s merchant_account_id=%s",
+                tenant_id, store_identity_legacy.merchant_account_id,
+            )
+            return HTMLResponse(
+                content=_install_error_html("merchant_identity_not_canonical"),
+                status_code=403,
+            )
+
         if salla_store_id and not is_new_merchant:
             ok, owner_tenant_id, reason = assert_oauth_tenant_matches_store_owner(
                 db,
                 session_tenant_id=tenant_id,
-                store_id=salla_store_id,
+                identity=store_identity_legacy,
             )
             if not ok:
                 logger.error(
@@ -3271,7 +3374,7 @@ async def salla_oauth_callback(
                     tenant_id, owner_tenant_id, salla_store_id, reason,
                 )
                 return HTMLResponse(
-                    content=_install_error_html("store_owned_by_other_tenant"),
+                    content=_install_error_html(reason or "store_owned_by_other_tenant"),
                     status_code=403,
                 )
 

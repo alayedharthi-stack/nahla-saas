@@ -410,6 +410,44 @@ class TestOAuthWrongSessionTenant:
         assert owner_tid == GENERIC_TENANT
         assert reason == "store_owned_by_other_tenant"
 
+    def test_legacy_alias_does_not_prove_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+        )
+        ok, owner_tid, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=WRONG_TENANT,
+            store_id=PARTNER_ALT,
+        )
+        assert ok is True
+        assert owner_tid is None
+        assert reason == ""
+
+    def test_merchant_id_only_config_does_not_prove_ownership(self, db):
+        from services.salla_store_identity import assert_oauth_tenant_matches_store_owner
+
+        db.merge(Tenant(id=GENERIC_TENANT, name="Generic"))
+        db.add(Integration(
+            tenant_id=GENERIC_TENANT,
+            provider="salla",
+            external_store_id=GENERIC_STORE,
+            config={"store_id": GENERIC_STORE, "merchant_id": GENERIC_ALT},
+            enabled=True,
+        ))
+        db.commit()
+        ok, _, reason = assert_oauth_tenant_matches_store_owner(
+            db,
+            session_tenant_id=GENERIC_WRONG_TENANT,
+            store_id=GENERIC_ALT,
+        )
+        assert ok is True
+        assert reason == ""
+
 
 class TestLaunchTenantGuard:
     def test_launch_dashboard_missing_store_id_returns_403(self, db):
@@ -625,7 +663,7 @@ class TestMerchantOnlyAliasRouting:
         assert exc.detail["has_canonical_store_id"] is False
         assert exc.detail["identity_source"] == "merchant_account_only"
 
-    def test_token_login_merchant_id_matching_external_store_opens_tenant(self, db):
+    def test_token_login_merchant_id_matching_external_store_is_not_canonical(self, db):
         from routers.salla_oauth import salla_token_login
 
         _seed_store(
@@ -672,18 +710,18 @@ class TestMerchantOnlyAliasRouting:
                 mock_client.get = AsyncMock()
                 mock_client_cls.return_value = mock_client
 
-                with patch("routers.salla_oauth.create_token", return_value="jwt"):
-                    with patch("routers.salla_oauth.audit"):
-                        with patch(
-                            "core.salla_onboarding_email.queue_salla_onboarding_email",
-                        ):
-                            return await salla_token_login(request, db)
+                with pytest.raises(HTTPException) as exc_info:
+                    await salla_token_login(request, db)
+                return exc_info.value
 
-        result = asyncio.run(_run())
-        assert result["tenant_id"] == PARTNER_TENANT
-        assert result["store_id"] == PARTNER_STORE
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert isinstance(exc.detail, dict)
+        assert exc.detail["detail"] == "merchant_identity_not_canonical"
+        assert exc.detail["code"] == "salla_store_link_required"
+        assert exc.detail["has_canonical_store_id"] is False
 
-    def test_token_login_unknown_merchant_only_provisions_new_tenant(self, db):
+    def test_token_login_unknown_merchant_only_fails_closed(self, db):
         from routers.salla_oauth import salla_token_login
 
         _seed_store(
@@ -692,6 +730,7 @@ class TestMerchantOnlyAliasRouting:
             canonical_store_id=PARTNER_STORE,
             alt_merchant_id=PARTNER_ALT,
         )
+        tenants_before = db.query(Tenant).count()
 
         introspect_body = {
             "success": True,
@@ -720,16 +759,16 @@ class TestMerchantOnlyAliasRouting:
                 mock_client.get = AsyncMock()
                 mock_client_cls.return_value = mock_client
 
-                with patch("routers.salla_oauth.create_token", return_value="jwt"):
-                    with patch("routers.salla_oauth.audit"):
-                        with patch(
-                            "core.salla_onboarding_email.queue_salla_onboarding_email",
-                        ):
-                            return await salla_token_login(request, db)
+                with pytest.raises(HTTPException) as exc_info:
+                    await salla_token_login(request, db)
+                return exc_info.value
 
-        result = asyncio.run(_run())
-        assert result["tenant_id"] != PARTNER_TENANT
-        assert result["store_id"] == UNKNOWN_STORE
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert isinstance(exc.detail, dict)
+        assert exc.detail["detail"] == "merchant_identity_not_canonical"
+        assert exc.detail["code"] == "salla_store_link_required"
+        assert db.query(Tenant).count() == tenants_before
 
     def test_session_rejects_partner_alt_for_tenant_one_jwt(self, db):
         from routers.salla_oauth import salla_check_session
