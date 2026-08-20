@@ -491,7 +491,9 @@ def stamp_product_claim_guard_provenance(
         result_data["product_claim_recompose_requested"] = True
     if recompose_performed:
         result_data["product_claim_recompose_performed"] = True
-        result_data["product_claim_recompose_count"] = 1
+        result_data["product_claim_recompose_count"] = int(
+            result_data.get("product_claim_recompose_count") or 1
+        )
 
 
 def resolve_product_claim_second_pass_reply(
@@ -575,6 +577,43 @@ def finalize_product_claim_after_authorized_recompose(
     if _has_usable_customer_content(resolved):
         return resolved
     return apply_product_claim_failed_compose_fallback(result_data)
+
+
+async def invoke_authorized_product_claim_recompose(
+    composer: Any,
+    decision: Any,
+    result: Any,
+    ctx: Any,
+) -> tuple[str, bool, int]:
+    """Invoke existing Composer once for product-claim grounding.
+
+    The latency role wrapper may fail before compose starts. In that case one
+    compose is still allowed. A compose that already started is never retried.
+    """
+    calls = 0
+    text: Any = None
+    failed = False
+    try:
+        from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
+
+        with safe_compose_role_scope("product_claim_grounding_recompose"):
+            calls += 1
+            text = await composer.compose(decision, result, ctx)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        if calls == 0:
+            try:
+                calls += 1
+                text = await composer.compose(decision, result, ctx)
+            except Exception:  # noqa: BLE001
+                failed = True
+                text = ""
+        elif not str(text or "").strip():
+            failed = True
+            text = ""
+    if not str(text or "").strip():
+        failed = True
+        text = str(text or "")
+    return str(text or ""), bool(failed), int(calls)
 
 
 def should_skip_quality_recompose_after_product_claim(

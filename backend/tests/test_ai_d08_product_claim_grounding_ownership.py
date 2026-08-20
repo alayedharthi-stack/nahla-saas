@@ -23,6 +23,7 @@ from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa
     ProductClaimGroundingGuardResult,
     apply_product_claim_grounding_guard,
     finalize_product_claim_after_authorized_recompose,
+    invoke_authorized_product_claim_recompose,
     resolve_product_claim_second_pass_reply,
     should_skip_quality_recompose_after_product_claim,
     stamp_product_claim_guard_provenance,
@@ -545,3 +546,84 @@ class TestAID08B1FailedRecomposeConstitutionalFallback:
         assert "_SAFE_" not in source
         assert "SAFE_NO_GROUNDED" not in source
         assert "أقدر أرسل لك الخيارات" not in source
+
+    def test_recompose_exception_does_not_retry_semantic_pass(self) -> None:
+        import asyncio
+
+        composer = MagicMock()
+        composer.compose = AsyncMock(side_effect=RuntimeError("compose boom"))
+        text, failed, calls = asyncio.run(
+            invoke_authorized_product_claim_recompose(composer, None, None, None),
+        )
+        assert composer.compose.await_count == 1
+        assert calls == 1
+        assert failed is True
+        assert text == ""
+
+    def test_latency_wrapper_failure_still_allows_one_compose(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import asyncio
+
+        class _BoomScope:
+            def __enter__(self) -> None:
+                raise RuntimeError("latency wrapper boom")
+
+            def __exit__(self, *_a: Any) -> bool:
+                return False
+
+        monkeypatch.setattr(
+            "core.turn_latency.safe_compose_role_scope",
+            lambda *_a, **_k: _BoomScope(),
+        )
+        composer = MagicMock()
+        composer.compose = AsyncMock(return_value="أقدر أرسل لك الخيارات المتوفرة.")
+        text, failed, calls = asyncio.run(
+            invoke_authorized_product_claim_recompose(composer, None, None, None),
+        )
+        assert composer.compose.await_count == 1
+        assert calls == 1
+        assert failed is False
+        assert text == "أقدر أرسل لك الخيارات المتوفرة."
+
+    def test_brain_export_keeps_fallback_chosen_path(self) -> None:
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            extract_reply_metadata_export,
+        )
+
+        second = ProductClaimGroundingGuardResult(
+            reply="",
+            action="stripped_empty",
+            replaced=True,
+            stripped=True,
+            scrubbed_empty=True,
+        )
+        result_data: Dict[str, Any] = {
+            "compose_source": "persona_llm",
+            "response_mode": "llm",
+            "chosen_path": "llm_reply",
+            "llm_candidate_present": True,
+            "final_text_transformed": False,
+            "final_transform_reasons": [],
+            "product_claim_recompose_performed": True,
+            "product_claim_recompose_count": 1,
+        }
+        pipeline_chosen_path = "llm_reply"
+        finalize_product_claim_after_authorized_recompose(
+            second_pass=second,
+            recomposed_reply=_UNGROUNDED_GENERIC,
+            result_data=result_data,
+        )
+        if result_data.get("product_claim_constitutional_fallback"):
+            pipeline_chosen_path = str(
+                result_data.get("chosen_path") or pipeline_chosen_path
+            ).strip() or pipeline_chosen_path
+        exported = extract_reply_metadata_export(
+            result_data,
+            chosen_path=pipeline_chosen_path,
+        )
+        assert exported["chosen_path"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+        assert exported["compose_source"] == "fallback_deterministic"
+        assert exported["fallback_reason"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON
+        assert exported["fallback_action_type"] == PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION

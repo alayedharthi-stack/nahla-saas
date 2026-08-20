@@ -4840,6 +4840,7 @@ class MerchantBrain:
             from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
                 apply_product_claim_grounding_guard,
                 finalize_product_claim_after_authorized_recompose,
+                invoke_authorized_product_claim_recompose,
                 product_claim_grounding_guard_mode,
                 stamp_product_claim_guard_provenance,
             )
@@ -4973,28 +4974,17 @@ class MerchantBrain:
                                 "product_claim_original_compose_candidate",
                                 result.data.get("compose_reply_candidate"),
                             )
-                        _pcgg_recomposed = None
-                        _pcgg_compose_failed = False
-                        try:
-                            from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
-
-                            with safe_compose_role_scope(
-                                "product_claim_grounding_recompose",
-                            ):
-                                _pcgg_recomposed = await self._composer.compose(
-                                    decision, result, ctx,
-                                )
-                        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
-                            if _pcgg_recomposed is None:
-                                try:
-                                    _pcgg_recomposed = await self._composer.compose(
-                                        decision, result, ctx,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    _pcgg_compose_failed = True
-                                    _pcgg_recomposed = ""
-                        if not (_pcgg_recomposed or "").strip():
-                            _pcgg_compose_failed = True
+                        _pcgg_recomposed, _pcgg_compose_failed, _pcgg_recompose_calls = (
+                            await invoke_authorized_product_claim_recompose(
+                                self._composer,
+                                decision,
+                                result,
+                                ctx,
+                            )
+                        )
+                        result.data["product_claim_recompose_count"] = int(
+                            _pcgg_recompose_calls
+                        )
                         if (_pcgg_recomposed or "").strip():
                             result.data["product_claim_recompose_candidate"] = (
                                 _pcgg_recomposed or ""
@@ -5031,6 +5021,10 @@ class MerchantBrain:
                             compose_failed=_pcgg_compose_failed,
                         )
                         _guard_replaced["product_claim_grounding_guard"] = True
+                        if result.data.get("product_claim_constitutional_fallback"):
+                            _chosen_path = str(
+                                result.data.get("chosen_path") or _chosen_path
+                            ).strip() or _chosen_path
         except Exception as _pcgg_exc:  # noqa: BLE001
             logger.warning(
                 "[PRODUCT_CLAIM_GROUNDING_GUARD] pipeline hook failed tenant=%s err=%s",
