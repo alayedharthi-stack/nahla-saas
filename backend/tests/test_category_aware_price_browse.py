@@ -26,8 +26,6 @@ from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # n
     ProductClaimGroundingEvidence,
 )
 from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
-    _SAFE_NO_GROUNDED_PRICE_AR,
-    _SAFE_UNAVAILABLE_ONLY_AR,
     _detect_violations,
     _filter_violations_for_category_browse,
     _is_general_category_browse_turn,
@@ -269,7 +267,7 @@ class TestProductClaimGroundingGuardCategoryBrowse:
                 "specific_product": False,
             },
         )
-        assert _SAFE_NO_GROUNDED_PRICE_AR not in guarded.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guarded.reply
         assert guarded.replaced is False
 
     def test_general_category_browse_does_not_emit_unavailable_product_message(self) -> None:
@@ -286,7 +284,7 @@ class TestProductClaimGroundingGuardCategoryBrowse:
                 "specific_product": False,
             },
         )
-        assert _SAFE_UNAVAILABLE_ONLY_AR not in guarded.reply
+        assert "هذا المنتج غير متوفر حالياً" not in guarded.reply
         assert guarded.replaced is False
 
     @patch(
@@ -306,7 +304,11 @@ class TestProductClaimGroundingGuardCategoryBrowse:
             },
         )
         assert guarded.replaced is True
-        assert _SAFE_UNAVAILABLE_ONLY_AR in guarded.reply
+        assert guarded.stripped is True
+        assert "تبي أرسل" not in guarded.reply
+        assert "هذا المنتج غير متوفر حالياً" not in guarded.reply
+        assert guarded.scrubbed_empty is True
+        assert guarded.requires_grounded_recompose is True
 
     @patch(
         "modules.ai.brain.catalog.catalog_browse_scope_resolver.resolve_catalog_category_scope",

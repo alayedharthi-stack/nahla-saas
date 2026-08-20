@@ -17,7 +17,13 @@ TOPIC_HEALTH_ADVISORY = "health_advisory_product_safety"
 TOPIC_COLD_SHIPPING = "cold_shipping_inquiry"
 TOPIC_STOREFRONT = "storefront_self_checkout"
 TOPIC_SHIPPING = "shipping_inquiry"
+TOPIC_SHIPPING_FEE = "shipping_fee"
 TOPIC_PRODUCT_KNOWLEDGE = "product_knowledge_facts"
+SHIPPING_TOPICS = frozenset({
+    TOPIC_COLD_SHIPPING,
+    TOPIC_SHIPPING,
+    TOPIC_SHIPPING_FEE,
+})
 PAYMENT_TOPICS = frozenset({
     "payment_receipt_received",
     "payment_evidence_pending_review",
@@ -144,7 +150,7 @@ def _infer_owner(*, topic: str, action: str, args: Mapping[str, Any]) -> Optiona
         return "health_advisory"
     if topic in PAYMENT_TOPICS:
         return "payment_evidence"
-    if topic in {TOPIC_COLD_SHIPPING, TOPIC_STOREFRONT, TOPIC_SHIPPING}:
+    if topic in {TOPIC_COLD_SHIPPING, TOPIC_STOREFRONT, *SHIPPING_TOPICS}:
         return "commerce_order_channel"
     if topic == TOPIC_PRODUCT_KNOWLEDGE:
         return "product_knowledge"
@@ -231,7 +237,7 @@ def build_turn_owner_contract(
             POSTPROCESS_MEDICAL_CLAIM_REWRITE,
         })
 
-    elif topic in {TOPIC_COLD_SHIPPING, TOPIC_SHIPPING}:
+    elif topic in SHIPPING_TOPICS:
         protected_final_reply = True
         block_product_ordering_prompt = True
         block_product_benefit_rewrite = True

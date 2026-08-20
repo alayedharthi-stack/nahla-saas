@@ -700,7 +700,11 @@ class TestCatalogPriceGuardDbFallback:
             },
         )
         assert guard.replaced is True
-        assert "ما ظهر عندي سعر مؤكد" in guard.reply
+        assert guard.stripped is True
+        assert "999" not in guard.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guard.reply
+        assert guard.scrubbed_empty is True
+        assert guard.requires_grounded_recompose is True
 
     def test_brain_result_exports_db_rebuild_diagnostics(self) -> None:
         from modules.ai.brain.pipeline import _catalog_fact_guard_diagnostics  # noqa: PLC0415
@@ -992,7 +996,11 @@ class TestCatalogPriceGuardFieldExtraction:
             },
         )
         assert guard.replaced is True
-        assert "ما ظهر عندي سعر مؤكد" in guard.reply
+        assert guard.stripped is True
+        assert "999" not in guard.reply
+        assert "ما ظهر عندي سعر مؤكد" not in guard.reply
+        assert guard.scrubbed_empty is True
+        assert guard.requires_grounded_recompose is True
 
     def test_guard_context_accepts_string_false_checkout_pressure(self) -> None:
         from modules.ai.brain import pipeline as pl  # noqa: PLC0415

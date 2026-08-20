@@ -5,15 +5,24 @@ Post-compose guard: block ungrounded product claims (prices, taste/medical
 comparisons, recommendations of unavailable SKUs, and contradictions after
 catalog-miss / no-synced signals).
 
+Enforce mode strips unsupported claim sentences/chunks only; it does not
+author canned merchant prose. When stripping leaves no usable customer-facing
+content, callers may invoke grounded recompose once. If that single
+authorized recompose cannot produce text that survives grounding, treat the
+outcome as a failed compose contract and route through the existing
+constitutional fallback (``core.fallback_policy``), never a new canned
+sentence in this guard.
+
 Modes (NAHLA_PRODUCT_CLAIM_GROUNDING_GUARD_MODE):
   off     — disabled
   shadow  — log only
-  enforce — rewrite blocked claims (default)
+  enforce — strip blocked claims (default)
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set
 
@@ -32,35 +41,13 @@ from modules.ai.brain.turn_owner_contract import (
 
 logger = logging.getLogger("nahla.brain.postprocess.product_claim_grounding_guard")
 
-_SAFE_NO_GROUNDED_PRICE_AR = (
-    "ما ظهر عندي سعر مؤكد من الكتالوج الآن. "
-    "أقدر أوضح المتوفر حالياً أو أحولك للموظف."
-)
+_USABLE_CUSTOMER_CONTENT_RE = re.compile(r"[a-zA-Z0-9\u0600-\u06FF]")
 
-_SAFE_NO_GROUNDED_COMPARISON_AR = (
-    "يختلف الطعم حسب المرعى والموسم. "
-    "أقدر أوضح لك المتوفر عندنا حالياً حسب الكتالوج."
+# Existing EX-FALLBACK-GENERIC-001 ownership — not a new customer-facing sentence.
+PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON = (
+    "product_claim_grounding_recompose_ungrounded"
 )
-
-_SAFE_UNAVAILABLE_ONLY_AR = (
-    "هذا المنتج غير متوفر حالياً. "
-    "أقدر أرسل لك الخيارات المتوفرة الآن من الكتالوج."
-)
-
-_SAFE_CONTRADICTION_AR = (
-    "ما ظهر عندي تطابقاً أو أسعاراً مؤكدة من الكتالوج في هذه اللحظة. "
-    "أرسل اسم المنتج كما في المتجر أو اطلب «أكثر مبيعاً»."
-)
-
-_SAFE_MEDICAL_CLAIM_AR = (
-    "ما عندي وصف موثق من المتجر عن فوائد صحية محددة لهذا المنتج. "
-    "أقدر أوضح المتوفر والأسعار المؤكدة."
-)
-
-_SAFE_BEST_PICK_NO_SOURCE_AR = (
-    "ما عندي ترشيح موثق من الكتالوج لنوع واحد «الأفضل». "
-    "أقدر أرسل الخيارات المتوفرة حالياً."
-)
+PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION = "llm_fallback_failed"
 
 _DETERMINISTIC_ALLOW_PATHS = frozenset({
     "variant_pricing",
@@ -164,6 +151,9 @@ class ProductClaimGroundingGuardResult:
     blocked_claims: tuple[str, ...] = ()
     shadow_mode: bool = False
     would_rewrite: bool = False
+    stripped: bool = False
+    scrubbed_empty: bool = False
+    requires_grounded_recompose: bool = False
 
 
 def _is_general_category_browse_turn(
@@ -401,35 +391,236 @@ def _detect_violations(
     return violations
 
 
-def _rewrite_for_violations(
-    violations: List[tuple[str, str]],
-    evidence: ProductClaimGroundingEvidence,
+def _has_usable_customer_content(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    return bool(_USABLE_CUSTOMER_CONTENT_RE.search(stripped))
+
+
+def _collect_strip_signals(
+    violations: Sequence[tuple[str, str]],
+) -> tuple[Set[int], List[str], List[str]]:
+    prices: Set[int] = set()
+    markers: List[str] = []
+    unavailable_titles: List[str] = []
+    for kind, detail in violations:
+        if kind == "ungrounded_price":
+            for part in detail.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    prices.add(int(part))
+                except ValueError:
+                    continue
+        elif kind in (
+            "ungrounded_comparison",
+            "ungrounded_medical",
+            "ungrounded_best_pick",
+        ):
+            if detail:
+                markers.append(detail)
+        elif kind == "unavailable_promoted" and detail:
+            unavailable_titles.append(detail)
+    return prices, markers, unavailable_titles
+
+
+def _chunk_contains_violation(
+    chunk: str,
+    *,
+    prices: Set[int],
+    markers: Sequence[str],
+    unavailable_titles: Sequence[str],
+) -> bool:
+    if prices:
+        chunk_prices = extract_reply_prices(chunk)
+        if chunk_prices & prices:
+            return True
+    if markers and _find_markers(chunk, markers):
+        return True
+    for title in unavailable_titles:
+        if _text_references_product(chunk, title):
+            return True
+    return False
+
+
+def strip_ungrounded_product_claim_sentences(
+    reply: str,
+    violations: Sequence[tuple[str, str]],
 ) -> str:
-    kinds = {v[0] for v in violations}
-    if "contradiction_after_catalog_miss" in kinds or "contradiction_no_synced" in kinds:
-        return _SAFE_CONTRADICTION_AR
-    if "ungrounded_price" in kinds:
-        return _SAFE_NO_GROUNDED_PRICE_AR
-    if "unavailable_promoted" in kinds:
-        avail_titles = [
-            str(p.get("title") or "").strip()
-            for p in evidence.available_products[:3]
-            if p.get("title")
-        ]
-        if avail_titles:
-            joined = " / ".join(avail_titles)
-            return (
-                f"{_SAFE_UNAVAILABLE_ONLY_AR}\n"
-                f"المتوفر الآن: {joined}."
-            )
-        return _SAFE_UNAVAILABLE_ONLY_AR
-    if "ungrounded_medical" in kinds:
-        return _SAFE_MEDICAL_CLAIM_AR
-    if "ungrounded_best_pick" in kinds:
-        return _SAFE_BEST_PICK_NO_SOURCE_AR
-    if "ungrounded_comparison" in kinds:
-        return _SAFE_NO_GROUNDED_COMPARISON_AR
-    return _SAFE_NO_GROUNDED_COMPARISON_AR
+    """Remove sentences/chunks containing unsupported product claims."""
+    raw = (reply or "").strip()
+    if not raw or not violations:
+        return raw
+
+    prices, markers, unavailable_titles = _collect_strip_signals(violations)
+    if not prices and not markers and not unavailable_titles:
+        return raw
+
+    kept: List[str] = []
+    for chunk in re.split(r"(?<=[.!?؟،])\s+|\n+", raw):
+        part = chunk.strip().rstrip("،,.")
+        if part and not _chunk_contains_violation(
+            part,
+            prices=prices,
+            markers=markers,
+            unavailable_titles=unavailable_titles,
+        ):
+            kept.append(part)
+    return " ".join(kept).strip()
+
+
+def stamp_product_claim_guard_provenance(
+    result_data: Dict[str, Any],
+    guard_result: ProductClaimGroundingGuardResult,
+    *,
+    recompose_requested: bool = False,
+    recompose_performed: bool = False,
+) -> None:
+    """Stamp product-claim guard observability on pipeline result.data."""
+    if guard_result.blocked_claims:
+        result_data["product_claim_blocked"] = True
+        result_data["product_claim_blocked_kinds"] = list(guard_result.blocked_claims)
+    if guard_result.reason:
+        result_data["product_claim_guard_reason"] = guard_result.reason
+    result_data["product_claim_stripped"] = bool(
+        result_data.get("product_claim_stripped") or guard_result.stripped
+    )
+    if recompose_requested:
+        result_data["product_claim_recompose_requested"] = True
+    if recompose_performed:
+        result_data["product_claim_recompose_performed"] = True
+        result_data["product_claim_recompose_count"] = int(
+            result_data.get("product_claim_recompose_count") or 1
+        )
+
+
+def resolve_product_claim_second_pass_reply(
+    *,
+    second_pass: ProductClaimGroundingGuardResult,
+    recomposed_reply: str,
+    compose_source: str = "",
+    fallback_reason: str = "",
+    compose_failed: bool = False,
+) -> str:
+    """Choose final reply after one grounded recompose and strip-only second pass.
+
+    Evidence-rejected recomposed text is not restored unless this pass had a
+    genuine compose failure (empty/exception) or constitutional fallback
+    metadata is present.
+    """
+    if second_pass.replaced or second_pass.stripped:
+        if not second_pass.scrubbed_empty:
+            return second_pass.reply
+        genuine_fallback = bool(compose_failed) or (
+            str(compose_source or "") == "fallback_deterministic"
+            and bool(str(fallback_reason or "").strip())
+        )
+        if genuine_fallback:
+            return (recomposed_reply or "").strip()
+        return second_pass.reply
+    return (recomposed_reply or "").strip()
+
+
+def apply_product_claim_failed_compose_fallback(
+    result_data: Dict[str, Any],
+) -> str:
+    """Route a failed grounded-recompose contract through existing emergency fallback.
+
+    Does not author merchant-domain or product prose. Uses the platform
+    compose-error fallback already owned by ``core.fallback_policy``.
+    """
+    from core.fallback_policy import (  # noqa: PLC0415
+        empty_reply_fallback,
+        operational_compose_error_fallback,
+    )
+
+    text = str(operational_compose_error_fallback() or "").strip()
+    if not text:
+        text = str(empty_reply_fallback() or "").strip()
+    result_data["compose_source"] = "fallback_deterministic"
+    result_data["response_mode"] = "fallback_deterministic"
+    result_data["chosen_path"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+    result_data["fallback_reason"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_REASON
+    result_data["fallback_action_type"] = PRODUCT_CLAIM_FAILED_COMPOSE_FALLBACK_ACTION
+    result_data["final_customer_text_source"] = "fallback_deterministic"
+    result_data["llm_candidate_present"] = True
+    result_data["product_claim_constitutional_fallback"] = True
+    reasons = [
+        str(r)
+        for r in (result_data.get("final_transform_reasons") or [])
+        if str(r or "").strip()
+    ]
+    if "product_claim_grounding_guard" not in reasons:
+        reasons.append("product_claim_grounding_guard")
+    result_data["final_transform_reasons"] = reasons
+    result_data["final_text_transformed"] = True
+    return text
+
+
+def finalize_product_claim_after_authorized_recompose(
+    *,
+    second_pass: ProductClaimGroundingGuardResult,
+    recomposed_reply: str,
+    result_data: Dict[str, Any],
+    compose_failed: bool = False,
+) -> str:
+    """Resolve second-pass text; never leave the turn empty after one recompose."""
+    resolved = resolve_product_claim_second_pass_reply(
+        second_pass=second_pass,
+        recomposed_reply=recomposed_reply,
+        compose_source=str(result_data.get("compose_source") or ""),
+        fallback_reason=str(result_data.get("fallback_reason") or ""),
+        compose_failed=compose_failed,
+    )
+    if _has_usable_customer_content(resolved):
+        return resolved
+    return apply_product_claim_failed_compose_fallback(result_data)
+
+
+async def invoke_authorized_product_claim_recompose(
+    composer: Any,
+    decision: Any,
+    result: Any,
+    ctx: Any,
+) -> tuple[str, bool, int]:
+    """Invoke existing Composer once for product-claim grounding.
+
+    The latency role wrapper may fail before compose starts. In that case one
+    compose is still allowed. A compose that already started is never retried.
+    """
+    calls = 0
+    text: Any = None
+    failed = False
+    try:
+        from core.turn_latency import safe_compose_role_scope  # noqa: PLC0415
+
+        with safe_compose_role_scope("product_claim_grounding_recompose"):
+            calls += 1
+            text = await composer.compose(decision, result, ctx)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        if calls == 0:
+            try:
+                calls += 1
+                text = await composer.compose(decision, result, ctx)
+            except Exception:  # noqa: BLE001
+                failed = True
+                text = ""
+        elif not str(text or "").strip():
+            failed = True
+            text = ""
+    if not str(text or "").strip():
+        failed = True
+        text = str(text or "")
+    return str(text or ""), bool(failed), int(calls)
+
+
+def should_skip_quality_recompose_after_product_claim(
+    result_data: Optional[Dict[str, Any]],
+) -> bool:
+    """True when this turn already consumed the single product-claim recompose."""
+    return bool((result_data or {}).get("product_claim_recompose_performed"))
 
 
 def log_product_claim_grounding_guard(
@@ -541,10 +732,14 @@ def apply_product_claim_grounding_guard(
     history: Optional[Sequence[Any]] = None,
     order_state: Any = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    allow_recompose: bool = True,
 ) -> ProductClaimGroundingGuardResult:
     mode = product_claim_grounding_guard_mode()
     original = str(reply or "")
     contract = get_turn_owner_contract(inbound_metadata=inbound_metadata)
+    meta = dict(inbound_metadata or {})
+    if meta.get("product_claim_recompose_performed"):
+        allow_recompose = False
 
     if mode == "off":
         return ProductClaimGroundingGuardResult(reply=original, action="disabled")
@@ -727,14 +922,22 @@ def apply_product_claim_grounding_guard(
                 would_rewrite=True,
             )
 
-        new_reply = _rewrite_for_violations(violations, evidence)
+        stripped = strip_ungrounded_product_claim_sentences(original, violations)
+        stripped_content = bool(stripped != original)
+        usable = _has_usable_customer_content(stripped)
+        scrubbed_empty = not usable
+        requires_recompose = bool(scrubbed_empty and allow_recompose)
+        action = "stripped_empty" if scrubbed_empty else "stripped"
         return ProductClaimGroundingGuardResult(
-            reply=new_reply,
-            action="blocked",
-            replaced=True,
+            reply=stripped,
+            action=action,
+            replaced=stripped_content,
             reason=reason,
             blocked_claims=tuple(kinds),
             would_rewrite=True,
+            stripped=stripped_content,
+            scrubbed_empty=scrubbed_empty,
+            requires_grounded_recompose=requires_recompose,
         )
     except Exception:  # noqa: silent-ok — guard failure must not block outbound send
         logger.exception(

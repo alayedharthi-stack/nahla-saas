@@ -19,6 +19,7 @@ from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa
 )
 from modules.ai.brain.turn_owner_contract import (  # noqa: E402
     TOPIC_SHIPPING,
+    TOPIC_SHIPPING_FEE,
     build_turn_owner_contract,
 )
 from modules.ai.brain.types import (  # noqa: E402
@@ -78,12 +79,12 @@ def test_pre_order_ask_shipping_decision_establishes_shipping_turn_owner() -> No
     contract = build_turn_owner_contract(decision)
 
     assert decision.action == ACTION_LLM_REPLY
-    assert decision.args.get("topic") == TOPIC_SHIPPING
+    assert decision.args.get("topic") in {TOPIC_SHIPPING, TOPIC_SHIPPING_FEE}
     assert decision.args.get("topic_hint") == "shipping"
     assert decision.args.get("topic") != "shipping"
 
     assert contract.owner == "commerce_order_channel"
-    assert contract.topic == TOPIC_SHIPPING
+    assert contract.topic in {TOPIC_SHIPPING, TOPIC_SHIPPING_FEE}
     assert contract.protected_final_reply is True
     assert contract.block_product_benefit_rewrite is True
     assert contract.block_medical_claim_rewrite is True
@@ -136,4 +137,6 @@ def test_ungrounded_fee_reply_without_shipping_contract_still_rewrites(
 
     assert result.replaced is True
     assert result.reply != composed
+    assert "25" not in result.reply
+    assert "ما ظهر عندي سعر مؤكد" not in result.reply
     assert "ungrounded_price" in result.blocked_claims
