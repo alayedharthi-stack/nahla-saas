@@ -24,7 +24,10 @@ from models import Base, Tenant, TenantSettings, WhatsAppConnection  # noqa: E40
 from core.trial_lifecycle import init_new_tenant_trial_state  # noqa: E402
 from routers.whatsapp_embedded import (  # noqa: E402
     ConfirmStandardCloudApiRequest,
+    _assign_embedded_phone_id,
+    _build_embedded_status_payload,
     _finalize_coexistence_exchange,
+    _is_coexistence_conn,
     _project_phone_sync_state,
     confirm_standard_cloud_api,
     sync_embedded_connection_from_meta,
@@ -283,7 +286,7 @@ def test_finalize_rejects_non_business_app_without_smb_wait(db):
     assert payload["connected"] is False
     assert conn.sending_enabled is False
     assert conn.status != "connected"
-    assert (conn.extra_metadata or {}).get("connection_mode") != "coexistence"
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
     assert (conn.extra_metadata or {}).get("smb_sync_deadline_at") is None
 
 
@@ -730,3 +733,118 @@ def test_confirm_standard_subscribe_prefers_waba(monkeypatch, db):
     ))
     assert captured.get("prefer_waba") is True
     assert captured.get("waba_id") == WABA_ID
+
+
+def test_multi_phone_coexistence_keeps_mode_until_selection(db):
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    conn = _conn(db, tenant.id, status="pending", extra_metadata={})
+    db.commit()
+    phones = [
+        {"id": "pn-coex-a", "display_phone_number": "+966500000001", "verified_name": "فرع أ"},
+        {"id": "pn-coex-b", "display_phone_number": "+966500000002", "verified_name": "فرع ب"},
+    ]
+    payload = asyncio.run(_finalize_coexistence_exchange(
+        conn,
+        db,
+        tenant_id=tenant.id,
+        waba_id=WABA_ID,
+        user_token="tok",
+        phones=phones,
+        hinted_phone_id="",
+        finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+    ))
+    db.refresh(conn)
+    assert payload["status"] == "pending"
+    assert payload["connected"] is False
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert _is_coexistence_conn(conn) is True
+
+
+def test_ineligible_coexistence_status_sync_does_not_register(monkeypatch, db):
+    tenant = _tenant(db, name="قميص قطني أزرق")
+    _ai_settings(db, tenant.id)
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={
+            "connection_mode": "coexistence",
+            "is_on_biz_app": False,
+            "last_coexistence_outcome": COEXISTENCE_NOT_ELIGIBLE,
+        },
+        status="failed",
+    )
+    db.commit()
+    register_calls = []
+
+    async def _register(*_a, **_k):
+        register_calls.append(1)
+        return {"success": True}, "platform"
+
+    _patch_phone(monkeypatch, {**_t1_shape_phone(), "status": "CONNECTED"})
+    monkeypatch.setattr("routers.whatsapp_embedded._register_phone_with_fallback", _register)
+    monkeypatch.setattr(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        lambda *a, **k: (True, None),
+    )
+    asyncio.run(sync_embedded_connection_from_meta(
+        conn,
+        db,
+        attempt_register=not _is_coexistence_conn(conn),
+        allow_demotion=not _is_coexistence_conn(conn),
+    ))
+    db.refresh(conn)
+    assert register_calls == []
+    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert conn.status != "connected"
+    assert conn.sending_enabled is False
+
+
+def test_standard_pending_is_not_labeled_coexistence_ineligible(db):
+    tenant = _tenant(db, name="حذاء رياضي أبيض")
+    conn = _conn(
+        db,
+        tenant.id,
+        extra_metadata={"is_on_biz_app": False},
+        status="otp_pending",
+    )
+    db.commit()
+    payload = _build_embedded_status_payload(conn)
+    assert payload.get("coexistence_not_eligible") is not True
+    assert payload["status"] == "otp_pending"
+
+
+def test_waba_replace_clears_stale_webhook_verified(monkeypatch, db):
+    from services import whatsapp_connection_service as wa_svc  # noqa: PLC0415
+
+    monkeypatch.setattr(wa_svc, "evict_waba_id_from_other_tenants", lambda *_a, **_kw: None, raising=False)
+    monkeypatch.setattr(wa_svc, "assert_waba_id_not_claimed", lambda *_a, **_kw: None, raising=False)
+    tenant = _tenant(db, name="متجر تجريبي عام")
+    conn = _conn(
+        db,
+        tenant.id,
+        whatsapp_business_account_id="waba-old-generic",
+        webhook_verified=True,
+        status="connected",
+        sending_enabled=True,
+    )
+    db.commit()
+    wa_svc.begin_waba_session(
+        db,
+        tenant_id=tenant.id,
+        waba_id="waba-new-generic",
+        access_token="tok",
+    )
+    db.refresh(conn)
+    assert conn.webhook_verified is False
+    assert conn.phone_number_id is None
+    assert conn.status == "pending"
+    assert conn.sending_enabled is False
+
+
+def test_assigning_new_phone_clears_webhook_verified(db):
+    tenant = _tenant(db)
+    conn = _conn(db, tenant.id, webhook_verified=True, phone_number_id=PHONE_ID)
+    db.commit()
+    _assign_embedded_phone_id(conn, "pn-new-identity")
+    assert conn.webhook_verified is False
+    assert conn.phone_number_id == "pn-new-identity"

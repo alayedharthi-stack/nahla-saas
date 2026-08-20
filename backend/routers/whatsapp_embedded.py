@@ -84,6 +84,14 @@ def _is_coexistence_conn(conn: Optional["WhatsAppConnection"]) -> bool:
     return bool(conn is not None and is_coexistence_mode(conn))
 
 
+def _assign_embedded_phone_id(conn: "WhatsAppConnection", phone_id: Optional[str]) -> None:
+    """Bind a phone identity and drop webhook proof when the identity changes."""
+    new_id = str(phone_id or "").strip() or None
+    if str(conn.phone_number_id or "") != str(new_id or ""):
+        conn.webhook_verified = False
+    conn.phone_number_id = new_id
+
+
 def _should_project_as_coexistence(
     conn: Optional["WhatsAppConnection"],
     phone_data: Optional[Dict[str, Any]] = None,
@@ -838,7 +846,7 @@ def _build_embedded_status_payload(
         should_project_as_coexistence,
     )
     on_app = provider_is_on_biz_app(None, meta)
-    not_eligible = (
+    not_eligible = _is_coexistence_conn(conn) and (
         str(meta.get("last_coexistence_outcome") or "") == COEXISTENCE_NOT_ELIGIBLE
         or on_app is False
         or str(meta.get("status_projection_reason") or "") == COEXISTENCE_NOT_ELIGIBLE
@@ -922,12 +930,11 @@ async def _finalize_coexistence_exchange(
 
     conn.status = "authorizing"
     conn.sending_enabled = False
-    meta = dict(conn.extra_metadata or {})
-    if finish_event:
-        meta["finish_event"] = finish_event
-    if hinted_phone_id:
-        meta["client_phone_hint"] = hinted_phone_id
-    conn.extra_metadata = meta
+    merge_coexistence_metadata(
+        conn,
+        finish_event=finish_event or None,
+        client_phone_hint=hinted_phone_id or None,
+    )
     db.commit()
 
     phone_ids = {str(p.get("id") or "") for p in phones if p.get("id")}
@@ -974,7 +981,7 @@ async def _finalize_coexistence_exchange(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Coexistence] eviction warning tenant=%s: %s", tenant_id, exc)
 
-    conn.phone_number_id = phone_id
+    _assign_embedded_phone_id(conn, phone_id)
     conn.phone_number = chosen.get("display_phone_number") or conn.phone_number
     conn.business_display_name = chosen.get("verified_name") or conn.business_display_name
     conn.connection_type = "embedded"
@@ -1226,8 +1233,14 @@ async def sync_embedded_connection_from_meta(
     # Sending is not proven until webhook subscription succeeds (or was already
     # verified). `_apply_embedded_state` may mirror Cloud "connected" flags
     # before that proof exists.
+    blocked_standard_without_confirm = (
+        _is_coexistence_conn(conn)
+        and not _should_project_as_coexistence(conn, phone_data)
+    )
+    if blocked_standard_without_confirm:
+        conn.sending_enabled = False
     projected_ready = bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected"
-    if projected_ready and not conn.webhook_verified:
+    if projected_ready and not conn.webhook_verified and not blocked_standard_without_confirm:
         conn.sending_enabled = False
         from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
         from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
@@ -1277,6 +1290,7 @@ async def sync_embedded_connection_from_meta(
     ready = (
         (bool(sync_state.get("connected")) or str(sync_state.get("db_status") or "") == "connected")
         and bool(conn.webhook_verified)
+        and not blocked_standard_without_confirm
     )
     if ready:
         conn.sending_enabled = True
@@ -1292,7 +1306,7 @@ async def sync_embedded_connection_from_meta(
                 detail="تعذر إتمام ربط واتساب.",
             ) from exc
     else:
-        if not conn.webhook_verified:
+        if not conn.webhook_verified or blocked_standard_without_confirm:
             conn.sending_enabled = False
         db.commit()
     return _build_embedded_status_payload(conn)
@@ -1850,7 +1864,7 @@ async def exchange_code(
             WhatsAppConnection.tenant_id != tenant_id,
         ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
 
-        conn.phone_number_id       = auto_pid
+        _assign_embedded_phone_id(conn, auto_pid)
         conn.phone_number          = auto_phone.get("display_phone_number", "")
         conn.business_display_name = auto_phone.get("verified_name", "")
         conn.status                = "pending"
@@ -1864,7 +1878,7 @@ async def exchange_code(
 
     # ── Multiple phones or none → return list for manual selection ─────────
     conn.status           = "pending"
-    conn.phone_number_id  = None
+    _assign_embedded_phone_id(conn, None)
     conn.phone_number     = None
     conn.business_display_name = None
     conn.connected_at     = None
@@ -1962,7 +1976,7 @@ async def select_phone(
     except Exception as _evict_exc:  # noqa: BLE001
         logger.warning("[EmbeddedSignup] select-phone eviction warning (non-fatal): %s", _evict_exc)
 
-    conn.phone_number_id       = body.phone_number_id
+    _assign_embedded_phone_id(conn, body.phone_number_id)
     conn.phone_number          = phone_data.get("display_phone_number", "")
     conn.business_display_name = phone_data.get("verified_name", "")
     conn.connection_type       = "embedded"
@@ -2254,7 +2268,7 @@ async def add_phone(
         WhatsAppConnection.tenant_id != tenant_id,
     ).update({"phone_number_id": None, "status": "disconnected", "sending_enabled": False})
 
-    conn.phone_number_id = phone_number_id
+    _assign_embedded_phone_id(conn, phone_number_id)
     conn.status          = "otp_pending"
     conn.connection_type = "embedded"
     conn.provider        = WHATSAPP_PROVIDER_META
@@ -2309,7 +2323,7 @@ async def verify_phone(
             detail=f"رمز التحقق غير صحيح: {verify_data['error'].get('message', '')}",
         )
 
-    conn.phone_number_id = body.phone_number_id
+    _assign_embedded_phone_id(conn, body.phone_number_id)
     conn.connection_type = "embedded"
     conn.provider = WHATSAPP_PROVIDER_META
     db.commit()

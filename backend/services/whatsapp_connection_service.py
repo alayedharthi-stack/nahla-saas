@@ -496,6 +496,7 @@ def begin_waba_session(
         conn = WhatsAppConnection(tenant_id=tenant_id)
         db.add(conn)
 
+    prior_waba = str(conn.whatsapp_business_account_id or "")
     conn.whatsapp_business_account_id = waba_id
     from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
     store_access_token(conn, access_token)
@@ -503,6 +504,10 @@ def begin_waba_session(
     conn.provider                     = provider
     conn.status                       = "pending"
     conn.sending_enabled              = False
+    conn.webhook_verified             = False
+    if prior_waba and prior_waba != str(waba_id or ""):
+        conn.phone_number_id = None
+        conn.phone_number = None
     conn.updated_at                   = datetime.now(timezone.utc)
 
     try:

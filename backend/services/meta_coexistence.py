@@ -149,10 +149,19 @@ def persist_ineligible_coexistence_outcome(
     phone_data: Optional[Dict[str, Any]] = None,
     error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Keep the phone/WABA, drop coexistence wait, and recommend Cloud API."""
-    meta = clear_obsolete_coexistence_state(conn)
+    """Keep Coexistence consent until explicit Cloud API confirm; stop SMB wait.
+
+    ``connection_mode`` stays coexistence so GET /status cannot silently
+    ``/register``. The merchant must call confirm-standard-cloud-api.
+    """
+    meta = dict(getattr(conn, "extra_metadata", None) or {})
+    for key in ("smb_sync", "smb_sync_deadline_at", "coexistence_onboarded_at"):
+        meta.pop(key, None)
+    meta["connection_mode"] = CONNECTION_MODE
+    conn.extra_metadata = meta
     persist_provider_phone_truth(conn, phone_data)
     meta = dict(getattr(conn, "extra_metadata", None) or {})
+    meta["connection_mode"] = CONNECTION_MODE
     meta["last_coexistence_outcome"] = COEXISTENCE_NOT_ELIGIBLE
     meta["recommended_mode"] = RECOMMENDED_MODE_CLOUD_API
     meta["standard_cloud_api_available"] = True
