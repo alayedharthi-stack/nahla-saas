@@ -70,6 +70,11 @@ _STALE_IDENTITY_PROVIDER_KEYS = (
     "embedded_status_message",
     "last_meta_sync_at",
     "failure_code",
+    "meta_verification_unavailable",
+    "meta_fetch_failure_kind",
+    "webhook_subscription_error",
+    "recommended_mode",
+    "standard_cloud_api_available",
 )
 _COEXISTENCE_WAIT_KEYS = (
     "smb_sync",
@@ -226,6 +231,8 @@ def invalidate_identity_scoped_proof(conn: Any) -> Dict[str, Any]:
     conn.webhook_verified = False
     if hasattr(conn, "sending_enabled"):
         conn.sending_enabled = False
+    if hasattr(conn, "last_verified_at"):
+        conn.last_verified_at = None
     return meta
 
 

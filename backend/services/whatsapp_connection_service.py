@@ -500,6 +500,8 @@ def begin_waba_session(
         db.add(conn)
 
     prior_waba = str(conn.whatsapp_business_account_id or "")
+    prior_provider = str(getattr(conn, "provider", None) or "")
+    prior_conn_type = str(getattr(conn, "connection_type", None) or "")
     conn.whatsapp_business_account_id = waba_id
     from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
     store_access_token(conn, access_token)
@@ -508,9 +510,16 @@ def begin_waba_session(
     conn.status                       = "pending"
     conn.sending_enabled              = False
     conn.webhook_verified             = False
-    if prior_waba and prior_waba != str(waba_id or ""):
-        conn.phone_number_id = None
-        conn.phone_number = None
+    waba_changed = prior_waba != str(waba_id or "")
+    identity_changed = (
+        waba_changed
+        or prior_provider != str(provider or "")
+        or prior_conn_type != str(connection_type or "")
+    )
+    if identity_changed:
+        if waba_changed and prior_waba:
+            conn.phone_number_id = None
+            conn.phone_number = None
         from services.meta_coexistence import invalidate_identity_scoped_proof  # noqa: PLC0415
         invalidate_identity_scoped_proof(conn)
     conn.updated_at                   = datetime.now(timezone.utc)
@@ -766,8 +775,9 @@ def subscribe_phone_webhook(
     """
     Subscribe Nahla's Meta app to receive webhooks for a WhatsApp asset.
 
-    Standard Embedded / Cloud API completion prefers
-    ``POST /{WABA_ID}/subscribed_apps`` (same order as Guardian).
+    Standard Embedded / Cloud API completion uses
+    ``POST /{WABA_ID}/subscribed_apps`` only. A WABA failure is fail-closed
+    and must not be hidden by a later phone-level 200.
     Direct / legacy callers keep phone-first with a narrow WABA fallback.
     """
     if not phone_number_id and not waba_id:
@@ -780,7 +790,9 @@ def subscribe_phone_webhook(
             "messages", "messaging_postbacks", "message_echoes",
         ]
         attempts: list[tuple[str, str]] = []
-        if prefer_waba and waba_id:
+        if prefer_waba:
+            if not waba_id:
+                return False, "waba_id is required for Standard WABA subscription"
             attempts.append(("waba", waba_id))
         else:
             if phone_number_id:
@@ -814,36 +826,7 @@ def subscribe_phone_webhook(
                 "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
                 tenant_id, target_kind, target_id, resp.status_code, last_msg,
             )
-            if (
-                prefer_waba
-                and target_kind == "waba"
-                and phone_number_id
-                and resp.status_code == 400
-                and "unsupported" in str(last_msg).lower()
-            ):
-                logger.info(
-                    "[WASvc] WABA-level subscribe unsupported — retrying phone-level "
-                    "tenant=%s phone=%s",
-                    tenant_id, phone_number_id,
-                )
-                fallback_url = (
-                    f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-                    f"/{phone_number_id}/subscribed_apps"
-                )
-                fb_resp = httpx.post(
-                    fallback_url,
-                    params={"access_token": access_token},
-                    json={"subscribed_fields": fields},
-                    timeout=10,
-                )
-                fb_data = fb_resp.json()
-                if fb_resp.status_code == 200 and fb_data.get("success"):
-                    logger.info(
-                        "[WASvc] subscribed_apps OK via phone fallback — tenant=%s phone=%s",
-                        tenant_id, phone_number_id,
-                    )
-                    return True, None
-                last_msg = (fb_data.get("error") or {}).get("message") or last_msg
+            if prefer_waba:
                 return False, last_msg
             if (
                 not prefer_waba

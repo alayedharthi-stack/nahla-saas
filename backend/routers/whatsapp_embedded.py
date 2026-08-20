@@ -93,6 +93,18 @@ def _assign_embedded_phone_id(conn: "WhatsAppConnection", phone_id: Optional[str
     conn.phone_number_id = new_id
 
 
+def _reset_metadata_for_standard_exchange(conn: "WhatsAppConnection") -> None:
+    """Drop leftover standard-session metadata without converting Coexistence consent.
+
+    A later default Cloud API ``/exchange`` must not wipe ``connection_mode``
+    and then ``/register``. Conversion stays on confirm-standard-cloud-api.
+    """
+    from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+    if is_coexistence_mode(conn):
+        return
+    conn.extra_metadata = {}
+
+
 def _should_project_as_coexistence(
     conn: Optional["WhatsAppConnection"],
     phone_data: Optional[Dict[str, Any]] = None,
@@ -1816,7 +1828,7 @@ async def exchange_code(
     conn.token_type = long_data.get("token_type") or token_data.get("token_type", "user")
     conn.last_error = None
     if not coexistence:
-        conn.extra_metadata = {}
+        _reset_metadata_for_standard_exchange(conn)
 
     # Token expiry (Meta user tokens expire in ~60 days)
     expires_in = long_data.get("expires_in") or token_data.get("expires_in")
@@ -1878,7 +1890,9 @@ async def exchange_code(
             "[EmbeddedSignup] exchange OK — auto-select tenant=%s waba=%s phone_id=%s",
             tenant_id, waba_id, auto_pid,
         )
-        return await sync_embedded_connection_from_meta(conn, db, attempt_register=True)
+        return await sync_embedded_connection_from_meta(
+            conn, db, attempt_register=not _is_coexistence_conn(conn),
+        )
 
     # ── Multiple phones or none → return list for manual selection ─────────
     conn.status           = "pending"
