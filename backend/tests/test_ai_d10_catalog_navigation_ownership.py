@@ -24,6 +24,13 @@ from modules.ai.brain.catalog.navigation_signals import (  # noqa: E402
     evaluate_catalog_navigation_signals,
     message_indicates_catalog_browse,
 )
+from modules.ai.brain.commerce.discovery_strategy import (  # noqa: E402
+    CatalogContextSnapshot,
+    DiscoveryMode,
+    resolve_discovery_strategy,
+)
+from modules.ai.brain.commerce.commerce_objective import COMMERCE_OBJECTIVE_DISCOVERY  # noqa: E402
+from modules.ai.brain.discovery.entry import START_ORDER_BARE  # noqa: E402
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_CATALOG_NAVIGATE,
     ACTION_LLM_REPLY,
@@ -187,8 +194,16 @@ class TestVoiceShapedStartOrderDoesNotOwnGroups:
         decision = try_catalog_navigation_decision(ctx)
         assert decision is None
 
+    @patch(
+        "modules.ai.brain.commerce.commerce_entry_catalog_delivery.try_commerce_entry_catalog_decision",
+        return_value=None,
+    )
     @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
-    def test_long_social_voice_transcript_engine_not_groups(self, _mock_groups) -> None:
+    def test_long_social_voice_transcript_engine_not_groups(
+        self,
+        _mock_groups,
+        _mock_ce2,
+    ) -> None:
         ctx = _ctx(
             VOICE_SOCIAL_START_ORDER,
             db=MagicMock(),
@@ -198,7 +213,32 @@ class TestVoiceShapedStartOrderDoesNotOwnGroups:
         )
         decision = DefaultDecisionEngine().decide(ctx)
         _assert_not_groups_owner(decision)
+        assert decision.action != ACTION_CATALOG_NAVIGATE
         assert decision.args.get("chosen_path") != PATH_GROUPS
+        assert decision.args.get("discovery_mode") != DiscoveryMode.COLLECTIONS_FIRST.value
+
+    @patch(
+        "modules.ai.brain.commerce.commerce_entry_catalog_delivery.try_commerce_entry_catalog_decision",
+        return_value=None,
+    )
+    @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
+    def test_social_unresolved_start_order_intent_stays_with_brain(
+        self,
+        _mock_groups,
+        _mock_ce2,
+    ) -> None:
+        ctx = _ctx(
+            "مرحبا كيف الحال",
+            db=MagicMock(),
+            intent_name="start_order",
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        _assert_not_groups_owner(decision)
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") != "purchase_channel_selection"
 
 
 class TestProductSpecificPurchaseNotGroups:
@@ -223,6 +263,17 @@ class TestTenantIsolation:
         assert browse_decision.args.get("chosen_path") == PATH_GROUPS
 
         assert mock_groups.call_count >= 1
+
+
+class TestBareStartOrderDoesNotSelectCollectionsFirst:
+    def test_start_order_bare_strategy_is_not_collections_first(self) -> None:
+        plan = resolve_discovery_strategy(
+            commerce_objective=COMMERCE_OBJECTIVE_DISCOVERY,
+            entry_type=START_ORDER_BARE,
+            catalog_context=CatalogContextSnapshot(product_count=24, collection_count=4),
+        )
+        assert plan.mode != DiscoveryMode.COLLECTIONS_FIRST
+        assert plan.mode == DiscoveryMode.FEATURED_FIRST
 
 
 class TestOwnershipNotPhraseMaps:
