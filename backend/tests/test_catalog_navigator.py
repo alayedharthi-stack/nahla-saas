@@ -72,7 +72,7 @@ HONEY_PRODUCTS = [
 GROUPS_REPLY = "\u0627\u0644\u0623\u0642\u0633\u0627\u0645 \u0627\u0644\u0645\u062a\u0648\u0641\u0631\u0629:\n\n1. \u0627\u0644\u0639\u0633\u0644\n2. \u0627\u0644\u0632\u064a\u0648\u062a"
 
 
-def _facts(*, product_count: int = 30) -> CommerceFacts:
+def _facts(*, product_count: int = 30, store_url: str = "", maps_url: str = "") -> CommerceFacts:
     return CommerceFacts(
         has_products=True,
         product_count=product_count,
@@ -81,6 +81,8 @@ def _facts(*, product_count: int = 30) -> CommerceFacts:
         orderable=True,
         snapshot_fresh=True,
         store_name="store",
+        store_url=store_url,
+        maps_url=maps_url,
         top_products=HONEY_PRODUCTS,
     )
 
@@ -164,11 +166,9 @@ class TestCatalogNavigatorDecisions:
         assert decision.args["owner_locked"] is True
 
     @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
-    def test_start_order_bare_returns_groups(self, _mock_groups):
+    def test_start_order_bare_does_not_claim_groups(self, _mock_groups):
         decision = try_catalog_navigation_decision(_ctx(MSG_START))
-        assert decision is not None
-        assert decision.action == ACTION_CATALOG_NAVIGATE
-        assert decision.args["navigator_step"] == "show_groups"
+        assert decision is None
 
     @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
     def test_types_overview_browse_returns_groups(self, _mock_groups):
@@ -285,11 +285,21 @@ class TestCatalogNavigatorEngine:
         assert decision.action == ACTION_CATALOG_NAVIGATE
 
     @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
-    def test_engine_does_not_start_order_on_browse(self, _mock_groups):
+    def test_engine_routes_bare_start_to_channel_selection(self, _mock_groups):
         engine = DefaultDecisionEngine()
-        decision = engine.decide(_ctx(MSG_START))
-        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
-        assert decision.action == ACTION_CATALOG_NAVIGATE
+        ctx = _ctx(
+            MSG_START,
+            db=MagicMock(),
+            intent_name="start_order",
+        )
+        ctx.facts = _facts(
+            store_url="https://shop.example",
+            maps_url="https://maps.example.com/showroom",
+        )
+        decision = engine.decide(ctx)
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "purchase_channel_selection"
 
     @patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=COLLECTIONS)
     def test_start_order_with_product_focus_not_navigator(self, _mock_groups):
