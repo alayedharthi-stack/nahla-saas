@@ -28,14 +28,12 @@ const required = [
   'MetaOnboardingModeChoice',
   'openOnboardingModeChoice',
   'requestAssistedConnect',
-  'metaApprovalNotice',
   'metaConnectBtn',
   'launchSignup',
   'launchCoexistenceSignup',
   'buildEmbeddedSignupFbLoginOptions',
   'buildCoexistenceEmbeddedSignupFbLoginOptions',
   'embeddedInCard',
-  'a.submitBtn',
 ]
 
 for (const needle of required) {
@@ -86,6 +84,49 @@ if (connectPage.includes('onClick={launchSignup}') || connectPage.includes('onCl
   console.log('OK   Meta entry does not silently start Embedded Signup')
 }
 
+if (connectPage.includes('<AssistedConnectFlow')) {
+  failed++
+  console.error('FAIL merchant first screen must not mount AssistedConnectFlow')
+} else {
+  console.log('OK   AssistedConnectFlow is not mounted on the merchant page')
+}
+
+if (connectPage.includes('chooseMethodTitle')) {
+  failed++
+  console.error('FAIL merchant first screen must not render chooseMethodTitle')
+} else {
+  console.log('OK   chooseMethodTitle is not rendered')
+}
+
+const metaCardStart = connectPage.indexOf('function MetaEmbeddedOptionCard')
+const metaCardEnd = connectPage.indexOf('function AssistedConnectFlow', metaCardStart)
+const metaCard = metaCardStart >= 0 && metaCardEnd > metaCardStart
+  ? connectPage.slice(metaCardStart, metaCardEnd)
+  : ''
+const firstScreenForbidden = [
+  'metaSteps',
+  'metaCardTitle',
+  'metaApprovalNotice',
+  'metaExistingAccountHint',
+  'manualSetup',
+  'coexistenceConnectBtn',
+  'metaCloudApiConnectBtn',
+]
+for (const needle of firstScreenForbidden) {
+  if (metaCard.includes(needle)) {
+    failed++
+    console.error(`FAIL MetaEmbeddedOptionCard first screen still renders ${needle}`)
+  } else {
+    console.log(`OK   first screen hides ${needle}`)
+  }
+}
+if (!metaCard.includes('<EmbeddedSignupFlow embeddedInCard')) {
+  failed++
+  console.error('FAIL MetaEmbeddedOptionCard must render only EmbeddedSignupFlow')
+} else {
+  console.log('OK   first screen is a single EmbeddedSignupFlow CTA')
+}
+
 const channelsHub = readFileSync(join(__dir, '../src/pages/ChannelsHub.tsx'), 'utf8')
 if (channelsHub.includes('/help/whatsapp-manual-setup')) {
   failed++
@@ -101,6 +142,21 @@ if (merchantNav.includes('/help/whatsapp-manual-setup')) {
   console.error('FAIL merchant sidebar must not include Manual Setup navigation')
 } else {
   console.log('OK   merchant sidebar hides Manual Setup')
+}
+
+const indexHtml = readFileSync(join(__dir, '../index.html'), 'utf8')
+const swSource = readFileSync(join(__dir, '../public/sw.js'), 'utf8')
+if (!indexHtml.includes("register('/sw.js?v=7')")) {
+  failed++
+  console.error('FAIL dashboard/index.html must register a cache-busted service worker')
+} else {
+  console.log('OK   service worker registration is cache-busted')
+}
+if (!swSource.includes("CACHE_NAME = 'nahlah-v7'")) {
+  failed++
+  console.error('FAIL dashboard/public/sw.js must bump CACHE_NAME to nahlah-v7')
+} else {
+  console.log('OK   service worker cache name is nahlah-v7')
 }
 
 const arChoice = 'ربط تطبيق WhatsApp Business الموجود على جوالي'

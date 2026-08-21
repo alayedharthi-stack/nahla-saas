@@ -1,7 +1,7 @@
-/* Nahla merchant PWA — v6: network-first for JS/CSS bundles so deployments
-   replace cached hashed chunks immediately when online (fixes «old UI half» bugs). */
+/* Nahla merchant PWA — v7: bump registration URL + cache name so stale
+   pre-choice-screen WhatsApp Connect shells are dropped after deploy. */
 
-const CACHE_NAME = 'nahlah-v6'
+const CACHE_NAME = 'nahlah-v7'
 
 const STATIC_ASSETS = ['/logo.png', '/manifest.json']
 

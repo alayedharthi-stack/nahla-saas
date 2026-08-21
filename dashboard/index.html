@@ -96,7 +96,7 @@
         window.addEventListener('load', function () {
           // Skip SW inside Salla iframe to avoid first-load races
           if (window.parent !== window) return;
-          navigator.serviceWorker.register('/sw.js').catch(function () {});
+          navigator.serviceWorker.register('/sw.js?v=7').catch(function () {});
         });
       }
     </script>
