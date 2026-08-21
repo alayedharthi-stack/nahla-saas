@@ -680,20 +680,16 @@ def preserve_canonical_referent_over_category_browse(
     try:
         from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
             canonical_referent_confirmed_by_catalog,
-            live_catalog_rows_present,
         )
 
-        if live_catalog_rows_present(facts, merchant_context) and not (
-            canonical_referent_confirmed_by_catalog(
-                referent,
-                facts=facts,
-                merchant_context=merchant_context,
-            )
+        if not canonical_referent_confirmed_by_catalog(
+            referent,
+            facts=facts,
+            merchant_context=merchant_context,
         ):
             return False
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing catalog evidence must not trap focus
-        if facts is not None or merchant_context:
-            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unconfirmed catalog evidence must not trap focus
+        return False
     if _explicit_category_scope_broadening(msg):
         return False
     if not _looks_like_generic_category_browse(msg):
@@ -714,17 +710,14 @@ def try_referent_scoped_product_reply_decision(ctx: BrainContext) -> Optional[De
         from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
             project_canonical_referent_catalog_facts,
         )
-        from .commerce.commerce_focus_owner import (  # noqa: PLC0415
-            canonical_product_referent,
-        )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — projection fallback uses live focus
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing projection must not invent a referent
         product = None
     else:
         product = project_canonical_referent_catalog_facts(
             state=getattr(ctx, "state", None),
             facts=getattr(ctx, "facts", None),
             merchant_context=getattr(ctx, "merchant_context", None),
-        ) or canonical_product_referent(getattr(ctx, "state", None))
+        )
     if not isinstance(product, dict) or not product:
         return None
     return Decision(
@@ -1797,6 +1790,28 @@ def try_price_query_decision(
 
     msg = ctx.message or ""
     focus = ctx.state.current_product_focus
+    try:
+        from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            canonical_referent_confirmed_by_catalog,
+        )
+        from .commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+
+        referent = canonical_product_referent(getattr(ctx, "state", None))
+        if not has_structured_catalog_identity(referent):
+            referent = focus if isinstance(focus, dict) else None
+        if not canonical_referent_confirmed_by_catalog(
+            referent,
+            facts=getattr(ctx, "facts", None),
+            merchant_context=getattr(ctx, "merchant_context", None),
+        ):
+            focus = None
+        elif isinstance(referent, dict) and referent:
+            focus = referent
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unconfirmed focus must not be treated as a product
+        focus = None
     product_query = _resolved_product_query(ctx, extracted_product_query)
 
     try:

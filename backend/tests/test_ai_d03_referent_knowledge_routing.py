@@ -24,10 +24,14 @@ for _p in (_BACKEND, os.path.join(_REPO, "database"), _REPO):
         sys.path.insert(0, _p)
 
 from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: E402
+    CATALOG_EVIDENCE_EMPTY,
+    CATALOG_EVIDENCE_UNAVAILABLE,
+    canonical_referent_confirmed_by_catalog,
     collect_catalog_reasoning_candidates,
     ensure_canonical_referent_catalog_projection,
     load_tenant_scoped_catalog_row,
     project_canonical_referent_catalog_facts,
+    tenant_catalog_evidence_status,
 )
 from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: E402
     canonical_product_referent,
@@ -291,7 +295,11 @@ class TestEstablishedReferentFollowup:
             state=state,
             facts=_facts(_SHOE, _SHOE_OTHER),
         )
-        assert preserve_canonical_referent_over_category_browse(state, _GENERIC_SHOE_FOLLOWUP)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _GENERIC_SHOE_FOLLOWUP,
+            facts=_facts(_SHOE, _SHOE_OTHER),
+        )
         assert try_category_price_browse_decision(ctx) is None
         types_dec = try_types_overview_decision(ctx)
         assert types_dec is not None
@@ -444,11 +452,16 @@ class TestLegitimateBroadening:
 
     def test_fresh_deictic_types_followup_keeps_referent(self) -> None:
         state = _state(_SUMMER_HONEY_1KG)
-        assert preserve_canonical_referent_over_category_browse(state, _DEICTIC_TYPES_FOLLOWUP)
+        facts = _facts(_UNRELATED_TALH_1KG, _SUMMER_HONEY_1KG)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _DEICTIC_TYPES_FOLLOWUP,
+            facts=facts,
+        )
         ctx = _ctx(
             _DEICTIC_TYPES_FOLLOWUP,
             state=state,
-            facts=_facts(_UNRELATED_TALH_1KG, _SUMMER_HONEY_1KG),
+            facts=facts,
         )
         types_dec = try_types_overview_decision(ctx)
         assert types_dec is not None
@@ -545,6 +558,87 @@ class TestStaleInvalidReferent:
         assert projected is None
         assert merchant_context["products"][0]["id"] == 502
 
+    def test_empty_catalog_does_not_preserve_deleted_focus(self) -> None:
+        stale = {
+            "id": 999,
+            "external_id": "deleted-sku",
+            "title": "white running shoe",
+        }
+        state = _state(stale)
+        facts = _facts()
+        message = "what types is this white running shoe"
+        assert tenant_catalog_evidence_status(facts, {}) == CATALOG_EVIDENCE_EMPTY
+        assert canonical_referent_confirmed_by_catalog(
+            stale,
+            facts=facts,
+            merchant_context={},
+        ) is False
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            message,
+            facts=facts,
+            merchant_context={},
+        ) is False
+        ctx = _ctx(message, state=state, facts=facts, merchant_context={})
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is None
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            facts=facts,
+            merchant_context={},
+        )
+        assert projected is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert _decision_product_id(decision) != 999
+        assert (decision.args or {}).get("block_catalog_browse") is not True
+
+    def test_empty_catalog_explicit_broadening_still_browses(self) -> None:
+        state = _state({
+            "id": 999,
+            "external_id": "deleted-sku",
+            "title": "عسل صيفي 1 كيلو",
+        })
+        facts = _facts()
+        ctx = _ctx(
+            _HONEY_BROADEN,
+            state=state,
+            facts=facts,
+        )
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _HONEY_BROADEN,
+            facts=facts,
+        ) is False
+        types_dec = try_types_overview_decision(ctx)
+        assert types_dec is None or types_dec.action != ACTION_LLM_REPLY or (
+            _decision_product_id(types_dec) != 999
+        )
+
+    def test_unavailable_catalog_does_not_fail_open(self) -> None:
+        state = _state(_SHOE)
+        assert tenant_catalog_evidence_status(None, None) == CATALOG_EVIDENCE_UNAVAILABLE
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _GENERIC_SHOE_FOLLOWUP,
+        ) is False
+
+    def test_no_referent_empty_catalog_creates_no_phantom_identity(self) -> None:
+        state = _state()
+        facts = _facts()
+        ctx = _ctx(_SHOE_PRICE_BROWSE, state=state, facts=facts, intent_name=INTENT_ASK_PRICE)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _SHOE_PRICE_BROWSE,
+            facts=facts,
+        ) is False
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert _decision_product_id(decision) is None
+        assert canonical_product_referent(state) in (None, {}) or not has_structured_catalog_identity(
+            canonical_product_referent(state)
+        )
+
     def test_empty_focus_does_not_trap_price_browse(self) -> None:
         ctx = _ctx(
             _SHOE_PRICE_BROWSE,
@@ -592,6 +686,16 @@ class TestTenantIsolation:
         state = _state(_SHOE)
         active = resolve_kb_active_product_ids(state, _GENERIC_SHOE_FOLLOWUP)
         assert active == {501}
+
+    def test_other_tenant_live_rows_do_not_confirm_this_referent(self) -> None:
+        state = _state(_SHOE)
+        facts = _facts(_PERFUME)
+        assert canonical_referent_confirmed_by_catalog(_SHOE, facts=facts) is False
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _GENERIC_SHOE_FOLLOWUP,
+            facts=facts,
+        ) is False
 
 
 class TestGenericFixNoRuntimeConstants:
@@ -751,9 +855,7 @@ class TestProjectionBind:
                 }
             ),
         )
-        assert projected is not None
-        assert projected.get("id") != 8801
-        assert "WRONG PRODUCT FACT" not in str(projected.get("description") or "")
+        assert projected is None
 
     def test_shared_sku_does_not_merge_different_internal_ids(self) -> None:
         state = _state({"id": 501, "sku": "shared-sku", "title": "حذاء رياضي أبيض", "price": 249})
@@ -769,9 +871,7 @@ class TestProjectionBind:
                 }
             ),
         )
-        assert projected is not None
-        assert projected["id"] == 501
-        assert "WRONG PRODUCT FACT" not in str(projected.get("description") or "")
+        assert projected is None
 
 
 class TestLinkedMerchantKnowledgeOverlay:

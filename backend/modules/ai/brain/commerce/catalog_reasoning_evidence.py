@@ -215,6 +215,30 @@ def live_catalog_rows_present(facts: Any = None, merchant_context: Any = None) -
     return bool(_iter_live_catalog_rows(facts, merchant_context))
 
 
+CATALOG_EVIDENCE_ROWS = "rows"
+CATALOG_EVIDENCE_EMPTY = "empty"
+CATALOG_EVIDENCE_UNAVAILABLE = "unavailable"
+
+
+def tenant_catalog_evidence_status(
+    facts: Any = None,
+    merchant_context: Any = None,
+) -> str:
+    """Distinguish inspected-empty catalog from catalog lookup not provided.
+
+    ``rows``: at least one live tenant catalog row is in evidence.
+    ``empty``: a catalog owner was provided and it contains no rows.
+    ``unavailable``: no catalog owner was provided for this turn.
+    Empty is not permission to skip identity validation.
+    """
+    catalog_owner_present = facts is not None or isinstance(merchant_context, dict)
+    if not catalog_owner_present:
+        return CATALOG_EVIDENCE_UNAVAILABLE
+    if live_catalog_rows_present(facts, merchant_context):
+        return CATALOG_EVIDENCE_ROWS
+    return CATALOG_EVIDENCE_EMPTY
+
+
 def canonical_referent_confirmed_by_catalog(
     referent: Any,
     *,
@@ -290,6 +314,13 @@ def project_canonical_referent_catalog_facts(
         authoritative = cached_proj
     if isinstance(authoritative, dict) and _rows_same_identity(projected, authoritative):
         projected = _merge_catalog_fact_fields(projected, authoritative, overwrite=True)
+    if not canonical_referent_confirmed_by_catalog(
+        projected,
+        facts=facts,
+        merchant_context=merchant_context,
+        catalog_row=authoritative,
+    ):
+        return None
     normalized = normalize_structured_product_referent(projected)
     return normalized or projected
 
@@ -526,9 +557,13 @@ def catalog_reasoning_titles(
 __all__ = [
     "canonical_referent_confirmed_by_catalog",
     "catalog_reasoning_titles",
+    "CATALOG_EVIDENCE_EMPTY",
+    "CATALOG_EVIDENCE_ROWS",
+    "CATALOG_EVIDENCE_UNAVAILABLE",
     "collect_catalog_reasoning_candidates",
     "ensure_canonical_referent_catalog_projection",
     "live_catalog_rows_present",
     "load_tenant_scoped_catalog_row",
     "project_canonical_referent_catalog_facts",
+    "tenant_catalog_evidence_status",
 ]
