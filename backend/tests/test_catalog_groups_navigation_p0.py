@@ -68,7 +68,7 @@ OIL_PRODUCTS = [
 ]
 
 
-def _facts(*, product_count: int = 30) -> CommerceFacts:
+def _facts(*, product_count: int = 30, store_url: str = "", maps_url: str = "") -> CommerceFacts:
     return CommerceFacts(
         has_products=True,
         product_count=product_count,
@@ -77,6 +77,8 @@ def _facts(*, product_count: int = 30) -> CommerceFacts:
         orderable=True,
         snapshot_fresh=True,
         store_name="store",
+        store_url=store_url,
+        maps_url=maps_url,
         top_products=HONEY_PRODUCTS,
     )
 
@@ -157,9 +159,13 @@ class TestCatalogSearchGateCollectionsFirst:
 
 
 class TestDiscoveryDecisionCollectionsFirst:
-    def test_start_order_decision_is_search_not_llm(self) -> None:
+    def test_start_order_decision_is_channel_selection_not_groups(self) -> None:
         db = _mock_db_groups()
         ctx = _ctx(MSG_START, db=db)
+        ctx.facts = _facts(
+            store_url="https://shop.example",
+            maps_url="https://maps.example.com/showroom",
+        )
         with patch(
             "modules.ai.brain.catalog.navigation._load_catalog_groups",
             return_value=[
@@ -168,10 +174,11 @@ class TestDiscoveryDecisionCollectionsFirst:
             ],
         ):
             decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_CATALOG_NAVIGATE
-        assert decision.action != ACTION_LLM_REPLY
-        assert decision.args.get("owner_locked") is True
-        assert decision.args.get("chosen_path") == "catalog_navigation_groups"
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("chosen_path") != "catalog_navigation_groups"
+        assert decision.args.get("navigator_step") != "show_groups"
 
     def test_wesh_aindakom_decision_is_search_not_llm(self) -> None:
         ctx = _ctx(MSG_BROWSE, db=_mock_db_groups())

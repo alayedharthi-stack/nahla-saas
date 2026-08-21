@@ -280,8 +280,8 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         score += 0.38
     if explore_frame:
         score += 0.22
-    if order_without_target:
-        score += 0.42
+    # Generic start_order / bare order-entry must not grant groups ownership.
+    # COLLECTIONS_HEADER / COLLECTIONS_CLOSING stay reachable via explicit browse frames only.
     if intent_browse:
         score += 0.10
     if navigation_state:
@@ -315,7 +315,6 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         and (
             inventory_frame
             or general_store_browse
-            or order_without_target
             or score >= HIGH_BROWSE_THRESHOLD
         )
     )
@@ -388,17 +387,14 @@ def message_indicates_catalog_browse(message: str, *, intent_name: str = "") -> 
         _INVENTORY_SUBJECT_RE.search(norm)
         and (_MERCHANT_SCOPE_RE.search(norm) or _QUESTION_OPEN_RE.search(norm))
     )
+    general_store_browse = bool(
+        norm
+        and _QUESTION_OPEN_RE.search(norm)
+        and _MERCHANT_SCOPE_RE.search(norm)
+    )
     explore_frame = bool(
         _EXPLORE_VERB_RE.search(norm) and _INVENTORY_SUBJECT_RE.search(norm)
     )
-    try:
-        from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
-
-        order_without_target = is_bare_start_order_phrase(message or "") or (
-            str(intent_name or "").strip() == INTENT_START_ORDER
-        )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — optional start-order probe
-        order_without_target = str(intent_name or "").strip() == INTENT_START_ORDER
     score = 0.0
     if inventory_frame:
         score += 0.36
@@ -406,11 +402,9 @@ def message_indicates_catalog_browse(message: str, *, intent_name: str = "") -> 
         score += 0.38
     if explore_frame:
         score += 0.22
-    if order_without_target:
-        score += 0.42
     if str(intent_name or "").strip() in _BROWSE_INTENTS:
         score += 0.10
-    return score >= HIGH_BROWSE_THRESHOLD or inventory_frame or general_store_browse or order_without_target
+    return score >= HIGH_BROWSE_THRESHOLD or inventory_frame or general_store_browse
 
 
 _MORE_FRAME_RE = re.compile(

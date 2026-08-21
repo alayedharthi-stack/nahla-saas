@@ -137,12 +137,11 @@ def _resolve_discovery_plan(
         mode = DiscoveryMode.DIRECT_CATALOG
         evidence = {"rule": "category_browse_direct"}
     elif entry == START_ORDER_BARE:
+        # Bare order-entry is not catalog-group browsing. COLLECTIONS_FIRST
+        # emits the retired collections menu; keep that mode for explicit browse.
         if catalog_context.product_count <= settings.small_catalog_threshold:
             mode = DiscoveryMode.DIRECT_CATALOG
             evidence = {"rule": "start_order_small_catalog"}
-        elif effective_collection_count >= 2:
-            mode = DiscoveryMode.COLLECTIONS_FIRST
-            evidence = {"rule": "start_order_collections_first"}
         else:
             mode = DiscoveryMode.FEATURED_FIRST
             evidence = {"rule": "start_order_featured_first"}
