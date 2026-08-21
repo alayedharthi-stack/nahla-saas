@@ -524,7 +524,7 @@ def try_broad_category_inquiry_decision(
 
 
 # Same product-deixis class as catalog_product_answer._PRODUCT_DEIXIS_RE.
-# Linguistic reference to the established product — not a phrase/SKU map.
+# Continuity marker for the established product — not a semantic attribute map.
 _REFERENT_SCOPE_DEICTIC_RE = re.compile(
     r"(?:(?:^|\s)(?:هذا|هذه|هذي|ذلك|تلك)\b)"
     r"|(?:هل\s+هو\b)|(?:هل\s+هي\b)"
@@ -532,39 +532,15 @@ _REFERENT_SCOPE_DEICTIC_RE = re.compile(
     r"|(?:^|\s)(?:this|that|these|those)\b",
     re.UNICODE | re.IGNORECASE,
 )
-_REFERENT_SCOPE_STOPWORDS = frozenset({
-    "من", "اي", "أي", "في", "عن", "على", "هل", "ما", "وش", "ايش",
-    "هذا", "هذه", "هذي", "ذلك", "تلك", "عندكم", "عندك", "ال",
-    "انواع", "أنواع", "نوع", "types", "type", "the", "of", "what", "which",
-    "this", "that", "these", "those", "are", "for", "with", "from", "and",
-    "its", "how", "does", "can", "you", "have", "has",
-    "متوفر", "متوفره", "متوفرة", "موجود", "موجوده", "موجودة",
-    "available", "سعر", "اسعار", "أسعار", "ثمن", "price",
-})
-_REFERENT_ATTRIBUTE_TOKENS = frozenset({
-    "size", "sizes", "color", "colors", "colour", "colours",
-    "option", "options", "variant", "variants",
-    "مقاس", "مقاسات", "لون", "الوان", "ألوان",
-    "خيار", "خيارات", "خامة", "احجام", "أحجام", "حجم",
-})
-_REFERENT_SCOPE_UNIT_TOKENS = frozenset({
-    "كيلو", "كيلوغرام", "كجم", "جرام", "kg", "gram", "g",
-    "لتر", "ml", "حبه", "حبة", "piece", "pack",
-})
 
 
-def _referent_scope_tokens(text: str) -> set[str]:
+def _referent_identity_tokens(text: str) -> set[str]:
+    """Identity tokens from structured title/context, not customer-attribute vocab."""
     tokens: set[str] = set()
     for raw in _normalize_ar(text or "").split():
         tok = raw.strip(" ؟?!.،,")
         tok = re.sub(r"^ال", "", tok)
-        if len(tok) < 3:
-            continue
-        if tok in _REFERENT_SCOPE_STOPWORDS or tok in _REFERENT_SCOPE_UNIT_TOKENS:
-            continue
-        if tok in _REFERENT_ATTRIBUTE_TOKENS:
-            continue
-        if tok.isdigit():
+        if len(tok) < 3 or tok.isdigit():
             continue
         tokens.add(tok)
     return tokens
@@ -625,6 +601,7 @@ def _explicit_category_scope_broadening(message: str) -> bool:
 
 
 def _generic_subject_tokens(message: str) -> set[str]:
+    """Category noun from existing browse/types extractors — not a new classifier."""
     generic_subject = ""
     try:
         from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
@@ -636,18 +613,7 @@ def _generic_subject_tokens(message: str) -> set[str]:
         generic_subject = ""
     if not generic_subject:
         generic_subject = extract_types_overview_query(message) or ""
-    return _referent_scope_tokens(generic_subject)
-
-
-def _turn_conflicts_with_canonical_referent(message: str, referent: Dict[str, Any]) -> bool:
-    """True when the turn names a different product/category family than the referent."""
-    title = str(referent.get("title") or referent.get("name") or "").strip()
-    title_tokens = _referent_scope_tokens(title)
-    subject_tokens = _generic_subject_tokens(message)
-    if subject_tokens - title_tokens:
-        return True
-    leftover = _referent_scope_tokens(message) - title_tokens - subject_tokens
-    return bool(leftover)
+    return _referent_identity_tokens(generic_subject)
 
 
 def _turn_scoped_to_canonical_referent(
@@ -656,16 +622,20 @@ def _turn_scoped_to_canonical_referent(
     *,
     state: Any = None,
 ) -> bool:
+    """True when the turn still refers to the structured product.
+
+    Continuity is deictic reference or distinctive identity tokens already
+    present on the structured referent. Customer attribute words are not
+    classified here; Brain interprets source/composition/material meaning.
+    """
     msg = (message or "").strip()
     if not msg or not isinstance(referent, dict):
         return False
-    if _turn_conflicts_with_canonical_referent(msg, referent):
-        return False
     title = str(referent.get("title") or referent.get("name") or "").strip()
-    title_tokens = _referent_scope_tokens(title)
+    title_tokens = _referent_identity_tokens(title)
     generic_tokens = _generic_subject_tokens(msg)
     distinctive = title_tokens - generic_tokens
-    distinctive_hit = bool(distinctive and (distinctive & _referent_scope_tokens(msg)))
+    distinctive_hit = bool(distinctive and (distinctive & _referent_identity_tokens(msg)))
     deictic_hit = bool(_REFERENT_SCOPE_DEICTIC_RE.search(msg))
     if not distinctive_hit and not deictic_hit:
         return False
@@ -688,9 +658,10 @@ def preserve_canonical_referent_over_category_browse(
 ) -> bool:
     """True when a valid structured referent still owns this category-shaped turn.
 
-    Generic category browse may proceed when the customer explicitly broadens
-    scope, when the turn is not bound to the current referent, or when the
-    structured focus is not confirmed in the current tenant catalog.
+    Generic category browse may proceed when an existing broadening owner
+    proves a scope change, when the turn has no deictic/identity continuity
+    with the referent, or when the structured focus is not confirmed in the
+    current tenant catalog.
     """
     msg = (message or "").strip()
     if not msg:

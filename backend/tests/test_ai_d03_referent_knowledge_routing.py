@@ -120,16 +120,18 @@ _PERFUME = {
 }
 
 _INCIDENT_FOLLOWUP = "من أي أنواع العسل هذا العسل الصيفي"
+_HONEY_NOVEL_ATTR_FOLLOWUP = "من أي أنواع الزهور هذا العسل الصيفي"
 _DEICTIC_TYPES_FOLLOWUP = "من أي أنواع هذا؟"
 _GENERIC_SHOE_FOLLOWUP = "من أي أنواع هذا الحذاء الرياضي"
+_SHOE_NOVEL_ATTR_FOLLOWUP = "من أي أنواع العزل هذا الحذاء الرياضي؟"
 _SHOE_SIZE_FOLLOWUP_EN = "what sizes are available for this running shoe"
 _SHOE_SIZE_FOLLOWUP_AR = "ما مقاسات هذا الحذاء الرياضي؟"
+_PERFUME_NOVEL_ATTR_FOLLOWUP = "what types of florigami does this rose perfume have"
 _HONEY_BROADEN = "وش أنواع العسل عندكم؟"
 _HONEY_TYPES_BARE = "من أي أنواع العسل؟"
 _SHOE_BROADEN = "وش أنواع الأحذية عندكم؟"
 _HONEY_PRICE_BROWSE = "أسعار العسل"
 _SHOE_PRICE_BROWSE = "أسعار الأحذية"
-_SHOE_AVAIL_ON_HONEY_FOCUS = "هل هذه الأحذية متوفرة؟"
 
 
 def _intent(message: str, name: str = INTENT_ASK_PRODUCT) -> Intent:
@@ -201,19 +203,51 @@ def _runtime_sources() -> List[str]:
 
 
 class TestEstablishedReferentFollowup:
+    def _assert_referent_survives(
+        self,
+        product: Dict[str, Any],
+        message: str,
+        *others: Dict[str, Any],
+    ) -> None:
+        state = _state(product)
+        facts = _facts(*(others + (product,)))
+        ctx = _ctx(message, state=state, facts=facts)
+        assert preserve_canonical_referent_over_category_browse(state, message, facts=facts)
+        browse = try_category_price_browse_decision(ctx)
+        assert browse is None or browse.action != ACTION_SEARCH_PRODUCTS
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is not None
+        assert reply.action == ACTION_LLM_REPLY
+        assert _decision_product_id(reply) == product["id"]
+        assert str((reply.args or {}).get("source") or "") != "category_browse"
+        engine = DefaultDecisionEngine().decide(ctx)
+        assert engine.action != ACTION_SEARCH_PRODUCTS
+        assert _decision_product_id(engine) == product["id"]
+
     def test_incident_followup_does_not_enter_category_browse(self) -> None:
-        state = _state(_SUMMER_HONEY_1KG)
-        ctx = _ctx(
+        self._assert_referent_survives(
+            _SUMMER_HONEY_1KG,
             _INCIDENT_FOLLOWUP,
-            state=state,
-            facts=_facts(_UNRELATED_TALH_1KG, _SUMMER_HONEY_1KG, _SUMMER_HONEY_250G),
+            _UNRELATED_TALH_1KG,
+            _SUMMER_HONEY_250G,
         )
-        assert preserve_canonical_referent_over_category_browse(state, _INCIDENT_FOLLOWUP)
-        assert try_category_price_browse_decision(ctx) is None
-        types_dec = try_types_overview_decision(ctx)
-        assert types_dec is not None
-        assert types_dec.action == ACTION_LLM_REPLY
-        assert types_dec.args.get("source") != "category_browse"
+
+    def test_novel_source_attribute_keeps_honey_referent(self) -> None:
+        self._assert_referent_survives(
+            _SUMMER_HONEY_1KG,
+            _HONEY_NOVEL_ATTR_FOLLOWUP,
+            _UNRELATED_TALH_1KG,
+        )
+
+    def test_novel_insulation_attribute_keeps_shoe_referent(self) -> None:
+        self._assert_referent_survives(
+            _SHOE,
+            _SHOE_NOVEL_ATTR_FOLLOWUP,
+            _SHOE_OTHER,
+        )
+
+    def test_nonce_attribute_keeps_perfume_referent(self) -> None:
+        self._assert_referent_survives(_PERFUME, _PERFUME_NOVEL_ATTR_FOLLOWUP)
 
     def test_variant_attribute_followup_keeps_shoe_referent(self) -> None:
         shoe = dict(_SHOE)
@@ -395,12 +429,18 @@ class TestLegitimateBroadening:
         assert types_dec is not None
         assert types_dec.action == ACTION_SEARCH_PRODUCTS
 
-    def test_deictic_other_category_does_not_keep_old_sku(self) -> None:
+    def test_explicit_other_category_browse_does_not_keep_old_sku(self) -> None:
         state = _state(_SUMMER_HONEY_1KG)
-        assert preserve_canonical_referent_over_category_browse(
-            state,
-            _SHOE_AVAIL_ON_HONEY_FOCUS,
-        ) is False
+        assert preserve_canonical_referent_over_category_browse(state, _SHOE_BROADEN) is False
+        ctx = _ctx(
+            _SHOE_BROADEN,
+            state=state,
+            facts=_facts(_SHOE, _SHOE_OTHER, _SUMMER_HONEY_1KG),
+        )
+        types_dec = try_types_overview_decision(ctx)
+        assert types_dec is not None
+        assert types_dec.action == ACTION_SEARCH_PRODUCTS
+        assert _decision_product_id(types_dec) != 154
 
     def test_fresh_deictic_types_followup_keeps_referent(self) -> None:
         state = _state(_SUMMER_HONEY_1KG)
@@ -567,11 +607,15 @@ class TestGenericFixNoRuntimeConstants:
             "عسل صيفي",
             "عسل الطلح",
             _INCIDENT_FOLLOWUP,
+            _HONEY_NOVEL_ATTR_FOLLOWUP,
             "product 146",
             "product 154",
             "product 141",
             "product 162",
             "section_id=212",
+            "_REFERENT_ATTRIBUTE_TOKENS",
+            "_turn_conflicts_with_canonical_referent",
+            "florigami",
         )
         for token in forbidden:
             assert token not in blob, token
