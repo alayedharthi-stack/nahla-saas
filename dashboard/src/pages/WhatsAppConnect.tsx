@@ -326,42 +326,16 @@ function MetaEmbeddedOptionCard({
 }: {
   onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
 }) {
-  const { t } = useLanguage()
-  const s = t(tr => tr.whatsappConnect.simplified)
-
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4 h-full flex flex-col">
-      <div>
-        <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
-        <p className="text-sm text-slate-500 mt-1 leading-relaxed">{s.metaCardDescription}</p>
-      </div>
-
-      <div className="bg-slate-50 rounded-xl p-4 space-y-2.5">
-        <p className="text-sm font-semibold text-slate-700">{s.metaStepsTitle}</p>
-        {s.metaSteps.map((step, index) => (
-          <div key={step} className="flex items-start gap-3">
-            <div className="w-6 h-6 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
-              {index + 1}
-            </div>
-            <p className="text-sm text-slate-600 leading-relaxed">{step}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900 leading-relaxed">
-        {s.metaApprovalNotice}
-      </div>
-
-      <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
-
-      <div className="mt-auto pt-1 space-y-3">
-        <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
-      </div>
+    <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm max-w-lg">
+      {/* Merchant first screen: one Meta CTA only. Choice screen is inside EmbeddedSignupFlow. */}
+      <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
     </div>
   )
 }
 
-function AssistedConnectFlow({
+/** Support/internal assisted-connect form. Must not be mounted on the merchant first screen. */
+export function AssistedConnectFlow({
   status,
   onSubmitted,
 }: {
@@ -2100,7 +2074,7 @@ export default function WhatsAppConnect() {
       onConfirm={confirmDisconnect}
       onCancel={() => setShowDisconnectModal(false)}
     />
-    <div className={`mx-auto space-y-4 ${step < 4 ? 'max-w-5xl' : 'max-w-lg'}`} dir={dir}>
+    <div className="mx-auto space-y-4 max-w-lg" dir={dir}>
 
       {/* Header */}
       <div>
@@ -2113,32 +2087,17 @@ export default function WhatsAppConnect() {
         </p>
       </div>
 
-      {/* ── Simplified connect options (merchant) ───────────────────────── */}
+      {/* ── Merchant first screen: one Meta CTA only ───────────────────── */}
       {step < 4 && !loading && (
-        <div className="space-y-4">
-          <p className="text-sm font-semibold text-slate-700">
-            {wc.simplified.chooseMethodTitle}
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 items-stretch">
-            <div className="min-h-0 h-full">
-              <MetaEmbeddedOptionCard
-                onConnected={(payload) => {
-                  setConnPhone(payload?.phone_number ?? '')
-                  setConnName(payload?.display_name ?? '')
-                  setConnAt(payload?.connected_at ?? new Date().toISOString())
-                  setConnLabel('ربط عبر Meta')
-                  setStep(4)
-                }}
-              />
-            </div>
-            <div className="min-h-0 h-full">
-              <AssistedConnectFlow
-                status={status}
-                onSubmitted={(next) => setStatus(next)}
-              />
-            </div>
-          </div>
-        </div>
+        <MetaEmbeddedOptionCard
+          onConnected={(payload) => {
+            setConnPhone(payload?.phone_number ?? '')
+            setConnName(payload?.display_name ?? '')
+            setConnAt(payload?.connected_at ?? new Date().toISOString())
+            setConnLabel('ربط عبر Meta')
+            setStep(4)
+          }}
+        />
       )}
 
       {/* ── Server-side Meta OAuth callback banner ───────────────────────── */}
