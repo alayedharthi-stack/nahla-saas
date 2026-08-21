@@ -93,50 +93,105 @@ for (const src of [loginLib, connectPage]) {
 
 if (!connectPage.includes('buildEmbeddedSignupFbLoginOptions')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must use buildEmbeddedSignupFbLoginOptions (primary path)')
+  console.error('FAIL WhatsAppConnect.tsx must use buildEmbeddedSignupFbLoginOptions (API path)')
 } else {
   console.log('OK   WhatsAppConnect uses default login options helper')
 }
 
 if (!connectPage.includes('buildCoexistenceEmbeddedSignupFbLoginOptions')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must keep buildCoexistenceEmbeddedSignupFbLoginOptions (explicit path)')
+  console.error('FAIL WhatsAppConnect.tsx must use buildCoexistenceEmbeddedSignupFbLoginOptions (Business App path)')
 } else {
-  console.log('OK   WhatsAppConnect keeps coexistence login options helper')
+  console.log('OK   WhatsAppConnect uses coexistence login options helper')
 }
 
-if (!connectPage.includes('launchSignup')) {
+if (!connectPage.includes('openOnboardingModeChoice')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx primary Meta CTA must use launchSignup')
+  console.error('FAIL WhatsAppConnect.tsx Meta entry CTA must open a mode choice, not FB.login')
 } else {
-  console.log('OK   primary Meta path uses standard Cloud API helper')
+  console.log('OK   Meta entry requires an explicit onboarding mode choice')
 }
 
-if (!connectPage.includes('launchCoexistenceSignup')) {
+if (connectPage.includes('onClick={launchSignup}') || connectPage.includes('onClick={launchCoexistenceSignup}')) {
   failed++
-  console.error('FAIL WhatsAppConnect.tsx must keep launchCoexistenceSignup as an explicit choice')
+  console.error('FAIL Meta path buttons must not call launchSignup/launchCoexistenceSignup until after mode choice')
 } else {
-  console.log('OK   explicit Coexistence path remains available')
+  console.log('OK   FB.login launchers are not bound to the first Meta CTA')
+}
+
+if (!connectPage.includes('onChooseCoexistence={launchCoexistenceSignup}')) {
+  failed++
+  console.error('FAIL Choice 1 must call only launchCoexistenceSignup')
+} else {
+  console.log('OK   Business App choice calls launchCoexistenceSignup')
+}
+
+if (!connectPage.includes('onChooseCloudApi={launchSignup}')) {
+  failed++
+  console.error('FAIL Choice 2 must call only launchSignup')
+} else {
+  console.log('OK   WhatsApp API choice calls launchSignup')
+}
+
+function extractCallback(source: string, name: string): string {
+  const start = source.indexOf(`const ${name} = useCallback`)
+  if (start < 0) return ''
+  const rest = source.slice(start)
+  const end = rest.search(/\n  \}, \[/)
+  return end > 0 ? rest.slice(0, end) : rest.slice(0, 1200)
+}
+
+const coexistenceLauncher = extractCallback(connectPage, 'launchCoexistenceSignup')
+const cloudApiLauncher = extractCallback(connectPage, 'launchSignup')
+const entryOpener = extractCallback(connectPage, 'openOnboardingModeChoice')
+
+if (!coexistenceLauncher.includes('buildCoexistenceEmbeddedSignupFbLoginOptions')) {
+  failed++
+  console.error('FAIL launchCoexistenceSignup must use buildCoexistenceEmbeddedSignupFbLoginOptions')
+} else if (coexistenceLauncher.includes('buildEmbeddedSignupFbLoginOptions(')) {
+  failed++
+  console.error('FAIL launchCoexistenceSignup must not use the standard Cloud API builder')
+} else {
+  console.log('OK   coexistence launcher is bound only to the Business App builder')
+}
+
+if (!cloudApiLauncher.includes('buildEmbeddedSignupFbLoginOptions')) {
+  failed++
+  console.error('FAIL launchSignup must use buildEmbeddedSignupFbLoginOptions')
+} else if (cloudApiLauncher.includes('buildCoexistenceEmbeddedSignupFbLoginOptions')) {
+  failed++
+  console.error('FAIL launchSignup must not use the Coexistence builder')
+} else {
+  console.log('OK   Cloud API launcher is bound only to the standard builder')
+}
+
+if (
+  !entryOpener
+  || entryOpener.includes('FB.login')
+  || entryOpener.includes('launchSignup')
+  || entryOpener.includes('launchCoexistenceSignup')
+) {
+  failed++
+  console.error('FAIL openOnboardingModeChoice must not call FB.login or either launcher')
+} else {
+  console.log('OK   Meta entry opener does not start Embedded Signup')
 }
 
 const compactCta = connectPage.split('Compact card CTA')[1] || ''
-const compactSignup = compactCta.indexOf('onClick={launchSignup}')
-const compactCoex = compactCta.indexOf('onClick={launchCoexistenceSignup}')
-if (compactSignup < 0 || compactCoex < 0 || compactSignup > compactCoex) {
+if (!compactCta.includes('onClick={openOnboardingModeChoice}')) {
   failed++
-  console.error('FAIL compact card primary CTA must be launchSignup, with launchCoexistenceSignup secondary')
+  console.error('FAIL compact card first Meta CTA must open the mode choice')
 } else {
-  console.log('OK   compact card default CTA is standard Cloud API')
+  console.log('OK   compact card first Meta CTA requires a mode choice')
 }
 
-const fullCta = connectPage.split('Main CTA — standard Cloud API')[1] || ''
-const fullSignup = fullCta.indexOf('onClick={launchSignup}')
-const fullCoex = fullCta.indexOf('onClick={launchCoexistenceSignup}')
-if (fullSignup < 0 || fullCoex < 0 || fullSignup > fullCoex) {
+const choice1Idx = connectPage.indexOf('Choice 1 — Coexistence (WhatsApp Business App)')
+const choice2Idx = connectPage.indexOf('Choice 2 — Standard Cloud API')
+if (choice1Idx < 0 || choice2Idx < 0 || choice1Idx > choice2Idx) {
   failed++
-  console.error('FAIL full flow primary CTA must be launchSignup, with launchCoexistenceSignup secondary')
+  console.error('FAIL Coexistence Business App choice must be visually first / primary')
 } else {
-  console.log('OK   full flow default CTA is standard Cloud API')
+  console.log('OK   Coexistence is the primary recommended choice')
 }
 
 if (!connectPage.includes('handleExchange(code, undefined)')) {
@@ -189,6 +244,13 @@ if (!connectPage.includes('confirm-standard-cloud-api')) {
   console.error('FAIL WhatsAppConnect.tsx must call confirm-standard-cloud-api after coexistence_not_eligible')
 } else {
   console.log('OK   standard Cloud API confirm path is present')
+}
+
+if (!connectPage.includes('no silent Cloud API conversion')) {
+  failed++
+  console.error('FAIL coexistence-not-eligible UI must require explicit merchant confirmation')
+} else {
+  console.log('OK   Coexistence ineligibility does not auto-convert to Cloud API')
 }
 
 const safetyNoteIdx = connectPage.indexOf('simp.coexistenceSafetyNote')

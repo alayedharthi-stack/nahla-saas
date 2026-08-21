@@ -25,16 +25,17 @@ let failed = 0
 const required = [
   'MetaEmbeddedOptionCard',
   'AssistedConnectFlow',
-  'ManualSetupGuideButton',
+  'MetaOnboardingModeChoice',
+  'openOnboardingModeChoice',
   'requestAssistedConnect',
   'metaApprovalNotice',
   'metaConnectBtn',
   'launchSignup',
+  'launchCoexistenceSignup',
   'buildEmbeddedSignupFbLoginOptions',
+  'buildCoexistenceEmbeddedSignupFbLoginOptions',
   'embeddedInCard',
   'a.submitBtn',
-  '/help/whatsapp-manual-setup',
-  'manualSetupLink',
 ]
 
 for (const needle of required) {
@@ -59,6 +60,7 @@ const forbidden = [
   'metaConnectDisabledBtn',
   'bg-[#1877F2]/40',
   "const [contactPhone, setContactPhone] = useState(status?.phone_number",
+  'ManualSetupGuideButton',
 ]
 
 for (const needle of forbidden) {
@@ -70,23 +72,51 @@ for (const needle of forbidden) {
   }
 }
 
-if (!connectPage.includes('onClick={launchSignup}')) {
+if (!connectPage.includes('onClick={openOnboardingModeChoice}')) {
   failed++
-  console.error('FAIL Meta connect button must call launchSignup (enabled trial path)')
+  console.error('FAIL Meta connect button must open the mode choice without calling FB.login')
 } else {
-  console.log('OK   Meta button calls launchSignup')
+  console.log('OK   Meta button opens onboarding mode choice')
 }
 
-const arGuideMeta = 'تحتاج مساعدة؟ افتح دليل الربط اليدوي'
-const arGuideAssisted = 'اقرأ دليل الربط اليدوي'
-const enGuideMeta = 'Need help? Open the manual setup guide'
-const enGuideAssisted = 'Read the manual setup guide'
+if (connectPage.includes('onClick={launchSignup}') || connectPage.includes('onClick={launchCoexistenceSignup}')) {
+  failed++
+  console.error('FAIL first Meta CTA must not call launchSignup or launchCoexistenceSignup')
+} else {
+  console.log('OK   Meta entry does not silently start Embedded Signup')
+}
+
+const channelsHub = readFileSync(join(__dir, '../src/pages/ChannelsHub.tsx'), 'utf8')
+if (channelsHub.includes('/help/whatsapp-manual-setup')) {
+  failed++
+  console.error('FAIL ChannelsHub must not show Manual Setup as a merchant connection card')
+} else {
+  console.log('OK   ChannelsHub hides Manual Setup card')
+}
+
+const sidebar = readFileSync(join(__dir, '../src/components/layout/Sidebar.tsx'), 'utf8')
+const merchantNav = sidebar.slice(sidebar.indexOf('const MERCHANT_NAV_GROUPS'))
+if (merchantNav.includes('/help/whatsapp-manual-setup')) {
+  failed++
+  console.error('FAIL merchant sidebar must not include Manual Setup navigation')
+} else {
+  console.log('OK   merchant sidebar hides Manual Setup')
+}
+
+const arChoice = 'ربط تطبيق WhatsApp Business الموجود على جوالي'
+const enChoice = 'Connect the WhatsApp Business app already on my phone'
+const arApi = 'ربط رقم عبر WhatsApp API'
+const enApi = 'Connect a number via WhatsApp API'
+const arEntry = 'ربط واتساب عبر Meta'
+const enEntry = 'Connect WhatsApp via Meta'
 
 for (const [label, text, locale] of [
-  ['ar meta guide', arGuideMeta, arLocale],
-  ['ar assisted guide', arGuideAssisted, arLocale],
-  ['en meta guide', enGuideMeta, enLocale],
-  ['en assisted guide', enGuideAssisted, enLocale],
+  ['ar entry CTA', arEntry, arLocale],
+  ['en entry CTA', enEntry, enLocale],
+  ['ar Business App choice', arChoice, arLocale],
+  ['en Business App choice', enChoice, enLocale],
+  ['ar API choice', arApi, arLocale],
+  ['en API choice', enApi, enLocale],
 ] as const) {
   if (!locale.includes(text)) {
     failed++

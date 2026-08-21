@@ -1,4 +1,4 @@
-"""AD-META-T1-1: standard Cloud API is the default Meta onboarding path."""
+"""AD-META-T1-1: Meta onboarding requires an explicit mode choice."""
 from __future__ import annotations
 
 import asyncio
@@ -161,14 +161,34 @@ def _patch_phone(monkeypatch, phone):
     )
 
 
-def test_default_meta_path_uses_standard_cloud_api_feature():
+def test_meta_entry_requires_explicit_onboarding_mode_choice():
     login = (REPO_ROOT / "dashboard" / "src" / "lib" / "metaEmbeddedSignupLogin.ts").read_text(encoding="utf-8")
     page = (REPO_ROOT / "dashboard" / "src" / "pages" / "WhatsAppConnect.tsx").read_text(encoding="utf-8")
     assert "feature: 'whatsapp_embedded_signup'" in login
     assert "featureType: 'whatsapp_business_app_onboarding'" in login
     compact = page.split("Compact card CTA")[1]
-    assert compact.index("onClick={launchSignup}") < compact.index("onClick={launchCoexistenceSignup}")
-    assert "Main CTA — standard Cloud API" in page
+    assert "onClick={openOnboardingModeChoice}" in compact
+    assert "onClick={launchSignup}" not in compact
+    assert "onChooseCoexistence={launchCoexistenceSignup}" in compact
+    assert "onChooseCloudApi={launchSignup}" in compact
+    assert compact.index("onChooseCoexistence={launchCoexistenceSignup}") < compact.index("onChooseCloudApi={launchSignup}")
+    choice = page.split("function MetaOnboardingModeChoice")[1].split("function MetaEmbeddedOptionCard")[0]
+    assert "Choice 1" in choice
+    assert "Choice 2" in choice
+    assert choice.index("Choice 1") < choice.index("Choice 2")
+    assert "openOnboardingModeChoice" in page
+
+
+def test_builders_are_not_swapped_across_onboarding_paths():
+    page = (REPO_ROOT / "dashboard" / "src" / "pages" / "WhatsAppConnect.tsx").read_text(encoding="utf-8")
+    coex_start = page.index("const launchCoexistenceSignup = useCallback")
+    cloud_start = page.index("const launchSignup = useCallback")
+    coex_fn = page[coex_start:cloud_start]
+    cloud_fn = page[cloud_start:page.index("const confirmStandardCloudApi = useCallback")]
+    assert "buildCoexistenceEmbeddedSignupFbLoginOptions" in coex_fn
+    assert "buildEmbeddedSignupFbLoginOptions(" not in coex_fn
+    assert "buildEmbeddedSignupFbLoginOptions" in cloud_fn
+    assert "buildCoexistenceEmbeddedSignupFbLoginOptions" not in cloud_fn
 
 
 def test_explicit_coexistence_choice_remains_available():
@@ -176,8 +196,9 @@ def test_explicit_coexistence_choice_remains_available():
     assert "launchCoexistenceSignup" in page
     assert "connectionMode: 'coexistence'" in page
     assert "buildCoexistenceEmbeddedSignupFbLoginOptions" in page
-    assert "coexistenceChoiceLabel" in page
-    assert "Explicit Coexistence" in page
+    assert "coexistenceChoiceTitle" in page
+    assert "Choice 1 — Coexistence" in page
+    assert "no silent Cloud API conversion" in page
 
 
 def test_business_app_safety_copy_not_on_generic_syncing_stage():

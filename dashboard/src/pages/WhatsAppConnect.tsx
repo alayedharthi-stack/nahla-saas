@@ -9,11 +9,9 @@ import {
   AlertCircle,
   AlertTriangle,
   BadgeCheck,
-  BookOpen,
   Building2,
   CheckCircle2,
   ChevronRight,
-  ExternalLink,
   Globe,
   Loader2,
   Mail,
@@ -272,29 +270,54 @@ function CoexistenceFlow({
   )
 }
 
-function ManualSetupGuideButton({
-  label,
-  variant = 'emerald',
+function MetaOnboardingModeChoice({
+  disabled,
+  onChooseCoexistence,
+  onChooseCloudApi,
+  onBack,
+  simp,
 }: {
-  label: string
-  variant?: 'emerald' | 'violet'
+  disabled: boolean
+  onChooseCoexistence: () => void
+  onChooseCloudApi: () => void
+  onBack: () => void
+  simp: Translations['whatsappConnect']['simplified']
 }) {
-  const palette =
-    variant === 'violet'
-      ? 'border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100 hover:border-violet-400'
-      : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 hover:border-emerald-400'
-
   return (
-    <a
-      href="/help/whatsapp-manual-setup"
-      target="_blank"
-      rel="noreferrer"
-      className={`w-full flex items-center justify-center gap-2 rounded-xl border-2 px-4 py-3 text-sm font-semibold transition shadow-sm ${palette}`}
-    >
-      <BookOpen className="w-4 h-4 shrink-0" />
-      <span>{label}</span>
-      <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-70" />
-    </a>
+    <div className="space-y-3">
+      <p className="text-sm font-semibold text-slate-800">{simp.modeChoiceTitle}</p>
+      {/* Choice 1 — Coexistence (WhatsApp Business App) */}
+      <button
+        type="button"
+        onClick={onChooseCoexistence}
+        disabled={disabled}
+        className="w-full text-start rounded-2xl border-2 border-[#1877F2] bg-blue-50 p-4 transition hover:bg-blue-100 disabled:opacity-60"
+      >
+        <span className="inline-flex text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[#1877F2] text-white">
+          {simp.coexistenceRecommendedBadge}
+        </span>
+        <p className="mt-2 font-bold text-slate-800">{simp.coexistenceChoiceTitle}</p>
+        <p className="mt-1 text-sm text-slate-600 leading-relaxed">{simp.coexistenceChoiceDescription}</p>
+        <p className="mt-2 text-xs text-amber-900 leading-relaxed">{simp.coexistenceSafetyNote}</p>
+      </button>
+      {/* Choice 2 — Standard Cloud API */}
+      <button
+        type="button"
+        onClick={onChooseCloudApi}
+        disabled={disabled}
+        className="w-full text-start rounded-2xl border border-slate-200 bg-white p-4 transition hover:bg-slate-50 disabled:opacity-60"
+      >
+        <p className="font-bold text-slate-800">{simp.cloudApiChoiceTitle}</p>
+        <p className="mt-1 text-sm text-slate-600 leading-relaxed">{simp.cloudApiChoiceDescription}</p>
+      </button>
+      <button
+        type="button"
+        onClick={onBack}
+        className="w-full text-sm font-medium text-slate-500 hover:text-slate-700 underline underline-offset-2"
+      >
+        {simp.modeChoiceBack}
+      </button>
+    </div>
   )
 }
 
@@ -308,14 +331,9 @@ function MetaEmbeddedOptionCard({
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4 h-full flex flex-col">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
-          <p className="text-sm text-slate-500 mt-1 leading-relaxed">{s.metaCardDescription}</p>
-        </div>
-        <span className="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700">
-          {s.metaCardBadge}
-        </span>
+      <div>
+        <p className="font-bold text-slate-800 text-lg">{s.metaCardTitle}</p>
+        <p className="text-sm text-slate-500 mt-1 leading-relaxed">{s.metaCardDescription}</p>
       </div>
 
       <div className="bg-slate-50 rounded-xl p-4 space-y-2.5">
@@ -337,7 +355,6 @@ function MetaEmbeddedOptionCard({
       <p className="text-xs text-slate-500 leading-relaxed">{s.metaExistingAccountHint}</p>
 
       <div className="mt-auto pt-1 space-y-3">
-        <ManualSetupGuideButton label={s.manualSetupLink} />
         <EmbeddedSignupFlow embeddedInCard onConnected={onConnected} />
       </div>
     </div>
@@ -459,8 +476,6 @@ function AssistedConnectFlow({
       {error && <ErrorBox msg={error} />}
 
       <div className="mt-auto space-y-3">
-        <ManualSetupGuideButton label={a.manualSetupLink} variant="violet" />
-
         <button
           type="button"
           onClick={submitRequest}
@@ -539,6 +554,12 @@ function EmbeddedSignupFlow({
   const [otpCode, setOtpCode]           = useState('')
   const [newPhoneId, setNewPhoneId]     = useState('')
   const [statusHint, setStatusHint]     = useState('')
+  const [showModeChoice, setShowModeChoice] = useState(false)
+
+  const openOnboardingModeChoice = useCallback(() => {
+    setError('')
+    setShowModeChoice(true)
+  }, [])
 
   // Load Meta config + FB SDK on mount
   useEffect(() => {
@@ -1228,6 +1249,7 @@ function EmbeddedSignupFlow({
           </div>
         )}
         {error && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>}
+        {/* Explicit merchant confirmation required — no silent Cloud API conversion */}
         <button
           type="button"
           onClick={() => { void confirmStandardCloudApi() }}
@@ -1235,6 +1257,19 @@ function EmbeddedSignupFlow({
           className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
         >
           {busy ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</> : simp.coexistenceContinueStandardBtn}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setError('')
+            setStatusHint('')
+            setShowModeChoice(true)
+            setStage('ready')
+          }}
+          disabled={busy}
+          className="w-full text-sm font-medium text-slate-500 hover:text-slate-700 underline underline-offset-2 disabled:opacity-60"
+        >
+          {simp.modeChoiceBack}
         </button>
       </div>
     )
@@ -1250,36 +1285,35 @@ function EmbeddedSignupFlow({
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
         )}
-        {/* Main CTA — standard Cloud API */}
-        <button
-          type="button"
-          onClick={launchSignup}
-          disabled={stage !== 'ready' || busy}
-          className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
-        >
-          {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
-            ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
-            : <>
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
-                </svg>
-                {simp.metaConnectBtn}
-              </>
-          }
-        </button>
-        <p className="text-xs text-slate-500 leading-relaxed">{simp.coexistenceChoiceLabel}</p>
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
-          {simp.coexistenceSafetyNote}
-        </div>
-        {/* Explicit Coexistence — WhatsApp Business App on phone */}
-        <button
-          type="button"
-          onClick={launchCoexistenceSignup}
-          disabled={stage !== 'ready' || busy}
-          className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
-        >
-          {simp.coexistenceConnectBtn}
-        </button>
+        {showModeChoice ? (
+          <MetaOnboardingModeChoice
+            disabled={stage !== 'ready' || busy}
+            onChooseCoexistence={launchCoexistenceSignup}
+            onChooseCloudApi={launchSignup}
+            onBack={() => setShowModeChoice(false)}
+            simp={simp}
+          />
+        ) : (
+          <>
+            {/* Meta entry CTA — does not call FB.login */}
+            <button
+              type="button"
+              onClick={openOnboardingModeChoice}
+              disabled={stage === 'exchanging' || busy}
+              className="w-full flex items-center justify-center gap-2 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60"
+            >
+              {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
+                ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
+                : <>
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                    </svg>
+                    {simp.metaConnectBtn}
+                  </>
+              }
+            </button>
+          </>
+        )}
       </div>
     )
   }
@@ -1321,37 +1355,35 @@ function EmbeddedSignupFlow({
         <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">{error}</div>
       )}
 
-      {/* Main CTA — standard Cloud API */}
-      <button
-        onClick={launchSignup}
-        disabled={stage !== 'ready' || busy}
-        className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
-      >
-        {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
-          ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
-          : <>
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
-              </svg>
-              {simp.metaConnectBtn}
-            </>
-        }
-      </button>
-
-      <p className="text-xs text-slate-500 leading-relaxed">{simp.coexistenceChoiceLabel}</p>
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 leading-relaxed">
-        {simp.coexistenceSafetyNote}
-      </div>
-
-      {/* Explicit Coexistence — WhatsApp Business App on phone */}
-      <button
-        type="button"
-        onClick={launchCoexistenceSignup}
-        disabled={stage !== 'ready' || busy}
-        className="w-full text-sm font-medium text-slate-600 hover:text-slate-800 underline underline-offset-2 disabled:opacity-60"
-      >
-        {simp.coexistenceConnectBtn}
-      </button>
+      {showModeChoice ? (
+        <MetaOnboardingModeChoice
+          disabled={stage !== 'ready' || busy}
+          onChooseCoexistence={launchCoexistenceSignup}
+          onChooseCloudApi={launchSignup}
+          onBack={() => setShowModeChoice(false)}
+          simp={simp}
+        />
+      ) : (
+        <>
+          {/* Meta entry CTA — does not call FB.login */}
+          <button
+            type="button"
+            onClick={openOnboardingModeChoice}
+            disabled={stage === 'exchanging' || busy}
+            className="w-full flex items-center justify-center gap-3 bg-[#1877F2] hover:bg-[#166FE5] text-white font-bold py-3.5 rounded-xl transition-all disabled:opacity-60 shadow-lg shadow-blue-600/20"
+          >
+            {(stage === 'loading-sdk' || stage === 'exchanging' || busy)
+              ? <><Loader2 className="w-5 h-5 animate-spin" />{emb.loading}</>
+              : <>
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                  </svg>
+                  {simp.metaConnectBtn}
+                </>
+            }
+          </button>
+        </>
+      )}
 
       <p className="text-center text-xs text-slate-400">
         {emb.initFooter}
