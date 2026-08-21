@@ -1721,6 +1721,8 @@ class MerchantBrain:
                         bind_to_merchant_context=preserve_canonical_referent_over_category_browse(
                             state,
                             message or "",
+                            facts=facts,
+                            merchant_context=merchant_context,
                         ),
                     )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — referent catalog projection must not break the turn

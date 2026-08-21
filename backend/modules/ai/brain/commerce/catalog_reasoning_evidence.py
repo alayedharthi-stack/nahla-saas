@@ -59,6 +59,12 @@ def _normalize_candidate(row: Any) -> Optional[Dict[str, Any]]:
     ext = str(row.get("external_id") or "").strip()
     if ext:
         item["external_id"] = ext
+    sku = str(row.get("sku") or "").strip()
+    if sku:
+        item["sku"] = sku
+    retailer_id = str(row.get("product_retailer_id") or "").strip()
+    if retailer_id:
+        item["product_retailer_id"] = retailer_id
     price = row.get("price")
     if price not in (None, ""):
         item["price"] = price
@@ -153,21 +159,24 @@ def _identity_of(row: Any) -> str:
         return ""
 
 
+_IDENTITY_NAMESPACES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("id", "product_id"), "id"),
+    (("external_id",), "ext"),
+    (("sku",), "sku"),
+    (("product_retailer_id",), "rid"),
+    (("variant_id",), "var"),
+)
+
+
 def _identity_keys(row: Any) -> set[str]:
     keys: set[str] = set()
     if not isinstance(row, dict):
         return keys
-    for key in ("id", "product_id"):
-        val = str(row.get(key) or "").strip()
-        if val:
-            keys.add(f"id:{val}")
-    for key in ("external_id", "sku", "product_retailer_id"):
-        val = str(row.get(key) or "").strip()
-        if val:
-            keys.add(f"ext:{val}")
-    variant_id = str(row.get("variant_id") or "").strip()
-    if variant_id:
-        keys.add(f"var:{variant_id}")
+    for fields, namespace in _IDENTITY_NAMESPACES:
+        for field in fields:
+            val = str(row.get(field) or "").strip()
+            if val:
+                keys.add(f"{namespace}:{val}")
     return keys
 
 
@@ -179,6 +188,49 @@ def _rows_same_identity(left: Any, right: Any) -> bool:
     if left_ids and right_ids and left_ids.isdisjoint(right_ids):
         return False
     return bool(left_keys & right_keys)
+
+
+def _iter_live_catalog_rows(facts: Any = None, merchant_context: Any = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if facts is not None:
+        rows.extend(
+            row
+            for row in list(getattr(facts, "discovery_products", None) or [])
+            if isinstance(row, dict)
+        )
+        rows.extend(
+            row
+            for row in list(getattr(facts, "top_products", None) or [])
+            if isinstance(row, dict)
+        )
+    ctx = merchant_context if isinstance(merchant_context, dict) else {}
+    rows.extend(row for row in list(ctx.get("products") or []) if isinstance(row, dict))
+    cached = ctx.get("_canonical_referent_catalog_facts")
+    if isinstance(cached, dict) and cached:
+        rows.append(cached)
+    return rows
+
+
+def live_catalog_rows_present(facts: Any = None, merchant_context: Any = None) -> bool:
+    return bool(_iter_live_catalog_rows(facts, merchant_context))
+
+
+def canonical_referent_confirmed_by_catalog(
+    referent: Any,
+    *,
+    facts: Any = None,
+    merchant_context: Any = None,
+    catalog_row: Any = None,
+) -> bool:
+    """True when the structured referent matches a current tenant catalog row."""
+    if not isinstance(referent, dict) or not referent:
+        return False
+    if isinstance(catalog_row, dict) and catalog_row and _rows_same_identity(referent, catalog_row):
+        return True
+    return any(
+        _rows_same_identity(referent, row)
+        for row in _iter_live_catalog_rows(facts, merchant_context)
+    )
 
 
 def _merge_catalog_fact_fields(
@@ -248,8 +300,13 @@ def load_tenant_scoped_catalog_row(
     product_id: Any = None,
     *,
     external_id: Any = None,
+    sku: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Load one catalog row by tenant + product id or storefront id. Never cross tenants."""
+    """Load one catalog row by tenant + product id, storefront id, or SKU.
+
+    Identity fields stay in separate namespaces: a SKU is never treated as
+    an external_id. Never cross tenants.
+    """
     if db is None or tenant_id is None:
         return None
     try:
@@ -263,7 +320,8 @@ def load_tenant_scoped_catalog_row(
         except (TypeError, ValueError):
             pid = None
     ext = str(external_id or "").strip()
-    if pid is None and not ext:
+    sku_key = str(sku or "").strip()
+    if pid is None and not ext and not sku_key:
         return None
     try:
         from models import Product  # noqa: PLC0415
@@ -276,6 +334,8 @@ def load_tenant_scoped_catalog_row(
             query = query.filter(Product.id == pid)
         elif ext:
             query = query.filter(Product.external_id == ext)
+        else:
+            query = query.filter(Product.sku == sku_key)
         row = query.first()
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog hydrate must not break the turn
         return None
@@ -325,8 +385,16 @@ def ensure_canonical_referent_catalog_projection(
         db,
         tenant_id,
         referent.get("id") or referent.get("product_id"),
-        external_id=referent.get("external_id") or referent.get("sku"),
+        external_id=referent.get("external_id"),
+        sku=referent.get("sku"),
     )
+    if not canonical_referent_confirmed_by_catalog(
+        referent,
+        facts=facts,
+        merchant_context=merchant_context,
+        catalog_row=catalog_row,
+    ):
+        return None
     projected = project_canonical_referent_catalog_facts(
         state=state,
         facts=facts,
@@ -456,9 +524,11 @@ def catalog_reasoning_titles(
 
 
 __all__ = [
+    "canonical_referent_confirmed_by_catalog",
     "catalog_reasoning_titles",
     "collect_catalog_reasoning_candidates",
     "ensure_canonical_referent_catalog_projection",
+    "live_catalog_rows_present",
     "load_tenant_scoped_catalog_row",
     "project_canonical_referent_catalog_facts",
 ]

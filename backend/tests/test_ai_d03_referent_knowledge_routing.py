@@ -45,6 +45,7 @@ from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
 from modules.ai.brain.product_discovery_gate import (  # noqa: E402
     preserve_canonical_referent_over_category_browse,
     try_category_price_browse_decision,
+    try_referent_scoped_product_reply_decision,
     try_types_overview_decision,
 )
 from modules.ai.brain.state.stages import STAGE_DISCOVERY  # noqa: E402
@@ -121,6 +122,8 @@ _PERFUME = {
 _INCIDENT_FOLLOWUP = "من أي أنواع العسل هذا العسل الصيفي"
 _DEICTIC_TYPES_FOLLOWUP = "من أي أنواع هذا؟"
 _GENERIC_SHOE_FOLLOWUP = "من أي أنواع هذا الحذاء الرياضي"
+_SHOE_SIZE_FOLLOWUP_EN = "what sizes are available for this running shoe"
+_SHOE_SIZE_FOLLOWUP_AR = "ما مقاسات هذا الحذاء الرياضي؟"
 _HONEY_BROADEN = "وش أنواع العسل عندكم؟"
 _HONEY_TYPES_BARE = "من أي أنواع العسل؟"
 _SHOE_BROADEN = "وش أنواع الأحذية عندكم؟"
@@ -211,6 +214,41 @@ class TestEstablishedReferentFollowup:
         assert types_dec is not None
         assert types_dec.action == ACTION_LLM_REPLY
         assert types_dec.args.get("source") != "category_browse"
+
+    def test_variant_attribute_followup_keeps_shoe_referent(self) -> None:
+        shoe = dict(_SHOE)
+        shoe["title"] = "white running shoe"
+        state = _state(shoe)
+        facts = _facts(shoe, _SHOE_OTHER)
+        ctx = _ctx(_SHOE_SIZE_FOLLOWUP_EN, state=state, facts=facts)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _SHOE_SIZE_FOLLOWUP_EN,
+            facts=facts,
+        )
+        browse = try_category_price_browse_decision(ctx)
+        assert browse is None or browse.action != ACTION_SEARCH_PRODUCTS
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is not None
+        assert reply.action == ACTION_LLM_REPLY
+        assert _decision_product_id(reply) == 501
+        assert str((reply.args or {}).get("query") or "") != "sizes"
+
+    def test_arabic_size_followup_keeps_shoe_referent(self) -> None:
+        state = _state(_SHOE)
+        facts = _facts(_SHOE, _SHOE_OTHER)
+        ctx = _ctx(_SHOE_SIZE_FOLLOWUP_AR, state=state, facts=facts)
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            _SHOE_SIZE_FOLLOWUP_AR,
+            facts=facts,
+        )
+        browse = try_category_price_browse_decision(ctx)
+        assert browse is None or browse.action != ACTION_SEARCH_PRODUCTS
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is not None
+        assert reply.action == ACTION_LLM_REPLY
+        assert _decision_product_id(reply) == 501
 
     def test_generic_shoe_followup_does_not_enter_category_browse(self) -> None:
         state = _state(_SHOE)
@@ -432,6 +470,41 @@ class TestStaleInvalidReferent:
         assert types_dec is not None
         assert types_dec.action == ACTION_SEARCH_PRODUCTS
 
+    def test_deleted_id_does_not_trap_when_live_catalog_moved_on(self) -> None:
+        stale = {
+            "id": 999,
+            "external_id": "deleted-sku",
+            "title": "white running shoe",
+        }
+        state = _state(stale)
+        facts = _facts(_SHOE_OTHER)
+        message = "what types is this white running shoe"
+        merchant_context = {"products": [dict(_SHOE_OTHER)]}
+        assert preserve_canonical_referent_over_category_browse(
+            state,
+            message,
+            facts=facts,
+            merchant_context=merchant_context,
+        ) is False
+        ctx = _ctx(
+            message,
+            state=state,
+            facts=facts,
+            merchant_context=merchant_context,
+        )
+        types_dec = try_types_overview_decision(ctx)
+        reply = try_referent_scoped_product_reply_decision(ctx)
+        assert reply is None
+        assert _decision_product_id(types_dec) != 999
+        projected = ensure_canonical_referent_catalog_projection(
+            state=state,
+            facts=facts,
+            merchant_context=merchant_context,
+            bind_to_merchant_context=True,
+        )
+        assert projected is None
+        assert merchant_context["products"][0]["id"] == 502
+
     def test_empty_focus_does_not_trap_price_browse(self) -> None:
         ctx = _ctx(
             _SHOE_PRICE_BROWSE,
@@ -613,6 +686,30 @@ class TestProjectionBind:
         assert projected is not None
         assert projected.get("id") == 501
         assert "شبكية" in str(projected.get("description") or "")
+
+    def test_sku_only_does_not_merge_foreign_external_id(self) -> None:
+        state = MerchantConversationState(greeted=True, stage=STAGE_DISCOVERY, turn=3)
+        set_product_focus(
+            state,
+            {"sku": "shared-key", "title": "حذاء رياضي أبيض"},
+            reason="ai_d03_test_focus",
+            turn=2,
+        )
+        projected = project_canonical_referent_catalog_facts(
+            state=state,
+            facts=_facts(
+                {
+                    "id": 8801,
+                    "external_id": "shared-key",
+                    "title": "عطر ورد 100ml",
+                    "price": 180,
+                    "description": "WRONG PRODUCT FACT",
+                }
+            ),
+        )
+        assert projected is not None
+        assert projected.get("id") != 8801
+        assert "WRONG PRODUCT FACT" not in str(projected.get("description") or "")
 
     def test_shared_sku_does_not_merge_different_internal_ids(self) -> None:
         state = _state({"id": 501, "sku": "shared-sku", "title": "حذاء رياضي أبيض", "price": 249})

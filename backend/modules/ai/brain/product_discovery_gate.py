@@ -536,8 +536,16 @@ _REFERENT_SCOPE_STOPWORDS = frozenset({
     "من", "اي", "أي", "في", "عن", "على", "هل", "ما", "وش", "ايش",
     "هذا", "هذه", "هذي", "ذلك", "تلك", "عندكم", "عندك", "ال",
     "انواع", "أنواع", "نوع", "types", "type", "the", "of", "what", "which",
+    "this", "that", "these", "those", "are", "for", "with", "from", "and",
+    "its", "how", "does", "can", "you", "have", "has",
     "متوفر", "متوفره", "متوفرة", "موجود", "موجوده", "موجودة",
     "available", "سعر", "اسعار", "أسعار", "ثمن", "price",
+})
+_REFERENT_ATTRIBUTE_TOKENS = frozenset({
+    "size", "sizes", "color", "colors", "colour", "colours",
+    "option", "options", "variant", "variants",
+    "مقاس", "مقاسات", "لون", "الوان", "ألوان",
+    "خيار", "خيارات", "خامة", "احجام", "أحجام", "حجم",
 })
 _REFERENT_SCOPE_UNIT_TOKENS = frozenset({
     "كيلو", "كيلوغرام", "كجم", "جرام", "kg", "gram", "g",
@@ -553,6 +561,8 @@ def _referent_scope_tokens(text: str) -> set[str]:
         if len(tok) < 3:
             continue
         if tok in _REFERENT_SCOPE_STOPWORDS or tok in _REFERENT_SCOPE_UNIT_TOKENS:
+            continue
+        if tok in _REFERENT_ATTRIBUTE_TOKENS:
             continue
         if tok.isdigit():
             continue
@@ -633,8 +643,10 @@ def _turn_conflicts_with_canonical_referent(message: str, referent: Dict[str, An
     """True when the turn names a different product/category family than the referent."""
     title = str(referent.get("title") or referent.get("name") or "").strip()
     title_tokens = _referent_scope_tokens(title)
-    msg_tokens = _referent_scope_tokens(message)
-    leftover = msg_tokens - title_tokens - _generic_subject_tokens(message)
+    subject_tokens = _generic_subject_tokens(message)
+    if subject_tokens - title_tokens:
+        return True
+    leftover = _referent_scope_tokens(message) - title_tokens - subject_tokens
     return bool(leftover)
 
 
@@ -671,11 +683,14 @@ def _turn_scoped_to_canonical_referent(
 def preserve_canonical_referent_over_category_browse(
     state: Any,
     message: str,
+    facts: Any = None,
+    merchant_context: Any = None,
 ) -> bool:
     """True when a valid structured referent still owns this category-shaped turn.
 
     Generic category browse may proceed when the customer explicitly broadens
-    scope, or when the turn is not bound to the current referent.
+    scope, when the turn is not bound to the current referent, or when the
+    structured focus is not confirmed in the current tenant catalog.
     """
     msg = (message or "").strip()
     if not msg:
@@ -691,6 +706,23 @@ def preserve_canonical_referent_over_category_browse(
     referent = canonical_product_referent(state)
     if not has_structured_catalog_identity(referent):
         return False
+    try:
+        from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            canonical_referent_confirmed_by_catalog,
+            live_catalog_rows_present,
+        )
+
+        if live_catalog_rows_present(facts, merchant_context) and not (
+            canonical_referent_confirmed_by_catalog(
+                referent,
+                facts=facts,
+                merchant_context=merchant_context,
+            )
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing catalog evidence must not trap focus
+        if facts is not None or merchant_context:
+            return False
     if _explicit_category_scope_broadening(msg):
         return False
     if not _looks_like_generic_category_browse(msg):
@@ -703,6 +735,8 @@ def try_referent_scoped_product_reply_decision(ctx: BrainContext) -> Optional[De
     if not preserve_canonical_referent_over_category_browse(
         getattr(ctx, "state", None),
         getattr(ctx, "message", "") or "",
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
     ):
         return None
     try:
@@ -1675,7 +1709,12 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
     msg = ctx.message or ""
     if not msg:
         return None
-    if preserve_canonical_referent_over_category_browse(getattr(ctx, "state", None), msg):
+    if preserve_canonical_referent_over_category_browse(
+        getattr(ctx, "state", None),
+        msg,
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+    ):
         return None
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
