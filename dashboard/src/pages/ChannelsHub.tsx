@@ -1,4 +1,4 @@
-import { Plug, Store, MessageCircle, HelpCircle } from 'lucide-react'
+import { Plug, Store, MessageCircle } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { HubCardGrid, type HubCardItem } from '../components/ui/HubCardGrid'
 import { useLanguage } from '../i18n/context'
@@ -25,12 +25,6 @@ export default function ChannelsHub() {
       icon: MessageCircle,
       title: page.cards.whatsappConnect.title,
       description: page.cards.whatsappConnect.description,
-    },
-    {
-      to: '/help/whatsapp-manual-setup',
-      icon: HelpCircle,
-      title: page.cards.manualSetup.title,
-      description: page.cards.manualSetup.description,
     },
     {
       to: '/sales-channels',

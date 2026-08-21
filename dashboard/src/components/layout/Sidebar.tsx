@@ -173,7 +173,6 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/integrations',               icon: Plug,         label: tr => tr.nav.items.integrations     },
       { to: '/store-integration',          icon: Store,        label: tr => tr.nav.items.storeIntegration },
       { to: '/whatsapp-connect',           icon: MessageCircle,label: tr => tr.nav.items.whatsappConnect  },
-      { to: '/help/whatsapp-manual-setup', icon: HelpCircle,   label: tr => tr.nav.items.manualSetup      },
       { to: '/widgets',                    icon: TrendingUp,   label: tr => tr.nav.items.widgets          },
       { to: '/system-status',              icon: Activity,     label: tr => tr.nav.items.systemStatus     },
       { to: '/delivery-quality',           icon: Gauge,        label: tr => tr.nav.items.deliveryQuality  },

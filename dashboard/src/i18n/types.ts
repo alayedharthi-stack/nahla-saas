@@ -1015,6 +1015,13 @@ export interface Translations {
       metaExistingAccountHint:  string
       metaConnectBtn:           string
       metaCloudApiConnectBtn:   string
+      modeChoiceTitle:          string
+      modeChoiceBack:           string
+      coexistenceChoiceTitle:   string
+      coexistenceChoiceDescription: string
+      coexistenceRecommendedBadge: string
+      cloudApiChoiceTitle:      string
+      cloudApiChoiceDescription: string
       coexistenceConnectBtn:    string
       coexistenceChoiceLabel:   string
       coexistenceSafetyNote:    string
