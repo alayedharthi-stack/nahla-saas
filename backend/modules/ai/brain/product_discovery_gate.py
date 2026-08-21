@@ -501,6 +501,9 @@ def try_broad_category_inquiry_decision(
     route: str = "",
 ) -> Optional[Decision]:
     """Route broad category inquiry to catalog search or open conversational LLM."""
+    _referent_reply = try_referent_scoped_product_reply_decision(ctx)
+    if _referent_reply is not None:
+        return _referent_reply
     if not inquiry_class:
         inquiry_class, route = classify_product_inquiry_route(ctx, query=query)
     if inquiry_class == INQUIRY_CLASS_OPEN and route == "llm":
@@ -520,6 +523,215 @@ def try_broad_category_inquiry_decision(
     )
 
 
+# Same product-deixis class as catalog_product_answer._PRODUCT_DEIXIS_RE.
+# Continuity marker for the established product — not a semantic attribute map.
+_REFERENT_SCOPE_DEICTIC_RE = re.compile(
+    r"(?:(?:^|\s)(?:هذا|هذه|هذي|ذلك|تلك)\b)"
+    r"|(?:هل\s+هو\b)|(?:هل\s+هي\b)"
+    r"|(?:وهل\s+هو\b)|(?:وهل\s+هي\b)"
+    r"|(?:^|\s)(?:this|that|these|those)\b",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _referent_identity_tokens(text: str) -> set[str]:
+    """Identity tokens from structured title/context, not customer-attribute vocab."""
+    tokens: set[str] = set()
+    for raw in _normalize_ar(text or "").split():
+        tok = raw.strip(" ؟?!.،,")
+        tok = re.sub(r"^ال", "", tok)
+        if len(tok) < 3 or tok.isdigit():
+            continue
+        tokens.add(tok)
+    return tokens
+
+
+def _looks_like_generic_category_browse(message: str) -> bool:
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if has_types_overview_ask(msg):
+        return True
+    try:
+        from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            is_category_price_or_availability_message,
+        )
+
+        return bool(is_category_price_or_availability_message(msg, ""))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — browse-shape probe must not block routing
+        return False
+
+
+def _explicit_category_scope_broadening(message: str) -> bool:
+    """Genuine catalog/category widening — existing owners only."""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if has_explicit_broad_browse_request(msg):
+        return True
+    try:
+        from .commerce.product_breadth_policy import (  # noqa: PLC0415
+            explicit_broad_browse_requested,
+            global_availability_browse_requested,
+        )
+
+        if explicit_broad_browse_requested(msg) or global_availability_browse_requested(msg):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — broadening probe must not block referent
+        pass
+    try:
+        from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            is_generic_category_browse,
+        )
+
+        if is_generic_category_browse(msg):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — generic browse probe must not block referent
+        pass
+    try:
+        from .postprocess.availability_guard_policy import (  # noqa: PLC0415
+            browse_alternatives_requested,
+        )
+
+        if browse_alternatives_requested(msg):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — alternatives probe must not block referent
+        pass
+    return False
+
+
+def _generic_subject_tokens(message: str) -> set[str]:
+    """Category noun from existing browse/types extractors — not a new classifier."""
+    generic_subject = ""
+    try:
+        from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            extract_browse_category_scope,
+        )
+
+        generic_subject = extract_browse_category_scope(message, "") or ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — subject probe is optional for overlap
+        generic_subject = ""
+    if not generic_subject:
+        generic_subject = extract_types_overview_query(message) or ""
+    return _referent_identity_tokens(generic_subject)
+
+
+def _turn_scoped_to_canonical_referent(
+    message: str,
+    referent: Dict[str, Any],
+    *,
+    state: Any = None,
+) -> bool:
+    """True when the turn still refers to the structured product.
+
+    Continuity is deictic reference or distinctive identity tokens already
+    present on the structured referent. Customer attribute words are not
+    classified here; Brain interprets source/composition/material meaning.
+    """
+    msg = (message or "").strip()
+    if not msg or not isinstance(referent, dict):
+        return False
+    title = str(referent.get("title") or referent.get("name") or "").strip()
+    title_tokens = _referent_identity_tokens(title)
+    generic_tokens = _generic_subject_tokens(msg)
+    distinctive = title_tokens - generic_tokens
+    distinctive_hit = bool(distinctive and (distinctive & _referent_identity_tokens(msg)))
+    deictic_hit = bool(_REFERENT_SCOPE_DEICTIC_RE.search(msg))
+    if not distinctive_hit and not deictic_hit:
+        return False
+    if deictic_hit and not distinctive_hit:
+        try:
+            from .commerce.product_visual import is_focus_fresh  # noqa: PLC0415
+
+            if state is not None and not is_focus_fresh(state):
+                return False
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — freshness miss must not trap the referent
+            return False
+    return True
+
+
+def preserve_canonical_referent_over_category_browse(
+    state: Any,
+    message: str,
+    facts: Any = None,
+    merchant_context: Any = None,
+) -> bool:
+    """True when a valid structured referent still owns this category-shaped turn.
+
+    Generic category browse may proceed when an existing broadening owner
+    proves a scope change, when the turn has no deictic/identity continuity
+    with the referent, or when the structured focus is not confirmed in the
+    current tenant catalog.
+    """
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    try:
+        from .commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing focus owner must not block browse
+        return False
+
+    referent = canonical_product_referent(state)
+    if not has_structured_catalog_identity(referent):
+        return False
+    try:
+        from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            canonical_referent_confirmed_by_catalog,
+        )
+
+        if not canonical_referent_confirmed_by_catalog(
+            referent,
+            facts=facts,
+            merchant_context=merchant_context,
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unconfirmed catalog evidence must not trap focus
+        return False
+    if _explicit_category_scope_broadening(msg):
+        return False
+    if not _looks_like_generic_category_browse(msg):
+        return False
+    return _turn_scoped_to_canonical_referent(msg, referent or {}, state=state)
+
+
+def try_referent_scoped_product_reply_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Route a referent-scoped follow-up to Brain with the established product."""
+    if not preserve_canonical_referent_over_category_browse(
+        getattr(ctx, "state", None),
+        getattr(ctx, "message", "") or "",
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+    ):
+        return None
+    try:
+        from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            project_canonical_referent_catalog_facts,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing projection must not invent a referent
+        product = None
+    else:
+        product = project_canonical_referent_catalog_facts(
+            state=getattr(ctx, "state", None),
+            facts=getattr(ctx, "facts", None),
+            merchant_context=getattr(ctx, "merchant_context", None),
+        )
+    if not isinstance(product, dict) or not product:
+        return None
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "product",
+            "product": dict(product),
+            "block_catalog_browse": True,
+        },
+        reason="referent-scoped follow-up — preserve canonical catalog referent",
+        confidence=0.9,
+    )
+
+
 def try_types_overview_decision(ctx: BrainContext) -> Optional[Decision]:
     """
     Route explicit types/options asks to category discovery.
@@ -530,6 +742,9 @@ def try_types_overview_decision(ctx: BrainContext) -> Optional[Decision]:
     msg = ctx.message or ""
     if not has_types_overview_ask(msg):
         return None
+    _referent_reply = try_referent_scoped_product_reply_decision(ctx)
+    if _referent_reply is not None:
+        return _referent_reply
     try:
         from .commerce.product_breadth_policy import (  # noqa: PLC0415
             global_availability_browse_requested,
@@ -1458,6 +1673,13 @@ def try_category_price_browse_decision(ctx: BrainContext) -> Optional[Decision]:
     msg = ctx.message or ""
     if not msg:
         return None
+    if preserve_canonical_referent_over_category_browse(
+        getattr(ctx, "state", None),
+        msg,
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+    ):
+        return None
     intent_name = str(getattr(ctx.intent, "name", "") or "")
     if intent_name not in (INTENT_ASK_PRICE, INTENT_ASK_PRODUCT):
         return None
@@ -1562,9 +1784,34 @@ def try_price_query_decision(
     _category_browse = try_category_price_browse_decision(ctx)
     if _category_browse is not None:
         return _category_browse
+    _referent_reply = try_referent_scoped_product_reply_decision(ctx)
+    if _referent_reply is not None:
+        return _referent_reply
 
     msg = ctx.message or ""
     focus = ctx.state.current_product_focus
+    try:
+        from .commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            canonical_referent_confirmed_by_catalog,
+        )
+        from .commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+
+        referent = canonical_product_referent(getattr(ctx, "state", None))
+        if not has_structured_catalog_identity(referent):
+            referent = focus if isinstance(focus, dict) else None
+        if not canonical_referent_confirmed_by_catalog(
+            referent,
+            facts=getattr(ctx, "facts", None),
+            merchant_context=getattr(ctx, "merchant_context", None),
+        ):
+            focus = None
+        elif isinstance(referent, dict) and referent:
+            focus = referent
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unconfirmed focus must not be treated as a product
+        focus = None
     product_query = _resolved_product_query(ctx, extracted_product_query)
 
     try:
@@ -2074,10 +2321,12 @@ __all__ = [
     "is_price_without_product_context",
     "log_inquiry_class",
     "log_product_discovery_blocked",
+    "preserve_canonical_referent_over_category_browse",
     "product_discovery_block_reason",
     "should_block_generic_product_discovery",
     "should_suppress_recommendation_escalation",
     "try_broad_category_inquiry_decision",
     "try_price_query_decision",
+    "try_referent_scoped_product_reply_decision",
     "try_types_overview_decision",
 ]

@@ -1704,6 +1704,32 @@ class MerchantBrain:
                 ) or {}
                 if _browse_defocus:
                     merchant_context["browse_defocus"] = True
+                try:
+                    from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+                        ensure_canonical_referent_catalog_projection,
+                    )
+                    from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+                        preserve_canonical_referent_over_category_browse,
+                    )
+
+                    ensure_canonical_referent_catalog_projection(
+                        db=db,
+                        tenant_id=tenant_id,
+                        state=state,
+                        merchant_context=merchant_context,
+                        facts=facts,
+                        bind_to_merchant_context=preserve_canonical_referent_over_category_browse(
+                            state,
+                            message or "",
+                            facts=facts,
+                            merchant_context=merchant_context,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — referent catalog projection must not break the turn
+                    logger.exception(
+                        "[BrainPipeline] canonical referent catalog projection failed tenant=%s",
+                        tenant_id,
+                    )
             except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 logger.warning(
                     "[BrainPipeline] build_merchant_context failed tenant=%s — "

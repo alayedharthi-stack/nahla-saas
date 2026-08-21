@@ -73,7 +73,13 @@ def _active_order_ctx(message: str, *, intent_name: str = "general") -> BrainCon
         message=message,
         intent=Intent(name=intent_name, confidence=0.55, raw_message=message),
         state=state,
-        facts=CommerceFacts(has_products=True, orderable=True),
+        facts=CommerceFacts(
+            has_products=True,
+            product_count=1,
+            orderable=True,
+            top_products=[dict(_PRODUCT)],
+            discovery_products=[dict(_PRODUCT)],
+        ),
     )
 
 

@@ -59,6 +59,12 @@ def _normalize_candidate(row: Any) -> Optional[Dict[str, Any]]:
     ext = str(row.get("external_id") or "").strip()
     if ext:
         item["external_id"] = ext
+    sku = str(row.get("sku") or "").strip()
+    if sku:
+        item["sku"] = sku
+    retailer_id = str(row.get("product_retailer_id") or "").strip()
+    if retailer_id:
+        item["product_retailer_id"] = retailer_id
     price = row.get("price")
     if price not in (None, ""):
         item["price"] = price
@@ -79,6 +85,15 @@ def _normalize_candidate(row: Any) -> Optional[Dict[str, Any]]:
     ).strip()
     if image_url:
         item["image_url"] = image_url
+    description = str(row.get("description") or row.get("body") or "").strip()
+    if description:
+        item["description"] = description
+    variants = row.get("variants")
+    if isinstance(variants, list) and variants:
+        item["variants"] = list(variants)
+    variants_summary = str(row.get("variants_summary") or "").strip()
+    if variants_summary:
+        item["variants_summary"] = variants_summary
     return item
 
 
@@ -100,6 +115,352 @@ def _extend_unique(
             continue
         seen.add(key)
         dest.append(item)
+
+
+_IDENTITY_KEYS = (
+    "id",
+    "product_id",
+    "external_id",
+    "sku",
+    "variant_id",
+    "product_retailer_id",
+)
+_CATALOG_FACT_MERGE_KEYS = (
+    "id",
+    "product_id",
+    "external_id",
+    "sku",
+    "variant_id",
+    "product_retailer_id",
+    "description",
+    "body",
+    "variants",
+    "variants_summary",
+    "title",
+    "price",
+    "in_stock",
+    "can_checkout",
+    "orderable",
+)
+
+
+def _identity_of(row: Any) -> str:
+    try:
+        from .commerce_focus_owner import product_focus_identity  # noqa: PLC0415
+
+        return product_focus_identity(row)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — identity probe must not block catalog facts
+        if not isinstance(row, dict):
+            return ""
+        for key in _IDENTITY_KEYS:
+            val = str(row.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+
+_IDENTITY_NAMESPACES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("id", "product_id"), "id"),
+    (("external_id",), "ext"),
+    (("sku",), "sku"),
+    (("product_retailer_id",), "rid"),
+    (("variant_id",), "var"),
+)
+
+
+def _identity_keys(row: Any) -> set[str]:
+    keys: set[str] = set()
+    if not isinstance(row, dict):
+        return keys
+    for fields, namespace in _IDENTITY_NAMESPACES:
+        for field in fields:
+            val = str(row.get(field) or "").strip()
+            if val:
+                keys.add(f"{namespace}:{val}")
+    return keys
+
+
+def _rows_same_identity(left: Any, right: Any) -> bool:
+    left_keys = _identity_keys(left)
+    right_keys = _identity_keys(right)
+    left_ids = {key[3:] for key in left_keys if key.startswith("id:")}
+    right_ids = {key[3:] for key in right_keys if key.startswith("id:")}
+    if left_ids and right_ids and left_ids.isdisjoint(right_ids):
+        return False
+    return bool(left_keys & right_keys)
+
+
+def _iter_live_catalog_rows(facts: Any = None, merchant_context: Any = None) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if facts is not None:
+        rows.extend(
+            row
+            for row in list(getattr(facts, "discovery_products", None) or [])
+            if isinstance(row, dict)
+        )
+        rows.extend(
+            row
+            for row in list(getattr(facts, "top_products", None) or [])
+            if isinstance(row, dict)
+        )
+    ctx = merchant_context if isinstance(merchant_context, dict) else {}
+    rows.extend(row for row in list(ctx.get("products") or []) if isinstance(row, dict))
+    cached = ctx.get("_canonical_referent_catalog_facts")
+    if isinstance(cached, dict) and cached:
+        rows.append(cached)
+    return rows
+
+
+def live_catalog_rows_present(facts: Any = None, merchant_context: Any = None) -> bool:
+    return bool(_iter_live_catalog_rows(facts, merchant_context))
+
+
+CATALOG_EVIDENCE_ROWS = "rows"
+CATALOG_EVIDENCE_EMPTY = "empty"
+CATALOG_EVIDENCE_UNAVAILABLE = "unavailable"
+
+
+def tenant_catalog_evidence_status(
+    facts: Any = None,
+    merchant_context: Any = None,
+) -> str:
+    """Distinguish inspected-empty catalog from catalog lookup not provided.
+
+    ``rows``: at least one live tenant catalog row is in evidence.
+    ``empty``: a catalog owner was provided and it contains no rows.
+    ``unavailable``: no catalog owner was provided for this turn.
+    Empty is not permission to skip identity validation.
+    """
+    catalog_owner_present = facts is not None or isinstance(merchant_context, dict)
+    if not catalog_owner_present:
+        return CATALOG_EVIDENCE_UNAVAILABLE
+    if live_catalog_rows_present(facts, merchant_context):
+        return CATALOG_EVIDENCE_ROWS
+    return CATALOG_EVIDENCE_EMPTY
+
+
+def canonical_referent_confirmed_by_catalog(
+    referent: Any,
+    *,
+    facts: Any = None,
+    merchant_context: Any = None,
+    catalog_row: Any = None,
+) -> bool:
+    """True when the structured referent matches a current tenant catalog row."""
+    if not isinstance(referent, dict) or not referent:
+        return False
+    if isinstance(catalog_row, dict) and catalog_row and _rows_same_identity(referent, catalog_row):
+        return True
+    return any(
+        _rows_same_identity(referent, row)
+        for row in _iter_live_catalog_rows(facts, merchant_context)
+    )
+
+
+def _merge_catalog_fact_fields(
+    dest: Dict[str, Any],
+    source: Any,
+    *,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    out = dict(dest or {})
+    item = _normalize_candidate(source) if isinstance(source, dict) else None
+    if not item:
+        return out
+    for key in _CATALOG_FACT_MERGE_KEYS:
+        incoming = item.get(key)
+        if incoming in (None, "", []):
+            continue
+        if overwrite or key not in out or out.get(key) in (None, "", []):
+            out[key] = incoming
+    return out
+
+
+def project_canonical_referent_catalog_facts(
+    *,
+    state: Any = None,
+    facts: Any = None,
+    merchant_context: Any = None,
+    catalog_row: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Merge tenant-scoped catalog facts onto the canonical structured referent."""
+    try:
+        from .commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+            normalize_structured_product_referent,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — referent projection must not block compose
+        return None
+
+    referent = canonical_product_referent(state) if state is not None else None
+    if not has_structured_catalog_identity(referent):
+        return None
+    projected = dict(referent)
+    sources: List[Any] = []
+    if facts is not None:
+        sources.extend(list(getattr(facts, "discovery_products", None) or []))
+        sources.extend(list(getattr(facts, "top_products", None) or []))
+    ctx = merchant_context if isinstance(merchant_context, dict) else {}
+    sources.extend(list(ctx.get("products") or []))
+    for row in sources:
+        if not isinstance(row, dict):
+            continue
+        if _rows_same_identity(projected, row):
+            projected = _merge_catalog_fact_fields(projected, row)
+    cached_proj = ctx.get("_canonical_referent_catalog_facts")
+    authoritative = catalog_row if isinstance(catalog_row, dict) and catalog_row else None
+    if authoritative is None and isinstance(cached_proj, dict) and cached_proj:
+        authoritative = cached_proj
+    if isinstance(authoritative, dict) and _rows_same_identity(projected, authoritative):
+        projected = _merge_catalog_fact_fields(projected, authoritative, overwrite=True)
+    if not canonical_referent_confirmed_by_catalog(
+        projected,
+        facts=facts,
+        merchant_context=merchant_context,
+        catalog_row=authoritative,
+    ):
+        return None
+    normalized = normalize_structured_product_referent(projected)
+    return normalized or projected
+
+
+def load_tenant_scoped_catalog_row(
+    db: Any,
+    tenant_id: Any,
+    product_id: Any = None,
+    *,
+    external_id: Any = None,
+    sku: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Load one catalog row by tenant + product id, storefront id, or SKU.
+
+    Identity fields stay in separate namespaces: a SKU is never treated as
+    an external_id. Never cross tenants.
+    """
+    if db is None or tenant_id is None:
+        return None
+    try:
+        tid = int(tenant_id)
+    except (TypeError, ValueError):
+        return None
+    pid = None
+    if product_id not in (None, ""):
+        try:
+            pid = int(product_id)
+        except (TypeError, ValueError):
+            pid = None
+    ext = str(external_id or "").strip()
+    sku_key = str(sku or "").strip()
+    if pid is None and not ext and not sku_key:
+        return None
+    try:
+        from models import Product  # noqa: PLC0415
+        from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog hydrate is best-effort
+        return None
+    try:
+        query = db.query(Product).filter(Product.tenant_id == tid)
+        if pid is not None:
+            query = query.filter(Product.id == pid)
+        elif ext:
+            query = query.filter(Product.external_id == ext)
+        else:
+            query = query.filter(Product.sku == sku_key)
+        row = query.first()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog hydrate must not break the turn
+        return None
+    if row is None:
+        return None
+    try:
+        formatted = CatalogContextBuilder(db, tid)._format(row)  # noqa: SLF001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — formatter fallback uses raw columns
+        formatted = {
+            "id": getattr(row, "id", None),
+            "external_id": getattr(row, "external_id", None),
+            "sku": getattr(row, "sku", None),
+            "title": getattr(row, "title", None),
+            "description": getattr(row, "description", None),
+            "price": getattr(row, "price", None),
+        }
+    return formatted if isinstance(formatted, dict) else None
+
+
+def ensure_canonical_referent_catalog_projection(
+    *,
+    db: Any = None,
+    tenant_id: Any = None,
+    state: Any = None,
+    merchant_context: Any = None,
+    facts: Any = None,
+    bind_to_merchant_context: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Project the canonical referent's catalog facts into Brain context.
+
+    Does not compose customer text. Linked merchant knowledge still flows
+    through tenant overlay via ``resolve_kb_active_product_ids``.
+    """
+    try:
+        from .commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — projection must not break the turn
+        return None
+
+    referent = canonical_product_referent(state) if state is not None else None
+    if not has_structured_catalog_identity(referent):
+        return None
+
+    catalog_row = load_tenant_scoped_catalog_row(
+        db,
+        tenant_id,
+        referent.get("id") or referent.get("product_id"),
+        external_id=referent.get("external_id"),
+        sku=referent.get("sku"),
+    )
+    if not canonical_referent_confirmed_by_catalog(
+        referent,
+        facts=facts,
+        merchant_context=merchant_context,
+        catalog_row=catalog_row,
+    ):
+        return None
+    projected = project_canonical_referent_catalog_facts(
+        state=state,
+        facts=facts,
+        merchant_context=merchant_context,
+        catalog_row=catalog_row,
+    )
+    if not projected:
+        return None
+
+    ctx = merchant_context if isinstance(merchant_context, dict) else None
+    if ctx is not None and bind_to_merchant_context:
+        products = [
+            dict(row)
+            for row in (ctx.get("products") or [])
+            if isinstance(row, dict)
+        ]
+        products = [row for row in products if not _rows_same_identity(row, projected)]
+        products.insert(0, dict(projected))
+        ctx["products"] = products[:8]
+        conversation = dict(ctx.get("conversation") or {})
+        conversation["selected_product"] = dict(projected)
+        ctx["conversation"] = conversation
+        ctx["_canonical_referent_projected"] = True
+    if ctx is not None:
+        ctx["_canonical_referent_catalog_facts"] = dict(projected)
+    if state is not None and isinstance(getattr(state, "current_product_focus", None), dict):
+        focus = dict(state.current_product_focus)
+        if _rows_same_identity(focus, projected):
+            state.current_product_focus = _merge_catalog_fact_fields(
+                focus,
+                projected,
+                overwrite=True,
+            )
+
+    return projected
 
 
 def collect_catalog_reasoning_candidates(
@@ -128,14 +489,13 @@ def collect_catalog_reasoning_candidates(
 
     if state is not None:
         try:
-            from .commerce_focus_owner import (  # noqa: PLC0415
-                canonical_product_referent,
-                has_structured_catalog_identity,
+            projected = project_canonical_referent_catalog_facts(
+                state=state,
+                facts=facts,
+                merchant_context=merchant_context,
             )
-
-            referent = canonical_product_referent(state)
-            if has_structured_catalog_identity(referent):
-                _extend_unique(out, [referent], seen=seen, limit=cap)
+            if projected:
+                _extend_unique(out, [projected], seen=seen, limit=cap)
         except Exception:  # noqa: BLE001  # noqa: silent-ok — referent probe must not block catalog facts
             pass
 
@@ -195,6 +555,15 @@ def catalog_reasoning_titles(
 
 
 __all__ = [
+    "canonical_referent_confirmed_by_catalog",
     "catalog_reasoning_titles",
+    "CATALOG_EVIDENCE_EMPTY",
+    "CATALOG_EVIDENCE_ROWS",
+    "CATALOG_EVIDENCE_UNAVAILABLE",
     "collect_catalog_reasoning_candidates",
+    "ensure_canonical_referent_catalog_projection",
+    "live_catalog_rows_present",
+    "load_tenant_scoped_catalog_row",
+    "project_canonical_referent_catalog_facts",
+    "tenant_catalog_evidence_status",
 ]
