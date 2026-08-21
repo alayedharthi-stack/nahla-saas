@@ -425,15 +425,18 @@ def _extract_pdf_text(
         {
           "text":              "<extracted body, possibly truncated>",
           "page_count":        <int, 0 on failure>,
-          "extraction_status": "ok" | "empty" | "encrypted"
-                              | "corrupt" | "library_missing"
-                              | "exception",
+          "extraction_status": "ok" | "incomplete" | "empty"
+                              | "encrypted" | "corrupt"
+                              | "library_missing" | "exception",
           "ocr_required":      bool,
+          "completeness_reason": str,
+          "completeness_signals": dict,
         }
 
-    ``ocr_required`` is True when the PDF *was* readable but pypdf
-    returned empty text — i.e. it's a scanned / image-only PDF and
-    the caller should fall back to vision OCR if available.
+    ``ocr_required`` is True when pypdf returned empty text on a
+    readable PDF *or* when non-empty text is structurally incomplete
+    (sparse overlay / dangling labels without values). The caller
+    should fall back to vision OCR when available.
     """
     if not file_bytes:
         return {
@@ -514,29 +517,52 @@ def _extract_pdf_text(
         combined = sanitize_persistence_text(combined)
         if len(combined) > _PDF_TEXT_CHAR_LIMIT:
             combined = combined[:_PDF_TEXT_CHAR_LIMIT]
+
+    from modules.ai.media.pdf_extraction_completeness import (  # noqa: PLC0415
+        assess_pdf_extraction_completeness,
+    )
+
+    assessment = assess_pdf_extraction_completeness(
+        combined,
+        file_bytes,
+        page_count,
+        reader=reader,
+    )
+    completeness_reason = assessment.reason
+    completeness_signals = assessment.signals
+    ocr_required = bool(assessment.ocr_required)
+
+    if combined:
+        extraction_status = "ok" if assessment.complete else "incomplete"
         logger.info(
-            "[PDF_EXTRACT] tenant=%s media_id=%s status=ok page_count=%d "
-            "text_len=%d preview=%r",
-            tenant_id, media_id, page_count, len(combined),
+            "[PDF_EXTRACT] tenant=%s media_id=%s status=%s page_count=%d "
+            "text_len=%d ocr_required=%s completeness_reason=%s preview=%r",
+            tenant_id, media_id, extraction_status, page_count,
+            len(combined), ocr_required, completeness_reason,
             combined[:120].replace("\n", " "),
         )
         return {
             "text": combined,
             "page_count": page_count,
-            "extraction_status": "ok",
-            "ocr_required": False,
+            "extraction_status": extraction_status,
+            "ocr_required": ocr_required,
+            "completeness_reason": completeness_reason,
+            "completeness_signals": completeness_signals,
         }
 
     logger.info(
         "[PDF_EXTRACT] tenant=%s media_id=%s status=empty page_count=%d "
+        "ocr_required=%s completeness_reason=%s "
         "(likely scanned image PDF — OCR needed)",
-        tenant_id, media_id, page_count,
+        tenant_id, media_id, page_count, ocr_required, completeness_reason,
     )
     return {
         "text": "",
         "page_count": page_count,
         "extraction_status": "empty",
-        "ocr_required": page_count > 0,
+        "ocr_required": ocr_required,
+        "completeness_reason": completeness_reason,
+        "completeness_signals": completeness_signals,
     }
 
 
@@ -2870,8 +2896,9 @@ async def _process_document(
          CDN URL expires.
       2. Persist via :func:`save_inbound_media` for permanent
          storage.
-      3. Extract PDF text via :func:`_extract_pdf_text`. If empty
-         and OCR is needed, run :func:`_ocr_pdf_with_vision`.
+      3. Extract PDF text via :func:`_extract_pdf_text`. When OCR is
+         required (empty or structurally incomplete), run
+         :func:`_ocr_pdf_with_vision` and merge supplemental text.
       4. Heuristically classify via :func:`classify_inbound_document`
          using filename + caption + extracted text + order context.
       5. For ``payment_receipt`` candidates, run
@@ -2970,6 +2997,9 @@ async def _process_document(
         base_meta["pdf_page_count"]  = int(ex.get("page_count") or 0)
         extracted_text               = str(ex.get("text") or "")
         base_meta["pdf_text_length"] = len(extracted_text)
+        base_meta["pdf_ocr_required"] = bool(ex.get("ocr_required"))
+        base_meta["pdf_completeness_reason"] = ex.get("completeness_reason")
+        base_meta["pdf_completeness_signals"] = ex.get("completeness_signals") or {}
         if extracted_text:
             base_meta["pdf_text_preview"] = (
                 extracted_text[:280].replace("\n", " ")
@@ -2982,16 +3012,12 @@ async def _process_document(
                 extracted_text[:_W13_FULL_TEXT_PERSIST_CAP]
             )
 
-        # If pypdf returned empty body but the file has pages,
-        # fall back to OpenAI Vision OCR over the raw PDF bytes.
-        # This handles older Saudi banks that ship scanned-image
-        # PDFs with no text streams. Skipped silently when no
+        # When structural completeness requires OCR, supplement pypdf
+        # text with OpenAI Vision OCR over the raw PDF bytes — even
+        # when primary text is non-empty. Skipped silently when no
         # OPENAI_API_KEY is configured.
-        if (
-            not extracted_text
-            and ex.get("ocr_required")
-            and _runtime_openai_key()
-        ):
+        if ex.get("ocr_required") and _runtime_openai_key():
+            primary_text = extracted_text
             try:
                 ocr_text = await _ocr_pdf_with_vision(
                     file_bytes,
@@ -3006,18 +3032,23 @@ async def _process_document(
                 ocr_text = ""
             if ocr_text:
                 from core.persistence_text_sanitize import sanitize_persistence_text  # noqa: PLC0415
+                from modules.ai.media.pdf_extraction_completeness import (  # noqa: PLC0415
+                    merge_primary_and_ocr_text,
+                )
 
                 ocr_text = sanitize_persistence_text(ocr_text)
-                extracted_text = ocr_text
-                base_meta["pdf_text_status"]  = "ocr"
-                base_meta["pdf_text_length"]  = len(ocr_text)
+                extracted_text = merge_primary_and_ocr_text(primary_text, ocr_text)
+                base_meta["pdf_text_status"] = (
+                    "ocr" if not (primary_text or "").strip() else "ocr_supplemented"
+                )
+                base_meta["pdf_text_length"] = len(extracted_text)
                 base_meta["pdf_text_preview"] = (
-                    ocr_text[:280].replace("\n", " ")
+                    extracted_text[:280].replace("\n", " ")
                 )
                 # Wave 1 W1.3 — full OCR body persisted for the
                 # receipt-extraction telemetry layer (additive).
                 base_meta["pdf_text_full"] = (
-                    ocr_text[:_W13_FULL_TEXT_PERSIST_CAP]
+                    extracted_text[:_W13_FULL_TEXT_PERSIST_CAP]
                 )
 
     # ── Heuristic classification ─────────────────────────────────
