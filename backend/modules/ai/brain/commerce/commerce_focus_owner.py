@@ -342,6 +342,11 @@ def set_product_focus(
 
     new_id = product_focus_identity(new_focus)
     cur_id = product_focus_identity(cur_dict)
+    from .catalog_reasoning_evidence import _rows_same_identity  # noqa: PLC0415
+
+    same_identity_rebind = bool(
+        new_focus and cur_dict and _rows_same_identity(new_focus, cur_dict)
+    )
 
     if (
         preserve_previous
@@ -352,11 +357,26 @@ def set_product_focus(
     ):
         state.previous_product_focus = cur_dict
 
+    if same_identity_rebind and cur_dict and new_focus:
+        # Ranking must not strip a prior selected/canonical referent (AI-D03).
+        for key in (
+            "customer_selected",
+            "provenance",
+            "from_catalog_order",
+            "from_native_catalog_order",
+        ):
+            if cur_dict.get(key) and not new_focus.get(key):
+                new_focus[key] = cur_dict.get(key)
+
     state.current_product_focus = new_focus
     if new_focus:
         state.conversation_focus = FOCUS_PRODUCT
         if turn:
-            state.product_focus_turn = int(turn)
+            prior_focus_turn = int(getattr(state, "product_focus_turn", 0) or 0)
+            if same_identity_rebind and prior_focus_turn:
+                pass
+            else:
+                state.product_focus_turn = int(turn)
         state.suspended_product_focus = None
         try:
             from .product_visual import stamp_product_focus_metadata  # noqa: PLC0415

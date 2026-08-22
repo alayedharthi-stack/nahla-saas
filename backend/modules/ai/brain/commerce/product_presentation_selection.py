@@ -1,7 +1,8 @@
 """
 Product presentation selection — multi choices vs single rich card.
 
-Platform-wide semantics only (cardinality + catalog identity).
+Platform-wide semantics only: cardinality, catalog identity, and
+authoritative referent grounding. A ranked singleton is not a referent.
 No merchant/platform hardcoding. No LLM/prompt instructions.
 """
 from __future__ import annotations
@@ -42,6 +43,149 @@ def _product_identity_tokens(product: Optional[Dict[str, Any]]) -> set[str]:
         if raw:
             tokens.add(raw)
     return tokens
+
+
+def _referent_matches_candidate(
+    referent: Any,
+    candidate: Dict[str, Any],
+) -> bool:
+    from .catalog_reasoning_evidence import _rows_same_identity  # noqa: PLC0415
+
+    return _rows_same_identity(referent, candidate)
+
+
+def _is_same_turn_unselected_focus(state: Any) -> bool:
+    """True when focus was bound on this turn and is not a customer selection.
+
+    Pipeline pins ``current_product_focus`` from a unique search hit before
+    compose. That pin is ranking, not an identity-bearing conversational
+    referent. A prior-turn focus (AI-D03) keeps ``product_focus_turn`` below
+    the current turn after same-identity rebind.
+    """
+    if state is None:
+        return False
+    from .commerce_focus_owner import is_customer_selected_checkout_referent  # noqa: PLC0415
+
+    focus = getattr(state, "current_product_focus", None)
+    if is_customer_selected_checkout_referent(focus):
+        return False
+    focus_turn = int(getattr(state, "product_focus_turn", 0) or 0)
+    current_turn = int(getattr(state, "turn", 0) or 0)
+    return bool(focus_turn and current_turn and focus_turn == current_turn)
+
+
+def authoritative_card_grounding(
+    candidate: Dict[str, Any],
+    *,
+    state: Any = None,
+    resolved_product: Optional[Dict[str, Any]] = None,
+    facts: Any = None,
+    merchant_context: Any = None,
+    identity_grounded: bool = False,
+    discovery_entry_type: str = "",
+) -> bool:
+    """True when an authoritative product referent grounds a singleton card.
+
+    A ranked search singleton alone is never sufficient. ``last_recommended`` /
+    ``last_presented`` unique rows do not create new card eligibility.
+    This-turn ``data["product"]`` / search-rank focus pins are candidates,
+    not referents. ``discovery_entry_type`` is unused: discovery class is not
+    product identity.
+    """
+    _ = discovery_entry_type  # ranking + discovery class is not a referent
+    if identity_grounded:
+        return True
+    if not isinstance(candidate, dict) or not _has_catalog_identity(candidate):
+        return False
+
+    from .assistant_presented_provenance import structured_selected_referent  # noqa: PLC0415
+    from .commerce_focus_owner import (  # noqa: PLC0415
+        get_effective_product_focus,
+        has_structured_catalog_identity,
+        is_customer_selected_checkout_referent,
+    )
+    from .catalog_reasoning_evidence import canonical_referent_confirmed_by_catalog  # noqa: PLC0415
+
+    selected = structured_selected_referent(state)
+    if isinstance(selected, dict) and _referent_matches_candidate(selected, candidate):
+        return True
+
+    if (
+        isinstance(resolved_product, dict)
+        and is_customer_selected_checkout_referent(resolved_product)
+        and _referent_matches_candidate(resolved_product, candidate)
+    ):
+        return True
+
+    focus = get_effective_product_focus(state)
+    if not isinstance(focus, dict) or not _referent_matches_candidate(focus, candidate):
+        return False
+    if is_customer_selected_checkout_referent(focus):
+        return True
+    if _is_same_turn_unselected_focus(state):
+        return False
+    return bool(
+        has_structured_catalog_identity(focus)
+        and canonical_referent_confirmed_by_catalog(
+            focus,
+            facts=facts,
+            merchant_context=merchant_context,
+        )
+    )
+
+
+def presentation_context_from_brain(
+    ctx: Any,
+    decision: Any,
+    *,
+    resolved_product: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Brain-context kwargs for ``apply_search_product_presentation``."""
+    return {
+        "state": getattr(ctx, "state", None),
+        "facts": getattr(ctx, "facts", None),
+        "merchant_context": getattr(ctx, "merchant_context", None),
+        "resolved_product": resolved_product,
+        "discovery_entry_type": str(
+            (getattr(decision, "args", None) or {}).get("discovery_entry_type") or ""
+        ),
+    }
+
+
+def clear_incompatible_product_cards(
+    result_data: Dict[str, Any],
+    *,
+    reason: str,
+) -> None:
+    """Drop pending cards when availability truth cannot present the product."""
+    if not isinstance(result_data, dict):
+        return
+    if not result_data.get("pending_product_cards"):
+        return
+    result_data.pop("pending_product_cards", None)
+    result_data["product_presentation_kind"] = PRESENTATION_NONE
+    result_data["cards_cleared_reason"] = str(reason or "").strip() or "cards_cleared"
+    stamp_presentation_observability(result_data)
+
+
+_AVAILABILITY_CARD_CLEAR_ACTIONS = frozenset({
+    "rewrite_conflict",
+    "rewrite_unknown",
+    "rewrite_false_positive",
+    "strip_inactive_catalog_lines",
+})
+
+
+def should_clear_cards_for_availability_guard(guard_result: Any) -> bool:
+    """True only for enforce rewrites. Shadow mode is log-only."""
+    if guard_result is None:
+        return False
+    if getattr(guard_result, "shadow_mode", False):
+        return False
+    if not bool(getattr(guard_result, "replaced", False)):
+        return False
+    action = str(getattr(guard_result, "action", "") or "").strip()
+    return action in _AVAILABILITY_CARD_CLEAR_ACTIONS
 
 
 def resolve_browse_presentation_candidates(
@@ -139,12 +283,18 @@ def resolve_product_presentation(
     candidates: Sequence[Dict[str, Any]] | None,
     *,
     resolved_product: Optional[Dict[str, Any]] = None,
+    identity_grounded: bool = False,
+    state: Any = None,
+    facts: Any = None,
+    merchant_context: Any = None,
+    discovery_entry_type: str = "",
 ) -> ProductPresentationDecision:
     """
     Decide outbound presentation for search/discovery product results.
 
     * 0 candidates → none
-    * 1 candidate with catalog identity → rich product presentation
+    * 1 candidate with authoritative referent grounding → rich product presentation
+    * 1 ranked singleton without referent → none (Brain may still recommend in prose)
     * 2+ candidates → reply-button choices (pick_N)
     """
     rows = [dict(p) for p in (candidates or []) if isinstance(p, dict)]
@@ -167,22 +317,12 @@ def resolve_product_presentation(
     single = rows[0]
     focus = resolved_product if isinstance(resolved_product, dict) else None
     chosen = single
-    if focus and _has_catalog_identity(focus):
-        # Prefer the already-resolved focus when it matches the singleton.
-        focus_id = str(
-            focus.get("external_id")
-            or focus.get("id")
-            or focus.get("product_id")
-            or ""
-        ).strip()
-        single_id = str(
-            single.get("external_id")
-            or single.get("id")
-            or single.get("product_id")
-            or ""
-        ).strip()
-        if not focus_id or not single_id or focus_id == single_id:
-            chosen = {**single, **{k: v for k, v in focus.items() if v not in (None, "")}}
+    if (
+        focus
+        and _has_catalog_identity(focus)
+        and _referent_matches_candidate(focus, single)
+    ):
+        chosen = {**single, **{k: v for k, v in focus.items() if v not in (None, "")}}
 
     if not _has_catalog_identity(chosen):
         # Title-only singleton cannot drive a trusted rich card; fall back to choices.
@@ -193,11 +333,27 @@ def resolve_product_presentation(
             reason="singleton_missing_catalog_identity",
         )
 
+    if not authoritative_card_grounding(
+        chosen,
+        state=state,
+        resolved_product=resolved_product,
+        facts=facts,
+        merchant_context=merchant_context,
+        identity_grounded=identity_grounded,
+        discovery_entry_type=discovery_entry_type,
+    ):
+        return ProductPresentationDecision(
+            kind=PRESENTATION_NONE,
+            candidate_count=1,
+            resolved_product=chosen,
+            reason="ranked_singleton_not_referent",
+        )
+
     return ProductPresentationDecision(
         kind=PRESENTATION_SINGLE_RICH,
         candidate_count=1,
         resolved_product=chosen,
-        reason="single_resolved_catalog_identity",
+        reason="authoritative_referent_grounded",
     )
 
 
@@ -243,6 +399,11 @@ def apply_search_product_presentation(
     *,
     candidates: Sequence[Dict[str, Any]],
     resolved_product: Optional[Dict[str, Any]] = None,
+    identity_grounded: bool = False,
+    state: Any = None,
+    facts: Any = None,
+    merchant_context: Any = None,
+    discovery_entry_type: str = "",
     build_buttons: Optional[Any] = None,
 ) -> ProductPresentationDecision:
     """
@@ -254,7 +415,19 @@ def apply_search_product_presentation(
     decision = resolve_product_presentation(
         rows,
         resolved_product=resolved_product,
+        identity_grounded=identity_grounded,
+        state=state,
+        facts=facts,
+        merchant_context=merchant_context,
+        discovery_entry_type=discovery_entry_type,
     )
+    if result_data.get("cards_cleared_reason") and decision.kind == PRESENTATION_SINGLE_RICH:
+        decision = ProductPresentationDecision(
+            kind=PRESENTATION_NONE,
+            candidate_count=decision.candidate_count,
+            resolved_product=decision.resolved_product,
+            reason=str(result_data.get("cards_cleared_reason") or "cards_cleared"),
+        )
     result_data["product_presentation_kind"] = decision.kind
     result_data["product_presentation_reason"] = decision.reason
     result_data["presentation_candidate_count"] = int(decision.candidate_count or len(rows))
@@ -316,8 +489,12 @@ __all__ = [
     "PRESENTATION_SINGLE_RICH",
     "ProductPresentationDecision",
     "apply_search_product_presentation",
+    "authoritative_card_grounding",
     "build_product_card_attachment_from_catalog",
     "build_standard_pick_buttons",
+    "clear_incompatible_product_cards",
+    "presentation_context_from_brain",
+    "should_clear_cards_for_availability_guard",
     "resolve_browse_presentation_candidates",
     "resolve_product_presentation",
     "stamp_presentation_observability",

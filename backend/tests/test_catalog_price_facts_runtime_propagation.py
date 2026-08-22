@@ -17,6 +17,7 @@ for _p in [_backend, os.path.join(_backend, "..")]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from modules.ai.brain.commerce.product_presentation_selection import PRESENTATION_NONE  # noqa: E402
 from modules.ai.brain.decision.actions import ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.persona.facts_bundle import PersonaComposeResult  # noqa: E402
 from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: E402
@@ -322,13 +323,14 @@ class TestResponderCatalogQaPersonaCompose:
                 ):
                     text = await composer.compose(decision, result, ctx)
 
-            # Single resolved browse hit → rich presentation, not pick_N.
-            assert "اختر رقم" not in text
+            # Ungrounded ranked singleton browse → no rich card. Brain/candidates remain.
+            assert (text or "").strip()
             assert result.data.get("pending_buttons") in (None, [])
-            assert not result.data.get("pending_buttons")
-            cards = result.data.get("pending_product_cards") or []
-            assert len(cards) == 1
-            assert cards[0].get("kind") == "product_card"
+            assert not result.data.get("pending_product_cards")
+            assert result.data.get("product_presentation_kind") in (
+                None,
+                PRESENTATION_NONE,
+            )
             assert result.data.get("pending_candidates")
 
         asyncio.run(_run())

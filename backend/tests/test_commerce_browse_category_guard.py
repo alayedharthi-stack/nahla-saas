@@ -400,8 +400,9 @@ class TestArabicPluralAndMultiScopeResolution:
         )
         assert len(filtered) == 1
         assert filtered[0]["id"] == 20
-        # Presentation (#787) requires candidate_count==1 + catalog identity —
-        # scope resolution must surface exactly one catalog row here.
+        # Category scope may surface a singleton catalog row. That row is a
+        # candidate, not a product referent; SINGLE_RICH still requires
+        # identity-bearing grounding (AI-D02).
         assert filtered[0].get("title") and (
             filtered[0].get("id") is not None or filtered[0].get("category")
         )
