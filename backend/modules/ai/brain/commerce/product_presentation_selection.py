@@ -168,6 +168,26 @@ def clear_incompatible_product_cards(
     stamp_presentation_observability(result_data)
 
 
+_AVAILABILITY_CARD_CLEAR_ACTIONS = frozenset({
+    "rewrite_conflict",
+    "rewrite_unknown",
+    "rewrite_false_positive",
+    "strip_inactive_catalog_lines",
+})
+
+
+def should_clear_cards_for_availability_guard(guard_result: Any) -> bool:
+    """True only for enforce rewrites. Shadow mode is log-only."""
+    if guard_result is None:
+        return False
+    if getattr(guard_result, "shadow_mode", False):
+        return False
+    if not bool(getattr(guard_result, "replaced", False)):
+        return False
+    action = str(getattr(guard_result, "action", "") or "").strip()
+    return action in _AVAILABILITY_CARD_CLEAR_ACTIONS
+
+
 def resolve_browse_presentation_candidates(
     *,
     display_candidates: Sequence[Dict[str, Any]] | None,
@@ -401,6 +421,13 @@ def apply_search_product_presentation(
         merchant_context=merchant_context,
         discovery_entry_type=discovery_entry_type,
     )
+    if result_data.get("cards_cleared_reason") and decision.kind == PRESENTATION_SINGLE_RICH:
+        decision = ProductPresentationDecision(
+            kind=PRESENTATION_NONE,
+            candidate_count=decision.candidate_count,
+            resolved_product=decision.resolved_product,
+            reason=str(result_data.get("cards_cleared_reason") or "cards_cleared"),
+        )
     result_data["product_presentation_kind"] = decision.kind
     result_data["product_presentation_reason"] = decision.reason
     result_data["presentation_candidate_count"] = int(decision.candidate_count or len(rows))
@@ -467,6 +494,7 @@ __all__ = [
     "build_standard_pick_buttons",
     "clear_incompatible_product_cards",
     "presentation_context_from_brain",
+    "should_clear_cards_for_availability_guard",
     "resolve_browse_presentation_candidates",
     "resolve_product_presentation",
     "stamp_presentation_observability",

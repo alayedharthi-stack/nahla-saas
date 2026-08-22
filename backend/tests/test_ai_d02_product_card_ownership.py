@@ -21,6 +21,7 @@ from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: 
     build_standard_pick_buttons,
     clear_incompatible_product_cards,
     resolve_product_presentation,
+    should_clear_cards_for_availability_guard,
     stamp_presentation_observability,
 )
 from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
@@ -369,13 +370,39 @@ class TestGuardClearsCards:
             replaced=True,
             availability_claim_blocked=True,
         )
-        if result.action in (
-            "rewrite_conflict",
-            "rewrite_unknown",
-            "rewrite_false_positive",
-        ) and (result.replaced or result.availability_claim_blocked):
+        if should_clear_cards_for_availability_guard(result):
             clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
         assert not data.get("pending_product_cards")
+
+    def test_shadow_mode_does_not_clear_cards(self) -> None:
+        data: dict[str, Any] = {
+            "pending_product_cards": [{"kind": "product_card", "id": 501}],
+        }
+        result = ProductAvailabilityTruthGuardResult(
+            reply="original",
+            action="rewrite_unknown",
+            replaced=False,
+            availability_claim_blocked=True,
+            shadow_mode=True,
+        )
+        if should_clear_cards_for_availability_guard(result):
+            clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
+        assert data.get("pending_product_cards")
+
+    def test_cleared_reason_blocks_restamp(self) -> None:
+        state = _selected_state(SHOE)
+        data: dict[str, Any] = {
+            "cards_cleared_reason": "availability_truth_unresolved",
+        }
+        decision = apply_search_product_presentation(
+            data,
+            candidates=[SHOE],
+            state=state,
+            merchant_context={"products": [dict(SHOE)]},
+        )
+        assert decision.kind == PRESENTATION_NONE
+        assert not data.get("pending_product_cards")
+        assert data.get("cards_cleared_reason") == "availability_truth_unresolved"
 
 
 class TestGroundedAvailableKeepsCard:
@@ -389,11 +416,7 @@ class TestGroundedAvailableKeepsCard:
             replaced=False,
             availability_claim_blocked=False,
         )
-        if result.action in (
-            "rewrite_conflict",
-            "rewrite_unknown",
-            "rewrite_false_positive",
-        ) and (result.replaced or result.availability_claim_blocked):
+        if should_clear_cards_for_availability_guard(result):
             clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
         assert data.get("pending_product_cards")
 
@@ -407,11 +430,7 @@ class TestGroundedAvailableKeepsCard:
             replaced=True,
             availability_claim_blocked=False,
         )
-        if result.action in (
-            "rewrite_conflict",
-            "rewrite_unknown",
-            "rewrite_false_positive",
-        ) and (result.replaced or result.availability_claim_blocked):
+        if should_clear_cards_for_availability_guard(result):
             clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
         assert data.get("pending_product_cards")
 

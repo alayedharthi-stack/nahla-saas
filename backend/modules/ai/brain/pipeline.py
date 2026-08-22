@@ -4856,17 +4856,12 @@ class MerchantBrain:
                         result.data["availability_claim_blocked"] = True
                         if _pavg.reason:
                             result.data["availability_guard_reason"] = _pavg.reason
-                    if _pavg.action in (
-                        "rewrite_conflict",
-                        "rewrite_unknown",
-                        "rewrite_false_positive",
-                    ) and (
-                        _pavg.replaced or _pavg.availability_claim_blocked
-                    ):
-                        from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: PLC0415
-                            clear_incompatible_product_cards,
-                        )
+                    from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: PLC0415
+                        clear_incompatible_product_cards,
+                        should_clear_cards_for_availability_guard,
+                    )
 
+                    if should_clear_cards_for_availability_guard(_pavg):
                         clear_incompatible_product_cards(
                             result.data,
                             reason="availability_truth_unresolved",
