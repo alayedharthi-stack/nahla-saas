@@ -3973,14 +3973,44 @@ class DefaultDecisionEngine:
                 _selected_ref = restore_selected_product_focus(state)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — selected-product restore must not block start-order
                 _selected_ref = None
-            from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+            _sales_channels = getattr(ctx, "merchant_sales_channels", None)
+            if _sales_channels is None:
+                try:
+                    from ..commerce.sales_channel_capabilities import (  # noqa: PLC0415
+                        resolve_merchant_sales_channels,
+                    )
 
-            _bare_start_order = is_bare_start_order_phrase(ctx.message or "")
-            if _selected_ref:
-                # Structured catalog selection is already the product. A later
-                # natural purchase must reuse it, not reopen discovery.
-                _bare_start_order = False
-            if _bare_start_order:
+                    _sales_channels = resolve_merchant_sales_channels(
+                        getattr(ctx, "_db", None),
+                        int(ctx.tenant_id or 0),
+                        store_url=str(getattr(facts, "store_url", "") or ""),
+                        store_url_source=str(
+                            getattr(facts, "store_url_source", "") or "",
+                        ),
+                        maps_url=str(getattr(facts, "maps_url", "") or ""),
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — sales-channel resolve must not block start-order
+                    _sales_channels = None
+            from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+                PURCHASE_CHANNEL_ENTRY_SELECTION,
+                PURCHASE_CHANNEL_ENTRY_SHOWROOM,
+                PURCHASE_CHANNEL_ENTRY_STORE,
+                is_genuine_purchase_channel_entry,
+                resolve_available_purchase_channel_facts,
+                resolve_purchase_channel_entry_owner,
+            )
+
+            _purchase_entry = is_genuine_purchase_channel_entry(
+                message=ctx.message or "",
+                intent=intent,
+                order_prep=getattr(state, "order_prep", None),
+                selected_product_referent=_selected_ref,
+                current_product_focus=getattr(state, "current_product_focus", None),
+                state=state,
+                inbound_metadata=getattr(ctx, "inbound_metadata", None),
+                stage=str(getattr(state, "stage", "") or ""),
+            )
+            if _purchase_entry:
                 try:
                     from ..order_context_gate import is_fulfillment_session_locked  # noqa: PLC0415
 
@@ -4004,26 +4034,79 @@ class DefaultDecisionEngine:
                         ctx.tenant_id,
                     )
                 try:
-                    from ..commerce.checkout_route_owner import (  # noqa: PLC0415
-                        should_route_bare_start_to_channel_selection,
-                    )
-
-                    if should_route_bare_start_to_channel_selection(
+                    _channel_owner = resolve_purchase_channel_entry_owner(
+                        message=ctx.message or "",
+                        intent=intent,
                         order_prep=getattr(state, "order_prep", None),
+                        selected_product_referent=_selected_ref,
+                        current_product_focus=getattr(
+                            state, "current_product_focus", None
+                        ),
+                        state=state,
+                        inbound_metadata=getattr(ctx, "inbound_metadata", None),
                         store_url=str(getattr(facts, "store_url", "") or ""),
                         maps_url=str(getattr(facts, "maps_url", "") or ""),
                         store_url_source=str(
                             getattr(facts, "store_url_source", "") or "",
                         ),
-                    ):
+                        merchant_sales_channels=_sales_channels,
+                        stage=str(getattr(state, "stage", "") or ""),
+                    )
+                    _available_channels = resolve_available_purchase_channel_facts(
+                        store_url=str(getattr(facts, "store_url", "") or ""),
+                        maps_url=str(getattr(facts, "maps_url", "") or ""),
+                        store_url_source=str(
+                            getattr(facts, "store_url_source", "") or "",
+                        ),
+                        merchant_sales_channels=_sales_channels,
+                    )
+                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_SELECTION:
                         return Decision(
                             action=ACTION_LLM_REPLY,
                             args={
                                 "topic": "purchase_channel_selection",
-                                "response_goal": "help_customer_choose_purchase_channel",
+                                "response_goal": (
+                                    "help_customer_choose_purchase_channel"
+                                ),
+                                "available_purchase_channels": list(
+                                    _available_channels
+                                ),
                             },
                             reason=(
-                                "bare start-order — purchase channel not chosen yet"
+                                "genuine purchase entry — multiple available "
+                                "purchase channels"
+                            ),
+                            confidence=0.92,
+                        )
+                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_STORE:
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "online_store_redirect",
+                                "response_goal": "guide_customer_to_online_store",
+                                "available_purchase_channels": list(
+                                    _available_channels
+                                ),
+                            },
+                            reason=(
+                                "genuine purchase entry — only online store "
+                                "is available"
+                            ),
+                            confidence=0.92,
+                        )
+                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_SHOWROOM:
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "showroom_visit",
+                                "response_goal": "guide_customer_to_showroom",
+                                "available_purchase_channels": list(
+                                    _available_channels
+                                ),
+                            },
+                            reason=(
+                                "genuine purchase entry — only showroom "
+                                "is available"
                             ),
                             confidence=0.92,
                         )
@@ -4034,7 +4117,7 @@ class DefaultDecisionEngine:
                     )
 
             if (
-                not _bare_start_order
+                not _purchase_entry
                 and (state.current_product_focus or _selected_ref)
                 and facts.has_products
             ):

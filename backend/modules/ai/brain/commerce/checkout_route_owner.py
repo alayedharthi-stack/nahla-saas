@@ -373,6 +373,236 @@ def should_route_bare_start_to_channel_selection(
     return len(channels) >= 2
 
 
+PURCHASE_CHANNEL_ENTRY_SELECTION = "purchase_channel_selection"
+PURCHASE_CHANNEL_ENTRY_WHATSAPP = "whatsapp_quick_order"
+PURCHASE_CHANNEL_ENTRY_STORE = "online_store"
+PURCHASE_CHANNEL_ENTRY_SHOWROOM = "showroom_visit"
+
+_MIXED_GREETING_PURCHASE_MAX_LEN = 64
+
+
+def _product_focus_owns_turn(current_product_focus: Any) -> bool:
+    if not isinstance(current_product_focus, dict):
+        return False
+    return bool(
+        str(current_product_focus.get("id") or "").strip()
+        or str(current_product_focus.get("external_id") or "").strip()
+        or str(current_product_focus.get("title") or "").strip()
+    )
+
+
+def _state_product_focus(state: Any) -> Any:
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return state.get("current_product_focus")
+    return getattr(state, "current_product_focus", None)
+
+
+def _capabilities_from_available_ids(
+    channel_ids: Sequence[str],
+    *,
+    store_url: str = "",
+    store_name: str = "",
+) -> CheckoutChannelCapabilities:
+    ids = {str(x or "").strip() for x in channel_ids}
+    return CheckoutChannelCapabilities(
+        whatsapp_fast=(
+            "whatsapp_quick_order" in ids or CHECKOUT_CHANNEL_WHATSAPP in ids
+        ),
+        store_link="online_store" in ids or CHECKOUT_CHANNEL_STORE in ids,
+        showroom_visit=(
+            "showroom_visit" in ids or CHECKOUT_CHANNEL_SHOWROOM in ids
+        ),
+        store_url=str(store_url or ""),
+        store_name=str(store_name or ""),
+    )
+
+
+def _checkout_channel_to_fact_id(channel: str) -> str:
+    mapped = _PURCHASE_CHANNEL_FACT_MAP.get(str(channel or "").strip())
+    if mapped:
+        return mapped
+    raw = str(channel or "").strip()
+    if raw in {
+        PURCHASE_CHANNEL_ENTRY_WHATSAPP,
+        PURCHASE_CHANNEL_ENTRY_STORE,
+        PURCHASE_CHANNEL_ENTRY_SHOWROOM,
+    }:
+        return raw
+    return ""
+
+
+def is_genuine_purchase_channel_entry(
+    *,
+    message: str,
+    intent: Any = None,
+    order_prep: Any = None,
+    selected_product_referent: Any = None,
+    current_product_focus: Any = None,
+    state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    stage: str = "",
+) -> bool:
+    """True for semantic purchase-entry that may own channel routing.
+
+    Independent producer is ``rules.match`` → ``start_order``. Classifier
+    labels alone are not enough. Phrase shape is not the owner.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    if purchase_channel_committed(order_prep):
+        return False
+    if selected_product_referent:
+        return False
+    focus = current_product_focus
+    if focus is None:
+        focus = _state_product_focus(state)
+    if _product_focus_owns_turn(focus):
+        return False
+
+    try:
+        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+            is_active_order_flow,
+        )
+
+        resolved_stage = str(stage or "").strip()
+        if not resolved_stage and state is not None:
+            if isinstance(state, dict):
+                resolved_stage = str(state.get("stage") or "").strip()
+            else:
+                resolved_stage = str(getattr(state, "stage", "") or "").strip()
+        if is_active_order_flow(stage=resolved_stage, order_prep=order_prep):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — active-order probe must not block entry
+        pass
+
+    try:
+        from modules.ai.brain.intent.rules import (  # noqa: PLC0415
+            INTENT_START_ORDER,
+            has_leading_greeting_frame,
+            is_pure_greeting_without_commerce,
+            match as match_intent,
+        )
+
+        if is_pure_greeting_without_commerce(raw):
+            return False
+        producer = match_intent(raw)
+        if producer is None or str(getattr(producer, "name", "") or "") != INTENT_START_ORDER:
+            return False
+        if (
+            has_leading_greeting_frame(raw)
+            and len(raw) > _MIXED_GREETING_PURCHASE_MAX_LEN
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — producer probe must not invent purchase entry
+        logger.debug("[CHECKOUT_ROUTE] genuine purchase-entry producer probe failed")
+        return False
+
+    try:
+        from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: PLC0415
+            is_current_turn_social_non_commerce,
+        )
+
+        if is_current_turn_social_non_commerce(
+            raw,
+            intent=intent if intent is not None else producer,
+            state=state,
+            inbound_metadata=inbound_metadata,
+        ):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — social probe must not block genuine entry
+        pass
+
+    try:
+        from modules.ai.brain.commerce.start_order_verb_guard import (  # noqa: PLC0415
+            extract_start_order_product_query,
+        )
+
+        if extract_start_order_product_query(raw):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — prefix product-query probe must not invent entry
+        pass
+
+    try:
+        from modules.ai.brain.discovery.entry import (  # noqa: PLC0415
+            _extract_embedded_order_product_query,
+        )
+
+        if _extract_embedded_order_product_query(raw):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — embedded product-query probe must not invent entry
+        pass
+
+    return True
+
+
+def resolve_purchase_channel_entry_owner(
+    *,
+    message: str,
+    intent: Any = None,
+    order_prep: Any = None,
+    selected_product_referent: Any = None,
+    current_product_focus: Any = None,
+    state: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    store_url: str = "",
+    maps_url: str = "",
+    whatsapp_available: bool = True,
+    store_url_source: str = "",
+    merchant_sales_channels: Any = None,
+    stage: str = "",
+) -> Optional[str]:
+    """Capability-driven owner for genuine purchase entry.
+
+    Returns a structured channel fact id, ``purchase_channel_selection``,
+    or ``None`` when this owner must not claim the turn.
+    """
+    if not is_genuine_purchase_channel_entry(
+        message=message,
+        intent=intent,
+        order_prep=order_prep,
+        selected_product_referent=selected_product_referent,
+        current_product_focus=current_product_focus,
+        state=state,
+        inbound_metadata=inbound_metadata,
+        stage=stage,
+    ):
+        return None
+
+    channels = resolve_available_purchase_channel_facts(
+        store_url=store_url,
+        maps_url=maps_url,
+        whatsapp_available=whatsapp_available,
+        store_url_source=store_url_source,
+        merchant_sales_channels=merchant_sales_channels,
+    )
+    if not channels:
+        return None
+
+    caps = _capabilities_from_available_ids(channels, store_url=store_url)
+    explicit = resolve_explicit_purchase_channel_payload(
+        message,
+        caps=caps,
+        inbound_metadata=inbound_metadata,
+    )
+    if explicit:
+        fact_id = _checkout_channel_to_fact_id(explicit)
+        if fact_id in channels:
+            return fact_id
+
+    parsed = parse_checkout_channel_choice(message, caps=caps)
+    if parsed and parsed != CHECKOUT_CHANNEL_INQUIRY:
+        fact_id = _checkout_channel_to_fact_id(parsed)
+        if fact_id in channels:
+            return fact_id
+
+    if len(channels) >= 2:
+        return PURCHASE_CHANNEL_ENTRY_SELECTION
+    return channels[0]
+
+
 def should_block_bare_start_product_prompt(
     *,
     order_prep: Any = None,
@@ -1252,6 +1482,8 @@ __all__ = [
     "purchase_channel_committed",
     "resolve_available_purchase_channel_facts",
     "resolve_explicit_purchase_channel_payload",
+    "resolve_purchase_channel_entry_owner",
+    "is_genuine_purchase_channel_entry",
     "should_block_bare_start_product_prompt",
     "should_route_bare_start_to_channel_selection",
     "checkout_route_owner_enabled",

@@ -676,19 +676,26 @@ def _classify_discovery_entry(ctx: BrainContext) -> DiscoveryEntryDecision:
                 reason="show more product options",
             )
 
-    from ..commerce.start_order_verb_guard import is_bare_start_order_phrase  # noqa: PLC0415
+    product_query = extract_order_product_query(ctx)
 
-    if is_bare_start_order_phrase(msg):
+    from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+        is_genuine_purchase_channel_entry,
+    )
+
+    if not product_query and is_genuine_purchase_channel_entry(
+        message=msg,
+        intent=getattr(ctx, "intent", None),
+        order_prep=getattr(getattr(ctx, "state", None), "order_prep", None),
+        state=getattr(ctx, "state", None),
+    ):
         return DiscoveryEntryDecision(
             matched=True,
             entry_type=START_ORDER_BARE,
             source="top_products_start_order",
             query="",
             category_scope=None,
-            reason="bare start-order opener — no product query",
+            reason="genuine purchase entry — no product query",
         )
-
-    product_query = extract_order_product_query(ctx)
     _global_browse_msg = False
     try:
         from ..commerce.product_breadth_policy import global_availability_browse_requested  # noqa: PLC0415

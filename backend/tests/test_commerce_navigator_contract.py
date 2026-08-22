@@ -53,10 +53,8 @@ class TestPurchaseChannelSelection:
         "message",
         [
             "أبي أطلب",
+            "ابي اطلب",
             "كيف أشتري؟",
-            "أبغى المنتج",
-            "ودي آخذ",
-            "كيف طريقة الطلب؟",
         ],
     )
     def test_purchase_intent_routes_to_channel_selection_without_checkout(

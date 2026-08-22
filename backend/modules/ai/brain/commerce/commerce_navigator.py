@@ -38,17 +38,6 @@ _DIA = "\u064b-\u065f\u0670\u06d6-\u06ed"
 _NORM_RE = re.compile(f"[{_DIA}]+")
 _WS_RE = re.compile(r"\s+")
 
-_GENERIC_BUY_INTENT_RE = re.compile(
-    r"(?:"
-    r"(?:\u0623?\u0628\u064a|\u0627\u0628\u064a|\u0623?\u0628\u063a(?:\u064a|\u0649)|\u0627\u0628\u063a(?:\u064a|\u0649)|"
-    r"\u0648\u062f(?:\u064a|\u064a)?)\s*(?:\u0623?\u0637\u0644\u0628|\u0627\u0637\u0644\u0628|\u0623?\u0634\u062a\u0631\u064a|\u0627\u0634\u062a\u0631\u064a|\u0622?\u062e\u0630|\u0623?\u062e\u0630|\u0627\u062e\u0630|\u062e\u0630)"
-    r"|(?:\u0643\u064a\u0641|\u0648\u0634)\s*(?:\u0623?\u0634\u062a\u0631\u064a|\u0627\u0634\u062a\u0631\u064a|\u0623?\u0637\u0644\u0628|\u0627\u0637\u0644\u0628|\u0637\u0631\u064a\u0642\u0629\s*\u0627\u0644(?:\u0637\u0644\u0628|\u0634\u0631\u0627\u0621))"
-    r"|(?:\u0623?\u0628\u063a(?:\u064a|\u0649)|\u0627\u0628\u063a(?:\u064a|\u0649))\s*(?:\u0627\u0644)?(?:\u0645\u0646\u062a\u062c|\u0645\u0646\u062a\u062c\u0627\u062a|\u0647\u0630\u0627|\u0647\u0630\u0647|\u0647\u0627|\u0647\u0648)"
-    r"|(?:\u0637\u0631\u064a\u0642\u0629|\u0643\u064a\u0641\u064a\u0629)\s*(?:\u0627\u0644)?(?:\u0637\u0644\u0628|\u0634\u0631\u0627\u0621|\u0627\u0644\u0637\u0644\u0628)"
-    r")",
-    re.UNICODE | re.IGNORECASE,
-)
-
 _WHATSAPP_CHANNEL_RE = re.compile(
     r"(?:"
     r"(?:\u0639\u0646\s*\u0637\u0631\u064a\u0642|\u0645\u0646\s*\u062e\u0644\u0627\u0644|\bvia)\s*(?:\u0648\u0627\u062a\u0633(?:\u0627\u0628|\u0628)?|whatsapp|\u0647\u0646\u0627)\b"
@@ -358,12 +347,6 @@ def _is_price_objection(
         return intent_name == "ask_price" and bool(slots.get("block_quantity_prompt"))
 
 
-def _is_generic_buy_intent(message: str, *, intent_name: str = "") -> bool:
-    if intent_name == "start_order":
-        return True
-    return bool(_GENERIC_BUY_INTENT_RE.search(_norm(message)))
-
-
 def _selected_channel(message: str) -> Optional[PurchaseChannel]:
     norm = _norm(message)
     if not norm:
@@ -584,6 +567,26 @@ def resolve_commerce_navigator(
         )
 
     channel = _selected_channel(msg)
+    genuine_purchase_entry = False
+    try:
+        from .checkout_route_owner import (  # noqa: PLC0415
+            is_genuine_purchase_channel_entry,
+        )
+
+        genuine_purchase_entry = is_genuine_purchase_channel_entry(
+            message=msg,
+            order_prep=order_prep,
+            state=state,
+            inbound_metadata=inbound_metadata,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — genuine-entry probe must not block navigator
+        genuine_purchase_entry = False
+    if (
+        channel is None
+        and genuine_purchase_entry
+        and len(channels) == 1
+    ):
+        channel = channels[0]
     whatsapp_committed = _whatsapp_checkout_committed(prep)
     browse_in_checkout = bool(_BROWSE_SIGNAL_RE.search(_norm(msg)))
     _address_turn = False
@@ -701,7 +704,11 @@ def resolve_commerce_navigator(
             customer_intent="whatsapp_quick_order",
         )
 
-    if _is_generic_buy_intent(msg, intent_name=intent_name) and not browse_in_checkout:
+    if (
+        genuine_purchase_entry
+        and not browse_in_checkout
+        and len(channels) >= 2
+    ):
         return CommerceNavigatorDecision(
             stage="purchase_channel_selection",
             confidence=0.91,

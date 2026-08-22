@@ -1526,3 +1526,16 @@ def is_pure_greeting_without_commerce(message: str) -> bool:
     if _has_substantive_residue(message):
         return False
     return True
+
+
+def has_leading_greeting_frame(message: str) -> bool:
+    """True when a greeting was stripped and substantive residue remains.
+
+    Reuses the existing greeting-residue stripper — not a new phrase map.
+    Distinguishes compact purchase openers from mixed greeting+commerce STT.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return False
+    residue = (_strip_greeting_residue(raw) or "").strip()
+    return bool(residue) and residue != raw
