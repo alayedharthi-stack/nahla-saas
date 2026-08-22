@@ -6,6 +6,7 @@ customer-facing wording.
 """
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any, Tuple
 from unittest.mock import patch
