@@ -21,10 +21,14 @@ from modules.ai.brain.catalog.navigation import (  # noqa: E402
     try_catalog_navigation_decision,
 )
 from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
+    has_actionable_active_order_context,
     is_genuine_purchase_channel_entry,
     purchase_channel_committed,
     resolve_available_purchase_channel_facts,
     resolve_purchase_channel_entry_owner,
+)
+from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: E402
+    is_active_order_flow,
 )
 from modules.ai.brain.commerce.commerce_navigator import (  # noqa: E402
     resolve_commerce_navigator,
@@ -187,6 +191,69 @@ def _decide(ctx: BrainContext):
         return_value=COLLECTIONS,
     ):
         return DefaultDecisionEngine().decide(ctx)
+
+
+_SHOE = {
+    "id": "501",
+    "external_id": "sku-white-shoe",
+    "title": "حذاء رياضي أبيض",
+    "price": 249,
+}
+
+
+def _stale_ordering_shell() -> MerchantConversationState:
+    """Generic equivalent of the live empty ordering shell.
+
+    Stage labels and identity are present. No product, referent, cart,
+    draft, or committed channel owns the turn.
+    """
+    return MerchantConversationState(
+        greeted=True,
+        stage="ordering",
+        turn=8,
+        current_product_focus=None,
+        commerce_session={
+            "stage": "variant_selected",
+            "active_product": "",
+            "active_variant": "",
+        },
+        order_prep=OrderPreparationState(
+            quantity=1,
+            customer_first_name="أحمد",
+            customer_last_name="سالم",
+            city="الرياض",
+            checkout_channel="",
+            awaiting_checkout_channel=False,
+            catalog_line_items_authoritative=False,
+        ),
+    )
+
+
+def _two_channel_sales() -> MerchantSalesChannels:
+    return _sales(store=True, whatsapp=True, store_url=_STORE)
+
+
+def _stale_shell_ctx(
+    msg: str,
+    *,
+    sales: MerchantSalesChannels | None = None,
+    state: MerchantConversationState | None = None,
+    intent_name: str | None = None,
+    store_url: str = _STORE,
+    maps_url: str = "",
+    tenant_id: int = 11,
+) -> BrainContext:
+    chosen_sales = sales if sales is not None else _two_channel_sales()
+    return _ctx(
+        msg,
+        tenant_id=tenant_id,
+        state=state or _stale_ordering_shell(),
+        db=MagicMock(),
+        intent_name=intent_name,
+        store_url=store_url,
+        maps_url=maps_url,
+        sales=chosen_sales,
+    )
 
 
 class TestGenuinePurchaseEntrySignal:
@@ -575,3 +642,272 @@ class TestControlNGenericCommerce:
             "online_store",
             "whatsapp_quick_order",
         ]
+
+
+def _actionable(state: MerchantConversationState, *, referent: Any = None) -> bool:
+    return has_actionable_active_order_context(
+        order_prep=state.order_prep,
+        state=state,
+        selected_product_referent=referent,
+        current_product_focus=state.current_product_focus,
+        stage=state.stage,
+    )
+
+
+class TestStaleShellControlALiveOrderingShell:
+    def test_empty_ordering_shell_is_fresh_two_channel_entry(self) -> None:
+        state = _stale_ordering_shell()
+        assert state.stage == "ordering"
+        assert (state.commerce_session or {}).get("stage") == "variant_selected"
+        assert state.current_product_focus is None
+        assert state.order_prep.checkout_channel == ""
+        assert state.order_prep.awaiting_checkout_channel is False
+        assert state.order_prep.quantity == 1
+        assert state.order_prep.catalog_line_items_authoritative is False
+        assert state.order_prep.customer_first_name
+        assert is_active_order_flow(stage=state.stage, order_prep=state.order_prep) is True
+        assert _actionable(state) is False
+        assert is_genuine_purchase_channel_entry(
+            message=MSG_LIVE,
+            order_prep=state.order_prep,
+            state=state,
+            current_product_focus=None,
+            selected_product_referent=None,
+            stage=state.stage,
+        ) is True
+        ctx = _stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state)
+        decision = _decide(ctx)
+        _assert_not_groups(decision)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+        ]
+        nav = resolve_commerce_navigator(
+            message=MSG_LIVE,
+            intent_name="start_order",
+            stage=state.stage,
+            order_prep=state.order_prep,
+            state=state,
+            merchant_sales_channels=_two_channel_sales(),
+        )
+        assert nav.stage == "purchase_channel_selection"
+
+
+class TestStaleShellControlBLegacyVariantSelected:
+    def test_variant_selected_label_without_product_is_not_active_checkout(self) -> None:
+        state = _stale_ordering_shell()
+        assert (state.commerce_session or {}).get("stage") == "variant_selected"
+        assert _actionable(state) is False
+        nav = resolve_commerce_navigator(
+            message=MSG_LIVE,
+            intent_name="start_order",
+            stage=state.stage,
+            order_prep=state.order_prep,
+            state=state,
+            merchant_sales_channels=_two_channel_sales(),
+        )
+        assert nav.stage != "whatsapp_quick_order"
+        assert nav.stage == "purchase_channel_selection"
+
+
+class TestStaleShellControlCIdentityDoesNotOwn:
+    def test_name_and_address_alone_are_not_commerce_ownership(self) -> None:
+        state = _stale_ordering_shell()
+        assert state.order_prep.customer_first_name == "أحمد"
+        assert state.order_prep.city == "الرياض"
+        assert _actionable(state) is False
+        decision = _decide(_stale_shell_ctx(MSG_START, intent_name="start_order", state=state))
+        assert decision.args.get("topic") == "purchase_channel_selection"
+
+
+class TestStaleShellControlDDefaultQuantityDoesNotOwn:
+    def test_quantity_one_alone_is_not_active_order_evidence(self) -> None:
+        state = _stale_ordering_shell()
+        assert state.order_prep.quantity == 1
+        assert _actionable(state) is False
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") == "purchase_channel_selection"
+
+
+class TestStaleShellControlERealProductReferent:
+    def test_valid_current_product_continues_commerce(self) -> None:
+        state = _stale_ordering_shell()
+        state.current_product_focus = dict(_SHOE)
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+
+
+class TestStaleShellControlFAuthoritativeLineItems:
+    def test_real_cart_items_continue_active_flow(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.line_items = [
+            {
+                "id": "501",
+                "external_id": "sku-white-shoe",
+                "title": "حذاء رياضي أبيض",
+                "quantity": 1,
+            },
+        ]
+        state.order_prep.catalog_line_items_authoritative = True
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+
+class TestStaleShellControlGValidDraft:
+    def test_real_draft_order_continues_active_flow(self) -> None:
+        state = _stale_ordering_shell()
+        state.draft_order_id = "draft-901"
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+
+class TestStaleShellControlHCommittedChannel:
+    def test_committed_channel_does_not_replay_selector(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.checkout_channel = "whatsapp_fast"
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        nav = resolve_commerce_navigator(
+            message=MSG_LIVE,
+            intent_name="start_order",
+            stage=state.stage,
+            order_prep=state.order_prep,
+            state=state,
+            merchant_sales_channels=_two_channel_sales(),
+        )
+        assert nav.stage != "purchase_channel_selection"
+
+
+class TestStaleShellControlIPaymentFulfillment:
+    def test_real_payment_order_continues(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.product_id = "501"
+        state.order_prep.order_status = "awaiting_payment"
+        state.order_prep.awaiting_payment_receipt = True
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+
+class TestStaleShellControlJTwoChannels:
+    def test_empty_shell_two_channels_selects_both(self) -> None:
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order"))
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+        ]
+
+
+class TestStaleShellControlKThreeChannels:
+    def test_empty_shell_three_channels_selects_all(self) -> None:
+        sales = _sales(
+            store=True,
+            whatsapp=True,
+            showroom=True,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+        ctx = _stale_shell_ctx(
+            MSG_LIVE,
+            sales=sales,
+            intent_name="start_order",
+            maps_url=_MAPS,
+        )
+        decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+
+
+class TestStaleShellControlLOneChannel:
+    def test_empty_shell_one_channel_routes_directly(self) -> None:
+        sales = _sales(store=True, whatsapp=False, store_url=_STORE)
+        ctx = _stale_shell_ctx(MSG_LIVE, sales=sales, intent_name="start_order")
+        decision = _decide(ctx)
+        assert decision.args.get("topic") == "online_store_redirect"
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == ["online_store"]
+
+
+class TestStaleShellControlMSocial:
+    def test_social_plus_stale_shell_does_not_activate_commerce(self) -> None:
+        state = _stale_ordering_shell()
+        assert _actionable(state) is False
+        ctx = _stale_shell_ctx(MSG_SOCIAL, state=state)
+        decision = _decide(ctx)
+        _assert_not_groups(decision)
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert decision.args.get("topic") != "order_recovery"
+        nav = resolve_commerce_navigator(
+            message=MSG_SOCIAL,
+            intent_name=str(ctx.intent.name),
+            stage=state.stage,
+            order_prep=state.order_prep,
+            state=state,
+            merchant_sales_channels=_two_channel_sales(),
+        )
+        assert nav.stage != "purchase_channel_selection"
+        assert nav.stage != "whatsapp_quick_order"
+
+
+class TestStaleShellControlNRetiredGroups:
+    def test_stale_shell_start_order_never_returns_groups(self) -> None:
+        ctx = _stale_shell_ctx(MSG_LIVE, intent_name="start_order")
+        decision = _decide(ctx)
+        _assert_not_groups(decision)
+        nav = try_catalog_navigation_decision(ctx)
+        assert nav is None or nav.args.get("chosen_path") != PATH_GROUPS
+
+
+class TestStaleShellControlOPriorD10:
+    def test_empty_state_two_channel_selector_still_passes(self) -> None:
+        ctx = _ctx(
+            MSG_LIVE,
+            db=MagicMock(),
+            intent_name="start_order",
+            store_url=_STORE,
+            sales=_two_channel_sales(),
+        )
+        decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+        ]
+
+
+class TestStaleShellControlQTenantIsolation:
+    def test_stale_shell_capabilities_remain_tenant_scoped(self) -> None:
+        store_sales = _two_channel_sales()
+        wa_sales = _sales(whatsapp=True)
+        dec_a = _decide(
+            _stale_shell_ctx(
+                MSG_LIVE,
+                tenant_id=41,
+                sales=store_sales,
+                intent_name="start_order",
+            )
+        )
+        dec_b = _decide(
+            _stale_shell_ctx(
+                MSG_LIVE,
+                tenant_id=42,
+                sales=wa_sales,
+                store_url="",
+                intent_name="start_order",
+            )
+        )
+        assert dec_a.args.get("topic") == "purchase_channel_selection"
+        assert "online_store" in dec_a.args.get("available_purchase_channels")
+        assert dec_b.args.get("topic") != "purchase_channel_selection"

@@ -361,11 +361,17 @@ def _selected_channel(message: str) -> Optional[PurchaseChannel]:
     return None
 
 
-def _is_active_whatsapp_checkout(*, stage: str = "", order_prep: Any = None) -> bool:
+def _is_active_whatsapp_checkout(*, stage: str = "", order_prep: Any = None, state: Any = None) -> bool:
     try:
-        from .prebrain_order_flow_arbiter import is_active_order_flow  # noqa: PLC0415
+        from .checkout_route_owner import (  # noqa: PLC0415
+            has_actionable_active_order_context,
+        )
 
-        return is_active_order_flow(stage=stage, order_prep=order_prep)
+        return has_actionable_active_order_context(
+            order_prep=order_prep,
+            state=state,
+            stage=stage,
+        )
     except Exception:  # noqa: BLE001
         return False
 
@@ -604,7 +610,7 @@ def resolve_commerce_navigator(
     if browse_in_checkout and not _address_turn and (
         whatsapp_committed
         or channel == "whatsapp_quick_order"
-        or _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep)
+        or _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep, state=state)
     ):
         return CommerceNavigatorDecision(
             stage="browse_with_purchase_intent",
@@ -622,7 +628,9 @@ def resolve_commerce_navigator(
         or whatsapp_committed
         or (
             channel is None
-            and _is_active_whatsapp_checkout(stage=stage, order_prep=order_prep)
+            and _is_active_whatsapp_checkout(
+                stage=stage, order_prep=order_prep, state=state
+            )
         )
     )
 
