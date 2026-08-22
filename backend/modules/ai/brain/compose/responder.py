@@ -552,16 +552,25 @@ class DefaultComposer:
                     from ..commerce.product_presentation_selection import (  # noqa: PLC0415
                         apply_search_product_presentation,
                         build_standard_pick_buttons,
+                        presentation_context_from_brain,
                     )
 
                     apply_search_product_presentation(
                         result.data,
                         candidates=candidates,
-                        resolved_product=(
-                            data.get("product")
-                            or getattr(getattr(ctx, "state", None), "current_product_focus", None)
-                        ),
                         build_buttons=build_standard_pick_buttons,
+                        **presentation_context_from_brain(
+                            ctx,
+                            decision,
+                            resolved_product=(
+                                data.get("product")
+                                or getattr(
+                                    getattr(ctx, "state", None),
+                                    "current_product_focus",
+                                    None,
+                                )
+                            ),
+                        ),
                     )
                 return discovery_text
 
@@ -866,6 +875,7 @@ class DefaultComposer:
                     from ..commerce.product_presentation_selection import (  # noqa: PLC0415
                         apply_search_product_presentation,
                         build_standard_pick_buttons,
+                        presentation_context_from_brain,
                     )
 
                     _resolved = data.get("product")
@@ -878,8 +888,12 @@ class DefaultComposer:
                     apply_search_product_presentation(
                         result.data,
                         candidates=_card_rows,
-                        resolved_product=_resolved,
                         build_buttons=build_standard_pick_buttons,
+                        **presentation_context_from_brain(
+                            ctx,
+                            decision,
+                            resolved_product=_resolved,
+                        ),
                     )
                 return (_catalog_text or "").strip()
 
@@ -894,6 +908,7 @@ class DefaultComposer:
                     from ..commerce.product_presentation_selection import (  # noqa: PLC0415
                         apply_search_product_presentation,
                         build_standard_pick_buttons,
+                        presentation_context_from_brain,
                         resolve_browse_presentation_candidates,
                     )
 
@@ -914,10 +929,14 @@ class DefaultComposer:
                         apply_search_product_presentation(
                             result.data,
                             candidates=_stamp_rows,
-                            resolved_product=(
-                                _resolved if isinstance(_resolved, dict) else None
-                            ),
                             build_buttons=build_standard_pick_buttons,
+                            **presentation_context_from_brain(
+                                ctx,
+                                decision,
+                                resolved_product=(
+                                    _resolved if isinstance(_resolved, dict) else None
+                                ),
+                            ),
                         )
                 elif _question_kind in _CATALOG_QA_QUESTION_KINDS:
                     _card_rows = list(candidates or compose_products or [])
@@ -927,6 +946,7 @@ class DefaultComposer:
                         from ..commerce.product_presentation_selection import (  # noqa: PLC0415
                             apply_search_product_presentation,
                             build_standard_pick_buttons,
+                            presentation_context_from_brain,
                         )
 
                         _resolved = data.get("product")
@@ -939,8 +959,12 @@ class DefaultComposer:
                         apply_search_product_presentation(
                             result.data,
                             candidates=_card_rows,
-                            resolved_product=_resolved,
                             build_buttons=build_standard_pick_buttons,
+                            **presentation_context_from_brain(
+                                ctx,
+                                decision,
+                                resolved_product=_resolved,
+                            ),
                         )
                 return (_catalog_text or "").strip()
 
@@ -981,6 +1005,7 @@ class DefaultComposer:
                 PRESENTATION_SINGLE_RICH,
                 apply_search_product_presentation,
                 build_standard_pick_buttons,
+                presentation_context_from_brain,
                 resolve_browse_presentation_candidates,
             )
 
@@ -998,8 +1023,12 @@ class DefaultComposer:
             _pres = apply_search_product_presentation(
                 result.data,
                 candidates=_stamp_rows or list(candidates or []),
-                resolved_product=_resolved if isinstance(_resolved, dict) else None,
                 build_buttons=build_standard_pick_buttons,
+                **presentation_context_from_brain(
+                    ctx,
+                    decision,
+                    resolved_product=_resolved if isinstance(_resolved, dict) else None,
+                ),
             )
             if _pres.kind == PRESENTATION_SINGLE_RICH:
                 # Card/caption carries product facts; avoid pick_N list text.

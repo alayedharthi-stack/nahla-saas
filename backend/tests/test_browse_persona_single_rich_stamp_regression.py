@@ -1,6 +1,6 @@
 """
-Regression: browse persona compose success must stamp pending_product_cards
-when SINGLE_RICH contract is met (one display candidate with catalog identity).
+Regression: browse persona compose stamps pending_product_cards only when an
+authoritative product referent grounds SINGLE_RICH (AI-D02).
 
 Reproduces the production path in responder.py ACTION_SEARCH_PRODUCTS browse branch.
 """
@@ -62,7 +62,7 @@ SHOE = {
 }
 
 
-def _search_ctx(*, message: str) -> BrainContext:
+def _search_ctx(*, message: str, state: MerchantConversationState | None = None) -> BrainContext:
     return BrainContext(
         tenant_id=1,
         customer_phone="966500009429",
@@ -70,9 +70,35 @@ def _search_ctx(*, message: str) -> BrainContext:
         conversation_id=9739,
         message=message,
         intent=Intent(name="browse", confidence=0.9, raw_message=message),
-        state=MerchantConversationState(greeted=True, stage="discovery"),
-        facts=CommerceFacts(has_products=True, orderable=True, product_count=1),
-        merchant_context={"ai_settings": {"persona_composer_enabled": True}},
+        state=state or MerchantConversationState(greeted=True, stage="discovery"),
+        facts=CommerceFacts(
+            has_products=True,
+            orderable=True,
+            product_count=1,
+            discovery_products=[dict(JACKET_RICH)],
+            top_products=[dict(JACKET_RICH)],
+        ),
+        merchant_context={
+            "ai_settings": {"persona_composer_enabled": True},
+            "products": [dict(JACKET_RICH)],
+        },
+    )
+
+
+def _grounded_search_ctx(*, message: str) -> BrainContext:
+    row = {
+        **JACKET_RICH,
+        "customer_selected": True,
+        "provenance": "catalog_order_selected",
+    }
+    return _search_ctx(
+        message=message,
+        state=MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            current_product_focus=dict(row),
+            last_presented_products=[dict(row)],
+        ),
     )
 
 
@@ -103,6 +129,7 @@ async def _run_browse_compose(
     message: str = "أبغى جاكيت",
     persona_text: str = "عندنا جاكيت رائع متوفر حالياً.",
     display_slice_override: tuple[list[dict[str, Any]], dict[str, Any]] | None = None,
+    ctx: BrainContext | None = None,
 ) -> tuple[str, ActionResult, dict[str, Any]]:
     """Drive responder browse path and capture presentation diagnostics."""
     from modules.ai.brain.compose.responder import (  # noqa: PLC0415
@@ -117,10 +144,17 @@ async def _run_browse_compose(
         classify_catalog_question_kind,
     )
 
-    ctx = _search_ctx(message=message)
+    ctx = ctx or _search_ctx(message=message)
+    result_payload: dict[str, Any] = {
+        "products": products,
+        "query": "جاكيت",
+        "count": len(products),
+    }
+    if len(products) == 1 and isinstance(products[0], dict):
+        result_payload["product"] = dict(products[0])
     result = ActionResult(
         success=True,
-        data={"products": products, "query": "جاكيت", "count": len(products)},
+        data=result_payload,
     )
     decision = Decision(
         action=ACTION_SEARCH_PRODUCTS,
@@ -153,7 +187,7 @@ async def _run_browse_compose(
 
     original_apply = pps.apply_search_product_presentation
 
-    def _spy_apply(result_data, *, candidates, resolved_product=None, build_buttons=None):
+    def _spy_apply(result_data, *, candidates, build_buttons=None, **kwargs):
         apply_calls.append(
             {
                 "candidate_count": len(list(candidates or [])),
@@ -165,8 +199,8 @@ async def _run_browse_compose(
         return original_apply(
             result_data,
             candidates=candidates,
-            resolved_product=resolved_product,
             build_buttons=build_buttons,
+            **kwargs,
         )
 
     composer = DefaultComposer()
@@ -231,19 +265,32 @@ async def _run_browse_compose(
 
 
 class TestBrowsePersonaSingleRichStamp:
-    def test_single_jacket_persona_success_stamps_rich_card(self) -> None:
-        """Matrix #1: one resolved product → persona text + SINGLE_RICH + pending_product_cards=1."""
+    def test_ungrounded_browse_singleton_does_not_stamp_card(self) -> None:
+        """Matrix #1: ranked singleton browse hit → persona text, no card."""
 
         async def _run() -> None:
             text, result, diag = await _run_browse_compose(products=[JACKET_RICH])
 
             assert text == "عندنا جاكيت رائع متوفر حالياً."
             assert diag["display_candidate_count"] == 1
-            assert diag["compose_product_ids"] == [28]
-            assert diag["catalog_product_ids"] == [28]
-            assert diag["apply_invoked"], (
-                "apply_search_product_presentation was never called on persona success path"
+            assert diag["apply_invoked"]
+            assert diag["presentation_kind"] == PRESENTATION_NONE, diag
+            assert diag["presentation_reason"] == "ranked_singleton_not_referent"
+            assert diag["pending_card_count_after"] == 0, diag
+            assert not result.data.get("pending_product_cards")
+
+        asyncio.run(_run())
+
+    def test_grounded_singleton_persona_success_stamps_rich_card(self) -> None:
+        """Matrix #1b: authoritative referent → SINGLE_RICH + pending_product_cards=1."""
+
+        async def _run() -> None:
+            text, result, diag = await _run_browse_compose(
+                products=[JACKET_RICH],
+                ctx=_grounded_search_ctx(message="أبغى نفس الجاكيت"),
             )
+
+            assert text == "عندنا جاكيت رائع متوفر حالياً."
             assert diag["presentation_kind"] == PRESENTATION_SINGLE_RICH, diag
             assert diag["pending_card_count_after"] == 1, diag
             assert result.data.get("pending_buttons") in (None, [])
@@ -251,10 +298,13 @@ class TestBrowsePersonaSingleRichStamp:
         asyncio.run(_run())
 
     def test_single_rich_card_carries_image_and_product_url(self) -> None:
-        """Matrix #2: stamped card carries file_url and product_url from catalog row."""
+        """Matrix #2: grounded stamped card carries file_url and product_url."""
 
         async def _run() -> None:
-            _text, result, diag = await _run_browse_compose(products=[JACKET_RICH])
+            _text, result, diag = await _run_browse_compose(
+                products=[JACKET_RICH],
+                ctx=_grounded_search_ctx(message="أبغى نفس الجاكيت"),
+            )
 
             assert diag["presentation_kind"] == PRESENTATION_SINGLE_RICH
             cards = result.data.get("pending_product_cards") or []
@@ -265,10 +315,13 @@ class TestBrowsePersonaSingleRichStamp:
         asyncio.run(_run())
 
     def test_persona_success_does_not_erase_stamp(self) -> None:
-        """Matrix #3: persona compose success leaves pending_product_cards intact."""
+        """Matrix #3: grounded persona compose leaves pending_product_cards intact."""
 
         async def _run() -> None:
-            text, result, _diag = await _run_browse_compose(products=[JACKET_RICH])
+            text, result, _diag = await _run_browse_compose(
+                products=[JACKET_RICH],
+                ctx=_grounded_search_ctx(message="أبغى نفس الجاكيت"),
+            )
 
             assert text
             cards = result.data.get("pending_product_cards") or []
@@ -283,7 +336,7 @@ class TestBrowsePersonaSingleRichStamp:
 
         data: dict[str, Any] = {
             "product_presentation_kind": PRESENTATION_SINGLE_RICH,
-            "product_presentation_reason": "single_resolved_catalog_identity",
+            "product_presentation_reason": "authoritative_referent_grounded",
             "presentation_candidate_count": 1,
             "pending_product_cards": [
                 {
@@ -407,8 +460,8 @@ class TestBrowsePersonaSingleRichStamp:
 
         asyncio.run(_run())
 
-    def test_title_only_plus_identified_companion_collapses_to_single_rich(self) -> None:
-        """Matrix #8: title-only junk + identified jacket → SINGLE_RICH for identified row."""
+    def test_title_only_plus_identified_companion_stays_ungrounded(self) -> None:
+        """Matrix #8: title-only junk + identified jacket without referent → no card."""
 
         title_only = {"title": "جاكيت", "can_checkout": True, "orderable": True}
 
@@ -420,22 +473,24 @@ class TestBrowsePersonaSingleRichStamp:
             )
 
             assert diag["apply_invoked"]
-            assert diag["presentation_kind"] == PRESENTATION_SINGLE_RICH, diag
-            assert diag["pending_card_count_after"] == 1
-            cards = result.data.get("pending_product_cards") or []
-            assert cards[0]["id"] == 28
+            assert diag["presentation_kind"] == PRESENTATION_NONE, diag
+            assert diag["pending_card_count_after"] == 0
+            assert not result.data.get("pending_product_cards")
 
         asyncio.run(_run())
 
     def test_stamp_emits_observability_fields(self) -> None:
-        """Matrix #9: presentation observability keys present after stamp."""
+        """Matrix #9: presentation observability keys present after grounded stamp."""
 
         async def _run() -> None:
-            _text, result, diag = await _run_browse_compose(products=[JACKET_RICH])
+            _text, result, diag = await _run_browse_compose(
+                products=[JACKET_RICH],
+                ctx=_grounded_search_ctx(message="أبغى نفس الجاكيت"),
+            )
 
             obs = diag["observability"]
             assert obs["product_presentation_kind"] == PRESENTATION_SINGLE_RICH
-            assert obs["product_presentation_reason"] == "single_resolved_catalog_identity"
+            assert obs["product_presentation_reason"] == "authoritative_referent_grounded"
             assert obs["presentation_candidate_count"] == 1
             assert obs["pending_product_card_count"] == 1
             assert obs["pending_product_card_ids"] == [28]
@@ -443,8 +498,8 @@ class TestBrowsePersonaSingleRichStamp:
 
         asyncio.run(_run())
 
-    def test_minimal_tenant1_jacket_shape_stamps_rich_card(self) -> None:
-        """Live Tenant 1 jacket row shape (no image_url) still stamps on persona success."""
+    def test_minimal_tenant1_jacket_shape_stamps_when_grounded(self) -> None:
+        """Live Tenant 1 jacket row shape stamps only with authoritative referent."""
 
         minimal = {
             "id": 28,
@@ -459,16 +514,18 @@ class TestBrowsePersonaSingleRichStamp:
             _text, result, diag = await _run_browse_compose(
                 products=[minimal],
                 message="اعرض الجاكيت",
+                ctx=_grounded_search_ctx(message="اعرض الجاكيت"),
             )
             assert diag["display_candidate_count"] == 1
             assert diag["apply_invoked"]
             assert diag["presentation_kind"] == PRESENTATION_SINGLE_RICH, diag
             assert diag["pending_card_count_after"] == 1
+            assert result.data.get("pending_product_cards")
 
         asyncio.run(_run())
 
-    def test_empty_display_slice_recovers_singleton_from_executor(self) -> None:
-        """Empty display slice recovers SINGLE_RICH via executor + catalog_product_ids."""
+    def test_empty_display_slice_recovers_singleton_without_card_when_ungrounded(self) -> None:
+        """Empty display slice recovers candidate row but does not stamp without referent."""
 
         from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
         from modules.ai.brain.commerce import product_presentation_selection as pps  # noqa: PLC0415
@@ -476,13 +533,13 @@ class TestBrowsePersonaSingleRichStamp:
         original_apply = pps.apply_search_product_presentation
         apply_calls: list[int] = []
 
-        def _spy_apply(_data, *, candidates, resolved_product=None, build_buttons=None):
+        def _spy_apply(_data, *, candidates, build_buttons=None, **kwargs):
             apply_calls.append(len(list(candidates or [])))
             return original_apply(
                 _data,
                 candidates=candidates,
-                resolved_product=resolved_product,
                 build_buttons=build_buttons,
+                **kwargs,
             )
 
         async def _run() -> None:
@@ -543,10 +600,9 @@ class TestBrowsePersonaSingleRichStamp:
 
             assert "الجاكيت" in text
             assert apply_calls == [1], "stamp gate must recover singleton from executor"
-            assert result.data.get("product_presentation_kind") == PRESENTATION_SINGLE_RICH
-            cards = result.data.get("pending_product_cards") or []
-            assert len(cards) == 1
-            assert cards[0]["id"] == 28
+            assert result.data.get("product_presentation_kind") == PRESENTATION_NONE
+            assert result.data.get("product_presentation_reason") == "ranked_singleton_not_referent"
+            assert not result.data.get("pending_product_cards")
             assert result.data.get("catalog_product_ids") == [28]
 
         asyncio.run(_run())

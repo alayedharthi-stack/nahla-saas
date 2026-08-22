@@ -231,7 +231,11 @@ class TestComposerBreadthIntegration:
                 state=MerchantConversationState(greeted=True),
                 facts=CommerceFacts(has_products=True, orderable=True),
             )
-            return await composer.compose(decision, result, ctx)
+            return await composer.compose(decision, result, ctx), result
 
-        reply = asyncio.run(_run())
-        assert "عسل طلح" in reply
+        reply, composed = asyncio.run(_run())
+        assert (reply or "").strip()
+        assert composed.data.get("product_presentation_kind") != "single_resolved_rich"
+        assert not composed.data.get("pending_product_cards")
+        candidates = composed.data.get("pending_candidates") or composed.data.get("products") or []
+        assert any(str((row or {}).get("title") or "") == "عسل طلح" for row in candidates)
