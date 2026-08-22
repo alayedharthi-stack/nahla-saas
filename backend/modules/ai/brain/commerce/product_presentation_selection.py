@@ -297,22 +297,12 @@ def resolve_product_presentation(
     single = rows[0]
     focus = resolved_product if isinstance(resolved_product, dict) else None
     chosen = single
-    if focus and _has_catalog_identity(focus):
-        # Prefer the already-resolved focus when it matches the singleton.
-        focus_id = str(
-            focus.get("external_id")
-            or focus.get("id")
-            or focus.get("product_id")
-            or ""
-        ).strip()
-        single_id = str(
-            single.get("external_id")
-            or single.get("id")
-            or single.get("product_id")
-            or ""
-        ).strip()
-        if not focus_id or not single_id or focus_id == single_id:
-            chosen = {**single, **{k: v for k, v in focus.items() if v not in (None, "")}}
+    if (
+        focus
+        and _has_catalog_identity(focus)
+        and _referent_matches_candidate(focus, single)
+    ):
+        chosen = {**single, **{k: v for k, v in focus.items() if v not in (None, "")}}
 
     if not _has_catalog_identity(chosen):
         # Title-only singleton cannot drive a trusted rich card; fall back to choices.

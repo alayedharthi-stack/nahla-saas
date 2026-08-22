@@ -342,7 +342,11 @@ def set_product_focus(
 
     new_id = product_focus_identity(new_focus)
     cur_id = product_focus_identity(cur_dict)
-    same_identity_rebind = bool(new_id and cur_id and new_id == cur_id)
+    from .catalog_reasoning_evidence import _rows_same_identity  # noqa: PLC0415
+
+    same_identity_rebind = bool(
+        new_focus and cur_dict and _rows_same_identity(new_focus, cur_dict)
+    )
 
     if (
         preserve_previous

@@ -266,6 +266,63 @@ class TestValidReferentD03:
         )
         assert decision.kind == PRESENTATION_SINGLE_RICH
 
+    def test_cross_namespace_identity_collision_does_not_preserve_turn(self) -> None:
+        prior = {
+            "id": 501,
+            "title": "قميص قطني أزرق",
+            "customer_selected": True,
+            "provenance": "catalog_order_selected",
+        }
+        ranked = {
+            "id": 802,
+            "external_id": "501",
+            "title": "حذاء رياضي أبيض",
+            "price": 249,
+            "in_stock": True,
+        }
+        state = MerchantConversationState(
+            greeted=True,
+            stage="discovery",
+            turn=8,
+            product_focus_turn=7,
+            current_product_focus=dict(prior),
+        )
+        set_product_focus(
+            state,
+            dict(ranked),
+            reason="executor_product_search_products",
+            turn=8,
+        )
+        assert state.product_focus_turn == 8
+        assert not state.current_product_focus.get("customer_selected")
+        decision = resolve_product_presentation(
+            [ranked],
+            state=state,
+            resolved_product=ranked,
+            facts=_catalog_facts(ranked),
+            merchant_context={"products": [dict(ranked)]},
+        )
+        assert decision.kind == PRESENTATION_NONE
+
+    def test_cross_namespace_resolved_product_does_not_merge_selection(self) -> None:
+        selected_shirt = {
+            "id": 501,
+            "title": "قميص قطني أزرق",
+            "customer_selected": True,
+            "provenance": "catalog_order_selected",
+        }
+        ranked_shoe = {
+            "id": 802,
+            "external_id": "501",
+            "title": "حذاء رياضي أبيض",
+        }
+        decision = resolve_product_presentation(
+            [ranked_shoe],
+            resolved_product=selected_shirt,
+        )
+        assert decision.kind == PRESENTATION_NONE
+        assert not (decision.resolved_product or {}).get("customer_selected")
+
 
 class TestStaleReferentNoCard:
     def test_title_only_focus_does_not_ground(self) -> None:
