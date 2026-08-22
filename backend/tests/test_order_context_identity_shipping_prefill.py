@@ -158,8 +158,9 @@ def test_proposed_name_requires_confirm_not_operational_skip() -> None:
         normalized_phone="966500000001",
         name="",
         extra_metadata={
-            "proposed_name": "WhatsApp User",
+            "proposed_name": "أحمد سالم",
             "customer_name_status": STATUS_PROPOSED,
+            "customer_name_source": "whatsapp_profile",
             "customer_name_confidence": 0.4,
         },
     )
@@ -174,6 +175,9 @@ def test_proposed_name_requires_confirm_not_operational_skip() -> None:
     )
     assert ctx.identity.missing_mode == MODE_CONFIRM
     assert ctx.identity.has_verified_name is False
+    assert ctx.identity.has_proposed_name is True
+    assert ctx.identity.confirmation_candidate == "أحمد سالم"
+    assert not ctx.identity.operational_name
 
 
 def test_order_context_prefills_verified_name_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

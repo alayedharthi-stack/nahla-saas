@@ -12,8 +12,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.customer_identity_resolver import (
+    SOURCE_WHATSAPP_PROFILE,
     STATUS_PROPOSED,
-    can_use_name_for_operations,
 )
 from core.wa_order_lifecycle import has_accepted_delivery_address
 
@@ -681,17 +681,45 @@ def build_checkout_compose_facts(
 
     name_mode = str(getattr(identity, "missing_mode", "") or prefill.identity_missing_mode)
     operational_name = str(getattr(identity, "operational_name", "") or "").strip()
+    confirmation_candidate = str(
+        getattr(identity, "confirmation_candidate", "") or ""
+    ).strip()
+    name_source = str(getattr(identity, "name_source", "") or "").strip()
+    name_status = str(getattr(identity, "name_status", "") or "").strip()
+    name_confidence = getattr(identity, "confidence", None)
+
     if name_mode == MODE_SKIP and operational_name:
         facts["name_mode"] = MODE_SKIP
         facts["known_name"] = operational_name
-        facts["name_reason"] = (
-            getattr(identity, "name_source", "") or "known_customer_name"
-        )
-    elif name_mode == MODE_CONFIRM and operational_name:
+        facts["name_operational"] = True
+        facts["name_reason"] = name_source or "known_customer_name"
+        if name_source:
+            facts["name_source"] = name_source
+        if name_status:
+            facts["name_status"] = name_status
+    elif name_mode == MODE_CONFIRM:
         facts["name_mode"] = MODE_CONFIRM
-        facts["known_name"] = operational_name
+        facts["name_operational"] = False
+        if confirmation_candidate:
+            facts["name_confirmation_candidate"] = confirmation_candidate
+            facts["name_source"] = name_source or SOURCE_WHATSAPP_PROFILE
+            if name_status:
+                facts["name_status"] = name_status
+            elif getattr(identity, "has_proposed_name", False):
+                facts["name_status"] = STATUS_PROPOSED
+            if name_confidence is not None:
+                facts["name_confidence"] = float(name_confidence or 0.0)
+        elif operational_name:
+            facts["name_confirmation_candidate"] = operational_name
+            facts["name_source"] = name_source or "inferred"
+            if name_status:
+                facts["name_status"] = name_status
     elif name_mode == MODE_ASK:
         facts["name_mode"] = MODE_ASK
+        facts["name_operational"] = False
+    elif name_mode == MODE_EDIT_REQUESTED:
+        facts["name_mode"] = MODE_EDIT_REQUESTED
+        facts["name_operational"] = False
 
     city_mode = str(prefill.shipping_city_mode or "")
     if shipping.city:

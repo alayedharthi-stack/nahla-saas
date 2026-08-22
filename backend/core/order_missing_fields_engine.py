@@ -212,13 +212,18 @@ def _resolve_name_state(ctx: Any) -> MissingFieldState:
             evidence={"customer_first_name": first, "customer_last_name": last},
         )
     if identity.has_proposed_name and not identity.has_verified_name:
+        candidate = str(getattr(identity, "confirmation_candidate", "") or "").strip()
         return MissingFieldState(
             field="name",
             mode=MODE_CONFIRM,
             reason="proposed_name_only",
-            source="whatsapp_profile",
+            source=str(getattr(identity, "name_source", "") or "").strip()
+            or "whatsapp_profile",
             confidence=identity.confidence,
-            evidence={"display_name": identity.display_name},
+            evidence={
+                "display_name": identity.display_name,
+                "name_confirmation_candidate": candidate or identity.display_name,
+            },
         )
     if identity.operational_name:
         return MissingFieldState(

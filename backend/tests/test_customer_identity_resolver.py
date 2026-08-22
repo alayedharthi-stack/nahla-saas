@@ -19,6 +19,7 @@ from core.customer_identity_resolver import (  # noqa: E402
     can_use_name_for_operations,
     is_official_name_status,
     read_customer_identity,
+    resolve_name_confirmation_candidate,
 )
 from core.customer_name_validator import validate_customer_name  # noqa: E402
 
@@ -102,3 +103,22 @@ class TestCustomerIdentityResolver:
         c = self._customer()
         apply_customer_name(c, "طيب طيب", source="ai_detected_name", explicit_customer_entry=True)
         assert c.name is None
+
+    def test_valid_proposed_name_is_confirmation_candidate_not_operational(self):
+        c = self._customer(
+            proposed_name="أحمد سالم",
+            customer_name_status=STATUS_PROPOSED,
+            customer_name_source="whatsapp_profile",
+            customer_name_confidence=0.4,
+        )
+        assert resolve_name_confirmation_candidate(c) == "أحمد سالم"
+        assert not can_use_name_for_operations(c)
+
+    def test_invalid_proposed_name_is_not_confirmation_candidate(self):
+        c = self._customer(
+            proposed_name="هذا انت",
+            customer_name_status=STATUS_PROPOSED,
+            customer_name_source="whatsapp_profile",
+        )
+        assert resolve_name_confirmation_candidate(c) == ""
+        assert not can_use_name_for_operations(c)

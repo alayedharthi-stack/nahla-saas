@@ -71,7 +71,7 @@ def _customer(db, tenant_id: int, *, name: str = "Ali Ahmed", verified: bool = T
             "customer_name_confidence": 0.95,
         }
     else:
-        meta = {"proposed_name": "WA User", "customer_name_status": "proposed", "customer_name_confidence": 0.4}
+        meta = {"proposed_name": "أحمد سالم", "customer_name_status": "proposed", "customer_name_confidence": 0.4}
     c = Customer(
         tenant_id=tenant_id,
         phone="+966500000001",
