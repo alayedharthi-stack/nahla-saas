@@ -107,6 +107,18 @@ def finalize_successful_whatsapp_connection(
             f"failed to persist successful WhatsApp connection for tenant={tenant_id}"
         ) from exc
 
+    try:
+        from services.meta_catalog_reconnect import (  # noqa: PLC0415
+            schedule_meta_catalog_reconnect_best_effort,
+        )
+        schedule_meta_catalog_reconnect_best_effort(tenant_id)
+    except Exception:  # noqa: silent-ok — catalog bind must not fail WhatsApp connect
+        logger.warning(
+            "[WAFinalize] catalog reconnect schedule skipped tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+
     return trial_started
 
 

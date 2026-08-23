@@ -19,7 +19,7 @@ import httpx
 
 from core.catalog import effective_retailer_id
 from core.config import META_GRAPH_API_VERSION
-from services.meta_catalog_import import _select_graph_token
+from services.meta_catalog_access import select_catalog_graph_token
 
 logger = logging.getLogger("nahla.meta_catalog_reconcile")
 
@@ -123,16 +123,19 @@ def fetch_meta_catalog_live_products(
         meta_info["error"] = "catalog_id_missing"
         return live, meta_info
 
-    token = str((_select_graph_token(conn) or {}).get("token") or "").strip()
+    pick = select_catalog_graph_token(conn, catalog_id) or {}
+    token = str(pick.get("token") or "").strip()
     if not token:
-        meta_info["error"] = "no_graph_token"
+        meta_info["error"] = str(pick.get("error") or "no_graph_token")
+        meta_info["token_source"] = pick.get("token_source")
         return live, meta_info
+    meta_info["token_source"] = pick.get("token_source")
 
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/products"
+    headers = {"Authorization": f"Bearer {token}"}
     params: Optional[Dict[str, str]] = {
         "fields": "id,retailer_id,name,price,availability",
         "limit": "250",
-        "access_token": token,
     }
 
     def _consume(resp: httpx.Response) -> bool:
@@ -162,7 +165,11 @@ def fetch_meta_catalog_live_products(
     try:
         if client is not None:
             while url:
-                resp = client.get(url, params=params if "graph.facebook.com" in url else None)
+                resp = client.get(
+                    url,
+                    params=params if "graph.facebook.com" in url else None,
+                    headers=headers,
+                )
                 if not _consume(resp):
                     meta_info["complete"] = False
                     return live, meta_info
@@ -173,7 +180,11 @@ def fetch_meta_catalog_live_products(
 
         with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
             while url:
-                resp = owned.get(url, params=params if "graph.facebook.com" in url else None)
+                resp = owned.get(
+                    url,
+                    params=params if "graph.facebook.com" in url else None,
+                    headers=headers,
+                )
                 if not _consume(resp):
                     meta_info["complete"] = False
                     return live, meta_info

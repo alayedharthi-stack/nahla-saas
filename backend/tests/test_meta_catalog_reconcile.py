@@ -229,8 +229,8 @@ def test_fetch_meta_catalog_retailer_ids_paginates():
     client.get.side_effect = [page1, page2]
 
     with patch(
-        "services.meta_catalog_reconcile._select_graph_token",
-        return_value={"token": "tok"},
+        "services.meta_catalog_reconcile.select_catalog_graph_token",
+        return_value={"token": "tok", "token_source": "platform_system_user"},
     ):
         ids, info = fetch_meta_catalog_retailer_ids(conn, "CAT-TEST", client=client)
 

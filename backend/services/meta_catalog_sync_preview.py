@@ -136,7 +136,9 @@ def preview_native_meta_sync(
 
     try:
         conn = _resolve_connection(db, tenant_id)
-        catalog_id, _token = _resolve_catalog_and_token(conn)
+        catalog_id, _token = _resolve_catalog_and_token(
+            conn, require_catalog_readable=False,
+        )
     except MetaCatalogPushError as exc:
         return {
             "eligible": False,

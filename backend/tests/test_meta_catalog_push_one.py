@@ -133,7 +133,7 @@ def test_confirm_get_empty_then_create():
     mock_client.__exit__.return_value = False
 
     with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
-        with patch("services.meta_catalog_push._select_graph_token", return_value={"token": "tok"}):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
 
@@ -173,7 +173,7 @@ def test_confirm_get_existing_then_update():
     mock_client.__exit__.return_value = False
 
     with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
-        with patch("services.meta_catalog_push._select_graph_token", return_value={"token": "tok"}):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
 
@@ -225,12 +225,31 @@ def test_missing_token_fails_before_post():
     db = _mock_db()
     with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
         with patch("services.meta_catalog_push.httpx.Client") as client_cls:
-            with patch("services.meta_catalog_push._select_graph_token", return_value={"token": ""}):
+            with patch(
+                "services.meta_catalog_push.select_catalog_graph_token",
+                return_value={"token": "", "error": "missing_graph_token"},
+            ):
                 try:
                     push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
                     assert False, "expected MetaCatalogPushError"
                 except MetaCatalogPushError as exc:
                     assert exc.code == "access_token_missing"
+    client_cls.assert_not_called()
+
+
+def test_catalog_unreadable_is_permission_denied_not_success():
+    db = _mock_db()
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.httpx.Client") as client_cls:
+            with patch(
+                "services.meta_catalog_push.select_catalog_graph_token",
+                return_value={"token": None, "error": "catalog_not_readable", "probes": []},
+            ):
+                try:
+                    push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+                    assert False, "expected MetaCatalogPushError"
+                except MetaCatalogPushError as exc:
+                    assert exc.code == "catalog_permission_denied"
     client_cls.assert_not_called()
 
 

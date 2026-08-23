@@ -14,6 +14,7 @@ from typing import Any, Dict, FrozenSet, Optional, Set
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.catalog import (
+    canonical_retailer_id,
     is_meta_export_eligible,
     meta_export_rejection_detail,
 )
@@ -22,7 +23,6 @@ from services.meta_catalog_push import (
     MetaCatalogPushError,
     find_meta_catalog_item_by_retailer_id,
     push_one_meta_catalog_item,
-    _resolve_catalog_and_token,
     _resolve_connection,
 )
 from services.meta_catalog_sync_preview import preview_native_meta_sync
@@ -287,6 +287,28 @@ def attempt_native_meta_sync(
     if parent is None:
         return {"ok": False, "skipped": True, "error_code": "sync_lock_not_acquired"}
 
+    try:
+        conn = _resolve_connection(db, tenant_id)
+        if not bool(getattr(conn, "catalog_enabled", False)):
+            parent.sync_status = "pending"
+            parent.sync_error = None
+            _write_sync_meta(parent, last_error_code="catalog_disabled")
+            db.commit()
+            return {
+                "ok": False,
+                "skipped": True,
+                "error_code": "catalog_disabled",
+                "sync_status": parent.sync_status,
+            }
+    except MetaCatalogPushError as exc:
+        _mark_failed(parent, error_code=exc.code, summary=exc.code)
+        db.commit()
+        return {
+            "ok": False,
+            "sync_status": parent.sync_status,
+            "error_code": exc.code,
+        }
+
     rejection = meta_export_rejection_detail(parent)
     if rejection is not None:
         _mark_blocked(parent, error_code="not_eligible", summary=rejection.get("message_ar", "not_eligible"))
@@ -358,7 +380,9 @@ def attempt_native_meta_sync(
 
     try:
         conn = _resolve_connection(db, tenant_id)
-        catalog_id, _token = _resolve_catalog_and_token(conn)
+        catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
+        if not catalog_id:
+            raise MetaCatalogPushError("catalog_id_missing", "meta_catalog_id is not set")
         meta_item_id, lookup = find_meta_catalog_item_by_retailer_id(
             conn, catalog_id, str(retailer_id), client=client,
         )
