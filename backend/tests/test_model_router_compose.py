@@ -36,6 +36,7 @@ from modules.ai.brain.types import (  # noqa: E402
     INTENT_GREETING,
     INTENT_SOLUTION_SEEKING_COMMERCE,
     INTENT_SOCIAL,
+    INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     Intent,
     MerchantConversationState,
@@ -126,6 +127,22 @@ class TestResolveComposeModelRoute:
         enabled = resolve_compose_model_route(intent_name="premium_explicit")
         assert enabled.tier == TIER_PREMIUM
         assert enabled.model == MODEL_SOL
+
+    def test_router_enabled_start_order_stays_cheap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
+        route = resolve_compose_model_route(intent_name=INTENT_START_ORDER)
+        assert route.enforced is True
+        assert route.tier == TIER_CHEAP
+        assert route.provider == "openai_compatible"
+        assert route.model == MODEL_LUNA
+
+    def test_router_enabled_unmatched_defaults_to_cheap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NAHLA_MODEL_ROUTER_ENABLED", "true")
+        route = resolve_compose_model_route(intent_name="general")
+        assert route.enforced is True
+        assert route.tier == TIER_CHEAP
+        assert route.model == MODEL_LUNA
+        assert route.reason == "default_cheap_when_enabled"
 
 
 class TestLlmComposeIntegration:

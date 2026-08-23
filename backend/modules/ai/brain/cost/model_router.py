@@ -49,6 +49,7 @@ _COMPOSE_CHEAP_INTENTS = _CHEAP_INTENTS | frozenset({
     "product_reference",
     "pick_list_item",
     "evaluate_price",
+    "start_order",
 })
 
 _HARD_STANDARD_REASONS = frozenset({
@@ -83,6 +84,7 @@ _ROUTINE_DAILY_COMMERCE_INTENTS = _COMPOSE_CHEAP_INTENTS | frozenset({
     "need_based_product_advice",
     "pick_list_item",
     "evaluate_price",
+    "start_order",
 })
 
 _ROUTINE_DAILY_COMMERCE_GOALS = _COMPOSE_CHEAP_GOALS | frozenset({
@@ -345,16 +347,18 @@ def resolve_compose_model_route(
             block_anthropic_fallback=True,
         )
 
-    # Router enabled but no cheap match — stay on standard (never premium).
-    standard = _env_tier_default(TIER_STANDARD)
+    # Router enabled but no cheap/standard match — stay on cheap default (Luna).
+    # Explicit escalation intents still take STANDARD above. Never premium here.
+    cheap = _env_tier_default(TIER_CHEAP)
     return ComposeModelRoute(
         enforced=True,
-        tier=TIER_STANDARD,
-        provider=str(standard.suggested_provider or customer_chat_provider()),
-        model=str(standard.suggested_model or resolve_standard_customer_chat_model()),
-        reason="default_standard_when_enabled",
+        tier=TIER_CHEAP,
+        provider=str(cheap.suggested_provider or customer_chat_provider()),
+        model=str(cheap.suggested_model or resolve_default_customer_chat_model()),
+        reason="default_cheap_when_enabled",
         provider_hint=customer_chat_provider(),
-        provider_chain_override=_standard_chain_override(),
+        provider_chain_override=_cheap_chain_no_anthropic(),
+        block_anthropic_fallback=True,
     )
 
 
