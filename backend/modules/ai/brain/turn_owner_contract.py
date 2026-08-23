@@ -16,6 +16,7 @@ logger = logging.getLogger("nahla.brain.turn_owner_contract")
 TOPIC_HEALTH_ADVISORY = "health_advisory_product_safety"
 TOPIC_COLD_SHIPPING = "cold_shipping_inquiry"
 TOPIC_STOREFRONT = "storefront_self_checkout"
+TOPIC_PURCHASE_CHANNEL_SELECTION = "purchase_channel_selection"
 TOPIC_SHIPPING = "shipping_inquiry"
 TOPIC_SHIPPING_FEE = "shipping_fee"
 TOPIC_PRODUCT_KNOWLEDGE = "product_knowledge_facts"
@@ -152,6 +153,8 @@ def _infer_owner(*, topic: str, action: str, args: Mapping[str, Any]) -> Optiona
         return "payment_evidence"
     if topic in {TOPIC_COLD_SHIPPING, TOPIC_STOREFRONT, *SHIPPING_TOPICS}:
         return "commerce_order_channel"
+    if topic == TOPIC_PURCHASE_CHANNEL_SELECTION:
+        return "purchase_channel_selection"
     if topic == TOPIC_PRODUCT_KNOWLEDGE:
         return "product_knowledge"
     if action == "catalog_navigate" or args.get("catalog_delivery_kind"):
@@ -258,6 +261,13 @@ def build_turn_owner_contract(
             POSTPROCESS_PRODUCT_BENEFIT_REWRITE,
             POSTPROCESS_MEDICAL_CLAIM_REWRITE,
         })
+
+    elif topic == TOPIC_PURCHASE_CHANNEL_SELECTION:
+        # Channel-choice semantics are not product recommendations.
+        # Catalog grounding must not rewrite Brain channel labels.
+        protected_final_reply = True
+        block_catalog_push = True
+        blocked.update({POSTPROCESS_CATALOG_GROUNDING})
 
     elif topic == TOPIC_PRODUCT_KNOWLEDGE:
         protected_final_reply = True
@@ -449,6 +459,7 @@ __all__ = [
     "POSTPROCESS_MEDICAL_CLAIM_REWRITE",
     "POSTPROCESS_PRODUCT_BENEFIT_REWRITE",
     "POSTPROCESS_PRODUCT_ORDERING_PROMPT",
+    "TOPIC_PURCHASE_CHANNEL_SELECTION",
     "PrebrainRouteContract",
     "TurnOwnerContract",
     "attach_turn_owner_contract",
