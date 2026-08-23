@@ -14,6 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from core.config import META_GRAPH_API_VERSION
+from services.meta_catalog_access import (
+    ERROR_CATALOG_ID_MISSING,
+    ERROR_CATALOG_NOT_READABLE,
+    ERROR_NO_GRAPH_TOKEN,
+    select_catalog_graph_token,
+)
 from services.meta_catalog_export import preview_meta_variant_payload
 from services.meta_catalog_import import _select_graph_token
 
@@ -90,20 +96,44 @@ def _resolve_connection(db: Any, tenant_id: int) -> Any:
     return conn
 
 
-def _resolve_catalog_and_token(conn: Any) -> Tuple[str, str]:
+def _resolve_catalog_and_token(
+    conn: Any,
+    *,
+    require_catalog_readable: bool = True,
+) -> Tuple[str, str]:
     catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
     if not catalog_id:
         raise MetaCatalogPushError("catalog_id_missing", "meta_catalog_id is not set")
 
-    token_info = _select_graph_token(conn) or {}
-    token = str(token_info.get("token") or "").strip()
-    if not token:
+    if not require_catalog_readable:
+        token_info = _select_graph_token(conn) or {}
+        token = str(token_info.get("token") or "").strip()
+        if not token:
+            raise MetaCatalogPushError(
+                "access_token_missing",
+                "No Graph-compatible access token available",
+                detail={"token_source": token_info.get("token_source")},
+            )
+        return catalog_id, token
+
+    pick = select_catalog_graph_token(conn, catalog_id) or {}
+    token = str(pick.get("token") or "").strip()
+    if token:
+        return catalog_id, token
+    error = str(pick.get("error") or ERROR_NO_GRAPH_TOKEN)
+    if error == ERROR_CATALOG_ID_MISSING:
+        raise MetaCatalogPushError("catalog_id_missing", "meta_catalog_id is not set")
+    if error == ERROR_NO_GRAPH_TOKEN:
         raise MetaCatalogPushError(
             "access_token_missing",
             "No Graph-compatible access token available",
-            detail={"token_source": token_info.get("token_source")},
+            detail={"probes": pick.get("probes")},
         )
-    return catalog_id, token
+    raise MetaCatalogPushError(
+        "catalog_permission_denied",
+        "No Graph token can read the merchant catalog",
+        detail={"error": error or ERROR_CATALOG_NOT_READABLE, "probes": pick.get("probes")},
+    )
 
 
 def _graph_auth_headers(token: str) -> Dict[str, str]:
@@ -221,7 +251,9 @@ def push_one_meta_catalog_item(
         return result
 
     conn = _resolve_connection(db, tenant_id)
-    catalog_id, token = _resolve_catalog_and_token(conn)
+    catalog_id, token = _resolve_catalog_and_token(
+        conn, require_catalog_readable=bool(confirm),
+    )
     result["catalog_id"] = catalog_id
 
     if not confirm:

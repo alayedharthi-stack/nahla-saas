@@ -773,6 +773,19 @@ async def merchant_catalog_patch(
     if changes:
         db.commit()
         db.refresh(conn)
+        try:
+            from services.meta_catalog_reconnect import (  # noqa: PLC0415
+                catalog_config_changes_require_reconcile,
+                schedule_meta_catalog_reconnect_best_effort,
+            )
+            if catalog_config_changes_require_reconcile(changes):
+                schedule_meta_catalog_reconnect_best_effort(int(tenant_id))
+        except Exception:  # noqa: silent-ok — settings save must not fail if bind schedule fails
+            logger.warning(
+                "[CATALOG_CONFIG] catalog reconnect schedule skipped tenant=%s",
+                tenant_id,
+                exc_info=True,
+            )
 
     audit(
         "merchant_catalog_config",
@@ -942,6 +955,19 @@ async def admin_catalog_patch(
     if changes:
         db.commit()
         db.refresh(conn)
+        try:
+            from services.meta_catalog_reconnect import (  # noqa: PLC0415
+                catalog_config_changes_require_reconcile,
+                schedule_meta_catalog_reconnect_best_effort,
+            )
+            if catalog_config_changes_require_reconcile(changes):
+                schedule_meta_catalog_reconnect_best_effort(int(body.tenant_id))
+        except Exception:  # noqa: silent-ok — settings save must not fail if bind schedule fails
+            logger.warning(
+                "[CATALOG_CONFIG] catalog reconnect schedule skipped tenant=%s",
+                body.tenant_id,
+                exc_info=True,
+            )
 
     audit(
         "admin_catalog_config",

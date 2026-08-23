@@ -1258,3 +1258,29 @@ def test_wa_life_46_backfill_finalization_failure_remains_non_success(monkeypatc
 
 def test_wa_life_47_canonical_writer_audit_still_closed():
     test_wa_life_28_production_writer_audit()
+
+
+def test_whatsapp_finalization_schedules_catalog_reconnect(db):
+    t = _tenant(db, name="متجر تجريبي عام")
+    conn = _conn(db, t.id, status="pending")
+    db.commit()
+    with patch(
+        "services.meta_catalog_reconnect.schedule_meta_catalog_reconnect_best_effort",
+    ) as sched:
+        started = finalize_successful_whatsapp_connection(db, conn)
+    assert started is True
+    sched.assert_called_once_with(t.id)
+
+
+def test_whatsapp_finalization_succeeds_when_catalog_schedule_raises(db):
+    t = _tenant(db, name="متجر تجريبي عام")
+    conn = _conn(db, t.id, status="pending")
+    db.commit()
+    with patch(
+        "services.meta_catalog_reconnect.schedule_meta_catalog_reconnect_best_effort",
+        side_effect=RuntimeError("catalog schedule boom"),
+    ):
+        started = finalize_successful_whatsapp_connection(db, conn)
+    db.refresh(conn)
+    assert started is True
+    assert conn.status == "connected"

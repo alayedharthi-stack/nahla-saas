@@ -191,6 +191,21 @@ def test_double_trigger_exits_when_lock_not_acquired(lock_mock):
     assert result["skipped"] is True
 
 
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator._resolve_connection")
+def test_catalog_disabled_skips_meta_write(conn_mock, lock_mock, push_mock):
+    parent = _generic_native_parent()
+    db = MagicMock()
+    lock_mock.return_value = parent
+    conn_mock.return_value = SimpleNamespace(catalog_enabled=False)
+    result = attempt_native_meta_sync(db, 9, 501)
+    assert result["skipped"] is True
+    assert result["error_code"] == "catalog_disabled"
+    assert parent.sync_status == "pending"
+    push_mock.assert_not_called()
+
+
 def test_waba_unlinked_does_not_fail_meta_sync_status():
     parent = _generic_native_parent(
         sync_status="synced",
