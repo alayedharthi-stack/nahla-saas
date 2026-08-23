@@ -399,6 +399,190 @@ def _state_product_focus(state: Any) -> Any:
     return getattr(state, "current_product_focus", None)
 
 
+_PAYMENT_FULFILLMENT_STATUSES = frozenset({
+    "awaiting_payment",
+    "awaiting_payment_receipt",
+    "awaiting_receipt",
+    "under_review",
+    "pending_review",
+    "payment_pending",
+    "paid",
+    "confirmed",
+    "creating",
+    "created",
+})
+
+_COMMITTED_CHECKOUT_CHANNELS = frozenset({
+    CHECKOUT_CHANNEL_WHATSAPP,
+    CHECKOUT_CHANNEL_STORE,
+    CHECKOUT_CHANNEL_SHOWROOM,
+    "whatsapp_quick_order",
+    "whatsapp_fast",
+    "online_store",
+    "showroom_visit",
+})
+
+
+def _nonempty_text(value: Any) -> bool:
+    return bool(str(value or "").strip())
+
+
+def _state_mapping_value(state: Any, key: str, default: Any = None) -> Any:
+    if state is None:
+        return default
+    if isinstance(state, dict):
+        return state.get(key, default)
+    return getattr(state, key, default)
+
+
+def _embedded_brain_state(order_prep: Any) -> Any:
+    """Persisted brain_state copied onto checkout-route order_prep, if any."""
+    prep = _order_prep_mapping(order_prep)
+    embedded = prep.get("_brain_state")
+    if isinstance(embedded, dict) and embedded:
+        return embedded
+    return None
+
+
+def _project_actionable_state(*, order_prep: Any = None, state: Any = None) -> Any:
+    """Prefer an explicit state object; else reuse embedded `_brain_state`."""
+    if state is not None:
+        return state
+    return _embedded_brain_state(order_prep)
+
+
+def _has_authoritative_commerce_items(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+) -> bool:
+    try:
+        from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+            authoritative_line_items_from_prep,
+            filter_authoritative_line_items,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing catalog evidence helper must not invent ownership
+        return False
+    if authoritative_line_items_from_prep(order_prep):
+        return True
+    cart = _state_mapping_value(state, "cart_items", []) or []
+    if not isinstance(cart, list):
+        return False
+    return bool(
+        filter_authoritative_line_items([item for item in cart if isinstance(item, dict)])
+    )
+
+
+def _has_valid_draft_order(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+) -> bool:
+    if _nonempty_text(_state_mapping_value(state, "draft_order_id")):
+        return True
+    prep = _order_prep_mapping(order_prep)
+    return _nonempty_text(prep.get("salla_order_id"))
+
+
+def _has_order_prep_product(order_prep: Any) -> bool:
+    prep = _order_prep_mapping(order_prep)
+    return _nonempty_text(prep.get("product_id") or prep.get("product_name"))
+
+
+def _has_session_product(state: Any) -> bool:
+    session = _state_mapping_value(state, "commerce_session", {}) or {}
+    if not isinstance(session, dict):
+        return False
+    return _nonempty_text(session.get("active_product")) or _nonempty_text(
+        session.get("active_variant")
+    )
+
+
+def _has_committed_checkout_channel(order_prep: Any) -> bool:
+    prep = _order_prep_mapping(order_prep)
+    return _checkout_channel(prep) in _COMMITTED_CHECKOUT_CHANNELS
+
+
+def _has_payment_or_fulfillment_order(
+    *,
+    order_prep: Any = None,
+    backed_by_commerce_object: bool = False,
+) -> bool:
+    prep = _order_prep_mapping(order_prep)
+    has_order_id = _nonempty_text(prep.get("salla_order_id"))
+    payment_flag = bool(prep.get("awaiting_payment_receipt")) or bool(
+        prep.get("payment_receipt_received")
+    )
+    status = str(prep.get("order_status") or "").strip().lower()
+    creation = str(prep.get("order_creation_status") or "").strip().lower()
+    status_active = (
+        status in _PAYMENT_FULFILLMENT_STATUSES or creation in {"creating", "created"}
+    )
+    if not payment_flag and not status_active:
+        return False
+    return backed_by_commerce_object or has_order_id
+
+
+def has_actionable_active_order_context(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+    selected_product_referent: Any = None,
+    current_product_focus: Any = None,
+    stage: str = "",
+) -> bool:
+    """True when a current commerce object owns the turn.
+
+    Stage labels, identity fields, default quantity, and empty commerce
+    session shells are not sufficient. ``stage`` is accepted for caller
+    compatibility and is intentionally unused.
+    """
+    del stage  # stale ordering/deciding/checkout labels are not owners
+    state = _project_actionable_state(order_prep=order_prep, state=state)
+    focus = current_product_focus
+    if focus is None:
+        focus = _state_product_focus(state)
+    if selected_product_referent or _product_focus_owns_turn(focus):
+        return True
+    if _has_authoritative_commerce_items(order_prep=order_prep, state=state):
+        return True
+    if _has_valid_draft_order(order_prep=order_prep, state=state):
+        return True
+    if _has_committed_checkout_channel(order_prep):
+        return True
+    if _has_order_prep_product(order_prep) or _has_session_product(state):
+        return True
+    backed = (
+        _has_authoritative_commerce_items(order_prep=order_prep, state=state)
+        or _has_valid_draft_order(order_prep=order_prep, state=state)
+        or _has_order_prep_product(order_prep)
+        or _has_session_product(state)
+    )
+    if _has_payment_or_fulfillment_order(
+        order_prep=order_prep,
+        backed_by_commerce_object=backed,
+    ):
+        return True
+    prep = _order_prep_mapping(order_prep)
+    if bool(prep.get("awaiting_option_confirmation") or prep.get("awaiting_variant_choice")) and (
+        _has_order_prep_product(order_prep) or _product_focus_owns_turn(focus)
+    ):
+        return True
+    missing = {
+        str(item).strip().lower()
+        for item in (prep.get("missing_fields") or [])
+        if str(item).strip()
+    }
+    if missing and (
+        _has_order_prep_product(order_prep)
+        or _has_authoritative_commerce_items(order_prep=order_prep, state=state)
+        or _has_valid_draft_order(order_prep=order_prep, state=state)
+        or _product_focus_owns_turn(focus)
+    ):
+        return True
+    return False
+
+
 def _capabilities_from_available_ids(
     channel_ids: Sequence[str],
     *,
@@ -462,21 +646,20 @@ def is_genuine_purchase_channel_entry(
     if _product_focus_owns_turn(focus):
         return False
 
-    try:
-        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
-            is_active_order_flow,
-        )
-
-        resolved_stage = str(stage or "").strip()
-        if not resolved_stage and state is not None:
-            if isinstance(state, dict):
-                resolved_stage = str(state.get("stage") or "").strip()
-            else:
-                resolved_stage = str(getattr(state, "stage", "") or "").strip()
-        if is_active_order_flow(stage=resolved_stage, order_prep=order_prep):
-            return False
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — active-order probe must not block entry
-        pass
+    resolved_stage = str(stage or "").strip()
+    if not resolved_stage and state is not None:
+        if isinstance(state, dict):
+            resolved_stage = str(state.get("stage") or "").strip()
+        else:
+            resolved_stage = str(getattr(state, "stage", "") or "").strip()
+    if has_actionable_active_order_context(
+        order_prep=order_prep,
+        state=state,
+        selected_product_referent=selected_product_referent,
+        current_product_focus=focus,
+        stage=resolved_stage,
+    ):
+        return False
 
     try:
         from modules.ai.brain.intent.rules import (  # noqa: PLC0415
@@ -1268,11 +1451,11 @@ def _active_whatsapp_checkout(
     if channel == CHECKOUT_CHANNEL_STORE:
         return False
     try:
-        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
-            is_active_order_flow,
+        return has_actionable_active_order_context(
+            order_prep=order_prep,
+            state=_project_actionable_state(order_prep=order_prep),
+            stage=stage,
         )
-
-        return is_active_order_flow(stage=stage, order_prep=order_prep)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional active-order probe must not block defer decision
         return False
 
@@ -1484,6 +1667,7 @@ __all__ = [
     "resolve_explicit_purchase_channel_payload",
     "resolve_purchase_channel_entry_owner",
     "is_genuine_purchase_channel_entry",
+    "has_actionable_active_order_context",
     "should_block_bare_start_product_prompt",
     "should_route_bare_start_to_channel_selection",
     "checkout_route_owner_enabled",

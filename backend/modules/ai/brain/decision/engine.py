@@ -4503,7 +4503,22 @@ class DefaultDecisionEngine:
         except Exception:  # noqa: BLE001
             pass
 
-        if state.stage in (STAGE_ORDERING, STAGE_DECIDING):
+        _actionable_ordering = False
+        try:
+            from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+                has_actionable_active_order_context,
+            )
+
+            _actionable_ordering = has_actionable_active_order_context(
+                order_prep=getattr(state, "order_prep", None),
+                state=state,
+                current_product_focus=getattr(state, "current_product_focus", None),
+                stage=str(getattr(state, "stage", "") or ""),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — stale-shell probe must not block decide
+            _actionable_ordering = bool(state.current_product_focus)
+
+        if state.stage in (STAGE_ORDERING, STAGE_DECIDING) and _actionable_ordering:
             if (
                 state.current_product_focus
                 and facts.orderable
