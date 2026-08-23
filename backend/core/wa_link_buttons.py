@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional, Sequence
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,187 @@ def prepare_cta_body_text(
         cleaned = cleaned.replace(url, "").strip()
         cleaned = strip_empty_markdown_links(cleaned)
     return cleaned
+
+
+# Purchase-channel selector: the Online Store reply button owns the
+# canonical storefront URL. When that structured action is present, the
+# same URL must not also appear raw in the WhatsApp body.
+PURCHASE_CHANNEL_SELECTION_TOPIC = "purchase_channel_selection"
+ONLINE_STORE_BUTTON_IDS = frozenset({"checkout_store_link", "online_store"})
+_BULLET_ONLY_LINE_RE = re.compile(r"^(?:[-*•–—]|\d+[.)])\s*$")
+
+
+def _is_purchase_channel_selection_turn(*, topic: str = "", owner: str = "") -> bool:
+    return (
+        str(topic or "").strip() == PURCHASE_CHANNEL_SELECTION_TOPIC
+        or str(owner or "").strip() == PURCHASE_CHANNEL_SELECTION_TOPIC
+    )
+
+
+def _copy_reply_button(button: Any) -> Dict[str, Any]:
+    if not isinstance(button, dict):
+        return {}
+    copied = dict(button)
+    reply = button.get("reply")
+    if isinstance(reply, dict):
+        copied["reply"] = dict(reply)
+    return copied
+
+
+def _button_reply_id(button: Any) -> str:
+    if not isinstance(button, dict):
+        return ""
+    reply = button.get("reply") if isinstance(button.get("reply"), dict) else {}
+    return str(button.get("id") or reply.get("id") or "").strip()
+
+
+def _button_destination_url(button: Any) -> str:
+    if not isinstance(button, dict):
+        return ""
+    reply = button.get("reply") if isinstance(button.get("reply"), dict) else {}
+    return str(
+        button.get("url")
+        or button.get("destination_url")
+        or reply.get("url")
+        or ""
+    ).strip()
+
+
+def _canonical_store_url_key(url: str) -> str:
+    """Host + path identity for the merchant storefront URL. Not a generic strip."""
+    raw = (url or "").strip().rstrip(".,:;!?)").rstrip("،")
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+    path = (parsed.path or "").rstrip("/")
+    return f"{host}{path}"
+
+
+def _urls_are_same_storefront(left: str, right: str) -> bool:
+    a = _canonical_store_url_key(left)
+    b = _canonical_store_url_key(right)
+    return bool(a and a == b)
+
+
+def _elide_exact_storefront_url_tokens(text: str, destination: str) -> str:
+    """Remove complete URL tokens whose storefront identity matches destination.
+
+    Does not treat the canonical host as a prefix of a longer product/payment
+    path on the same host.
+    """
+    if not text or not destination:
+        return text or ""
+    spans: list[tuple[int, int]] = []
+    for match in _URL_RE.finditer(text):
+        raw_url = match.group(0).rstrip(".,:;!?)\u061B\u061F،")
+        if not raw_url or not _urls_are_same_storefront(raw_url, destination):
+            continue
+        spans.append((match.start(), match.start() + len(raw_url)))
+    if not spans:
+        return text
+    parts: list[str] = []
+    last = 0
+    for start, end in spans:
+        parts.append(text[last:start])
+        last = end
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _tidy_body_after_store_url_elision(text: str) -> str:
+    body = strip_empty_markdown_links(text or "")
+    lines: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        if _BULLET_ONLY_LINE_RE.match(stripped):
+            continue
+        stripped = re.sub(r"[\s\u00A0]*[:،,;\-—–]+[\s\u00A0]*$", "", stripped)
+        if not stripped or _BULLET_ONLY_LINE_RE.match(stripped):
+            continue
+        lines.append(stripped)
+    out = "\n".join(lines).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return out
+
+
+def whatsapp_reply_buttons_payload(buttons: Sequence[Any]) -> list[Dict[str, Any]]:
+    """WhatsApp Cloud API reply buttons: ``type`` + ``reply.{id,title}`` only."""
+    out: list[Dict[str, Any]] = []
+    for button in list(buttons or [])[:3]:
+        if not isinstance(button, dict):
+            continue
+        reply = button.get("reply") if isinstance(button.get("reply"), dict) else {}
+        out.append(
+            {
+                "type": str(button.get("type") or "reply"),
+                "reply": {
+                    "id": str(reply.get("id") or ""),
+                    "title": str(reply.get("title") or ""),
+                },
+            }
+        )
+    return out
+
+
+def prepare_purchase_channel_selector_presentation(
+    *,
+    body: str,
+    buttons: Sequence[Any],
+    topic: str = "",
+    owner: str = "",
+    canonical_store_url: str = "",
+) -> tuple[str, list[Dict[str, Any]]]:
+    """Presentation/wire: drop a duplicate canonical store URL from the body.
+
+    Gates (all required):
+      * topic/owner is ``purchase_channel_selection``
+      * an Online Store interactive button is present
+      * that button's destination equals the tenant canonical ``store_url``
+
+    Only that matching storefront URL is elided. Other URLs stay. Button
+    ids/titles are unchanged; the store button keeps ``url`` set to the
+    canonical store URL for the action payload.
+    """
+    copied = [_copy_reply_button(b) for b in list(buttons or []) if isinstance(b, dict)]
+    original = body or ""
+    if not _is_purchase_channel_selection_turn(topic=topic, owner=owner):
+        return original, copied
+
+    canonical = str(canonical_store_url or "").strip()
+    store_indexes = [
+        i for i, button in enumerate(copied)
+        if _button_reply_id(button) in ONLINE_STORE_BUTTON_IDS
+    ]
+    if not store_indexes:
+        return original, copied
+
+    if canonical:
+        for idx in store_indexes:
+            if not _button_destination_url(copied[idx]):
+                copied[idx]["url"] = canonical
+
+    destination = _button_destination_url(copied[store_indexes[0]])
+    if not destination or not canonical:
+        return original, copied
+    if not _urls_are_same_storefront(destination, canonical):
+        return original, copied
+
+    if not original.strip():
+        return original, copied
+
+    cleaned = _elide_exact_storefront_url_tokens(original, destination)
+    cleaned = _tidy_body_after_store_url_elision(cleaned)
+    if not cleaned:
+        return original, copied
+    return cleaned, copied
 
 # Greedy enough for WhatsApp links but stops at whitespace / common
 # punctuation so we don't swallow trailing colons or RTL marks.
@@ -480,7 +661,12 @@ __all__ = [
     "UrlClassification",
     "CtaExtraction",
     "CtaMessage",
+    "ONLINE_STORE_BUTTON_IDS",
+    "PURCHASE_CHANNEL_SELECTION_TOPIC",
     "classify_url",
     "extract_first_cta_url",
+    "prepare_cta_body_text",
+    "prepare_purchase_channel_selector_presentation",
     "split_text_for_cta_buttons",
+    "whatsapp_reply_buttons_payload",
 ]

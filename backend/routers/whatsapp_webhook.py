@@ -12401,6 +12401,35 @@ async def _handle_merchant_message(
                     tenant_id, _mep_exc,
                 )
 
+        # Purchase-channel selector: if an Online Store button already
+        # owns the canonical storefront URL, do not also print that
+        # same URL in the visible body. Presentation/wire only.
+        if _brain_buttons and reply:
+            try:
+                from core.wa_link_buttons import (  # noqa: PLC0415
+                    prepare_purchase_channel_selector_presentation as _prep_pcs,
+                )
+                from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+                    resolve_store_url as _resolve_pcs_store_url,
+                )
+
+                _pcs_store_url = str(
+                    _resolve_pcs_store_url(db, int(tenant_id or 0)).url or ""
+                ).strip()
+                reply, _brain_buttons = _prep_pcs(
+                    body=reply,
+                    buttons=list(_brain_buttons or []),
+                    topic=str((_br_dec_args or {}).get("topic") or ""),
+                    owner=str((_br_dec_args or {}).get("owner") or ""),
+                    canonical_store_url=_pcs_store_url,
+                )
+            except Exception as _pcs_exc:  # noqa: BLE001  # noqa: silent-ok — body URL elision must not block send
+                logger.debug(
+                    "[PURCHASE_CHANNEL_URL] presentation skipped tenant=%s err=%s",
+                    tenant_id,
+                    _pcs_exc,
+                )
+
         # ── Sync persisted body to post-safety-net reply ────────────
         # ``StateManager.save_message(direction="outbound")`` ran way
         # upstream (≈ L5883), BEFORE the safety nets / scrub / asset-
@@ -15716,12 +15745,21 @@ async def _send_interactive_reply(
     phone_id: str, to: str, body_text: str, buttons: list,
     _tenant_id: Optional[int] = None, _db=None,
 ) -> bool:
+    wire_buttons = list(buttons or [])[:3]
+    try:
+        from core.wa_link_buttons import (  # noqa: PLC0415
+            whatsapp_reply_buttons_payload as _wa_reply_buttons,
+        )
+
+        wire_buttons = _wa_reply_buttons(wire_buttons)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — payload sanitize must not block send
+        wire_buttons = list(buttons or [])[:3]
     return await _post_wa(phone_id, {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
             "type": "button",
             "body": {"text": body_text},
-            "action": {"buttons": buttons[:3]},
+            "action": {"buttons": wire_buttons[:3]},
         },
     }, _tenant_id=_tenant_id, _db=_db)
 
