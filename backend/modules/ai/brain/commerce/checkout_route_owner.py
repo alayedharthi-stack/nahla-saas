@@ -399,16 +399,6 @@ def _state_product_focus(state: Any) -> Any:
     return getattr(state, "current_product_focus", None)
 
 
-_LINE_ITEM_IDENTITY_KEYS = (
-    "id",
-    "external_id",
-    "product_id",
-    "sku",
-    "title",
-    "name",
-    "product_name",
-)
-
 _PAYMENT_FULFILLMENT_STATUSES = frozenset({
     "awaiting_payment",
     "awaiting_payment_receipt",
@@ -445,17 +435,20 @@ def _state_mapping_value(state: Any, key: str, default: Any = None) -> Any:
     return getattr(state, key, default)
 
 
-def _has_identity_bearing_line_item(items: Any) -> bool:
-    if not isinstance(items, list):
-        return False
-    for item in items:
-        if isinstance(item, dict):
-            if any(_nonempty_text(item.get(key)) for key in _LINE_ITEM_IDENTITY_KEYS):
-                return True
-            continue
-        if _nonempty_text(item):
-            return True
-    return False
+def _embedded_brain_state(order_prep: Any) -> Any:
+    """Persisted brain_state copied onto checkout-route order_prep, if any."""
+    prep = _order_prep_mapping(order_prep)
+    embedded = prep.get("_brain_state")
+    if isinstance(embedded, dict) and embedded:
+        return embedded
+    return None
+
+
+def _project_actionable_state(*, order_prep: Any = None, state: Any = None) -> Any:
+    """Prefer an explicit state object; else reuse embedded `_brain_state`."""
+    if state is not None:
+        return state
+    return _embedded_brain_state(order_prep)
 
 
 def _has_authoritative_commerce_items(
@@ -463,10 +456,21 @@ def _has_authoritative_commerce_items(
     order_prep: Any = None,
     state: Any = None,
 ) -> bool:
-    prep = _order_prep_mapping(order_prep)
-    if _has_identity_bearing_line_item(prep.get("line_items")):
+    try:
+        from core.catalog_authoritative_line_items import (  # noqa: PLC0415
+            authoritative_line_items_from_prep,
+            filter_authoritative_line_items,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing catalog evidence helper must not invent ownership
+        return False
+    if authoritative_line_items_from_prep(order_prep):
         return True
-    return _has_identity_bearing_line_item(_state_mapping_value(state, "cart_items", []))
+    cart = _state_mapping_value(state, "cart_items", []) or []
+    if not isinstance(cart, list):
+        return False
+    return bool(
+        filter_authoritative_line_items([item for item in cart if isinstance(item, dict)])
+    )
 
 
 def _has_valid_draft_order(
@@ -534,6 +538,7 @@ def has_actionable_active_order_context(
     compatibility and is intentionally unused.
     """
     del stage  # stale ordering/deciding/checkout labels are not owners
+    state = _project_actionable_state(order_prep=order_prep, state=state)
     focus = current_product_focus
     if focus is None:
         focus = _state_product_focus(state)
@@ -1448,6 +1453,7 @@ def _active_whatsapp_checkout(
     try:
         return has_actionable_active_order_context(
             order_prep=order_prep,
+            state=_project_actionable_state(order_prep=order_prep),
             stage=stage,
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional active-order probe must not block defer decision

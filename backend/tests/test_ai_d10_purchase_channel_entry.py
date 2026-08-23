@@ -21,6 +21,7 @@ from modules.ai.brain.catalog.navigation import (  # noqa: E402
     try_catalog_navigation_decision,
 )
 from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
+    _active_whatsapp_checkout,
     has_actionable_active_order_context,
     is_genuine_purchase_channel_entry,
     purchase_channel_committed,
@@ -750,6 +751,10 @@ class TestStaleShellControlFAuthoritativeLineItems:
                 "external_id": "sku-white-shoe",
                 "title": "حذاء رياضي أبيض",
                 "quantity": 1,
+                "from_catalog_order": True,
+                "product_retailer_id": "sku-white-shoe",
+                "catalog_product_id": 501,
+                "price": 249,
             },
         ]
         state.order_prep.catalog_line_items_authoritative = True
@@ -911,3 +916,98 @@ class TestStaleShellControlQTenantIsolation:
         assert dec_a.args.get("topic") == "purchase_channel_selection"
         assert "online_store" in dec_a.args.get("available_purchase_channels")
         assert dec_b.args.get("topic") != "purchase_channel_selection"
+
+
+_FREE_TEXT_LINE_ITEM = {
+    "title": "حذاء رياضي أبيض",
+    "name": "حذاء رياضي أبيض",
+    "quantity": 1,
+    "source": "free_text_mention",
+    "match_status": "needs_review",
+}
+
+_CATALOG_LINE_ITEM = {
+    "id": "501",
+    "external_id": "sku-white-shoe",
+    "title": "حذاء رياضي أبيض",
+    "quantity": 1,
+    "from_catalog_order": True,
+    "product_retailer_id": "sku-white-shoe",
+    "catalog_product_id": 501,
+    "price": 249,
+}
+
+
+def _route_prep_with_embedded_state(
+    *,
+    current_product_focus: dict[str, Any] | None = None,
+    draft_order_id: str = "",
+    cart_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Mimic load_checkout_route_context embedding `_brain_state` on order_prep."""
+    state = _stale_ordering_shell()
+    state.current_product_focus = current_product_focus
+    state.draft_order_id = draft_order_id or None
+    if cart_items is not None:
+        state.cart_items = list(cart_items)
+    prep = state.order_prep.to_dict()
+    prep["_brain_state"] = state.to_dict()
+    return prep
+
+
+class TestAuthoritativeLineItemSourceOfTruth:
+    def test_free_text_needs_review_item_is_not_actionable(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.catalog_line_items_authoritative = False
+        state.order_prep.line_items = [dict(_FREE_TEXT_LINE_ITEM)]
+        assert state.order_prep.line_items[0]["title"]
+        assert _actionable(state) is False
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") == "purchase_channel_selection"
+
+    def test_catalog_backed_item_without_flag_is_actionable(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.catalog_line_items_authoritative = False
+        state.order_prep.line_items = [dict(_CATALOG_LINE_ITEM)]
+        assert _actionable(state) is True
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_free_text_cart_items_are_not_actionable(self) -> None:
+        state = _stale_ordering_shell()
+        state.cart_items = [dict(_FREE_TEXT_LINE_ITEM)]
+        assert _actionable(state) is False
+
+    def test_catalog_backed_cart_items_are_actionable(self) -> None:
+        state = _stale_ordering_shell()
+        state.cart_items = [dict(_CATALOG_LINE_ITEM)]
+        assert _actionable(state) is True
+
+
+class TestPersistedBrainStateProjection:
+    def test_embedded_product_focus_is_actionable_without_explicit_state(self) -> None:
+        prep = _route_prep_with_embedded_state(current_product_focus=dict(_SHOE))
+        assert has_actionable_active_order_context(
+            order_prep=prep,
+            stage="ordering",
+        ) is True
+        assert _active_whatsapp_checkout(stage="ordering", order_prep=prep) is True
+
+    def test_embedded_draft_id_is_actionable_without_explicit_state(self) -> None:
+        prep = _route_prep_with_embedded_state(draft_order_id="draft-901")
+        assert has_actionable_active_order_context(
+            order_prep=prep,
+            stage="ordering",
+        ) is True
+        assert _active_whatsapp_checkout(stage="ordering", order_prep=prep) is True
+
+    def test_embedded_identity_shell_is_not_actionable(self) -> None:
+        prep = _route_prep_with_embedded_state()
+        assert prep.get("customer_first_name")
+        assert prep.get("quantity") == 1
+        assert has_actionable_active_order_context(
+            order_prep=prep,
+            stage="ordering",
+        ) is False
+        assert _active_whatsapp_checkout(stage="ordering", order_prep=prep) is False
+
