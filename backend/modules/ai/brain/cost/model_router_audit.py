@@ -75,6 +75,7 @@ _CHEAP_INTENTS = frozenset({
     "need_based_product_advice",
     "ask_price",
     "evaluate_price",
+    "start_order",
 })
 
 _STANDARD_INTENTS = frozenset({
@@ -199,10 +200,7 @@ def suggest_model_tier(
     if is_premium_model_allowed() and intent == "premium_explicit":
         return _env_tier_default(TIER_PREMIUM)
 
-    # Unknown commerce / general — suggest standard but never premium by default.
-    if intent:
-        return _env_tier_default(TIER_STANDARD)
-
+    # Unknown / default customer compose — cheap (Luna). Never premium by default.
     return _env_tier_default(TIER_CHEAP)
 
 
