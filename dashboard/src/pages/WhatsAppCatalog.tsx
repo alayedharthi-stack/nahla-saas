@@ -54,6 +54,7 @@ import CatalogSummaryCard from '../components/catalog/CatalogSummaryCard'
 import CatalogChannelsCard from '../components/catalog/CatalogChannelsCard'
 import CatalogAdvancedSection, { AdvancedSubSection } from '../components/catalog/CatalogAdvancedSection'
 import ManualProductModal from '../components/catalog/ManualProductModal'
+import ReviewHarnessStatusBanner from '../components/catalog/ReviewHarnessStatusBanner'
 import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import type { Lang, Translations } from '../i18n/types'
@@ -385,12 +386,14 @@ export default function WhatsAppCatalog() {
     )
   }
 
+  const harness = status?.review_harness
   return (
-    <div className="space-y-6 w-full" dir={dir}>
+    <div className="space-y-6 w-full" dir={harness?.active ? 'ltr' : dir} lang={harness?.active ? 'en' : undefined}>
+      <ReviewHarnessStatusBanner status={harness} />
       {diagnostics && (
         <CatalogSummaryCard
           diagnostics={diagnostics}
-          showMetaImport={diagnostics.catalog.catalog_id_present}
+          showMetaImport={!harness?.active && diagnostics.catalog.catalog_id_present}
           metaImportBusy={metaImportBusy}
           onImportMeta={() => void runMetaImport()}
           onAddManual={openManualForm}
@@ -464,10 +467,12 @@ export default function WhatsAppCatalog() {
                   {cm.connectionStatus.whatsappLabel}{' '}
                   {status.connection.found ? (status.connection.status ?? '—') : cm.connectionStatus.notLinked}
                 </span>
+                {!harness?.hide_graph_ids && (
                 <span className="text-xs text-slate-500">
                   {cm.connectionStatus.catalogIdLabel}{' '}
                   {status.connection.meta_catalog_id ? status.connection.meta_catalog_id : '—'}
                 </span>
+                )}
                 <span className="text-xs text-slate-500">
                   {cm.connectionStatus.retailerCoverageLabel}{' '}
                   {status.coverage.with_retailer_id} / {status.coverage.sample_size}

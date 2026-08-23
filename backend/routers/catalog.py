@@ -308,7 +308,7 @@ def _status_payload(db: Session, tenant_id: int, *, sample: int = 5) -> Dict[str
     )
     _, with_rid_total = _product_retailer_coverage(db, tenant_id)
 
-    return {
+    payload = {
         "tenant_id":       tenant_id,
         "connection":      conn_block,
         "eligibility":     eligibility_block,
@@ -324,6 +324,15 @@ def _status_payload(db: Session, tenant_id: int, *, sample: int = 5) -> Dict[str
             with_rid=with_rid_total,
         ),
     }
+    from core.catalog_review_harness import (  # noqa: PLC0415
+        is_catalog_review_harness_enabled,
+        public_review_harness_status,
+        redact_graph_ids,
+    )
+    if is_catalog_review_harness_enabled():
+        payload = redact_graph_ids(payload)
+        payload["review_harness"] = public_review_harness_status(conn)
+    return payload
 
 
 def _status_advice(
@@ -694,7 +703,22 @@ async def merchant_catalog_waba_link_status(
     no DB writes, no tokens in the response.
     """
     tenant_id = resolve_tenant_id(request)
-    return get_waba_catalog_link_status(db, tenant_id)
+    payload = get_waba_catalog_link_status(db, tenant_id)
+    from core.catalog_review_harness import (  # noqa: PLC0415
+        is_catalog_review_harness_enabled,
+        public_review_harness_status,
+        redact_graph_ids,
+    )
+    if is_catalog_review_harness_enabled():
+        from models import WhatsAppConnection as _WA  # noqa: PLC0415
+        conn = (
+            db.query(_WA)
+            .filter(_WA.tenant_id == int(tenant_id))
+            .first()
+        )
+        payload = redact_graph_ids(payload)
+        payload["review_harness"] = public_review_harness_status(conn)
+    return payload
 
 
 @merchant_router.get("/commerce-settings-status")

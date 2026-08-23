@@ -42,6 +42,14 @@ export interface CatalogCoverage {
   sample_size:         number
 }
 
+export interface ReviewHarnessStatus {
+  active: boolean
+  ui_status: 'setting_up' | 'connected_and_synced' | 'reauth_required' | 'blocked' | string
+  ui_label: string
+  hide_graph_ids: boolean
+  error_code?: string | null
+}
+
 export interface CatalogStatus {
   tenant_id:        number
   connection:       CatalogConnectionBlock
@@ -49,6 +57,7 @@ export interface CatalogStatus {
   products_sample:  CatalogProductRow[]
   coverage:         CatalogCoverage
   advice:           string
+  review_harness?:  ReviewHarnessStatus | null
 }
 
 export interface CatalogConfigPatch {
@@ -127,6 +136,7 @@ export interface WabaCatalogLinkStatus {
   error_category?:         string | null
   link_status?:            'linked' | 'mismatch' | 'not_linked' | 'unknown' | null
   catalog_exists?:         boolean | null
+  review_harness?:         ReviewHarnessStatus | null
 }
 
 // ── Product diagnostic + resync ──────────────────────────────────────

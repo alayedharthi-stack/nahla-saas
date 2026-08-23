@@ -45,6 +45,13 @@ from core.config import (
     is_meta_embedded_signup_enabled,
     meta_embedded_disabled_reason,
 )
+from core.catalog_review_harness import (
+    embedded_signup_app_id,
+    embedded_signup_app_secret,
+    embedded_signup_config_id,
+    embedded_signup_oauth_scopes,
+    is_catalog_review_harness_enabled,
+)
 from core.database import get_db
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
@@ -102,7 +109,13 @@ def _reset_metadata_for_standard_exchange(conn: "WhatsAppConnection") -> None:
     from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
     if is_coexistence_mode(conn):
         return
-    conn.extra_metadata = {}
+    preserved = {}
+    if is_catalog_review_harness_enabled():
+        from services.meta_catalog_review_harness import (  # noqa: PLC0415
+            preserve_harness_metadata,
+        )
+        preserved = preserve_harness_metadata(getattr(conn, "extra_metadata", None))
+    conn.extra_metadata = preserved or {}
 
 
 def _should_project_as_coexistence(
@@ -160,7 +173,12 @@ async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None
     FB.login JS SDK / Coexistence must pass ``None`` so Graph omits
     ``redirect_uri`` — Meta did not issue that code against a Nahlah URI.
     """
-    params = graph_oauth_token_params(code=code, redirect_uri=redirect_uri)
+    params = graph_oauth_token_params(
+        code=code,
+        redirect_uri=redirect_uri,
+        client_id=embedded_signup_app_id(),
+        client_secret=embedded_signup_app_secret(),
+    )
     safe = token_exchange_log_fields(params)
 
     async with httpx.AsyncClient(timeout=15) as client:
@@ -186,7 +204,9 @@ async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None
 
 async def _debug_token(token: str) -> dict:
     """Inspect token metadata including granular scopes (WABA IDs)."""
-    app_token = f"{META_APP_ID}|{META_APP_SECRET}"
+    app_id = embedded_signup_app_id()
+    app_secret = embedded_signup_app_secret()
+    app_token = f"{app_id}|{app_secret}"
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
             f"{GRAPH}/debug_token",
@@ -204,15 +224,15 @@ async def _debug_token(token: str) -> dict:
 
 async def _exchange_for_long_lived_token(short_token: str) -> dict:
     """Exchange a short-lived user token for a long-lived token when possible."""
-    if not META_APP_ID or not META_APP_SECRET or not short_token:
+    if not embedded_signup_app_id() or not embedded_signup_app_secret() or not short_token:
         return {"access_token": short_token, "token_type": "short_lived"}
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
             f"{GRAPH}/oauth/access_token",
             params={
                 "grant_type": "fb_exchange_token",
-                "client_id": META_APP_ID,
-                "client_secret": META_APP_SECRET,
+                "client_id": embedded_signup_app_id(),
+                "client_secret": embedded_signup_app_secret(),
                 "fb_exchange_token": short_token,
             },
         )
@@ -1375,7 +1395,9 @@ async def get_config():
     erroring out. A 503 is reserved for the case where ``META_APP_ID``
     itself isn't configured (no Meta integration at all).
     """
-    if not META_APP_ID:
+    app_id = embedded_signup_app_id()
+    config_id = embedded_signup_config_id()
+    if not app_id:
         # No Meta integration whatsoever. The dashboard should never
         # try to mount the FB SDK — surface that explicitly.
         return {
@@ -1389,15 +1411,16 @@ async def get_config():
             ),
             "oauth_start_path": None,
             "redirect_uri_configured": bool(META_REDIRECT_URI and "://" in META_REDIRECT_URI),
+            "review_harness": False,
         }
     enabled = is_meta_embedded_signup_enabled()
     return {
-        "app_id": META_APP_ID,
+        "app_id": app_id,
         # We expose the config_id under BOTH names so older dashboard
         # builds (which only read ``config_id``) keep working while
         # newer builds can opt into the explicit name.
-        "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
-        "embedded_signup_config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
+        "config_id": config_id,
+        "embedded_signup_config_id": config_id,
         "graph_version": META_GRAPH_API_VERSION,
         "embedded_signup_enabled": enabled,
         "disabled_reason": "" if enabled else meta_embedded_disabled_reason(),
@@ -1406,6 +1429,7 @@ async def get_config():
         # embedded environments where window.open is blocked).
         "oauth_start_path": "/whatsapp/embedded/oauth/start" if enabled else None,
         "redirect_uri_configured": bool(META_REDIRECT_URI and "://" in META_REDIRECT_URI),
+        "review_harness": is_catalog_review_harness_enabled(),
     }
 
 
@@ -1534,15 +1558,11 @@ def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
     from urllib.parse import urlencode  # noqa: PLC0415
 
     params = {
-        "client_id": META_APP_ID,
+        "client_id": embedded_signup_app_id(),
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
-        "scope": ",".join([
-            "business_management",
-            "whatsapp_business_management",
-            "whatsapp_business_messaging",
-        ]),
+        "config_id": embedded_signup_config_id(),
+        "scope": ",".join(embedded_signup_oauth_scopes()),
         "state": state,
     }
     base = f"https://www.facebook.com/{META_GRAPH_API_VERSION}/dialog/oauth"
@@ -1738,7 +1758,7 @@ async def exchange_code(
     """
     tenant_id = resolve_tenant_id(request)
 
-    if not META_APP_ID or not META_APP_SECRET:
+    if not embedded_signup_app_id() or not embedded_signup_app_secret():
         raise HTTPException(
             status_code=503,
             detail="إعدادات تطبيق Meta غير مكتملة. تواصل مع الدعم.",

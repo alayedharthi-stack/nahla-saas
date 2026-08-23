@@ -866,7 +866,7 @@ def _safe_view(conn: WhatsAppConnection) -> dict:
     """Return a connection dict safe for the frontend (no access_token)."""
     meta = dict(conn.extra_metadata or {})
     token_ctx = get_token_context(conn)
-    return {
+    payload = {
         "status":                       conn.status,
         "connection_status":            conn.status,
         "phone_number":                 conn.phone_number,
@@ -892,6 +892,15 @@ def _safe_view(conn: WhatsAppConnection) -> dict:
         "merchant_channel_label":       _merchant_channel_label(conn),
         "connection_type":              conn.connection_type,
     }
+    from core.catalog_review_harness import (  # noqa: PLC0415
+        is_catalog_review_harness_enabled,
+        public_review_harness_status,
+        redact_graph_ids,
+    )
+    if is_catalog_review_harness_enabled():
+        payload = redact_graph_ids(payload)
+        payload["review_harness"] = public_review_harness_status(conn)
+    return payload
 
 
 async def _exchange_code_for_token(code: str) -> dict:
@@ -1722,7 +1731,12 @@ async def manual_connect(
 
 @router.post("/connection/disconnect")
 async def disconnect(request: Request, db: Session = Depends(get_db)):
-    """Merchant disconnects WhatsApp — wipes token, preserves identifiers for re-connect."""
+    """Merchant disconnects WhatsApp — wipes token, preserves identifiers for re-connect.
+
+    Never deletes a Meta catalog, never unlinks a catalog from a WABA, and
+    never deletes catalog products. App Review harness filming depends on
+    those assets remaining visible in Commerce Manager.
+    """
     tenant_id = resolve_tenant_id(request)
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
@@ -1746,6 +1760,13 @@ async def disconnect(request: Request, db: Session = Depends(get_db)):
     conn.disconnect_reason       = "merchant_requested_disconnect"
     conn.disconnected_at         = now
     conn.disconnected_by_user_id = actor_user_id
+
+    from core.catalog_review_harness import is_catalog_review_harness_enabled  # noqa: PLC0415
+    if is_catalog_review_harness_enabled():
+        from services.meta_catalog_review_harness import (  # noqa: PLC0415
+            stamp_disconnect_preserves_assets,
+        )
+        stamp_disconnect_preserves_assets(conn)
 
     db.commit()
     audit(

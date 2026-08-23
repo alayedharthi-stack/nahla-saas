@@ -34,6 +34,7 @@ import {
 } from '../lib/metaEmbeddedSignupLogin'
 import { useLanguage } from '../i18n/context'
 import type { Translations } from '../i18n/types'
+import ReviewHarnessStatusBanner from '../components/catalog/ReviewHarnessStatusBanner'
 
 /** Map stored Arabic connLabel values to localized display — logic keys unchanged. */
 function displayConnLabel(raw: string, wc: Translations['whatsappConnect']): string {
@@ -549,6 +550,7 @@ function EmbeddedSignupFlow({
           embedded_signup_enabled?: boolean
           disabled_reason?: string
           oauth_start_path?: string | null
+          review_harness?: boolean
         }>('/whatsapp/embedded/config')
         if (cancelled) return
         const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
@@ -569,7 +571,9 @@ function EmbeddedSignupFlow({
         if (!document.getElementById('facebook-jssdk')) {
           const s  = document.createElement('script')
           s.id     = 'facebook-jssdk'
-          s.src    = 'https://connect.facebook.net/ar_AR/sdk.js'
+          s.src    = cfg.review_harness
+            ? 'https://connect.facebook.net/en_US/sdk.js'
+            : 'https://connect.facebook.net/ar_AR/sdk.js'
           s.async  = true
           s.defer  = true
           document.body.appendChild(s)
@@ -2139,6 +2143,7 @@ export default function WhatsAppConnect() {
 
         return (
         <div className="space-y-4">
+          <ReviewHarnessStatusBanner status={status?.review_harness} />
           <div className={`border rounded-2xl p-6 text-center space-y-3 ${palette.wrap}`}>
             <div className={`w-16 h-16 rounded-full flex items-center justify-center mx-auto ${palette.iconWrap}`}>
               {trulyBroken
@@ -2186,8 +2191,8 @@ export default function WhatsAppConnect() {
                         has_token:           wc.connected.checkToken,
                         provider_reachable:  `${wc.connected.checkProvider}${c.name === 'provider_reachable' && liveVerify!.provider ? ` (${liveVerify!.provider})` : ''}`,
                       } as Record<string,string>)[c.name] || c.name}
-                      {c.status_code != null && ` (${c.status_code})`}
-                      {c.detail && !c.ok && <span className="text-slate-500"> — {c.detail}</span>}
+                      {c.status_code != null && !status?.review_harness?.hide_graph_ids && ` (${c.status_code})`}
+                      {c.detail && !c.ok && !status?.review_harness?.hide_graph_ids && <span className="text-slate-500"> — {c.detail}</span>}
                     </span>
                   </div>
                 ))}

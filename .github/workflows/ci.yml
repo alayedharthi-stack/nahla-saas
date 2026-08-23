@@ -45,6 +45,9 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Meta catalog App Review harness tests
+        run: python -m pytest backend/tests/test_meta_catalog_review_harness.py -q --maxfail=1
+
       - name: Customer conditional coupon Layer 0 consumer tests
         run: |
           python -m pytest \

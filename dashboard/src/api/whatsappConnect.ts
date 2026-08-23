@@ -1,4 +1,5 @@
 import { apiCall } from './client'
+import type { ReviewHarnessStatus } from './catalog'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ export interface WaConnection {
   last_coexistence_event?: CoexistenceEvent | null
   last_coexistence_events_by_category?: Record<string, CoexistenceEvent>
   last_status_event?: CoexistenceEvent | null
+  review_harness?: ReviewHarnessStatus | null
 }
 
 export interface CoexistenceWebhookBlock {

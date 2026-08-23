@@ -108,10 +108,19 @@ def finalize_successful_whatsapp_connection(
         ) from exc
 
     try:
-        from services.meta_catalog_reconnect import (  # noqa: PLC0415
-            schedule_meta_catalog_reconnect_best_effort,
+        from core.catalog_review_harness import (  # noqa: PLC0415
+            is_catalog_review_harness_enabled,
         )
-        schedule_meta_catalog_reconnect_best_effort(tenant_id)
+        if is_catalog_review_harness_enabled():
+            from services.meta_catalog_review_harness import (  # noqa: PLC0415
+                schedule_catalog_review_harness_best_effort,
+            )
+            schedule_catalog_review_harness_best_effort(tenant_id)
+        else:
+            from services.meta_catalog_reconnect import (  # noqa: PLC0415
+                schedule_meta_catalog_reconnect_best_effort,
+            )
+            schedule_meta_catalog_reconnect_best_effort(tenant_id)
     except Exception:  # noqa: silent-ok — catalog bind must not fail WhatsApp connect
         logger.warning(
             "[WAFinalize] catalog reconnect schedule skipped tenant=%s",

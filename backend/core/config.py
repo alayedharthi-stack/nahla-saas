@@ -315,10 +315,18 @@ def is_meta_embedded_signup_enabled() -> bool:
         ``false`` (or ``0``, ``no``, ``off``) → force-disabled even
         when the config id is present. Used by ops as a kill switch
         while the Meta entitlement is still under review.
+      * App Review harness (non-production, flag on) uses the Test App
+        config_id instead of live ``META_WA_CONFIG_ID``.
     """
-    if not META_EMBEDDED_SIGNUP_CONFIG_ID:
+    from core.catalog_review_harness import (  # noqa: PLC0415
+        embedded_signup_app_id,
+        embedded_signup_app_secret,
+        embedded_signup_config_id,
+    )
+
+    if not embedded_signup_config_id():
         return False
-    if not META_APP_ID or not META_APP_SECRET:
+    if not embedded_signup_app_id() or not embedded_signup_app_secret():
         return False
     forced = (_META_DIRECT_SIGNUP_FORCE_ENV or "").strip().lower()
     if forced in {"0", "false", "no", "off", "disabled"}:
