@@ -32,6 +32,18 @@ export function extractDestinationPath(url: string): string {
   }
 }
 
+function trySendBeaconFallback(endpoint: string, serialized: string): void {
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      const blob = new Blob([serialized], { type: 'application/json' })
+      // Best-effort only — return value is not proof the server received telemetry.
+      navigator.sendBeacon(endpoint, blob)
+    }
+  } catch {
+    /* best effort only */
+  }
+}
+
 export function emitSallaReconcileTelemetry(payload: SallaReconcileTelemetryPayload): void {
   const body: SallaReconcileTelemetryPayload = {
     ...payload,
@@ -42,23 +54,16 @@ export function emitSallaReconcileTelemetry(payload: SallaReconcileTelemetryPayl
   const endpoint = `${getApiBase()}/api/salla/embedded/reconcile-telemetry`
   const serialized = JSON.stringify(body)
   try {
-    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
-      const blob = new Blob([serialized], { type: 'application/json' })
-      if (navigator.sendBeacon(endpoint, blob)) {
-        return
-      }
-    }
-  } catch {
-    /* fall through to fetch */
-  }
-  try {
     void fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: serialized,
       keepalive: true,
+      credentials: 'omit',
+    }).catch(() => {
+      trySendBeaconFallback(endpoint, serialized)
     })
   } catch {
-    /* best effort only */
+    trySendBeaconFallback(endpoint, serialized)
   }
 }
