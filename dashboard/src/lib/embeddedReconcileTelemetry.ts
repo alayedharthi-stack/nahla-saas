@@ -1,7 +1,8 @@
-﻿/**
+/**
  * Server-observable telemetry for the Salla embedded reconcile CTA only.
  * Payloads are flat, path-only, and must never include tokens or query values.
  */
+import { getApiBase } from '../auth'
 
 export type SallaReconcileTelemetryEvent =
   | 'SALLA_RECONCILE_CTA_CLICK'
@@ -17,16 +18,6 @@ export interface SallaReconcileTelemetryPayload {
   fallback_stage?: string
   destination_path?: string
   ts?: number
-}
-
-function resolveTelemetryApiBase(): string {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
-  const fromEnv =
-    env?.VITE_API_BASE?.trim()
-    || env?.VITE_API_BASE_URL?.trim()
-    || env?.VITE_API_URL?.trim()
-  if (fromEnv) return fromEnv.replace(/\/+$/, '')
-  return 'https://nahla-saas-production.up.railway.app'
 }
 
 export function createReconcileCorrelationId(): string {
@@ -48,7 +39,7 @@ export function emitSallaReconcileTelemetry(payload: SallaReconcileTelemetryPayl
   }
   // eslint-disable-next-line no-console
   console.info('[SallaReconcileTelemetry]', body)
-  const endpoint = `${resolveTelemetryApiBase()}/api/salla/embedded/reconcile-telemetry`
+  const endpoint = `${getApiBase()}/api/salla/embedded/reconcile-telemetry`
   const serialized = JSON.stringify(body)
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
