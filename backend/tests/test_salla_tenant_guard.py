@@ -544,6 +544,8 @@ class TestLaunchTenantGuard:
                 "sub": DERIVED_EMAIL,
                 "role": "merchant",
                 "store_id": PARTNER_STORE,
+                "jti": "test-launch-jti",
+                "exp": 9999999999,
             }):
                 with pytest.raises(HTTPException) as exc_info:
                     await resolve_launch(request, db)

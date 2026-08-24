@@ -33,6 +33,15 @@ function clearEmbeddedSession(): void {
   clearSallaEmbeddedSession()
 }
 
+
+function sanitizeInternalNextPath(raw: string, fallback = '/overview'): string {
+  const trimmed = (raw || '').trim()
+  if (!trimmed.startsWith('/')) return fallback
+  if (trimmed.startsWith('//') || trimmed.includes('://')) return fallback
+  if (trimmed.includes('\\')) return fallback
+  return trimmed
+}
+
 function decodeJwtPayload(token: string): Record<string, unknown> {
   try {
     const parts = token.split('.')
@@ -50,7 +59,7 @@ export default function SallaLaunch() {
   useEffect(() => {
     const params    = new URLSearchParams(window.location.search)
     const token     = params.get('token') || ''
-    const nextPath  = params.get('next')  || '/overview'
+    const nextPath  = sanitizeInternalNextPath(params.get('next') || '/overview')
 
     if (!token) {
       setErrorMsg(t.launch.errorInvalidLink)
