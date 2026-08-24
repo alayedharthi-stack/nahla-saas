@@ -113,3 +113,22 @@ export function waitForEmbeddedSdkContext(
 export function resetEmbeddedSdkHandshakeForTests(): void {
   sdkInitPromise = null
 }
+
+export function getEmbeddedSdkRuntimeState(): { sdkLoaded: boolean; sdkInitialized: boolean } {
+  if (typeof window === 'undefined') {
+    return { sdkLoaded: false, sdkInitialized: false }
+  }
+  const scriptLoaded = !!document.querySelector(`script[src="${EMBEDDED_SDK_URL}"]`)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const embedded = (window as any).Salla?.embedded
+  const sdkLoaded = scriptLoaded && !!embedded
+  let sdkInitialized = false
+  if (embedded && typeof embedded.isReady === 'function') {
+    try {
+      sdkInitialized = !!embedded.isReady()
+    } catch {
+      sdkInitialized = false
+    }
+  }
+  return { sdkLoaded, sdkInitialized }
+}

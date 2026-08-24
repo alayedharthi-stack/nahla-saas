@@ -36,6 +36,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -2252,6 +2253,53 @@ def _resolve_tenant_from_query_token(token: str) -> int:
         return int(tid)
     except (TypeError, ValueError):
         raise HTTPException(status_code=401, detail="token tenant_id is not an integer")
+
+
+
+
+_ALLOWED_SALLA_RECONCILE_TELEMETRY_EVENTS = frozenset({
+    "SALLA_RECONCILE_CTA_CLICK",
+    "SALLA_EMBEDDED_SDK_STATE",
+    "SALLA_RECONCILE_NAV_ATTEMPT",
+})
+
+
+class SallaEmbeddedReconcileTelemetryBody(BaseModel):
+    event: str = Field(..., max_length=64)
+    correlation_id: str = Field(..., max_length=64, pattern=r"^src_[a-z0-9_]+$")
+    sdk_loaded: Optional[bool] = None
+    sdk_initialized: Optional[bool] = None
+    attempted_method: Optional[str] = Field(None, max_length=64)
+    fallback_stage: Optional[str] = Field(None, max_length=64)
+    destination_path: Optional[str] = Field(None, max_length=256, pattern=r"^/[^?]*$")
+    ts: Optional[int] = Field(None, ge=0)
+
+
+@router.post("/api/salla/embedded/reconcile-telemetry")
+async def salla_embedded_reconcile_telemetry(
+    request: Request,
+    body: SallaEmbeddedReconcileTelemetryBody,
+):
+    """Public, token-less telemetry for embedded reconcile CTA navigation only."""
+    if body.event not in _ALLOWED_SALLA_RECONCILE_TELEMETRY_EVENTS:
+        raise HTTPException(status_code=400, detail="invalid event")
+    client_ip = request.headers.get("X-Real-IP") or (
+        request.client.host if request.client else "?"
+    )
+    logger.info(
+        "[SallaEmbeddedTelemetry] event=%s correlation_id=%s sdk_loaded=%s "
+        "sdk_initialized=%s attempted_method=%s fallback_stage=%s destination_path=%s ts=%s ip=%s",
+        body.event,
+        body.correlation_id,
+        body.sdk_loaded,
+        body.sdk_initialized,
+        body.attempted_method,
+        body.fallback_stage,
+        body.destination_path,
+        body.ts,
+        client_ip,
+    )
+    return {"ok": True}
 
 
 @router.get("/api/salla/oauth/start")

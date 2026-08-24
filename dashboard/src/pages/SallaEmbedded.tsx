@@ -41,8 +41,14 @@ import {
 } from '../lib/embeddedLogin'
 import {
   navigateEmbeddedExternalUrl,
+  openUserGestureFallbackWindow,
   redactExternalNavUrlForLog,
 } from '../lib/embeddedNavigation'
+import {
+  createReconcileCorrelationId,
+  emitSallaReconcileTelemetry,
+  extractDestinationPath,
+} from '../lib/embeddedReconcileTelemetry'
 import {
   signalEmbeddedReady,
   startEmbeddedSdkHandshake,
@@ -203,12 +209,25 @@ export default function SallaEmbedded() {
 
   const openOauthReconcile = useCallback(() => {
     const startUrl = resolveOauthReconcileStartUrl(API_BASE, storeLinkPayload)
+    const correlationId = createReconcileCorrelationId()
+    const destinationPath = extractDestinationPath(startUrl)
+    const gesturePopup = openUserGestureFallbackWindow()
     clearEmbeddedSession()
+    emitSallaReconcileTelemetry({
+      event: 'SALLA_RECONCILE_CTA_CLICK',
+      correlation_id: correlationId,
+      destination_path: destinationPath,
+    })
     console.info(
-      '[SallaEmbedded] OAuth reconcile CTA clicked | url=%s | has_jwt=false',
+      '[SallaEmbedded] OAuth reconcile CTA clicked | url=%s | has_jwt=false | correlation_id=%s',
       redactExternalNavUrlForLog(startUrl),
+      correlationId,
     )
-    void navigateEmbeddedExternalUrl(startUrl, { logPrefix: '[SallaEmbedded]' })
+    void navigateEmbeddedExternalUrl(startUrl, {
+      logPrefix: '[SallaEmbedded]',
+      correlationId,
+      gesturePopup,
+    })
       .then((result) => {
         console.info(
           '[SallaEmbedded] OAuth reconcile navigation complete | method=%s | sdk=%s | handed_off=%s | expect_backend=embedded_reconcile_start',
