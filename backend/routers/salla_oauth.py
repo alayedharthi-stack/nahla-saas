@@ -331,16 +331,16 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email, canonical_store_id or lookup_store_id, identity_source or "unknown",
     )
 
-    test_compat_tenant: Optional[int] = None
+    test_compat_match = None
     if identity_source == "merchant_account_only":
-        from services.salla_test_compat import resolve_salla_test_compat_tenant  # noqa: PLC0415
+        from services.salla_test_compat import resolve_salla_test_compat_match  # noqa: PLC0415
 
-        test_compat_tenant = resolve_salla_test_compat_tenant(
+        test_compat_match = resolve_salla_test_compat_match(
             db,
             merchant_account_id=lookup_store_id,
             app_id=app_id,
         )
-        if test_compat_tenant is None:
+        if test_compat_match is None:
             reject_merchant_account_only_alias_routing(
                 db,
                 merchant_account_id=lookup_store_id,
@@ -355,8 +355,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 ),
             )
         logger.info(
-            "[SallaLogin] test compat entry authorized | tenant_id=%s merchant_account_id=%s",
-            test_compat_tenant,
+            "[SallaLogin] test compat entry authorized | tenant_id=%s integration_id=%s external_store_id=%s merchant_account_id=%s",
+            test_compat_match.tenant_id,
+            test_compat_match.integration_id,
+            test_compat_match.external_store_id,
             lookup_store_id,
         )
 
@@ -376,18 +378,17 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         if canonical_store_id
         else (None, None, "")
     )
-    if test_compat_tenant is not None:
-        owner_tenant_id = test_compat_tenant
-        owner_integration = (
-            db.query(Integration)
-            .filter(
-                Integration.provider == "salla",
-                Integration.tenant_id == test_compat_tenant,
+    if test_compat_match is not None:
+        owner_tenant_id = test_compat_match.tenant_id
+        owner_integration = db.get(Integration, test_compat_match.integration_id)
+        owner_matched_via = test_compat_match.matched_via
+        if owner_integration is None:
+            logger.error(
+                "[SallaLogin] test compat integration missing | integration_id=%s tenant_id=%s",
+                test_compat_match.integration_id,
+                test_compat_match.tenant_id,
             )
-            .order_by(Integration.id.asc())
-            .first()
-        )
-        owner_matched_via = "test_compat" if owner_integration is not None else "" 
+            raise HTTPException(status_code=500, detail="test_compat_integration_missing")
     if owner_tenant_id is not None:
         verify_jwt_tenant_owns_salla_store(
             db,
@@ -689,7 +690,7 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                 guard_reason = final_guard.reason or "store_tenant_mismatch"
                 if (
                     guard_reason == "merchant_identity_not_canonical"
-                    and test_compat_tenant is None
+                    and test_compat_match is None
                 ):
                     raise HTTPException(
                         status_code=403,
@@ -699,10 +700,10 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
                             has_canonical_store_id=bool(canonical_store_id),
                         ),
                     )
-                if guard_reason == "merchant_identity_not_canonical" and test_compat_tenant is not None:
+                if guard_reason == "merchant_identity_not_canonical" and test_compat_match is not None:
                     logger.info(
                         "[SallaLogin] test compat bypass final merchant guard | tenant_id=%s store_id=%s",
-                        test_compat_tenant,
+                        test_compat_match.tenant_id,
                         jwt_store_id,
                     )
                 elif guard_reason != "merchant_identity_not_canonical":

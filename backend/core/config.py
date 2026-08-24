@@ -228,18 +228,17 @@ SALLA_OAUTH_REDIRECT_URI  = (
 # For Salla embedded apps this is typically the partner app iframe URL.
 
 # ── Salla owner test-store compatibility (TEMPORARY — disable after Salla acceptance) ──
-# Allows the flagged Tenant 1 partner test store to enter when canonical introspect
-# lacks store.id but the trusted identity matches an explicit server-side allowlist.
+# Flag OFF by default. When ON, SALLA_TEST_COMPAT_TRUSTED_IDENTITY and
+# SALLA_TEST_COMPAT_TENANT_ID must be explicitly set or compatibility is unavailable.
 SALLA_TEST_COMPAT_ENABLED = os.environ.get("SALLA_TEST_COMPAT_ENABLED", "").strip().lower() in (
     "1", "true", "yes",
 )
-SALLA_TEST_COMPAT_TRUSTED_IDENTITY = (
-    os.environ.get("SALLA_TEST_COMPAT_TRUSTED_IDENTITY", "22825873") or "22825873"
-).strip()
+SALLA_TEST_COMPAT_TRUSTED_IDENTITY = (os.environ.get("SALLA_TEST_COMPAT_TRUSTED_IDENTITY") or "").strip()
+_SALLA_TEST_COMPAT_TENANT_RAW = (os.environ.get("SALLA_TEST_COMPAT_TENANT_ID") or "").strip()
 try:
-    SALLA_TEST_COMPAT_TENANT_ID = int(os.environ.get("SALLA_TEST_COMPAT_TENANT_ID", "1") or "1")
+    SALLA_TEST_COMPAT_TENANT_ID = int(_SALLA_TEST_COMPAT_TENANT_RAW) if _SALLA_TEST_COMPAT_TENANT_RAW else 0
 except ValueError:
-    SALLA_TEST_COMPAT_TENANT_ID = 1
+    SALLA_TEST_COMPAT_TENANT_ID = 0
 
 SALLA_EMBEDDED_URL = os.environ.get(
     "SALLA_EMBEDDED_URL",
