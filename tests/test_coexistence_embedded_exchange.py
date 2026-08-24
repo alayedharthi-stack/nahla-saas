@@ -225,7 +225,7 @@ def test_finalize_not_eligible_restores_dialog360():
         status="disconnected",
         provider="dialog360",
         phone_number="+966501234567",
-        extra_metadata={"legacy_channel": "1061057720431678"},
+        extra_metadata={"legacy_channel": "TEST-CHANNEL-001"},
     )
     db.add(conn)
     db.commit()
@@ -305,7 +305,7 @@ def test_finalize_webhook_failure_restores_dialog360():
     db.close()
 
 
-def test_tenant35_style_connected_meta_unaffected_by_missing_coexistence_env(monkeypatch):
+def test_connected_meta_unaffected_by_missing_coexistence_env(monkeypatch):
     """Deploy safety: coexistence env unset does not imply connected Meta rows must change."""
     from core import config as cfg  # noqa: PLC0415
     from models import Tenant, WhatsAppConnection  # noqa: PLC0415
@@ -314,14 +314,14 @@ def test_tenant35_style_connected_meta_unaffected_by_missing_coexistence_env(mon
     assert cfg.is_coexistence_embedded_signup_available() is False
 
     db = _sqlite_session()
-    db.add(Tenant(id=535, name="connected-meta", is_active=True))
+    db.add(Tenant(id=801, name="connected-meta", is_active=True))
     conn = WhatsAppConnection(
-        tenant_id=535,
+        tenant_id=801,
         status="connected",
         provider="meta",
         connection_type="embedded",
-        whatsapp_business_account_id="WABA-CONNECTED-535",
-        phone_number_id="PHONE-CONNECTED-535",
+        whatsapp_business_account_id="TEST-WABA-CONNECTED-001",
+        phone_number_id="TEST-PHONE-CONNECTED-001",
         phone_number="+966501111222",
         extra_metadata={"connection_mode": "coexistence"},
     )

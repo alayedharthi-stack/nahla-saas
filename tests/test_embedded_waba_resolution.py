@@ -172,9 +172,9 @@ def test_no_first_granular_without_phone_match():
             await resolve_coexistence_assets_from_graph(
                 "https://graph.facebook.com/v21.0",
                 "token",
-                _debug(["WABA-FIRST", "WABA-SECOND"]),
+                _debug(["WABA-FIRST", "WABA-SECOND"], ["BIZ-1"]),
                 expected_phone_number="+966501234567",
             )
-        assert exc.value.code == REAUTH_REQUIRED
+        assert exc.value.code == WRONG_PHONE
 
     asyncio.run(run(pytest.MonkeyPatch()))

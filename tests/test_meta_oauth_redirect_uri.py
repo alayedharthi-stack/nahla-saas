@@ -61,7 +61,7 @@ def test_meta_oauth_01_start_and_exchange_share_bound_redirect_uri():
     from routers.whatsapp_embedded import _build_meta_oauth_authorize_url, _sign_oauth_state, _verify_oauth_state
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(7, "nonce1", issued_at, start_uri)
+    state = _sign_oauth_state(7, "nonce1", issued_at, start_uri, "cloud_api")
     authorize = _build_meta_oauth_authorize_url(state, start_uri)
     dialog_uri = parse_qs(urlparse(authorize).query)["redirect_uri"][0]
     bound = _verify_oauth_state(state).redirect_uri
@@ -127,7 +127,7 @@ def test_meta_oauth_06_callback_path_stays_identical():
     from routers.whatsapp_embedded import _build_meta_oauth_authorize_url, _sign_oauth_state, _verify_oauth_state
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(3, "n", issued_at, start_uri)
+    state = _sign_oauth_state(3, "n", issued_at, start_uri, "cloud_api")
     dialog_path = urlparse(parse_qs(urlparse(
         _build_meta_oauth_authorize_url(state, start_uri)
     ).query)["redirect_uri"][0]).path
@@ -139,7 +139,7 @@ def test_meta_oauth_07_state_binds_start_redirect_uri():
     from routers.whatsapp_embedded import _sign_oauth_state, _verify_oauth_state
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(11, "bound-nonce", issued_at, CANONICAL_SLASH)
+    state = _sign_oauth_state(11, "bound-nonce", issued_at, CANONICAL_SLASH, "cloud_api")
     parsed = _verify_oauth_state(state)
     assert parsed.tenant_id == 11
     assert parsed.redirect_uri == CANONICAL_SLASH
@@ -150,7 +150,7 @@ def test_meta_oauth_bound_redirect_uri_reused_without_strip():
 
     exact = "https://api.example.test/whatsapp/embedded/oauth/callback "
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    parsed = _verify_oauth_state(_sign_oauth_state(4, "n", issued_at, exact))
+    parsed = _verify_oauth_state(_sign_oauth_state(4, "n", issued_at, exact, "cloud_api"))
     assert parsed.redirect_uri == exact
     assert parsed.redirect_uri != exact.strip()
 
@@ -159,7 +159,7 @@ def test_meta_oauth_08_tampered_state_cannot_supply_other_redirect():
     from routers.whatsapp_embedded import _sign_oauth_state, _verify_oauth_state
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(11, "bound-nonce", issued_at, CANONICAL)
+    state = _sign_oauth_state(11, "bound-nonce", issued_at, CANONICAL, "cloud_api")
     body_b64, sig_b64 = state.split(".", 1)
     pad = "=" * (-len(body_b64) % 4)
     payload = json.loads(base64.urlsafe_b64decode(body_b64 + pad))
@@ -295,7 +295,7 @@ def test_state_hmac_uses_jwt_secret_not_request_data():
     from routers.whatsapp_embedded import JWT_SECRET, _sign_oauth_state
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(1, "n", issued_at, CANONICAL)
+    state = _sign_oauth_state(1, "n", issued_at, CANONICAL, "cloud_api")
     body_b64, sig_b64 = state.split(".", 1)
     body = base64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4))
     expected = hmac.new(JWT_SECRET.encode("utf-8"), body, hashlib.sha256).digest()
