@@ -201,6 +201,7 @@ JWT_PUBLIC_PREFIXES = (
 # "/salla/app-settings").
 JWT_PUBLIC_EXACT_PATHS = frozenset({
     "/salla/app",                       # legacy embedded HTML landing (iframe)
+    "/api/salla/embedded/reconcile-telemetry",  # embedded reconcile CTA telemetry (no secrets)
 })
 
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
