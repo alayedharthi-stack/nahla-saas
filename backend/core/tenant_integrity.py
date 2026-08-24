@@ -198,6 +198,73 @@ def assert_store_not_claimed(
 # Evict stale cross-tenant phone/waba ownership (write, use carefully)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+
+def find_cross_tenant_whatsapp_asset_conflict(
+    db: Session,
+    claiming_tenant_id: int,
+    *,
+    waba_id: Optional[str] = None,
+    phone_number_id: Optional[str] = None,
+) -> Optional["WhatsAppConnection"]:
+    """
+    Return the first other-tenant row that already claims the WABA or phone id.
+    Includes disconnected rows — coexistence exchange must not auto-transfer assets.
+    """
+    from database.models import WhatsAppConnection  # noqa: PLC0415
+
+    waba = str(waba_id or "").strip()
+    phone = str(phone_number_id or "").strip()
+    if not waba and not phone:
+        return None
+    q = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id != claiming_tenant_id)
+    if waba:
+        hit = q.filter(WhatsAppConnection.whatsapp_business_account_id == waba).first()
+        if hit:
+            return hit
+    if phone:
+        hit = q.filter(WhatsAppConnection.phone_number_id == phone).first()
+        if hit:
+            return hit
+    return None
+
+
+def assert_no_cross_tenant_whatsapp_asset(
+    db: Session,
+    claiming_tenant_id: int,
+    *,
+    waba_id: Optional[str] = None,
+    phone_number_id: Optional[str] = None,
+) -> None:
+    conflict = find_cross_tenant_whatsapp_asset_conflict(
+        db,
+        claiming_tenant_id,
+        waba_id=waba_id,
+        phone_number_id=phone_number_id,
+    )
+    if not conflict:
+        return
+    log_integrity_event(
+        db,
+        event="write_blocked",
+        tenant_id=claiming_tenant_id,
+        other_tenant_id=conflict.tenant_id,
+        waba_id=waba_id,
+        phone_number_id=phone_number_id,
+        action="assert_no_cross_tenant_whatsapp_asset",
+        result="blocked",
+        detail=(
+            f"asset claimed by tenant={conflict.tenant_id} status={conflict.status}"
+        ),
+    )
+    raise TenantIntegrityError(
+        "CROSS_TENANT_ASSET_CONFLICT: WhatsApp asset is registered to another tenant. "
+        "Use the admin reconciliation tool.",
+        conflict_tenant_id=conflict.tenant_id,
+        waba_id=waba_id,
+        phone_number_id=phone_number_id,
+    )
+
 def evict_phone_id_from_other_tenants(
     db: Session,
     phone_number_id: str,

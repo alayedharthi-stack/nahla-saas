@@ -521,6 +521,7 @@ function EmbeddedSignupFlow({
 
   const [configId, setConfigId] = useState('')
   const [coexistenceConfigId, setCoexistenceConfigId] = useState('')
+  const [coexistenceAvailable, setCoexistenceAvailable] = useState(false)
 
   // Add-phone form state
   const [newPhone, setNewPhone]         = useState('')
@@ -546,7 +547,8 @@ function EmbeddedSignupFlow({
           app_id: string
           config_id: string
           embedded_signup_config_id?: string
-          coexistence_embedded_signup_config_id?: string
+          coexistence_embedded_signup_config_id?: string | null
+          coexistence_embedded_signup_available?: boolean
           graph_version: string
           embedded_signup_enabled?: boolean
           disabled_reason?: string
@@ -554,9 +556,10 @@ function EmbeddedSignupFlow({
         }>('/whatsapp/embedded/config')
         if (cancelled) return
         const cfgId = cfg.embedded_signup_config_id || cfg.config_id || ''
-        const coexistenceCfgId = cfg.coexistence_embedded_signup_config_id || cfgId
         if (cfgId) setConfigId(cfgId)
-        if (coexistenceCfgId) setCoexistenceConfigId(coexistenceCfgId)
+        const coexistenceCfgId = cfg.coexistence_embedded_signup_config_id || ''
+        setCoexistenceAvailable(Boolean(cfg.coexistence_embedded_signup_available && coexistenceCfgId))
+        setCoexistenceConfigId(coexistenceCfgId)
 
         const hasCredentials = !!cfg.app_id && !!cfgId
         if (!hasCredentials) {
@@ -771,6 +774,10 @@ function EmbeddedSignupFlow({
   }, [])
 
   const launchCoexistenceSignup = useCallback(() => {
+    if (!coexistenceAvailable || !coexistenceConfigId) {
+      setError('WhatsApp coexistence setup is temporarily unavailable.')
+      return
+    }
     if (!window.FB || !sdkLoaded.current) { setError(emb.sdkNotReady); return }
     setError('')
     setBusy(true)
@@ -835,7 +842,7 @@ function EmbeddedSignupFlow({
           setBusy(false)
         }
       })()
-    }, buildCoexistenceEmbeddedSignupFbLoginOptions(coexistenceConfigId || configId))
+    }, buildCoexistenceEmbeddedSignupFbLoginOptions(coexistenceConfigId))
   }, [
     applySessionMessage,
     abortIfUnsafeSession,

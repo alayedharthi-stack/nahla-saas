@@ -39,6 +39,8 @@ from core.config import (
     META_APP_ID,
     META_APP_SECRET,
     META_EMBEDDED_SIGNUP_CONFIG_ID,
+    META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID,
+    is_coexistence_embedded_signup_available,
     META_GRAPH_API_VERSION,
     META_REDIRECT_URI,
     META_WA_CONFIG_ID,
@@ -49,6 +51,10 @@ from core.config import (
 from core.database import get_db
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
+from services.coexistence_embedded_exchange import (
+    _conn_field_snapshot,
+    coexistence_exchange_fingerprint,
+)
 from services.whatsapp_platform.token_manager import (
     get_oauth_session_state as _shared_get_oauth_session_state,
     get_token_candidates,
@@ -923,13 +929,13 @@ async def _finalize_coexistence_exchange(
     waba_id: str,
     user_token: str,
     phones: List[dict],
-    hinted_phone_id: str,
+    trusted_phone_id: str,
     finish_event: Optional[str],
+    exchange_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     from core.tenant_integrity import (  # noqa: PLC0415
         TenantIntegrityError,
-        assert_phone_id_not_claimed,
-        evict_phone_id_from_other_tenants,
+        assert_no_cross_tenant_whatsapp_asset,
     )
     from services.meta_coexistence import (  # noqa: PLC0415
         apply_smb_sync_results,
@@ -950,21 +956,21 @@ async def _finalize_coexistence_exchange(
     merge_coexistence_metadata(
         conn,
         finish_event=finish_event or None,
-        client_phone_hint=hinted_phone_id or None,
+        client_phone_hint=trusted_phone_id or None,
     )
     db.commit()
 
     phone_ids = {str(p.get("id") or "") for p in phones if p.get("id")}
     chosen: Optional[dict] = None
-    if hinted_phone_id:
-        if hinted_phone_id not in phone_ids:
+    if trusted_phone_id:
+        if trusted_phone_id not in phone_ids:
             conn.status = "failed"
             conn.sending_enabled = False
             conn.last_error = "رقم الهاتف الذي أرجعته Meta لا ينتمي لهذا الحساب."
             persist_provider_phone_truth(conn)
             db.commit()
             raise HTTPException(status_code=400, detail=conn.last_error)
-        chosen = next(p for p in phones if str(p.get("id")) == hinted_phone_id)
+        chosen = next(p for p in phones if str(p.get("id")) == trusted_phone_id)
     elif len(phones) == 1:
         chosen = phones[0]
     elif not phones:
@@ -986,18 +992,18 @@ async def _finalize_coexistence_exchange(
 
     phone_id = str(chosen["id"])
     try:
-        assert_phone_id_not_claimed(db, phone_id, tenant_id)
+        assert_no_cross_tenant_whatsapp_asset(
+            db,
+            tenant_id,
+            waba_id=waba_id,
+            phone_number_id=phone_id,
+        )
     except TenantIntegrityError as exc:
         conn.status = "failed"
         conn.sending_enabled = False
         conn.last_error = str(exc)
         db.commit()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    try:
-        evict_phone_id_from_other_tenants(db, phone_id, tenant_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[Coexistence] eviction warning tenant=%s: %s", tenant_id, exc)
-
     _assign_embedded_phone_id(conn, phone_id)
     conn.phone_number = chosen.get("display_phone_number") or conn.phone_number
     conn.business_display_name = chosen.get("verified_name") or conn.business_display_name
@@ -1044,7 +1050,7 @@ async def _finalize_coexistence_exchange(
     merge_coexistence_metadata(
         conn,
         finish_event=finish_event or None,
-        client_phone_hint=hinted_phone_id or None,
+        client_phone_hint=trusted_phone_id or None,
         is_on_biz_app=phone_data.get("is_on_biz_app"),
         platform_type=phone_data.get("platform_type"),
     )
@@ -1086,6 +1092,14 @@ async def _finalize_coexistence_exchange(
                 status_code=502,
                 detail="تعذر إتمام ربط واتساب بعد اكتمال مزامنة التطبيق.",
             ) from exc
+        if exchange_fingerprint:
+            from services.coexistence_embedded_exchange import mark_coexistence_exchange_completed  # noqa: PLC0415
+            mark_coexistence_exchange_completed(
+                conn,
+                exchange_fingerprint,
+                waba_id=waba_id,
+                phone_number_id=phone_id,
+            )
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["message"] = (
             "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
@@ -1382,6 +1396,8 @@ async def get_config():
         return {
             "app_id": "",
             "config_id": "",
+            "coexistence_embedded_signup_config_id": None,
+            "coexistence_embedded_signup_available": False,
             "graph_version": META_GRAPH_API_VERSION,
             "embedded_signup_enabled": False,
             "disabled_reason": (
@@ -1399,6 +1415,8 @@ async def get_config():
         # newer builds can opt into the explicit name.
         "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
         "embedded_signup_config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
+        "coexistence_embedded_signup_config_id": META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID or None,
+        "coexistence_embedded_signup_available": is_coexistence_embedded_signup_available(),
         "graph_version": META_GRAPH_API_VERSION,
         "embedded_signup_enabled": enabled,
         "disabled_reason": "" if enabled else meta_embedded_disabled_reason(),
@@ -1509,7 +1527,7 @@ def _verify_oauth_state(state: str) -> _OAuthState:
     return _OAuthState(tenant_id=tenant_id, redirect_uri=redirect_uri)
 
 
-def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
+def _build_meta_oauth_authorize_url(state: str, redirect_uri: str, *, config_id: str) -> str:
     """Build the canonical FB Login for Business / WhatsApp Embedded
     Signup authorize URL.
 
@@ -1551,7 +1569,7 @@ def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
 
 
 @router.get("/oauth/start")
-async def oauth_start(request: Request):
+async def oauth_start(request: Request, connection_mode: Optional[str] = None):
     """Server-side entry point for the Embedded Signup flow.
 
     The dashboard navigates the merchant's browser to this URL; we
@@ -1572,10 +1590,21 @@ async def oauth_start(request: Request):
             status_code=503,
             detail="عنوان رجوع OAuth لـ Meta غير مُعد على الخادم.",
         )
+    coexistence = str(connection_mode or "").strip().lower() == "coexistence"
+    if coexistence and not is_coexistence_embedded_signup_available():
+        raise HTTPException(
+            status_code=503,
+            detail="WhatsApp coexistence setup is temporarily unavailable.",
+        )
+    oauth_config_id = (
+        META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID
+        if coexistence
+        else META_EMBEDDED_SIGNUP_CONFIG_ID
+    )
     nonce = _secrets.token_urlsafe(16)
     issued_at = int(datetime.now(timezone.utc).timestamp())
     state = _sign_oauth_state(tenant_id, nonce, issued_at, redirect_uri)
-    url = _build_meta_oauth_authorize_url(state, redirect_uri)
+    url = _build_meta_oauth_authorize_url(state, redirect_uri, config_id=oauth_config_id)
     logger.info(
         "[EmbeddedSignup] oauth/start tenant=%s redirect_uri=%s",
         tenant_id, redirect_uri,
@@ -1783,70 +1812,144 @@ async def exchange_code(
 
     coexistence = str(body.connection_mode or "").strip().lower() == "coexistence"
 
-    # 2 — Discover WABA ID (prefer coexistence session hints / known phone)
+    if coexistence and not is_coexistence_embedded_signup_available():
+        raise HTTPException(
+            status_code=503,
+            detail="WhatsApp coexistence setup is temporarily unavailable.",
+        )
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+    if not conn:
+        conn = WhatsAppConnection(tenant_id=tenant_id)
+        db.add(conn)
+    snapshot = _conn_field_snapshot(conn)
+    fingerprint = coexistence_exchange_fingerprint(body.code, body.access_token)
+
     if coexistence:
-        from services.embedded_waba_resolution import resolve_embedded_waba_id  # noqa: PLC0415
-        conn_existing = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-        try:
-            waba_id = await resolve_embedded_waba_id(
-                GRAPH,
-                user_token,
-                debug_info,
-                hinted_waba_id=body.waba_id,
-                hinted_phone_number_id=body.phone_number_id,
-                known_phone_number=conn_existing.phone_number if conn_existing else None,
-            )
-        except ValueError:
-            waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
-    else:
-        waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
-    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s coexistence=%s", waba_id, tenant_id, coexistence)
-    if coexistence:
+        from services.coexistence_embedded_exchange import (  # noqa: PLC0415
+            read_completed_coexistence_exchange,
+            restore_connection_snapshot,
+        )
+        from services.embedded_waba_resolution import (  # noqa: PLC0415
+            CoexistenceWabaResolutionError,
+            resolve_coexistence_assets_from_graph,
+        )
         from services.meta_coexistence import reject_coexistence_finish_event  # noqa: PLC0415
+        from core.tenant_integrity import (  # noqa: PLC0415
+            assert_no_cross_tenant_whatsapp_asset,
+            TenantIntegrityError,
+        )
+        prior = read_completed_coexistence_exchange(conn, fingerprint)
+        if prior:
+            phones = await _get_phone_numbers(str(prior["waba_id"]), user_token)
+            return await _finalize_coexistence_exchange(
+                conn,
+                db,
+                tenant_id=tenant_id,
+                waba_id=str(prior["waba_id"]),
+                user_token=user_token,
+                phones=phones,
+                trusted_phone_id=str(prior["phone_number_id"]),
+                finish_event=body.finish_event,
+                exchange_fingerprint=fingerprint,
+            )
         reject_msg = reject_coexistence_finish_event(body.finish_event)
         if reject_msg:
             raise HTTPException(status_code=400, detail=reject_msg)
-        hinted_waba = str(body.waba_id or "").strip()
-        if hinted_waba and hinted_waba != str(waba_id):
-            raise HTTPException(
-                status_code=400,
-                detail="تعذر مطابقة حساب واتساب للأعمال مع نتيجة Meta. أعد المحاولة.",
+        try:
+            verified = await resolve_coexistence_assets_from_graph(
+                GRAPH,
+                user_token,
+                debug_info,
+                expected_phone_number=conn.phone_number,
             )
+            try:
+                assert_no_cross_tenant_whatsapp_asset(
+                    db,
+                    tenant_id,
+                    waba_id=verified.waba_id,
+                    phone_number_id=verified.phone_number_id,
+                )
+            except TenantIntegrityError as exc:
+                raise CoexistenceWabaResolutionError(
+                    "CROSS_TENANT_ASSET_CONFLICT",
+                    str(exc),
+                    http_status=409,
+                ) from exc
+            waba_id = verified.waba_id
+            phones = await _get_phone_numbers(waba_id, user_token)
+            from services.coexistence_embedded_exchange import stage_coexistence_credentials  # noqa: PLC0415
+            stage_coexistence_credentials(
+                conn,
+                waba_id=waba_id,
+                access_token=user_token,
+                token_type=long_data.get("token_type") or token_data.get("token_type", "user"),
+            )
+            expires_in = long_data.get("expires_in") or token_data.get("expires_in")
+            expires_at = None
+            if expires_in:
+                expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
+            else:
+                expires_at = _token_expiry_from_debug(debug_info)
+            _update_oauth_state(
+                conn,
+                status="healthy" if debug_info.get("is_valid", True) else "invalid",
+                token_source="merchant_oauth",
+                debug_info=debug_info,
+                expires_at=expires_at,
+            )
+            db.flush()
+            return await _finalize_coexistence_exchange(
+                conn,
+                db,
+                tenant_id=tenant_id,
+                waba_id=waba_id,
+                user_token=user_token,
+                phones=phones,
+                trusted_phone_id=verified.phone_number_id,
+                finish_event=body.finish_event,
+                exchange_fingerprint=fingerprint,
+            )
+        except CoexistenceWabaResolutionError as exc:
+            restore_connection_snapshot(conn, snapshot)
+            db.rollback()
+            raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+        except Exception:
+            restore_connection_snapshot(conn, snapshot)
+            db.rollback()
+            raise
 
-    # 3 — Enforce WABA uniqueness (fatal if claimed by another tenant) and
-    #     store intermediate credentials via the canonical service.
-    #     This also evicts stale disconnected rows that reference this WABA.
+    # 2 — Cloud API embedded signup
+    waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
+    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s coexistence=%s", waba_id, tenant_id, coexistence)
+
     from services.whatsapp_connection_service import (  # noqa: PLC0415
         begin_waba_session,
-        subscribe_phone_webhook,
         WhatsAppConnectionConflict,
         WhatsAppConnectionError,
     )
     try:
         begin_waba_session(
             db,
-            tenant_id       = tenant_id,
-            waba_id         = waba_id,
-            access_token    = user_token,
-            connection_type = "embedded",
-            actor           = "embedded_exchange",
+            tenant_id=tenant_id,
+            waba_id=waba_id,
+            access_token=user_token,
+            connection_type="embedded",
+            actor="embedded_exchange",
         )
     except WhatsAppConnectionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except WhatsAppConnectionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    # Re-fetch conn after service write so we can update token metadata
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
         raise HTTPException(status_code=500, detail="Internal error: connection row missing after write.")
 
     conn.token_type = long_data.get("token_type") or token_data.get("token_type", "user")
     conn.last_error = None
-    if not coexistence:
-        _reset_metadata_for_standard_exchange(conn)
+    _reset_metadata_for_standard_exchange(conn)
 
-    # Token expiry (Meta user tokens expire in ~60 days)
     expires_in = long_data.get("expires_in") or token_data.get("expires_in")
     expires_at = None
     if expires_in:
@@ -1862,28 +1965,8 @@ async def exchange_code(
     )
     db.commit()
 
-    # 4 — List phone numbers FIRST (Meta requires phone-level subscription, not WABA-level).
-    # We defer subscription until a phone is selected; if exactly one phone exists we
-    # auto-select it below and subscription happens during finalize. Multi-phone setups
-    # subscribe inside /select-phone via the same finalize path.
     phones = await _get_phone_numbers(waba_id, user_token)
 
-    if coexistence:
-        return await _finalize_coexistence_exchange(
-            conn,
-            db,
-            tenant_id=tenant_id,
-            waba_id=waba_id,
-            user_token=user_token,
-            phones=phones,
-            hinted_phone_id=str(body.phone_number_id or "").strip(),
-            finish_event=body.finish_event,
-        )
-
-    # If we land on the "auto-select" path the per-phone subscription happens inside
-    # sync_embedded_connection_from_meta(); otherwise it happens after the merchant
-    # picks a phone in /select-phone. The boolean below is reported to the UI so it
-    # knows the WABA half is healthy even before the phone half completes.
     webhook_ok, webhook_err = (False, "deferred until phone is selected")
 
     # ── Auto-select when exactly one phone exists ─────────────────────────
@@ -1975,7 +2058,7 @@ async def select_phone(
             waba_id=conn.whatsapp_business_account_id or "",
             user_token=token,
             phones=phones,
-            hinted_phone_id=body.phone_number_id,
+            trusted_phone_id=body.phone_number_id,
             finish_event=(conn.extra_metadata or {}).get("finish_event"),
         )
 
@@ -1993,7 +2076,6 @@ async def select_phone(
     # ── Integrity guard: phone_number_id uniqueness — always fatal ───────────
     from core.tenant_integrity import (  # noqa: PLC0415
         assert_phone_id_not_claimed,
-        evict_phone_id_from_other_tenants,
         TenantIntegrityError,
     )
     try:

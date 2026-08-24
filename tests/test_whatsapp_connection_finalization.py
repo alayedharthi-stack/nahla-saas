@@ -178,7 +178,7 @@ def test_wa_life_02_coexistence_finalization_starts_trial_once(db):
             waba_id="waba-generic-1",
             user_token="tok",
             phones=phones,
-            hinted_phone_id="pn-generic-1",
+            trusted_phone_id="pn-generic-1",
             finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
         ))
     db.refresh(t)
@@ -207,7 +207,7 @@ def test_wa_life_02_coexistence_finalization_starts_trial_once(db):
             waba_id="waba-generic-1",
             user_token="tok",
             phones=phones,
-            hinted_phone_id="pn-generic-1",
+            trusted_phone_id="pn-generic-1",
             finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
         ))
     db.refresh(t)

@@ -302,7 +302,7 @@ def test_finalize_rejects_non_business_app_without_smb_wait(db):
             waba_id=WABA_ID,
             user_token="tok",
             phones=phones,
-            hinted_phone_id=PHONE_ID,
+            trusted_phone_id=PHONE_ID,
             finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
         ))
     db.refresh(conn)
@@ -355,7 +355,7 @@ def test_finalize_keeps_eligible_business_app_coexistence(db):
             waba_id=BIZ_APP_WABA_ID,
             user_token="tok",
             phones=phones,
-            hinted_phone_id=BIZ_APP_PHONE_ID,
+            trusted_phone_id=BIZ_APP_PHONE_ID,
             finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
         ))
     db.refresh(conn)
@@ -865,7 +865,7 @@ def test_multi_phone_coexistence_keeps_mode_until_selection(db):
         waba_id=WABA_ID,
         user_token="tok",
         phones=phones,
-        hinted_phone_id="",
+        trusted_phone_id="",
         finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
     ))
     db.refresh(conn)
