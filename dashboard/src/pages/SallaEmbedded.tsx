@@ -21,6 +21,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { getApiBase } from '../auth'
 import { useEmbeddedLocale } from '../hooks/useEmbeddedLocale'
 import { buildEmbeddedEntryQuery, resolveEmbeddedAppearanceAndLocale } from '../i18n/embeddedContext'
 import { useEmbeddedTheme } from '../hooks/useEmbeddedTheme'
@@ -208,7 +209,7 @@ export default function SallaEmbedded() {
   }, [clearWatchdog])
 
   const openOauthReconcile = useCallback(() => {
-    const startUrl = resolveOauthReconcileStartUrl(API_BASE, storeLinkPayload)
+    const startUrl = resolveOauthReconcileStartUrl(getApiBase(), storeLinkPayload)
     const correlationId = createReconcileCorrelationId()
     const destinationPath = extractDestinationPath(startUrl)
     const gesturePopup = openUserGestureFallbackWindow()
