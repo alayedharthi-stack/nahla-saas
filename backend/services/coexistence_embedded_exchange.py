@@ -24,6 +24,7 @@ def _conn_field_snapshot(conn: WhatsAppConnection) -> Dict[str, Any]:
         "sending_enabled": conn.sending_enabled,
         "last_error": conn.last_error,
         "token_type": conn.token_type,
+        "access_token": conn.access_token,
         "extra_metadata": deepcopy(conn.extra_metadata or {}),
     }
 

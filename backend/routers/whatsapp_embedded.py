@@ -932,18 +932,26 @@ async def _finalize_coexistence_exchange(
     trusted_phone_id: str,
     finish_event: Optional[str],
     exchange_fingerprint: Optional[str] = None,
+    oauth_debug_info: Optional[Dict[str, Any]] = None,
+    oauth_expires_at: Optional[datetime] = None,
+    token_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     from core.tenant_integrity import (  # noqa: PLC0415
         TenantIntegrityError,
         assert_no_cross_tenant_whatsapp_asset,
     )
+    from services.coexistence_embedded_exchange import (  # noqa: PLC0415
+        _conn_field_snapshot,
+        mark_coexistence_exchange_completed,
+        restore_connection_snapshot,
+        stage_coexistence_credentials,
+    )
+    from services.embedded_waba_resolution import _digits, _phones_match  # noqa: PLC0415
     from services.meta_coexistence import (  # noqa: PLC0415
         apply_smb_sync_results,
         coexistence_webhook_fields,
         initiate_smb_app_data,
         merge_coexistence_metadata,
-        persist_ineligible_coexistence_outcome,
-        persist_provider_phone_truth,
         provider_is_on_biz_app,
         smb_syncs_accepted,
         start_coexistence_deadline,
@@ -951,46 +959,31 @@ async def _finalize_coexistence_exchange(
     )
     from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
 
-    conn.status = "authorizing"
-    conn.sending_enabled = False
-    merge_coexistence_metadata(
-        conn,
-        finish_event=finish_event or None,
-        client_phone_hint=trusted_phone_id or None,
-    )
-    db.commit()
+    snapshot = _conn_field_snapshot(conn)
+
+    def _rollback_dialog360() -> None:
+        restore_connection_snapshot(conn, snapshot)
+        db.commit()
+
+    trusted = str(trusted_phone_id or "").strip()
+    if not trusted:
+        _rollback_dialog360()
+        raise HTTPException(
+            status_code=400,
+            detail="Could not verify WhatsApp phone without Graph proof. Reauthorize with Meta.",
+        )
 
     phone_ids = {str(p.get("id") or "") for p in phones if p.get("id")}
-    chosen: Optional[dict] = None
-    if trusted_phone_id:
-        if trusted_phone_id not in phone_ids:
-            conn.status = "failed"
-            conn.sending_enabled = False
-            conn.last_error = "رقم الهاتف الذي أرجعته Meta لا ينتمي لهذا الحساب."
-            persist_provider_phone_truth(conn)
-            db.commit()
-            raise HTTPException(status_code=400, detail=conn.last_error)
-        chosen = next(p for p in phones if str(p.get("id")) == trusted_phone_id)
-    elif len(phones) == 1:
-        chosen = phones[0]
-    elif not phones:
-        conn.status = "failed"
-        conn.sending_enabled = False
-        conn.last_error = "لم يرجع Meta رقم هاتف لحساب واتساب الأعمال."
-        db.commit()
-        raise HTTPException(status_code=400, detail=conn.last_error)
-    else:
-        conn.status = "pending"
-        conn.sending_enabled = False
-        conn.last_error = None
-        db.commit()
-        payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
-        payload["status"] = "pending"
-        payload["connected"] = False
-        payload["message"] = "تم ربط حساب واتساب للأعمال. اختر رقم واتساب الأعمال الموجود على الجوال."
-        return payload
+    if trusted not in phone_ids:
+        _rollback_dialog360()
+        raise HTTPException(
+            status_code=400,
+            detail="Meta phone id does not match Graph-verified phone list.",
+        )
 
+    chosen = next(p for p in phones if str(p.get("id")) == trusted)
     phone_id = str(chosen["id"])
+
     try:
         assert_no_cross_tenant_whatsapp_asset(
             db,
@@ -999,32 +992,23 @@ async def _finalize_coexistence_exchange(
             phone_number_id=phone_id,
         )
     except TenantIntegrityError as exc:
-        conn.status = "failed"
-        conn.sending_enabled = False
-        conn.last_error = str(exc)
-        db.commit()
+        _rollback_dialog360()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    _assign_embedded_phone_id(conn, phone_id)
-    conn.phone_number = chosen.get("display_phone_number") or conn.phone_number
-    conn.business_display_name = chosen.get("verified_name") or conn.business_display_name
-    conn.connection_type = "embedded"
-    conn.provider = WHATSAPP_PROVIDER_META
-    conn.sending_enabled = False
-    db.commit()
 
     eligible, phone_data, eligibility_err = verify_coexistence_phone(phone_id, user_token, tenant_id)
-    if phone_data.get("display_phone_number"):
-        conn.phone_number = phone_data.get("display_phone_number") or conn.phone_number
-    if phone_data.get("verified_name"):
-        conn.business_display_name = phone_data.get("verified_name") or conn.business_display_name
-    persist_provider_phone_truth(conn, phone_data)
+    display = phone_data.get("display_phone_number") or chosen.get("display_phone_number")
+    expected_phone = conn.phone_number
+    if expected_phone and not _phones_match(_digits(expected_phone), display):
+        _rollback_dialog360()
+        payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
+        payload["connected"] = False
+        payload["status"] = "failed"
+        payload["message"] = "Graph-verified phone does not match merchant phone."
+        return payload
+
     on_app = provider_is_on_biz_app(phone_data, dict(conn.extra_metadata or {}))
     if on_app is False:
-        persist_ineligible_coexistence_outcome(conn, phone_data, eligibility_err)
-        conn.status = "failed"
-        conn.sending_enabled = False
-        conn.last_error = eligibility_err
-        db.commit()
+        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["connected"] = False
         payload["status"] = "coexistence_not_eligible"
@@ -1033,28 +1017,14 @@ async def _finalize_coexistence_exchange(
         payload["recommended_mode"] = "cloud_api"
         payload["message"] = eligibility_err
         return payload
+
     if not eligible:
-        conn.status = "failed"
-        conn.sending_enabled = False
-        conn.last_error = eligibility_err
-        persist_provider_phone_truth(conn, phone_data)
-        db.commit()
+        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["connected"] = False
         payload["status"] = "failed"
         payload["message"] = eligibility_err
         return payload
-
-    conn.status = "configuring"
-    start_coexistence_deadline(conn)
-    merge_coexistence_metadata(
-        conn,
-        finish_event=finish_event or None,
-        client_phone_hint=trusted_phone_id or None,
-        is_on_biz_app=phone_data.get("is_on_biz_app"),
-        platform_type=phone_data.get("platform_type"),
-    )
-    db.commit()
 
     webhook_ok, webhook_err = subscribe_phone_webhook(
         phone_id,
@@ -1063,58 +1033,85 @@ async def _finalize_coexistence_exchange(
         waba_id=waba_id,
         subscribed_fields=coexistence_webhook_fields(),
     )
-    conn.webhook_verified = bool(webhook_ok)
-    merge_coexistence_metadata(conn, webhook_subscription_error=webhook_err)
     if not webhook_ok:
-        conn.status = "configuring"
-        conn.last_error = "تم حفظ الحساب لكن الاشتراك في Webhooks لم يكتمل بعد."
-        db.commit()
+        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["status"] = "configuring"
         payload["connected"] = False
-        payload["message"] = conn.last_error
+        payload["message"] = "Phone linked but webhook subscription failed."
         return payload
 
     sync_results = initiate_smb_app_data(phone_id, user_token, tenant_id)
+    work_meta = dict(conn.extra_metadata or {})
+    conn.extra_metadata = work_meta
     apply_smb_sync_results(conn, sync_results)
     meta = dict(conn.extra_metadata or {})
-    if smb_syncs_accepted(meta):
-        conn.sending_enabled = True
-        conn.last_error = None
-        from core.whatsapp_connection_finalization import (  # noqa: PLC0415
-            WhatsAppConnectionFinalizationError,
-            finalize_successful_whatsapp_connection,
-        )
-        try:
-            finalize_successful_whatsapp_connection(db, conn)
-        except WhatsAppConnectionFinalizationError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail="تعذر إتمام ربط واتساب بعد اكتمال مزامنة التطبيق.",
-            ) from exc
-        if exchange_fingerprint:
-            from services.coexistence_embedded_exchange import mark_coexistence_exchange_completed  # noqa: PLC0415
-            mark_coexistence_exchange_completed(
-                conn,
-                exchange_fingerprint,
-                waba_id=waba_id,
-                phone_number_id=phone_id,
-            )
+    if not smb_syncs_accepted(meta):
+        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
-        payload["message"] = (
-            "تم ربط رقم واتساب الأعمال على الجوال مع نحلة. "
-            "أبقِ التطبيق مفتوحاً لإكمال المزامنة."
-        )
+        payload["status"] = "configuring"
+        payload["connected"] = False
+        payload["message"] = "Link partial. Waiting for WhatsApp Business app sync."
         return payload
 
-    conn.status = "configuring"
-    conn.sending_enabled = False
-    conn.last_error = "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال."
+    stage_coexistence_credentials(
+        conn,
+        waba_id=waba_id,
+        access_token=user_token,
+        token_type=token_type,
+    )
+    _assign_embedded_phone_id(conn, phone_id)
+    conn.phone_number = display or conn.phone_number
+    conn.business_display_name = (
+        phone_data.get("verified_name") or chosen.get("verified_name") or conn.business_display_name
+    )
+    conn.webhook_verified = True
+    merge_coexistence_metadata(
+        conn,
+        finish_event=finish_event or None,
+        client_phone_hint=trusted or None,
+        is_on_biz_app=phone_data.get("is_on_biz_app"),
+        platform_type=phone_data.get("platform_type"),
+        webhook_subscription_error=webhook_err,
+    )
+    start_coexistence_deadline(conn)
+    if oauth_debug_info is not None:
+        _update_oauth_state(
+            conn,
+            status="healthy" if oauth_debug_info.get("is_valid", True) else "invalid",
+            token_source="merchant_oauth",
+            debug_info=oauth_debug_info,
+            expires_at=oauth_expires_at,
+        )
+
+    conn.sending_enabled = True
+    conn.last_error = None
+    from core.whatsapp_connection_finalization import (  # noqa: PLC0415
+        WhatsAppConnectionFinalizationError,
+        finalize_successful_whatsapp_connection,
+    )
+    try:
+        finalize_successful_whatsapp_connection(db, conn)
+    except WhatsAppConnectionFinalizationError as exc:
+        _rollback_dialog360()
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to finalize coexistence connection.",
+        ) from exc
+
+    if exchange_fingerprint:
+        mark_coexistence_exchange_completed(
+            conn,
+            exchange_fingerprint,
+            waba_id=waba_id,
+            phone_number_id=phone_id,
+        )
     db.commit()
+
     payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
-    payload["status"] = "configuring"
-    payload["connected"] = False
-    payload["message"] = conn.last_error
+    payload["message"] = (
+        "تم ربط حساب واتساب للأعمال على الجوال بنجاح. يمكنك متابعة استخدام تطبيق واتساب للأعمال على الجوال."
+    )
     return payload
 
 
@@ -1556,7 +1553,7 @@ def _build_meta_oauth_authorize_url(state: str, redirect_uri: str, *, config_id:
         "client_id": META_APP_ID,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "config_id": META_EMBEDDED_SIGNUP_CONFIG_ID,
+        "config_id": config_id,
         "scope": ",".join([
             "business_management",
             "whatsapp_business_management",
@@ -1878,27 +1875,12 @@ async def exchange_code(
                 ) from exc
             waba_id = verified.waba_id
             phones = await _get_phone_numbers(waba_id, user_token)
-            from services.coexistence_embedded_exchange import stage_coexistence_credentials  # noqa: PLC0415
-            stage_coexistence_credentials(
-                conn,
-                waba_id=waba_id,
-                access_token=user_token,
-                token_type=long_data.get("token_type") or token_data.get("token_type", "user"),
-            )
             expires_in = long_data.get("expires_in") or token_data.get("expires_in")
             expires_at = None
             if expires_in:
                 expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
             else:
                 expires_at = _token_expiry_from_debug(debug_info)
-            _update_oauth_state(
-                conn,
-                status="healthy" if debug_info.get("is_valid", True) else "invalid",
-                token_source="merchant_oauth",
-                debug_info=debug_info,
-                expires_at=expires_at,
-            )
-            db.flush()
             return await _finalize_coexistence_exchange(
                 conn,
                 db,
@@ -1909,6 +1891,9 @@ async def exchange_code(
                 trusted_phone_id=verified.phone_number_id,
                 finish_event=body.finish_event,
                 exchange_fingerprint=fingerprint,
+                oauth_debug_info=debug_info,
+                oauth_expires_at=expires_at,
+                token_type=long_data.get("token_type") or token_data.get("token_type", "user"),
             )
         except CoexistenceWabaResolutionError as exc:
             restore_connection_snapshot(conn, snapshot)
@@ -2034,31 +2019,36 @@ async def select_phone(
         raise HTTPException(status_code=400, detail="أكمل خطوة ربط حساب واتساب أولاً.")
 
     if _is_coexistence_conn(conn):
-        from services.whatsapp_platform.token_manager import get_token_for_operation  # noqa: PLC0415
+        from services.embedded_waba_resolution import (  # noqa: PLC0415
+            CoexistenceWabaResolutionError,
+            resolve_coexistence_assets_from_graph,
+        )
         from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
-        phones = []
-        if conn.whatsapp_business_account_id:
-            try:
-                list_ctx = await get_token_for_operation(
-                    db, conn, tenant_id=tenant_id, operation="embedded.list_phones", prefer_platform=False,
-                )
-                phones = await _get_phone_numbers(conn.whatsapp_business_account_id, list_ctx.token)
-            except Exception as exc:
-                logger.warning("[Coexistence] select-phone list failed: %s", exc)
         token = read_access_token(conn)
-        if not phones:
+        if not token:
             raise HTTPException(
                 status_code=400,
-                detail="تعذر جلب أرقام واتساب الأعمال من Meta. أعد المحاولة.",
+                detail="Reauthorize with Meta before selecting a coexistence phone.",
             )
+        debug_info = await _debug_token(token)
+        try:
+            verified = await resolve_coexistence_assets_from_graph(
+                GRAPH,
+                token,
+                debug_info,
+                expected_phone_number=conn.phone_number,
+            )
+        except CoexistenceWabaResolutionError as exc:
+            raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+        phones = await _get_phone_numbers(verified.waba_id, token)
         return await _finalize_coexistence_exchange(
             conn,
             db,
             tenant_id=tenant_id,
-            waba_id=conn.whatsapp_business_account_id or "",
+            waba_id=verified.waba_id,
             user_token=token,
             phones=phones,
-            trusted_phone_id=body.phone_number_id,
+            trusted_phone_id=verified.phone_number_id,
             finish_event=(conn.extra_metadata or {}).get("finish_event"),
         )
 

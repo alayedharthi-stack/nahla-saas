@@ -287,11 +287,12 @@ def test_finalize_rejects_non_business_app_without_smb_wait(db):
         "display_phone_number": "+966500000099",
         "verified_name": "متجر تجريبي عام",
     }]
-    with patch("core.tenant_integrity.assert_phone_id_not_claimed"), patch(
-        "core.tenant_integrity.evict_phone_id_from_other_tenants",
-    ), patch(
+    with patch("core.tenant_integrity.assert_no_cross_tenant_whatsapp_asset"), patch(
         "services.meta_coexistence.verify_coexistence_phone",
         return_value=(False, _t1_shape_phone(), "not eligible"),
+    ), patch(
+        "services.meta_coexistence.provider_is_on_biz_app",
+        return_value=False,
     ), patch(
         "services.meta_coexistence.initiate_smb_app_data",
     ) as smb:
@@ -312,7 +313,7 @@ def test_finalize_rejects_non_business_app_without_smb_wait(db):
     assert payload["connected"] is False
     assert conn.sending_enabled is False
     assert conn.status != "connected"
-    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
+    assert (conn.extra_metadata or {}).get("connection_mode") is None
     assert (conn.extra_metadata or {}).get("smb_sync_deadline_at") is None
 
 
@@ -324,6 +325,7 @@ def test_finalize_keeps_eligible_business_app_coexistence(db):
         status="pending",
         phone_number_id=BIZ_APP_PHONE_ID,
         whatsapp_business_account_id=BIZ_APP_WABA_ID,
+        phone_number="+966500000035",
         extra_metadata={},
     )
     db.commit()
@@ -336,11 +338,12 @@ def test_finalize_keeps_eligible_business_app_coexistence(db):
         "display_phone_number": "+966500000035",
         "verified_name": "متجر تجريبي عام",
     }]
-    with patch("core.tenant_integrity.assert_phone_id_not_claimed"), patch(
-        "core.tenant_integrity.evict_phone_id_from_other_tenants",
-    ), patch(
+    with patch("core.tenant_integrity.assert_no_cross_tenant_whatsapp_asset"), patch(
         "services.meta_coexistence.verify_coexistence_phone",
         return_value=(True, _biz_app_phone(), None),
+    ), patch(
+        "services.meta_coexistence.provider_is_on_biz_app",
+        return_value=True,
     ), patch(
         "services.whatsapp_connection_service.subscribe_phone_webhook",
         return_value=(True, None),
@@ -850,29 +853,30 @@ def test_confirm_standard_subscribe_prefers_waba(monkeypatch, db):
     assert captured.get("waba_id") == WABA_ID
 
 
-def test_multi_phone_coexistence_keeps_mode_until_selection(db):
-    tenant = _tenant(db, name="متجر تجريبي عام")
+def test_multi_phone_coexistence_without_graph_proof_fails_closed(db):
+    tenant = _tenant(db, name="generic-store")
     conn = _conn(db, tenant.id, status="pending", extra_metadata={})
     db.commit()
     phones = [
-        {"id": "pn-coex-a", "display_phone_number": "+966500000001", "verified_name": "فرع أ"},
-        {"id": "pn-coex-b", "display_phone_number": "+966500000002", "verified_name": "فرع ب"},
+        {"id": "pn-coex-a", "display_phone_number": "+966500000001", "verified_name": "A"},
+        {"id": "pn-coex-b", "display_phone_number": "+966500000002", "verified_name": "B"},
     ]
-    payload = asyncio.run(_finalize_coexistence_exchange(
-        conn,
-        db,
-        tenant_id=tenant.id,
-        waba_id=WABA_ID,
-        user_token="tok",
-        phones=phones,
-        trusted_phone_id="",
-        finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
-    ))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_finalize_coexistence_exchange(
+            conn,
+            db,
+            tenant_id=tenant.id,
+            waba_id=WABA_ID,
+            user_token="tok",
+            phones=phones,
+            trusted_phone_id="",
+            finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+        ))
+    assert exc.value.status_code == 400
     db.refresh(conn)
-    assert payload["status"] == "pending"
-    assert payload["connected"] is False
-    assert (conn.extra_metadata or {}).get("connection_mode") == "coexistence"
-    assert _is_coexistence_conn(conn) is True
+    assert conn.status != "connected"
+    assert (conn.extra_metadata or {}).get("connection_mode") is None
+
 
 
 def test_ineligible_coexistence_status_sync_does_not_register(monkeypatch, db):

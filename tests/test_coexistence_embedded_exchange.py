@@ -142,3 +142,203 @@ def test_embedded_config_coexistence_unavailable(monkeypatch):
     assert data["coexistence_embedded_signup_config_id"] is None
     assert data["coexistence_embedded_signup_available"] is False
     assert data["embedded_signup_config_id"] == "cloud-cfg"
+
+
+def test_authorize_url_uses_passed_config_id_not_cloud_constant():
+    import routers.whatsapp_embedded as emb  # noqa: PLC0415
+
+    url = emb._build_meta_oauth_authorize_url("state-token", "https://api.example.test/cb", config_id="coex-only-id")
+    assert "coex-only-id" in url
+    assert "config_id=coex-only-id" in url.replace("%", "")
+
+
+def test_oauth_start_coexistence_isolated_from_cloud_config(monkeypatch):
+    import routers.whatsapp_embedded as emb  # noqa: PLC0415
+
+    monkeypatch.setattr(emb, "META_EMBEDDED_SIGNUP_CONFIG_ID", "cloud-config-id", raising=False)
+    monkeypatch.setattr(emb, "META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID", "coexistence-config-id", raising=False)
+    monkeypatch.setattr(emb, "is_coexistence_embedded_signup_available", lambda: True, raising=False)
+    url = emb._build_meta_oauth_authorize_url(
+        "state",
+        "https://api.example.test/cb",
+        config_id=emb.META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID,
+    )
+    assert "coexistence-config-id" in url
+    assert "cloud-config-id" not in url
+
+
+def test_snapshot_restores_access_token_literal():
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
+    from services.whatsapp_platform.wa_connection_secrets import (  # noqa: PLC0415
+        read_access_token,
+        store_access_token,
+    )
+    from services.coexistence_embedded_exchange import (  # noqa: PLC0415
+        _conn_field_snapshot,
+        restore_connection_snapshot,
+        stage_coexistence_credentials,
+    )
+
+    db = _sqlite_session()
+    db.add(Tenant(id=401, name="token-snap", is_active=True))
+    conn = WhatsAppConnection(
+        tenant_id=401,
+        status="disconnected",
+        provider="dialog360",
+        phone_number="+966501222333",
+    )
+    db.add(conn)
+    db.commit()
+    store_access_token(conn, "dialog360-original-token")
+    db.commit()
+    original_encrypted = conn.access_token
+    snap = _conn_field_snapshot(conn)
+    stage_coexistence_credentials(
+        conn,
+        waba_id="WABA-TMP",
+        access_token="meta-new-token",
+        token_type="user",
+    )
+    assert read_access_token(conn) == "meta-new-token"
+    restore_connection_snapshot(conn, snap)
+    assert conn.access_token == original_encrypted
+    assert read_access_token(conn) == "dialog360-original-token"
+    assert conn.provider == "dialog360"
+    db.close()
+
+
+def test_finalize_not_eligible_restores_dialog360():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from routers.whatsapp_embedded import _finalize_coexistence_exchange  # noqa: PLC0415
+    from services.whatsapp_platform.wa_connection_secrets import store_access_token  # noqa: PLC0415
+
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
+
+    db = _sqlite_session()
+    tenant = Tenant(id=501, name="fail-eligible", is_active=True)
+    db.add(tenant)
+    conn = WhatsAppConnection(
+        tenant_id=501,
+        status="disconnected",
+        provider="dialog360",
+        phone_number="+966501234567",
+        extra_metadata={"legacy_channel": "1061057720431678"},
+    )
+    db.add(conn)
+    db.commit()
+    store_access_token(conn, "dialog-token-501")
+    db.commit()
+    phones = [{"id": "PHONE-501", "display_phone_number": "+966501234567"}]
+    with patch(
+        "services.meta_coexistence.verify_coexistence_phone",
+        return_value=(False, {"display_phone_number": "+966501234567", "is_on_biz_app": False}, "not eligible"),
+    ), patch("services.meta_coexistence.provider_is_on_biz_app", return_value=False):
+        payload = asyncio.run(
+            _finalize_coexistence_exchange(
+                conn,
+                db,
+                tenant_id=501,
+                waba_id="WABA-501",
+                user_token="tok",
+                phones=phones,
+                trusted_phone_id="PHONE-501",
+                finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+            )
+        )
+    db.refresh(conn)
+    assert payload["status"] == "coexistence_not_eligible"
+    assert conn.provider == "dialog360"
+    assert conn.whatsapp_business_account_id is None
+    assert conn.phone_number_id is None
+    db.close()
+
+
+def test_finalize_webhook_failure_restores_dialog360():
+    import asyncio
+    from unittest.mock import patch
+
+    from routers.whatsapp_embedded import _finalize_coexistence_exchange  # noqa: PLC0415
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token, store_access_token  # noqa: PLC0415
+
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
+
+    db = _sqlite_session()
+    tenant = Tenant(id=502, name="fail-webhook", is_active=True)
+    db.add(tenant)
+    conn = WhatsAppConnection(
+        tenant_id=502,
+        status="disconnected",
+        provider="dialog360",
+        phone_number="+966509876543",
+    )
+    db.add(conn)
+    db.commit()
+    store_access_token(conn, "dialog-token-502")
+    db.commit()
+    phones = [{"id": "PHONE-502", "display_phone_number": "+966509876543"}]
+    with patch(
+        "services.meta_coexistence.verify_coexistence_phone",
+        return_value=(True, {"display_phone_number": "+966509876543", "is_on_biz_app": True}, None),
+    ), patch("services.meta_coexistence.provider_is_on_biz_app", return_value=True), patch(
+        "services.whatsapp_connection_service.subscribe_phone_webhook",
+        return_value=(False, "webhook failed"),
+    ):
+        payload = asyncio.run(
+            _finalize_coexistence_exchange(
+                conn,
+                db,
+                tenant_id=502,
+                waba_id="WABA-502",
+                user_token="tok",
+                phones=phones,
+                trusted_phone_id="PHONE-502",
+                finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+            )
+        )
+    db.refresh(conn)
+    assert payload["connected"] is False
+    assert conn.provider == "dialog360"
+    assert read_access_token(conn) == "dialog-token-502"
+    db.close()
+
+
+def test_tenant35_style_connected_meta_unaffected_by_missing_coexistence_env(monkeypatch):
+    """Deploy safety: coexistence env unset does not imply connected Meta rows must change."""
+    from core import config as cfg  # noqa: PLC0415
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
+
+    monkeypatch.setattr(cfg, "META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID", "", raising=False)
+    assert cfg.is_coexistence_embedded_signup_available() is False
+
+    db = _sqlite_session()
+    db.add(Tenant(id=535, name="connected-meta", is_active=True))
+    conn = WhatsAppConnection(
+        tenant_id=535,
+        status="connected",
+        provider="meta",
+        connection_type="embedded",
+        whatsapp_business_account_id="WABA-CONNECTED-535",
+        phone_number_id="PHONE-CONNECTED-535",
+        phone_number="+966501111222",
+        extra_metadata={"connection_mode": "coexistence"},
+    )
+    db.add(conn)
+    db.commit()
+    before = (
+        conn.status,
+        conn.provider,
+        conn.whatsapp_business_account_id,
+        conn.phone_number_id,
+    )
+    db.refresh(conn)
+    after = (
+        conn.status,
+        conn.provider,
+        conn.whatsapp_business_account_id,
+        conn.phone_number_id,
+    )
+    assert before == after
+    db.close()
