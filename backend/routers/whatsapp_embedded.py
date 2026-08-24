@@ -42,6 +42,7 @@ from core.config import (
     META_GRAPH_API_VERSION,
     META_REDIRECT_URI,
     META_WA_CONFIG_ID,
+    meta_coexistence_embedded_signup_config_id,
     is_meta_embedded_signup_enabled,
     meta_embedded_disabled_reason,
 )
@@ -272,7 +273,7 @@ def _candidate_graph_tokens(
     return get_token_candidates(conn, prefer_platform=prefer_platform)
 
 
-async def _get_waba_id_from_token(token: str) -> str:
+async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None) -> str:
     """
     Extract the WhatsApp Business Account ID from the token using multiple strategies:
     1. debug_token granular_scopes (works when config_id triggers full WA signup)
@@ -280,7 +281,7 @@ async def _get_waba_id_from_token(token: str) -> str:
     3. GET /me/whatsapp_business_accounts (direct query)
     """
     # Strategy 1: debug_token granular_scopes
-    info = await _debug_token(token)
+    info = debug_info if debug_info is not None else await _debug_token(token)
     for scope in info.get("granular_scopes", []):
         if scope.get("scope") == "whatsapp_business_management":
             ids = scope.get("target_ids", [])
@@ -1780,11 +1781,26 @@ async def exchange_code(
     user_token = long_data.get("access_token") or short_token
     debug_info = await _debug_token(user_token)
 
-    # 2 — Discover WABA ID from token scopes
-    waba_id = await _get_waba_id_from_token(user_token)
-    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s", waba_id, tenant_id)
-
     coexistence = str(body.connection_mode or "").strip().lower() == "coexistence"
+
+    # 2 — Discover WABA ID (prefer coexistence session hints / known phone)
+    if coexistence:
+        from services.embedded_waba_resolution import resolve_embedded_waba_id  # noqa: PLC0415
+        conn_existing = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
+        try:
+            waba_id = await resolve_embedded_waba_id(
+                GRAPH,
+                user_token,
+                debug_info,
+                hinted_waba_id=body.waba_id,
+                hinted_phone_number_id=body.phone_number_id,
+                known_phone_number=conn_existing.phone_number if conn_existing else None,
+            )
+        except ValueError:
+            waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
+    else:
+        waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
+    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s coexistence=%s", waba_id, tenant_id, coexistence)
     if coexistence:
         from services.meta_coexistence import reject_coexistence_finish_event  # noqa: PLC0415
         reject_msg = reject_coexistence_finish_event(body.finish_event)

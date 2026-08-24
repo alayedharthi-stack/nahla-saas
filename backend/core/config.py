@@ -276,6 +276,17 @@ META_EMBEDDED_SIGNUP_CONFIG_ID = (
     or os.environ.get("META_WA_CONFIG_ID", "")
 )
 META_WA_CONFIG_ID        = META_EMBEDDED_SIGNUP_CONFIG_ID  # legacy alias
+# Optional separate Embedded Signup configuration for WhatsApp Business App
+# coexistence (featureType=whatsapp_business_app_onboarding). When unset,
+# coexistence falls back to META_EMBEDDED_SIGNUP_CONFIG_ID.
+META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID = (
+    os.environ.get("META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID", "").strip()
+    or META_EMBEDDED_SIGNUP_CONFIG_ID
+)
+
+
+def meta_coexistence_embedded_signup_config_id() -> str:
+    return META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID or META_EMBEDDED_SIGNUP_CONFIG_ID
 
 # Where Meta redirects after the user approves the OAuth dialog in
 # the SERVER-SIDE embedded-signup flow (``GET /whatsapp/embedded/
