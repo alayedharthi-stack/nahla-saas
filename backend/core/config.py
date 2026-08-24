@@ -226,6 +226,21 @@ SALLA_OAUTH_REDIRECT_URI  = (
 # Where to redirect after Salla OAuth completes (the embedded app landing page).
 # Set SALLA_EMBEDDED_URL in Railway env to override.
 # For Salla embedded apps this is typically the partner app iframe URL.
+
+# ── Salla owner test-store compatibility (TEMPORARY — disable after Salla acceptance) ──
+# Allows the flagged Tenant 1 partner test store to enter when canonical introspect
+# lacks store.id but the trusted identity matches an explicit server-side allowlist.
+SALLA_TEST_COMPAT_ENABLED = os.environ.get("SALLA_TEST_COMPAT_ENABLED", "").strip().lower() in (
+    "1", "true", "yes",
+)
+SALLA_TEST_COMPAT_TRUSTED_IDENTITY = (
+    os.environ.get("SALLA_TEST_COMPAT_TRUSTED_IDENTITY", "22825873") or "22825873"
+).strip()
+try:
+    SALLA_TEST_COMPAT_TENANT_ID = int(os.environ.get("SALLA_TEST_COMPAT_TENANT_ID", "1") or "1")
+except ValueError:
+    SALLA_TEST_COMPAT_TENANT_ID = 1
+
 SALLA_EMBEDDED_URL = os.environ.get(
     "SALLA_EMBEDDED_URL",
     "https://app.nahlah.ai/app/salla",
