@@ -23,6 +23,10 @@ import {
   clearSallaEmbeddedSession,
   SALLA_STORE_LINK_REQUIRED_CODE,
 } from '../src/lib/embeddedLogin.ts'
+import {
+  EMBEDDED_EXTERNAL_NAV_FALLBACK_ORDER,
+  redactExternalNavUrlForLog,
+} from '../src/lib/embeddedNavigation.ts'
 
 type Lang  = 'ar' | 'en'
 type Theme = 'light' | 'dark'
@@ -254,6 +258,27 @@ try {
 } catch {
   console.log('OK   [onboarding] clearSallaEmbeddedSession skipped (no storage)')
 }
+
+const redacted = redactExternalNavUrlForLog(
+  'https://api.nahlah.ai/api/salla/oauth/start?embedded_reconcile=1&token=secret',
+)
+if (redacted.includes('secret') || !redacted.includes('embedded_reconcile')) {
+  failed++
+  console.error('FAIL [nav] redactExternalNavUrlForLog leaked query value')
+} else {
+  console.log('OK   [nav] redactExternalNavUrlForLog hides values, keeps keys')
+}
+
+if (
+  EMBEDDED_EXTERNAL_NAV_FALLBACK_ORDER[0] !== 'sdk_page_redirect'
+  || !EMBEDDED_EXTERNAL_NAV_FALLBACK_ORDER.includes('window_top_location')
+) {
+  failed++
+  console.error('FAIL [nav] external nav prefers SDK redirect before top-frame fallback')
+} else {
+  console.log('OK   [nav] external nav fallback order prefers SDK redirect')
+}
+
 
 if (failed > 0) {
   console.error(`\n${failed} case(s) failed`)

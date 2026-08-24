@@ -40,6 +40,10 @@ import {
   type SallaStoreLinkPayload,
 } from '../lib/embeddedLogin'
 import {
+  navigateEmbeddedExternalUrl,
+  redactExternalNavUrlForLog,
+} from '../lib/embeddedNavigation'
+import {
   signalEmbeddedReady,
   startEmbeddedSdkHandshake,
   waitForEmbeddedSdkContext,
@@ -199,16 +203,29 @@ export default function SallaEmbedded() {
 
   const openOauthReconcile = useCallback(() => {
     const startUrl = resolveOauthReconcileStartUrl(API_BASE, storeLinkPayload)
-    console.info(
-      '[SallaEmbedded] OAuth reconcile CTA | url=%s | has_jwt=false',
-      startUrl,
-    )
     clearEmbeddedSession()
-    if (window.top) {
-      window.top.location.href = startUrl
-    } else {
-      window.location.href = startUrl
-    }
+    console.info(
+      '[SallaEmbedded] OAuth reconcile CTA clicked | url=%s | has_jwt=false',
+      redactExternalNavUrlForLog(startUrl),
+    )
+    void navigateEmbeddedExternalUrl(startUrl, { logPrefix: '[SallaEmbedded]' })
+      .then((result) => {
+        console.info(
+          '[SallaEmbedded] OAuth reconcile navigation complete | method=%s | sdk=%s | handed_off=%s | expect_backend=embedded_reconcile_start',
+          result.method,
+          result.sdkAvailable,
+          result.handedOff,
+        )
+        if (!result.handedOff) {
+          console.error(
+            '[SallaEmbedded] OAuth reconcile navigation blocked — no backend hit expected | url=%s',
+            redactExternalNavUrlForLog(startUrl),
+          )
+        }
+      })
+      .catch((err: unknown) => {
+        console.error('[SallaEmbedded] OAuth reconcile navigation error:', err)
+      })
   }, [storeLinkPayload])
 
   // How long the brief welcome card stays on screen before we auto-navigate
