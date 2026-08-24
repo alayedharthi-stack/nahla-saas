@@ -27,7 +27,8 @@
     "check:orders-tab-load": "npx --yes tsx@4 scripts/check-orders-tab-load.mts",
     "smoke:order-catalog-pick": "npx --yes tsx@4 scripts/smoke-order-catalog-pick.mts",
     "check:embedded-navigation": "npx --yes tsx@4 scripts/smoke-embedded-navigation.mts",
-    "check:embedded-reconcile-telemetry": "npx --yes tsx@4 scripts/smoke-embedded-reconcile-telemetry.mts"
+    "check:embedded-reconcile-telemetry": "npx --yes tsx@4 scripts/smoke-embedded-reconcile-telemetry.mts",
+    "check:embedded-reconcile-cta-apibase": "npx --yes tsx@4 scripts/smoke-embedded-reconcile-cta-apibase.mts"
   },
   "dependencies": {
     "@sentry/react": "^8.30.0",
