@@ -1527,7 +1527,7 @@ def _verify_oauth_state(state: str) -> _OAuthState:
     return _OAuthState(tenant_id=tenant_id, redirect_uri=redirect_uri)
 
 
-def _build_meta_oauth_authorize_url(state: str, redirect_uri: str, *, config_id: str) -> str:
+def _build_meta_oauth_authorize_url(state: str, redirect_uri: str, *, config_id: str = META_EMBEDDED_SIGNUP_CONFIG_ID) -> str:
     """Build the canonical FB Login for Business / WhatsApp Embedded
     Signup authorize URL.
 
