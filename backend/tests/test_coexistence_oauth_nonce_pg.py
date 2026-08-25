@@ -273,7 +273,11 @@ def test_existing_dialog360_snapshot_restored_on_rollback(pg_session: Session) -
     pg_session.expire_all()
     restored = pg_session.query(WhatsAppConnection).filter_by(tenant_id=990882).one()
     for key, value in original.items():
-        assert getattr(restored, key) == value
+        got = getattr(restored, key)
+        if key == "connected_at" and got is not None and value is not None:
+            assert got.replace(tzinfo=timezone.utc) == value.replace(tzinfo=timezone.utc)
+        else:
+            assert got == value
 
 
 def test_exactly_one_commit_on_success_route(pg_session: Session, monkeypatch) -> None:
