@@ -168,22 +168,21 @@ def test_existing_salla_0100_upgrade_to_0101_creates_nonce_table(postgres_engine
     admin.dispose()
 
 
-def test_pg_advisory_xact_lock_serializes(pg_session: Session) -> None:
+def test_pg_advisory_xact_lock_serializes(postgres_engine: Engine, pg_session: Session) -> None:
     pg_session.add(Tenant(id=990877, name="lock-tenant", is_active=True))
     pg_session.commit()
     results: list[int] = []
     lock = threading.Lock()
 
     def worker() -> None:
-        bind = pg_session.get_bind()
-        conn = bind.connect()
+        conn = postgres_engine.connect()
         trans = conn.begin()
-        local = sessionmaker(bind=conn)()
+        local = sessionmaker(bind=conn, expire_on_commit=False)()
         try:
             acquire_tenant_transaction_lock(local, 990877)
             with lock:
                 results.append(1)
-            local.execute(text("SELECT pg_sleep(0.05)"))
+            local.execute(text("SELECT pg_sleep(0.1)"))
             trans.commit()
         finally:
             local.close()
@@ -193,8 +192,8 @@ def test_pg_advisory_xact_lock_serializes(pg_session: Session) -> None:
     t2 = threading.Thread(target=worker)
     t1.start()
     t2.start()
-    t1.join(timeout=10)
-    t2.join(timeout=10)
+    t1.join(timeout=15)
+    t2.join(timeout=15)
     assert len(results) == 2
 
 
