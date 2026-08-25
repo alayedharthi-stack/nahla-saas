@@ -499,19 +499,99 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         owner_email, canonical_store_id or lookup_store_id, identity_source or "unknown",
     )
 
+    oauth_verified_binding_reentry = None
     if identity_source == "merchant_account_only":
-        reject_merchant_account_only_alias_routing(
-            db,
-            merchant_account_id=lookup_store_id,
-            context="token_login",
+        from services.salla_embedded_identity_binding import (  # noqa: PLC0415
+            find_active_binding,
+            validate_binding_for_reentry,
         )
-        raise HTTPException(
-            status_code=403,
-            detail=build_merchant_identity_not_canonical_detail(
-                identity_source="merchant_account_only",
+        from services.salla_reconciliation_challenge import (  # noqa: PLC0415
+            ReconciliationChallengeUnavailable,
+            create_reconciliation_challenge,
+        )
+
+        active_binding = find_active_binding(
+            db,
+            provider="salla",
+            app_id=app_id,
+            merchant_account_id=lookup_store_id,
+        )
+        if active_binding is None:
+            reject_merchant_account_only_alias_routing(
+                db,
                 merchant_account_id=lookup_store_id,
-                has_canonical_store_id=False,
-            ),
+                context="token_login",
+            )
+            try:
+                reconcile_nonce = create_reconciliation_challenge(
+                    provider="salla",
+                    app_id=app_id,
+                    merchant_account_id=lookup_store_id,
+                )
+            except ReconciliationChallengeUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": "reconciliation_unavailable",
+                        "code": "reconciliation_unavailable",
+                    },
+                )
+            oauth_start_path = (
+                "/api/salla/oauth/start?embedded_reconcile=1"
+                f"&reconcile_nonce={urllib.parse.quote(reconcile_nonce, safe='')}"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=build_merchant_identity_not_canonical_detail(
+                    identity_source="merchant_account_only",
+                    merchant_account_id=lookup_store_id,
+                    has_canonical_store_id=False,
+                    oauth_start_path=oauth_start_path,
+                ),
+            )
+
+        reentry = validate_binding_for_reentry(db, active_binding, app_id=app_id)
+        if not reentry.ok:
+            db.commit()
+            try:
+                reconcile_nonce = create_reconciliation_challenge(
+                    provider="salla",
+                    app_id=app_id,
+                    merchant_account_id=lookup_store_id,
+                )
+            except ReconciliationChallengeUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": "reconciliation_unavailable",
+                        "code": "reconciliation_unavailable",
+                    },
+                )
+            oauth_start_path = (
+                "/api/salla/oauth/start?embedded_reconcile=1"
+                f"&reconcile_nonce={urllib.parse.quote(reconcile_nonce, safe='')}"
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=build_merchant_identity_not_canonical_detail(
+                    identity_source="merchant_account_only",
+                    merchant_account_id=lookup_store_id,
+                    has_canonical_store_id=False,
+                    oauth_start_path=oauth_start_path,
+                ),
+            )
+
+        oauth_verified_binding_reentry = reentry
+        canonical_store_id = reentry.canonical_store_id
+        identity_source = "oauth_verified_binding"
+        owner_email = reentry.merchant_user.email
+        email_is_derived = False
+        store_identity = SallaStoreIdentity(
+            store_id=reentry.canonical_store_id,
+            merchant_account_id=lookup_store_id,
+            store_name=store_name,
+            owner_email=owner_email,
+            resolved_via="oauth_verified_binding",
         )
 
     # ── Authoritative store owner (canonical store id only) ──
@@ -521,15 +601,20 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         merchant_account_id=lookup_store_id,
         resolved_via="merchant_account_only",
     )
-    owner_tenant_id, owner_integration, owner_matched_via = (
-        resolve_canonical_store_owner(
-            db,
-            identity_for_lookup,
-            include_disabled=True,
+    if oauth_verified_binding_reentry is not None:
+        owner_tenant_id = oauth_verified_binding_reentry.tenant_id
+        owner_integration = oauth_verified_binding_reentry.integration
+        owner_matched_via = "oauth_verified_binding"
+    else:
+        owner_tenant_id, owner_integration, owner_matched_via = (
+            resolve_canonical_store_owner(
+                db,
+                identity_for_lookup,
+                include_disabled=True,
+            )
+            if canonical_store_id
+            else (None, None, "")
         )
-        if canonical_store_id
-        else (None, None, "")
-    )
     if owner_tenant_id is not None:
         verify_jwt_tenant_owns_salla_store(
             db,
@@ -2517,6 +2602,7 @@ async def salla_api_oauth_start(
     request: Request,
     token: Optional[str] = None,
     embedded_reconcile: bool = Query(False),
+    reconcile_nonce: Optional[str] = Query(None),
 ):
     """
     Start the Custom OAuth flow for the SECOND ("Sync") Salla app.
@@ -2544,11 +2630,54 @@ async def salla_api_oauth_start(
     embedded_mode = bool(embedded_reconcile) and not (token or "").strip()
     tenant_id = 0
     if embedded_mode:
-        state = f"embedded_{_secrets.token_urlsafe(8)}{_API_SYNC_STATE_SUFFIX}"
-        logger.info(
-            "[Salla API OAuth] embedded reconcile start (no JWT) | state=%r",
-            state,
+        from services.salla_reconciliation_challenge import (  # noqa: PLC0415
+            ReconciliationChallengeUnavailable,
+            bind_oauth_state_to_reconciliation_challenge,
+            resolve_reconciliation_nonce,
         )
+
+        raw_nonce_param = reconcile_nonce if isinstance(reconcile_nonce, str) else None
+        raw_reconcile_nonce = (raw_nonce_param or "").strip()
+        if raw_reconcile_nonce:
+            try:
+                challenge = resolve_reconciliation_nonce(raw_reconcile_nonce)
+            except ReconciliationChallengeUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": "reconciliation_unavailable",
+                        "code": "reconciliation_unavailable",
+                    },
+                )
+            if challenge is None:
+                raise HTTPException(status_code=403, detail="reconcile_nonce_invalid")
+            state = f"embedded_{_secrets.token_urlsafe(8)}{_API_SYNC_STATE_SUFFIX}"
+            try:
+                bind_oauth_state_to_reconciliation_challenge(
+                    state,
+                    nonce=raw_reconcile_nonce,
+                )
+            except ReconciliationChallengeUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "detail": "reconciliation_unavailable",
+                        "code": "reconciliation_unavailable",
+                    },
+                )
+            except ValueError:
+                raise HTTPException(status_code=403, detail="reconcile_nonce_invalid")
+            logger.info(
+                "[Salla API OAuth] embedded reconcile start with challenge | app_id=%s merchant_account_id=%s",
+                challenge.app_id,
+                challenge.merchant_account_id,
+            )
+        else:
+            state = f"embedded_{_secrets.token_urlsafe(8)}{_API_SYNC_STATE_SUFFIX}"
+            logger.info(
+                "[Salla API OAuth] embedded reconcile start (legacy, no challenge) | state=%r",
+                state,
+            )
     else:
         tenant_id = _resolve_tenant_from_query_token(token or "")
         state = f"t{tenant_id}_{_secrets.token_urlsafe(6)}{_API_SYNC_STATE_SUFFIX}"
@@ -2718,6 +2847,30 @@ async def salla_api_oauth_callback(
             url=_api_oauth_redirect_url("error", reason="wrong_callback"),
             status_code=302,
         )
+
+
+    reconcile_challenge = None
+    if embedded_reconcile:
+        from services.salla_reconciliation_challenge import (  # noqa: PLC0415
+            ReconciliationChallengeUnavailable,
+            resolve_reconciliation_challenge_for_oauth_state,
+        )
+        try:
+            reconcile_challenge = resolve_reconciliation_challenge_for_oauth_state(raw_state)
+        except ReconciliationChallengeUnavailable:
+            logger.error(
+                "[Salla API OAuth] reconcile challenge store unavailable at callback | source=%s",
+                state_source,
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'reconciliation_unavailable'})}",
+                status_code=302,
+            )
+        if reconcile_challenge is None:
+            logger.info(
+                "[Salla API OAuth] embedded reconcile callback without challenge association | source=%s",
+                state_source,
+            )
 
     # ── Token exchange ──────────────────────────────────────────────────────
     normalized_redirect = (SALLA_OAUTH_REDIRECT_URI or "").strip().rstrip("/")
@@ -3036,6 +3189,43 @@ async def salla_api_oauth_callback(
 
             persist_external_store_name(db, tenant_id, store_name, "salla")
         db.commit()
+
+        if embedded_reconcile and reconcile_challenge and salla_store_id and tenant_id:
+            from services.salla_embedded_identity_binding import (  # noqa: PLC0415
+                upsert_binding_from_oauth_reconcile,
+            )
+            from services.salla_reconciliation_challenge import (  # noqa: PLC0415
+                consume_reconciliation_challenge_for_oauth_state,
+            )
+
+            bound_integration = db.query(Integration).filter(
+                Integration.tenant_id == tenant_id,
+                Integration.provider == "salla",
+                Integration.external_store_id == salla_store_id,
+            ).first()
+            if bound_integration is not None:
+                upsert_binding_from_oauth_reconcile(
+                    db,
+                    challenge=reconcile_challenge,
+                    canonical_store_id=salla_store_id,
+                    integration_id=bound_integration.id,
+                    tenant_id=tenant_id,
+                )
+                consumed = consume_reconciliation_challenge_for_oauth_state(raw_state)
+                if consumed is None:
+                    logger.warning(
+                        "[Salla API OAuth] reconcile challenge consume miss after binding write | tenant=%s store_id=%s",
+                        tenant_id,
+                        salla_store_id,
+                    )
+                db.commit()
+                logger.info(
+                    "[Salla API OAuth] embedded identity binding persisted | tenant=%s store_id=%s merchant_account_id=%s",
+                    tenant_id,
+                    salla_store_id,
+                    reconcile_challenge.merchant_account_id,
+                )
+
         logger.info(
             "[Salla API OAuth] OK | tenant=%s store_id=%s store=%r api_sync_enabled=True",
             tenant_id, salla_store_id, store_name,

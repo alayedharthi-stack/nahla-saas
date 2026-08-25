@@ -699,7 +699,7 @@ class TestMerchantOnlyAliasRouting:
         assert exc.detail["detail"] == "merchant_identity_not_canonical"
         assert exc.detail["code"] == "salla_store_link_required"
         assert exc.detail["next_action"] == "oauth_sync"
-        assert exc.detail["oauth_start_path"] == "/api/salla/oauth/start?embedded_reconcile=1"
+        assert exc.detail["oauth_start_path"].startswith("/api/salla/oauth/start?embedded_reconcile=1&reconcile_nonce=")
         assert exc.detail["has_canonical_store_id"] is False
         assert exc.detail["identity_source"] == "merchant_account_only"
 
