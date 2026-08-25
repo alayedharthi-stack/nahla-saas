@@ -32,6 +32,7 @@ import {
   EMBEDDED_SESSION_TIMEOUT_MS,
   EMBEDDED_WATCHDOG_TIMEOUT_MS,
   shouldRetryEmbeddedLogin,
+  isInvalidSallaAppIdResponse,
   isSallaRoutingBlockResponse,
   isSallaStoreLinkRequired,
   clearSallaEmbeddedSession,
@@ -165,6 +166,7 @@ export default function SallaEmbedded() {
   const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loginFlightRef                  = useRef<AbortController | null>(null)
   const oauthReconcileFlightRef         = useRef(false)
+  const configErrorRef                  = useRef(false)
 
   // Read URL params once
   const paramsRef  = useRef(new URLSearchParams(window.location.search))
@@ -189,8 +191,9 @@ export default function SallaEmbedded() {
     loginFlightRef.current = null
   }, [])
 
-  const showError = useCallback((msg: string) => {
+  const showError = useCallback((msg: string, opts?: { configError?: boolean }) => {
     clearWatchdog()
+    configErrorRef.current = Boolean(opts?.configError)
     console.error('[SallaEmbedded] ✗ error:', msg)
     setStoreLinkPayload(null)
     setPhase('error')
@@ -455,6 +458,10 @@ export default function SallaEmbedded() {
               return
             }
           }
+          if (isInvalidSallaAppIdResponse(data)) {
+            showError(t.errors.appIdMisconfigured, { configError: true })
+            return
+          }
           if (isSallaRoutingBlockResponse(data)) {
             clearEmbeddedSession()
             console.warn('[SallaEmbedded] routing block — session cleared | detail=%s', detail)
@@ -593,6 +600,7 @@ export default function SallaEmbedded() {
   // ── Retry ─────────────────────────────────────────────────────────────────
 
   const handleRetry = useCallback(() => {
+    configErrorRef.current = false
     console.info('[SallaEmbedded] retry triggered')
     clearWatchdog()
     cancelActiveLogin('user_retry')
@@ -728,13 +736,15 @@ export default function SallaEmbedded() {
             <p className="font-semibold text-base" style={{ color: shell.title }}>{t.errors.title}</p>
             <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: shell.muted }}>{errorDetail}</p>
             <div className="flex flex-col gap-3 pt-2">
-              <button
-                onClick={handleRetry}
+              {!configErrorRef.current && (
+                <button
+                  onClick={handleRetry}
                 className="w-full py-3 px-6 rounded-xl font-bold text-sm"
                 style={{ background: '#f59e0b', color: '#0f172a', boxShadow: '0 4px 20px rgba(245,158,11,0.35)' }}
               >
                 {t.errors.retry}
-              </button>
+                </button>
+              )}
               <a
                 href={`mailto:${COMPANY_INFO.email}`}
                 className="text-slate-500 text-xs text-center hover:text-slate-400"

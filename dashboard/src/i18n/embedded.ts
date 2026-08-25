@@ -30,6 +30,7 @@ export interface EmbeddedStrings {
     noAuthToken:     string
     invalidResponse: string
     verifyFailed:    string
+    appIdMisconfigured: string
     timeout:         string
     network:         string
     watchdog:        string
@@ -204,6 +205,7 @@ const ar: EmbeddedStrings = {
     noAuthToken:     'لم يتم استقبال رمز المصادقة من سلة.\nتأكد من أن رابط التطبيق في بوابة الشركاء يشير إلى:\nhttps://app.nahlah.ai/app/salla',
     invalidResponse: 'الخادم أرجع استجابة غير صالحة. حاول مجدداً.',
     verifyFailed:    'تعذّر التحقق من هويتك. أغلق التطبيق وأعد فتحه.',
+    appIdMisconfigured: 'إعداد تطبيق سلة غير مكتمل على منصة نحلة. لا تكرر المحاولة — تواصل مع الدعم لإكمال الإعداد.',
     timeout:         'استغرق الخادم وقتاً طويلاً. تحقق من اتصالك وأعد المحاولة.',
     network:         'تعذر الوصول إلى الخادم. تحقق من اتصالك بالإنترنت.',
     watchdog:        'استغرق التحميل وقتاً طويلاً. أعد فتح التطبيق أو تواصل مع الدعم.',
@@ -370,6 +372,7 @@ const en: EmbeddedStrings = {
     noAuthToken:     'No authentication token received from Salla.\nMake sure the app URL in Salla Partners points to:\nhttps://app.nahlah.ai/app/salla',
     invalidResponse: 'The server returned an invalid response. Please try again.',
     verifyFailed:    'Could not verify your identity. Close the app and reopen it.',
+    appIdMisconfigured: 'Salla app configuration is incomplete on Nahla. Do not retry — contact support to finish setup.',
     timeout:         'The server took too long to respond. Check your connection and try again.',
     network:         'Cannot reach the server. Check your internet connection.',
     watchdog:        'Loading took too long. Reopen the app or contact support.',

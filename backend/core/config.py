@@ -165,6 +165,11 @@ WA_BUSINESS_ACCOUNT_ID = os.environ.get("WA_BUSINESS_ACCOUNT_ID", "")
 # ── Salla OAuth ────────────────────────────────────────────────────────────────
 SALLA_CLIENT_ID      = os.environ.get("SALLA_CLIENT_ID", "")
 SALLA_CLIENT_SECRET  = os.environ.get("SALLA_CLIENT_SECRET", "")
+# Embedded Communication App identifier from Salla Partner Portal (iframe ?app_id=,
+# introspect S-Source, embedded identity binding).  Often numeric and distinct from
+# SALLA_CLIENT_ID when Salla assigns separate OAuth credentials.  Required for
+# embedded token-login after PR #884; set explicitly — never infer from OAuth IDs.
+SALLA_EMBEDDED_APP_ID = os.environ.get("SALLA_EMBEDDED_APP_ID", "")
 SALLA_REDIRECT_URI   = os.environ.get(
     "SALLA_REDIRECT_URI",
     "https://api.nahlah.ai/oauth/salla/callback",
@@ -193,7 +198,10 @@ SALLA_TEST_REDIRECT_URI  = os.environ.get(
 
 # ── Salla OAuth (Sync) app — separate Custom OAuth app ──────────────────────
 # Dual Integration Architecture:
-#   • SALLA_CLIENT_ID above       → Communication App (embedded iframe + introspect).
+#   • SALLA_EMBEDDED_APP_ID above → Partner Portal Communication App app_id for
+#                                   embedded iframe launch + introspect S-Source.
+#   • SALLA_CLIENT_ID above       → OAuth client credentials for the basic /
+#                                   Communication App authorize + callback flows.
 #                                   Cannot deliver offline_access / refresh_token.
 #   • SALLA_OAUTH_CLIENT_ID here  → SECOND, completely separate General/Custom
 #                                   OAuth app whose ONLY job is to deliver a
