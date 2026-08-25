@@ -1,4 +1,4 @@
-"""PostgreSQL migration tests for attaching 0089 onto validated 0088."""
+﻿"""PostgreSQL migration tests for attaching 0089 onto validated 0088."""
 from __future__ import annotations
 
 import os
@@ -35,7 +35,7 @@ from scripts.operators.staging_migration_0088_to_0089_contract import (  # noqa:
 )
 
 MIGRATION_TENANT_ID = 890_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0099"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0100"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",

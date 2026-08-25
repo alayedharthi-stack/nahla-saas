@@ -1,4 +1,4 @@
-"""A1-Validate migration tests — 0087 → 0088 only (never head/0089)."""
+﻿"""A1-Validate migration tests — 0087 → 0088 only (never head/0089)."""
 from __future__ import annotations
 
 import os
@@ -30,7 +30,7 @@ from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
 )
 
 MIGRATION_TENANT_ID = 880_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0099"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0100"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
@@ -328,7 +328,7 @@ def test_migration_0088_never_selected_by_head_literal() -> None:
         os.chdir(prev_cwd)
     for head in script.get_heads():
         assert head in _REPOSITORY_ALEMBIC_HEADS
-    assert "head" not in {"0092", "0099"}
+    assert "head" not in {"0092", "0100"}
 
 
 def test_new_writes_still_enforced_after_0088(ephemeral_validate_engine: Engine) -> None:
