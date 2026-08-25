@@ -81,7 +81,7 @@ export const defaultEmbeddedExternalNavDeps: EmbeddedExternalNavDeps = {
   getPageApi: getEmbeddedPageApiFromWindow,
   windowOpen(url: string) {
     try {
-      return window.open(url, '_blank', 'noopener,noreferrer')
+      return window.open(url, '_blank', DIRECT_WINDOW_OPEN_FEATURES)
     } catch {
       return null
     }
@@ -107,10 +107,65 @@ export const defaultEmbeddedExternalNavDeps: EmbeddedExternalNavDeps = {
   },
 }
 
-/** Open a blank tab synchronously on user click — preserves activation for later navigation. */
-export function openUserGestureFallbackWindow(): Window | null {
+/** Pre-open target/features — no noopener so WindowProxy stays usable for close/reuse. */
+export const GESTURE_POPUP_PREOPEN_URL = 'about:blank'
+export const GESTURE_POPUP_PREOPEN_FEATURES: string | undefined = undefined
+export const DIRECT_WINDOW_OPEN_FEATURES = 'noopener,noreferrer'
+
+export const GESTURE_POPUP_WAITING_TITLE = 'جاري فتح سلة…'
+export const GESTURE_POPUP_WAITING_SUBTITLE = 'Opening Salla…'
+
+/** Minimal transient waiting page — no external content, OAuth URL, or secrets. */
+export function renderGesturePopupWaitingState(popup: Window): void {
   try {
-    return window.open('about:blank', '_blank', 'noopener,noreferrer')
+    const doc = popup.document
+    doc.open()
+    doc.write(`<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${GESTURE_POPUP_WAITING_TITLE}</title>
+  <style>
+    body { margin: 0; font-family: Cairo, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #fff; color: #111; }
+    .wrap { text-align: center; padding: 24px; }
+    .primary { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+    .secondary { font-size: 14px; color: #666; }
+  </style>
+</head>
+<body><div class="wrap"><div class="primary">${GESTURE_POPUP_WAITING_TITLE}</div><div class="secondary">${GESTURE_POPUP_WAITING_SUBTITLE}</div></div></body>
+</html>`)
+    doc.close()
+  } catch {
+    /* ignore — popup may be cross-origin or already closed */
+  }
+}
+
+export interface OpenUserGestureFallbackWindowOptions {
+  open?: (url?: string, target?: string, features?: string) => Window | null
+}
+
+/** Open a controlled tab synchronously on user click — preserves activation for later navigation. */
+export function openUserGestureFallbackWindow(
+  options: OpenUserGestureFallbackWindowOptions = {},
+): Window | null {
+  if (typeof window === 'undefined' && !options.open) return null
+  const openFn = options.open ?? ((url, target, features) => window.open(url, target, features))
+  try {
+    const popup = openFn(
+      GESTURE_POPUP_PREOPEN_URL,
+      '_blank',
+      GESTURE_POPUP_PREOPEN_FEATURES,
+    )
+    if (!popup || popup.closed) return null
+    try {
+      popup.opener = null
+    } catch {
+      /* ignore — some browsers restrict opener assignment */
+    }
+    renderGesturePopupWaitingState(popup)
+    if (popup.closed) return null
+    return popup
   } catch {
     return null
   }
@@ -119,10 +174,15 @@ export function openUserGestureFallbackWindow(): Window | null {
 export function navigateGesturePopup(popup: Window | null | undefined, url: string): boolean {
   if (!popup || popup.closed) return false
   try {
-    popup.location.href = url
+    popup.location.replace(url)
     return true
   } catch {
-    return false
+    try {
+      popup.location.href = url
+      return true
+    } catch {
+      return false
+    }
   }
 }
 
@@ -289,6 +349,7 @@ export async function runEmbeddedExternalNavChain(
   }
 
   if (deps.windowOpen(startUrl) != null) {
+    closeGesturePopupIfOpen(gesturePopup)
     reportNavAttempt(deps, 'window_open', 'window_open_direct', true)
     return {
       method: 'window_open',
@@ -300,6 +361,7 @@ export async function runEmbeddedExternalNavChain(
   }
 
   if (deps.setWindowTopLocation(startUrl)) {
+    closeGesturePopupIfOpen(gesturePopup)
     reportNavAttempt(deps, 'window_top_location', 'window_top_location', true)
     return {
       method: 'window_top_location',
@@ -311,6 +373,7 @@ export async function runEmbeddedExternalNavChain(
   }
 
   if (deps.setWindowLocation(startUrl)) {
+    closeGesturePopupIfOpen(gesturePopup)
     reportNavAttempt(deps, 'window_location', 'window_location', true)
     return {
       method: 'window_location',
@@ -414,7 +477,13 @@ export async function navigateEmbeddedExternalUrl(
     sdkState.sdkInitialized,
   )
 
-  const result = await runEmbeddedExternalNavChain(startUrl, deps)
+  let result: EmbeddedExternalNavResult
+  try {
+    result = await runEmbeddedExternalNavChain(startUrl, deps)
+  } catch (err) {
+    closeGesturePopupIfOpen(deps.gesturePopup)
+    throw err
+  }
 
   if (result.handedOff) {
     // eslint-disable-next-line no-console
