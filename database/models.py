@@ -2323,6 +2323,19 @@ class WhatsAppConnection(Base):
     tenant = relationship('Tenant', back_populates='whatsapp_connection')
 
 
+class WhatsAppOAuthNonce(Base):
+    """One-time hashed OAuth nonce for Meta embedded signup callbacks."""
+    __tablename__ = 'whatsapp_oauth_nonces'
+
+    id = Column(Integer, primary_key=True)
+    nonce_hash = Column(String(64), nullable=False, unique=True, index=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False, index=True)
+    connection_mode = Column(String(32), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 # ── Store Knowledge Sync ──────────────────────────────────────────────────────
 
 class StoreSyncJob(Base):

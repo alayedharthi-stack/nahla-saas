@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from core.log_redaction import redact_graph_id  # noqa: E402
+
 logger = logging.getLogger("nahla.tenant_integrity")
 
 
@@ -815,12 +817,14 @@ def log_integrity_event(
     """Write one row to integrity_events (best-effort)."""
     try:
         from database.models import IntegrityEvent  # noqa: PLC0415
+        safe_phone = redact_graph_id(phone_number_id) if phone_number_id else None
+        safe_waba = redact_graph_id(waba_id) if waba_id else None
         entry = IntegrityEvent(
             event=event,
             tenant_id=tenant_id,
             other_tenant_id=other_tenant_id,
-            phone_number_id=phone_number_id,
-            waba_id=waba_id,
+            phone_number_id=safe_phone,
+            waba_id=safe_waba,
             store_id=store_id,
             provider=provider,
             action=action,
@@ -829,18 +833,22 @@ def log_integrity_event(
             actor=actor,
             dry_run=dry_run,
         )
-        db.add(entry)
-        db.flush()
+        nested = db.begin_nested()
+        try:
+            db.add(entry)
+            db.flush()
+            nested.commit()
+        except Exception:
+            nested.rollback()
+            raise
     except Exception as exc:
         logger.debug("[IntegrityEvent] write failed: %s", exc)
-        try:
-            db.rollback()
-        except Exception:
-            pass
 
     # Mirror to structured log regardless of DB success
     logger.info(
         "INTEGRITY event=%s tenant=%s other=%s phone=%s waba=%s store=%s action=%s result=%s detail=%s",
-        event, tenant_id, other_tenant_id, phone_number_id,
-        waba_id, store_id, action, result, (detail or "")[:200],
+        event, tenant_id, other_tenant_id,
+        redact_graph_id(phone_number_id) if phone_number_id else None,
+        redact_graph_id(waba_id) if waba_id else None,
+        store_id, action, result, (detail or "")[:200],
     )

@@ -85,8 +85,7 @@ def test_cross_tenant_disconnected_blocks():
 def test_snapshot_restore_keeps_provider():
     from models import Tenant, WhatsAppConnection  # noqa: PLC0415
     from services.coexistence_embedded_exchange import (  # noqa: PLC0415
-        _conn_field_snapshot,
-        restore_connection_snapshot,
+        load_connection_for_update,
         stage_coexistence_credentials,
     )
 
@@ -100,7 +99,7 @@ def test_snapshot_restore_keeps_provider():
     )
     db.add(conn)
     db.commit()
-    snap = _conn_field_snapshot(conn)
+    conn, _had = load_connection_for_update(db, 301)
     stage_coexistence_credentials(
         conn,
         waba_id="WABA-T",
@@ -108,7 +107,9 @@ def test_snapshot_restore_keeps_provider():
         token_type="user",
     )
     assert conn.provider == "meta"
-    restore_connection_snapshot(conn, snap)
+    db.flush()
+    db.rollback()
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=301).one()
     assert conn.provider == "dialog360"
     assert conn.whatsapp_business_account_id is None
     db.close()
@@ -174,8 +175,7 @@ def test_snapshot_restores_access_token_literal():
         store_access_token,
     )
     from services.coexistence_embedded_exchange import (  # noqa: PLC0415
-        _conn_field_snapshot,
-        restore_connection_snapshot,
+        load_connection_for_update,
         stage_coexistence_credentials,
     )
 
@@ -192,7 +192,7 @@ def test_snapshot_restores_access_token_literal():
     store_access_token(conn, "dialog360-original-token")
     db.commit()
     original_encrypted = conn.access_token
-    snap = _conn_field_snapshot(conn)
+    conn, _had = load_connection_for_update(db, 401)
     stage_coexistence_credentials(
         conn,
         waba_id="WABA-TMP",
@@ -200,7 +200,9 @@ def test_snapshot_restores_access_token_literal():
         token_type="user",
     )
     assert read_access_token(conn) == "meta-new-token"
-    restore_connection_snapshot(conn, snap)
+    db.flush()
+    db.rollback()
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=401).one()
     assert conn.access_token == original_encrypted
     assert read_access_token(conn) == "dialog360-original-token"
     assert conn.provider == "dialog360"
@@ -246,8 +248,11 @@ def test_finalize_not_eligible_restores_dialog360():
                 phones=phones,
                 trusted_phone_id="PHONE-501",
                 finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+                trusted_business_portfolio_id="TEST-BUSINESS-001",
+                canonical_phone_e164="+966501234567",
             )
         )
+    db.rollback()
     db.refresh(conn)
     assert payload["status"] == "coexistence_not_eligible"
     assert conn.provider == "dialog360"
@@ -296,8 +301,11 @@ def test_finalize_webhook_failure_restores_dialog360():
                 phones=phones,
                 trusted_phone_id="PHONE-502",
                 finish_event="FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+                trusted_business_portfolio_id="TEST-BUSINESS-001",
+                canonical_phone_e164="+966509876543",
             )
         )
+    db.rollback()
     db.refresh(conn)
     assert payload["connected"] is False
     assert conn.provider == "dialog360"

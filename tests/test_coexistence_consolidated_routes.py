@@ -31,8 +31,8 @@ from services.embedded_waba_resolution import (  # noqa: E402
     resolve_coexistence_assets_from_graph,
 )
 from services.coexistence_embedded_exchange import (  # noqa: E402
-    prepare_connection_context,
-    rollback_connection_context,
+    load_connection_for_update,
+    persist_oauth_nonce,
 )
 
 
@@ -175,16 +175,17 @@ def _sqlite_session():
 
 
 def test_new_connection_failure_leaves_no_row():
-    from models import Tenant  # noqa: PLC0415
+    from models import Tenant, WhatsAppConnection  # noqa: PLC0415
 
     db = _sqlite_session()
     db.add(Tenant(id=601, name="new-tenant", is_active=True))
     db.commit()
-    conn, snapshot, had_row = prepare_connection_context(db, 601)
+    conn, had_row = load_connection_for_update(db, 601)
     assert had_row is False
     conn.provider = "meta"
-    rollback_connection_context(db, conn, snapshot, had_row)
-    assert db.query(type(conn)).filter_by(tenant_id=601).count() == 0
+    db.flush()
+    db.rollback()
+    assert db.query(WhatsAppConnection).filter_by(tenant_id=601).count() == 0
     db.close()
 
 
@@ -205,6 +206,14 @@ def test_oauth_callback_coexistence_skips_begin_waba_session(monkeypatch):
     db.commit()
 
     issued_at = int(datetime.now(timezone.utc).timestamp())
+    persist_oauth_nonce(
+        db,
+        nonce="n1",
+        tenant_id=701,
+        connection_mode="coexistence",
+        expires_at=datetime.fromtimestamp(issued_at + 600, tz=timezone.utc),
+    )
+    db.commit()
     state = emb._sign_oauth_state(701, "n1", issued_at, "https://api.example.test/cb", "coexistence")
 
     monkeypatch.setattr(emb, "_exchange_code_for_token", AsyncMock(return_value={"access_token": "short"}))

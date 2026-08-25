@@ -41,6 +41,7 @@ def finalize_successful_whatsapp_connection(
     conn: Any,
     *,
     connected_at: Optional[datetime] = None,
+    commit: bool = True,
 ) -> bool:
     """Apply platform post-connect lifecycle for a ready WhatsApp row.
 
@@ -97,7 +98,9 @@ def finalize_successful_whatsapp_connection(
     )
 
     try:
-        db.commit()
+        db.flush()
+        if commit:
+            db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[WAFinalize] connection commit failed tenant=%s: %s", tenant_id, exc,
@@ -107,6 +110,14 @@ def finalize_successful_whatsapp_connection(
             f"failed to persist successful WhatsApp connection for tenant={tenant_id}"
         ) from exc
 
+    if commit:
+        schedule_whatsapp_catalog_reconnect(tenant_id)
+
+    return trial_started
+
+
+def schedule_whatsapp_catalog_reconnect(tenant_id: int) -> None:
+    """Best-effort catalog bind after the WhatsApp transaction commits."""
     try:
         from services.meta_catalog_reconnect import (  # noqa: PLC0415
             schedule_meta_catalog_reconnect_best_effort,
@@ -118,8 +129,6 @@ def finalize_successful_whatsapp_connection(
             tenant_id,
             exc_info=True,
         )
-
-    return trial_started
 
 
 def _rollback_finalization(db: Session, conn: Any) -> None:

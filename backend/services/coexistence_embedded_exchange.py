@@ -1,48 +1,128 @@
-
 """Atomic coexistence embedded exchange helpers (no cross-tenant eviction)."""
 from __future__ import annotations
 
 import hashlib
-from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from database.models import WhatsAppConnection
+from database.models import WhatsAppConnection, WhatsAppOAuthNonce
 
 
-def _conn_field_snapshot(conn: WhatsAppConnection) -> Dict[str, Any]:
-    return {
-        "status": conn.status,
-        "provider": conn.provider,
-        "connection_type": conn.connection_type,
-        "whatsapp_business_account_id": conn.whatsapp_business_account_id,
-        "phone_number_id": conn.phone_number_id,
-        "phone_number": conn.phone_number,
-        "business_display_name": conn.business_display_name,
-        "business_manager_id": conn.business_manager_id,
-        "meta_business_account_id": conn.meta_business_account_id,
-        "webhook_verified": conn.webhook_verified,
-        "sending_enabled": conn.sending_enabled,
-        "last_error": conn.last_error,
-        "token_type": conn.token_type,
-        "access_token": conn.access_token,
-        "token_expires_at": conn.token_expires_at,
-        "connected_at": conn.connected_at,
-        "last_verified_at": conn.last_verified_at,
-        "last_attempt_at": conn.last_attempt_at,
-        "whatsapp_ai_live_since": conn.whatsapp_ai_live_since,
-        "disconnect_reason": conn.disconnect_reason,
-        "disconnected_at": conn.disconnected_at,
-        "disconnected_by_user_id": conn.disconnected_by_user_id,
-        "extra_metadata": deepcopy(conn.extra_metadata or {}),
-    }
+COEXISTENCE_TENANT_LOCK_CLASS = 877001
 
 
-def restore_connection_snapshot(conn: WhatsAppConnection, snapshot: Dict[str, Any]) -> None:
-    for key, value in snapshot.items():
-        setattr(conn, key, value)
+def hash_oauth_nonce(nonce: str) -> str:
+    return hashlib.sha256(str(nonce or "").encode("utf-8")).hexdigest()
+
+
+def acquire_tenant_transaction_lock(db: Session, tenant_id: int) -> None:
+    """Serialize coexistence callbacks per tenant across workers."""
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_class, :tenant_id)"),
+            {"lock_class": COEXISTENCE_TENANT_LOCK_CLASS, "tenant_id": int(tenant_id)},
+        )
+        return
+    # SQLite (and other local engines) serialize on a tenant-row write lock.
+    db.execute(
+        text("UPDATE tenants SET name = name WHERE id = :tenant_id"),
+        {"tenant_id": int(tenant_id)},
+    )
+
+
+def persist_oauth_nonce(
+    db: Session,
+    *,
+    nonce: str,
+    tenant_id: int,
+    connection_mode: str,
+    expires_at: datetime,
+) -> None:
+    db.add(
+        WhatsAppOAuthNonce(
+            nonce_hash=hash_oauth_nonce(nonce),
+            tenant_id=int(tenant_id),
+            connection_mode=str(connection_mode),
+            expires_at=expires_at,
+            consumed_at=None,
+        )
+    )
+    db.flush()
+
+
+def consume_oauth_nonce(
+    db: Session,
+    *,
+    nonce: str,
+    tenant_id: int,
+    connection_mode: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """Atomically consume a persisted nonce.
+
+    Returns:
+        ``consumed`` on success,
+        ``already_consumed`` when the same nonce was used,
+        ``expired`` / ``mismatch`` / ``missing`` otherwise.
+    """
+    now = now or datetime.now(timezone.utc)
+    nonce_hash = hash_oauth_nonce(nonce)
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        result = db.execute(
+            text(
+                "UPDATE whatsapp_oauth_nonces "
+                "SET consumed_at = :now "
+                "WHERE nonce_hash = :nonce_hash "
+                "AND tenant_id = :tenant_id "
+                "AND connection_mode = :connection_mode "
+                "AND consumed_at IS NULL "
+                "AND expires_at > :now "
+                "RETURNING id"
+            ),
+            {
+                "now": now,
+                "nonce_hash": nonce_hash,
+                "tenant_id": int(tenant_id),
+                "connection_mode": str(connection_mode),
+            },
+        )
+        if result.first() is not None:
+            db.flush()
+            return "consumed"
+    else:
+        candidate = (
+            db.query(WhatsAppOAuthNonce)
+            .filter(
+                WhatsAppOAuthNonce.nonce_hash == nonce_hash,
+                WhatsAppOAuthNonce.tenant_id == int(tenant_id),
+                WhatsAppOAuthNonce.connection_mode == str(connection_mode),
+                WhatsAppOAuthNonce.consumed_at.is_(None),
+            )
+            .first()
+        )
+        if candidate is not None:
+            expires_at = candidate.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at is None or expires_at > now:
+                candidate.consumed_at = now
+                db.flush()
+                return "consumed"
+
+    row = db.query(WhatsAppOAuthNonce).filter(WhatsAppOAuthNonce.nonce_hash == nonce_hash).first()
+    if row is None:
+        return "missing"
+    if int(row.tenant_id) != int(tenant_id) or str(row.connection_mode) != str(connection_mode):
+        return "mismatch"
+    if row.consumed_at is not None:
+        return "already_consumed"
+    return "expired"
+
 
 
 def coexistence_exchange_fingerprint(code: Optional[str], access_token: Optional[str]) -> str:
@@ -53,7 +133,7 @@ def coexistence_exchange_fingerprint(code: Optional[str], access_token: Optional
 def read_completed_coexistence_exchange(
     conn: WhatsAppConnection,
     fingerprint: str,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[dict]:
     meta = dict(conn.extra_metadata or {})
     claim = dict(meta.get("coexistence_exchange_claim") or {})
     if claim.get("fingerprint") == fingerprint and claim.get("status") == "completed":
@@ -104,30 +184,35 @@ def stage_coexistence_credentials(
     conn.last_error = None
 
 
-def prepare_connection_context(
+def load_connection_for_update(
     db: Session,
     tenant_id: int,
-) -> Tuple[WhatsAppConnection, Dict[str, Any], bool]:
-    """Return conn, snapshot, and whether a row existed before this request."""
-    existing = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
-    had_row = existing is not None
-    conn = existing or WhatsAppConnection(tenant_id=tenant_id)
-    if not had_row:
-        db.add(conn)
-        db.flush()
-    snapshot = _conn_field_snapshot(conn)
-    return conn, snapshot, had_row
+) -> Tuple[WhatsAppConnection, bool]:
+    """Return the tenant connection, creating an uncommitted row when needed."""
+    query = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id)
+    if db.get_bind().dialect.name == "postgresql":
+        query = query.with_for_update()
+    existing = query.first()
+    if existing is not None:
+        return existing, True
+    conn = WhatsAppConnection(tenant_id=tenant_id)
+    db.add(conn)
+    db.flush()
+    return conn, False
 
 
-def rollback_connection_context(
-    db: Session,
-    conn: WhatsAppConnection,
-    snapshot: Dict[str, Any],
-    had_row: bool,
-) -> None:
-    if had_row:
-        restore_connection_snapshot(conn, snapshot)
-        db.commit()
-    else:
-        db.delete(conn)
-        db.commit()
+def coexistence_finalize_succeeded(payload: Optional[dict]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {"failed", "coexistence_not_eligible", "configuring", "error"}:
+        return False
+    return payload.get("connected") is True
+
+
+def commit_coexistence_transaction(db: Session, tenant_id: int) -> None:
+    db.flush()
+    db.commit()
+    from core.whatsapp_connection_finalization import schedule_whatsapp_catalog_reconnect  # noqa: PLC0415
+
+    schedule_whatsapp_catalog_reconnect(tenant_id)

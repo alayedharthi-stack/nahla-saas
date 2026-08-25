@@ -52,10 +52,14 @@ from core.database import get_db
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
 from services.coexistence_embedded_exchange import (
-    _conn_field_snapshot,
+    acquire_tenant_transaction_lock,
     coexistence_exchange_fingerprint,
-    prepare_connection_context,
-    rollback_connection_context,
+    coexistence_finalize_succeeded,
+    commit_coexistence_transaction,
+    consume_oauth_nonce,
+    load_connection_for_update,
+    persist_oauth_nonce,
+    read_completed_coexistence_exchange,
 )
 from services.whatsapp_platform.token_manager import (
     get_oauth_session_state as _shared_get_oauth_session_state,
@@ -377,7 +381,12 @@ async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
             params={"fields": "id,display_phone_number,verified_name,code_verification_status"},
         )
         data = resp.json()
-    logger.info("[EmbeddedSignup] phone_numbers WABA=%s result=%s", waba_id, data)
+    from core.log_redaction import redact_graph_id  # noqa: PLC0415
+    logger.info(
+        "[EmbeddedSignup] phone_numbers waba=%s count=%s",
+        redact_graph_id(waba_id),
+        len(data.get("data") or []) if isinstance(data, dict) else 0,
+    )
     return data.get("data", [])
 
 
@@ -940,15 +949,14 @@ async def _finalize_coexistence_exchange(
     oauth_expires_at: Optional[datetime] = None,
     token_type: Optional[str] = None,
     trusted_business_portfolio_id: Optional[str] = None,
+    canonical_phone_e164: Optional[str] = None,
 ) -> Dict[str, Any]:
     from core.tenant_integrity import (  # noqa: PLC0415
         TenantIntegrityError,
         assert_no_cross_tenant_whatsapp_asset,
     )
     from services.coexistence_embedded_exchange import (  # noqa: PLC0415
-        _conn_field_snapshot,
         mark_coexistence_exchange_completed,
-        restore_connection_snapshot,
         stage_coexistence_credentials,
     )
     from services.embedded_waba_resolution import (  # noqa: PLC0415
@@ -967,15 +975,8 @@ async def _finalize_coexistence_exchange(
     )
     from services.whatsapp_connection_service import subscribe_phone_webhook  # noqa: PLC0415
 
-    snapshot = _conn_field_snapshot(conn)
-
-    def _rollback_dialog360() -> None:
-        restore_connection_snapshot(conn, snapshot)
-        db.commit()
-
     trusted = str(trusted_phone_id or "").strip()
     if not trusted:
-        _rollback_dialog360()
         raise HTTPException(
             status_code=400,
             detail="Could not verify WhatsApp phone without Graph proof. Reauthorize with Meta.",
@@ -983,7 +984,6 @@ async def _finalize_coexistence_exchange(
 
     phone_ids = {str(p.get("id") or "") for p in phones if p.get("id")}
     if trusted not in phone_ids:
-        _rollback_dialog360()
         raise HTTPException(
             status_code=400,
             detail="Meta phone id does not match Graph-verified phone list.",
@@ -1000,14 +1000,12 @@ async def _finalize_coexistence_exchange(
             phone_number_id=phone_id,
         )
     except TenantIntegrityError as exc:
-        _rollback_dialog360()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     eligible, phone_data, eligibility_err = verify_coexistence_phone(phone_id, user_token, tenant_id)
     display = phone_data.get("display_phone_number") or chosen.get("display_phone_number")
     expected_phone = conn.phone_number
     if expected_phone and not phones_match_exact_e164(expected_phone, display):
-        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["connected"] = False
         payload["status"] = "failed"
@@ -1016,7 +1014,6 @@ async def _finalize_coexistence_exchange(
 
     on_app = provider_is_on_biz_app(phone_data, dict(conn.extra_metadata or {}))
     if on_app is False:
-        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["connected"] = False
         payload["status"] = "coexistence_not_eligible"
@@ -1027,7 +1024,6 @@ async def _finalize_coexistence_exchange(
         return payload
 
     if not eligible:
-        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["connected"] = False
         payload["status"] = "failed"
@@ -1042,7 +1038,6 @@ async def _finalize_coexistence_exchange(
         subscribed_fields=coexistence_webhook_fields(),
     )
     if not webhook_ok:
-        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["status"] = "configuring"
         payload["connected"] = False
@@ -1055,7 +1050,6 @@ async def _finalize_coexistence_exchange(
     apply_smb_sync_results(conn, sync_results)
     meta = dict(conn.extra_metadata or {})
     if not smb_syncs_accepted(meta):
-        _rollback_dialog360()
         payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
         payload["status"] = "configuring"
         payload["connected"] = False
@@ -1099,22 +1093,30 @@ async def _finalize_coexistence_exchange(
         finalize_successful_whatsapp_connection,
     )
     try:
-        finalize_successful_whatsapp_connection(db, conn)
+        finalize_successful_whatsapp_connection(db, conn, commit=False)
     except WhatsAppConnectionFinalizationError as exc:
-        _rollback_dialog360()
         raise HTTPException(
             status_code=502,
             detail="Failed to finalize coexistence connection.",
         ) from exc
 
+    proven_portfolio = str(trusted_business_portfolio_id or "").strip()
+    proven_e164 = str(canonical_phone_e164 or "").strip() or canonicalize_phone_e164(display)
     if exchange_fingerprint:
+        if not proven_portfolio or not proven_e164:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not complete WhatsApp link without Graph-proven business and phone.",
+            )
         mark_coexistence_exchange_completed(
             conn,
             exchange_fingerprint,
             waba_id=waba_id,
             phone_number_id=phone_id,
+            trusted_business_portfolio_id=proven_portfolio,
+            canonical_phone_e164=proven_e164,
         )
-    db.commit()
+    db.flush()
 
     payload = _build_embedded_status_payload(conn, _serialize_phones(phones))
     payload["message"] = (
@@ -1588,7 +1590,7 @@ def _build_meta_oauth_authorize_url(state: str, redirect_uri: str, *, config_id:
 
 
 @router.get("/oauth/start")
-async def oauth_start(request: Request, connection_mode: Optional[str] = None):
+async def oauth_start(request: Request, db: Session = Depends(get_db), connection_mode: Optional[str] = None):
     """Server-side entry point for the Embedded Signup flow.
 
     The dashboard navigates the merchant's browser to this URL; we
@@ -1625,6 +1627,14 @@ async def oauth_start(request: Request, connection_mode: Optional[str] = None):
     )
     nonce = _secrets.token_urlsafe(16)
     issued_at = int(datetime.now(timezone.utc).timestamp())
+    persist_oauth_nonce(
+        db,
+        nonce=nonce,
+        tenant_id=tenant_id,
+        connection_mode=mode_raw,
+        expires_at=datetime.fromtimestamp(issued_at + _OAUTH_STATE_TTL_SECONDS, tz=timezone.utc),
+    )
+    db.commit()
     state = _sign_oauth_state(tenant_id, nonce, issued_at, redirect_uri, mode_raw)
     url = _build_meta_oauth_authorize_url(state, redirect_uri, config_id=oauth_config_id)
     logger.info(
@@ -1685,19 +1695,6 @@ async def oauth_callback(
             reason="لم يرجع Meta رمز التفويض. أعد محاولة الربط من نحلة.",
         )
 
-    try:
-        token_data = await _exchange_code_for_token(code, redirect_uri)
-    except HTTPException as exc:
-        # Catch the BSP/TP variant explicitly so the merchant lands
-        # on the "use 360dialog" message instead of a raw Meta error.
-        return _oauth_callback_finish(ok=False, reason=str(exc.detail))
-
-    short_token = token_data["access_token"]
-    long_data = await _exchange_for_long_lived_token(short_token)
-    user_token = long_data.get("access_token") or short_token
-
-    debug_info = await _debug_token(user_token)
-
     from database.models import Tenant as _Tenant  # noqa: PLC0415
     if not db.query(_Tenant).filter(_Tenant.id == tenant_id).first():
         logger.error(
@@ -1706,13 +1703,34 @@ async def oauth_callback(
         )
         return _oauth_callback_finish(ok=False, reason="المتجر غير موجود — أعد تسجيل الدخول.")
 
+    acquire_tenant_transaction_lock(db, tenant_id)
+    nonce_status = consume_oauth_nonce(
+        db,
+        nonce=oauth_state.nonce,
+        tenant_id=tenant_id,
+        connection_mode=oauth_state.connection_mode,
+    )
+    if nonce_status == "already_consumed":
+        logger.info("[EmbeddedSignup] oauth/callback replay rejected tenant=%s", tenant_id)
+        return _oauth_callback_finish(ok=False, reason="تم استخدام رابط الربط مسبقاً. أعد المحاولة من نحلة.")
+    if nonce_status != "consumed":
+        return _oauth_callback_finish(ok=False, reason="رابط ربط Meta غير صالح أو منتهي الصلاحية. أعد المحاولة من نحلة.")
+
+    try:
+        token_data = await _exchange_code_for_token(code, redirect_uri)
+    except HTTPException as exc:
+        # Catch the BSP/TP variant explicitly so the merchant lands
+        # on the "use 360dialog" message instead of a raw Meta error.
+        db.rollback()
+        return _oauth_callback_finish(ok=False, reason=str(exc.detail))
+
+    short_token = token_data["access_token"]
+    long_data = await _exchange_for_long_lived_token(short_token)
+    user_token = long_data.get("access_token") or short_token
+
+    debug_info = await _debug_token(user_token)
+
     if oauth_state.connection_mode == "coexistence":
-        from services.coexistence_embedded_exchange import (  # noqa: PLC0415
-            prepare_connection_context,
-            rollback_connection_context,
-            coexistence_exchange_fingerprint,
-            read_completed_coexistence_exchange,
-        )
         from services.embedded_waba_resolution import (  # noqa: PLC0415
             CoexistenceWabaResolutionError,
             assert_retry_claim_matches,
@@ -1724,7 +1742,7 @@ async def oauth_callback(
             TenantIntegrityError,
         )
 
-        conn, snapshot, had_row = prepare_connection_context(db, tenant_id)
+        conn, _had_row = load_connection_for_update(db, tenant_id)
         fingerprint = coexistence_exchange_fingerprint(code, None)
         portfolio = derive_trusted_business_portfolio_id(debug_info)
         try:
@@ -1758,7 +1776,7 @@ async def oauth_callback(
                 expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
             else:
                 expires_at = _token_expiry_from_debug(debug_info)
-            await _finalize_coexistence_exchange(
+            payload = await _finalize_coexistence_exchange(
                 conn,
                 db,
                 tenant_id=tenant_id,
@@ -1772,16 +1790,24 @@ async def oauth_callback(
                 oauth_expires_at=expires_at,
                 token_type=long_data.get("token_type") or token_data.get("token_type", "user"),
                 trusted_business_portfolio_id=verified.trusted_business_portfolio_id,
+                canonical_phone_e164=verified.canonical_phone_e164,
             )
         except CoexistenceWabaResolutionError as exc:
-            rollback_connection_context(db, conn, snapshot, had_row)
+            db.rollback()
             return _oauth_callback_finish(ok=False, reason=exc.message)
         except HTTPException as exc:
-            rollback_connection_context(db, conn, snapshot, had_row)
+            db.rollback()
             return _oauth_callback_finish(ok=False, reason=str(exc.detail))
         except Exception:
-            rollback_connection_context(db, conn, snapshot, had_row)
+            db.rollback()
             raise
+        if not coexistence_finalize_succeeded(payload):
+            db.rollback()
+            return _oauth_callback_finish(
+                ok=False,
+                reason=str(payload.get("message") or "تعذر إكمال ربط واتساب."),
+            )
+        commit_coexistence_transaction(db, tenant_id)
         logger.info("[EmbeddedSignup] oauth/callback coexistence OK tenant=%s", tenant_id)
         return _oauth_callback_finish(ok=True, reason=None)
 
@@ -1920,7 +1946,8 @@ async def exchange_code(
             detail="WhatsApp coexistence setup is temporarily unavailable.",
         )
 
-    conn, snapshot, had_row = prepare_connection_context(db, tenant_id)
+    acquire_tenant_transaction_lock(db, tenant_id)
+    conn, _had_row = load_connection_for_update(db, tenant_id)
     fingerprint = coexistence_exchange_fingerprint(body.code, body.access_token)
 
     if coexistence:
@@ -1978,7 +2005,7 @@ async def exchange_code(
                 expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
             else:
                 expires_at = _token_expiry_from_debug(debug_info)
-            return await _finalize_coexistence_exchange(
+            payload = await _finalize_coexistence_exchange(
                 conn,
                 db,
                 tenant_id=tenant_id,
@@ -1992,12 +2019,21 @@ async def exchange_code(
                 oauth_expires_at=expires_at,
                 token_type=long_data.get("token_type") or token_data.get("token_type", "user"),
                 trusted_business_portfolio_id=verified.trusted_business_portfolio_id,
+                canonical_phone_e164=verified.canonical_phone_e164,
             )
+            if not coexistence_finalize_succeeded(payload):
+                db.rollback()
+                return payload
+            commit_coexistence_transaction(db, tenant_id)
+            return payload
         except CoexistenceWabaResolutionError as exc:
-            rollback_connection_context(db, conn, snapshot, had_row)
+            db.rollback()
             raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+        except HTTPException:
+            db.rollback()
+            raise
         except Exception:
-            rollback_connection_context(db, conn, snapshot, had_row)
+            db.rollback()
             raise
 
     # 2 — Cloud API embedded signup
@@ -2120,6 +2156,8 @@ async def select_phone(
             resolve_coexistence_assets_from_graph,
         )
         from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415
+        acquire_tenant_transaction_lock(db, tenant_id)
+        conn, _had_row = load_connection_for_update(db, tenant_id)
         token = read_access_token(conn)
         if not token:
             raise HTTPException(
@@ -2138,19 +2176,33 @@ async def select_phone(
                 expected_business_portfolio_id=portfolio,
                 hinted_phone_number_id=body.phone_number_id,
             )
+            phones = await _get_phone_numbers(verified.waba_id, token)
+            payload = await _finalize_coexistence_exchange(
+                conn,
+                db,
+                tenant_id=tenant_id,
+                waba_id=verified.waba_id,
+                user_token=token,
+                phones=phones,
+                trusted_phone_id=verified.phone_number_id,
+                finish_event=(conn.extra_metadata or {}).get("finish_event"),
+                trusted_business_portfolio_id=verified.trusted_business_portfolio_id,
+                canonical_phone_e164=verified.canonical_phone_e164,
+            )
         except CoexistenceWabaResolutionError as exc:
+            db.rollback()
             raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
-        phones = await _get_phone_numbers(verified.waba_id, token)
-        return await _finalize_coexistence_exchange(
-            conn,
-            db,
-            tenant_id=tenant_id,
-            waba_id=verified.waba_id,
-            user_token=token,
-            phones=phones,
-            trusted_phone_id=verified.phone_number_id,
-            finish_event=(conn.extra_metadata or {}).get("finish_event"),
-        )
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        if not coexistence_finalize_succeeded(payload):
+            db.rollback()
+            return payload
+        commit_coexistence_transaction(db, tenant_id)
+        return payload
 
     phone_data, _ = await _get_phone_details_with_fallback(conn, db, body.phone_number_id)
 
@@ -2166,6 +2218,7 @@ async def select_phone(
     # ── Integrity guard: phone_number_id uniqueness — always fatal ───────────
     from core.tenant_integrity import (  # noqa: PLC0415
         assert_phone_id_not_claimed,
+        evict_phone_id_from_other_tenants,
         TenantIntegrityError,
     )
     try:
@@ -2179,6 +2232,8 @@ async def select_phone(
         raise HTTPException(status_code=409, detail=str(_tie)) from _tie
     try:
         evict_phone_id_from_other_tenants(db, body.phone_number_id, tenant_id)
+    except NameError:
+        raise
     except Exception as _evict_exc:  # noqa: BLE001
         logger.warning("[EmbeddedSignup] select-phone eviction warning (non-fatal): %s", _evict_exc)
 

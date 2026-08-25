@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+import hashlib
+from typing import Any, Optional
 
 _ACCESS_TOKEN_QS = re.compile(r"(access_token=)[^&\s\"']+", re.IGNORECASE)
 _BEARER = re.compile(r"(Bearer\s+)[^\s\"']+", re.IGNORECASE)
@@ -15,6 +16,15 @@ def redact_secrets(text: str) -> str:
         return text
     out = _ACCESS_TOKEN_QS.sub(r"\1REDACTED", text)
     return _BEARER.sub(r"\1REDACTED", out)
+
+
+def redact_graph_id(value: Optional[str]) -> str:
+    """Hash a Graph WABA/phone identifier for logs and audit persistence."""
+    token = str(value or "").strip()
+    if not token:
+        return "∅"
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+    return f"#{digest}"
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -37,4 +47,4 @@ class SecretRedactingFilter(logging.Filter):
         return True
 
 
-__all__ = ["SecretRedactingFilter", "redact_secrets"]
+__all__ = ["SecretRedactingFilter", "redact_graph_id", "redact_secrets"]
