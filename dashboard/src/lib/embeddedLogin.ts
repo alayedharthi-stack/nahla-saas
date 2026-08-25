@@ -8,6 +8,7 @@ export const EMBEDDED_WATCHDOG_TIMEOUT_MS = 52_000
 export const EMBEDDED_LOGIN_MAX_ATTEMPTS  = 2
 
 export const SALLA_STORE_LINK_REQUIRED_CODE = 'salla_store_link_required'
+export const INVALID_SALLA_APP_ID_CODE = 'invalid_salla_app_id'
 export const SALLA_OAUTH_SYNC_ACTION = 'oauth_sync'
 export const SALLA_EMBEDDED_OAUTH_START_PATH =
   '/api/salla/oauth/start?embedded_reconcile=1'
@@ -82,6 +83,19 @@ export function extractApiErrorDetail(data: unknown): string {
     return data.detail.detail
   }
   return ''
+}
+
+export function extractApiErrorCode(data: unknown): string {
+  if (!isRecord(data)) return ''
+  if (typeof data.code === 'string') return data.code
+  if (isRecord(data.detail) && typeof data.detail.code === 'string') {
+    return data.detail.code
+  }
+  return ''
+}
+
+export function isInvalidSallaAppIdResponse(data: unknown): boolean {
+  return extractApiErrorCode(data) === INVALID_SALLA_APP_ID_CODE
 }
 
 export function isSallaRoutingBlockDetail(detail: unknown): boolean {
