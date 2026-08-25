@@ -230,7 +230,13 @@ def _mock_token_login_client(introspect_body: dict):
     return mock_client
 
 
-def _mock_oauth_client(store_id: str, merchant_id: str, store_name: str = "Store"):
+def _mock_oauth_client(
+    store_id: str,
+    merchant_id: str,
+    store_name: str = "Store",
+    *,
+    include_merchant: bool = True,
+):
     token_resp = MagicMock()
     token_resp.status_code = 200
     token_resp.json.return_value = {
@@ -241,15 +247,16 @@ def _mock_oauth_client(store_id: str, merchant_id: str, store_name: str = "Store
     }
     token_resp.text = ""
 
+    store_payload: dict = {
+        "id": store_id,
+        "name": store_name,
+    }
+    if include_merchant:
+        store_payload["merchant"] = {"id": merchant_id}
+
     store_resp = MagicMock()
     store_resp.status_code = 200
-    store_resp.json.return_value = {
-        "data": {
-            "id": store_id,
-            "name": store_name,
-            "merchant": {"id": merchant_id},
-        },
-    }
+    store_resp.json.return_value = {"data": store_payload}
     store_resp.text = ""
 
     mock_client = AsyncMock()
@@ -267,6 +274,7 @@ async def _run_api_oauth_callback(
     store_id: str,
     merchant_id: str,
     store_name: str = "Store",
+    include_merchant: bool = True,
 ):
     from routers.salla_oauth import salla_api_oauth_callback
 
@@ -282,7 +290,10 @@ async def _run_api_oauth_callback(
                 with patch("routers.salla_oauth._DASHBOARD_ORIGIN", "https://app.nahlah.ai"):
                     with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
                         mock_client_cls.return_value = _mock_oauth_client(
-                            store_id, merchant_id, store_name,
+                            store_id,
+                            merchant_id,
+                            store_name,
+                            include_merchant=include_merchant,
                         )
                         with patch("asyncio.ensure_future", return_value=MagicMock()):
                             return await salla_api_oauth_callback(
@@ -1028,6 +1039,185 @@ class TestEmbeddedReconcileOAuthMerchantCorrelation:
         assert "reason=reconcile_identity_mismatch" in response.headers["location"]
         assert db.query(SallaEmbeddedIdentityBinding).count() == 0
         handoff_mock.assert_not_called()
+
+
+
+    def test_store_id_fallback_accepts_when_challenge_equals_canonical_store(self):
+        from services.salla_embedded_identity_binding import (
+            verify_embedded_reconcile_oauth_merchant_correlation,
+        )
+        from services.salla_store_identity import SallaStoreIdentity
+
+        challenge = _make_challenge(app_id=APP_ID, merchant_account_id=GENERIC_STORE)
+        oauth_identity = SallaStoreIdentity(
+            store_id=GENERIC_STORE,
+            merchant_account_id="",
+            resolved_via="store_info",
+        )
+        ok, reason = verify_embedded_reconcile_oauth_merchant_correlation(
+            challenge=challenge,
+            oauth_store_identity=oauth_identity,
+        )
+        assert ok is True
+        assert reason == "ok"
+
+    def test_present_oauth_merchant_mismatch_rejects_even_when_store_matches(self):
+        from services.salla_embedded_identity_binding import (
+            verify_embedded_reconcile_oauth_merchant_correlation,
+        )
+        from services.salla_store_identity import SallaStoreIdentity
+
+        challenge = _make_challenge(app_id=APP_ID, merchant_account_id=GENERIC_STORE)
+        oauth_identity = SallaStoreIdentity(
+            store_id=GENERIC_STORE,
+            merchant_account_id="99001122",
+            resolved_via="store_info",
+        )
+        ok, reason = verify_embedded_reconcile_oauth_merchant_correlation(
+            challenge=challenge,
+            oauth_store_identity=oauth_identity,
+        )
+        assert ok is False
+        assert reason == "reconcile_identity_mismatch"
+
+    def test_oauth_callback_creates_binding_when_store_info_omits_merchant_field(
+        self, db, fake_redis,
+    ):
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+        )
+
+        integration = _seed_store(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_STORE,
+            alt_merchant_id=GENERIC_ALT,
+            owner_email=GENERIC_EMAIL,
+            store_name=GENERIC_STORE_NAME,
+        )
+        _seed_merchant(db, tenant_id=GENERIC_TENANT, email=GENERIC_EMAIL)
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=GENERIC_STORE,
+        )
+        oauth_state = f"embedded_corr_store_only{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        response = asyncio.run(
+            _run_api_oauth_callback(
+                db,
+                state=oauth_state,
+                store_id=GENERIC_STORE,
+                merchant_id="",
+                store_name=GENERIC_STORE_NAME,
+                include_merchant=False,
+            )
+        )
+        assert response.status_code == 302
+        binding = (
+            db.query(SallaEmbeddedIdentityBinding)
+            .filter_by(
+                merchant_account_id=GENERIC_STORE,
+                canonical_store_id=GENERIC_STORE,
+                status="active",
+            )
+            .one()
+        )
+        assert binding.integration_id == integration.id
+        assert binding.tenant_id == GENERIC_TENANT
+
+    def test_visit2_direct_entry_after_oauth_callback_without_merchant_field(
+        self, db, fake_redis,
+    ):
+        from routers.salla_oauth import salla_token_login
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+        )
+
+        integration = _seed_store(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_STORE,
+            alt_merchant_id=GENERIC_ALT,
+            owner_email=GENERIC_EMAIL,
+            store_name=GENERIC_STORE_NAME,
+        )
+        _seed_merchant(db, tenant_id=GENERIC_TENANT, email=GENERIC_EMAIL)
+
+        async def _visit1_token_login():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.visit1", "app_id": APP_ID})
+            request.headers = {}
+            request.client = None
+            with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value = _mock_token_login_client(
+                    _merchant_only_introspect(GENERIC_STORE),
+                )
+                with pytest.raises(HTTPException) as exc_info:
+                    await salla_token_login(request, db)
+            return exc_info.value
+
+        visit1_exc = asyncio.run(_visit1_token_login())
+        assert visit1_exc.status_code == 403
+        assert visit1_exc.detail["detail"] == "merchant_identity_not_canonical"
+        assert "reconcile_nonce=" in visit1_exc.detail["oauth_start_path"]
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=GENERIC_STORE,
+        )
+        oauth_state = f"embedded_visit2_store_only{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        callback_response = asyncio.run(
+            _run_api_oauth_callback(
+                db,
+                state=oauth_state,
+                store_id=GENERIC_STORE,
+                merchant_id="",
+                store_name=GENERIC_STORE_NAME,
+                include_merchant=False,
+            )
+        )
+        assert callback_response.status_code == 302
+        assert (
+            db.query(SallaEmbeddedIdentityBinding)
+            .filter_by(merchant_account_id=GENERIC_STORE, status="active")
+            .count()
+            == 1
+        )
+
+        captured: dict = {}
+
+        def _capture_token(**kwargs):
+            captured.update(kwargs)
+            return "jwt-visit2"
+
+        async def _visit2_token_login():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.visit2", "app_id": APP_ID})
+            request.headers = {}
+            request.client = None
+            with patch("routers.salla_oauth.httpx.AsyncClient") as mock_client_cls:
+                mock_client_cls.return_value = _mock_token_login_client(
+                    _merchant_only_introspect(GENERIC_STORE),
+                )
+                with patch("routers.salla_oauth.create_token", side_effect=_capture_token):
+                    with patch("routers.salla_oauth.audit"):
+                        with patch("core.salla_onboarding_email.queue_salla_onboarding_email"):
+                            return await salla_token_login(request, db)
+
+        visit2_result = asyncio.run(_visit2_token_login())
+        assert visit2_result["tenant_id"] == GENERIC_TENANT
+        assert visit2_result["store_id"] == GENERIC_STORE
+        assert visit2_result["access_token"] == "jwt-visit2"
+        assert captured.get("extra_claims", {}).get("store_id") == GENERIC_STORE
+        assert integration.external_store_id == GENERIC_STORE
 
 
 class TestBindingValidationNegative:

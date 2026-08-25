@@ -48,16 +48,27 @@ def verify_embedded_reconcile_oauth_merchant_correlation(
     challenge: ReconciliationChallenge,
     oauth_store_identity: SallaStoreIdentity,
 ) -> tuple[bool, str]:
-    """Require OAuth store/info merchant.id to exactly match challenge merchant_account_id."""
+    """Correlate OAuth store/info proof with embedded reconcile challenge merchant identity.
+
+    When Salla returns ``merchant.id``, it is the strongest proof and must match the
+    challenge exactly. When ``merchant.id`` is absent, accept only if OAuth
+    ``store.id`` equals the challenge merchant id (introspect merchant-only case
+    where merchant_id is the canonical store id). Never use Integration.config
+    aliases for this decision.
+    """
     oauth_store_id = _str_id(oauth_store_identity.canonical_store_id)
     oauth_merchant_id = _str_id(oauth_store_identity.merchant_account_id)
     challenge_merchant_id = _str_id(challenge.merchant_account_id)
 
-    if not oauth_store_id or not oauth_merchant_id:
+    if not challenge_merchant_id or not oauth_store_id:
         return False, "reconcile_identity_mismatch"
-    if oauth_merchant_id != challenge_merchant_id:
-        return False, "reconcile_identity_mismatch"
-    return True, "ok"
+    if oauth_merchant_id:
+        if oauth_merchant_id != challenge_merchant_id:
+            return False, "reconcile_identity_mismatch"
+        return True, "ok"
+    if oauth_store_id == challenge_merchant_id:
+        return True, "ok"
+    return False, "reconcile_identity_mismatch"
 
 
 def find_active_binding(
