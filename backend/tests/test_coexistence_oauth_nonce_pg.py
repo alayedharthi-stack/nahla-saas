@@ -84,7 +84,9 @@ def _run_alembic(engine: Engine, revision: str) -> None:
     try:
         os.chdir(_REPO / "database")
         cfg = Config("alembic.ini")
-        cfg.set_main_option("sqlalchemy.url", str(engine.url.render_as_string(hide_password=False)))
+        url = engine.url.render_as_string(hide_password=False)
+        cfg.set_main_option("sqlalchemy.url", url)
+        os.environ["DATABASE_URL"] = url
         command.upgrade(cfg, revision)
     finally:
         os.chdir(prev_cwd)
@@ -118,13 +120,21 @@ def pg_session(postgres_engine: Engine) -> Iterator[Session]:
         connection.close()
 
 
+def _admin_engine() -> Engine:
+    base = (_candidate_database_urls()[0]).rsplit("/", 1)[0]
+    return create_engine(f"{base}/postgres", isolation_level="AUTOCOMMIT", poolclass=NullPool)
+
+
+def _fresh_db_url(db_name: str) -> str:
+    return f"{_candidate_database_urls()[0].rsplit('/', 1)[0]}/{db_name}"
+
+
 def test_fresh_database_upgrade_to_0101_creates_nonce_table(postgres_engine: Engine) -> None:
-    admin = create_engine(str(postgres_engine.url), isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    admin = _admin_engine()
     db_name = f"coex_nonce_fresh_{hashlib.sha256(os.urandom(8)).hexdigest()[:8]}"
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-    fresh_url = str(postgres_engine.url).rsplit("/", 1)[0] + f"/{db_name}"
-    fresh = create_engine(fresh_url, poolclass=NullPool)
+    fresh = create_engine(_fresh_db_url(db_name), poolclass=NullPool)
     try:
         _run_alembic(fresh, "0101")
         _assert_nonce_table(fresh)
@@ -139,12 +149,11 @@ def test_fresh_database_upgrade_to_0101_creates_nonce_table(postgres_engine: Eng
 
 
 def test_existing_salla_0100_upgrade_to_0101_creates_nonce_table(postgres_engine: Engine) -> None:
-    admin = create_engine(str(postgres_engine.url), isolation_level="AUTOCOMMIT", poolclass=NullPool)
+    admin = _admin_engine()
     db_name = f"coex_nonce_salla_{hashlib.sha256(os.urandom(8)).hexdigest()[:8]}"
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-    fresh_url = str(postgres_engine.url).rsplit("/", 1)[0] + f"/{db_name}"
-    fresh = create_engine(fresh_url, poolclass=NullPool)
+    fresh = create_engine(_fresh_db_url(db_name), poolclass=NullPool)
     try:
         _run_alembic(fresh, "0100")
         with fresh.connect() as conn:
