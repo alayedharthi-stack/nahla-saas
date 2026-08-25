@@ -88,6 +88,174 @@ _DASHBOARD_ORIGIN = _DASHBOARD or "https://app.nahlah.ai"
 # embedded URL (which only works inside Salla's iframe context).
 _SALLA_POST_OAUTH_PATH = "/app/entry"
 
+# Opaque one-time launch handoff used by /app/salla/launch completion surface.
+_OAUTH_EMBEDDED_RECONCILE_NEXT = "/app/entry?salla_oauth=success"
+
+
+def _sanitize_internal_next_path(next_path: str, *, default: str = "/overview") -> str:
+    raw = (next_path or "").strip()
+    if not raw.startswith("/"):
+        return default
+    if raw.startswith("//") or "://" in raw:
+        return default
+    if raw.startswith("/\\") or "\\" in raw:
+        return default
+    return raw
+
+
+
+def _load_tenant_bound_merchant_user(
+    db: Session,
+    *,
+    tenant_id: int,
+    user_id: int | None = None,
+    email: str | None = None,
+):
+    """Exact tenant-scoped active merchant lookup for launch handoff binding."""
+    if tenant_id <= 0:
+        return None
+    q = db.query(User).filter(
+        User.tenant_id == tenant_id,
+        User.role == "merchant",
+        User.is_active.is_(True),
+    )
+    if user_id is not None and int(user_id) > 0:
+        return q.filter(User.id == int(user_id)).first()
+    if email:
+        return q.filter(User.email == str(email).strip().lower()).first()
+    return None
+
+
+def _resolve_oauth_completion_merchant_user(
+    db: Session,
+    *,
+    tenant_id: int,
+    store_id: str,
+    store_name: str,
+):
+    """Resolve the canonical merchant user — never the first active tenant user."""
+    from core.merchant_provisioning import get_or_create_merchant_user  # noqa: PLC0415
+
+    integ = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    cfg = dict((integ.config or {}) if integ else {})
+    owner_email = (cfg.get("salla_owner_email") or "").strip().lower()
+    email_derived = False
+    if not owner_email:
+        safe_name = "".join(
+            c for c in (store_name or "") if c.isalnum() or c in "-_"
+        ).lower()[:30]
+        owner_email = f"{safe_name or 'store'}-{store_id}@salla-merchant.nahlah.ai"
+        email_derived = True
+
+    provision = get_or_create_merchant_user(
+        db,
+        provider="salla",
+        external_store_id=store_id,
+        owner_email=owner_email,
+        store_name=store_name or f"Store {store_id}",
+        is_email_derived=email_derived,
+        issued_via="salla_oauth_embedded_reconcile_handoff",
+        allow_alias_match=False,
+    )
+    if provision.tenant_id != tenant_id:
+        logger.error(
+            "[Salla OAuth] merchant provision tenant mismatch | expected=%s got=%s store_id=%s",
+            tenant_id, provision.tenant_id, store_id,
+        )
+        return None
+
+    user = _load_tenant_bound_merchant_user(
+        db,
+        tenant_id=tenant_id,
+        user_id=provision.user_id,
+    )
+    if user is None:
+        merchant = (
+            db.query(User)
+            .filter(
+                User.tenant_id == tenant_id,
+                User.role == "merchant",
+                User.is_active.is_(True),
+            )
+            .order_by(User.id.asc())
+            .first()
+        )
+        if merchant is None:
+            derived_email = f"store-{store_id}@salla-merchant.nahlah.ai"
+            provision = get_or_create_merchant_user(
+                db,
+                provider="salla",
+                external_store_id=store_id,
+                owner_email=derived_email,
+                store_name=store_name or f"Store {store_id}",
+                is_email_derived=True,
+                issued_via="salla_oauth_embedded_reconcile_handoff",
+                allow_alias_match=False,
+            )
+            if provision.tenant_id != tenant_id:
+                logger.error(
+                    "[Salla OAuth] derived merchant provision tenant mismatch | expected=%s got=%s",
+                    tenant_id, provision.tenant_id,
+                )
+                return None
+            user = _load_tenant_bound_merchant_user(
+                db,
+                tenant_id=tenant_id,
+                user_id=provision.user_id,
+            )
+        else:
+            user = merchant
+
+    if (
+        user is None
+        or user.tenant_id != tenant_id
+        or not user.is_active
+        or (user.role or "merchant") != "merchant"
+    ):
+        return None
+    return user
+
+
+def _issue_opaque_launch_handoff(
+    *,
+    tenant_id: int,
+    store_id: str,
+    user_id: int,
+    email: str,
+    next_path: str,
+) -> str:
+    from core.launch_handoff import issue_launch_handoff, LaunchHandoffUnavailable  # noqa: PLC0415
+
+    safe_next = _sanitize_internal_next_path(
+        next_path,
+        default=_OAUTH_EMBEDDED_RECONCILE_NEXT,
+    )
+    try:
+        return issue_launch_handoff(
+            tenant_id=tenant_id,
+            store_id=store_id,
+            user_id=user_id,
+            email=email,
+            next_path=safe_next,
+            role="merchant",
+        )
+    except ValueError as exc:
+        raise LaunchHandoffUnavailable(str(exc)) from exc
+
+
+def _build_launch_handoff_url(opaque_handle: str, next_path: str | None = None) -> str:
+    safe_next = _sanitize_internal_next_path(
+        next_path or _OAUTH_EMBEDDED_RECONCILE_NEXT,
+        default=_OAUTH_EMBEDDED_RECONCILE_NEXT,
+    )
+    params = urllib.parse.urlencode({"token": opaque_handle, "next": safe_next})
+    return f"{_DASHBOARD_ORIGIN.rstrip('/')}/app/salla/launch?{params}"
+
+
 # NOTE: We deliberately do NOT define a post-install redirect target.
 # After OAuth completes, /oauth/salla/callback returns a neutral 200 OK
 # with a single Arabic line and stops.  Salla's embedded-app policy
@@ -930,34 +1098,56 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
         )
         raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
-    # Fetch user_id if missing
-    if not user_id:
-        from models import User  # noqa: PLC0415
-        u = db.query(User).filter(User.email == email).first()
-        user_id = u.id if u else None
+    from models import User  # noqa: PLC0415
 
-    # Build SHORT-LIVED launch token (120 s) with marker
-    from datetime import timedelta, timezone  # noqa: PLC0415
-    launch_payload = {
-        "sub":          email,
-        "role":         role,
-        "tenant_id":    tenant_id,
-        "user_id":      user_id,
-        "launch_token": True,
-        "exp":          int((datetime.now(timezone.utc) + timedelta(seconds=120)).timestamp()),
-    }
-    if store_id:
-        launch_payload["store_id"] = store_id
+    if (role or "merchant") != "merchant":
+        logger.warning(
+            "[LaunchDashboard] non-merchant JWT rejected | tenant=%s role=%s",
+            tenant_id, role,
+        )
+        raise HTTPException(status_code=403, detail="merchant_role_required")
+
+    db_user = None
+    if user_id:
+        db_user = _load_tenant_bound_merchant_user(
+            db,
+            tenant_id=tenant_id,
+            user_id=int(user_id),
+        )
+    if db_user is None and email:
+        db_user = _load_tenant_bound_merchant_user(
+            db,
+            tenant_id=tenant_id,
+            email=email,
+        )
+    if db_user is None:
+        logger.warning(
+            "[LaunchDashboard] tenant-scoped merchant user missing | tenant=%s email=%s",
+            tenant_id, email,
+        )
+        raise HTTPException(status_code=403, detail="merchant_user_required")
+
+    user_id = db_user.id
+    email = db_user.email
+
+    safe_next = _sanitize_internal_next_path(next_path, default="/overview")
     try:
-        import jose.jwt as _jose_jwt  # noqa: PLC0415
-        launch_jwt = _jose_jwt.encode(launch_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        from core.launch_handoff import LaunchHandoffUnavailable  # noqa: PLC0415
+        opaque_handle = _issue_opaque_launch_handoff(
+            tenant_id=tenant_id,
+            store_id=store_id,
+            user_id=int(user_id),
+            email=email,
+            next_path=safe_next,
+        )
+    except LaunchHandoffUnavailable:
+        logger.error("[LaunchDashboard] handoff store unavailable | tenant=%s", tenant_id)
+        raise HTTPException(status_code=503, detail="launch_handoff_unavailable")
     except Exception as _e:
-        logger.error("[LaunchDashboard] Failed to encode launch token: %s", _e)
-        raise HTTPException(status_code=500, detail="token_encoding_failed")
+        logger.error("[LaunchDashboard] Failed to issue launch handoff: %s", _e)
+        raise HTTPException(status_code=500, detail="launch_handoff_failed")
 
-    import urllib.parse as _up  # noqa: PLC0415
-    params = _up.urlencode({"token": launch_jwt, "next": next_path})
-    launch_url = f"{_DASHBOARD.rstrip('/')}/app/salla/launch?{params}"
+    launch_url = _build_launch_handoff_url(opaque_handle, safe_next)
 
     logger.info(
         "[LaunchDashboard] launch_url issued | tenant=%s store_id=%s email=%s next=%s",
@@ -978,7 +1168,7 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
     stores the returned token in localStorage, then replaces the URL
     (hiding the token) and navigates to the `next` path.
 
-    Request body: { "token": "<launch_jwt>" }
+    Request body: { "token": "<opaque_one_time_handle>" }
     Response:     { "access_token": "...", "tenant_id": ..., "email": "...",
                     "role": "...", "store_name": "..." }
     """
@@ -994,31 +1184,33 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
     if not token:
         raise HTTPException(status_code=400, detail="token required")
 
-    # Validate the launch JWT
-    try:
-        import jose.jwt as _jose_jwt  # noqa: PLC0415
-        decoded = _jose_jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except Exception as _e:
-        logger.warning("[ResolveLaunch] Invalid or expired token: %s", _e)
+    # Reject legacy signed launch JWTs — only opaque one-time handles are accepted.
+    if token.count(".") == 2:
+        logger.warning("[ResolveLaunch] signed JWT launch credential rejected")
         raise HTTPException(
             status_code=401,
             detail="تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.",
         )
 
-    # Extra safety: the token MUST carry the launch_token marker so that
-    # normal session tokens cannot be submitted here to mint a second session.
-    if not decoded.get("launch_token"):
+    from core.launch_handoff import consume_launch_handoff  # noqa: PLC0415
+
+    record = consume_launch_handoff(token)
+    if record is None:
+        logger.warning("[ResolveLaunch] opaque handoff missing/replay/unavailable")
         raise HTTPException(
             status_code=401,
             detail="تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.",
         )
 
-    email     = str(decoded.get("sub", ""))
-    role      = str(decoded.get("role", "merchant"))
-    tenant_id = int(decoded.get("tenant_id", 0))
-    store_id  = str(decoded.get("store_id") or "").strip()
+    tenant_id = record.tenant_id
+    store_id = record.store_id
+    user_id = record.user_id
+    next_path = _sanitize_internal_next_path(
+        record.next_path,
+        default=_OAUTH_EMBEDDED_RECONCILE_NEXT,
+    )
 
-    if not tenant_id or not email:
+    if tenant_id <= 0 or user_id <= 0:
         raise HTTPException(status_code=401, detail="بيانات الجلسة غير مكتملة.")
 
     from services.salla_store_identity import verify_jwt_tenant_owns_salla_store  # noqa: PLC0415
@@ -1039,9 +1231,26 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
     if not guard.ok:
         raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
-    # Fetch user_id (may be absent from token if legacy)
-    db_user = db.query(User).filter(User.email == email).first()
-    user_id = db_user.id if db_user else decoded.get("user_id")
+    db_user = _load_tenant_bound_merchant_user(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    if (
+        db_user is None
+        or db_user.id != user_id
+        or db_user.tenant_id != tenant_id
+        or not db_user.is_active
+        or (db_user.role or "merchant") != "merchant"
+    ):
+        logger.warning(
+            "[ResolveLaunch] tenant-bound merchant guard failed | tenant=%s user_id=%s",
+            tenant_id, user_id,
+        )
+        raise HTTPException(status_code=403, detail="merchant_user_binding_failed")
+
+    email = db_user.email
+    role = "merchant"
 
     # Fetch store name from integration config for localStorage persistence
     integ = (
@@ -1071,6 +1280,7 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
         "role":         role,
         "store_name":   store_name,
         "store_id":     store_id or None,
+        "next_path":    next_path,
     }
 
 
@@ -2842,9 +3052,52 @@ async def salla_api_oauth_callback(
         )
 
     if embedded_reconcile:
-        success_url = (
-            f"{_DASHBOARD_ORIGIN}/app/salla?"
-            f"{urllib.parse.urlencode({'salla_oauth': 'success', 'store': salla_store_id or ''})}"
+        merchant_user = _resolve_oauth_completion_merchant_user(
+            db,
+            tenant_id=tenant_id,
+            store_id=salla_store_id or "",
+            store_name=store_name or "",
+        )
+        if not merchant_user:
+            logger.error(
+                "[Salla API OAuth] embedded reconcile merchant user unresolved | tenant=%s store_id=%s",
+                tenant_id, salla_store_id,
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'missing_merchant_user'})}",
+                status_code=302,
+            )
+        try:
+            from core.launch_handoff import LaunchHandoffUnavailable  # noqa: PLC0415
+            opaque_handle = _issue_opaque_launch_handoff(
+                tenant_id=tenant_id,
+                store_id=salla_store_id or "",
+                user_id=merchant_user.id,
+                email=str(merchant_user.email),
+                next_path=_OAUTH_EMBEDDED_RECONCILE_NEXT,
+            )
+        except LaunchHandoffUnavailable:
+            logger.error(
+                "[Salla API OAuth] embedded reconcile handoff store unavailable | tenant=%s store_id=%s",
+                tenant_id, salla_store_id,
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'launch_handoff_unavailable'})}",
+                status_code=302,
+            )
+        except Exception as exc:
+            logger.exception(
+                "[Salla API OAuth] embedded reconcile launch handoff failed | tenant=%s store_id=%s err=%s",
+                tenant_id, salla_store_id, exc,
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'launch_handoff_failed'})}",
+                status_code=302,
+            )
+        success_url = _build_launch_handoff_url(opaque_handle, _OAUTH_EMBEDDED_RECONCILE_NEXT)
+        logger.info(
+            "[Salla API OAuth] embedded reconcile launch handoff issued | tenant=%s store_id=%s user_id=%s",
+            tenant_id, salla_store_id, merchant_user.id,
         )
     else:
         success_url = _api_oauth_redirect_url("success", store=salla_store_id or "")

@@ -504,7 +504,28 @@ class TestLaunchTenantGuard:
     def test_launch_dashboard_matching_tenant_passes(self, db):
         from routers.salla_oauth import launch_dashboard
 
-        _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE)
+        _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE, owner_email=PARTNER_EMAIL)
+        db.add(User(
+            username="merchant",
+            email=PARTNER_EMAIL,
+            password_hash="x",
+            role="merchant",
+            tenant_id=PARTNER_TENANT,
+            is_active=True,
+        ))
+        db.commit()
+
+        class _FakeRedis:
+            def __init__(self):
+                self._data = {}
+            def set(self, key, value, nx=False, ex=None):
+                del ex
+                if nx and key in self._data:
+                    return False
+                self._data[key] = value
+                return True
+            def getdel(self, key):
+                return self._data.pop(key, None)
 
         async def _run():
             request = MagicMock()
@@ -515,36 +536,55 @@ class TestLaunchTenantGuard:
             request.headers = {}
             request.query_params = {"next": "/overview"}
 
-            with patch("jose.jwt.decode", return_value={
-                "tenant_id": PARTNER_TENANT,
-                "sub": PARTNER_EMAIL,
-                "role": "merchant",
-                "user_id": 15,
-                "store_id": PARTNER_STORE,
-            }):
-                with patch("jose.jwt.encode", return_value="launch-jwt"):
+            with patch("core.launch_handoff.get_redis", return_value=_FakeRedis()):
+                with patch("jose.jwt.decode", return_value={
+                    "tenant_id": PARTNER_TENANT,
+                    "sub": PARTNER_EMAIL,
+                    "role": "merchant",
+                    "user_id": 15,
+                    "store_id": PARTNER_STORE,
+                }):
                     return await launch_dashboard(request, db)
 
         result = asyncio.run(_run())
         assert "launch_url" in result
-        assert "launch-jwt" in result["launch_url"]
+        assert "/app/salla/launch" in result["launch_url"]
+        assert "token=" in result["launch_url"]
+        assert "launch-jwt" not in result["launch_url"]
 
     def test_resolve_launch_mismatch_returns_403(self, db):
+        from core.launch_handoff import issue_launch_handoff
         from routers.salla_oauth import resolve_launch
 
         _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE)
 
+        class _FakeRedis:
+            def __init__(self):
+                self._data = {}
+            def set(self, key, value, nx=False, ex=None):
+                del ex
+                if nx and key in self._data:
+                    return False
+                self._data[key] = value
+                return True
+            def getdel(self, key):
+                return self._data.pop(key, None)
+
+        fake = _FakeRedis()
+        with patch("core.launch_handoff.get_redis", return_value=fake):
+            handle = issue_launch_handoff(
+                tenant_id=WRONG_TENANT,
+                store_id=PARTNER_STORE,
+                user_id=16,
+                email=DERIVED_EMAIL,
+                next_path="/overview",
+                role="merchant",
+            )
+
         async def _run():
             request = MagicMock()
-            request.json = AsyncMock(return_value={"token": "launch-jwt"})
-
-            with patch("jose.jwt.decode", return_value={
-                "launch_token": True,
-                "tenant_id": WRONG_TENANT,
-                "sub": DERIVED_EMAIL,
-                "role": "merchant",
-                "store_id": PARTNER_STORE,
-            }):
+            request.json = AsyncMock(return_value={"token": handle})
+            with patch("core.launch_handoff.get_redis", return_value=fake):
                 with pytest.raises(HTTPException) as exc_info:
                     await resolve_launch(request, db)
                 return exc_info.value

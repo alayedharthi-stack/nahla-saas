@@ -164,6 +164,7 @@ export default function SallaEmbedded() {
   const bootedRef                       = useRef(false)
   const watchdogRef                     = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loginFlightRef                  = useRef<AbortController | null>(null)
+  const oauthReconcileFlightRef         = useRef(false)
 
   // Read URL params once
   const paramsRef  = useRef(new URLSearchParams(window.location.search))
@@ -209,6 +210,11 @@ export default function SallaEmbedded() {
   }, [clearWatchdog])
 
   const openOauthReconcile = useCallback(() => {
+    if (oauthReconcileFlightRef.current) {
+      console.info('[SallaEmbedded] OAuth reconcile CTA ignored — in-flight navigation')
+      return
+    }
+    oauthReconcileFlightRef.current = true
     const startUrl = resolveOauthReconcileStartUrl(getApiBase(), storeLinkPayload)
     const correlationId = createReconcileCorrelationId()
     const destinationPath = extractDestinationPath(startUrl)
@@ -245,6 +251,9 @@ export default function SallaEmbedded() {
       })
       .catch((err: unknown) => {
         console.error('[SallaEmbedded] OAuth reconcile navigation error:', err)
+      })
+      .finally(() => {
+        oauthReconcileFlightRef.current = false
       })
   }, [storeLinkPayload])
 
