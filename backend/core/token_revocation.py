@@ -77,6 +77,8 @@ def revoke_jti(jti: Optional[str], exp_ts: Optional[int]) -> None:
         _local_revoke(jti, exp_ts)
 
 
+
+
 def is_jti_revoked(jti: Optional[str]) -> bool:
     """True iff the given ``jti`` has been revoked. Returns False on errors."""
     if not jti:
