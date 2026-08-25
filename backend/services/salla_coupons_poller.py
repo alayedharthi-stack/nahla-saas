@@ -211,7 +211,7 @@ async def _run_one_tick() -> Dict[str, Any]:
                 )
                 try:
                     db.rollback()
-                except Exception:
+                except Exception:  # noqa: silent-ok — best-effort rollback after tenant poll error
                     pass
 
             _state["tenants"][tenant_id] = tenant_state
@@ -252,11 +252,11 @@ async def _run_one_tick() -> Dict[str, Any]:
             try:
                 db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
                 db.commit()
-            except Exception:
+            except Exception:  # noqa: silent-ok — advisory unlock cleanup is best-effort
                 pass
         try:
             db.close()
-        except Exception:
+        except Exception:  # noqa: silent-ok — session close cleanup is best-effort
             pass
 
 
