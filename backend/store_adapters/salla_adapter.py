@@ -1307,92 +1307,92 @@ class SallaAdapter(BaseStoreAdapter):
         )
         return all_items
 
-    # ── Products ───────────────────────────────────────────────────────────────
+    async def _fetch_all_pages_result(
+        self,
+        path: str,
+        *,
+        per_page: int = 60,
+        extra_params: Optional[Dict[str, Any]] = None,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        from services.salla_coupon_fetch import classify_fetch_exception, empty_fetch_result  # noqa: PLC0415
 
+        tag = label or path.strip("/")
+        all_items: List[Dict[str, Any]] = []
+        page = 1
+        pages_fetched = 0
 
-async def _fetch_all_pages_result(
-    self,
-    path: str,
-    *,
-    per_page: int = 60,
-    extra_params: Optional[Dict[str, Any]] = None,
-    label: str = "",
-) -> Dict[str, Any]:
-    from services.salla_coupon_fetch import classify_fetch_exception, empty_fetch_result
+        def _partial_result(info: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "items": all_items,
+                "pages_fetched": pages_fetched,
+                "items_seen": len(all_items),
+                "partial": True,
+                "http_status": info.get("http_status"),
+                "failure_class": "partial_pagination",
+                "retry_after": info.get("retry_after"),
+            }
 
-    tag = label or path.strip("/")
-    all_items: List[Dict[str, Any]] = []
-    page = 1
-    pages_fetched = 0
+        while True:
+            params: Dict[str, Any] = {"per_page": per_page, "page": page}
+            if extra_params:
+                params.update(extra_params)
+            try:
+                data = await self._get(path, params)
+                pages_fetched += 1
+            except SallaTokenRevokedException:
+                info = {"http_status": 401, "failure_class": "needs_reauth", "retry_after": None}
+                if page == 1:
+                    return empty_fetch_result(**info)
+                return _partial_result(info)
+            except Exception as exc:
+                info = classify_fetch_exception(exc)
+                if page == 1:
+                    return empty_fetch_result(
+                        failure_class=str(info.get("failure_class") or type(exc).__name__),
+                        http_status=info.get("http_status"),
+                        retry_after=info.get("retry_after"),
+                    )
+                return _partial_result(info)
 
-    def _partial_result(info: Dict[str, Any]) -> Dict[str, Any]:
+            items = data.get("data") or []
+            all_items.extend(items)
+            pagination = data.get("pagination") or data.get("meta") or {}
+            total_pages_hint = pagination.get(
+                "totalPages",
+                pagination.get("last_page", pagination.get("total_pages", None)),
+            )
+            logger.info(
+                "[Salla:%s] tenant=%s page %d fetched %d items cumulative=%d%s",
+                tag, self._tenant_id, page, len(items), len(all_items),
+                f" total_pages={total_pages_hint}" if total_pages_hint else "",
+            )
+            if not items:
+                break
+            if total_pages_hint and page >= total_pages_hint:
+                break
+            if len(items) < per_page:
+                break
+            page += 1
+
         return {
-            "ok": False,
+            "ok": True,
             "items": all_items,
             "pages_fetched": pages_fetched,
             "items_seen": len(all_items),
-            "partial": True,
-            "http_status": info.get("http_status"),
-            "failure_class": "partial_pagination",
-            "retry_after": info.get("retry_after"),
+            "partial": False,
+            "http_status": None,
+            "failure_class": None,
+            "retry_after": None,
         }
 
-    while True:
-        params: Dict[str, Any] = {"per_page": per_page, "page": page}
-        if extra_params:
-            params.update(extra_params)
+    async def fetch_coupons_paginated(self, *, per_page: int = 60) -> Dict[str, Any]:
+        self._require_auth("fetch_coupons_paginated")
+        return await self._fetch_all_pages_result("/coupons", per_page=per_page, label="coupons")
 
-        try:
-            data = await self._get(path, params)
-            pages_fetched += 1
-        except SallaTokenRevokedException:
-            info = {"http_status": 401, "failure_class": "needs_reauth", "retry_after": None}
-            if page == 1:
-                return empty_fetch_result(**info)
-            return _partial_result(info)
-        except Exception as exc:
-            info = classify_fetch_exception(exc)
-            if page == 1:
-                return empty_fetch_result(
-                    failure_class=str(info.get("failure_class") or type(exc).__name__),
-                    http_status=info.get("http_status"),
-                    retry_after=info.get("retry_after"),
-                )
-            return _partial_result(info)
 
-        items = data.get("data") or []
-        all_items.extend(items)
-        pagination = data.get("pagination") or data.get("meta") or {}
-        total_pages_hint = pagination.get(
-            "totalPages",
-            pagination.get("last_page", pagination.get("total_pages", None)),
-        )
-        logger.info(
-            "[Salla:%s] tenant=%s page %d fetched %d items cumulative=%d%s",
-            tag, self._tenant_id, page, len(items), len(all_items),
-            f" total_pages={total_pages_hint}" if total_pages_hint else "",
-        )
-        if not items:
-            break
-        if total_pages_hint and page >= total_pages_hint:
-            break
-        if len(items) < per_page:
-            break
-        page += 1
-
-    return {
-        "ok": True,
-        "items": all_items,
-        "pages_fetched": pages_fetched,
-        "items_seen": len(all_items),
-        "partial": False,
-        "http_status": None,
-        "failure_class": None,
-        "retry_after": None,
-    }
-
-async def fetch_coupons_paginated(self, *, per_page: int = 60) -> Dict[str, Any]:
-    return await self._fetch_all_pages_result("/coupons", per_page=per_page, label="coupons")
+    # ── Products ───────────────────────────────────────────────────────────────
 
     async def get_products(self, updated_since: Optional[str] = None) -> List[NormalizedProduct]:
         try:
