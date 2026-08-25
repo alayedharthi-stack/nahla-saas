@@ -2985,6 +2985,36 @@ async def salla_api_oauth_callback(
         )
 
     # ── Persist as the canonical Sync integration ───────────────────────────
+
+    if embedded_reconcile and reconcile_challenge is not None:
+        from services.salla_embedded_identity_binding import (  # noqa: PLC0415
+            verify_embedded_reconcile_oauth_merchant_correlation,
+        )
+        from services.salla_reconciliation_challenge import (  # noqa: PLC0415
+            consume_reconciliation_challenge_for_oauth_state,
+        )
+        from services.salla_store_identity import SallaStoreIdentity as _OAuthStoreIdentity  # noqa: PLC0415
+
+        oauth_identity = store_identity or _OAuthStoreIdentity(store_id="")
+        correlation_ok, correlation_reason = verify_embedded_reconcile_oauth_merchant_correlation(
+            challenge=reconcile_challenge,
+            oauth_store_identity=oauth_identity,
+        )
+        if not correlation_ok:
+            consume_reconciliation_challenge_for_oauth_state(raw_state)
+            logger.error(
+                "[Salla API OAuth] embedded reconcile identity correlation failed | "
+                "reason=%s challenge_merchant=%s oauth_merchant=%s oauth_store=%s",
+                correlation_reason,
+                reconcile_challenge.merchant_account_id,
+                oauth_identity.merchant_account_id or "-",
+                oauth_identity.canonical_store_id or "-",
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'reconcile_identity_mismatch'})}",
+                status_code=302,
+            )
+
     try:
         from core.merchant_provisioning import get_or_create_merchant_user  # noqa: PLC0415
         from services.salla_guard import claim_store_for_tenant  # noqa: PLC0415

@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 from database.models import Integration, SallaEmbeddedIdentityBinding, User
 from services.salla_reconciliation_challenge import ReconciliationChallenge
 
+from services.salla_store_identity import SallaStoreIdentity
+
+
 logger = logging.getLogger("nahla.salla_embedded_binding")
 
 PROVIDER_SALLA = "salla"
@@ -36,6 +39,24 @@ def _utc_now() -> datetime:
 
 def _str_id(value: object) -> str:
     return str(value or "").strip()
+
+
+
+def verify_embedded_reconcile_oauth_merchant_correlation(
+    *,
+    challenge: ReconciliationChallenge,
+    oauth_store_identity: SallaStoreIdentity,
+) -> tuple[bool, str]:
+    """Require OAuth store/info merchant.id to exactly match challenge merchant_account_id."""
+    oauth_store_id = _str_id(oauth_store_identity.canonical_store_id)
+    oauth_merchant_id = _str_id(oauth_store_identity.merchant_account_id)
+    challenge_merchant_id = _str_id(challenge.merchant_account_id)
+
+    if not oauth_store_id or not oauth_merchant_id:
+        return False, "reconcile_identity_mismatch"
+    if oauth_merchant_id != challenge_merchant_id:
+        return False, "reconcile_identity_mismatch"
+    return True, "ok"
 
 
 def find_active_binding(

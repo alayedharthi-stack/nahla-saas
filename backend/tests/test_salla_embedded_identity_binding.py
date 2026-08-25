@@ -713,6 +713,186 @@ class TestOAuthCallbackCreatesBinding:
         assert binding.integration_id == integration.id
 
 
+
+class TestEmbeddedReconcileOAuthMerchantCorrelation:
+    def test_matching_oauth_merchant_creates_binding(self, db, fake_redis):
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+        )
+
+        integration = _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+        _seed_merchant(db, tenant_id=PARTNER_TENANT, email=PARTNER_EMAIL)
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=PARTNER_ALT,
+        )
+        oauth_state = f"embedded_corr_match{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        response = asyncio.run(
+            _run_api_oauth_callback(
+                db,
+                state=oauth_state,
+                store_id=PARTNER_STORE,
+                merchant_id=PARTNER_ALT,
+            )
+        )
+        assert response.status_code == 302
+        binding = (
+            db.query(SallaEmbeddedIdentityBinding)
+            .filter_by(merchant_account_id=PARTNER_ALT, status="active")
+            .one()
+        )
+        assert binding.canonical_store_id == PARTNER_STORE
+        assert binding.integration_id == integration.id
+
+    def test_oauth_merchant_mismatch_fails_closed_without_binding_or_handoff(self, db, fake_redis):
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+            resolve_reconciliation_challenge_for_oauth_state,
+        )
+
+        _seed_store(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_STORE,
+            alt_merchant_id=GENERIC_ALT,
+            owner_email=GENERIC_EMAIL,
+        )
+        _seed_merchant(db, tenant_id=GENERIC_TENANT, email=GENERIC_EMAIL)
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=GENERIC_ALT,
+        )
+        oauth_state = f"embedded_corr_mismatch{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        with patch("routers.salla_oauth._issue_opaque_launch_handoff") as handoff_mock:
+            response = asyncio.run(
+                _run_api_oauth_callback(
+                    db,
+                    state=oauth_state,
+                    store_id=GENERIC_STORE,
+                    merchant_id="88770011",
+                )
+            )
+
+        assert response.status_code == 302
+        assert "reason=reconcile_identity_mismatch" in response.headers["location"]
+        assert (
+            db.query(SallaEmbeddedIdentityBinding)
+            .filter_by(merchant_account_id=GENERIC_ALT, status="active")
+            .count()
+            == 0
+        )
+        assert resolve_reconciliation_challenge_for_oauth_state(oauth_state) is None
+        handoff_mock.assert_not_called()
+
+    def test_missing_oauth_merchant_account_id_fails_closed(self, db, fake_redis):
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+        )
+
+        _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=PARTNER_ALT,
+        )
+        oauth_state = f"embedded_corr_missing{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        with patch("routers.salla_oauth._issue_opaque_launch_handoff") as handoff_mock:
+            response = asyncio.run(
+                _run_api_oauth_callback(
+                    db,
+                    state=oauth_state,
+                    store_id=PARTNER_STORE,
+                    merchant_id="",
+                )
+            )
+
+        assert response.status_code == 302
+        assert "reason=reconcile_identity_mismatch" in response.headers["location"]
+        assert db.query(SallaEmbeddedIdentityBinding).count() == 0
+        handoff_mock.assert_not_called()
+
+    def test_integration_alias_cannot_satisfy_oauth_merchant_correlation(self, db, fake_redis):
+        from services.salla_embedded_identity_binding import (
+            verify_embedded_reconcile_oauth_merchant_correlation,
+        )
+        from services.salla_reconciliation_challenge import (
+            bind_oauth_state_to_reconciliation_challenge,
+            create_reconciliation_challenge,
+        )
+        from services.salla_store_identity import SallaStoreIdentity
+
+        integration = _seed_store(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_STORE,
+            alt_merchant_id=GENERIC_ALT,
+            owner_email=GENERIC_EMAIL,
+        )
+        assert integration.config.get("merchant_id") == GENERIC_ALT
+
+        challenge = _make_challenge(app_id=APP_ID, merchant_account_id=GENERIC_ALT)
+        oauth_identity = SallaStoreIdentity(
+            store_id=GENERIC_STORE,
+            merchant_account_id="99001122",
+            resolved_via="store_info",
+        )
+        ok, reason = verify_embedded_reconcile_oauth_merchant_correlation(
+            challenge=challenge,
+            oauth_store_identity=oauth_identity,
+        )
+        assert ok is False
+        assert reason == "reconcile_identity_mismatch"
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=GENERIC_ALT,
+        )
+        oauth_state = f"embedded_corr_alias{STATE_SUFFIX}"
+        bind_oauth_state_to_reconciliation_challenge(oauth_state, nonce=nonce)
+
+        with patch("routers.salla_oauth._issue_opaque_launch_handoff") as handoff_mock:
+            response = asyncio.run(
+                _run_api_oauth_callback(
+                    db,
+                    state=oauth_state,
+                    store_id=GENERIC_STORE,
+                    merchant_id="99001122",
+                )
+            )
+
+        assert response.status_code == 302
+        assert "reason=reconcile_identity_mismatch" in response.headers["location"]
+        assert db.query(SallaEmbeddedIdentityBinding).count() == 0
+        handoff_mock.assert_not_called()
+
+
 class TestBindingValidationNegative:
     def test_integration_external_store_mismatch_revokes_binding(self, db):
         from services.salla_embedded_identity_binding import (
