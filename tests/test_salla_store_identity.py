@@ -41,12 +41,12 @@ if not getattr(Base.metadata, "_salla_identity_jsonb_shim", False):
 
 @pytest.fixture(autouse=True)
 def trusted_embedded_app_ids():
-    """Token-login tests use app_id="app" or default SALLA_CLIENT_ID in CI."""
+    """Token-login tests use app_id="app" or default SALLA_EMBEDDED_APP_ID in CI."""
     with patch(
         "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
         return_value=frozenset({"app"}),
     ):
-        with patch("services.salla_embedded_app_identity.SALLA_CLIENT_ID", "app"):
+        with patch("services.salla_embedded_app_identity.SALLA_EMBEDDED_APP_ID", "app"):
             with patch("routers.salla_oauth.SALLA_CLIENT_ID", "app"):
                 yield
 

@@ -358,15 +358,25 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     salla_token = (body.get("token") or "").strip()
-    from services.salla_embedded_app_identity import resolve_trusted_salla_embedded_app_id  # noqa: PLC0415
+    from services.salla_embedded_app_identity import (  # noqa: PLC0415
+        INVALID_SALLA_APP_ID_CODE,
+        log_rejected_embedded_app_id,
+        resolve_trusted_salla_embedded_app_id,
+    )
 
     trusted_app_id = resolve_trusted_salla_embedded_app_id(body.get("app_id"))
     if not trusted_app_id:
+        log_rejected_embedded_app_id(
+            incoming_raw=body.get("app_id"),
+            request_id=request.headers.get("X-Request-Id")
+            or request.headers.get("X-Request-ID"),
+            client_ip=client_ip,
+        )
         raise HTTPException(
             status_code=403,
             detail={
-                "detail": "invalid_salla_app_id",
-                "code": "invalid_salla_app_id",
+                "detail": INVALID_SALLA_APP_ID_CODE,
+                "code": INVALID_SALLA_APP_ID_CODE,
             },
         )
     app_id = trusted_app_id
