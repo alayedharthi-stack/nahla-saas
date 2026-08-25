@@ -36,6 +36,22 @@ from services.coexistence_embedded_exchange import (  # noqa: E402
     persist_oauth_nonce,
 )
 
+_tests_dir = str(_REPO / "tests")
+if _tests_dir not in sys.path:
+    sys.path.insert(0, _tests_dir)
+from test_coexistence_transaction_and_replay import (  # noqa: E402
+    GraphScript,
+    PORTFOLIO as ROUTE_PORTFOLIO,
+    WABA as ROUTE_WABA,
+    PHONE as ROUTE_PHONE,
+    E164 as ROUTE_E164,
+    _build_client,
+    _install_httpx,
+    _patch_meta_env,
+    _callback,
+    _start_state,
+)
+
 WABA = "PG-WABA-877"
 PHONE = "PG-PHONE-877"
 PORTFOLIO = "PG-BUSINESS-877"
@@ -116,6 +132,19 @@ def pg_session(postgres_engine: Engine) -> Iterator[Session]:
         yield session
     finally:
         session.close()
+        if transaction.is_active:
+            transaction.rollback()
+        connection.close()
+
+
+@pytest.fixture()
+def pg_db_factory(postgres_engine: Engine) -> Iterator[sessionmaker]:
+    connection = postgres_engine.connect()
+    transaction = connection.begin()
+    factory = sessionmaker(bind=connection, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
         if transaction.is_active:
             transaction.rollback()
         connection.close()
@@ -302,3 +331,209 @@ def test_exactly_one_commit_on_success_route(pg_session: Session, monkeypatch) -
     consume_oauth_nonce(pg_session, nonce=nonce, tenant_id=990883, connection_mode="coexistence")
     pg_session.commit()
     assert commits.count("commit") == 2
+def _seed_pg_tenant(SessionLocal: sessionmaker, tenant_id: int, **conn_kwargs) -> WhatsAppConnection | None:
+    db = SessionLocal()
+    db.add(Tenant(id=tenant_id, name=f"tenant-{tenant_id}", is_active=True))
+    conn = WhatsAppConnection(
+        tenant_id=tenant_id,
+        status="disconnected",
+        provider="dialog360",
+        phone_number=ROUTE_E164,
+        **conn_kwargs,
+    )
+    db.add(conn)
+    db.commit()
+    db.refresh(conn)
+    db.close()
+    return conn
+
+
+def _pg_route_stack(pg_db_factory: sessionmaker, monkeypatch, *, mode: str = "success") -> tuple:
+    script = GraphScript(mode=mode)
+    _install_httpx(monkeypatch, script)
+    _patch_meta_env(monkeypatch)
+    client, emb = _build_client(pg_db_factory, monkeypatch)
+    return client, emb, script
+
+
+def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine, pg_session: Session) -> None:
+    pg_session.add(Tenant(id=990884, name="conc-nonce", is_active=True))
+    pg_session.commit()
+    nonce = "pg-nonce-conc-877"
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    persist_oauth_nonce(
+        pg_session,
+        nonce=nonce,
+        tenant_id=990884,
+        connection_mode="coexistence",
+        expires_at=expires,
+    )
+    pg_session.commit()
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        conn = postgres_engine.connect()
+        trans = conn.begin()
+        local = sessionmaker(bind=conn, expire_on_commit=False)()
+        try:
+            outcome = consume_oauth_nonce(
+                local,
+                nonce=nonce,
+                tenant_id=990884,
+                connection_mode="coexistence",
+            )
+            trans.commit()
+            with lock:
+                results.append(outcome)
+        except Exception:  # noqa: BLE001
+            trans.rollback()
+        finally:
+            local.close()
+            conn.close()
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+    assert sorted(results) == ["already_consumed", "consumed"]
+def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    tenant_id = 990885
+    _seed_pg_tenant(pg_db_factory, tenant_id)
+    client, emb, _script = _pg_route_stack(pg_db_factory, monkeypatch)
+    state = _start_state(client, tenant_id)
+    request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant_id), headers={})
+
+    async def _one() -> str:
+        db = pg_db_factory()
+        try:
+            resp = await emb.oauth_callback(
+                request=request,
+                db=db,
+                code="oauth-code-877",
+                state=state,
+            )
+            db.commit()
+            return getattr(resp, "headers", {}).get("location") or str(resp)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            return f"error:{type(exc).__name__}"
+        finally:
+            db.close()
+
+    async def _both() -> tuple[str, str]:
+        return await asyncio.gather(_one(), _one())
+
+    locations = asyncio.run(_both())
+    ok = [loc for loc in locations if isinstance(loc, str) and "#meta=ok" in loc]
+    other = [loc for loc in locations if loc not in ok]
+    assert len(ok) == 1, locations
+    assert len(other) == 1, locations
+    db = pg_db_factory()
+    assert db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id, status="connected").count() == 1
+    db.close()
+
+
+def test_pg_callback_route_restores_dialog360_on_graph_failure(pg_db_factory: sessionmaker, monkeypatch) -> None:
+    tenant_id = 990886
+    _seed_pg_tenant(pg_db_factory, tenant_id)
+    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch, mode="boom")
+    state = _start_state(client, tenant_id)
+    resp = _callback(client, tenant_id, state)
+    assert resp.status_code == 302
+    assert "#meta=error" in resp.headers["location"]
+    db = pg_db_factory()
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
+    assert conn.provider == "dialog360"
+    assert conn.status == "disconnected"
+    db.close()
+    script.assert_no_mutations()
+def test_pg_exchange_route_success(pg_db_factory: sessionmaker, monkeypatch) -> None:
+    tenant_id = 990887
+    _seed_pg_tenant(pg_db_factory, tenant_id)
+    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    resp = client.post(
+        "/whatsapp/embedded/exchange",
+        headers={"X-Tenant-ID": str(tenant_id)},
+        json={
+            "code": "js-sdk-code-pg-877",
+            "connection_mode": "coexistence",
+            "finish_event": "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+            "waba_id": "client-hint-ignored",
+            "phone_number_id": "client-phone-hint",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("connected") is True
+    db = pg_db_factory()
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
+    assert conn.status == "connected"
+    claim = (conn.extra_metadata or {}).get("coexistence_exchange_claim") or {}
+    assert claim.get("trusted_business_portfolio_id") == ROUTE_PORTFOLIO
+    db.close()
+    script.assert_no_mutations()
+
+
+def test_pg_select_phone_coexistence_route(pg_db_factory: sessionmaker, monkeypatch) -> None:
+    from services.whatsapp_platform.wa_connection_secrets import store_access_token
+
+    tenant_id = 990888
+    db = pg_db_factory()
+    db.add(Tenant(id=tenant_id, name="pg-sel", is_active=True))
+    conn = WhatsAppConnection(
+        tenant_id=tenant_id,
+        status="pending",
+        provider="meta",
+        connection_type="embedded",
+        phone_number=ROUTE_E164,
+        extra_metadata={"connection_mode": "coexistence"},
+    )
+    db.add(conn)
+    db.commit()
+    store_access_token(conn, "user-long-token")
+    db.commit()
+    db.close()
+    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    with patch("core.tenant_integrity.evict_phone_id_from_other_tenants") as evict:
+        resp = client.post(
+            "/whatsapp/embedded/select-phone",
+            headers={"X-Tenant-ID": str(tenant_id)},
+            json={"phone_number_id": ROUTE_PHONE},
+        )
+        evict.assert_not_called()
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("connected") is True
+    script.assert_no_mutations()
+def test_pg_callback_graph_requests_exclude_sensitive_query_params(pg_db_factory: sessionmaker, monkeypatch) -> None:
+    from services.meta_graph_oauth_client import assert_no_sensitive_query_params
+
+    tenant_id = 990889
+    _seed_pg_tenant(pg_db_factory, tenant_id)
+    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    state = _start_state(client, tenant_id)
+    resp = _callback(client, tenant_id, state)
+    assert resp.status_code == 302
+    assert "#meta=ok" in resp.headers["location"]
+    oauth_requests = [
+        req
+        for req in script.requests
+        if "/oauth/" in req.url.path or req.url.path.endswith("/debug_token")
+    ]
+    assert oauth_requests, "expected OAuth/debug_token Graph requests"
+    for req in oauth_requests:
+        assert_no_sensitive_query_params(req)
+    asset_requests = [
+        req
+        for req in script.requests
+        if ROUTE_PHONE in req.url.path or ROUTE_WABA in req.url.path
+    ]
+    assert asset_requests, "expected asset Graph requests during callback"
+    for req in asset_requests:
+        assert "access_token" not in req.url.params
+        assert "user-long-token" not in str(req.url)
+        assert req.headers.get("authorization") == "Bearer user-long-token"
