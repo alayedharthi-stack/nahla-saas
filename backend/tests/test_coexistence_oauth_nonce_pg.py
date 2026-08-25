@@ -256,7 +256,7 @@ def test_existing_dialog360_snapshot_restored_on_rollback(pg_session: Session) -
         extra_metadata={"legacy": "pg-877"},
     )
     pg_session.add(conn)
-    pg_session.commit()
+    pg_session.flush()
     original = {
         "provider": conn.provider,
         "status": conn.status,
@@ -264,10 +264,12 @@ def test_existing_dialog360_snapshot_restored_on_rollback(pg_session: Session) -
         "connected_at": conn.connected_at,
         "extra_metadata": dict(conn.extra_metadata or {}),
     }
-    loaded, _ = load_connection_for_update(pg_session, 990882)
+    loaded, existed = load_connection_for_update(pg_session, 990882)
+    assert existed is True
     stage_coexistence_credentials(loaded, waba_id=WABA, access_token=SYNTH_TOKEN, token_type="user")
     pg_session.flush()
     pg_session.rollback()
+    pg_session.expire_all()
     restored = pg_session.query(WhatsAppConnection).filter_by(tenant_id=990882).one()
     for key, value in original.items():
         assert getattr(restored, key) == value
