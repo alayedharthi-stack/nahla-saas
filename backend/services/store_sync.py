@@ -2304,18 +2304,42 @@ class StoreSyncService:
 
     # ── Coupons sync ───────────────────────────────────────────────────────────
 
-    async def sync_coupons(self) -> int:
+    async def sync_coupons(self, *, triggered_by: str = "store_sync") -> int:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_coupons"):
+            self._record_coupon_sync_meta(
+                triggered_by=triggered_by,
+                items_seen=0,
+                created=0,
+                updated=0,
+                failure_class="no_adapter",
+            )
             return 0
 
         try:
             raw_list = await adapter.get_coupons()
         except Exception as exc:
-            logger.warning("tenant=%s coupons sync failed: %s", self.tenant_id, exc)
+            logger.warning(
+                "tenant=%s coupons sync failed (triggered_by=%s): %s",
+                self.tenant_id,
+                triggered_by,
+                exc,
+            )
+            self._record_coupon_sync_meta(
+                triggered_by=triggered_by,
+                items_seen=0,
+                created=0,
+                updated=0,
+                failure_class=type(exc).__name__,
+            )
             return 0
 
-        logger.info("tenant=%s syncing %d coupons", self.tenant_id, len(raw_list))
+        logger.info(
+            "tenant=%s syncing %d coupons (triggered_by=%s)",
+            self.tenant_id,
+            len(raw_list),
+            triggered_by,
+        )
 
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
@@ -2392,12 +2416,74 @@ class StoreSyncService:
                 created += 1
         self.db.flush()
         logger.info(
-            "tenant=%s coupons sync done — created=%d updated=%d",
-            self.tenant_id, created, updated,
+            "tenant=%s coupons sync done — created=%d updated=%d items_seen=%d triggered_by=%s",
+            self.tenant_id,
+            created,
+            updated,
+            len(raw_list),
+            triggered_by,
+        )
+        self._record_coupon_sync_meta(
+            triggered_by=triggered_by,
+            items_seen=len(raw_list),
+            created=created,
+            updated=updated,
+            failure_class=None,
         )
         return created + updated
 
-    # ── Store profile sync (Pack A1 — Salla /store/info) ───────────────────────
+    def _record_coupon_sync_meta(
+        self,
+        *,
+        triggered_by: str,
+        items_seen: int,
+        created: int,
+        updated: int,
+        failure_class: Optional[str],
+    ) -> None:
+        """Persist last coupon import stats on the canonical Salla integration."""
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        from models import Integration  # noqa: PLC0415
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        meta = {
+            "last_success_at": now.isoformat() if not failure_class else None,
+            "last_attempt_at": now.isoformat(),
+            "items_seen": items_seen,
+            "created": created,
+            "updated": updated,
+            "failure_class": failure_class,
+            "triggered_by": triggered_by,
+        }
+
+        intg = None
+        if self._integration_connection_id is not None:
+            intg = (
+                self.db.query(Integration)
+                .filter_by(id=int(self._integration_connection_id), tenant_id=self.tenant_id)
+                .first()
+            )
+        if intg is None:
+            intg = pick_active_salla_integration(self.db, self.tenant_id)
+        if intg is None:
+            return
+
+        cfg = dict(intg.config or {})
+        cfg["coupon_sync_meta"] = meta
+        intg.config = cfg
+        flag_modified(intg, "config")
+        try:
+            self.db.flush()
+        except Exception as exc:
+            logger.debug(
+                "tenant=%s coupon_sync_meta flush skipped: %s",
+                self.tenant_id,
+                exc,
+            )
+
+    # ── Store profile sync (Pack A1 — Salla /store/info) ── (Pack A1 — Salla /store/info) ───────────────────────
 
     async def sync_store_info(self) -> bool:
         """Fetch customer-facing store profile from Salla GET /store/info.

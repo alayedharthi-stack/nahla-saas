@@ -3849,7 +3849,8 @@ class SallaAdapter(BaseStoreAdapter):
         """
         self._last_coupon_create_error = None
         self._require_auth("create_coupon")
-        start_dt = datetime.now(timezone.utc)
+        from core.salla_order_fidelity import _riyadh_tz  # noqa: PLC0415
+        start_dt = datetime.now(_riyadh_tz())
         expiry_dt = start_dt + timedelta(days=expiry_days)
         from services.coupon_salla_push import coerce_salla_coupon_date_string  # noqa: PLC0415
 
