@@ -23,8 +23,8 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 )
 
 
-def test_repository_parallel_heads_0092_and_0100() -> None:
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0100"})
+def test_repository_parallel_heads_0092_and_0101() -> None:
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101"})
 
 
 def test_migration_0094_extends_integration_branch_from_0093() -> None:
@@ -40,13 +40,13 @@ def test_migration_0094_extends_integration_branch_from_0093() -> None:
     rev_0095 = script.get_revision("0095")
     assert rev_0095 is not None
     assert rev_0095.down_revision == "0094"
-    assert set(script.get_heads()) == frozenset({"0092", "0100"})
+    assert set(script.get_heads()) == frozenset({"0092", "0101"})
 
 
 def test_supported_deployment_revision_states_are_explicit() -> None:
     assert NORMAL_BOOTSTRAP_REVISIONS == frozenset({"0093"})
     assert VALIDATED_STAGING_BOOTSTRAP_REVISIONS == frozenset({"0088", "0093"})
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0100"})
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101"})
 
 
 def test_normal_bootstrap_pins_0093_not_head() -> None:
@@ -80,3 +80,22 @@ def test_admin_migration_endpoint_pins_0093_not_head() -> None:
 
     assert "build_normal_bootstrap_upgrade_argv" in source
     assert "INTEGRATION_BOOTSTRAP_TARGET" in source
+
+def test_alembic_revision_ids_are_unique() -> None:
+    """Duplicate revision IDs must fail — never collapse via set()."""
+    prev_cwd = os.getcwd()
+    try:
+        os.chdir(_REPO / "database")
+        script = ScriptDirectory(str(_REPO / "database" / "migrations"))
+    finally:
+        os.chdir(prev_cwd)
+    seen: list[str] = []
+    duplicates: list[str] = []
+    for rev in script.walk_revisions():
+        rid = rev.revision
+        if rid in seen:
+            duplicates.append(rid)
+        else:
+            seen.append(rid)
+    assert duplicates == [], f"duplicate Alembic revision identifiers: {duplicates}"
+

@@ -39,6 +39,7 @@ from models import WhatsAppConnection  # noqa: E402
 
 from core.audit import audit
 from core.auth import get_jwt_user_id, is_platform_admin_role, require_admin, require_merchant_scope
+from services.meta_graph_oauth_client import exchange_code_for_token as _secure_exchange_code_for_token, exchange_for_long_lived_token as _secure_exchange_for_long_lived_token
 from core.config import (
     BACKEND_URL,
     D360_COHOST_ALLOW_SELF_REQUEST,
@@ -905,22 +906,18 @@ async def _exchange_code_for_token(code: str) -> dict:
             status_code=503,
             detail="META_APP_ID / META_APP_SECRET are not configured on this server.",
         )
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{GRAPH_BASE}/oauth/access_token",
-            params={
-                "client_id":     META_APP_ID,
-                "client_secret": META_APP_SECRET,
-                "code":          code,
-                "redirect_uri":  "",  # Embedded signup uses empty redirect_uri
-            },
-        )
-    if resp.status_code != 200:
+    data = await _secure_exchange_code_for_token({
+        "client_id": META_APP_ID,
+        "client_secret": META_APP_SECRET,
+        "code": code,
+        "redirect_uri": "",
+    })
+    if "error" in data:
         raise HTTPException(
             status_code=400,
-            detail=f"Meta token exchange failed: {resp.text[:400]}",
+            detail="Meta token exchange failed",
         )
-    return resp.json()
+    return data
 
 
 async def _fetch_waba_info(token: str, waba_id: str) -> dict:
@@ -955,24 +952,10 @@ async def _fetch_phone_number_info(token: str, phone_number_id: str) -> dict:
 
 async def _exchange_for_long_lived_token(short_token: str) -> dict:
     """Exchange a short-lived user token for a 60-day long-lived token."""
-    if not META_APP_ID or not META_APP_SECRET:
-        return {"access_token": short_token, "token_type": "short_lived"}
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{GRAPH_BASE}/oauth/access_token",
-            params={
-                "grant_type":        "fb_exchange_token",
-                "client_id":         META_APP_ID,
-                "client_secret":     META_APP_SECRET,
-                "fb_exchange_token": short_token,
-            },
-        )
-    if resp.status_code != 200:
-        return {"access_token": short_token, "token_type": "short_lived"}
-    data = resp.json()
+    data = await _secure_exchange_for_long_lived_token(short_token)
     return {
         "access_token": data.get("access_token", short_token),
-        "token_type":   "long_lived",
+        "token_type": data.get("token_type", "long_lived"),
         "expires_in":   data.get("expires_in", 5183944),   # ~60 days
     }
 

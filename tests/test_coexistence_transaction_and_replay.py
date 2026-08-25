@@ -211,9 +211,12 @@ def _install_httpx(monkeypatch, script: GraphScript) -> None:
 
 def _patch_meta_env(monkeypatch) -> None:
     import routers.whatsapp_embedded as emb
+    import services.meta_graph_oauth_client as oauth_client
 
     monkeypatch.setattr(emb, "META_APP_ID", "app-test", raising=False)
     monkeypatch.setattr(emb, "META_APP_SECRET", "secret-test", raising=False)
+    monkeypatch.setattr(oauth_client, "META_APP_ID", "app-test", raising=False)
+    monkeypatch.setattr(oauth_client, "META_APP_SECRET", "secret-test", raising=False)
     monkeypatch.setattr(emb, "META_COEXISTENCE_EMBEDDED_SIGNUP_CONFIG_ID", "coex-cfg", raising=False)
     monkeypatch.setattr(emb, "META_EMBEDDED_SIGNUP_CONFIG_ID", "cloud-cfg", raising=False)
     monkeypatch.setattr(emb, "is_meta_embedded_signup_enabled", lambda: True)

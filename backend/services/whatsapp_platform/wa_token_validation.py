@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
+from services.meta_graph_oauth_client import debug_token as _secure_debug_token, debug_token_sync as _secure_debug_token_sync
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 
 logger = logging.getLogger("nahla.wa_token_validation")
@@ -94,19 +95,7 @@ def _now_utc() -> datetime:
 async def debug_meta_token(token: str) -> Dict[str, Any]:
     if not token or not META_APP_ID or not META_APP_SECRET:
         return {}
-    app_token = f"{META_APP_ID}|{META_APP_SECRET}"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{GRAPH}/debug_token",
-                params={"input_token": token, "access_token": app_token},
-            )
-            data = resp.json()
-    except Exception as exc:
-        logger.warning("[wa_token_validation] debug_token network error: %s", exc)
-        return {"is_valid": False, "error": {"message": str(exc)}}
-    info = dict(data.get("data") or {})
-    # Log safe subset only
+    info = await _secure_debug_token(token)
     logger.info(
         "[wa_token_validation] debug_token is_valid=%s type=%s app_id=%s expires_at=%s",
         info.get("is_valid"),
@@ -284,14 +273,8 @@ def validate_meta_access_token_sync(token: str) -> TokenValidationResult:
             error_message="debug_token unavailable",
             debug_info={},
         )
-    app_token = f"{META_APP_ID}|{META_APP_SECRET}"
     try:
-        resp = httpx.get(
-            f"{GRAPH}/debug_token",
-            params={"input_token": token, "access_token": app_token},
-            timeout=20,
-        )
-        debug_info = dict((resp.json() or {}).get("data") or {})
+        debug_info = _secure_debug_token_sync(token)
     except Exception as exc:
         logger.warning("[wa_token_validation] debug_token sync error: %s", exc)
         debug_info = {"is_valid": False, "error": {"message": str(exc)}}

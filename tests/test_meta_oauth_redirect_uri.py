@@ -232,22 +232,19 @@ def test_meta_oauth_js_sdk_exchange_helper_does_not_inject_login_success(caplog)
         def __init__(self, *args, **kwargs):
             pass
 
-        async def __aenter__(self):
-            return self
+        async def aclose(self):
+            return None
 
-        async def __aexit__(self, *args):
-            return False
-
-        async def get(self, url, params=None):
+        async def post(self, url, data=None, **kwargs):
             captured["url"] = url
-            captured["params"] = params
+            captured["data"] = dict(data or {})
             return _Resp()
 
     caplog.set_level(logging.INFO)
-    with patch("routers.whatsapp_embedded.httpx.AsyncClient", _Client):
+    with patch("services.meta_graph_oauth_client.httpx.AsyncClient", _Client):
         data = asyncio.run(_exchange_code_for_token("live-auth-code", None))
     assert data["access_token"] == "tok-secret"
-    assert "redirect_uri" not in captured["params"]
+    assert "redirect_uri" not in captured["data"]
     joined = " ".join(record.getMessage() for record in caplog.records)
     assert "live-auth-code" not in joined
     assert "tok-secret" not in joined
@@ -269,19 +266,16 @@ def test_meta_oauth_11_server_path_still_sends_bound_uri():
         def __init__(self, *args, **kwargs):
             pass
 
-        async def __aenter__(self):
-            return self
+        async def aclose(self):
+            return None
 
-        async def __aexit__(self, *args):
-            return False
-
-        async def get(self, url, params=None):
-            captured["params"] = params
+        async def post(self, url, data=None, **kwargs):
+            captured["data"] = dict(data or {})
             return _Resp()
 
-    with patch("routers.whatsapp_embedded.httpx.AsyncClient", _Client):
+    with patch("services.meta_graph_oauth_client.httpx.AsyncClient", _Client):
         asyncio.run(_exchange_code_for_token("auth-code", CANONICAL))
-    assert captured["params"]["redirect_uri"] == CANONICAL
+    assert captured["data"]["redirect_uri"] == CANONICAL
 
 
 def test_meta_oauth_12_helper_has_no_brain_imports():

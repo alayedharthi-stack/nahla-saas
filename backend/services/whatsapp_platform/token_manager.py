@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, WA_TOKEN
+from services.meta_graph_oauth_client import refresh_long_lived_token
 from .provider_utils import (
     WHATSAPP_CONNECTION_TYPE_DIRECT,
     WHATSAPP_PROVIDER_360DIALOG,
@@ -240,17 +241,7 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
         getattr(conn, "tenant_id", "?"),
     )
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                f"{GRAPH}/oauth/access_token",
-                params={
-                    "grant_type": "fb_exchange_token",
-                    "client_id": META_APP_ID,
-                    "client_secret": META_APP_SECRET,
-                    "fb_exchange_token": plain,
-                },
-            )
-            data = resp.json()
+        data = await refresh_long_lived_token(plain)
     except Exception as exc:
         logger.warning("[WA token] refresh failed with network error: %s", exc)
         return None

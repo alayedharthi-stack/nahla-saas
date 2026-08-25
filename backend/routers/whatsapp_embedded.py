@@ -74,6 +74,11 @@ from routers.whatsapp_connect import (
     _provider_label,
     _wa_provider,
 )
+from services.meta_graph_oauth_client import (
+    debug_token as _secure_debug_token,
+    exchange_code_for_token as _secure_exchange_code_for_token,
+    exchange_for_long_lived_token as _secure_exchange_for_long_lived_token,
+)
 from services.meta_oauth_redirect import (
     canonical_meta_redirect_uri,
     graph_oauth_token_params,
@@ -178,14 +183,11 @@ async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None
     params = graph_oauth_token_params(code=code, redirect_uri=redirect_uri)
     safe = token_exchange_log_fields(params)
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(f"{GRAPH}/oauth/access_token", params=params)
-        data = resp.json()
+    data = await _secure_exchange_code_for_token(params)
 
     logger.info(
-        "[EmbeddedSignup] token exchange: http=%s keys=%s has_token=%s "
+        "[EmbeddedSignup] token exchange: keys=%s has_token=%s "
         "redirect_uri_present=%s redirect_uri=%s",
-        resp.status_code,
         sorted(data.keys()) if isinstance(data, dict) else type(data).__name__,
         bool(isinstance(data, dict) and data.get("access_token")),
         safe["redirect_uri_present"],
@@ -201,48 +203,12 @@ async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None
 
 async def _debug_token(token: str) -> dict:
     """Inspect token metadata including granular scopes (WABA IDs)."""
-    app_token = f"{META_APP_ID}|{META_APP_SECRET}"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(
-            f"{GRAPH}/debug_token",
-            params={"input_token": token, "access_token": app_token},
-        )
-        data = resp.json()
-    logger.info(
-        "[EmbeddedSignup] debug_token: is_valid=%s type=%s expires_at=%s",
-        data.get("data", {}).get("is_valid") if isinstance(data, dict) else None,
-        data.get("data", {}).get("type") if isinstance(data, dict) else None,
-        data.get("data", {}).get("expires_at") if isinstance(data, dict) else None,
-    )
-    return data.get("data", {})
+    return await _secure_debug_token(token)
 
 
 async def _exchange_for_long_lived_token(short_token: str) -> dict:
     """Exchange a short-lived user token for a long-lived token when possible."""
-    if not META_APP_ID or not META_APP_SECRET or not short_token:
-        return {"access_token": short_token, "token_type": "short_lived"}
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{GRAPH}/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": META_APP_ID,
-                "client_secret": META_APP_SECRET,
-                "fb_exchange_token": short_token,
-            },
-        )
-        data = resp.json()
-    if "error" in data:
-        logger.warning(
-            "[EmbeddedSignup] long-lived exchange failed: %s",
-            (data.get("error") or {}).get("message") if isinstance(data, dict) else "unknown",
-        )
-        return {"access_token": short_token, "token_type": "short_lived"}
-    return {
-        "access_token": data.get("access_token", short_token),
-        "token_type": "long_lived",
-        "expires_in": data.get("expires_in", 5183944),
-    }
+    return await _secure_exchange_for_long_lived_token(short_token)
 
 
 def _token_expiry_from_debug(debug_info: Dict[str, Any]) -> Optional[datetime]:
