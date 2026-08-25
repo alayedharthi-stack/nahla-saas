@@ -30,7 +30,7 @@ from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
 )
 
 MIGRATION_TENANT_ID = 880_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0099"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0100"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",

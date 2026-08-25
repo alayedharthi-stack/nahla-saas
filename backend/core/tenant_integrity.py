@@ -841,7 +841,7 @@ def log_integrity_event(
         except Exception:
             nested.rollback()
             raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: silent-ok — integrity audit persist is best-effort
         logger.debug("[IntegrityEvent] write failed: %s", exc)
 
     # Mirror to structured log regardless of DB success
