@@ -1673,18 +1673,26 @@ async def _generate_coupons_all_tenants() -> None:
         return
 
     try:
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
         integrations = db.query(Integration).filter(
             Integration.provider == "salla",
             Integration.enabled == True,  # noqa: E712
         ).all()
 
-        if not integrations:
+        tenant_ids = sorted({int(i.tenant_id) for i in integrations if i.tenant_id})
+        if not tenant_ids:
             return
 
-        logger.info("[Coupon Scheduler] Processing %d tenant(s)...", len(integrations))
+        logger.info("[Coupon Scheduler] Processing %d tenant(s)...", len(tenant_ids))
 
-        for intg in integrations:
-            tenant_id = intg.tenant_id
+        for tenant_id in tenant_ids:
+            intg = pick_active_salla_integration(db, tenant_id)
+            if intg is None:
+                continue
+            cfg = intg.config or {}
+            if bool(cfg.get("needs_reauth")) or not cfg.get("api_key"):
+                continue
             try:
                 from services.coupon_generator import CouponGeneratorService
                 svc = CouponGeneratorService(db, tenant_id)

@@ -1,10 +1,6 @@
-﻿"""
+"""
 services/salla_coupons_poller.py
-Dedicated background poller that imports coupons from Salla every 60s.
-
-Salla does not expose a supported coupon CRUD webhook in Nahla's integration
-surface, so inbound coupon sync relies on idempotent polling (same guarantee
-pattern as ``salla_orders_poller.py``).
+Dedicated background poller that imports coupons from Salla with adaptive SLA.
 """
 from __future__ import annotations
 
@@ -42,6 +38,13 @@ _state: Dict[str, Any] = {
         "advisory_lock_key": ADVISORY_LOCK_KEY,
         "startup_delay_seconds": STARTUP_DELAY_SECONDS,
         "disabled": DISABLED,
+        "adaptive_sla": {
+            "small_catalog_max": 120,
+            "small_catalog_seconds": 60,
+            "medium_catalog_max": 600,
+            "medium_catalog_seconds": 300,
+            "large_catalog_seconds": 900,
+        },
     },
 }
 
@@ -54,17 +57,29 @@ def get_poller_state() -> Dict[str, Any]:
     }
 
 
+def _retry_after_active(meta: Dict[str, Any], *, now: Optional[datetime] = None) -> bool:
+    now = now or datetime.now(timezone.utc)
+    raw = meta.get("retry_after_until")
+    if not raw:
+        return False
+    try:
+        until = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return now < until.astimezone(timezone.utc)
+    except ValueError:
+        return False
+
+
 async def run_salla_coupons_poller_scheduler() -> None:
     if DISABLED:
-        logger.warning(
-            "[Salla Coupons Poller] DISABLED via NAHLA_SALLA_COUPONS_POLLER_DISABLED — exiting",
-        )
+        logger.warning("[Salla Coupons Poller] DISABLED via NAHLA_SALLA_COUPONS_POLLER_DISABLED")
         return
 
     _state["started_at"] = datetime.now(timezone.utc).isoformat()
     await asyncio.sleep(STARTUP_DELAY_SECONDS)
     logger.info(
-        "[Salla Coupons Poller] starting — interval=%ss advisory_lock_key=%s",
+        "[Salla Coupons Poller] starting interval=%ss advisory_lock_key=%s",
         POLL_INTERVAL_SECONDS,
         ADVISORY_LOCK_KEY,
     )
@@ -72,7 +87,7 @@ async def run_salla_coupons_poller_scheduler() -> None:
         try:
             await _run_one_tick()
         except asyncio.CancelledError:
-            logger.info("[Salla Coupons Poller] cancelled — exiting loop")
+            logger.info("[Salla Coupons Poller] cancelled")
             raise
         except Exception as exc:
             logger.exception("[Salla Coupons Poller] tick crashed: %s", exc)
@@ -96,10 +111,7 @@ async def _run_one_tick() -> Dict[str, Any]:
             ).scalar()
             lock_acquired = bool(row)
         except Exception as lock_exc:
-            logger.debug(
-                "[Salla Coupons Poller] advisory lock unsupported (%s) — running anyway",
-                lock_exc,
-            )
+            logger.debug("[Salla Coupons Poller] advisory lock unsupported (%s)", lock_exc)
             lock_acquired = True
 
         if not lock_acquired:
@@ -109,7 +121,8 @@ async def _run_one_tick() -> Dict[str, Any]:
             return {"skipped": True, "reason": "advisory_lock_held_by_other_worker"}
 
         from models import Integration  # noqa: PLC0415
-        from store_integration.registry import adapter_for_integration  # noqa: PLC0415
+        from services.salla_coupon_fetch import tenant_poll_due  # noqa: PLC0415
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
 
         integrations = (
             db.query(Integration)
@@ -117,15 +130,9 @@ async def _run_one_tick() -> Dict[str, Any]:
                 Integration.provider == "salla",
                 Integration.enabled == True,  # noqa: E712
             )
-            .order_by(Integration.id.asc())
             .all()
         )
-        integrations = [
-            intg for intg in integrations
-            if bool((intg.config or {}).get("api_key"))
-            and not bool((intg.config or {}).get("needs_reauth"))
-            and adapter_for_integration(intg) is not None
-        ]
+        tenant_ids = sorted({int(i.tenant_id) for i in integrations if i.tenant_id})
 
         scanned = 0
         items_seen_total = 0
@@ -133,13 +140,17 @@ async def _run_one_tick() -> Dict[str, Any]:
         updated_total = 0
         errors = 0
 
-        for intg in integrations:
-            tenant_id = int(intg.tenant_id)
-            cfg = intg.config or {}
-            store_id = cfg.get("store_id") or cfg.get("merchant_id") or intg.external_store_id
+        for tenant_id in tenant_ids:
+            intg = pick_active_salla_integration(db, tenant_id)
+            cfg = (intg.config or {}) if intg is not None else {}
+            store_id = (
+                cfg.get("store_id")
+                or cfg.get("merchant_id")
+                or (intg.external_store_id if intg is not None else None)
+            )
             tenant_state: Dict[str, Any] = {
                 "tenant_id": tenant_id,
-                "integration_id": intg.id,
+                "integration_id": intg.id if intg is not None else None,
                 "store_id": store_id,
                 "scanned_at": datetime.now(timezone.utc).isoformat(),
                 "result": None,
@@ -147,12 +158,26 @@ async def _run_one_tick() -> Dict[str, Any]:
                 "stats": None,
             }
 
+            if intg is None:
+                tenant_state["result"] = "skipped_no_integration"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
             if bool(cfg.get("needs_reauth")):
                 tenant_state["result"] = "skipped_needs_reauth"
                 _state["tenants"][tenant_id] = tenant_state
                 continue
             if not cfg.get("api_key"):
                 tenant_state["result"] = "skipped_no_api_key"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
+
+            coupon_sync_meta = cfg.get("coupon_sync_meta") or {}
+            if _retry_after_active(coupon_sync_meta):
+                tenant_state["result"] = "skipped_retry_after"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
+            if not tenant_poll_due(coupon_sync_meta):
+                tenant_state["result"] = "skipped_not_due"
                 _state["tenants"][tenant_id] = tenant_state
                 continue
 
@@ -164,23 +189,25 @@ async def _run_one_tick() -> Dict[str, Any]:
                 updated_total += stats["updated"]
                 tenant_state.update({"result": "ok", "stats": stats})
                 logger.info(
-                    "[Salla Coupons Poller] tenant=%s store=%s items_seen=%d created=%d updated=%d duration_ms=%d",
+                    "[Salla Coupons Poller] tenant=%s store=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
                     tenant_id,
                     store_id,
                     stats["items_seen"],
                     stats["created"],
                     stats["updated"],
                     stats["duration_ms"],
+                    stats.get("fetch_ok"),
+                    stats.get("partial"),
                 )
             except Exception as exc:
                 errors += 1
                 tenant_state["result"] = "error"
-                tenant_state["error"] = repr(exc)
+                tenant_state["error"] = type(exc).__name__
                 logger.exception(
                     "[Salla Coupons Poller] tenant=%s store=%s error=%s",
                     tenant_id,
                     store_id,
-                    exc,
+                    type(exc).__name__,
                 )
                 try:
                     db.rollback()
@@ -241,29 +268,22 @@ async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:
     from services.store_sync import StoreSyncService  # noqa: PLC0415
 
     adapter = adapter_for_integration(intg)
+    if adapter is None or not hasattr(adapter, "fetch_coupons_paginated"):
+        raise RuntimeError("missing_fetch_coupons_paginated")
+
+    fetch_result = await adapter.fetch_coupons_paginated(per_page=60)
     svc = StoreSyncService(
         db,
         tenant_id,
         integration_connection_id=int(intg.id),
         adapter=adapter,
     )
-
-    items_seen = 0
-    api_error: Optional[str] = None
-    try:
-        adapter = svc._get_adapter()  # noqa: SLF001
-        if adapter is not None and hasattr(adapter, "get_coupons"):
-            raw_list = await adapter.get_coupons()
-            items_seen = len(raw_list or [])
-    except Exception as adapter_exc:
-        api_error = repr(adapter_exc)
-        logger.warning(
-            "[Salla Coupons Poller] tenant=%s salla_api_response error=%s",
-            tenant_id,
-            adapter_exc,
-        )
-
-    upserted = await svc.sync_coupons(triggered_by="salla_coupons_poller")
+    upserted = await svc.sync_coupons(
+        triggered_by="salla_coupons_poller",
+        raw_list=list(fetch_result.get("items") or []),
+        fetch_result=fetch_result,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
     try:
         db.commit()
         db.refresh(intg)
@@ -276,14 +296,16 @@ async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:
     meta = cfg.get("coupon_sync_meta") or {}
     created = int(meta.get("created") or 0)
     updated = int(meta.get("updated") or 0)
-    if not meta:
-        updated = max(0, upserted - created)
 
     return {
-        "items_seen": items_seen or int(meta.get("items_seen") or 0),
+        "items_seen": int(meta.get("items_seen") or fetch_result.get("items_seen") or 0),
         "created": created,
         "updated": updated,
         "upserted": upserted,
-        "api_error": api_error,
         "duration_ms": duration_ms,
+        "fetch_ok": bool(fetch_result.get("ok")),
+        "partial": bool(fetch_result.get("partial")),
+        "failure_class": fetch_result.get("failure_class"),
+        "pages_fetched": fetch_result.get("pages_fetched"),
+        "poll_interval_seconds": meta.get("poll_interval_seconds"),
     }

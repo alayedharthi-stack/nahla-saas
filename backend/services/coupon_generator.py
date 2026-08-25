@@ -57,7 +57,9 @@ from core.obs import EVENTS, log_event  # noqa: E402
 logger = logging.getLogger("nahla-backend")
 
 # ── Code format ───────────────────────────────────────────────────────────────
-POOL_SIZE_PER_SEGMENT = 15
+POOL_SIZE_PER_SEGMENT = 3
+DEFAULT_POOL_REFILL_THRESHOLD = 1
+MAX_POOL_TARGET_PER_SEGMENT = 15
 
 SHORT_CODE_PREFIX = "NH"
 SHORT_CODE_BODY_LEN = 3
@@ -271,6 +273,16 @@ def _get_levels_config(db: Session, tenant_id: int) -> Dict[str, Dict[str, Any]]
                 out[lid] = entry
     return out
 
+
+
+def _get_warm_pool_config(db: Session, tenant_id: int) -> Dict[str, int]:
+    block = _get_coupon_dashboard_block(db, tenant_id)
+    warm = dict(block.get("warm_pool") or {})
+    target = int(warm.get("target_per_segment") or POOL_SIZE_PER_SEGMENT)
+    target = max(0, min(target, MAX_POOL_TARGET_PER_SEGMENT))
+    refill = int(warm.get("refill_threshold") or DEFAULT_POOL_REFILL_THRESHOLD)
+    refill = max(0, min(refill, target))
+    return {"target_per_segment": target, "refill_threshold": refill}
 
 def _get_ai_policy(db: Session, tenant_id: int) -> Dict[str, Any]:
     """Return the merchant's AI coupon policy with safe defaults."""
@@ -557,15 +569,25 @@ class CouponGeneratorService:
         the merchant's coupon dashboard settings (``coupons_dashboard.levels``).
         Falls back to ``SEGMENT_DEFAULTS`` when no level config exists.
         """
+        ai_policy = _get_ai_policy(self.db, self.tenant_id)
+        if ai_policy.get("pool_mode") == "on_demand_only":
+            return {segment: 0 for segment in SEGMENT_DEFAULTS}
+
         limits = _get_merchant_limits(self.db, self.tenant_id)
         adapter = self._get_adapter()
         levels_cfg = _get_levels_config(self.db, self.tenant_id)
+        warm_cfg = _get_warm_pool_config(self.db, self.tenant_id)
+        target_per_segment = warm_cfg["target_per_segment"]
+        refill_threshold = warm_cfg["refill_threshold"]
         created: Dict[str, int] = {}
         reserved_codes = self._reserved_codes()
 
         for segment, defaults in SEGMENT_DEFAULTS.items():
             current = self._count_pool(segment)
-            needed = POOL_SIZE_PER_SEGMENT - current
+            if current > refill_threshold:
+                created[segment] = 0
+                continue
+            needed = target_per_segment - current
             if needed <= 0:
                 created[segment] = 0
                 continue

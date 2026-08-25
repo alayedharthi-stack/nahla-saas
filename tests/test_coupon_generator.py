@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,7 +91,7 @@ def test_build_coupon_send_payload_includes_exact_expiry_text():
     assert "الساعة" in (payload["expires_text"] or "")
 
 
-def test_ensure_coupon_pool_targets_fifteen_per_segment():
+def test_ensure_coupon_pool_targets_three_per_segment():
     db, tenant_id, engine = _make_db()
     try:
         svc = CouponGeneratorService(db, tenant_id)
@@ -115,16 +115,16 @@ def test_ensure_coupon_pool_targets_fifteen_per_segment():
 
         created = asyncio.run(svc.ensure_coupon_pool())
 
-        assert POOL_SIZE_PER_SEGMENT == 15
-        assert all(count == 15 for count in created.values())
+        assert POOL_SIZE_PER_SEGMENT == 3
+        assert all(count == 3 for count in created.values())
         rows = db.query(Coupon).filter(Coupon.tenant_id == tenant_id).all()
-        assert len(rows) == 15 * 5
+        assert len(rows) == 3 * 5
 
         # New format: NH + 3 alphanumeric chars (length 5).
         NEW_PATTERN = _re.compile(r"^NH[A-Z0-9]{3}$")
         assert all(NEW_PATTERN.match(c.code) for c in rows), (
             "All newly generated coupons must match the NH*** spec "
-            f"— got {[c.code for c in rows if not NEW_PATTERN.match(c.code)]}"
+            f"â€” got {[c.code for c in rows if not NEW_PATTERN.match(c.code)]}"
         )
 
         # Uniqueness: no two coupons share a code.
@@ -135,9 +135,9 @@ def test_ensure_coupon_pool_targets_fifteen_per_segment():
         engine.dispose()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # NH*** format + collision/compensation tests (Phase G)
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def test_short_code_regex_accepts_new_and_legacy_formats():
     """
@@ -197,9 +197,9 @@ def test_create_one_coupon_retries_on_db_collision_and_compensates_salla():
     Scenario: Salla creation succeeds, local INSERT hits IntegrityError (the
     unique index on (tenant_id, code) fires because of a concurrent writer).
     The generator must:
-      • call delete_coupon_by_code(code) to un-orphan the Salla side
-      • generate a new code and try again
-      • eventually return a Coupon with a fresh, non-colliding code
+      â€¢ call delete_coupon_by_code(code) to un-orphan the Salla side
+      â€¢ generate a new code and try again
+      â€¢ eventually return a Coupon with a fresh, non-colliding code
     """
     import asyncio as _asyncio
     from types import SimpleNamespace
@@ -398,3 +398,4 @@ def test_generate_for_customer_picks_from_pool_when_available():
     finally:
         db.close()
         engine.dispose()
+
