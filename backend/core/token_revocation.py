@@ -79,47 +79,6 @@ def revoke_jti(jti: Optional[str], exp_ts: Optional[int]) -> None:
 
 
 
-_LOCAL_CONSUMED: "OrderedDict[str, float]" = OrderedDict()
-
-
-def try_consume_one_time_jti(
-    jti: Optional[str],
-    exp_ts: Optional[int],
-    *,
-    namespace: str = "launch",
-) -> bool:
-    if not jti or not exp_ts:
-        return False
-    try:
-        ttl = max(1, int(exp_ts - time.time()))
-    except Exception:
-        return False
-    key = f"jwt:{namespace}:consumed:{jti}"
-    r = get_redis()
-    if r is None:
-        existing = _LOCAL_CONSUMED.get(jti)
-        if existing is not None:
-            if time.time() > existing:
-                _LOCAL_CONSUMED.pop(jti, None)
-            else:
-                return False
-        _LOCAL_CONSUMED[jti] = float(exp_ts)
-        while len(_LOCAL_CONSUMED) > _LOCAL_MAX:
-            _LOCAL_CONSUMED.popitem(last=False)
-        return True
-    try:
-        return bool(r.set(key, "1", nx=True, ex=ttl))
-    except Exception as exc:
-        logger.warning("[revocation] redis SET NX failed for jti=%s: %s", jti, exc)
-        existing = _LOCAL_CONSUMED.get(jti)
-        if existing is not None and time.time() <= existing:
-            return False
-        _LOCAL_CONSUMED[jti] = float(exp_ts)
-        while len(_LOCAL_CONSUMED) > _LOCAL_MAX:
-            _LOCAL_CONSUMED.popitem(last=False)
-        return True
-
-
 def is_jti_revoked(jti: Optional[str]) -> bool:
     """True iff the given ``jti`` has been revoked. Returns False on errors."""
     if not jti:
