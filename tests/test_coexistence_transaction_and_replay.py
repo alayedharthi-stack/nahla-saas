@@ -60,6 +60,7 @@ class GraphScript:
     def __init__(self, *, mode: str = "success"):
         self.mode = mode
         self.calls: list[tuple[str, str]] = []
+        self.requests: list[httpx.Request] = []
         self.lock = threading.Lock()
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -67,6 +68,7 @@ class GraphScript:
         method = request.method.upper()
         with self.lock:
             self.calls.append((method, url))
+            self.requests.append(request)
         path = urlparse(url).path
         if method in {"DELETE", "PUT"}:
             return httpx.Response(500, json={"error": {"message": "mutation forbidden in test"}})
@@ -104,7 +106,18 @@ class GraphScript:
             )
         if path.endswith(f"{PHONE}/subscribed_apps"):
             if self.mode == "webhook_fail":
-                return httpx.Response(400, json={"error": {"message": "webhook failed"}})
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                f"webhook failed phone_id={PHONE} waba_id={WABA} "
+                                f"phone={E164} business_id={PORTFOLIO} "
+                                "access_token=user-long-token"
+                            )
+                        }
+                    },
+                )
             return httpx.Response(200, json={"success": True})
         if path.endswith(f"{PHONE}/smb_app_data"):
             if self.mode == "smb_wait":
@@ -617,3 +630,124 @@ def test_new_tenant_graph_exception_leaves_no_connection_row(monkeypatch):
     db = Session()
     assert db.query(WhatsAppConnection).filter_by(tenant_id=8784).count() == 0
     db.close()
+
+
+def _add_graph_log_filters():
+    from core.log_redaction import SecretRedactingFilter
+
+    redact_filter = SecretRedactingFilter()
+    graph_loggers = [logging.getLogger("httpx"), logging.getLogger("httpcore")]
+    for graph_logger in graph_loggers:
+        graph_logger.addFilter(redact_filter)
+    return redact_filter, graph_loggers
+
+
+def _assert_sensitive_values_absent(log_text: str) -> None:
+    raw_values = (
+        "user-long-token",
+        "app-test|secret-test",
+        "secret-test",
+        "oauth-code-877",
+        PHONE,
+        WABA,
+        PORTFOLIO,
+        E164,
+    )
+    for raw in raw_values:
+        assert raw not in log_text
+
+
+def test_coexistence_finalize_success_uses_bearer_and_redacts_all_logs(monkeypatch, caplog):
+    from core.log_redaction import redact_graph_id
+
+    Session, _engine = _session_factory()
+    script = GraphScript(mode="success")
+    _install_httpx(monkeypatch, script)
+    _seed_tenant(Session, 8790)
+    client, _emb = _build_client(Session, monkeypatch)
+    redact_filter, graph_loggers = _add_graph_log_filters()
+    caplog.set_level(logging.INFO)
+    try:
+        state = _start_state(client, 8790)
+        resp = _callback(client, 8790, state)
+    finally:
+        for graph_logger in graph_loggers:
+            graph_logger.removeFilter(redact_filter)
+
+    assert resp.status_code == 302
+    assert "#meta=ok" in resp.headers["location"]
+    asset_requests = [
+        request
+        for request in script.requests
+        if PHONE in request.url.path or WABA in request.url.path
+    ]
+    assert asset_requests, "MockTransport must observe finalize Graph requests"
+    for request in asset_requests:
+        assert "access_token" not in request.url.params
+        assert "user-long-token" not in str(request.url)
+        assert request.headers.get("authorization") == "Bearer user-long-token"
+
+    combined = caplog.text
+    _assert_sensitive_values_absent(combined)
+    assert redact_graph_id(PHONE) in combined
+    assert redact_graph_id(WABA) in combined
+    assert "smb-req-1" not in combined
+    assert redact_graph_id("smb-req-1") in combined
+
+
+def test_coexistence_finalize_failure_redacts_provider_error_logs(monkeypatch, caplog):
+    from core.log_redaction import redact_graph_id
+
+    Session, _engine = _session_factory()
+    script = GraphScript(mode="webhook_fail")
+    _install_httpx(monkeypatch, script)
+    _seed_tenant(Session, 8791)
+    client, _emb = _build_client(Session, monkeypatch)
+    redact_filter, graph_loggers = _add_graph_log_filters()
+    caplog.set_level(logging.INFO)
+    try:
+        state = _start_state(client, 8791)
+        resp = _callback(client, 8791, state)
+    finally:
+        for graph_logger in graph_loggers:
+            graph_logger.removeFilter(redact_filter)
+
+    assert resp.status_code == 302
+    assert "#meta=error" in resp.headers["location"]
+    combined = caplog.text
+    _assert_sensitive_values_absent(combined)
+    assert redact_graph_id(PHONE) in combined
+    assert redact_graph_id(WABA) in combined
+    assert redact_graph_id(PORTFOLIO) in combined
+    assert redact_graph_id(E164) in combined
+    assert "access_token=REDACTED" in combined
+
+
+def test_httpx_request_and_exception_logging_redacts_url_and_identifiers(caplog):
+    from core.log_redaction import redact_graph_id
+
+    redact_filter, graph_loggers = _add_graph_log_filters()
+    caplog.set_level(logging.INFO, logger="httpx")
+    url = httpx.URL(
+        f"https://graph.facebook.com/v20.0/{PHONE}/subscribed_apps"
+        "?access_token=user-long-token&input_token=user-long-token"
+    )
+    request = httpx.Request("POST", url)
+    error = httpx.ConnectError(
+        f"request failed {url} business_id={PORTFOLIO} phone={E164}",
+        request=request,
+    )
+    try:
+        logging.getLogger("httpx").info("HTTP Request: %s", url)
+        logging.getLogger("httpx").error("HTTP exception: %s", error)
+    finally:
+        for graph_logger in graph_loggers:
+            graph_logger.removeFilter(redact_filter)
+
+    combined = caplog.text
+    _assert_sensitive_values_absent(combined)
+    assert redact_graph_id(PHONE) in combined
+    assert redact_graph_id(PORTFOLIO) in combined
+    assert redact_graph_id(E164) in combined
+    assert "access_token=REDACTED" in combined
+    assert "input_token=REDACTED" in combined

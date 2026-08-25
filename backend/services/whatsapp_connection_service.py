@@ -45,6 +45,8 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
+from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+
 logger = logging.getLogger("nahla.wa_conn_svc")
 
 
@@ -808,7 +810,7 @@ def subscribe_phone_webhook(
             )
             resp = httpx.post(
                 url,
-                params={"access_token": access_token},
+                headers={"Authorization": f"Bearer {access_token}"},
                 json={"subscribed_fields": fields},
                 timeout=10,
             )
@@ -816,15 +818,24 @@ def subscribe_phone_webhook(
             if resp.status_code == 200 and data.get("success"):
                 logger.info(
                     "[WASvc] subscribed_apps OK — tenant=%s %s_id=%s",
-                    tenant_id, target_kind, target_id,
+                    tenant_id, target_kind, redact_graph_id(target_id),
                 )
                 return True, None
 
             err = data.get("error", {})
-            last_msg = err.get("message") or f"HTTP {resp.status_code}"
+            provider_msg = err.get("message") or f"HTTP {resp.status_code}"
+            last_msg = redact_sensitive_log_text(
+                provider_msg,
+                graph_ids=(phone_number_id, waba_id, target_id),
+                secrets=(access_token,),
+            )
             logger.warning(
                 "[WASvc] subscribed_apps FAILED — tenant=%s %s_id=%s status=%s err=%r",
-                tenant_id, target_kind, target_id, resp.status_code, last_msg,
+                tenant_id,
+                target_kind,
+                redact_graph_id(target_id),
+                resp.status_code,
+                last_msg,
             )
             if prefer_waba:
                 return False, last_msg
@@ -833,12 +844,12 @@ def subscribe_phone_webhook(
                 and target_kind == "phone"
                 and waba_id
                 and resp.status_code == 400
-                and "unsupported" in str(last_msg).lower()
+                and "unsupported" in str(provider_msg).lower()
             ):
                 logger.info(
                     "[WASvc] phone-level subscribe rejected — retrying WABA-level "
                     "tenant=%s waba=%s",
-                    tenant_id, waba_id,
+                    tenant_id, redact_graph_id(waba_id),
                 )
                 fallback_url = (
                     f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
@@ -846,7 +857,7 @@ def subscribe_phone_webhook(
                 )
                 fb_resp = httpx.post(
                     fallback_url,
-                    params={"access_token": access_token},
+                    headers={"Authorization": f"Bearer {access_token}"},
                     json={"subscribed_fields": fields},
                     timeout=10,
                 )
@@ -854,18 +865,26 @@ def subscribe_phone_webhook(
                 if fb_resp.status_code == 200 and fb_data.get("success"):
                     logger.info(
                         "[WASvc] subscribed_apps OK via WABA fallback — tenant=%s waba=%s",
-                        tenant_id, waba_id,
+                        tenant_id, redact_graph_id(waba_id),
                     )
                     return True, None
 
         return False, last_msg
 
     except Exception as exc:  # noqa: BLE001
+        safe_error = redact_sensitive_log_text(
+            exc,
+            graph_ids=(phone_number_id, waba_id),
+            secrets=(access_token,),
+        )
         logger.warning(
             "[WASvc] subscribed_apps EXCEPTION — tenant=%s phone=%s waba=%s: %s",
-            tenant_id, phone_number_id, waba_id, exc,
+            tenant_id,
+            redact_graph_id(phone_number_id),
+            redact_graph_id(waba_id),
+            safe_error,
         )
-        return False, str(exc)
+        return False, safe_error
 
 
 # Backwards-compat alias so older imports keep working until callers migrate.

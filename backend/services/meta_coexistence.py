@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
+from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+
 logger = logging.getLogger("nahla.meta_coexistence")
 
 COEXISTENCE_FINISH_EVENT = "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING"
@@ -315,17 +317,27 @@ def verify_coexistence_phone(
         )
         data = resp.json()
     except Exception as exc:  # noqa: BLE001
+        safe_error = redact_sensitive_log_text(
+            exc,
+            graph_ids=(phone_number_id,),
+            secrets=(access_token,),
+        )
         logger.warning(
             "[Coexistence] phone verify exception tenant=%s phone_id=%s err=%s",
-            tenant_id, phone_number_id, exc,
+            tenant_id, redact_graph_id(phone_number_id), safe_error,
         )
         return False, {}, "تعذر التحقق من أهلية الرقم لربط واتساب الأعمال على الجوال."
 
     if "error" in data:
         msg = (data.get("error") or {}).get("message") or f"HTTP {resp.status_code}"
+        safe_msg = redact_sensitive_log_text(
+            msg,
+            graph_ids=(phone_number_id,),
+            secrets=(access_token,),
+        )
         logger.warning(
             "[Coexistence] phone verify Graph error tenant=%s phone_id=%s err=%s",
-            tenant_id, phone_number_id, msg,
+            tenant_id, redact_graph_id(phone_number_id), safe_msg,
         )
         return False, data, "Meta رفضت التحقق من الرقم. تأكد أن الرقم ما زال على تطبيق واتساب الأعمال."
 
@@ -360,26 +372,36 @@ def initiate_smb_app_data(
             )
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
+            safe_error = redact_sensitive_log_text(
+                exc,
+                graph_ids=(phone_number_id,),
+                secrets=(access_token,),
+            )
             logger.warning(
                 "[Coexistence] smb_app_data exception tenant=%s phone_id=%s type=%s err=%s",
-                tenant_id, phone_number_id, sync_type, exc,
+                tenant_id, redact_graph_id(phone_number_id), sync_type, safe_error,
             )
-            results[sync_type] = {"accepted": False, "error": str(exc)}
+            results[sync_type] = {"accepted": False, "error": safe_error}
             continue
         request_id = data.get("request_id")
         accepted = resp.status_code == 200 and bool(request_id)
         if "error" in data:
             err = (data.get("error") or {}).get("message") or f"HTTP {resp.status_code}"
+            safe_error = redact_sensitive_log_text(
+                err,
+                graph_ids=(phone_number_id,),
+                secrets=(access_token,),
+            )
             logger.warning(
                 "[Coexistence] smb_app_data failed tenant=%s phone_id=%s type=%s err=%s",
-                tenant_id, phone_number_id, sync_type, err,
+                tenant_id, redact_graph_id(phone_number_id), sync_type, safe_error,
             )
-            results[sync_type] = {"accepted": False, "error": err}
+            results[sync_type] = {"accepted": False, "error": safe_error}
             continue
         if not accepted:
             logger.warning(
                 "[Coexistence] smb_app_data missing request_id tenant=%s phone_id=%s type=%s status=%s",
-                tenant_id, phone_number_id, sync_type, resp.status_code,
+                tenant_id, redact_graph_id(phone_number_id), sync_type, resp.status_code,
             )
             results[sync_type] = {"accepted": False, "error": "missing_request_id"}
             continue
@@ -390,7 +412,10 @@ def initiate_smb_app_data(
         }
         logger.info(
             "[Coexistence] smb_app_data accepted tenant=%s phone_id=%s type=%s request_id=%s",
-            tenant_id, phone_number_id, sync_type, request_id,
+            tenant_id,
+            redact_graph_id(phone_number_id),
+            sync_type,
+            redact_graph_id(request_id),
         )
     return results
 
