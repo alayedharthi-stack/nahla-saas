@@ -102,6 +102,7 @@ def _assert_nonce_table(engine: Engine) -> None:
 @pytest.fixture(scope="module")
 def postgres_engine() -> Iterator[Engine]:
     engine = _connect_engine()
+    _run_alembic(engine, "0101")
     yield engine
     engine.dispose()
 
