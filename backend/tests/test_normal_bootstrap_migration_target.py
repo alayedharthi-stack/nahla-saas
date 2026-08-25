@@ -1,4 +1,4 @@
-"""Regression checks for the normal migration bootstrap contract."""
+﻿"""Regression checks for the normal migration bootstrap contract."""
 from __future__ import annotations
 
 import os
@@ -23,7 +23,7 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 )
 
 
-def test_repository_parallel_heads_0092_and_0099() -> None:
+def test_repository_parallel_heads_0092_and_0100() -> None:
     assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0100"})
 
 

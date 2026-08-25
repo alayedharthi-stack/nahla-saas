@@ -3996,6 +3996,55 @@ class ProductRanking(Base):
     product = relationship("Product")
 
 
+
+
+class SallaEmbeddedIdentityBinding(Base):
+    """OAuth-verified durable link between embedded merchant identity and canonical store."""
+
+    __tablename__ = 'salla_embedded_identity_bindings'
+    __table_args__ = (
+        Index(
+            'uq_seib_active_identity',
+            'provider', 'app_id', 'merchant_account_id',
+            unique=True,
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        Index(
+            'ix_seib_lookup',
+            'provider', 'app_id', 'merchant_account_id', 'status',
+        ),
+        Index('ix_seib_integration_id', 'integration_id'),
+        Index('ix_seib_tenant_id', 'tenant_id'),
+        Index('ix_seib_canonical_store_id', 'canonical_store_id'),
+    )
+
+    id = Column(Integer, primary_key=True)
+    provider = Column(String, nullable=False)
+    app_id = Column(String, nullable=False)
+    merchant_account_id = Column(String, nullable=False)
+    canonical_store_id = Column(String, nullable=False)
+    integration_id = Column(Integer, ForeignKey('integrations.id'), nullable=False)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    verified_via = Column(String, nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+    status = Column(String, nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_reason = Column(String, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    tenant = relationship('Tenant')
+    integration = relationship('Integration')
+
 class CommerceLifecycleNotificationLedger(Base):
     """
     Lifecycle notification idempotency and outbound send audit ledger.

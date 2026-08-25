@@ -1,4 +1,4 @@
-"""PostgreSQL integration tests for guarded staging migration 0030→0087 chain."""
+﻿"""PostgreSQL integration tests for guarded staging migration 0030→0087 chain."""
 from __future__ import annotations
 
 import os

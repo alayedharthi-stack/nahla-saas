@@ -1,4 +1,4 @@
-"""PostgreSQL migration tests for attaching 0089 onto validated 0088."""
+﻿"""PostgreSQL migration tests for attaching 0089 onto validated 0088."""
 from __future__ import annotations
 
 import os

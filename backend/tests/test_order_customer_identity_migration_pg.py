@@ -1,4 +1,4 @@
-"""A1-Expand migration tests — 0086 → 0087 only (0088 deferred to A1-Validate PR)."""
+﻿"""A1-Expand migration tests — 0086 → 0087 only (0088 deferred to A1-Validate PR)."""
 from __future__ import annotations
 
 import os
