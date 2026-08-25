@@ -358,7 +358,18 @@ async def salla_token_login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     salla_token = (body.get("token") or "").strip()
-    app_id      = str(body.get("app_id") or SALLA_CLIENT_ID or "")
+    from services.salla_embedded_app_identity import resolve_trusted_salla_embedded_app_id  # noqa: PLC0415
+
+    trusted_app_id = resolve_trusted_salla_embedded_app_id(body.get("app_id"))
+    if not trusted_app_id:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "detail": "invalid_salla_app_id",
+                "code": "invalid_salla_app_id",
+            },
+        )
+    app_id = trusted_app_id
 
     if not salla_token:
         raise HTTPException(status_code=400, detail="token required")
@@ -2651,6 +2662,18 @@ async def salla_api_oauth_start(
                 )
             if challenge is None:
                 raise HTTPException(status_code=403, detail="reconcile_nonce_invalid")
+            from services.salla_embedded_app_identity import is_trusted_salla_embedded_app_id  # noqa: PLC0415
+            from services.salla_reconciliation_challenge import consume_reconciliation_challenge  # noqa: PLC0415
+
+            if not is_trusted_salla_embedded_app_id(challenge.app_id):
+                consume_reconciliation_challenge(raw_reconcile_nonce)
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "detail": "invalid_salla_app_id",
+                        "code": "invalid_salla_app_id",
+                    },
+                )
             state = f"embedded_{_secrets.token_urlsafe(8)}{_API_SYNC_STATE_SUFFIX}"
             try:
                 bind_oauth_state_to_reconciliation_challenge(
@@ -2994,6 +3017,19 @@ async def salla_api_oauth_callback(
             consume_reconciliation_challenge_for_oauth_state,
         )
         from services.salla_store_identity import SallaStoreIdentity as _OAuthStoreIdentity  # noqa: PLC0415
+
+        from services.salla_embedded_app_identity import is_trusted_salla_embedded_app_id as _trusted_embedded_app  # noqa: PLC0415
+
+        if not _trusted_embedded_app(reconcile_challenge.app_id):
+            consume_reconciliation_challenge_for_oauth_state(raw_state)
+            logger.error(
+                "[Salla API OAuth] embedded reconcile untrusted challenge app_id | app_id=%s",
+                reconcile_challenge.app_id,
+            )
+            return RedirectResponse(
+                url=f"{_DASHBOARD_ORIGIN}/app/salla?{urllib.parse.urlencode({'salla_oauth': 'error', 'reason': 'invalid_salla_app_id'})}",
+                status_code=302,
+            )
 
         oauth_identity = store_identity or _OAuthStoreIdentity(store_id="")
         correlation_ok, correlation_reason = verify_embedded_reconcile_oauth_merchant_correlation(

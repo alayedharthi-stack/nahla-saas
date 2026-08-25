@@ -52,6 +52,16 @@ GENERIC_EMAIL = "ahmad.salem@example.com"
 UNKNOWN_STORE = "99001122"
 
 
+
+
+@pytest.fixture(autouse=True)
+def trusted_embedded_app_ids():
+    with patch(
+        "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+        return_value=frozenset({"app"}),
+    ):
+        yield
+
 @pytest.fixture()
 def db():
     engine = create_engine(

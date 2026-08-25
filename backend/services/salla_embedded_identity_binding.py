@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from database.models import Integration, SallaEmbeddedIdentityBinding, User
 from services.salla_reconciliation_challenge import ReconciliationChallenge
 
+from services.salla_embedded_app_identity import is_trusted_salla_embedded_app_id
 from services.salla_store_identity import SallaStoreIdentity
 
 
@@ -113,6 +114,16 @@ def validate_binding_for_reentry(
 ) -> BindingReentryResult:
     """Re-prove live Integration + merchant user before token-login re-entry."""
     app = _str_id(app_id)
+    if app and not is_trusted_salla_embedded_app_id(app):
+        revoke_binding(db, binding, reason="app_id_untrusted")
+        db.flush()
+        return BindingReentryResult(ok=False, reason="app_id_untrusted", binding=binding)
+
+    if not is_trusted_salla_embedded_app_id(binding.app_id):
+        revoke_binding(db, binding, reason="app_id_untrusted")
+        db.flush()
+        return BindingReentryResult(ok=False, reason="app_id_untrusted", binding=binding)
+
     if app and binding.app_id != app:
         revoke_binding(db, binding, reason="app_id_mismatch")
         db.flush()

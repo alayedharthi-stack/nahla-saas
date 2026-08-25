@@ -92,6 +92,16 @@ def _postgres_reachable() -> bool:
     return False
 
 
+
+
+@pytest.fixture(autouse=True)
+def trusted_embedded_app_ids():
+    with patch(
+        "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+        return_value=frozenset({APP_ID, "nahla-test-embedded-app"}),
+    ):
+        yield
+
 @pytest.fixture()
 def fake_redis():
     store = FakeRedis()
@@ -712,6 +722,133 @@ class TestOAuthCallbackCreatesBinding:
         assert binding.canonical_store_id == GENERIC_STORE
         assert binding.integration_id == integration.id
 
+
+
+
+class TestTrustedEmbeddedAppId:
+    def test_trusted_app_id_allows_reconcile_challenge_creation(self, fake_redis):
+        from services.salla_reconciliation_challenge import create_reconciliation_challenge
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=PARTNER_ALT,
+        )
+        assert nonce
+
+    def test_untrusted_app_id_blocked_before_challenge_creation(self, fake_redis):
+        from services.salla_reconciliation_challenge import create_reconciliation_challenge
+
+        with pytest.raises(ValueError, match="reconcile_challenge_untrusted_app_id"):
+            create_reconciliation_challenge(
+                provider="salla",
+                app_id="evil-untrusted-app",
+                merchant_account_id=PARTNER_ALT,
+            )
+
+    def test_token_login_untrusted_app_id_fails_before_binding_or_challenge(self, db, fake_redis):
+        from routers.salla_oauth import salla_token_login
+
+        integration = _seed_store(
+            db,
+            tenant_id=PARTNER_TENANT,
+            canonical_store_id=PARTNER_STORE,
+            alt_merchant_id=PARTNER_ALT,
+            owner_email=PARTNER_EMAIL,
+        )
+        _seed_active_binding(db, integration=integration, merchant_account_id=PARTNER_ALT)
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "v4.public.test", "app_id": "evil-untrusted-app"})
+            request.headers = {}
+            request.client = None
+            with pytest.raises(HTTPException) as exc_info:
+                await salla_token_login(request, db)
+            return exc_info.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail["code"] == "invalid_salla_app_id"
+
+    def test_oauth_start_rejects_challenge_when_app_id_becomes_untrusted(self, fake_redis):
+        from services.salla_reconciliation_challenge import (
+            create_reconciliation_challenge,
+            resolve_reconciliation_nonce,
+        )
+        from routers.salla_oauth import salla_api_oauth_start
+
+        nonce = create_reconciliation_challenge(
+            provider="salla",
+            app_id=APP_ID,
+            merchant_account_id=PARTNER_ALT,
+        )
+
+        with patch("routers.salla_oauth.SALLA_OAUTH_CLIENT_ID", "oauth-sync-client"):
+            with patch(
+                "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+                return_value=frozenset({"other-trusted-app"}),
+            ):
+                request = MagicMock()
+                with pytest.raises(HTTPException) as exc_info:
+                    asyncio.run(
+                        salla_api_oauth_start(
+                            request,
+                            embedded_reconcile=True,
+                            reconcile_nonce=nonce,
+                        )
+                    )
+            assert exc_info.value.status_code == 403
+            assert exc_info.value.detail["code"] == "invalid_salla_app_id"
+
+        assert resolve_reconciliation_nonce(nonce) is None
+
+    def test_secondary_test_app_allowed_when_configured(self, fake_redis):
+        from services.salla_embedded_app_identity import (
+            is_trusted_salla_embedded_app_id,
+            resolve_trusted_salla_embedded_app_id,
+        )
+
+        with patch("services.salla_embedded_app_identity.SALLA_TEST_CLIENT_ID", "nahla-test-embedded-app"):
+            with patch(
+                "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+                return_value=frozenset({APP_ID, "nahla-test-embedded-app"}),
+            ):
+                assert is_trusted_salla_embedded_app_id("nahla-test-embedded-app") is True
+                assert resolve_trusted_salla_embedded_app_id("nahla-test-embedded-app") == "nahla-test-embedded-app"
+
+    def test_binding_revoked_when_stored_app_id_no_longer_trusted(self, db):
+        from services.salla_embedded_identity_binding import (
+            STATUS_REVOKED,
+            validate_binding_for_reentry,
+        )
+
+        integration = _seed_store(
+            db,
+            tenant_id=GENERIC_TENANT,
+            canonical_store_id=GENERIC_STORE,
+            alt_merchant_id=GENERIC_ALT,
+            owner_email=GENERIC_EMAIL,
+        )
+        _seed_merchant(db, tenant_id=GENERIC_TENANT, email=GENERIC_EMAIL)
+        binding = _seed_active_binding(
+            db,
+            integration=integration,
+            merchant_account_id=GENERIC_ALT,
+            app_id="legacy-untrusted-app",
+        )
+
+        with patch(
+            "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+            return_value=frozenset({APP_ID}),
+        ):
+            result = validate_binding_for_reentry(db, binding, app_id="legacy-untrusted-app")
+        db.commit()
+        db.refresh(binding)
+
+        assert result.ok is False
+        assert result.reason == "app_id_untrusted"
+        assert binding.status == STATUS_REVOKED
 
 
 class TestEmbeddedReconcileOAuthMerchantCorrelation:

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.redis_client import get_redis
+from services.salla_embedded_app_identity import is_trusted_salla_embedded_app_id
 
 logger = logging.getLogger("nahla.salla_reconcile_challenge")
 
@@ -95,6 +96,8 @@ def create_reconciliation_challenge(
         raise ValueError("reconcile_challenge_invalid_provider")
     if not app:
         raise ValueError("reconcile_challenge_app_id_required")
+    if not is_trusted_salla_embedded_app_id(app):
+        raise ValueError("reconcile_challenge_untrusted_app_id")
     if not merchant_id:
         raise ValueError("reconcile_challenge_merchant_account_id_required")
 
