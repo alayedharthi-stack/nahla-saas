@@ -103,6 +103,29 @@ def _sanitize_internal_next_path(next_path: str, *, default: str = "/overview") 
     return raw
 
 
+
+def _load_tenant_bound_merchant_user(
+    db: Session,
+    *,
+    tenant_id: int,
+    user_id: int | None = None,
+    email: str | None = None,
+):
+    """Exact tenant-scoped active merchant lookup for launch handoff binding."""
+    if tenant_id <= 0:
+        return None
+    q = db.query(User).filter(
+        User.tenant_id == tenant_id,
+        User.role == "merchant",
+        User.is_active.is_(True),
+    )
+    if user_id is not None and int(user_id) > 0:
+        return q.filter(User.id == int(user_id)).first()
+    if email:
+        return q.filter(User.email == str(email).strip().lower()).first()
+    return None
+
+
 def _resolve_oauth_completion_merchant_user(
     db: Session,
     *,
@@ -138,11 +161,19 @@ def _resolve_oauth_completion_merchant_user(
         issued_via="salla_oauth_embedded_reconcile_handoff",
         allow_alias_match=False,
     )
-    user = db.query(User).filter(User.id == provision.user_id).first()
-    if user is None:
+    if provision.tenant_id != tenant_id:
+        logger.error(
+            "[Salla OAuth] merchant provision tenant mismatch | expected=%s got=%s store_id=%s",
+            tenant_id, provision.tenant_id, store_id,
+        )
         return None
 
-    if (user.role or "merchant") != "merchant":
+    user = _load_tenant_bound_merchant_user(
+        db,
+        tenant_id=tenant_id,
+        user_id=provision.user_id,
+    )
+    if user is None:
         merchant = (
             db.query(User)
             .filter(
@@ -165,11 +196,26 @@ def _resolve_oauth_completion_merchant_user(
                 issued_via="salla_oauth_embedded_reconcile_handoff",
                 allow_alias_match=False,
             )
-            user = db.query(User).filter(User.id == provision.user_id).first()
+            if provision.tenant_id != tenant_id:
+                logger.error(
+                    "[Salla OAuth] derived merchant provision tenant mismatch | expected=%s got=%s",
+                    tenant_id, provision.tenant_id,
+                )
+                return None
+            user = _load_tenant_bound_merchant_user(
+                db,
+                tenant_id=tenant_id,
+                user_id=provision.user_id,
+            )
         else:
             user = merchant
 
-    if user is None or (user.role or "merchant") != "merchant":
+    if (
+        user is None
+        or user.tenant_id != tenant_id
+        or not user.is_active
+        or (user.role or "merchant") != "merchant"
+    ):
         return None
     return user
 
@@ -188,14 +234,17 @@ def _issue_opaque_launch_handoff(
         next_path,
         default=_OAUTH_EMBEDDED_RECONCILE_NEXT,
     )
-    return issue_launch_handoff(
-        tenant_id=tenant_id,
-        store_id=store_id,
-        user_id=user_id,
-        email=email,
-        next_path=safe_next,
-        role="merchant",
-    )
+    try:
+        return issue_launch_handoff(
+            tenant_id=tenant_id,
+            store_id=store_id,
+            user_id=user_id,
+            email=email,
+            next_path=safe_next,
+            role="merchant",
+        )
+    except ValueError as exc:
+        raise LaunchHandoffUnavailable(str(exc)) from exc
 
 
 def _build_launch_handoff_url(opaque_handle: str, next_path: str | None = None) -> str:
@@ -1049,11 +1098,7 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
         )
         raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
-    # Fetch user_id if missing
-    if not user_id:
-        from models import User  # noqa: PLC0415
-        u = db.query(User).filter(User.email == email).first()
-        user_id = u.id if u else None
+    from models import User  # noqa: PLC0415
 
     if (role or "merchant") != "merchant":
         logger.warning(
@@ -1062,13 +1107,36 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
         )
         raise HTTPException(status_code=403, detail="merchant_role_required")
 
+    db_user = None
+    if user_id:
+        db_user = _load_tenant_bound_merchant_user(
+            db,
+            tenant_id=tenant_id,
+            user_id=int(user_id),
+        )
+    if db_user is None and email:
+        db_user = _load_tenant_bound_merchant_user(
+            db,
+            tenant_id=tenant_id,
+            email=email,
+        )
+    if db_user is None:
+        logger.warning(
+            "[LaunchDashboard] tenant-scoped merchant user missing | tenant=%s email=%s",
+            tenant_id, email,
+        )
+        raise HTTPException(status_code=403, detail="merchant_user_required")
+
+    user_id = db_user.id
+    email = db_user.email
+
     safe_next = _sanitize_internal_next_path(next_path, default="/overview")
     try:
         from core.launch_handoff import LaunchHandoffUnavailable  # noqa: PLC0415
         opaque_handle = _issue_opaque_launch_handoff(
             tenant_id=tenant_id,
             store_id=store_id,
-            user_id=int(user_id or 0),
+            user_id=int(user_id),
             email=email,
             next_path=safe_next,
         )
@@ -1134,8 +1202,6 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
             detail="تعذر تسجيل الدخول من سلة، حاول فتح التطبيق مرة أخرى.",
         )
 
-    email = record.email
-    role = "merchant"
     tenant_id = record.tenant_id
     store_id = record.store_id
     user_id = record.user_id
@@ -1144,7 +1210,7 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
         default=_OAUTH_EMBEDDED_RECONCILE_NEXT,
     )
 
-    if not tenant_id or not email or not user_id:
+    if tenant_id <= 0 or user_id <= 0:
         raise HTTPException(status_code=401, detail="بيانات الجلسة غير مكتملة.")
 
     from services.salla_store_identity import verify_jwt_tenant_owns_salla_store  # noqa: PLC0415
@@ -1165,13 +1231,26 @@ async def resolve_launch(request: Request, db: Session = Depends(get_db)):
     if not guard.ok:
         raise HTTPException(status_code=403, detail=guard.reason or "store_tenant_mismatch")
 
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if db_user is None or (db_user.role or "merchant") != "merchant":
+    db_user = _load_tenant_bound_merchant_user(
+        db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    if (
+        db_user is None
+        or db_user.id != user_id
+        or db_user.tenant_id != tenant_id
+        or not db_user.is_active
+        or (db_user.role or "merchant") != "merchant"
+    ):
         logger.warning(
-            "[ResolveLaunch] merchant user guard failed | tenant=%s user_id=%s",
+            "[ResolveLaunch] tenant-bound merchant guard failed | tenant=%s user_id=%s",
             tenant_id, user_id,
         )
-        raise HTTPException(status_code=403, detail="merchant_role_required")
+        raise HTTPException(status_code=403, detail="merchant_user_binding_failed")
+
+    email = db_user.email
+    role = "merchant"
 
     # Fetch store name from integration config for localStorage persistence
     integ = (

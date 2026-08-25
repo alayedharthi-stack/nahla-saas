@@ -429,3 +429,294 @@ class TestLaunchNextPathSafety:
         assert "salla-access-token" not in url
         assert "salla-refresh-token" not in url
         assert url.count(".") == 0 or "opaque-handle-abc" in url
+
+class TestLaunchHandoffUserTenantBinding:
+    def test_handoff_user_from_other_tenant_blocked(self, db, fake_redis):
+        from core.launch_handoff import issue_launch_handoff
+        from routers.salla_oauth import resolve_launch
+
+        merchant_t1 = _seed_partner_store(db)
+        other_tid = 35
+        db.merge(__import__("database.models", fromlist=["Tenant"]).Tenant(id=other_tid, name="Tenant 35"))
+        other_user = __import__("database.models", fromlist=["User"]).User(
+            username="other-merchant",
+            email="other-merchant@example.com",
+            password_hash="x",
+            role="merchant",
+            tenant_id=other_tid,
+            is_active=True,
+        )
+        db.add(other_user)
+        db.commit()
+        db.refresh(other_user)
+
+        handle = issue_launch_handoff(
+            tenant_id=PARTNER_TENANT,
+            store_id=PARTNER_STORE,
+            user_id=other_user.id,
+            email=other_user.email,
+            next_path="/app/entry?salla_oauth=success",
+            role="merchant",
+        )
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": handle})
+            with pytest.raises(HTTPException) as exc:
+                await resolve_launch(request, db)
+            return exc.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_user_binding_failed"
+
+    def test_inactive_merchant_blocked(self, db, fake_redis):
+        from core.launch_handoff import issue_launch_handoff
+        from routers.salla_oauth import resolve_launch
+
+        db.merge(__import__("database.models", fromlist=["Tenant"]).Tenant(id=PARTNER_TENANT, name="Tenant 1"))
+        inactive = __import__("database.models", fromlist=["User"]).User(
+            username="inactive",
+            email=PARTNER_EMAIL,
+            password_hash="x",
+            role="merchant",
+            tenant_id=PARTNER_TENANT,
+            is_active=False,
+        )
+        db.add(inactive)
+        db.add(
+            Integration(
+                tenant_id=PARTNER_TENANT,
+                provider="salla",
+                external_store_id=PARTNER_STORE,
+                config={"store_id": PARTNER_STORE, "salla_owner_email": PARTNER_EMAIL},
+                enabled=True,
+            )
+        )
+        db.commit()
+        db.refresh(inactive)
+
+        handle = issue_launch_handoff(
+            tenant_id=PARTNER_TENANT,
+            store_id=PARTNER_STORE,
+            user_id=inactive.id,
+            email=inactive.email,
+            next_path="/app/entry?salla_oauth=success",
+            role="merchant",
+        )
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": handle})
+            with pytest.raises(HTTPException) as exc:
+                await resolve_launch(request, db)
+            return exc.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_user_binding_failed"
+
+    def test_admin_user_in_handoff_blocked(self, db, fake_redis):
+        from core.launch_handoff import issue_launch_handoff
+        from routers.salla_oauth import resolve_launch
+
+        db.merge(__import__("database.models", fromlist=["Tenant"]).Tenant(id=PARTNER_TENANT, name="Tenant 1"))
+        admin = __import__("database.models", fromlist=["User"]).User(
+            username="admin",
+            email=ADMIN_EMAIL,
+            password_hash="x",
+            role="admin",
+            tenant_id=PARTNER_TENANT,
+            is_active=True,
+        )
+        db.add(admin)
+        db.add(
+            Integration(
+                tenant_id=PARTNER_TENANT,
+                provider="salla",
+                external_store_id=PARTNER_STORE,
+                config={"store_id": PARTNER_STORE, "salla_owner_email": ADMIN_EMAIL},
+                enabled=True,
+            )
+        )
+        db.commit()
+        db.refresh(admin)
+
+        handle = issue_launch_handoff(
+            tenant_id=PARTNER_TENANT,
+            store_id=PARTNER_STORE,
+            user_id=admin.id,
+            email=admin.email,
+            next_path="/app/entry?salla_oauth=success",
+            role="merchant",
+        )
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": handle})
+            with pytest.raises(HTTPException) as exc:
+                await resolve_launch(request, db)
+            return exc.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_user_binding_failed"
+
+    def test_callback_provision_tenant_mismatch_blocks_handoff(self, db, fake_redis):
+        from core.merchant_provisioning import ProvisioningResult
+        from routers import salla_oauth as mod
+
+        _seed_partner_store(db)
+
+        with patch(
+            "core.merchant_provisioning.get_or_create_merchant_user",
+            return_value=ProvisioningResult(
+                user_id=99,
+                tenant_id=STALE_TENANT,
+                email=PARTNER_EMAIL,
+                role="merchant",
+                created_user=False,
+                created_tenant=False,
+                linked_existing=True,
+                filled_gap=False,
+                set_password_token=None,
+            ),
+        ):
+            user = mod._resolve_oauth_completion_merchant_user(
+                db,
+                tenant_id=PARTNER_TENANT,
+                store_id=PARTNER_STORE,
+                store_name="Test",
+            )
+        assert user is None
+
+    def test_launch_dashboard_wrong_tenant_email_blocked(self, db, fake_redis):
+        from routers.salla_oauth import launch_dashboard
+
+        _seed_partner_store(db)
+        wrong_tid = 35
+        db.merge(__import__("database.models", fromlist=["Tenant"]).Tenant(id=wrong_tid, name="Tenant 35"))
+        db.add(
+            __import__("database.models", fromlist=["User"]).User(
+                username="other",
+                email="shared@example.com",
+                password_hash="x",
+                role="merchant",
+                tenant_id=wrong_tid,
+                is_active=True,
+            )
+        )
+        db.commit()
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "jwt", "store_id": PARTNER_STORE})
+            request.headers = {}
+            request.query_params = {"next": "/overview"}
+            with patch("jose.jwt.decode", return_value={
+                "tenant_id": PARTNER_TENANT,
+                "sub": "shared@example.com",
+                "role": "merchant",
+                "user_id": None,
+                "store_id": PARTNER_STORE,
+            }):
+                with pytest.raises(HTTPException) as exc:
+                    await launch_dashboard(request, db)
+                return exc.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_user_required"
+
+    def test_launch_dashboard_missing_merchant_no_handoff(self, db, fake_redis):
+        from routers.salla_oauth import launch_dashboard
+
+        db.merge(__import__("database.models", fromlist=["Tenant"]).Tenant(id=PARTNER_TENANT, name="Tenant 1"))
+        db.add(
+            Integration(
+                tenant_id=PARTNER_TENANT,
+                provider="salla",
+                external_store_id=PARTNER_STORE,
+                config={"store_id": PARTNER_STORE},
+                enabled=True,
+            )
+        )
+        db.commit()
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": "jwt", "store_id": PARTNER_STORE})
+            request.headers = {}
+            request.query_params = {"next": "/overview"}
+            with patch("jose.jwt.decode", return_value={
+                "tenant_id": PARTNER_TENANT,
+                "sub": "missing@example.com",
+                "role": "merchant",
+                "user_id": None,
+                "store_id": PARTNER_STORE,
+            }):
+                with pytest.raises(HTTPException) as exc:
+                    await launch_dashboard(request, db)
+                return exc.value
+
+        exc = asyncio.run(_run())
+        assert exc.status_code == 403
+        assert exc.detail == "merchant_user_required"
+        assert fake_redis._data == {}
+
+    def test_issue_launch_handoff_invalid_inputs_blocked(self, fake_redis):
+        from core.launch_handoff import issue_launch_handoff
+
+        with pytest.raises(ValueError):
+            issue_launch_handoff(
+                tenant_id=0,
+                store_id=PARTNER_STORE,
+                user_id=1,
+                email=PARTNER_EMAIL,
+                next_path="/overview",
+                role="merchant",
+            )
+        with pytest.raises(ValueError):
+            issue_launch_handoff(
+                tenant_id=PARTNER_TENANT,
+                store_id="",
+                user_id=1,
+                email=PARTNER_EMAIL,
+                next_path="/overview",
+                role="merchant",
+            )
+        with pytest.raises(ValueError):
+            issue_launch_handoff(
+                tenant_id=PARTNER_TENANT,
+                store_id=PARTNER_STORE,
+                user_id=0,
+                email=PARTNER_EMAIL,
+                next_path="/overview",
+                role="merchant",
+            )
+        with pytest.raises(ValueError):
+            issue_launch_handoff(
+                tenant_id=PARTNER_TENANT,
+                store_id=PARTNER_STORE,
+                user_id=1,
+                email="",
+                next_path="/overview",
+                role="merchant",
+            )
+
+    def test_normal_tenant1_merchant_handoff_passes(self, db, fake_redis):
+        from routers.salla_oauth import resolve_launch
+
+        merchant = _seed_partner_store(db)
+        callback = asyncio.run(_run_api_oauth_callback(db))
+        token = _extract_opaque_token(callback.headers["location"])
+
+        async def _run():
+            request = MagicMock()
+            request.json = AsyncMock(return_value={"token": token})
+            return await resolve_launch(request, db)
+
+        session = asyncio.run(_run())
+        assert session["tenant_id"] == PARTNER_TENANT
+        assert session["email"] == merchant.email
+        assert session["role"] == "merchant"

@@ -93,6 +93,42 @@ def get_redis():
     return _REDIS_CLIENT
 
 
+
+def redis_supports_getdel() -> dict:
+    """Probe whether the configured Redis client/server supports atomic GETDEL.
+
+    Returns a safe status dict — never includes REDIS_URL or credentials.
+    """
+    r = get_redis()
+    if r is None:
+        return {
+            "configured": False,
+            "getdel_supported": False,
+            "reason": _REDIS_REASON or "not_configured",
+        }
+
+    if not hasattr(r, "getdel"):
+        return {
+            "configured": True,
+            "getdel_supported": False,
+            "reason": "client_missing_getdel",
+        }
+
+    try:
+        info = r.execute_command("COMMAND", "INFO", "GETDEL")
+        supported = bool(info)
+        return {
+            "configured": True,
+            "getdel_supported": supported,
+            "reason": "ok" if supported else "server_missing_getdel",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "configured": True,
+            "getdel_supported": False,
+            "reason": f"probe_failed:{type(exc).__name__}",
+        }
+
 def redis_available() -> bool:
     """True iff a live Redis connection is usable right now."""
     return get_redis() is not None

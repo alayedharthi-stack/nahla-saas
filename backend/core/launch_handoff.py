@@ -44,6 +44,14 @@ def issue_launch_handoff(
     role: str = "merchant",
 ) -> str:
     """Create a one-time opaque handle. Never log the raw handle."""
+    if tenant_id <= 0:
+        raise ValueError("launch_handoff_invalid_tenant")
+    if not str(store_id or "").strip():
+        raise ValueError("launch_handoff_invalid_store")
+    if user_id <= 0:
+        raise ValueError("launch_handoff_invalid_user")
+    if not str(email or "").strip():
+        raise ValueError("launch_handoff_invalid_email")
     if role != "merchant":
         raise ValueError("launch_handoff_role_must_be_merchant")
 

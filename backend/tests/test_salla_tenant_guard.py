@@ -504,7 +504,16 @@ class TestLaunchTenantGuard:
     def test_launch_dashboard_matching_tenant_passes(self, db):
         from routers.salla_oauth import launch_dashboard
 
-        _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE)
+        _seed_store(db, tenant_id=PARTNER_TENANT, canonical_store_id=PARTNER_STORE, owner_email=PARTNER_EMAIL)
+        db.add(User(
+            username="merchant",
+            email=PARTNER_EMAIL,
+            password_hash="x",
+            role="merchant",
+            tenant_id=PARTNER_TENANT,
+            is_active=True,
+        ))
+        db.commit()
 
         class _FakeRedis:
             def __init__(self):
