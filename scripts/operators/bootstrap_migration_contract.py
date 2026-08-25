@@ -1,10 +1,10 @@
-"""Closed contract for normal bootstrap migration targets (multi-head aware).
+﻿"""Closed contract for normal bootstrap migration targets (multi-head aware).
 
 Repository Alembic graph has parallel heads ``0092`` (A1-Validate branch) and
-``0095`` (commerce lifecycle send_method extending ``0094`` → ``0093``), both
+``0095`` (commerce lifecycle send_method extending ``0094`` â†’ ``0093``), both
 branching from the ``0090`` / ``0091`` siblings off ``0088`` / ``0089``.
 
-Normal application bootstrap must never invoke bare ``head`` — that would apply
+Normal application bootstrap must never invoke bare ``head`` â€” that would apply
 both sibling heads and advance capability to ``validated`` unintentionally.
 Integration and local bootstrap pin to ``0093`` explicitly so capability remains
 ``expand`` until the guarded staging Validate operator runs.
@@ -16,11 +16,11 @@ validated-staging state ``{0088, 0093}``; it must not select ``0092``.
 """
 from __future__ import annotations
 
-REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0099"})
+REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0100"})
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})
 VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0093"})
-# Historical state produced by the guarded 0088→0089 attach operator before
+# Historical state produced by the guarded 0088â†’0089 attach operator before
 # normal bootstrap advances the integration branch to 0093.
 STAGING_VALIDATED_ATTACH_REVISIONS = frozenset({"0088", "0089"})
 FORBIDDEN_BOOTSTRAP_LITERALS = frozenset({"head"})

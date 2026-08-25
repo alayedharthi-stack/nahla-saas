@@ -253,6 +253,7 @@ def build_merchant_identity_not_canonical_detail(
     identity_source: str = "merchant_account_only",
     merchant_account_id: str = "",
     has_canonical_store_id: bool = False,
+    oauth_start_path: str | None = None,
 ) -> dict:
     """Structured 403 payload for embedded merchant-only identity gaps."""
     payload: dict = {
@@ -261,7 +262,7 @@ def build_merchant_identity_not_canonical_detail(
         "identity_source": identity_source,
         "has_canonical_store_id": has_canonical_store_id,
         "next_action": SALLA_OAUTH_SYNC_NEXT_ACTION,
-        "oauth_start_path": SALLA_EMBEDDED_OAUTH_START_PATH,
+        "oauth_start_path": oauth_start_path or SALLA_EMBEDDED_OAUTH_START_PATH,
     }
     mid = _str_id(merchant_account_id)
     if mid:

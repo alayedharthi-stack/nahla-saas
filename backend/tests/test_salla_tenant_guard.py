@@ -52,6 +52,16 @@ GENERIC_EMAIL = "ahmad.salem@example.com"
 UNKNOWN_STORE = "99001122"
 
 
+
+
+@pytest.fixture(autouse=True)
+def trusted_embedded_app_ids():
+    with patch(
+        "services.salla_embedded_app_identity.trusted_salla_embedded_app_ids",
+        return_value=frozenset({"app"}),
+    ):
+        yield
+
 @pytest.fixture()
 def db():
     engine = create_engine(
@@ -699,7 +709,7 @@ class TestMerchantOnlyAliasRouting:
         assert exc.detail["detail"] == "merchant_identity_not_canonical"
         assert exc.detail["code"] == "salla_store_link_required"
         assert exc.detail["next_action"] == "oauth_sync"
-        assert exc.detail["oauth_start_path"] == "/api/salla/oauth/start?embedded_reconcile=1"
+        assert exc.detail["oauth_start_path"].startswith("/api/salla/oauth/start?embedded_reconcile=1&reconcile_nonce=")
         assert exc.detail["has_canonical_store_id"] is False
         assert exc.detail["identity_source"] == "merchant_account_only"
 
