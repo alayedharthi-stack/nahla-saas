@@ -320,10 +320,6 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
     }
 
 
-def _auth_headers(token: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {(token or '').strip()}"}
-
-
 def _graph_json(
     method: str,
     path: str,
