@@ -24,7 +24,7 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 
 
 def test_repository_parallel_heads_0092_and_0101() -> None:
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101"})
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101", "0102"})
 
 
 def test_migration_0094_extends_integration_branch_from_0093() -> None:
@@ -40,13 +40,13 @@ def test_migration_0094_extends_integration_branch_from_0093() -> None:
     rev_0095 = script.get_revision("0095")
     assert rev_0095 is not None
     assert rev_0095.down_revision == "0094"
-    assert set(script.get_heads()) == frozenset({"0092", "0101"})
+    assert set(script.get_heads()) == frozenset({"0092", "0101", "0102"})
 
 
 def test_supported_deployment_revision_states_are_explicit() -> None:
     assert NORMAL_BOOTSTRAP_REVISIONS == frozenset({"0093"})
     assert VALIDATED_STAGING_BOOTSTRAP_REVISIONS == frozenset({"0088", "0093"})
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101"})
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0101", "0102"})
 
 
 def test_normal_bootstrap_pins_0093_not_head() -> None:
@@ -119,4 +119,4 @@ def test_main_has_step_d_nonce_guard() -> None:
     main_source = (_REPO / "backend" / "main.py").read_text(encoding="utf-8")
     assert "Step D:" in main_source
     assert "build_coexistence_nonce_upgrade_argv" in main_source
-    assert "COEXISTENCE_NONCE_TABLE" in main_source
+    assert "resolve_coexistence_nonce_migration_target" in main_source

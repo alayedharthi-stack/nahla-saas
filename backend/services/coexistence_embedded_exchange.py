@@ -233,3 +233,85 @@ def commit_coexistence_transaction(db: Session, tenant_id: int) -> None:
     from core.whatsapp_connection_finalization import schedule_whatsapp_catalog_reconnect  # noqa: PLC0415
 
     schedule_whatsapp_catalog_reconnect(tenant_id)
+
+def _classify_nonce_row(row, *, tenant_id: int, connection_mode: str, now) -> str:
+    if row is None:
+        return "missing"
+    row_tenant = int(row["tenant_id"] if isinstance(row, dict) else row.tenant_id)
+    row_mode = str(row["connection_mode"] if isinstance(row, dict) else row.connection_mode)
+    consumed_at = row["consumed_at"] if isinstance(row, dict) else row.consumed_at
+    expires_at = row["expires_at"] if isinstance(row, dict) else row.expires_at
+    if row_tenant != int(tenant_id) or row_mode != str(connection_mode):
+        return "mismatch"
+    if consumed_at is not None:
+        return "already_consumed"
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at is not None and expires_at <= now:
+        return "expired"
+    return "expired"
+
+
+def consume_oauth_nonce_durable(
+    engine,
+    *,
+    nonce: str,
+    tenant_id: int,
+    connection_mode: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """Commit nonce consumption in an independent transaction before downstream work."""
+    assert_coexistence_nonce_migration_applied(engine)
+    now = now or datetime.now(timezone.utc)
+    nonce_hash = hash_oauth_nonce(nonce)
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "UPDATE whatsapp_oauth_nonces "
+                    "SET consumed_at = :now "
+                    "WHERE nonce_hash = :nonce_hash "
+                    "AND tenant_id = :tenant_id "
+                    "AND connection_mode = :connection_mode "
+                    "AND consumed_at IS NULL "
+                    "AND expires_at > :now "
+                    "RETURNING id"
+                ),
+                {
+                    "now": now,
+                    "nonce_hash": nonce_hash,
+                    "tenant_id": int(tenant_id),
+                    "connection_mode": str(connection_mode),
+                },
+            )
+            if result.first() is not None:
+                return "consumed"
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT tenant_id, connection_mode, consumed_at, expires_at "
+                    "FROM whatsapp_oauth_nonces WHERE nonce_hash = :nonce_hash"
+                ),
+                {"nonce_hash": nonce_hash},
+            ).mappings().first()
+        return _classify_nonce_row(row, tenant_id=tenant_id, connection_mode=connection_mode, now=now)
+
+    from sqlalchemy.orm import sessionmaker
+
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    session = SessionLocal()
+    try:
+        status = consume_oauth_nonce(
+            session,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode=connection_mode,
+            now=now,
+        )
+        if status == "consumed":
+            session.commit()
+        else:
+            session.rollback()
+        return status
+    finally:
+        session.close()

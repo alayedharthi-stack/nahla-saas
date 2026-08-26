@@ -152,6 +152,7 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
       else if (typeof d.message_ar === 'string' && d.message_ar.trim()) msg = d.message_ar
       else if (typeof d.detail === 'string') msg = d.detail
       if (typeof d.code === 'string') code = d.code
+      else if (typeof d.error_code === 'string') code = d.error_code
       else if (typeof d.error === 'string') code = d.error
       // Stash the structured payload so callers (e.g. the Meta catalog
       // import diagnostic panel) can read fields like ``token_source``,

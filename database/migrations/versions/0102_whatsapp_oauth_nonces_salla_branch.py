@@ -1,6 +1,6 @@
-"""0101 — hashed one-time WhatsApp OAuth nonces.
+"""0102 — hashed one-time WhatsApp OAuth nonces (Salla branch).
 
-Revision ID: 0101
+Revision ID: 0102
 Revises:    0100
 
 Stores hashed Meta embedded-signup nonces so the same signed state cannot
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import inspect
 
-revision = "0101"
-down_revision = "0093"
+revision = "0102"
+down_revision = "0100"
 branch_labels = None
 depends_on = None
 

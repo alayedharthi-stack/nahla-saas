@@ -66,6 +66,8 @@ from services.d360_logging import (
     d360_response_summary,
     d360_safe_error_payload,
     d360_safe_exception_fields,
+    d360_safe_persist_webhook_setup,
+    d360_project_connection_metadata,
     d360_url_flags,
     log_d360_verify,
 )
@@ -817,6 +819,8 @@ def _log_integration_state(
 
 def _coexistence_status_payload(conn: Optional[WhatsAppConnection]) -> dict:
     base = _build_wa_status(conn)
+    if conn and isinstance(conn.extra_metadata, dict):
+        base["provider_metadata"] = d360_project_connection_metadata(conn.extra_metadata)
     state = _coexistence_state(conn)
     base.update({
         "coexistence_status": state.get("status"),
@@ -2077,8 +2081,8 @@ async def coexistence_partner_connect(
             if channel_status == "ready":
                 conn.sending_enabled = True
                 _set_coexistence_state(conn, status="connected")
-        meta["last_webhook_setup"] = webhook_result
-        meta["last_waba_webhook_setup"] = waba_webhook_result
+        meta["last_webhook_setup"] = d360_safe_persist_webhook_setup(webhook_result)
+        meta["last_waba_webhook_setup"] = d360_safe_persist_webhook_setup(waba_webhook_result)
     else:
         # Channel not ready yet — store pending state, webhook from 360dialog will follow
         conn.access_token = None
@@ -2207,15 +2211,15 @@ async def admin_activate_coexistence(
             waba_webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
         channel_ok = "error" not in (webhook_result or {})
         waba_ok    = "error" not in (waba_webhook_result or {})
-        meta["last_webhook_setup"] = webhook_result
-        meta["last_waba_webhook_setup"] = waba_webhook_result
+        meta["last_webhook_setup"] = d360_safe_persist_webhook_setup(webhook_result)
+        meta["last_waba_webhook_setup"] = d360_safe_persist_webhook_setup(waba_webhook_result)
         conn.extra_metadata = meta
         flag_modified(conn, "extra_metadata")
         if not channel_ok and not waba_ok:
             conn.status = "action_required"
             conn.webhook_verified = False
             conn.sending_enabled = False
-            conn.last_error = str((webhook_result or {}).get("error"))
+            conn.last_error = str((webhook_result or {}).get("error_type") or (webhook_result or {}).get("error") or "webhook_setup_failed")[:500]
             _set_coexistence_state(
                 conn,
                 status="action_required",

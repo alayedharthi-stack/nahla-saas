@@ -81,7 +81,7 @@ def test_commit_connection_integrity_error_maps_to_asset_race(caplog):
          patch("services.whatsapp_connection_service.register_phone_number", return_value=(True, None)), \
          patch("services.whatsapp_connection_service.subscribe_phone_webhook", return_value=(True, None)), \
          patch("services.whatsapp_platform.wa_connection_secrets.store_access_token"), \
-         patch("services.whatsapp_asset_lock.acquire_whatsapp_asset_advisory_locks"), \
+         patch("services.whatsapp_asset_lock.whatsapp_asset_advisory_lock_hold"), \
          patch("services.whatsapp_platform.wa_token_validation.validate_meta_access_token_sync", return_value=SimpleNamespace(is_valid=True, token_status="valid", token_source_label="system_user", warnings=[], expires_at=None, error_message=None)), \
          patch("services.whatsapp_platform.wa_token_validation.apply_validation_to_connection"), \
          patch("services.whatsapp_platform.wa_token_validation.production_sending_allowed", return_value=True), \

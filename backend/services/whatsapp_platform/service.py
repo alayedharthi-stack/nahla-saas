@@ -25,6 +25,7 @@ from .provider_utils import (
 from services.d360_logging import (
     d360_live_verify_step_record,
     d360_response_summary,
+    d360_safe_webhook_result,
     d360_safe_error_payload,
     d360_sanitize_live_verify_probe,
     log_d360_verify,
@@ -1009,7 +1010,7 @@ async def dialog360_configure_webhook(
     logger.info("[WA dialog360 webhook] configure status=%s summary=%s", resp.status_code, summary)
     if resp.status_code >= 400 and "error" not in data:
         data = {"error": data, "status_code": resp.status_code}
-    return data
+    return d360_safe_webhook_result(resp.status_code, data)
 
 
 async def dialog360_get_webhook_config(
@@ -1034,7 +1035,7 @@ async def dialog360_get_webhook_config(
     logger.info("[WA dialog360 webhook] read status=%s summary=%s", resp.status_code, summary)
     if resp.status_code >= 400:
         return {"error": data, "status_code": resp.status_code}
-    return data
+    return d360_safe_webhook_result(resp.status_code, data)
 
 
 # ── 360dialog WABA-level webhook (Coexistence) ────────────────────────────────
@@ -1138,7 +1139,7 @@ async def dialog360_set_waba_webhook(
     )
     if resp.status_code >= 400 and "error" not in data:
         data = {"error": data, "status_code": resp.status_code}
-    return data
+    return d360_safe_webhook_result(resp.status_code, data)
 
 
 def _clip_body(body: Any, limit: int = 240) -> str:

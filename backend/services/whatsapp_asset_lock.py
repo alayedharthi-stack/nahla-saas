@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine
 
 _LOCK_CLASS_PHONE = 877010
 _LOCK_CLASS_WABA = 877011
@@ -40,57 +40,38 @@ def _lock_pairs(
     return locks
 
 
-def acquire_whatsapp_asset_advisory_locks(
-    db: Session,
-    *,
-    provider: str = "meta",
-    phone_number_id: Optional[str] = None,
-    waba_id: Optional[str] = None,
-) -> list[tuple[int, int]]:
-    """Session-scoped locks survive in-function commits."""
-    locks = _lock_pairs(
-        provider=provider,
-        phone_number_id=phone_number_id,
-        waba_id=waba_id,
-    )
-    bind = db.get_bind()
-    if bind.dialect.name == "postgresql":
-        for lock_class, lock_key in locks:
-            db.execute(
-                text("SELECT pg_advisory_lock(:lock_class, :lock_key)"),
-                {"lock_class": lock_class, "lock_key": lock_key},
-            )
-    return locks
-
-
-def release_whatsapp_asset_advisory_locks(
-    db: Session,
-    locks: list[tuple[int, int]],
-) -> None:
-    bind = db.get_bind()
-    if bind.dialect.name == "postgresql":
-        for lock_class, lock_key in reversed(locks):
-            db.execute(
-                text("SELECT pg_advisory_unlock(:lock_class, :lock_key)"),
-                {"lock_class": lock_class, "lock_key": lock_key},
-            )
-
-
 @contextmanager
-def whatsapp_asset_advisory_locks(
-    db: Session,
+def whatsapp_asset_advisory_lock_hold(
+    engine: Engine,
     *,
     provider: str = "meta",
     phone_number_id: Optional[str] = None,
     waba_id: Optional[str] = None,
 ) -> Iterator[None]:
-    locks = acquire_whatsapp_asset_advisory_locks(
-        db,
+    """Hold advisory locks on a dedicated physical connection until the block exits."""
+    locks = _lock_pairs(
         provider=provider,
         phone_number_id=phone_number_id,
         waba_id=waba_id,
     )
-    try:
+    if engine.dialect.name != "postgresql" or not locks:
         yield
+        return
+
+    conn = engine.connect()
+    try:
+        for lock_class, lock_key in locks:
+            conn.execute(
+                text("SELECT pg_advisory_lock(:lock_class, :lock_key)"),
+                {"lock_class": lock_class, "lock_key": lock_key},
+            )
+        try:
+            yield
+        finally:
+            for lock_class, lock_key in reversed(locks):
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:lock_class, :lock_key)"),
+                    {"lock_class": lock_class, "lock_key": lock_key},
+                )
     finally:
-        release_whatsapp_asset_advisory_locks(db, locks)
+        conn.close()

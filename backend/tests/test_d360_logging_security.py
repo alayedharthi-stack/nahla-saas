@@ -271,3 +271,32 @@ def test_dialog360_live_verify_probe_sanitized():
     _assert_absent(rendered)
     assert "body_preview" not in rendered
     assert "url" not in str(probe.get("steps") or [])
+
+def test_d360_safe_persist_webhook_setup_strips_payload():
+    from services.d360_logging import d360_safe_persist_webhook_setup
+
+    raw = {
+        "status_code": 400,
+        "error": {"message": PAYLOAD, "code": 100},
+        "url": URL,
+        "waba_id": WABA,
+    }
+    safe = d360_safe_persist_webhook_setup(raw)
+    rendered = str(safe)
+    _assert_absent(rendered)
+    assert safe.get("http_status") == 400
+
+
+def test_d360_project_connection_metadata_strips_sensitive_keys():
+    from services.d360_logging import d360_project_connection_metadata
+
+    meta = {
+        "provider_details": {"channel_id": CHANNEL, "webhook_url": URL},
+        "last_webhook_setup": {"status_code": 200, "url": URL, "waba_id": WABA},
+        "api_key": API_KEY,
+    }
+    projected = d360_project_connection_metadata(meta)
+    rendered = str(projected)
+    _assert_absent(rendered)
+    assert "api_key" not in projected
+    assert "url" not in str(projected.get("last_webhook_setup") or {})

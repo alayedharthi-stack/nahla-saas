@@ -60,8 +60,28 @@ class WhatsAppConnectionConflict(Exception):
         self.code = code
 
 
+CONFLICT_SAFE_MESSAGES: dict[str, str] = {
+    "CONFLICT_PHONE_CLAIMED": (
+        "رقم واتساب هذا مرتبط بمتجر آخر على نحلة. تواصل مع الدعم إن كان يخصك."
+    ),
+    "CONFLICT_WABA_CLAIMED": (
+        "حساب واتساب للأعمال هذا مرتبط بمتجر آخر على نحلة."
+    ),
+    "CONFLICT_PHONE_WABA_MISMATCH": (
+        "رقم واتساب لا ينتمي إلى حساب الأعمال المحدد."
+    ),
+    "CONFLICT_ASSET_CLAIMED": (
+        "أصل واتساب مرتبط بمتجر آخر على نحلة."
+    ),
+    "CONFLICT_ASSET_RACE": (
+        "تعذر إتمام الربط بسبب تعارض متزامن. أعد المحاولة."
+    ),
+}
+
+
 def connection_conflict_http_detail(exc: WhatsAppConnectionConflict) -> dict:
-    return {"code": exc.code, "message": str(exc)}
+    message = CONFLICT_SAFE_MESSAGES.get(exc.code, CONFLICT_SAFE_MESSAGES["CONFLICT_ASSET_CLAIMED"])
+    return {"code": exc.code, "message": message}
 
 
 class WhatsAppConnectionError(Exception):
@@ -191,18 +211,15 @@ def commit_connection(
         actor,
     )
 
-    from services.whatsapp_asset_lock import (  # noqa: PLC0415
-        acquire_whatsapp_asset_advisory_locks,
-        release_whatsapp_asset_advisory_locks,
-    )
+    from services.whatsapp_asset_lock import whatsapp_asset_advisory_lock_hold  # noqa: PLC0415
 
-    _asset_locks = acquire_whatsapp_asset_advisory_locks(
-        db,
+    engine = db.get_bind()
+    with whatsapp_asset_advisory_lock_hold(
+        engine,
         provider=provider,
         phone_number_id=phone_number_id,
         waba_id=waba_id,
-    )
-    try:
+    ):
         return _commit_connection_with_asset_lock(
             db,
             tenant_id=tenant_id,
@@ -218,8 +235,6 @@ def commit_connection(
             skip_phone_register=skip_phone_register,
             subscribed_fields=subscribed_fields,
         )
-    finally:
-        release_whatsapp_asset_advisory_locks(db, _asset_locks)
 
 
 def _commit_connection_with_asset_lock(

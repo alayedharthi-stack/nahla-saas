@@ -248,3 +248,70 @@ def d360_sanitize_live_verify_probe(probe: Any) -> dict[str, Any]:
         "steps": safe_steps,
         "summary": str(probe.get("summary") or ""),
     }
+
+def d360_safe_webhook_result(http_status: int | None, parsed_json: object) -> dict:
+    payload = parsed_json if isinstance(parsed_json, dict) else {}
+    summary = d360_response_summary({"status_code": http_status, **payload})
+    return {
+        "http_status": http_status,
+        **summary,
+    }
+
+
+def d360_safe_persist_webhook_setup(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {
+            "success": False,
+            "error_type": "invalid_response",
+            "retryable": True,
+        }
+    if raw.get("error") or raw.get("error_type"):
+        safe = d360_safe_error_payload(
+            Exception(str(raw.get("error") or raw.get("error_type"))),
+            operation="dialog360_webhook_setup",
+        )
+        return {**safe, **d360_safe_webhook_result(raw.get("status_code"), raw)}
+    return d360_safe_webhook_result(raw.get("status_code"), raw)
+
+
+_SENSITIVE_NESTED_KEYS = frozenset({
+    "channel_id",
+    "client_id",
+    "webhook_url",
+    "phone_number_id",
+    "waba_id",
+})
+
+_SENSITIVE_METADATA_KEYS = frozenset({
+    "api_key",
+    "access_token",
+    "token",
+    "raw",
+    "url",
+    "webhook_url",
+    "channel_body_preview",
+    "waba_body_preview",
+    "response_body_preview",
+})
+
+
+def d360_project_connection_metadata(meta: object) -> dict:
+    if not isinstance(meta, dict):
+        return {}
+    projected: dict = {}
+    for key, value in meta.items():
+        if key in _SENSITIVE_METADATA_KEYS or key in _SENSITIVE_NESTED_KEYS:
+            continue
+        if key in {"last_webhook_setup", "last_waba_webhook_setup"}:
+            projected[key] = d360_safe_persist_webhook_setup(value)
+            continue
+        if isinstance(value, dict):
+            projected[key] = d360_project_connection_metadata(value)
+        elif isinstance(value, list):
+            projected[key] = [
+                d360_project_connection_metadata(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            projected[key] = value
+    return projected

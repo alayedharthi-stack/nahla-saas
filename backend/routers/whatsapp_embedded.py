@@ -50,7 +50,10 @@ from core.config import (
 )
 from core.database import get_db
 from core.log_redaction import redact_graph_id, redact_sensitive_log_text
-from services.whatsapp_connection_service import connection_conflict_http_detail
+from services.whatsapp_connection_service import (
+    connection_conflict_http_detail,
+    CONFLICT_SAFE_MESSAGES,
+)
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
 from services.coexistence_embedded_exchange import (
@@ -59,6 +62,7 @@ from services.coexistence_embedded_exchange import (
     coexistence_finalize_succeeded,
     commit_coexistence_transaction,
     consume_oauth_nonce,
+    consume_oauth_nonce_durable,
     load_connection_for_update,
     persist_oauth_nonce,
     read_completed_coexistence_exchange,
@@ -1700,8 +1704,8 @@ async def oauth_callback(
         )
         logger.warning(
             "[EmbeddedSignup] oauth/callback Meta returned error tenant=%s "
-            "error=%s reason=%s desc=%s",
-            tenant_id, error, error_reason, error_description,
+            "error_present=%s reason_present=%s desc_present=%s",
+            tenant_id, bool(error), bool(error_reason), bool(error_description),
         )
         return _oauth_callback_finish(ok=False, reason=friendly)
 
@@ -1719,13 +1723,13 @@ async def oauth_callback(
         )
         return _oauth_callback_finish(ok=False, reason="المتجر غير موجود — أعد تسجيل الدخول.")
 
-    acquire_tenant_transaction_lock(db, tenant_id)
-    nonce_status = consume_oauth_nonce(
-        db,
+    nonce_status = consume_oauth_nonce_durable(
+        db.get_bind(),
         nonce=oauth_state.nonce,
         tenant_id=tenant_id,
         connection_mode=oauth_state.connection_mode,
     )
+    acquire_tenant_transaction_lock(db, tenant_id)
     if nonce_status == "already_consumed":
         logger.info("[EmbeddedSignup] oauth/callback replay rejected tenant=%s", tenant_id)
         return _oauth_callback_finish(ok=False, reason="تم استخدام رابط الربط مسبقاً. أعد المحاولة من نحلة.")
@@ -1737,8 +1741,12 @@ async def oauth_callback(
     except HTTPException as exc:
         # Catch the BSP/TP variant explicitly so the merchant lands
         # on the "use 360dialog" message instead of a raw Meta error.
-        db.rollback()
-        return _oauth_callback_finish(ok=False, reason=str(exc.detail))
+        detail = exc.detail
+        if isinstance(detail, dict):
+            reason = str(detail.get("message") or detail.get("detail") or "تعذر إكمال الربط مع Meta.")
+        else:
+            reason = str(detail)
+        return _oauth_callback_finish(ok=False, reason=reason)
 
     short_token = token_data["access_token"]
     long_data = await _exchange_for_long_lived_token(short_token)
@@ -1809,13 +1817,10 @@ async def oauth_callback(
                 canonical_phone_e164=verified.canonical_phone_e164,
             )
         except CoexistenceWabaResolutionError as exc:
-            db.rollback()
             return _oauth_callback_finish(ok=False, reason=exc.message)
         except HTTPException as exc:
-            db.rollback()
             return _oauth_callback_finish(ok=False, reason=str(exc.detail))
         except Exception:
-            db.rollback()
             raise
         if not coexistence_finalize_succeeded(payload):
             db.rollback()
@@ -1847,7 +1852,8 @@ async def oauth_callback(
             actor="embedded_oauth_callback",
         )
     except WhatsAppConnectionConflict as exc:
-        return _oauth_callback_finish(ok=False, reason=str(exc))
+        detail = connection_conflict_http_detail(exc)
+        return _oauth_callback_finish(ok=False, reason=detail["message"])
     except WhatsAppConnectionError as exc:
         return _oauth_callback_finish(ok=False, reason=str(exc))
 
@@ -2248,7 +2254,10 @@ async def select_phone(
         )
         raise HTTPException(
             status_code=409,
-            detail={"error_code": "phone_id_already_claimed"},
+            detail={
+                "code": "PHONE_ID_ALREADY_CLAIMED",
+                "message": CONFLICT_SAFE_MESSAGES["CONFLICT_PHONE_CLAIMED"],
+            },
         ) from _tie
     try:
         evict_phone_id_from_other_tenants(db, body.phone_number_id, tenant_id)

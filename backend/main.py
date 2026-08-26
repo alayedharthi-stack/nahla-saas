@@ -807,31 +807,44 @@ async def on_startup() -> None:
                     _elapsed,
                 )
 
-                # ── Step D: Coexistence OAuth nonce table (0101) ─────────────
-                from sqlalchemy import inspect as _sqla_inspect  # noqa: PLC0415
+                # ── Step D: Coexistence OAuth nonce table (0101/0102) ────────
                 from scripts.operators.bootstrap_migration_contract import (  # noqa: PLC0415
-                    COEXISTENCE_NONCE_MIGRATION_TARGET, COEXISTENCE_NONCE_TABLE, assert_coexistence_nonce_migration_applied, build_coexistence_nonce_upgrade_argv,
+                    assert_coexistence_nonce_migration_applied,
+                    build_coexistence_nonce_upgrade_argv,
+                    resolve_coexistence_nonce_migration_target,
                 )
 
-                _nonce_missing = False
+                _nonce_target = None
                 try:
                     _eng_d = create_engine(_db_url, pool_pre_ping=True)
                     with _eng_d.connect() as _conn_d:
-                        _nonce_missing = COEXISTENCE_NONCE_TABLE not in _sqla_inspect(_conn_d).get_table_names()
+                        _nonce_target = resolve_coexistence_nonce_migration_target(_conn_d)
+                        try:
+                            assert_coexistence_nonce_migration_applied(_conn_d)
+                            _nonce_needed = False
+                        except RuntimeError:
+                            _nonce_needed = True
                     _eng_d.dispose()
                 except Exception as _d_probe_exc:
-                    logger.warning(
-                        "[BOOT/db] Step D: nonce table probe failed (non-fatal): %s",
+                    logger.error(
+                        "[BOOT/db] Step D: nonce migration probe FAILED (fail-closed): %s",
                         _d_probe_exc,
                     )
+                    return
 
-                if _nonce_missing:
-                    _nonce_upgrade_cmd = build_coexistence_nonce_upgrade_argv(
-                        python_executable=sys.executable,
-                    )
+                if _nonce_needed:
+                    _eng_target = create_engine(_db_url, pool_pre_ping=True)
+                    try:
+                        with _eng_target.connect() as _conn_target:
+                            _nonce_upgrade_cmd = build_coexistence_nonce_upgrade_argv(
+                                python_executable=sys.executable,
+                                bind=_conn_target,
+                            )
+                    finally:
+                        _eng_target.dispose()
                     logger.info(
                         "[BOOT/db] Step D: alembic upgrade %s (timeout=%ds)",
-                        COEXISTENCE_NONCE_MIGRATION_TARGET,
+                        _nonce_target,
                         _T_UPGRADE,
                     )
                     _t0d = _t.monotonic()
@@ -855,19 +868,14 @@ async def on_startup() -> None:
                     _elapsed_d = _t.monotonic() - _t0d
                     if _alembic_d.stdout:
                         logger.info(
-                            "[BOOT/db] Step D stdout (rc=%d, elapsed=%.1fs):
-%s",
+                            "[BOOT/db] Step D stdout rc=%d elapsed=%.1fs body=%s",
                             _alembic_d.returncode,
                             _elapsed_d,
                             _alembic_d.stdout.strip(),
                         )
                     if _alembic_d.returncode != 0:
                         logger.error(
-                            "[BOOT/db] Step D FAILED rc=%d elapsed=%.1fs
---- stderr ---
-%s
---- stdout ---
-%s",
+                            "[BOOT/db] Step D FAILED rc=%d elapsed=%.1fs stderr=%s stdout=%s",
                             _alembic_d.returncode,
                             _elapsed_d,
                             (_alembic_d.stderr or "").strip(),
@@ -884,13 +892,13 @@ async def on_startup() -> None:
                         return
                     logger.info(
                         "[BOOT/db] Step D: alembic upgrade %s OK rc=0 elapsed=%.1fs",
-                        COEXISTENCE_NONCE_TABLE,
+                        _nonce_target,
                         _elapsed_d,
                     )
                 else:
                     logger.info(
-                        "[BOOT/db] Step D: skipped (%s already present)",
-                        COEXISTENCE_NONCE_TABLE,
+                        "[BOOT/db] Step D: coexistence nonce migration already applied (target=%s)",
+                        _nonce_target,
                     )
 
 

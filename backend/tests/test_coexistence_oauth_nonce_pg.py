@@ -32,6 +32,7 @@ from services.coexistence_embedded_exchange import (  # noqa: E402
     COEXISTENCE_TENANT_LOCK_CLASS,
     acquire_tenant_transaction_lock,
     consume_oauth_nonce,
+    consume_oauth_nonce_durable,
     hash_oauth_nonce,
     load_connection_for_update,
     persist_oauth_nonce,
@@ -179,7 +180,7 @@ def test_fresh_database_upgrade_to_0101_creates_nonce_table(postgres_engine: Eng
     admin.dispose()
 
 
-def test_existing_salla_0100_upgrade_to_0101_creates_nonce_table(postgres_engine: Engine) -> None:
+def test_existing_salla_0100_upgrade_to_0102_creates_nonce_table(postgres_engine: Engine) -> None:
     admin = _admin_engine()
     db_name = f"coex_nonce_salla_{hashlib.sha256(os.urandom(8)).hexdigest()[:8]}"
     with admin.connect() as conn:
@@ -190,8 +191,11 @@ def test_existing_salla_0100_upgrade_to_0101_creates_nonce_table(postgres_engine
         with fresh.connect() as conn:
             assert "salla_embedded_identity_bindings" in inspect(fresh).get_table_names()
             assert "whatsapp_oauth_nonces" not in inspect(fresh).get_table_names()
-        _run_alembic(fresh, "0101")
+        _run_alembic(fresh, "0102")
         _assert_nonce_table(fresh)
+        with fresh.connect() as conn:
+            revs = [row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))]
+        assert "0102" in revs
     finally:
         fresh.dispose()
         with admin.connect() as conn:
@@ -679,3 +683,79 @@ def test_pg_callback_graph_requests_exclude_sensitive_query_params(postgres_engi
         assert "access_token" not in req.url.params
         assert "user-long-token" not in str(req.url)
         assert req.headers.get("authorization") == "Bearer user-long-token"
+
+def test_durable_nonce_consume_survives_session_rollback(pg_session: Session, postgres_engine) -> None:
+    tenant_id = 990890
+    pg_session.add(Tenant(id=tenant_id, name="durable", is_active=True))
+    pg_session.commit()
+    nonce = "pg-nonce-durable-877"
+    persist_oauth_nonce(
+        pg_session,
+        nonce=nonce,
+        tenant_id=tenant_id,
+        connection_mode="coexistence",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    pg_session.commit()
+    assert (
+        consume_oauth_nonce_durable(
+            postgres_engine,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+        )
+        == "consumed"
+    )
+    pg_session.rollback()
+    assert (
+        consume_oauth_nonce_durable(
+            postgres_engine,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+        )
+        == "already_consumed"
+    )
+
+
+def test_concurrent_durable_nonce_consume_single_winner(postgres_engine: Engine) -> None:
+    tenant_id = 990891
+    nonce = "pg-nonce-durable-conc-877"
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    with postgres_engine.begin() as conn:
+        setup_session = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup_session.add(Tenant(id=tenant_id, name="durable-conc", is_active=True))
+        setup_session.flush()
+        persist_oauth_nonce(
+            setup_session,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+            expires_at=expires,
+        )
+        setup_session.flush()
+
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        outcome = consume_oauth_nonce_durable(
+            postgres_engine,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+        )
+        with lock:
+            results.append(outcome)
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+    assert sorted(results) == ["already_consumed", "consumed"]
+
+    with postgres_engine.begin() as conn:
+        conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id = :tid"), {"tid": tenant_id})
+        conn.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": tenant_id})

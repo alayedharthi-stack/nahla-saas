@@ -217,3 +217,24 @@ def test_concurrent_commit_connection_one_conflict(pg_engine):
                 ),
                 {"phone": PHONE, "waba": WABA},
             )
+
+def test_asset_lock_released_on_exception(pg_engine) -> None:
+    from services.whatsapp_asset_lock import whatsapp_asset_advisory_lock_hold
+    from sqlalchemy import text
+
+    with pg_engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    try:
+        with whatsapp_asset_advisory_lock_hold(
+            pg_engine,
+            phone_number_id="CANCEL-PHONE-877",
+            waba_id="CANCEL-WABA-877",
+        ):
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    with pg_engine.connect() as conn:
+        conn.execute(
+            text("SELECT pg_advisory_unlock(:c, :k)"),
+            {"c": 877010, "k": 1},
+        )
