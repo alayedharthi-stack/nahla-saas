@@ -58,6 +58,12 @@ from core.coexistence_client_id import (
     sanitize_coexistence_client_id,
 )
 from core.database import get_db
+from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+from services.wa_direct_logging import (
+    log_wa_direct_exception,
+    log_wa_direct_graph_result,
+    log_wa_direct_stage,
+)
 from core.tenant import get_or_create_settings, get_or_create_tenant, resolve_tenant_id
 from core.whatsapp_connection_finalization import (
     WhatsAppConnectionFinalizationError,
@@ -309,12 +315,14 @@ def _log_d360_verify(
     pd = dict(meta.get("provider_details") or {})
     channel_id = pd.get("channel_id") or pd.get("channel") or "-"
 
+    _pid = getattr(conn, "phone_number_id", None) if conn else None
+    _wid = getattr(conn, "whatsapp_business_account_id", None) if conn else None
     fields = {
         "tenant_id":             tenant_id,
         "connection_id":         getattr(conn, "id", None) if conn else None,
         "channel_id":            channel_id,
-        "phone_number_id":       getattr(conn, "phone_number_id", None) if conn else None,
-        "waba_id":               getattr(conn, "whatsapp_business_account_id", None) if conn else None,
+        "phone_number_id":       redact_graph_id(_pid) if _pid else None,
+        "waba_id":               redact_graph_id(_wid) if _wid else None,
         "api_key_tail":          _d360_key_tail(getattr(conn, "access_token", None) if conn else None),
         "operation":             operation,
         "endpoint_used":         endpoint_used,
@@ -1369,10 +1377,13 @@ async def embedded_signup_callback(
             )
             db.commit()
 
-        logger.info(
-            "tenant=%s WhatsApp oauth callback done — WABA=%s phone=%s readiness=%s",
-            tenant_id, _wid_to_write, _pid_to_write,
-            result.to_api_dict().get("readiness"),
+        log_wa_direct_stage(
+            stage="oauth callback done",
+            tenant_id=tenant_id,
+            success=True,
+            phone_number_id=_pid_to_write,
+            waba_id=_wid_to_write,
+            tag="whatsapp/oauth",
         )
 
         # Notify merchant — WhatsApp connected
@@ -1388,7 +1399,7 @@ async def embedded_signup_callback(
             if _phone:
                 _asyncio.ensure_future(notify_whatsapp_connected(_phone, _sname))
         except Exception as _exc:  # noqa: BLE001
-            logger.warning("tenant=%s WhatsApp-connected notification error: %s", tenant_id, _exc)
+            log_wa_direct_exception("whatsapp connected notification", _exc, tenant_id=tenant_id)
 
         api_dict = result.to_api_dict()
         if conn:
@@ -1401,7 +1412,7 @@ async def embedded_signup_callback(
         conn.status     = "error"
         conn.last_error = str(exc)[:1000]
         db.commit()
-        logger.error("tenant=%s WhatsApp callback error: %s", tenant_id, exc)
+        log_wa_direct_exception("whatsapp callback", exc, tenant_id=tenant_id, level="error")
         raise HTTPException(status_code=502, detail=f"Meta callback failed: {exc}") from exc
 
 
@@ -1664,11 +1675,7 @@ async def manual_connect(
         raise HTTPException(status_code=422, detail="Access Token مطلوب")
 
     # ── Step 4: log the resolved identity BEFORE any write ────────────────────
-    logger.info(
-        "[manual_connect] IDENTITY RESOLVED — tenant_id=%s tenant_name=%r "
-        "actor_user_id=%s phone_number_id=%s waba_id=%s ip=%s",
-        tenant_id, tenant_row.name, actor_user_id, pid, wid, client_ip,
-    )
+    log_wa_direct_stage(stage="manual connect identity resolved", tenant_id=tenant_id, phone_number_id=pid, waba_id=wid, tag="manual_connect")
 
     # ── Step 5+6: delegate write + webhook to the canonical connection service ──
     # All integrity checks, the DB write, and webhook subscription happen inside
@@ -1694,12 +1701,7 @@ async def manual_connect(
     except WhatsAppConnectionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    logger.info(
-        "[manual_connect] DONE — tenant_id=%s tenant_name=%r phone=%s waba=%s "
-        "readiness=%s actor=%s",
-        tenant_id, tenant_row.name, pid, wid,
-        result.to_api_dict().get("readiness"), actor_user_id,
-    )
+    log_wa_direct_stage(stage="manual connect done", tenant_id=tenant_id, success=True, phone_number_id=pid, waba_id=wid, tag="manual_connect")
     return result.to_api_dict()
 
 
@@ -2007,8 +2009,7 @@ async def coexistence_partner_connect(
         partner_id=D360_PARTNER_ID,
         channel_id=channel_id,
     )
-    logger.info("[coexistence/partner-connect] tenant=%s client=%s channel=%s info=%s",
-                tenant_id, body.client_id, channel_id, channel_info)
+    log_wa_direct_stage(stage="partner-connect channel", tenant_id=tenant_id, success=bool(channel_id), tag="coexistence")
 
     # Attempt to generate an API key
     api_key_resp = await dialog360_generate_api_key(
@@ -2061,7 +2062,7 @@ async def coexistence_partner_connect(
                 timeout=5.0,
             )
         except Exception as exc:
-            logger.warning("[coexistence/partner-connect] webhook configure fail-open: %s", exc)
+            log_wa_direct_exception("coexistence partner webhook configure", exc, tag="coexistence")
             webhook_result = {"error": str(exc)[:500]}
         # ALSO set the WABA-level webhook (override_all=True) — this is the
         # only scope that guarantees inbound delivery when 360dialog rotates
@@ -2076,7 +2077,7 @@ async def coexistence_partner_connect(
                 timeout=8.0,
             )
         except Exception as exc:
-            logger.warning("[coexistence/partner-connect] WABA webhook fail-open: %s", exc)
+            log_wa_direct_exception("coexistence partner waba webhook", exc, tag="coexistence")
             waba_webhook_result = {"error": str(exc)[:500]}
         channel_ok = "error" not in (webhook_result or {})
         waba_ok    = "error" not in (waba_webhook_result or {})
@@ -2200,7 +2201,7 @@ async def admin_activate_coexistence(
                 timeout=5.0,
             )
         except Exception as exc:
-            logger.warning("[coexistence/activate] webhook configure fail-open: %s", exc)
+            log_wa_direct_exception("coexistence activate webhook configure", exc, tag="coexistence")
             webhook_result = {"error": str(exc)[:500]}
         try:
             waba_webhook_result = await dialog360_set_waba_webhook(
@@ -2211,7 +2212,7 @@ async def admin_activate_coexistence(
                 timeout=8.0,
             )
         except Exception as exc:
-            logger.warning("[coexistence/activate] WABA webhook fail-open: %s", exc)
+            log_wa_direct_exception("coexistence activate waba webhook", exc, tag="coexistence")
             waba_webhook_result = {"error": str(exc)[:500]}
         channel_ok = "error" not in (webhook_result or {})
         waba_ok    = "error" not in (waba_webhook_result or {})
@@ -2248,7 +2249,7 @@ async def admin_activate_coexistence(
         try:
             await _resolve_and_apply_metadata(conn, request_id=request_id, source="activate")
         except Exception as exc:
-            logger.warning("[coexistence/activate] auto-resolve failed tenant=%s err=%s", body.tenant_id, exc)
+            log_wa_direct_exception("coexistence activate auto-resolve", exc, tenant_id=body.tenant_id, tag="coexistence")
 
     if should_finalize:
         _finalize_connected_or_http(db, conn)
@@ -2614,11 +2615,7 @@ async def admin_coexistence_verify_webhook(
         )
     except Exception as exc:
         verify_error = f"{type(exc).__name__}: {exc}"[:400]
-        logger.warning(
-            "[admin/coexistence/verify-webhook] fail-open tenant=%s: %s",
-            body.tenant_id,
-            verify_error,
-        )
+        log_wa_direct_exception("coexistence verify-webhook", Exception(verify_error), tenant_id=body.tenant_id, tag="coexistence")
         cfg = {"error": "fail_open", "detail": verify_error}
 
     remote_url = ""
@@ -2805,7 +2802,7 @@ async def admin_coexistence_auto_configure(
             timeout=6.0,
         )
     except Exception as exc:
-        logger.warning("[admin/coexistence/auto-configure] fail-open tenant=%s: %s", body.tenant_id, exc)
+        log_wa_direct_exception("coexistence auto-configure", exc, tenant_id=body.tenant_id, tag="coexistence")
         result = {"error": str(exc)[:500]}
     ok = "error" not in (result or {})
     _log_d360_verify(
@@ -2854,10 +2851,7 @@ async def admin_coexistence_auto_configure(
         )
         waba_ok = "error" not in (waba_result or {})
     except Exception as exc:
-        logger.warning(
-            "[admin/coexistence/auto-configure] WABA webhook set failed tenant=%s: %s",
-            body.tenant_id, exc,
-        )
+        log_wa_direct_exception("coexistence auto-configure waba webhook", exc, tenant_id=body.tenant_id, tag="coexistence")
         waba_result = {"error": str(exc)[:500]}
     _log_d360_verify(
         operation="auto_configure_waba",
@@ -3440,10 +3434,7 @@ async def admin_coexistence_diagnose(
                 )
                 dup_by_channel_id = [_row_to_dup(r) for r in wa_rows]
         except Exception as exc:
-            logger.warning(
-                "[admin/coexistence/diagnose] channel_id duplicate query failed tenant=%s: %s",
-                tenant_id, exc,
-            )
+            log_wa_direct_exception("coexistence diagnose channel duplicate", exc, tenant_id=tenant_id, tag="coexistence")
 
     has_duplicates = any(
         len([d for d in lst if not d["is_this_tenant"]]) > 0
@@ -3780,8 +3771,8 @@ def _normalize_phone(raw: str) -> tuple[str, str]:
         national = cleaned
 
     logger.info(
-        "[PhoneNorm] original=%r  cleaned=%r  cc=%s  national=%s  valid=%s",
-        raw, cleaned, cc, national,
+        "[PhoneNorm] cc=%s valid=%s",
+        cc,
         bool(_re.match(r"^5\d{8}$", national)),
     )
 
@@ -3836,18 +3827,20 @@ async def direct_request_otp(
     cc, national = _normalize_phone(body.phone_number)
 
     # ── Full trace log ───────────────────────────────────────────────────────
-    logger.info(
-        "[WA Direct] request-otp TRACE | tenant=%s "
-        "original_input=%r  cc=%s  national=%s  waba=%s",
-        tenant_id, body.phone_number, cc, national, WA_BUSINESS_ACCOUNT_ID,
+    log_wa_direct_stage(
+        stage="request-otp start",
+        tenant_id=tenant_id,
+        waba_id=WA_BUSINESS_ACCOUNT_ID,
     )
 
     # Validate after normalization — reject early with a clear Arabic message
     phone_err = _validate_phone(cc, national)
     if phone_err:
-        logger.warning(
-            "[WA Direct] PHONE_VALIDATION_ERROR | tenant=%s input=%r cc=%s national=%s reason=%s",
-            tenant_id, body.phone_number, cc, national, phone_err,
+        log_wa_direct_stage(
+            stage="request-otp phone validation failed",
+            tenant_id=tenant_id,
+            success=False,
+            level="warning",
         )
         raise HTTPException(
             status_code=400,
@@ -3861,9 +3854,10 @@ async def direct_request_otp(
         "Content-Type":  "application/json",
     }
 
-    logger.info(
-        "[WA Direct] META_REQUEST | tenant=%s WABA=%s cc=%s national=%s display_name=%r method=%s",
-        tenant_id, WA_BUSINESS_ACCOUNT_ID, cc, national, body.display_name, body.method,
+    log_wa_direct_stage(
+        stage="request-otp meta request",
+        tenant_id=tenant_id,
+        waba_id=WA_BUSINESS_ACCOUNT_ID,
     )
 
     # ── Check DB: if already pending for same number, validate ID then skip add ──
@@ -3875,9 +3869,10 @@ async def direct_request_otp(
         and existing_conn.phone_number == full_phone
     ):
         stored_phone_id = existing_conn.phone_number_id
-        logger.info(
-            "[WA Direct] Pending resume candidate tenant=%s phone=%s id=%s — validating with Meta",
-            tenant_id, full_phone, stored_phone_id,
+        log_wa_direct_stage(
+            stage="pending resume validate",
+            tenant_id=tenant_id,
+            phone_number_id=stored_phone_id,
         )
         # ── Validate the stored phone_number_id is still alive on Meta ────────
         id_valid = False
@@ -3890,18 +3885,20 @@ async def direct_request_otp(
                 )
                 chk_data = chk.json()
             if "error" in chk_data:
-                logger.warning(
-                    "[WA Direct] Stored phone_number_id=%s is STALE (Meta error=%s) — will re-add",
-                    stored_phone_id, chk_data["error"],
+                log_wa_direct_graph_result(
+                    stage="pending resume stale id",
+                    tenant_id=tenant_id,
+                    response=chk_data,
+                    phone_number_id=stored_phone_id,
                 )
                 # Clear stale ID so the add-step runs below
                 existing_conn.phone_number_id = None
                 db.commit()
             else:
                 id_valid = True
-                logger.info("[WA Direct] phone_number_id=%s still valid — resuming", stored_phone_id)
+                log_wa_direct_stage(stage="pending resume id valid", tenant_id=tenant_id, success=True, phone_number_id=stored_phone_id)
         except Exception as exc:
-            logger.warning("[WA Direct] Validation check failed (%s) — will re-add", exc)
+            log_wa_direct_exception("pending resume validate", exc, tenant_id=tenant_id, secrets=[token_ctx.token if token_ctx else None, stored_phone_id])
 
         if id_valid:
             phone_number_id = stored_phone_id
@@ -3919,7 +3916,7 @@ async def direct_request_otp(
                     err_code    = err.get("code", 0)
                     err_subcode = err.get("error_subcode", 0)
                     user_msg    = err.get("error_user_msg", "")
-                    logger.warning("[WA Direct] Resend OTP error (pending resume): %s", otp_data)
+                    log_wa_direct_graph_result(stage="pending resume request otp", tenant_id=tenant_id, response=otp_data, phone_number_id=phone_number_id)
 
                     # Rate-limited / too many failed attempts — surface to user
                     RATE_CODES = {136024, 131056, 131042, 368, 4, 17, 80007, 2388091}
@@ -3942,7 +3939,7 @@ async def direct_request_otp(
             except HTTPException:
                 raise
             except Exception as exc:
-                logger.warning("[WA Direct] Resend OTP exception (pending resume): %s", exc)
+                log_wa_direct_exception("pending resume request otp", exc, tenant_id=tenant_id, secrets=[token_ctx.token if token_ctx else None, phone_number_id])
             # OTP sent successfully — proceed to Step 2
             return {
                 "status":          META_CODE_SENT,
@@ -3968,13 +3965,16 @@ async def direct_request_otp(
             dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "").replace("+", "")
             if bare_number in dp or dp in bare_number:
                 phone_number_id = entry["id"]
-                logger.info(
-                    "[WA Direct] Phone already in WABA id=%s dp=%s status=%s",
-                    phone_number_id, dp, entry.get("code_verification_status"),
+                log_wa_direct_stage(
+                    stage="waba phone-list match",
+                    tenant_id=tenant_id,
+                    success=True,
+                    phone_number_id=phone_number_id,
+                    waba_id=WA_BUSINESS_ACCOUNT_ID,
                 )
                 break
     except Exception as lookup_exc:
-        logger.warning("[WA Direct] WABA phone list lookup failed: %s", lookup_exc)
+        log_wa_direct_exception("waba phone-list lookup", lookup_exc, tenant_id=tenant_id, secrets=[token_ctx.token if token_ctx else None, WA_BUSINESS_ACCOUNT_ID])
 
     # ── Step B: Add phone number to WABA only if not already there ───────────
     if not phone_number_id:
@@ -3992,7 +3992,7 @@ async def direct_request_otp(
                 )
                 add_data = add_resp.json()
         except Exception as exc:
-            logger.error("[WA Direct] Add phone API error: %s", exc)
+            log_wa_direct_exception("add phone", exc, tenant_id=tenant_id, level="error", secrets=[token_ctx.token if token_ctx else None, WA_BUSINESS_ACCOUNT_ID, national, bare_number])
             raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
 
         if "error" in add_data:
@@ -4001,10 +4001,7 @@ async def direct_request_otp(
             subcode  = err.get("error_subcode", 0)
             msg      = err.get("message", "")
             user_msg = err.get("error_user_msg", "") or err.get("error_user_title", "")
-            logger.warning(
-                "[WA Direct] Add phone raw_error code=%s subcode=%s msg=%s full=%s",
-                code, subcode, msg, add_data,
-            )
+            log_wa_direct_graph_result(stage="add phone", tenant_id=tenant_id, response=add_data, waba_id=WA_BUSINESS_ACCOUNT_ID)
             internal_code, ux_message = _normalize_meta_error(code, msg, subcode, user_msg)
             # Try to extract phone_number_id from error_data
             phone_number_id = err.get("error_data", {}).get("id", "") or ""
@@ -4051,7 +4048,7 @@ async def direct_request_otp(
             )
             otp_data = otp_resp.json()
     except Exception as exc:
-        logger.error("[WA Direct] Request OTP API error: %s", exc)
+        log_wa_direct_exception("request otp", exc, tenant_id=tenant_id, level="error", secrets=[token_ctx.token if token_ctx else None, phone_number_id])
         raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
     if "error" in otp_data:
@@ -4059,10 +4056,7 @@ async def direct_request_otp(
         err_code = err.get("code", 0)
         err_sub  = err.get("error_subcode", 0)
         err_msg  = err.get("message", "")
-        logger.warning(
-            "[WA Direct] OTP request raw_error code=%s subcode=%s msg=%r fbtrace=%s full=%s",
-            err_code, err_sub, err_msg, err.get("fbtrace_id"), otp_data,
-        )
+        log_wa_direct_graph_result(stage="request otp", tenant_id=tenant_id, response=otp_data, phone_number_id=phone_number_id)
         # Rate-limited or code already sent → tell user to use the previous code
         RATE_LIMIT_CODES = {131056, 131042, 368, 4, 17}
         OTP_SENT_SUBCODES = {2388016, 2388021}
@@ -4085,10 +4079,7 @@ async def direct_request_otp(
         # If phone is already in WABA (phone_number_id known), proceed to Step 2
         # regardless of OTP error — user may already have the code
         if phone_number_id:
-            logger.info(
-                "[WA Direct] OTP step failed but phone_number_id=%s known → resuming Step 2",
-                phone_number_id,
-            )
+            log_wa_direct_stage(stage="request otp failed resume step2", tenant_id=tenant_id, success=False, phone_number_id=phone_number_id)
             return {
                 "status":          META_CODE_SENT,
                 "code":            META_CODE_SENT,
@@ -4098,10 +4089,7 @@ async def direct_request_otp(
             }
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
-    logger.info(
-        "[WA Direct] OTP sent | tenant=%s phone_number_id=%s",
-        tenant_id, phone_number_id,
-    )
+    log_wa_direct_stage(stage="request otp sent", tenant_id=tenant_id, success=True, phone_number_id=phone_number_id)
 
     return {
         "status":          META_CODE_SENT,
@@ -4146,14 +4134,14 @@ async def direct_resend_otp(
             )
             data = r.json()
     except Exception as exc:
-        logger.error("[WA Resend] API error: %s", exc)
+        log_wa_direct_exception("resend otp", exc, tenant_id=tenant_id, level="error", tag="WA Resend", secrets=[token_ctx.token if token_ctx else None, phone_number_id])
         raise HTTPException(status_code=503, detail="خطأ في الاتصال بـ Meta")
 
     if "error" in data:
         err = data["error"]
         err_code    = err.get("code", 0)
         err_subcode = err.get("error_subcode", 0)
-        logger.warning("[WA Resend] raw_error code=%s subcode=%s full=%s", err_code, err_subcode, data)
+        log_wa_direct_graph_result(stage="resend otp", tenant_id=tenant_id, response=data, phone_number_id=phone_number_id, tag="WA Resend")
 
         # ── Stale / invalid phone_number_id (Meta error 100, subcode 33) ──────
         # The stored ID no longer exists on Meta — try to find the fresh one or reset.
@@ -4162,7 +4150,7 @@ async def direct_resend_otp(
             fresh_id = ""
             try:
                 stored_phone = (conn.phone_number or "").replace("+","").replace(" ","").replace("-","")
-                logger.info("[WA Resend] ID stale — searching WABA list for phone=%s", stored_phone)
+                log_wa_direct_stage(stage="resend stale id lookup", tenant_id=tenant_id, tag="WA Resend")
                 async with httpx.AsyncClient(timeout=15) as client:
                     lst = await client.get(
                         f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
@@ -4174,10 +4162,10 @@ async def direct_resend_otp(
                     dp = entry.get("display_phone_number","").replace(" ","").replace("-","").replace("+","")
                     if stored_phone and (stored_phone in dp or dp in stored_phone):
                         fresh_id = entry["id"]
-                        logger.info("[WA Resend] fresh ID found: %s for phone=%s", fresh_id, stored_phone)
+                        log_wa_direct_stage(stage="resend fresh id found", tenant_id=tenant_id, success=True, phone_number_id=fresh_id, tag="WA Resend")
                         break
             except Exception as lookup_exc:
-                logger.error("[WA Resend] WABA lookup failed: %s", lookup_exc)
+                log_wa_direct_exception("resend waba lookup", lookup_exc, tenant_id=tenant_id, level="error", tag="WA Resend", secrets=[token_ctx.token if token_ctx else None])
 
             if fresh_id:
                 # Update DB and retry request_code with fresh ID
@@ -4192,7 +4180,7 @@ async def direct_resend_otp(
                             json={"code_method": "SMS", "language": "ar"},
                         )
                         d2 = r2.json()
-                    logger.info("[WA Resend] retry with fresh_id=%s result=%s", fresh_id, d2)
+                    log_wa_direct_graph_result(stage="resend retry", tenant_id=tenant_id, response=d2, phone_number_id=fresh_id, tag="WA Resend")
                     if "error" not in d2:
                         if conn:
                             conn.last_attempt_at = datetime.now(timezone.utc)
@@ -4203,7 +4191,7 @@ async def direct_resend_otp(
                             "message":         "تم إرسال رمز تحقق جديد إلى رقمك.",
                         }
                 except Exception as retry_exc:
-                    logger.error("[WA Resend] retry with fresh_id failed: %s", retry_exc)
+                    log_wa_direct_exception("resend retry", retry_exc, tenant_id=tenant_id, level="error", tag="WA Resend", secrets=[token_ctx.token if token_ctx else None, fresh_id])
 
             # Fresh ID not found — clear stale DB record and force restart
             logger.warning("[WA Resend] Cannot recover stale ID for tenant=%s — clearing DB", tenant_id)
@@ -4278,10 +4266,7 @@ async def direct_verify_otp(
         "Content-Type":  "application/json",
     }
 
-    logger.info(
-        "[WA verify] ▶ START | tenant=%s phone_number_id=%s waba=%s token_present=%s",
-        tenant_id, phone_id, WA_BUSINESS_ACCOUNT_ID, bool(token_ctx.token),
-    )
+    log_wa_direct_stage(stage="verify start", tenant_id=tenant_id, phone_number_id=phone_id, waba_id=WA_BUSINESS_ACCOUNT_ID, success=bool(token_ctx.token))
 
     # ── Pre-check: confirm phone_number_id belongs to our WABA & token ────────
     # If the stored ID is stale/inaccessible, try to find the fresh ID from WABA.
@@ -4294,26 +4279,16 @@ async def direct_verify_otp(
             )
             chk_data   = chk_resp.json()
             chk_status = chk_resp.status_code
-        logger.info(
-            "[WA verify] pre-check GET /%s | http=%s body=%s",
-            phone_id, chk_status, chk_data,
-        )
+        log_wa_direct_graph_result(stage="verify pre-check", tenant_id=tenant_id, response=chk_data, http_status=chk_status, phone_number_id=phone_id, tag="WA verify")
         if "error" in chk_data:
             chk_err = chk_data["error"]
-            logger.warning(
-                "[WA verify] pre-check FAILED for id=%s (code=%s msg=%s) — "
-                "trying fresh WABA lookup to find correct phone_number_id",
-                phone_id, chk_err.get("code"), chk_err.get("message"),
-            )
+            log_wa_direct_graph_result(stage="verify pre-check failed", tenant_id=tenant_id, response=chk_data, phone_number_id=phone_id, tag="WA verify")
             # ── Fallback: find correct phone_number_id from WABA phone list ──
             fresh_id = ""
             try:
                 conn_rec = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
                 stored_phone = (conn_rec.phone_number or "").replace("+", "").replace(" ", "").replace("-", "")
-                logger.info(
-                    "[WA verify] fallback lookup — stored_phone=%s WABA=%s",
-                    stored_phone, WA_BUSINESS_ACCOUNT_ID,
-                )
+                log_wa_direct_stage(stage="verify fallback lookup", tenant_id=tenant_id, waba_id=WA_BUSINESS_ACCOUNT_ID, tag="WA verify")
                 async with httpx.AsyncClient(timeout=15) as client:
                     list_resp = await client.get(
                         f"{graph}/{WA_BUSINESS_ACCOUNT_ID}/phone_numbers",
@@ -4321,24 +4296,18 @@ async def direct_verify_otp(
                         params={"fields": "id,display_phone_number,code_verification_status"},
                     )
                     list_data = list_resp.json()
-                logger.info("[WA verify] WABA phone list: %s", list_data)
+                log_wa_direct_graph_result(stage="verify waba phone-list", tenant_id=tenant_id, response=list_data, waba_id=WA_BUSINESS_ACCOUNT_ID, tag="WA verify")
                 for entry in list_data.get("data", []):
                     dp = entry.get("display_phone_number", "").replace(" ", "").replace("-", "").replace("+", "")
                     if stored_phone and (stored_phone in dp or dp in stored_phone):
                         fresh_id = entry["id"]
-                        logger.info(
-                            "[WA verify] fallback found fresh id=%s for phone=%s",
-                            fresh_id, stored_phone,
-                        )
+                        log_wa_direct_stage(stage="verify fallback fresh id", tenant_id=tenant_id, success=True, phone_number_id=fresh_id, tag="WA verify")
                         break
             except Exception as lookup_exc:
-                logger.error("[WA verify] fallback lookup error: %s", lookup_exc)
+                log_wa_direct_exception("verify fallback lookup", lookup_exc, tenant_id=tenant_id, level="error", tag="WA verify", secrets=[token_ctx.token, phone_id])
 
             if fresh_id:
-                logger.info(
-                    "[WA verify] replacing stale phone_number_id=%s → %s",
-                    phone_id, fresh_id,
-                )
+                log_wa_direct_stage(stage="verify replace stale id", tenant_id=tenant_id, phone_number_id=fresh_id, tag="WA verify")
                 phone_id = fresh_id
                 # Update DB with fresh ID
                 conn_u = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
@@ -4346,11 +4315,7 @@ async def direct_verify_otp(
                     conn_u.phone_number_id = fresh_id
                     db.commit()
             else:
-                logger.error(
-                    "[WA verify] phone_number_id=%s not accessible and no fresh ID found | "
-                    "WABA=%s token_present=%s",
-                    phone_id, WA_BUSINESS_ACCOUNT_ID, bool(token_ctx.token),
-                )
+                log_wa_direct_stage(stage="verify no fresh id", tenant_id=tenant_id, success=False, phone_number_id=phone_id, waba_id=WA_BUSINESS_ACCOUNT_ID, level="error", tag="WA verify")
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -4362,15 +4327,12 @@ async def direct_verify_otp(
     except HTTPException:
         raise
     except Exception as pre_exc:
-        logger.warning("[WA verify] pre-check network error (non-fatal): %s", pre_exc)
+        log_wa_direct_exception("verify pre-check network", pre_exc, tenant_id=tenant_id, tag="WA verify", secrets=[token_ctx.token, phone_id, body.code])
 
     # ── Step A: verify_code ───────────────────────────────────────────────────
     verify_endpoint = f"{graph}/{phone_id}/verify_code"
     verify_payload  = {"code": body.code}
-    logger.info(
-        "[WA verify] ▶ verify_code | method=POST endpoint=%s payload=%s",
-        verify_endpoint, verify_payload,
-    )
+    log_wa_direct_stage(stage="verify_code request", tenant_id=tenant_id, phone_number_id=phone_id, tag="WA verify")
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             verify_resp = await client.post(
@@ -4381,18 +4343,15 @@ async def direct_verify_otp(
             verify_status = verify_resp.status_code
             verify_data   = verify_resp.json()
     except Exception as exc:
-        logger.error("[WA verify] verify_code network error: %s", exc)
+        log_wa_direct_exception("verify_code", exc, tenant_id=tenant_id, level="error", tag="WA verify", secrets=[token_ctx.token, phone_id, body.code])
         raise HTTPException(status_code=503, detail=_UX_MESSAGES[META_UNKNOWN_ERROR])
 
-    logger.info(
-        "[WA verify] verify_code response | http=%s body=%s",
-        verify_status, verify_data,
-    )
+    log_wa_direct_graph_result(stage="verify_code", tenant_id=tenant_id, response=verify_data, http_status=verify_status, phone_number_id=phone_id, tag="WA verify")
 
     if "error" in verify_data:
         err  = verify_data["error"]
         code = err.get("code", 0)
-        logger.warning("[WA Direct] submit_otp Meta error | code=%s full=%s", code, verify_data)
+        log_wa_direct_graph_result(stage="submit otp", tenant_id=tenant_id, response=verify_data, phone_number_id=phone_id)
         if code in (136012, 136013):
             raise HTTPException(
                 status_code=400,
@@ -4410,10 +4369,7 @@ async def direct_verify_otp(
     if _conn_for_pin:
         db.commit()
 
-    logger.info(
-        "[WA Direct] ▶ register | endpoint=POST %s/%s/register",
-        graph, phone_id,
-    )
+    log_wa_direct_stage(stage="register request", tenant_id=tenant_id, phone_number_id=phone_id)
     register_data: dict = {}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -4425,24 +4381,18 @@ async def direct_verify_otp(
             reg_status = reg_resp.status_code
             register_data = reg_resp.json()
     except Exception as exc:
-        logger.error("[WA Direct] register network error: %s", exc)
+        log_wa_direct_exception("register", exc, tenant_id=tenant_id, level="error", secrets=[token_ctx.token, phone_id])
         register_data = {}
         reg_status    = 0
 
-    logger.info(
-        "[WA Direct] register response | status=%s body=%s",
-        reg_status, register_data,
-    )
+    log_wa_direct_graph_result(stage="register", tenant_id=tenant_id, response=register_data, http_status=reg_status, phone_number_id=phone_id)
 
     if "error" in register_data:
         reg_err = register_data["error"]
         reg_code = reg_err.get("code", 0)
         # Error 80007 = already registered — that is acceptable
         if reg_code != 80007:
-            logger.warning(
-                "[WA Direct] register failed | code=%s full=%s",
-                reg_code, register_data,
-            )
+            log_wa_direct_graph_result(stage="register failed", tenant_id=tenant_id, response=register_data, phone_number_id=phone_id)
             ic, ux = _normalize_meta_error(reg_code, reg_err.get("message", ""), reg_err.get("error_subcode", 0))
             raise HTTPException(
                 status_code=400,
@@ -4451,10 +4401,7 @@ async def direct_verify_otp(
             )
 
     # ── Step C: fetch real phone status from Meta ─────────────────────────────
-    logger.info(
-        "[WA Direct] ▶ fetch_phone_status | endpoint=GET %s/%s",
-        graph, phone_id,
-    )
+    log_wa_direct_stage(stage="fetch phone status request", tenant_id=tenant_id, phone_number_id=phone_id)
     phone_number  = ""
     display_name  = ""
     meta_status   = ""
@@ -4468,16 +4415,13 @@ async def direct_verify_otp(
             info_status = info_resp.status_code
             info        = info_resp.json()
 
-        logger.info(
-            "[WA Direct] fetch_phone_status response | status=%s body=%s",
-            info_status, info,
-        )
+        log_wa_direct_graph_result(stage="fetch phone status", tenant_id=tenant_id, response=info, http_status=info_status, phone_number_id=phone_id)
 
         phone_number = info.get("display_phone_number", "")
         display_name = info.get("verified_name", "")
         meta_status  = info.get("code_verification_status", "")
     except Exception as exc:
-        logger.error("[WA Direct] fetch_phone_status error: %s", exc)
+        log_wa_direct_exception("fetch phone status", exc, tenant_id=tenant_id, level="error", secrets=[token_ctx.token, phone_id])
 
     # ── Step D: persist to DB using live Meta state ──────────────────────────
     # IMPORTANT:
@@ -4530,10 +4474,7 @@ async def direct_verify_otp(
     else:
         db.commit()
 
-    logger.info(
-        "[WA Direct] ✅ Finalized | tenant=%s phone=%s name=%s meta_verification=%s db_status=%s sending_enabled=%s",
-        tenant_id, phone_number, display_name, meta_status, conn.status, conn.sending_enabled,
-    )
+    log_wa_direct_stage(stage="verify finalized", tenant_id=tenant_id, success=bool(conn.sending_enabled), phone_number_id=phone_id)
 
     return {
         "status":              conn.status,
@@ -4660,7 +4601,7 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
             except HTTPException:
                 raise
             except Exception as exc:
-                logger.warning("[whatsapp/status] embedded sync failed tenant=%s: %s", tenant_id, exc)
+                log_wa_direct_exception("whatsapp status embedded sync", exc, tenant_id=tenant_id)
         payload = _build_wa_status(conn)
         payload["coexistence_available"] = _coexistence_enabled_for_tenant(db, tenant_id)
         return payload
@@ -4668,8 +4609,7 @@ async def whatsapp_status(request: Request, db: Session = Depends(get_db)):
         raise
     except Exception as exc:
         import traceback
-        logger.error("[whatsapp/status] unhandled error tenant=%s: %s\n%s",
-                     getattr(request.state, "tenant_id", "?"), exc, traceback.format_exc())
+        log_wa_direct_exception("whatsapp status unhandled", exc, tenant_id=getattr(request.state, "tenant_id", None), level="error", tag="whatsapp/status")
         from fastapi.responses import JSONResponse as _JSONResponse
         return _JSONResponse(
             status_code=500,
@@ -4719,10 +4659,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         "Content-Type": "application/json",
     }
 
-    logger.info(
-        "[WA refresh] ▶ fetch_phone_status | tenant=%s phone_id=%s endpoint=GET %s/%s",
-        tenant_id, phone_id, graph, phone_id,
-    )
+    log_wa_direct_stage(stage="refresh fetch phone status", tenant_id=tenant_id, phone_number_id=phone_id, tag="WA refresh")
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -4734,17 +4671,14 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             resp_status = resp.status_code
             data = resp.json()
     except Exception as exc:
-        logger.error("[WA refresh] Meta API error: %s", exc)
+        log_wa_direct_exception("refresh meta api", exc, tenant_id=tenant_id, level="error", tag="WA refresh", secrets=[token_ctx.token if token_ctx else None, phone_id])
         return {"updated": False, "message": "تعذّر الاتصال بـ Meta. حاول مرة أخرى."}
 
-    logger.info(
-        "[WA refresh] fetch_phone_status response | status=%s body=%s",
-        resp_status, data,
-    )
+    log_wa_direct_graph_result(stage="refresh fetch phone status", tenant_id=tenant_id, response=data, http_status=resp_status, phone_number_id=phone_id, tag="WA refresh")
 
     if "error" in data:
         err = data["error"]
-        logger.warning("[WA refresh] Meta error: %s", err)
+        log_wa_direct_graph_result(stage="refresh meta error", tenant_id=tenant_id, response=data, http_status=resp_status, phone_number_id=phone_id, tag="WA refresh")
         return {
             "updated": False,
             "meta_response": data,
@@ -4755,10 +4689,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     display_phone       = data.get("display_phone_number", conn.phone_number or "")
     verified_name       = data.get("verified_name", conn.business_display_name or "")
 
-    logger.info(
-        "[WA refresh] tenant=%s phone_id=%s meta_verification=%s",
-        tenant_id, phone_id, verification_status,
-    )
+    log_wa_direct_stage(stage="refresh status parsed", tenant_id=tenant_id, success=True, phone_number_id=phone_id, tag="WA refresh")
 
     # If NOT_VERIFIED: attempt register to re-activate, except Meta Coexistence.
     from services.meta_coexistence import is_coexistence_mode, smb_syncs_accepted  # noqa: PLC0415
@@ -4769,10 +4700,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         if conn:
             db.commit()
 
-        logger.info(
-            "[WA refresh] ▶ re-register | endpoint=POST %s/%s/register",
-            graph, phone_id,
-        )
+        log_wa_direct_stage(stage="refresh re-register request", tenant_id=tenant_id, phone_number_id=phone_id, tag="WA refresh")
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 reg = await client.post(
@@ -4781,9 +4709,9 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
                     json={"messaging_product": "whatsapp", "pin": _refresh_pin},
                 )
                 reg_data = reg.json()
-            logger.info("[WA refresh] re-register response | status=%s body=%s", reg.status_code, reg_data)
+            log_wa_direct_graph_result(stage="refresh re-register", tenant_id=tenant_id, response=reg_data, http_status=reg.status_code, phone_number_id=phone_id, tag="WA refresh")
         except Exception as exc:
-            logger.error("[WA refresh] re-register error: %s", exc)
+            log_wa_direct_exception("refresh re-register", exc, tenant_id=tenant_id, level="error", tag="WA refresh", secrets=[token_ctx.token if token_ctx else None, phone_id])
             reg_data = {}
 
     from routers.whatsapp_embedded import _project_phone_sync_state as _bps  # noqa: PLC0415
@@ -4900,12 +4828,12 @@ async def direct_save_profile(
             )
             data = resp.json()
     except Exception as exc:
-        logger.warning("[WA Direct] save-profile API error: %s", exc)
+        log_wa_direct_exception("save profile", exc, tenant_id=tenant_id, tag="WA Direct", secrets=[token_ctx.token if token_ctx else None])
         raise HTTPException(status_code=503, detail="خطأ في حفظ الملف التجاري")
 
     if "error" in data:
         err = data["error"]
-        logger.warning("[WA Direct] save-profile raw_error code=%s full=%s", err.get("code"), data)
+        log_wa_direct_graph_result(stage="save profile", tenant_id=tenant_id, response=data, tag="WA Direct")
         ic, ux = _normalize_meta_error(err.get("code", 0), err.get("message", ""), err.get("error_subcode", 0))
         raise HTTPException(status_code=400, detail=ux, headers={"X-Nahla-Error-Code": ic})
 
@@ -4960,10 +4888,7 @@ def _normalize_meta_error(
     Map a raw Meta error to an (internal_code, arabic_ux_message) tuple.
     The raw message is LOGGED but never returned to the UI.
     """
-    logger.debug(
-        "[MetaNormalizer] raw error code=%s subcode=%s msg=%s user_msg=%s",
-        code, subcode, message, user_msg,
-    )
+    logger.debug("[MetaNormalizer] error code=%s subcode=%s", code, subcode)
 
     # ── Subcode mapping (most specific) ─────────────────────────────────────
     subcode_map: dict[int, str] = {
@@ -5005,10 +4930,7 @@ def _normalize_meta_error(
         return META_PERMISSION_ERROR, _UX_MESSAGES[META_PERMISSION_ERROR]
 
     # Fallback — log and return generic
-    logger.info(
-        "[MetaNormalizer] unmapped error code=%s raw=%r → META_UNKNOWN_ERROR",
-        code, raw[:200],
-    )
+    logger.info("[MetaNormalizer] unmapped error code=%s subcode=%s", code, subcode)
     return META_UNKNOWN_ERROR, _UX_MESSAGES[META_UNKNOWN_ERROR]
 
 
