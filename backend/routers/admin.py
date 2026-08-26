@@ -4269,6 +4269,20 @@ async def admin_test_email(
 #
 # Both are admin-only.
 
+@router.get("/admin/salla/realtime-commerce/diag")
+async def salla_realtime_commerce_diag(
+    tenant_id: int = Query(..., description="Tenant whose Salla realtime commerce health to inspect"),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+  """Return webhook + reconciler diagnostics for Salla near-real-time commerce."""
+  from services.salla_realtime_observability import build_realtime_commerce_diag
+
+  diag = build_realtime_commerce_diag(db, tenant_id)
+  audit("admin_salla_realtime_commerce_diag", tenant_id=tenant_id)
+  return {"ok": True, "diag": diag}
+
+
 @router.get("/admin/salla/orders-poller/diag")
 async def salla_orders_poller_diag(
     tenant_id: int = Query(..., description="Tenant whose Salla integration to inspect"),

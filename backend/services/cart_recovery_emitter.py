@@ -46,6 +46,32 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.cart_recovery_emitter")
 
+def _parse_abandoned_at_naive_utc(value):
+    """Parse Salla abandonment timestamp to naive UTC for AutomationEvent.created_at."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            from services.customer_intelligence import extract_order_datetime
+            dt = extract_order_datetime({"created_at": raw})
+        except Exception:
+            dt = None
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except Exception:
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+
 
 def _extract_phone(normalised: Dict[str, Any]) -> Optional[str]:
     info = normalised.get("customer_info") or {}
@@ -209,6 +235,12 @@ def emit_cart_abandoned_if_new(
     }
 
     try:
+        abandoned_at_raw = (
+            normalised.get("abandoned_at")
+            or meta.get("abandoned_at")
+            or payload.get("abandoned_at")
+        )
+        event_created_at = _parse_abandoned_at_naive_utc(abandoned_at_raw)
         event = emit_automation_event(
             db,
             tenant_id=tenant_id,
@@ -216,6 +248,7 @@ def emit_cart_abandoned_if_new(
             customer_id=customer_id,
             payload=payload,
             commit=True,
+            created_at=event_created_at,
         )
     except Exception:
         logger.exception(

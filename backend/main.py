@@ -1316,6 +1316,11 @@ async def on_startup() -> None:
     else:
         _start("salla_coupons_poller", _f_salla_coupons_poller, 6)
 
+    def _f_salla_commerce_reconciler():
+        from services.salla_commerce_reconciler import run_salla_commerce_reconciler_scheduler  # noqa: PLC0415
+        return run_salla_commerce_reconciler_scheduler()
+    _start("salla_commerce_reconciler", _f_salla_commerce_reconciler, 6)
+
     # Tier 2 (≤ 15s) — periodic business loops
     def _f_scheduler():
         from core.scheduler import run_scheduler  # noqa: PLC0415

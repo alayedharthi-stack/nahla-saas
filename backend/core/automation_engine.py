@@ -73,6 +73,7 @@ def emit_automation_event(
     payload: Optional[Dict[str, Any]] = None,
     *,
     commit: bool = False,
+    created_at: Optional[datetime] = None,
 ) -> Any:
     """
     Insert an AutomationEvent row with processed=False.
@@ -114,7 +115,7 @@ def emit_automation_event(
         customer_id=customer_id,
         payload=payload or {},
         processed=False,
-        created_at=_utcnow_naive(),
+        created_at=created_at if created_at is not None else _utcnow_naive(),
     )
     db.add(ev)
     if commit:

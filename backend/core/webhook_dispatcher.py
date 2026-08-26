@@ -150,10 +150,21 @@ async def _dispatch_salla(db: Session, event) -> None:
         integration_connection_id=integration_connection_id,
     )
 
-    if event_type in ("order.created", "order.updated"):
+    from services.salla_realtime_events import (  # noqa: PLC0415
+        SALLA_CUSTOMER_LOGIN_EVENTS,
+        SALLA_CUSTOMER_WEBHOOK_EVENTS,
+        SALLA_ORDER_WEBHOOK_EVENTS,
+        SALLA_PRODUCT_DELETE_WEBHOOK_EVENTS,
+        SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS,
+        SALLA_SPECIAL_OFFER_WEBHOOK_EVENTS,
+        classify_abandoned_cart_event,
+    )
+
+    if event_type in SALLA_ORDER_WEBHOOK_EVENTS:
         await svc.handle_order_webhook(
             data,
             integration_resolution=integration_resolution,
+            webhook_event_type=event_type,
         )
         # Close the analytics loop: if this order is confirmed, mark the
         # matching ConversationTrace so we know the AI sale converted.
@@ -164,28 +175,45 @@ async def _dispatch_salla(db: Session, event) -> None:
             logger.debug("[Dispatcher] outcome_tracker raised (non-fatal): %s", _ot_exc)
         return
 
-    if event_type in ("product.created", "product.updated"):
-        await svc.handle_product_webhook(data)
+    if event_type in SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS:
+        await svc.handle_product_webhook(
+            data,
+            webhook_event_type=event_type,
+        )
         return
 
-    if event_type == "product.deleted":
+    if event_type in SALLA_PRODUCT_DELETE_WEBHOOK_EVENTS:
         await svc.handle_product_deleted(str(data.get("id", "")))
         return
 
-    if event_type in ("customer.created", "customer.updated"):
+    if event_type in SALLA_CUSTOMER_WEBHOOK_EVENTS:
         await svc.handle_customer_webhook(
             data,
             integration_connection_id=integration_connection_id,
         )
         return
 
-    # Salla fires `abandoned.cart` (sometimes namespaced as `cart.abandoned`)
-    # when a customer leaves the checkout. We persist the cart payload into
-    # the same Order table the dashboard reads from with `is_abandoned=True`
-    # so the recovery automation can pick it up immediately — without having
-    # to wait for the next scheduled `sync_abandoned_carts` poll.
-    if event_type in ("abandoned.cart", "cart.abandoned", "abandoned_cart"):
-        await svc.handle_abandoned_cart_webhook(data)
+    if event_type in SALLA_CUSTOMER_LOGIN_EVENTS:
+        logger.info(
+            "[Dispatcher] customer.login acknowledged tenant=%s webhook_event_id=%s",
+            tenant_id, event.id,
+        )
+        return
+
+    cart_kind = classify_abandoned_cart_event(event_type)
+    if cart_kind is not None:
+        await svc.handle_abandoned_cart_webhook(
+            data,
+            event_kind=cart_kind,
+            webhook_event_type=event_type,
+        )
+        return
+
+    if event_type in SALLA_SPECIAL_OFFER_WEBHOOK_EVENTS:
+        await svc.handle_special_offer_webhook(
+            data,
+            webhook_event_type=event_type,
+        )
         return
 
     # Merchant saved App Quick-Setup settings inside Salla Partner Portal.
