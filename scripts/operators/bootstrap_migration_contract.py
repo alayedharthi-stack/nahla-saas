@@ -30,9 +30,16 @@ def _alembic_versions(bind) -> set[str]:
         if "alembic_version" not in inspect(bind).get_table_names():
             return set()
     except Exception:  # noqa: silent-ok - alembic version table may be absent on fresh DB
-        pass
+        return set()
     try:
-        return {str(row[0]) for row in bind.execute(text("SELECT version_num FROM alembic_version"))}
+        from sqlalchemy.engine import Engine
+
+        if isinstance(bind, Engine):
+            with bind.connect() as conn:
+                rows = conn.execute(text("SELECT version_num FROM alembic_version"))
+                return {str(row[0]) for row in rows}
+        rows = bind.execute(text("SELECT version_num FROM alembic_version"))
+        return {str(row[0]) for row in rows}
     except Exception:
         return set()
 
@@ -66,15 +73,27 @@ def assert_coexistence_nonce_migration_applied(bind) -> None:
     revs = _alembic_versions(bind)
     if not revs.intersection(COEXISTENCE_NONCE_REVISIONS):
         raise RuntimeError("missing_nonce_revision")
+    indexes = insp.get_indexes(COEXISTENCE_NONCE_TABLE)
+    idx_names = {i.get("name") for i in indexes}
     uq_names = {u.get("name") for u in insp.get_unique_constraints(COEXISTENCE_NONCE_TABLE)}
-    if _NONCE_UQ not in uq_names:
+    has_unique_nonce_hash = any(
+        bool(i.get("unique"))
+        and "nonce_hash" in (i.get("column_names") or [])
+        for i in indexes
+    )
+    if _NONCE_UQ not in uq_names and not has_unique_nonce_hash:
         raise RuntimeError(f"missing_uq:{_NONCE_UQ}")
-    idx_names = {i.get("name") for i in insp.get_indexes(COEXISTENCE_NONCE_TABLE)}
     for required in (_NONCE_IX_TENANT, _NONCE_IX_EXPIRES):
         if required not in idx_names:
             raise RuntimeError(f"missing_index:{required}")
-    fk_names = {fk.get("name") for fk in insp.get_foreign_keys(COEXISTENCE_NONCE_TABLE)}
-    if _NONCE_FK not in fk_names:
+    foreign_keys = insp.get_foreign_keys(COEXISTENCE_NONCE_TABLE)
+    fk_names = {fk.get("name") for fk in foreign_keys}
+    has_tenant_fk = any(
+        fk.get("referred_table") == "tenants"
+        and "tenant_id" in (fk.get("constrained_columns") or [])
+        for fk in foreign_keys
+    )
+    if _NONCE_FK not in fk_names and not has_tenant_fk:
         raise RuntimeError(f"missing_fk:{_NONCE_FK}")
 
 

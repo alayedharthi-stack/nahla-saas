@@ -155,21 +155,32 @@ def test_retry_claim_mismatch_fails():
 
 
 def _sqlite_session():
-    from sqlalchemy import JSON, create_engine
+    from sqlalchemy import JSON, create_engine, text
     from sqlalchemy.dialects.postgresql import JSONB
     from sqlalchemy.orm import sessionmaker
     from models import Base
+    from database.models import Base as DatabaseBase
 
     engine = create_engine("sqlite:///:memory:")
     saved = []
-    for table in Base.metadata.sorted_tables:
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                saved.append((col, col.type))
-                col.type = JSON()
+    for metadata in (Base.metadata, DatabaseBase.metadata):
+        for table in metadata.sorted_tables:
+            for col in table.columns:
+                if isinstance(col.type, JSONB):
+                    saved.append((col, col.type))
+                    col.type = JSON()
     Base.metadata.create_all(engine)
+    DatabaseBase.metadata.create_all(engine)
     for col, orig_type in saved:
         col.type = orig_type
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version "
+                "(version_num VARCHAR(32) NOT NULL)"
+            )
+        )
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0101')"))
     Session = sessionmaker(bind=engine)
     return Session()
 
