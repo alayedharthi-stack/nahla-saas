@@ -1,4 +1,4 @@
-﻿"""PostgreSQL integration tests for WhatsApp OAuth nonce migration and coexistence security."""
+"""PostgreSQL integration tests for WhatsApp OAuth nonce migration and coexistence security."""
 from __future__ import annotations
 
 import asyncio
@@ -359,13 +359,11 @@ def _pg_route_stack(pg_db_factory: sessionmaker, monkeypatch, *, mode: str = "su
 def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine) -> None:
     tenant_id = 990884
     nonce = "pg-nonce-conc-877"
-    setup_conn = postgres_engine.connect()
-    setup_trans = setup_conn.begin()
-    setup_session = sessionmaker(bind=setup_conn, expire_on_commit=False)()
-    try:
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    with postgres_engine.begin() as conn:
+        setup_session = sessionmaker(bind=conn, expire_on_commit=False)()
         setup_session.add(Tenant(id=tenant_id, name="conc-nonce", is_active=True))
-        setup_session.commit()
-        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        setup_session.flush()
         persist_oauth_nonce(
             setup_session,
             nonce=nonce,
@@ -373,11 +371,7 @@ def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine) -> None
             connection_mode="coexistence",
             expires_at=expires,
         )
-        setup_session.commit()
-        setup_trans.commit()
-    finally:
-        setup_session.close()
-        setup_conn.close()
+        setup_session.flush()
 
     results: list[str] = []
     lock = threading.Lock()
