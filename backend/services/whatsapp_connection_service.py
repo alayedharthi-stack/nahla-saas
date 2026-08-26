@@ -183,13 +183,13 @@ def commit_connection(
     try:
         assert_phone_id_not_claimed(db, phone_number_id, tenant_id)
     except TenantIntegrityError as exc:
-        logger.error("[WASvc] BLOCKED phone conflict tenant=%s: %s", tenant_id, exc)
+        logger.error("[WASvc] BLOCKED phone conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
         raise WhatsAppConnectionConflict(str(exc)) from exc
 
     try:
         assert_waba_id_not_claimed(db, waba_id, tenant_id)
     except TenantIntegrityError as exc:
-        logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, exc)
+        logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
         raise WhatsAppConnectionConflict(str(exc)) from exc
 
     # ── Step 3: Evict stale disconnected rows (non-fatal if eviction fails) ──
@@ -197,7 +197,7 @@ def commit_connection(
         evict_phone_id_from_other_tenants(db, phone_number_id, tenant_id)
         evict_waba_id_from_other_tenants(db, waba_id, tenant_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[WASvc] eviction warning (non-fatal): %s", exc)
+        logger.warning("[WASvc] eviction warning (non-fatal): %s", redact_sensitive_log_text(exc))
 
     # ── Step 4: Validate phone_number_id → waba_id ownership ─────────────────
     # Ask Meta whether phone_number_id actually belongs to the supplied waba_id.
@@ -325,7 +325,7 @@ def commit_connection(
         db.refresh(conn)
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        logger.error("[WASvc] DB commit FAILED tenant=%s: %s", tenant_id, exc)
+        logger.error("[WASvc] DB commit FAILED tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
         raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
 
     logger.info(
@@ -427,7 +427,7 @@ def commit_connection(
         try:
             db.commit()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[WASvc] pending-readiness commit failed: %s", exc)
+            logger.warning("[WASvc] pending-readiness commit failed: %s", redact_sensitive_log_text(exc))
 
     logger.info(
         "[WASvc] RESULT — tenant=%s readiness=%s creds=%s registered=%s webhook=%s inbound=%s",
@@ -488,7 +488,7 @@ def begin_waba_session(
     try:
         assert_waba_id_not_claimed(db, waba_id, tenant_id)
     except TenantIntegrityError as exc:
-        logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, exc)
+        logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
         raise WhatsAppConnectionConflict(str(exc)) from exc
 
     try:
@@ -530,10 +530,10 @@ def begin_waba_session(
         db.commit()
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        logger.error("[WASvc] begin_waba_session DB commit FAILED tenant=%s: %s", tenant_id, exc)
+        logger.error("[WASvc] begin_waba_session DB commit FAILED tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
         raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
 
-    logger.info("[WASvc] begin_waba_session COMMITTED — tenant=%s waba=%s", tenant_id, waba_id)
+    logger.info("[WASvc] begin_waba_session COMMITTED — tenant=%s waba=%s", tenant_id, redact_graph_id(waba_id))
 
 
 def fetch_phone_metadata(

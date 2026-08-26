@@ -92,6 +92,36 @@ router = APIRouter(prefix="/whatsapp/embedded", tags=["whatsapp-embedded"])
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 
+
+
+def _log_embedded_graph_result(
+    *,
+    stage: str,
+    tenant_id: int | None = None,
+    phone_number_id: str | None = None,
+    response: dict | None = None,
+    level: str = "info",
+) -> None:
+    """Structured Embedded Signup Graph logging without raw payloads or identifiers."""
+    has_error = isinstance(response, dict) and "error" in response
+    err = (response or {}).get("error") or {} if isinstance(response, dict) else {}
+    safe_phone = redact_graph_id(str(phone_number_id or "")) if phone_number_id else "—"
+    message = (
+        "[EmbeddedSignup] %s tenant=%s phone_id=%s success=%s error_code=%s error_subcode=%s"
+    )
+    args = (
+        stage,
+        tenant_id,
+        safe_phone,
+        not has_error,
+        err.get("code"),
+        err.get("error_subcode"),
+    )
+    if level == "warning":
+        logger.warning(message, *args)
+    else:
+        logger.info(message, *args)
+
 def _log_select_phone_otp_result(
     *,
     tenant_id: int,
@@ -99,22 +129,12 @@ def _log_select_phone_otp_result(
     otp_data: dict,
 ) -> None:
     """Structured OTP logging — never log raw Meta payloads or identifiers."""
-    safe_phone_id = redact_graph_id(str(phone_number_id or ""))
-    if isinstance(otp_data, dict) and "error" in otp_data:
-        err = otp_data.get("error") or {}
-        logger.warning(
-            "[EmbeddedSignup] select-phone OTP request failed tenant=%s phone_id=%s "
-            "error_code=%s error_subcode=%s",
-            tenant_id,
-            safe_phone_id,
-            err.get("code"),
-            err.get("error_subcode"),
-        )
-        return
-    logger.info(
-        "[EmbeddedSignup] select-phone OTP request succeeded tenant=%s phone_id=%s",
-        tenant_id,
-        safe_phone_id,
+    _log_embedded_graph_result(
+        stage="select-phone OTP request",
+        tenant_id=tenant_id,
+        phone_number_id=phone_number_id,
+        response=otp_data,
+        level="warning" if isinstance(otp_data, dict) and "error" in otp_data else "info",
     )
 
 
@@ -323,7 +343,7 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
                 logger.info("[EmbeddedSignup] WABA found via businesses: %s", redact_graph_id(waba["id"]))
                 return str(waba["id"])
     except Exception as e:
-        logger.warning("[EmbeddedSignup] Business lookup failed: %s", redact_sensitive_log_text(e))
+        logger.warning("[EmbeddedSignup] Business lookup failed: %s", redact_sensitive_log_text(e, secrets=[token]))
 
     # Strategy 3: direct query (some token types expose this edge)
     logger.info("[EmbeddedSignup] Trying /me/whatsapp_business_accounts direct query")
@@ -340,7 +360,7 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
             logger.info("[EmbeddedSignup] WABA found via direct query: %s", redact_graph_id(waba["id"]))
             return str(waba["id"])
     except Exception as e:
-        logger.warning("[EmbeddedSignup] Direct WABA query failed: %s", redact_sensitive_log_text(e))
+        logger.warning("[EmbeddedSignup] Direct WABA query failed: %s", redact_sensitive_log_text(e, secrets=[token]))
 
     raise HTTPException(
         status_code=400,
@@ -1516,7 +1536,7 @@ def _verify_oauth_state(state: str) -> _OAuthState:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("[EmbeddedSignup] oauth/callback rejected — bad state: %s", exc)
+        logger.warning("[EmbeddedSignup] oauth/callback rejected — bad state: %s", redact_sensitive_log_text(exc))
         raise HTTPException(
             status_code=400,
             detail="رابط ربط Meta غير صالح أو منتهي الصلاحية. أعد المحاولة من نحلة.",
@@ -2230,7 +2250,7 @@ async def select_phone(
     except NameError:
         raise
     except Exception as _evict_exc:  # noqa: BLE001
-        logger.warning("[EmbeddedSignup] select-phone eviction warning (non-fatal): %s", _evict_exc)
+        logger.warning("[EmbeddedSignup] select-phone eviction warning (non-fatal): %s", redact_sensitive_log_text(_evict_exc))
 
     _assign_embedded_phone_id(conn, body.phone_number_id)
     conn.phone_number          = phone_data.get("display_phone_number", "")
@@ -2337,7 +2357,7 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
                 await _get_phone_numbers(conn.whatsapp_business_account_id, list_ctx.token),
             )
         except Exception as exc:
-            logger.warning("[EmbeddedSignup] status phone list fetch failed: %s", exc)
+            logger.warning("[EmbeddedSignup] status phone list fetch failed: %s", redact_sensitive_log_text(exc))
 
     if conn.phone_number_id:
         try:
@@ -2350,7 +2370,7 @@ async def get_status(request: Request, db: Session = Depends(get_db)):
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("[EmbeddedSignup] status sync failed tenant=%s: %s", tenant_id, exc)
+            logger.warning("[EmbeddedSignup] status sync failed tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
             conn.last_error = str(exc)[:500]
             db.commit()
 
@@ -2478,7 +2498,7 @@ async def add_phone(
             continue
         break
 
-    logger.info("[EmbeddedSignup] add-phone register: %s", reg_data)
+    _log_embedded_graph_result(stage="add-phone register", tenant_id=tenant_id, response=reg_data)
 
     if "error" in reg_data:
         err = reg_data["error"]
@@ -2561,7 +2581,7 @@ async def verify_phone(
         "[EmbeddedSignup] verify-phone START tenant=%s origin=%s phone_id=%s",
         tenant_id,
         request.headers.get("origin", ""),
-        body.phone_number_id,
+        redact_graph_id(body.phone_number_id),
     )
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
@@ -2582,7 +2602,13 @@ async def verify_phone(
         )
         verify_data = verify_resp.json()
 
-    logger.info("[EmbeddedSignup] verify-phone: %s", verify_data)
+    _log_embedded_graph_result(
+        stage="verify-phone",
+        tenant_id=tenant_id,
+        phone_number_id=body.phone_number_id,
+        response=verify_data,
+        level="warning" if isinstance(verify_data, dict) and "error" in verify_data else "info",
+    )
 
     if "error" in verify_data:
         raise HTTPException(
